@@ -523,9 +523,12 @@ impl NativeVisualOverlayService {
                 };
                 let mut controller = factory();
                 let mut running = true;
-                while running {
-                    let active = controller.operation_id().is_some();
-                    let first = if active {
+                while running || controller.has_native_work() {
+                    let active = controller.has_native_work();
+                    let first = if !running {
+                        thread::park_timeout(active_wait);
+                        None
+                    } else if active {
                         match command_rx.recv_timeout(active_wait) {
                             Ok(command) => Some(command),
                             Err(RecvTimeoutError::Timeout) => None,
@@ -578,7 +581,10 @@ impl NativeVisualOverlayService {
                             }
                         }
                     }
-                    if running && controller.operation_id().is_some() {
+                    if !running {
+                        controller.shutdown();
+                    }
+                    if controller.has_native_work() {
                         controller.advance();
                     }
                     for event in controller.drain_events() {
@@ -601,9 +607,12 @@ impl NativeVisualOverlayService {
         })
     }
 
+    pub fn request_shutdown(&self) {
+        let _ = self.commands.send(VisualOverlayCommand::Shutdown);
+    }
     pub fn shutdown_and_join(&mut self) {
+        self.request_shutdown();
         if let Some(worker) = self.worker.take() {
-            let _ = self.commands.send(VisualOverlayCommand::Shutdown);
             let _ = worker.join();
             #[cfg(test)]
             if let Some(observer) = &self.observer {
@@ -690,7 +699,10 @@ fn apply_command(controller: &mut VisualOverlayController, command: VisualOverla
                 controller.cancel()
             }
         }
-        VisualOverlayCommand::Shutdown => return false,
+        VisualOverlayCommand::Shutdown => {
+            controller.shutdown();
+            return false;
+        }
     }
     true
 }
@@ -1069,6 +1081,14 @@ pub trait OverlayRenderer: Send {
     ) -> Result<(), VisualOverlayError>;
     fn poll_input(&mut self) -> Result<Vec<OverlayInput>, VisualOverlayError>;
     fn close(&mut self);
+    /// close() can retain rectangle shields until their held transaction ends.
+    fn close_pending(&self) -> bool {
+        false
+    }
+    /// Completion already consumed the native Up. Do not poll a later press.
+    fn close_after_release(&mut self) {
+        self.close();
+    }
 }
 
 pub trait OverlayClock: Send {
@@ -1100,6 +1120,8 @@ pub struct VisualOverlayController {
     virtual_desktop: Option<ScreenRect>,
     picker_pointer: Option<MkPoint>,
     shut_down: bool,
+    pending_terminals: VecDeque<VisualOverlayEvent>,
+    pending_start: Option<(OperationId, VisualOverlayState, OverlayVisual)>,
 }
 
 impl Default for VisualOverlayController {
@@ -1122,13 +1144,18 @@ impl VisualOverlayController {
             virtual_desktop: None,
             picker_pointer: None,
             shut_down: false,
+            pending_terminals: VecDeque::new(),
+            pending_start: None,
         }
     }
     pub fn state(&self) -> &VisualOverlayState {
         &self.state
     }
     pub fn operation_id(&self) -> Option<OperationId> {
-        self.operation_id
+        self.pending_start
+            .as_ref()
+            .map(|(id, _, _)| *id)
+            .or(self.operation_id)
     }
     fn allocate(&mut self) -> OperationId {
         let id = self.next_id;
@@ -1136,21 +1163,59 @@ impl VisualOverlayController {
         id
     }
     fn replace_with_id(&mut self, new_id: OperationId) -> OperationId {
-        if let Some(id) = self.operation_id.take() {
-            tracing::debug!(outgoing_operation_id = id, incoming_operation_id = new_id,
-                state = ?self.state, "replacing visual overlay operation");
-            self.renderer.close();
-            // Nothing produced by the replaced operation may be observed after
-            // its replacement.  Keep one useful cancellation notification,
-            // but quarantine an earlier error/expiry (and duplicate cancel).
-            self.events.retain(|event| event_operation_id(event) != id);
-            self.events
+        if let Some((id, _, _)) = self.pending_start.take() {
+            self.pending_terminals
                 .push_back(VisualOverlayEvent::Cancelled { operation_id: id });
+        }
+        if let Some(id) = self.operation_id {
+            self.events.retain(|event| event_operation_id(event) != id);
+            self.finish_operation(VisualOverlayEvent::Cancelled { operation_id: id });
         }
         self.state = VisualOverlayState::Idle;
         self.virtual_desktop = None;
         self.picker_pointer = None;
         new_id
+    }
+    /// Terminal events and replacements cannot escape while the native owner
+    /// still shields an unfinished physical transaction.
+    fn finish_operation(&mut self, event: VisualOverlayEvent) {
+        if matches!(event, VisualOverlayEvent::RectangleConfirmed { .. }) {
+            self.renderer.close_after_release();
+        } else {
+            self.renderer.close();
+        }
+        self.state = VisualOverlayState::Idle;
+        self.virtual_desktop = None;
+        self.picker_pointer = None;
+        if self.renderer.close_pending() {
+            let id = event_operation_id(&event);
+            self.pending_terminals
+                .retain(|pending| event_operation_id(pending) != id);
+            self.pending_terminals.push_back(event);
+        } else {
+            self.operation_id = None;
+            self.pending_terminals.clear();
+            self.events.push_back(event);
+        }
+    }
+    fn has_native_work(&self) -> bool {
+        self.operation_id.is_some() || self.renderer.close_pending()
+    }
+    fn finish_pending_close(&mut self) {
+        if self.renderer.close_pending() {
+            return;
+        }
+        self.operation_id = None;
+        if self.shut_down {
+            self.pending_terminals.clear();
+        } else {
+            self.events.extend(self.pending_terminals.drain(..));
+        }
+        if let Some((id, state, visual)) = self.pending_start.take() {
+            if !self.shut_down {
+                self.start_replaced(id, state, visual);
+            }
+        }
     }
     fn replace(&mut self) -> OperationId {
         let id = self.allocate();
@@ -1172,11 +1237,37 @@ impl VisualOverlayController {
     fn start_replaced(
         &mut self,
         id: OperationId,
-        state: VisualOverlayState,
+        mut state: VisualOverlayState,
         visual: OverlayVisual,
     ) -> OperationId {
+        if self.renderer.close_pending() {
+            self.pending_start = Some((id, state, visual));
+            return id;
+        }
         self.shut_down = false;
+        if let VisualOverlayState::PickingRectangle {
+            virtual_desktop,
+            pointer,
+            ..
+        } = &state
+        {
+            self.virtual_desktop = Some(*virtual_desktop);
+            self.picker_pointer = Some(*pointer);
+        }
         let started_at = self.clock.now();
+        // A passive replacement may have waited behind a held transaction.
+        // Its visible lifetime begins when actually shown, not when requested.
+        match &mut state {
+            VisualOverlayState::PreviewingRectangle { expires_at, .. }
+            | VisualOverlayState::HighlightingMonitor { expires_at, .. }
+            | VisualOverlayState::IdentifyingMonitors { expires_at, .. }
+            | VisualOverlayState::PreviewingDesktop { expires_at, .. }
+            | VisualOverlayState::HighlightingWindow { expires_at, .. }
+            | VisualOverlayState::PreviewingOcrDebug { expires_at, .. } => {
+                *expires_at = started_at + PASSIVE_OVERLAY_DURATION
+            }
+            _ => {}
+        }
         let expires_at = passive_expiry(&state);
         tracing::debug!(operation_id = id, visual = ?visual, ?started_at, ?expires_at,
             state = ?self.state, "starting visual overlay operation");
@@ -1188,8 +1279,8 @@ impl VisualOverlayController {
                         Ok(true) => *phase = RectangleInteractionPhase::AwaitingInitialRelease,
                         Ok(false) => *phase = RectangleInteractionPhase::Armed,
                         Err(error) => {
-                            self.renderer.close();
-                            self.events.push_back(VisualOverlayEvent::Error {
+                            self.operation_id = Some(id);
+                            self.finish_operation(VisualOverlayEvent::Error {
                                 operation_id: id,
                                 error,
                             });
@@ -1204,12 +1295,8 @@ impl VisualOverlayController {
                 // show() is permitted to fail after creating some native
                 // resources, so close is mandatory even though the operation
                 // was never published as active.
-                self.renderer.close();
-                self.state = VisualOverlayState::Idle;
-                self.operation_id = None;
-                self.virtual_desktop = None;
-                self.picker_pointer = None;
-                self.events.push_back(VisualOverlayEvent::Error {
+                self.operation_id = Some(id);
+                self.finish_operation(VisualOverlayEvent::Error {
                     operation_id: id,
                     error,
                 });
@@ -1463,31 +1550,42 @@ impl VisualOverlayController {
         }
     }
     pub fn cancel(&mut self) {
-        // Keep cleanup unconditional: a native show can fail after allocating
-        // resources, and a disconnected/replaced owner must never strand one.
-        self.renderer.close();
-        if let Some(id) = self.operation_id.take() {
-            self.events
+        if let Some((id, _, _)) = self.pending_start.take() {
+            self.pending_terminals
                 .push_back(VisualOverlayEvent::Cancelled { operation_id: id });
         }
-        self.state = VisualOverlayState::Idle;
-        self.virtual_desktop = None;
-        self.picker_pointer = None;
+        if !self.pending_terminals.is_empty() {
+            return;
+        }
+        if let Some(id) = self.operation_id {
+            self.finish_operation(VisualOverlayEvent::Cancelled { operation_id: id });
+        } else {
+            self.renderer.close();
+        }
     }
     pub fn shutdown(&mut self) {
         if self.shut_down {
             return;
         }
+        self.shut_down = true;
+        self.pending_start = None;
+        self.pending_terminals.clear();
         self.renderer.close();
         self.operation_id = None;
         self.state = VisualOverlayState::Idle;
         self.virtual_desktop = None;
         self.picker_pointer = None;
         self.events.clear();
-        self.shut_down = true;
     }
     /// Advances native input/message state. Only the service worker calls this in production.
     pub fn advance(&mut self) {
+        if self.renderer.close_pending() {
+            // Native close completion consumes the owned release, but never
+            // turns a canceled drag into confirmation or starts its successor early.
+            let _ = self.renderer.poll_input();
+            self.finish_pending_close();
+            return;
+        }
         let input_result = self.renderer.poll_input();
         if let Ok(inputs) = input_result.as_ref() {
             for input in inputs.iter().copied() {
@@ -1495,14 +1593,13 @@ impl VisualOverlayController {
             }
         }
         if let Err(error) = input_result {
-            self.renderer.close();
-            if let Some(id) = self.operation_id.take() {
-                self.state = VisualOverlayState::Idle;
-                self.virtual_desktop = None;
-                self.events.push_back(VisualOverlayEvent::Error {
+            if let Some(id) = self.operation_id {
+                self.finish_operation(VisualOverlayEvent::Error {
                     operation_id: id,
                     error,
                 });
+            } else {
+                self.renderer.close();
             }
         }
         let expired = match &self.state {
@@ -1535,7 +1632,10 @@ impl VisualOverlayController {
         self.drain_events()
     }
     fn handle_input(&mut self, input: OverlayInput) {
-        if self.operation_id != Some(input.operation_id) {
+        if !self.pending_terminals.is_empty()
+            || self.shut_down
+            || self.operation_id != Some(input.operation_id)
+        {
             return;
         }
         if matches!(input.kind, OverlayInputKind::Escape) {
@@ -1694,12 +1794,7 @@ impl VisualOverlayController {
                 },
             )
         {
-            self.renderer.close();
-            self.operation_id = None;
-            self.state = VisualOverlayState::Idle;
-            self.virtual_desktop = None;
-            self.picker_pointer = None;
-            self.events.push_back(VisualOverlayEvent::Error {
+            self.finish_operation(VisualOverlayEvent::Error {
                 operation_id: id,
                 error,
             });
@@ -1716,17 +1811,12 @@ impl VisualOverlayController {
         };
         match normalized_rect(start, current) {
             Ok(rect) if !rect.is_empty() => {
-                let id = self.operation_id.take().unwrap();
-                self.renderer.close();
-                self.state = VisualOverlayState::Idle;
-                self.virtual_desktop = None;
-                self.picker_pointer = None;
-                self.events
-                    .push_back(VisualOverlayEvent::RectangleConfirmed {
-                        operation_id: id,
-                        purpose,
-                        rect,
-                    });
+                let id = self.operation_id.unwrap();
+                self.finish_operation(VisualOverlayEvent::RectangleConfirmed {
+                    operation_id: id,
+                    purpose,
+                    rect,
+                });
             }
             // Empty drags are retries: discard the drag and re-arm without emitting.
             _ => {
@@ -1853,6 +1943,9 @@ mod tests {
     struct FakeData {
         left_down: bool,
         show_left_down: Option<bool>,
+        startup_error: Option<VisualOverlayError>,
+        defer_close_while_held: bool,
+        closing: bool,
         cursor: MkPoint,
         inputs: Vec<OverlayInput>,
         calls: Vec<RecordedCall>,
@@ -1864,6 +1957,9 @@ mod tests {
             Self {
                 left_down: false,
                 show_left_down: None,
+                startup_error: None,
+                defer_close_while_held: false,
+                closing: false,
                 cursor: point(40, 50),
                 inputs: vec![],
                 calls: vec![],
@@ -1876,6 +1972,13 @@ mod tests {
     impl OverlayRenderer for FakeRenderer {
         fn left_button_down(&mut self) -> Result<bool, VisualOverlayError> {
             Ok(self.0.lock().unwrap().left_down)
+        }
+        fn rectangle_startup_left_down(&mut self) -> Result<bool, VisualOverlayError> {
+            let mut data = self.0.lock().unwrap();
+            match data.startup_error.take() {
+                Some(error) => Err(error),
+                None => Ok(data.left_down),
+            }
         }
         fn cursor_position(&mut self) -> Result<MkPoint, VisualOverlayError> {
             Ok(self.0.lock().unwrap().cursor)
@@ -1914,6 +2017,12 @@ mod tests {
         fn poll_input(&mut self) -> Result<Vec<OverlayInput>, VisualOverlayError> {
             let mut data = self.0.lock().unwrap();
             data.calls.push(RecordedCall::Poll);
+            if data.closing && !data.left_down {
+                data.closing = false;
+                data.calls.push(RecordedCall::Close);
+                data.inputs.clear();
+                return Ok(vec![]);
+            }
             if let Some(error) = data.poll_error.take() {
                 Err(error)
             } else {
@@ -1921,6 +2030,20 @@ mod tests {
             }
         }
         fn close(&mut self) {
+            let mut data = self.0.lock().unwrap();
+            if data.closing {
+                return;
+            }
+            if data.defer_close_while_held && data.left_down {
+                data.closing = true;
+            } else {
+                data.calls.push(RecordedCall::Close);
+            }
+        }
+        fn close_pending(&self) -> bool {
+            self.0.lock().unwrap().closing
+        }
+        fn close_after_release(&mut self) {
             self.0.lock().unwrap().calls.push(RecordedCall::Close);
         }
     }
@@ -2304,6 +2427,219 @@ mod tests {
                 pointer: point(0, 0),
             },
         }
+    }
+
+    fn guarded_drag() -> (VisualOverlayController, Arc<Mutex<FakeData>>, OperationId) {
+        let (mut controller, data, _) = controller();
+        data.lock().unwrap().defer_close_while_held = true;
+        let id = controller.begin_rectangle_pick(
+            RectanglePurpose::PinboardCapture,
+            ScreenRect::new(-100, -100, 400, 300),
+        );
+        {
+            let mut data = data.lock().unwrap();
+            data.left_down = true;
+            data.inputs.push(OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::LeftPressed(point(-20, 30)),
+            });
+        }
+        assert!(advance_and_drain(&mut controller).is_empty());
+        (controller, data, id)
+    }
+
+    #[test]
+    fn rectangle_guard_escape_defers_terminal_and_close_until_owned_release() {
+        let (mut controller, data, id) = guarded_drag();
+        data.lock().unwrap().inputs.push(OverlayInput {
+            operation_id: id,
+            kind: OverlayInputKind::Escape,
+        });
+        assert!(advance_and_drain(&mut controller).is_empty());
+        assert!(data.lock().unwrap().closing);
+        assert_eq!(close_count(&data), 0);
+        controller.cancel();
+        assert!(advance_and_drain(&mut controller).is_empty());
+        data.lock().unwrap().left_down = false;
+        assert_eq!(
+            advance_and_drain(&mut controller),
+            vec![VisualOverlayEvent::Cancelled { operation_id: id }]
+        );
+        assert_eq!(close_count(&data), 1);
+        assert_eq!(controller.operation_id(), None);
+        assert!(!data.lock().unwrap().closing);
+        assert!(advance_and_drain(&mut controller).is_empty());
+        assert_eq!(
+            close_count(&data),
+            1,
+            "no delayed close swallows the next ordinary input"
+        );
+    }
+
+    #[test]
+    fn rectangle_guard_replacement_waits_for_release_and_starts_once() {
+        let (mut controller, data, old_id) = guarded_drag();
+        let next_id = controller.preview_rectangle(ScreenRect::new(1, 2, 30, 40));
+        assert!(controller.drain_events().is_empty());
+        assert_eq!(
+            data.lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|c| matches!(c, RecordedCall::Show { .. }))
+                .count(),
+            1
+        );
+        data.lock().unwrap().left_down = false;
+        assert_eq!(
+            advance_and_drain(&mut controller),
+            vec![VisualOverlayEvent::Cancelled {
+                operation_id: old_id
+            }]
+        );
+        assert_eq!(controller.operation_id(), Some(next_id));
+        assert!(matches!(
+            controller.state(),
+            VisualOverlayState::PreviewingRectangle { .. }
+        ));
+        assert_eq!(close_count(&data), 1);
+        assert_eq!(
+            data.lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|c| matches!(c, RecordedCall::Show { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn rectangle_guard_queued_passive_expiry_starts_at_actual_show() {
+        let (mut controller, data, now) = controller();
+        data.lock().unwrap().defer_close_while_held = true;
+        let old_id = controller.begin_rectangle_pick(
+            RectanglePurpose::PinboardCapture,
+            ScreenRect::new(0, 0, 100, 100),
+        );
+        data.lock().unwrap().left_down = true;
+        data.lock().unwrap().inputs.push(OverlayInput {
+            operation_id: old_id,
+            kind: OverlayInputKind::LeftPressed(point(10, 20)),
+        });
+        assert!(advance_and_drain(&mut controller).is_empty());
+        let new_id = controller.preview_rectangle(ScreenRect::new(1, 2, 30, 40));
+        let actual_show = PASSIVE_OVERLAY_DURATION * 4;
+        *now.lock().unwrap() = actual_show;
+        data.lock().unwrap().left_down = false;
+        assert_eq!(
+            advance_and_drain(&mut controller),
+            vec![VisualOverlayEvent::Cancelled {
+                operation_id: old_id
+            }]
+        );
+        assert!(
+            matches!(controller.state(), VisualOverlayState::PreviewingRectangle { expires_at, .. } if *expires_at == actual_show + PASSIVE_OVERLAY_DURATION)
+        );
+        *now.lock().unwrap() = actual_show + PASSIVE_OVERLAY_DURATION - Duration::from_millis(1);
+        assert!(advance_and_drain(&mut controller).is_empty());
+        *now.lock().unwrap() = actual_show + PASSIVE_OVERLAY_DURATION;
+        assert_eq!(
+            advance_and_drain(&mut controller),
+            vec![VisualOverlayEvent::Expired {
+                operation_id: new_id
+            }]
+        );
+    }
+
+    #[test]
+    fn rectangle_guard_targeted_cancel_of_queued_replacement_emits_its_terminal_after_release() {
+        let (mut controller, data, old_id) = guarded_drag();
+        let queued_id = controller.preview_rectangle(ScreenRect::new(1, 2, 30, 40));
+        assert_eq!(controller.operation_id(), Some(queued_id));
+        assert!(apply_command(
+            &mut controller,
+            VisualOverlayCommand::Cancel {
+                expected_operation_id: Some(queued_id)
+            }
+        ));
+        assert!(controller.drain_events().is_empty());
+        data.lock().unwrap().left_down = false;
+        let events = advance_and_drain(&mut controller);
+        assert!(events.contains(&VisualOverlayEvent::Cancelled {
+            operation_id: old_id
+        }));
+        assert!(events.contains(&VisualOverlayEvent::Cancelled {
+            operation_id: queued_id
+        }));
+        assert_eq!(events.len(), 2);
+        assert_eq!(controller.operation_id(), None);
+        assert_eq!(
+            data.lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|c| matches!(c, RecordedCall::Show { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(close_count(&data), 1);
+    }
+
+    #[test]
+    fn rectangle_guard_native_failure_waits_for_release_and_never_confirms() {
+        for reason in ["capture lost", "coverage repair failed"] {
+            let (mut controller, data, id) = guarded_drag();
+            data.lock().unwrap().poll_error = Some(VisualOverlayError {
+                kind: OverlayErrorKind::Platform,
+                message: reason.into(),
+            });
+            assert!(advance_and_drain(&mut controller).is_empty());
+            assert_eq!(controller.state(), &VisualOverlayState::Idle);
+            assert!(data.lock().unwrap().closing);
+            data.lock().unwrap().left_down = false;
+            let events = advance_and_drain(&mut controller);
+            assert!(
+                matches!(events.as_slice(), [VisualOverlayEvent::Error { operation_id, error }] if *operation_id == id && error.message == reason)
+            );
+            assert_eq!(close_count(&data), 1);
+        }
+    }
+
+    #[test]
+    fn rectangle_guard_readiness_error_clears_geometry_and_closes_partial_show() {
+        let (mut controller, data, _) = controller();
+        data.lock().unwrap().startup_error = Some(VisualOverlayError {
+            kind: OverlayErrorKind::Platform,
+            message: "not ready".into(),
+        });
+        let id = controller.begin_rectangle_pick(
+            RectanglePurpose::PinboardCapture,
+            ScreenRect::new(0, 0, 100, 100),
+        );
+        assert!(
+            matches!(controller.drain_events().as_slice(), [VisualOverlayEvent::Error { operation_id, .. }] if *operation_id == id)
+        );
+        assert_eq!(controller.operation_id(), None);
+        assert_eq!(controller.virtual_desktop, None);
+        assert_eq!(controller.picker_pointer, None);
+        assert_eq!(close_count(&data), 1);
+    }
+
+    #[test]
+    fn rectangle_guard_shutdown_owner_stays_alive_until_release_then_joins() {
+        let (controller, data, _) = guarded_drag();
+        let shared =
+            super::super::visual_capture_workflow::SharedVisualOverlayController::new(controller);
+        assert_eq!(shared.poll_app_exit(false), None);
+        assert_eq!(shared.poll_app_exit(true), Some(false));
+        wait_until(|| data.lock().unwrap().closing);
+        assert_eq!(shared.poll_app_exit(false), Some(false));
+        assert_eq!(close_count(&data), 0);
+        data.lock().unwrap().left_down = false;
+        wait_until(|| shared.poll_app_exit(false) == Some(true));
+        assert_eq!(close_count(&data), 1);
+        assert_eq!(shared.poll_app_exit(false), Some(true));
     }
 
     #[test]

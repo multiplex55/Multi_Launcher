@@ -31,10 +31,10 @@ use windows::{
                 IsWindowVisible, LWA_ALPHA, LWA_COLORKEY, MA_NOACTIVATE, MSG, PM_REMOVE,
                 PeekMessageW, RegisterClassW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE,
                 SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
-                ShowWindow, TranslateMessage, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WNDCLASSW,
-                WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-                WS_EX_TRANSPARENT, WS_POPUP,
+                ShowWindow, TranslateMessage, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_ERASEBKGND,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCREATE,
+                WM_NCHITTEST, WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
             },
         },
     },
@@ -81,31 +81,74 @@ struct RectangleNativeInput {
     ready: bool,
     startup_left_down: bool,
     left_down: bool,
+    owned_left_down: bool,
+    capture_lost: bool,
+    topology_changed: bool,
+    release_boundary: bool,
     events: Vec<OverlayInputKind>,
 }
 impl RectangleNativeInput {
     fn acknowledge(&mut self, left_down: bool) {
         self.events.clear();
+        self.release_boundary = false;
         self.left_down = left_down;
+        self.owned_left_down = false;
         self.startup_left_down = left_down;
         self.ready = true;
     }
     fn record(&mut self, msg: u32, point: MkPoint) {
-        if !self.ready {
-            return;
-        }
-        match msg {
-            WM_LBUTTONDOWN if !self.left_down => {
-                self.left_down = true;
-                self.events.push(OverlayInputKind::LeftPressed(point));
-            }
-            WM_LBUTTONUP if self.left_down => {
-                self.left_down = false;
+        // A shield Down is fresh even if launch Up went to a foreign capture
+        // owner before our first poll. The baseline was never our owned press.
+        if msg == WM_LBUTTONDOWN {
+            self.release_boundary = false;
+            if self.ready && self.startup_left_down {
                 self.events.push(OverlayInputKind::LeftReleased(point));
             }
-            WM_MOUSEMOVE => self.events.push(OverlayInputKind::PointerMoved(point)),
-            _ => {}
+            self.startup_left_down = false;
+            if !self.owned_left_down {
+                self.owned_left_down = true;
+                self.left_down = true;
+                if self.ready {
+                    self.events.push(OverlayInputKind::LeftPressed(point));
+                }
+            }
+        } else if msg == WM_LBUTTONUP {
+            self.release_boundary = self.awaiting_release();
+            self.owned_left_down = false;
+            if self.left_down && self.ready {
+                self.events.push(OverlayInputKind::LeftReleased(point));
+            }
+            self.left_down = false;
+            self.startup_left_down = false;
+        } else if msg == WM_MOUSEMOVE && self.ready {
+            self.events.push(OverlayInputKind::PointerMoved(point));
         }
+    }
+    fn record_system_message(&mut self, msg: u32) {
+        if msg == WM_CAPTURECHANGED && self.owned_left_down {
+            self.capture_lost = true;
+        }
+        if msg == WM_DISPLAYCHANGE {
+            self.topology_changed = true;
+        }
+    }
+    fn wait_for_close_release(&mut self, physical_left: bool) -> bool {
+        // Foreign launch Up is not ours; lost capture likewise cannot be
+        // represented as a consumed native Up. Wait for physical-up after the
+        // native queue is drained, then safely retire the interrupted picker.
+        if !physical_left && (self.startup_left_down || self.capture_lost) {
+            self.left_down = false;
+            self.owned_left_down = false;
+            self.startup_left_down = false;
+        }
+        self.events.clear();
+        self.awaiting_release()
+    }
+    fn awaiting_release(&self) -> bool {
+        self.left_down || self.owned_left_down
+    }
+    fn saw_release(&self) -> bool {
+        self.release_boundary
     }
 }
 
@@ -143,6 +186,8 @@ pub(super) struct NativeOverlayRenderer {
     left_down: bool,
     escape_down: bool,
     return_down: bool,
+    closing: bool,
+    capture_recovery_attempted: bool,
 }
 unsafe impl Send for NativeOverlayRenderer {}
 
@@ -231,6 +276,18 @@ unsafe extern "system" fn input_shield_wndproc(
     match msg {
         // These windows are intentionally hit-testable, but never activate and
         // never forward mouse messages to the application below them.
+        WM_CAPTURECHANGED | WM_DISPLAYCHANGE => {
+            let state =
+                unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WindowPaintState };
+            if !state.is_null() {
+                if let Some(input) = unsafe { &*state }.rectangle_input.as_ref() {
+                    if let Ok(mut input) = input.lock() {
+                        input.record_system_message(msg);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE => {
             let state =
@@ -457,6 +514,145 @@ impl NativeOverlayRenderer {
         Err(error)
     }
 
+    fn destroy_windows_unchecked(&mut self) {
+        if self.operation_id.is_some()
+            || !self.windows.is_empty()
+            || !self.input_shields.is_empty()
+            || !self.passive_edges.is_empty()
+            || !self.passive_badges.is_empty()
+        {
+            tracing::debug!(operation_id = ?self.operation_id, visual = ?self.visual, "closing native visual overlay");
+        }
+        for window in self.input_shields.drain(..) {
+            let destroyed_at = Instant::now();
+            tracing::debug!(
+                operation_id=?self.operation_id,
+                hwnd=?window.hwnd,
+                created_at=?window.created_at,
+                destruction_time=?destroyed_at,
+                lifetime=?destroyed_at.duration_since(window.created_at),
+                paint_count=window.state.paint_count.load(Ordering::Relaxed),
+                "destroying input shield window"
+            );
+            destroy_overlay_window(window);
+        }
+        if let Some(window) = self.tooltip.take() {
+            destroy_overlay_window(window);
+        }
+        for window in self.windows.drain(..) {
+            destroy_overlay_window(window);
+        }
+        for window in self
+            .passive_edges
+            .drain(..)
+            .chain(self.passive_badges.drain(..))
+        {
+            let destroyed_at = Instant::now();
+            tracing::debug!(operation_id=?self.operation_id, hwnd=?window.hwnd,
+                edge=window.state.description, created_at=?window.created_at,
+                destruction_time=?destroyed_at, lifetime=?destroyed_at.duration_since(window.created_at),
+                paint_count=window.state.paint_count.load(Ordering::Relaxed), "destroying passive overlay window");
+            destroy_overlay_window(window);
+        }
+        self.closing = false;
+        self.capture_recovery_attempted = false;
+        self.rectangle_input = None;
+        self.operation_id = None;
+        self.visual = None;
+        self.left_down = false;
+        self.escape_down = false;
+        self.return_down = false;
+    }
+    fn pump_messages(&mut self) {
+        if self
+            .rectangle_input
+            .as_ref()
+            .is_some_and(|input| input.lock().is_ok_and(|input| input.saw_release()))
+        {
+            return;
+        }
+        let mut msg = MSG::default();
+        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            // Return Up before dispatching a later press. Terminal transitions
+            // tear down at this boundary, so later input cannot extend a drag.
+            if self
+                .rectangle_input
+                .as_ref()
+                .is_some_and(|input| input.lock().is_ok_and(|input| input.saw_release()))
+            {
+                break;
+            }
+        }
+    }
+    fn destroy_windows(&mut self) {
+        for window in &self.input_shields {
+            if unsafe { GetCapture() } == window.hwnd {
+                let _ = unsafe { ReleaseCapture() };
+            }
+        }
+        self.destroy_windows_unchecked();
+    }
+    fn refresh_shield_coverage(&mut self) -> Result<(), VisualOverlayError> {
+        let physical = displays()?;
+        if physical.is_empty() {
+            return Err(platform(
+                "No active monitor remains for rectangle input coverage",
+            ));
+        }
+        let missing: Vec<_> = physical
+            .iter()
+            .copied()
+            .filter(|bounds| {
+                !self.input_shields.iter().any(|window| {
+                    window.state.bounds == *bounds
+                        && unsafe { IsWindowVisible(window.hwnd) }.as_bool()
+                })
+            })
+            .collect();
+        if !missing.is_empty() {
+            let module = unsafe { GetModuleHandleW(None) }
+                .map_err(|e| platform(format!("shield repair module lookup failed: {e}")))?;
+            let operation_id = self
+                .operation_id
+                .or_else(|| self.input_shields.first().map(|w| w.state.operation_id))
+                .unwrap_or(0);
+            self.show_input_shields(
+                module,
+                windows::core::w!("MultiLauncherVisualOverlayInputShield"),
+                operation_id,
+                &missing,
+            )?;
+        }
+        for bounds in &physical {
+            let covered = self.input_shields.iter().any(|window| {
+                let mut actual = RECT::default();
+                unsafe { GetWindowRect(window.hwnd, &mut actual) }.is_ok()
+                    && shield_covers_monitor(
+                        *bounds,
+                        ScreenRect::new(
+                            actual.left,
+                            actual.top,
+                            (i64::from(actual.right) - i64::from(actual.left)).max(0) as u32,
+                            (i64::from(actual.bottom) - i64::from(actual.top)).max(0) as u32,
+                        ),
+                        unsafe { IsWindowVisible(window.hwnd) }.as_bool(),
+                        unsafe { GetWindowLongPtrW(window.hwnd, GWL_EXSTYLE) } as u32,
+                    )
+            });
+            if !covered {
+                return Err(platform(
+                    "Rectangle shield coverage could not be restored after display change",
+                ));
+            }
+        }
+        // Retain old shields through release; never destroy the old capture
+        // owner first while repairing coverage for a changed topology.
+        Ok(())
+    }
     fn show_input_shields(
         &mut self,
         module: windows::Win32::Foundation::HMODULE,
@@ -714,8 +910,12 @@ impl OverlayRenderer for NativeOverlayRenderer {
     ) -> Result<(), VisualOverlayError> {
         tracing::debug!(operation_id, visual = ?visual, "showing native visual overlay; replacing current operation");
         self.close();
+        if self.closing {
+            return Err(platform(
+                "Previous rectangle transaction is still awaiting release",
+            ));
+        }
         if matches!(visual, OverlayVisual::RectanglePicker { .. }) {
-            self.left_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
             self.escape_down = unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) } < 0;
             self.return_down = unsafe { GetAsyncKeyState(VK_RETURN.0 as i32) } < 0;
         } else if matches!(visual, OverlayVisual::PointPicker { .. }) {
@@ -1077,12 +1277,58 @@ impl OverlayRenderer for NativeOverlayRenderer {
     }
 
     fn poll_input(&mut self) -> Result<Vec<OverlayInput>, VisualOverlayError> {
-        let mut msg = MSG::default();
-        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
-            unsafe {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+        self.pump_messages();
+        let mut interruption = None;
+        if let Some(input) = self.rectangle_input.clone() {
+            let (capture_lost, topology_changed, owned_down) = {
+                let input = input
+                    .lock()
+                    .map_err(|_| platform("Rectangle input state lock poisoned"))?;
+                (
+                    input.capture_lost,
+                    input.topology_changed,
+                    input.owned_left_down,
+                )
+            };
+            if topology_changed {
+                input
+                    .lock()
+                    .map_err(|_| platform("Rectangle input state lock poisoned"))?
+                    .topology_changed = false;
+                interruption = Some(self.refresh_shield_coverage().err().unwrap_or_else(|| {
+                    platform("Rectangle selection canceled because monitor topology changed")
+                }));
             }
+            if capture_lost && owned_down && !self.capture_recovery_attempted {
+                // One attempt to retain native capture; shields still own
+                // hit-testing when Windows limits background capture.
+                if !self.capture_recovery_attempted {
+                    self.capture_recovery_attempted = true;
+                    if let Some(window) = self.input_shields.first() {
+                        unsafe {
+                            SetCapture(window.hwnd);
+                        }
+                    }
+                }
+                interruption = Some(platform(
+                    "Rectangle selection canceled because mouse capture was lost",
+                ));
+            }
+        }
+        if self.closing {
+            let left = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
+            let waiting = self.rectangle_input.as_ref().is_some_and(|input| {
+                input
+                    .lock()
+                    .is_ok_and(|mut input| input.wait_for_close_release(left))
+            });
+            if !waiting {
+                self.destroy_windows();
+            }
+            return interruption.map_or(Ok(vec![]), Err);
+        }
+        if let Some(error) = interruption {
+            return Err(error);
         }
         // Passive windows have no input contract; in particular, do not let a
         // click intended for the underlying application affect controller state.
@@ -1112,6 +1358,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
             if !input.left_down {
                 input.startup_left_down = false;
             }
+            input.release_boundary = false;
             out.extend(
                 std::mem::take(&mut input.events)
                     .into_iter()
@@ -1161,51 +1408,26 @@ impl OverlayRenderer for NativeOverlayRenderer {
     }
 
     fn close(&mut self) {
-        if self.operation_id.is_some()
-            || !self.windows.is_empty()
-            || !self.input_shields.is_empty()
-            || !self.passive_edges.is_empty()
-            || !self.passive_badges.is_empty()
-        {
-            tracing::debug!(operation_id = ?self.operation_id, visual = ?self.visual, "closing native visual overlay");
+        if self.closing {
+            return;
         }
-        for window in self.input_shields.drain(..) {
-            let destroyed_at = Instant::now();
-            tracing::debug!(
-                operation_id=?self.operation_id,
-                hwnd=?window.hwnd,
-                created_at=?window.created_at,
-                destruction_time=?destroyed_at,
-                lifetime=?destroyed_at.duration_since(window.created_at),
-                paint_count=window.state.paint_count.load(Ordering::Relaxed),
-                "destroying input shield window"
-            );
-            destroy_overlay_window(window);
+        // Cancel may arrive before the next tick has witnessed a queued Down.
+        self.pump_messages();
+        let waiting = self
+            .rectangle_input
+            .as_ref()
+            .is_some_and(|input| input.lock().is_ok_and(|input| input.awaiting_release()));
+        if waiting {
+            self.closing = true;
+        } else {
+            self.destroy_windows();
         }
-        if let Some(window) = self.tooltip.take() {
-            destroy_overlay_window(window);
-        }
-        for window in self.windows.drain(..) {
-            destroy_overlay_window(window);
-        }
-        for window in self
-            .passive_edges
-            .drain(..)
-            .chain(self.passive_badges.drain(..))
-        {
-            let destroyed_at = Instant::now();
-            tracing::debug!(operation_id=?self.operation_id, hwnd=?window.hwnd,
-                edge=window.state.description, created_at=?window.created_at,
-                destruction_time=?destroyed_at, lifetime=?destroyed_at.duration_since(window.created_at),
-                paint_count=window.state.paint_count.load(Ordering::Relaxed), "destroying passive overlay window");
-            destroy_overlay_window(window);
-        }
-        self.rectangle_input = None;
-        self.operation_id = None;
-        self.visual = None;
-        self.left_down = false;
-        self.escape_down = false;
-        self.return_down = false;
+    }
+    fn close_pending(&self) -> bool {
+        self.closing
+    }
+    fn close_after_release(&mut self) {
+        self.destroy_windows();
     }
 }
 fn destroy_overlay_window(window: OverlayWindow) {
@@ -1222,7 +1444,9 @@ fn destroy_overlay_window(window: OverlayWindow) {
 
 impl Drop for NativeOverlayRenderer {
     fn drop(&mut self) {
-        self.close();
+        // Normal service shutdown drains release first. Unwinding still must
+        // reclaim HWNDs before dropping their borrowed paint-state boxes.
+        self.destroy_windows();
     }
 }
 
@@ -1266,7 +1490,6 @@ mod tests {
         let mut input = RectangleNativeInput::default();
         let point = MkPoint { x: -40, y: 20 };
         input.acknowledge(true);
-        input.record(WM_LBUTTONDOWN, point);
         input.record(WM_LBUTTONUP, point);
         input.record(WM_LBUTTONDOWN, point);
         input.record(WM_LBUTTONUP, point);
@@ -1278,6 +1501,70 @@ mod tests {
                 OverlayInputKind::LeftReleased(point)
             ]
         );
+    }
+
+    #[test]
+    fn rectangle_shield_fresh_down_after_foreign_launch_release_is_not_lost() {
+        let mut input = RectangleNativeInput::default();
+        let point = MkPoint { x: -40, y: 20 };
+        input.acknowledge(true);
+        // The foreign owner received launch Up before this fresh shield Down.
+        input.record(WM_LBUTTONDOWN, point);
+        input.record(WM_LBUTTONUP, point);
+        assert_eq!(
+            input.events,
+            vec![
+                OverlayInputKind::LeftReleased(point),
+                OverlayInputKind::LeftPressed(point),
+                OverlayInputKind::LeftReleased(point)
+            ]
+        );
+        assert!(!input.awaiting_release());
+        assert!(!input.startup_left_down);
+        assert!(!input.owned_left_down);
+    }
+
+    #[test]
+    fn rectangle_shield_partial_install_release_is_a_boundary_without_semantic_events() {
+        let mut input = RectangleNativeInput::default();
+        let point = MkPoint { x: -20, y: 10 };
+        input.record(WM_LBUTTONDOWN, point);
+        assert!(input.awaiting_release());
+        assert!(input.events.is_empty());
+        input.record(WM_LBUTTONUP, point);
+        assert!(
+            input.saw_release(),
+            "native pump must stop before a later unrelated Down"
+        );
+        assert!(
+            input.events.is_empty(),
+            "unacknowledged picker never publishes selection"
+        );
+        assert!(!input.wait_for_close_release(false));
+    }
+
+    #[test]
+    fn rectangle_shield_interruption_retains_owned_transaction_until_release() {
+        let point = MkPoint { x: 10, y: 20 };
+        for signal in [WM_CAPTURECHANGED, WM_DISPLAYCHANGE] {
+            let mut input = RectangleNativeInput::default();
+            input.acknowledge(false);
+            input.record(WM_LBUTTONDOWN, point);
+            input.record_system_message(signal);
+            assert!(input.wait_for_close_release(true));
+            assert_eq!(input.capture_lost, signal == WM_CAPTURECHANGED);
+            assert_eq!(input.topology_changed, signal == WM_DISPLAYCHANGE);
+            if signal == WM_DISPLAYCHANGE {
+                assert!(
+                    input.wait_for_close_release(false),
+                    "intact owned capture needs its native Up"
+                );
+                input.record(WM_LBUTTONUP, point);
+            }
+            assert!(!input.wait_for_close_release(false));
+            input.record_system_message(WM_CAPTURECHANGED);
+            assert!(!input.awaiting_release());
+        }
     }
 
     #[test]

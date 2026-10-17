@@ -4793,12 +4793,30 @@ pub(crate) fn persist_launcher_close_preferences(
     })
 }
 
+impl LauncherApp {
+    fn guard_overlay_app_exit(&self, ctx: &egui::Context) {
+        let requested = ctx.input(|input| input.viewport().close_requested());
+        if let Some(ready) = self.mkmacro_dialog.visual_overlay.poll_app_exit(requested) {
+            ctx.send_viewport_cmd(if ready {
+                egui::ViewportCommand::Close
+            } else {
+                egui::ViewportCommand::CancelClose
+            });
+            if !ready {
+                ctx.request_repaint();
+            }
+        }
+    }
+}
+
 impl eframe::App for LauncherApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.guard_overlay_app_exit(ctx);
         self.begin_root_frame_logic(ctx, frame);
     }
 
     fn logic_only(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.guard_overlay_app_exit(ctx);
         self.run_hidden_logic_tick(ctx, frame);
     }
 

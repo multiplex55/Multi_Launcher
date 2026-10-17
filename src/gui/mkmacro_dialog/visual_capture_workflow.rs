@@ -122,6 +122,33 @@ struct OverlayServiceState {
     terminal_shutdown: bool,
 }
 impl SharedVisualOverlayController {
+    /// Cooperatively stop the native owner before eframe exits the process.
+    /// Keep the service/JoinHandle owned here while its shields await release.
+    /// None means no exit was requested; false asks the GUI to cancel Close.
+    pub(crate) fn poll_app_exit(&self, requested: bool) -> Option<bool> {
+        let mut state = self.0.service.lock().unwrap();
+        if !requested && !state.terminal_shutdown {
+            return None;
+        }
+        if !state.terminal_shutdown {
+            state.terminal_shutdown = true;
+            if let Some(service) = &state.service {
+                service.request_shutdown();
+            }
+        }
+        if state
+            .service
+            .as_ref()
+            .is_some_and(|service| !service.is_finished())
+        {
+            return Some(false);
+        }
+        if let Some(mut service) = state.service.take() {
+            service.shutdown_and_join();
+        }
+        self.set_active_id(0);
+        Some(true)
+    }
     fn set_active_id(&self, id: OperationId) {
         self.0.active_id.store(id, Ordering::Release);
         crate::hotkey::launcher_invocation::set_exclusive_owner(
