@@ -53,6 +53,7 @@ windows = { version = "0.58", features = [
     "UI_Notifications",
     "Foundation",
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_UI_Shell_PropertiesSystem",

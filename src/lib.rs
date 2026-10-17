@@ -20,6 +20,7 @@ pub mod actions;
 pub mod actions_editor;
 pub mod active_window;
 pub mod annotation;
+pub mod batch_rename;
 
 pub mod clipboard_modify;
 pub mod color;
