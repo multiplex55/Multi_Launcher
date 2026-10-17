@@ -870,11 +870,60 @@ mod tests {
     use super::*;
     use crate::coordinate_tool::capture::{CaptureControl, CaptureUpdatePublisher};
     use crate::coordinate_tool::{
-        CaptureOutcome, CapturePhase, CaptureRuntime, CaptureSessionId, CoordinateOffset,
+        CaptureOutcome, CapturePhase, CaptureRuntime, CaptureSessionId, ClickEffectStyle,
+        ClickObservationLease, ClickObservationProvider, ClickPressSink, CoordinateOffset,
         CoordinateRenderFrame, CoordinateSample, CoordinateSampler, CoordinateSpace,
         CoordinateSurfaceBackend, CrosshairColor, ForegroundClientGeometry, HaloPreferences,
-        MonitorGeometry, MonitorId, PhysicalPoint, PhysicalRect, ZoomMode, ZoomPreferences,
+        MonitorGeometry, MonitorId, MouseGestureClickObservationProvider, PhysicalPoint,
+        PhysicalRect, ZoomMode, ZoomPreferences,
     };
+
+    #[derive(Clone, Default)]
+    struct TestClickObservation {
+        active_generation: Arc<Mutex<Option<u64>>>,
+        acquisitions: Arc<AtomicUsize>,
+        releases: Arc<AtomicUsize>,
+    }
+
+    impl TestClickObservation {
+        fn is_active(&self) -> bool {
+            self.active_generation.lock().unwrap().is_some()
+        }
+    }
+
+    struct TestClickObservationLease {
+        active_generation: Arc<Mutex<Option<u64>>>,
+        releases: Arc<AtomicUsize>,
+        generation: u64,
+    }
+
+    impl ClickObservationLease for TestClickObservationLease {}
+
+    impl Drop for TestClickObservationLease {
+        fn drop(&mut self) {
+            let mut active = self.active_generation.lock().unwrap();
+            if *active == Some(self.generation) {
+                *active = None;
+            }
+            self.releases.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    impl ClickObservationProvider for TestClickObservation {
+        fn acquire(
+            &self,
+            generation: u64,
+            _sink: Arc<dyn ClickPressSink>,
+        ) -> Result<Box<dyn ClickObservationLease>, String> {
+            *self.active_generation.lock().unwrap() = Some(generation);
+            self.acquisitions.fetch_add(1, Ordering::AcqRel);
+            Ok(Box::new(TestClickObservationLease {
+                active_generation: Arc::clone(&self.active_generation),
+                releases: Arc::clone(&self.releases),
+                generation,
+            }))
+        }
+    }
 
     #[derive(Clone)]
     struct FakeFactory {
@@ -1013,6 +1062,22 @@ mod tests {
         mpsc::Sender<CaptureOutcome>,
         FakeClipboard,
     ) {
+        capture_adapter_with_click_observation(
+            settings_path,
+            Arc::new(MouseGestureClickObservationProvider),
+        )
+    }
+
+    fn capture_adapter_with_click_observation(
+        settings_path: String,
+        click_observation: Arc<dyn ClickObservationProvider>,
+    ) -> (
+        CoordinateToolGui,
+        mpsc::Receiver<CoordinateRenderFrame>,
+        mpsc::Receiver<CaptureSessionId>,
+        mpsc::Sender<CaptureOutcome>,
+        FakeClipboard,
+    ) {
         let (rendered, frames) = mpsc::channel();
         let current_sample = Arc::new(Mutex::new(sample(-1800, 200)));
         let factory = FakeFactory {
@@ -1031,12 +1096,13 @@ mod tests {
             writes: Arc::new(Mutex::new(Vec::new())),
             current: Arc::new(Mutex::new(None)),
         };
-        let adapter = CoordinateToolGui::with_backends_and_capture(
+        let adapter = CoordinateToolGui::with_backends_and_capture_and_click_observation(
             settings_path,
             CoordinateToolPreferences::default(),
             Arc::new(factory),
             Box::new(clipboard.clone()),
             runtime,
+            click_observation,
         );
         (adapter, frames, started_rx, outcome_tx, clipboard)
     }
@@ -1378,11 +1444,20 @@ mod tests {
             .join("settings.json")
             .to_string_lossy()
             .to_string();
-        let (mut gui, frames, started, outcomes, clipboard) = capture_adapter(path.clone());
+        let click_observation = TestClickObservation::default();
+        let (mut gui, frames, started, outcomes, clipboard) =
+            capture_adapter_with_click_observation(
+                path.clone(),
+                Arc::new(click_observation.clone()),
+            );
         gui.update_preferences(|preferences| {
             preferences.space = CoordinateSpace::Monitor;
             preferences.halo.radius = 88;
             preferences.zoom.zoom_factor = 3.0;
+            preferences.click.style = ClickEffectStyle::Flash;
+            preferences.click.size_px = 48;
+            preferences.click.opacity = 0.65;
+            preferences.click.duration_ms = 900;
         })
         .unwrap();
         gui.execute(&CoordinateToolCommand::SetHudEnabled(true))
@@ -1394,6 +1469,11 @@ mod tests {
             .unwrap();
         gui.execute(&CoordinateToolCommand::SetZoomEnabled(true))
             .unwrap();
+        gui.execute(&CoordinateToolCommand::SetClickEnabled(true))
+            .unwrap();
+        assert!(gui.runtime_state().click_enabled());
+        assert!(click_observation.is_active());
+        assert_eq!(click_observation.acquisitions.load(Ordering::Acquire), 1);
         gui.execute(&CoordinateToolCommand::Freeze).unwrap();
         assert_eq!(
             gui.execute(&CoordinateToolCommand::Copy).unwrap(),
@@ -1424,6 +1504,9 @@ mod tests {
         assert!(!state.crosshair_enabled());
         assert!(!state.halo_enabled());
         assert!(!state.zoom_enabled());
+        assert!(!state.click_enabled());
+        assert!(!click_observation.is_active());
+        assert_eq!(click_observation.releases.load(Ordering::Acquire), 1);
         assert!(state.is_frozen());
         assert_eq!(state.last_successful_copy(), Some(&copy_before));
         assert!(gui.capture_pending());
@@ -1436,7 +1519,13 @@ mod tests {
         assert!(gui.cancel_pick());
         outcomes.send(CaptureOutcome::Cancelled).unwrap();
         wait_for_capture_join(&mut gui);
+        gui.execute(&CoordinateToolCommand::SetClickEnabled(true))
+            .unwrap();
+        assert!(click_observation.is_active());
+        assert_eq!(click_observation.acquisitions.load(Ordering::Acquire), 2);
         gui.shutdown().unwrap();
+        assert!(!click_observation.is_active());
+        assert_eq!(click_observation.releases.load(Ordering::Acquire), 2);
     }
 
     #[test]

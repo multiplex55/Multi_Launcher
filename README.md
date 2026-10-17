@@ -791,10 +791,10 @@ primary monitor, and samples the frozen image throughout the session.
 
 On Windows, `mouse` discovers the common Mouse actions. `mouse settings`
 opens the focused Mouse Settings dialog; `mouse help` describes the command
-hierarchy. Settings are grouped into Crosshair, Cursor Halo, Cursor Magnifier,
-and Coordinate Display, using the same saved appearance preferences as
-commands. Appearance options primarily live in this dialog rather than filling
-normal launcher discovery with parameter commands.
+hierarchy. Settings are grouped into Click Visualization, Crosshair, Cursor
+Halo, Cursor Magnifier, and Coordinate Display, using the same saved appearance
+preferences as commands. Appearance options primarily live in this dialog rather
+than filling normal launcher discovery with parameter commands.
 
 `mouse coords toggle` toggles a cursor-following, click-through coordinate HUD.
 `mouse crosshair toggle` independently toggles a passive crosshair at the cursor. Both can run
@@ -802,6 +802,16 @@ together without taking focus or intercepting ordinary typing and clicks.
 `mouse coords on|off` and `mouse crosshair on|off` set a mode explicitly. Their
 Enabled checkboxes in Mouse Settings change live, transient runtime state;
 opening settings does not enable a mode. Apply saves appearance changes.
+
+`mouse click toggle|on|off` adds a transient visual at physical left, right, and
+middle button-down positions. It observes through the existing shared mouse
+gesture hook, so enabling it does not change which presses a configured gesture
+consumes or passes through. Injected and tagged replay events are ignored, which
+prevents a replayed unmatched right click from drawing twice. Apply in Mouse
+Settings saves the Ripple, Circle, or Flash style, color, 4..256 physical-pixel size,
+0.1..1.0 opacity, and 50..2000 ms duration; click enablement is session-only
+and starts off after restart. With click as the only active effect, its worker
+waits for press events and does not sample the cursor while idle.
 
 Coordinates are signed physical pixels, including negative desktop positions.
 `mouse coords space desktop|monitor|client` selects desktop coordinates, coordinates
@@ -841,8 +851,10 @@ crosshair stroke. Advanced controls remain available as
 `mouse crosshair guides on|off`, and `mouse crosshair contrast on|off`.
 Guides span the virtual desktop; contrast adds an
 outline for visibility. Preferences are saved, while activation and frozen/copy
-state are temporary. `mouse coords help` and `mouse crosshair help` show the
-feature controls. Old standalone `coord` and `crosshair` queries/raw actions
+state are temporary. `mouse effects off` also disables click feedback, while
+keeping the HUD, frozen display, last successful copy, clipboard, and an active
+pick. `mouse coords help`, `mouse crosshair help`, and `mouse click help` show
+the feature controls. Old standalone `coord` and `crosshair` queries/raw actions
 are removed; this branch's inspected stored data had no references requiring aliases.
 
 Cursor Halo inverts actual desktop pixels in a circular region centered on the

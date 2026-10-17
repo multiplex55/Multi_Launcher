@@ -940,6 +940,72 @@ mod tests {
         PhysicalRect,
     };
     use crate::coordinate_tool::render::ClickEffectFrame;
+    use crate::mouse_gestures::overlay::OverlayBackend;
+    use crate::mouse_gestures::service::{
+        ClickObservationGuard, CursorPositionProvider, MockHookBackend, MouseGestureConfig,
+        MouseGestureService, NoMatchBehavior, OverlayFactory, RightClickBackend,
+    };
+
+    struct InertGestureOverlay;
+
+    impl OverlayBackend for InertGestureOverlay {
+        fn draw_trail_segment(
+            &mut self,
+            _from: (f32, f32),
+            _to: (f32, f32),
+            _color: [u8; 4],
+            _width: f32,
+        ) {
+        }
+
+        fn clear_trail(&mut self) {}
+
+        fn show_hint(&mut self, _text: &str, _position: (f32, f32)) {}
+
+        fn hide_hint(&mut self) {}
+    }
+
+    struct InertGestureOverlayFactory;
+
+    impl OverlayFactory for InertGestureOverlayFactory {
+        fn trail_backend(&self) -> Box<dyn OverlayBackend> {
+            Box::new(InertGestureOverlay)
+        }
+
+        fn hint_backend(&self) -> Box<dyn OverlayBackend> {
+            Box::new(InertGestureOverlay)
+        }
+    }
+
+    struct InertRightClickBackend;
+
+    impl RightClickBackend for InertRightClickBackend {
+        fn send_right_click(&self) {}
+    }
+
+    struct FixedGestureCursor;
+
+    impl CursorPositionProvider for FixedGestureCursor {
+        fn cursor_position(&self) -> Option<(f32, f32)> {
+            Some((0.0, 0.0))
+        }
+    }
+
+    struct LocalGestureClickObservationProvider {
+        service: Arc<Mutex<MouseGestureService>>,
+    }
+
+    impl ClickObservationProvider for LocalGestureClickObservationProvider {
+        fn acquire(
+            &self,
+            generation: u64,
+            sink: Arc<dyn ClickPressSink>,
+        ) -> Result<Box<dyn ClickObservationLease>, String> {
+            ClickObservationGuard::acquire(Arc::clone(&self.service), generation, sink)
+                .map(|guard| Box::new(guard) as Box<dyn ClickObservationLease>)
+                .map_err(|error| error.to_string())
+        }
+    }
 
     #[derive(Clone)]
     struct FakeClickObservation {
@@ -2038,17 +2104,35 @@ mod tests {
     }
 
     #[test]
-    fn click_press_uses_captured_physical_point_while_cursor_sampling_fails() {
+    fn raw_hook_click_reaches_worker_without_changing_gesture_policy_or_sampled_coordinates() {
         let moved_sample = sample(700, 800, "DISPLAY1");
-        let (factory, rendered) = FakeFactory::new(
+        let (factory, rendered, sample_gate) = FakeFactory::with_sample_gate(
             [
                 Ok(moved_sample.clone()),
                 Err("cursor query failed after press".into()),
             ],
             Err("cursor query failed after press".into()),
         );
-        let observer = Arc::new(FakeClickObservation::new(None));
-        let provider: Arc<dyn ClickObservationProvider> = observer.clone();
+        let (hook_backend, hook) = MockHookBackend::new();
+        let service = Arc::new(Mutex::new(
+            MouseGestureService::new_with_backend_and_overlays(
+                Box::new(hook_backend),
+                Arc::new(InertGestureOverlayFactory),
+                Arc::new(InertRightClickBackend),
+                Arc::new(FixedGestureCursor),
+            ),
+        ));
+        let mut gesture_config = MouseGestureConfig::default();
+        gesture_config.enabled = true;
+        gesture_config.no_match_behavior = NoMatchBehavior::DoNothing;
+        service.lock().unwrap().update_db(None);
+        service.lock().unwrap().update_config(gesture_config);
+        assert!(service.lock().unwrap().is_running());
+
+        let provider: Arc<dyn ClickObservationProvider> =
+            Arc::new(LocalGestureClickObservationProvider {
+                service: Arc::clone(&service),
+            });
         let mut controller = CoordinateToolController::new_with_preferences_and_click_observation(
             Arc::new(factory.clone()),
             Default::default(),
@@ -2058,15 +2142,38 @@ mod tests {
         controller.set_hud_enabled(true).unwrap();
         let first = receive(&rendered);
         assert_eq!(first.current_sample, Some(moved_sample.clone()));
+        let release_failure = sample_gate
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the second sample should wait at the deterministic gate");
+        controller.freeze();
+        controller.record_successful_copy(crate::coordinate_tool::FormattedCoordinate {
+            space: crate::coordinate_tool::CoordinateSpace::Desktop,
+            point: moved_sample.desktop_point,
+            text: "700,800".into(),
+        });
+        release_failure.send(()).unwrap();
+        let failed_frame = receive_matching(&rendered, |frame| {
+            frame.current_sample.is_none()
+                && frame
+                    .sample_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("cursor query failed after press"))
+        });
+        assert_eq!(failed_frame.placement_sample, Some(moved_sample.clone()));
+        assert!(failed_frame.runtime_state.is_frozen());
+        assert_eq!(failed_frame.displayed_sample, Some(moved_sample.clone()));
+
         controller.set_click_enabled(true).unwrap();
-        let (generation, sink) = observer.current().unwrap();
-        let press = ClickPressEvent {
-            button: ClickButton::Right,
-            position: PhysicalPoint::new(-1510, 620),
-            observed_at: Instant::now(),
-            generation,
-        };
-        assert!(sink.try_send(press));
+
+        assert_eq!(hook.install_count(), 1, "clicks share the gesture hook");
+        let point = PhysicalPoint::new(-1510, 620);
+        let press_started = Instant::now();
+        assert!(hook.emit_physical_button_down(ClickButton::Right, point, false, false));
+        let press = receive_click(&controller);
+        let press_finished = Instant::now();
+        assert_eq!(press.button, ClickButton::Right);
+        assert_eq!(press.position, point);
+        assert!(press.observed_at >= press_started && press.observed_at <= press_finished);
 
         let rendered_click = wait_for_click_render(&factory, |frames| {
             frames
@@ -2076,19 +2183,45 @@ mod tests {
         assert_eq!(rendered_click.len(), 1);
         assert_eq!(rendered_click[0].origin, PhysicalPoint::new(-1526, 604));
         assert!(factory.count(&factory.sample_calls) >= 2);
-        let failed_frame = receive_matching(&rendered, |frame| {
-            frame.current_sample.is_none()
-                && frame
-                    .sample_error
-                    .as_deref()
-                    .is_some_and(|error| error.contains("cursor query failed after press"))
-        });
-        assert_eq!(failed_frame.placement_sample, Some(moved_sample));
         assert_eq!(
             controller.effects_status().click(),
             &super::ClickEffectStatus::Animating
         );
+
+        assert!(!hook.emit_physical_button_down(ClickButton::Right, point, true, false));
+        assert!(!hook.emit_physical_button_down(ClickButton::Right, point, false, true));
+        assert!(
+            controller.take_click_presses().is_empty(),
+            "injected or tagged replay must not create a second visual"
+        );
+
+        let copy = controller.runtime_state().last_successful_copy().cloned();
+        controller.disable_effects().unwrap();
+        let state = controller.runtime_state();
+        assert!(state.hud_enabled());
+        assert!(state.is_frozen());
+        assert!(!state.crosshair_enabled());
+        assert!(!state.halo_enabled());
+        assert!(!state.zoom_enabled());
+        assert!(!state.click_enabled());
+        assert_eq!(state.last_successful_copy(), copy.as_ref());
+        wait_for_click_render(&factory, |frames| frames.is_empty());
+        assert_eq!(
+            controller.effects_status().click(),
+            &super::ClickEffectStatus::Disabled
+        );
+        assert!(service.lock().unwrap().is_running());
+        assert_eq!(hook.uninstall_count(), 0, "gesture consumer keeps the hook");
+
+        controller.set_click_enabled(true).unwrap();
+        assert_eq!(hook.install_count(), 1, "shutdown lease reuses the hook");
         controller.shutdown().unwrap();
+        assert!(!controller.is_running());
+        assert!(hook.emit_physical_button_down(ClickButton::Right, point, false, false));
+        assert!(controller.take_click_presses().is_empty());
+        assert_eq!(factory.count(&factory.shutdowns), 1);
+        service.lock().unwrap().stop();
+        assert_eq!(hook.uninstall_count(), 1);
     }
 
     #[test]

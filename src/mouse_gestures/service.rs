@@ -613,7 +613,7 @@ pub struct ClickObservationGuard {
 }
 
 impl ClickObservationGuard {
-    fn acquire(
+    pub(crate) fn acquire(
         service: Arc<Mutex<MouseGestureService>>,
         generation: u64,
         sink: Arc<dyn ClickPressSink>,

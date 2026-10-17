@@ -8,7 +8,7 @@ impl MousePlugin {
     fn action(label: impl Into<String>, command: impl Into<String>) -> Action {
         Action {
             label: label.into(),
-            desc: "Mouse coordinate HUD, one-shot picking, click feedback, crosshair, actual desktop inversion halo, and live screen magnifier of desktop content. Appearance is saved in Mouse Settings; enablement is session-only. Halo inversion depends on supported composited Windows content and may fall back to a non-inverting outline.".into(),
+            desc: "Mouse coordinate HUD, one-shot picking, click feedback, crosshair, actual desktop inversion halo, and live screen magnifier of desktop content. Click feedback passively observes physical presses through the shared gesture hook, preserves its consume/replay behavior, and ignores injected or tagged replays. Appearance is saved in Mouse Settings; click enablement is session-only and starts off after restart. Halo inversion depends on supported composited Windows content and may fall back to a non-inverting outline.".into(),
             action: command.into(),
             args: None,
         }
@@ -118,7 +118,7 @@ impl Plugin for MousePlugin {
     }
 
     fn description(&self) -> &str {
-        "Mouse coordinate tools, click feedback, actual desktop inversion halo, and live screen magnifier. Appearance is saved in Mouse Settings; enablement is session-only; halo inversion depends on supported composited Windows content and may fall back to a non-inverting outline (prefix: `mouse`)."
+        "Mouse coordinate tools, passive physical click feedback through the shared gesture hook, actual desktop inversion halo, and live screen magnifier. Click observation preserves gesture consume/replay behavior and ignores injected or tagged replays. Appearance is saved in Mouse Settings; click enablement is session-only and starts off after restart; halo inversion depends on supported composited Windows content and may fall back to a non-inverting outline (prefix: `mouse`)."
     }
 
     fn capabilities(&self) -> &[&str] {

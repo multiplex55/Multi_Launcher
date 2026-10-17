@@ -114,7 +114,7 @@ impl MouseSettingsDialog {
                         );
                         crate::gui::theme::widgets::secondary_help(
                             ui,
-                            "Commands: mouse coords …, mouse crosshair gap N, mouse halo/zoom toggle|on|off, mouse effects off, and mouse help.",
+                            "Commands: mouse coords …, mouse click toggle|on|off or settings, mouse crosshair gap N, mouse halo/zoom toggle|on|off, mouse effects off, and mouse help.",
                         );
                         ui.separator();
 
