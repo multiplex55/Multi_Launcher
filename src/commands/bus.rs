@@ -3,11 +3,10 @@ use crate::commands::handlers::{
     handle_batch_rename, handle_calendar, handle_clipboard_modify_with_history_query,
     handle_color_pick, handle_coordinate_tool, handle_crop, handle_data, handle_diff,
     handle_file_search, handle_hash_generator, handle_headless_gui_with_history_query,
-    handle_json_utility, handle_launcher, handle_link, handle_mouse_gesture, handle_multi_manager,
-    handle_note, handle_ocr, handle_paste_sequence, handle_query, handle_radial,
-    handle_search_replace,
-    handle_hotfolder, handle_screen_draw, handle_screenshot, handle_simple_dialog, handle_snippet_run, handle_todo,
-    handle_pinboard, handle_xml_toolkit,
+    handle_hotfolder, handle_json_utility, handle_launcher, handle_link, handle_mouse_gesture,
+    handle_multi_manager, handle_note, handle_ocr, handle_paste_sequence, handle_pinboard,
+    handle_query, handle_radial, handle_screen_draw, handle_screenshot, handle_search_replace,
+    handle_simple_dialog, handle_snippet_run, handle_todo, handle_xml_toolkit,
 };
 
 #[derive(Debug, Default)]
@@ -105,18 +104,18 @@ mod tests {
     use crate::commands::{
         ActivationSource, CalendarCommandHost, CoordinateToolCommand, CropCommandHost,
         DialogCommandHost, HeadlessCommandHost, HistoryPolicy, LauncherCommand,
-        LauncherCommandHost, MultiManagerCommandHost, NoteCommandHost, QueryCommand, QueryPolicy,
-        PinboardCommandHost, RadialCommandHost, TodoCommandHost, VisibilityPolicy,
+        LauncherCommandHost, MultiManagerCommandHost, NoteCommandHost, PinboardCommandHost,
+        QueryCommand, QueryPolicy, RadialCommandHost, TodoCommandHost, VisibilityPolicy,
     };
     use crate::gui::hotfolder_dispatch::{
         LauncherHotFolderActionAdapter, invoke_registered_action_from_catalog,
         pump_launcher_completions_with,
     };
     use crate::hotfolder::{
-        ActionEnablement, HotFolderCandidateId,
+        ActionEnablement, HotFolderCandidateId, HotFolderExecutionPhase,
         HotFolderExternalActionRequest, HotFolderExternalEnableAuthorization,
-        HotFolderExternalFileEvidence, HotFolderExecutionPhase, HotFolderTerminalStatus,
-        RuleAction, RuleId, bind_registered_launcher_action,
+        HotFolderExternalFileEvidence, HotFolderTerminalStatus, RuleAction, RuleId,
+        bind_registered_launcher_action,
     };
     use crate::universal_actions::{ActionTarget, ResolvedActionTarget};
     use std::path::PathBuf;
@@ -933,7 +932,8 @@ mod tests {
             action.args.is_none(),
             "the command does not carry a root path"
         );
-        assert!(action.desc.contains("extensions are protected by default"));
+        assert!(action.desc.contains("extensions are protected"));
+        assert!(action.desc.contains("safe Undo"));
         let plugin_description = manager
             .plugin_infos()
             .into_iter()
@@ -947,8 +947,15 @@ mod tests {
             .into_iter()
             .find(|command| command.action == "query:rename")
             .expect("the plugin contributes a searchable help entry");
-        assert!(help.desc.contains("explicitly chosen folder"));
-        assert!(help.desc.contains("extensions are protected by default"));
+        assert!(help.desc.contains("explicit root"));
+        assert!(help.desc.contains("extensions stay protected by default"));
+        assert!(
+            help.desc
+                .contains("Apply rechecks stale sources and occupied names")
+        );
+        assert!(help.desc.contains("Existing files are never overwritten"));
+        assert!(help.desc.contains("recovery receipt"));
+        assert!(help.desc.contains("safe Undo"));
         assert!(
             !manager
                 .search_filtered("rename-me", None, None)
@@ -993,19 +1000,28 @@ mod tests {
             .into_iter()
             .find(|action| action.action == "replace:open")
             .expect("normal plugin construction registers Search and Replace");
-        assert!(action.args.is_none(), "the command carries no path or pattern");
-        assert!(manager
-            .commands()
-            .iter()
-            .any(|command| command.action == "query:replace"));
-        assert!(manager
-            .plugin_names()
-            .iter()
-            .any(|name| name == "search_replace"));
-        assert!(manager
-            .search_filtered("replacefoo", None, None)
-            .iter()
-            .all(|action| action.action != "replace:open"));
+        assert!(
+            action.args.is_none(),
+            "the command carries no path or pattern"
+        );
+        assert!(
+            manager
+                .commands()
+                .iter()
+                .any(|command| command.action == "query:replace")
+        );
+        assert!(
+            manager
+                .plugin_names()
+                .iter()
+                .any(|name| name == "search_replace")
+        );
+        assert!(
+            manager
+                .search_filtered("replacefoo", None, None)
+                .iter()
+                .all(|action| action.action != "replace:open")
+        );
 
         let invocation = crate::commands::parse_command(
             action,
@@ -1060,20 +1076,27 @@ mod tests {
         }
 
         let mut host = FakeHost::default();
-        let open_invocation = crate::commands::parse_command(
-            open,
-            None,
-            ActivationSource::Enter,
-        )
-        .unwrap();
-        assert_eq!(open_invocation.command, Command::HotFolder(crate::commands::HotFolderCommand::Open));
+        let open_invocation =
+            crate::commands::parse_command(open, None, ActivationSource::Enter).unwrap();
+        assert_eq!(
+            open_invocation.command,
+            Command::HotFolder(crate::commands::HotFolderCommand::Open)
+        );
         let outcome = CommandBus.dispatch(&open_invocation, &mut host).unwrap();
         assert_eq!(outcome.visibility, VisibilityPolicy::Show);
-        assert_eq!(host.hotfolder_commands, vec![crate::commands::HotFolderCommand::Open]);
+        assert_eq!(
+            host.hotfolder_commands,
+            vec![crate::commands::HotFolderCommand::Open]
+        );
 
         for raw in ["hotfolder:pause", "hotfolder:resume"] {
             let invocation = crate::commands::parse_command(
-                Action { label: raw.into(), desc: String::new(), action: raw.into(), args: None },
+                Action {
+                    label: raw.into(),
+                    desc: String::new(),
+                    action: raw.into(),
+                    args: None,
+                },
                 None,
                 ActivationSource::Enter,
             )
@@ -1210,10 +1233,8 @@ mod tests {
         let macro_store = Arc::new(crate::mkmacro::MkMacroStore::empty_for_test(
             std::env::temp_dir(),
         ));
-        let (adapter, pump) = LauncherHotFolderActionAdapter::new(
-            eframe::egui::Context::default(),
-            macro_store,
-        );
+        let (adapter, pump) =
+            LauncherHotFolderActionAdapter::new(eframe::egui::Context::default(), macro_store);
         let (target, action) = registered_launcher_fixture();
         let entries = vec![target.clone()];
         let request = launcher_request(action.clone(), 144);
