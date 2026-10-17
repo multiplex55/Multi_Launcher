@@ -4,8 +4,9 @@ use crate::batch_rename::{
     SnapshotEntryRef,
 };
 use crate::file_operations::{
-    RenameScanCoordinator, RenameScanGeneration, RenameScanResult, RenameScanStatus,
-    RenameScanTicket, VerifiedRenamePlan, VerifiedRenamePreview, VerifiedRenameSnapshot,
+    RenameRuntimeSnapshot, RenameScanCoordinator, RenameScanGeneration, RenameScanResult,
+    RenameScanStatus, RenameScanTicket, VerifiedRenamePlan, VerifiedRenamePreview,
+    VerifiedRenameSnapshot,
 };
 use eframe::egui::{self, Align, Layout};
 use egui_extras::{Column, TableBuilder};
@@ -22,6 +23,9 @@ pub(crate) enum BatchRenameUiCommand {
     SelectRoot(PathBuf),
     Rescan,
     RecursiveChanged,
+    ApplyConfirmed,
+    UndoConfirmed(String),
+    CancelOperation,
     Closed,
 }
 
@@ -118,6 +122,9 @@ pub(crate) struct BatchRenameDialogState {
     snapshot: Option<VerifiedRenameSnapshot>,
     verified_preview: Option<VerifiedRenamePreview>,
     pending_intent: Option<VerifiedRenamePlan>,
+    apply_confirmation_open: bool,
+    undo_confirmation: Option<String>,
+    operation_was_active: bool,
     rules: Vec<RuleDraft>,
     next_rule_id: u64,
     rules_revision: u64,
@@ -156,6 +163,9 @@ impl Default for BatchRenameDialogState {
             snapshot: None,
             verified_preview: None,
             pending_intent: None,
+            apply_confirmation_open: false,
+            undo_confirmation: None,
+            operation_was_active: false,
             rules: Vec::new(),
             next_rule_id: 1,
             rules_revision: 0,
@@ -199,7 +209,27 @@ impl BatchRenameDialogState {
             self.scan_banner = ScanBanner::ChooseRoot;
         }
         self.clear_snapshot_state();
+        self.undo_confirmation = None;
         self.status_message = None;
+    }
+
+    pub(crate) fn observe_runtime(&mut self, runtime: &RenameRuntimeSnapshot) {
+        if runtime.operation_active {
+            self.operation_was_active = true;
+            return;
+        }
+        if self.operation_was_active {
+            self.operation_was_active = false;
+            self.clear_snapshot_state();
+            self.scan_banner = ScanBanner::Cancelled;
+            self.status_message = Some(format!(
+                "{}. Refresh the preview before applying another batch.",
+                runtime
+                    .last_message
+                    .as_deref()
+                    .unwrap_or("The rename operation ended")
+            ));
+        }
     }
 
     pub(crate) fn has_pending_scan(&self) -> bool {
@@ -335,6 +365,18 @@ impl BatchRenameDialogState {
         self.pending_intent.as_ref()
     }
 
+    pub(crate) fn take_pending_intent(&mut self) -> Option<VerifiedRenamePlan> {
+        self.pending_intent.take()
+    }
+
+    pub(crate) fn set_status_message(&mut self, message: String) {
+        self.status_message = Some(message);
+    }
+
+    pub(crate) fn mark_operation_submitted(&mut self) {
+        self.operation_was_active = true;
+    }
+
     #[cfg(test)]
     pub(crate) fn has_accepted_snapshot(&self) -> bool {
         self.snapshot.is_some()
@@ -371,6 +413,7 @@ impl BatchRenameDialogState {
         self.snapshot = None;
         self.verified_preview = None;
         self.pending_intent = None;
+        self.apply_confirmation_open = false;
         self.selected_by_ref.clear();
         self.included_by_ref.clear();
         self.folder_tree.clear();
@@ -565,12 +608,17 @@ impl BatchRenameDialogState {
         &mut self,
         ctx: &egui::Context,
         allow_mutations: bool,
+        runtime: &RenameRuntimeSnapshot,
     ) -> Vec<BatchRenameUiCommand> {
         let mut commands = Vec::new();
         if !self.open {
             return commands;
         }
-        let process_interactions = allow_mutations && ctx.current_pass_index() == 0;
+        let process_interactions = allow_mutations
+            && ctx.current_pass_index() == 0
+            && !runtime.operation_active
+            && !self.apply_confirmation_open
+            && self.undo_confirmation.is_none();
 
         let mut window_open = self.open;
         egui::Window::new("Batch Renamer")
@@ -587,32 +635,264 @@ impl BatchRenameDialogState {
                 ui.separator();
                 self.draw_preview(ui, &mut commands, process_interactions);
                 ui.separator();
+                self.draw_operation_footer(ui, runtime, &mut commands, process_interactions);
                 ui.horizontal(|ui| {
-                    ui.label("Read-only preview. This window does not change files.");
+                    if ui.button("Close").clicked() {
+                        commands.push(BatchRenameUiCommand::Closed);
+                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let close_clicked = ui.button("Close").clicked();
-                        if process_interactions && close_clicked {
-                            commands.push(BatchRenameUiCommand::Closed);
-                        }
                         let preview_clicked = ui
-                            .add_enabled(self.snapshot.is_some(), egui::Button::new("Preview"))
+                            .add_enabled(
+                                process_interactions && self.snapshot.is_some(),
+                                egui::Button::new("Preview"),
+                            )
                             .clicked();
-                        if process_interactions && preview_clicked {
+                        if preview_clicked {
                             self.rebuild_preview();
                         }
                     });
                 });
             });
 
-        if process_interactions
+        if ctx.current_pass_index() == 0
             && (!window_open || commands.contains(&BatchRenameUiCommand::Closed))
         {
             self.end_session();
             if !commands.contains(&BatchRenameUiCommand::Closed) {
                 commands.push(BatchRenameUiCommand::Closed);
             }
+            return commands;
         }
+
+        self.draw_confirmations(ctx, runtime, &mut commands, allow_mutations);
         commands
+    }
+
+    fn draw_operation_footer(
+        &mut self,
+        ui: &mut egui::Ui,
+        runtime: &RenameRuntimeSnapshot,
+        commands: &mut Vec<BatchRenameUiCommand>,
+        process_interactions: bool,
+    ) {
+        if !runtime.journal_ready {
+            if let Some(error) = &runtime.journal_error {
+                ui.colored_label(ui.visuals().error_fg_color, format!("Recovery data is unavailable: {error}"));
+            } else {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Checking the batch rename recovery journal…");
+                });
+            }
+        }
+        if runtime.operation_active {
+            if let Some(progress) = &runtime.progress {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spinner();
+                    ui.label(format!(
+                        "{:?}: {} ({}/{})",
+                        progress.phase, progress.message, progress.completed, progress.total
+                    ));
+                    if ui.button("Cancel safely").clicked() {
+                        // Cancellation is a worker-owned request handled between
+                        // native atomic moves, never a frame-thread filesystem action.
+                        commands.push(BatchRenameUiCommand::CancelOperation);
+                    }
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Rechecking the confirmed rename plan…");
+                    if ui.button("Cancel safely").clicked() {
+                        commands.push(BatchRenameUiCommand::CancelOperation);
+                    }
+                });
+            }
+        } else if let Some(message) = &self.status_message {
+            ui.label(message);
+        } else if let Some(message) = &runtime.last_message {
+            ui.label(message);
+        }
+
+        let can_apply = process_interactions
+            && runtime.journal_ready
+            && !runtime
+                .receipts
+                .iter()
+                .any(|receipt| receipt.status().blocks_new_apply())
+            && self.verified_preview.as_ref().is_some_and(|preview| {
+                preview.preview().readiness() == PreviewReadiness::Ready
+                    && preview
+                        .preview()
+                        .plan()
+                        .is_some_and(|plan| !plan.actions().is_empty())
+            });
+        if ui
+            .add_enabled(can_apply, egui::Button::new("Apply selected renames…"))
+            .clicked()
+        {
+            if self.freeze_confirmed_plan().is_some() {
+                self.apply_confirmation_open = true;
+            }
+        }
+
+        if runtime.receipts.is_empty() {
+            return;
+        }
+        ui.collapsing("Rename recovery and Undo", |ui| {
+            for receipt in runtime.receipts.iter().rev() {
+                ui.group(|ui| {
+                    ui.label(format!("{} · {:?}", receipt.id(), receipt.status()));
+                    ui.label(receipt.root_path().display().to_string());
+                    ui.label(receipt.message());
+                    let remaining = receipt.remaining_undo_count();
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Undo entries: {remaining}"));
+                        let enabled = process_interactions
+                            && receipt.status().can_undo()
+                            && remaining > 0;
+                        if ui
+                            .add_enabled(enabled, egui::Button::new("Undo…"))
+                            .clicked()
+                        {
+                            self.undo_confirmation = Some(receipt.id().to_owned());
+                        }
+                    });
+                    for entry in receipt.entries() {
+                        ui.label(format!(
+                            "{} → {} ({:?})",
+                            entry.current_path().unwrap_or(entry.final_path()).display(),
+                            entry.original_path().display(),
+                            entry.outcome()
+                        ));
+                    }
+                });
+            }
+        });
+    }
+
+    fn draw_confirmations(
+        &mut self,
+        ctx: &egui::Context,
+        runtime: &RenameRuntimeSnapshot,
+        commands: &mut Vec<BatchRenameUiCommand>,
+        allow_mutations: bool,
+    ) {
+        let process_interactions = allow_mutations && ctx.current_pass_index() == 0;
+        if self.apply_confirmation_open {
+            let Some(plan) = self.pending_intent.as_ref() else {
+                self.apply_confirmation_open = false;
+                return;
+            };
+            let mut confirmation_open = true;
+            let mut confirm_clicked = false;
+            let mut cancel_clicked = false;
+            egui::Window::new("Confirm batch rename")
+                .collapsible(false)
+                .resizable(true)
+                .default_size(egui::vec2(680.0, 480.0))
+                .open(&mut confirmation_open)
+                .show(ctx, |ui| {
+                    ui.label(format!("Root: {}", plan.canonical_root().display()));
+                    ui.label(format!(
+                        "Scope: {} · files: {} · scan generation: {} · rules revision: {}",
+                        if plan.recursive_scope() { "recursive" } else { "direct children" },
+                        plan.plan().actions().len(),
+                        plan.generation().0,
+                        plan.plan().rules_revision().0
+                    ));
+                    ui.label("These exact source and target names are frozen for this transaction.");
+                    ui.label("Each file is staged in its own folder; existing names are never replaced. If a safe rollback is blocked, recovery paths remain in the receipt.");
+                    ui.label("Undo checks the recorded file identity, bytes, size, and last-modified time. Content verification allows up to 1 GiB per file and 4 GiB per batch.");
+                    egui::ScrollArea::vertical().max_height(330.0).show(ui, |ui| {
+                        for action in plan.plan().actions() {
+                            ui.label(format!(
+                                "{} → {}",
+                                action.source_path().display(),
+                                action.target_path().display()
+                            ));
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        let confirm = ui
+                            .add_enabled(
+                                process_interactions
+                                    && runtime.journal_ready
+                                    && !runtime.operation_active,
+                                egui::Button::new("Confirm and apply"),
+                            )
+                            .clicked();
+                        confirm_clicked = confirm;
+                        cancel_clicked = ui.button("Cancel").clicked();
+                    });
+                });
+            if confirm_clicked {
+                commands.push(BatchRenameUiCommand::ApplyConfirmed);
+                self.apply_confirmation_open = false;
+            } else if cancel_clicked || !confirmation_open {
+                self.cancel_apply_confirmation();
+            }
+        }
+        if let Some(transaction_id) = self.undo_confirmation.clone() {
+            if let Some(receipt) = runtime
+                .receipts
+                .iter()
+                .find(|receipt| receipt.id() == transaction_id)
+            {
+                let mut confirmation_open = true;
+                egui::Window::new("Confirm Undo")
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_size(egui::vec2(680.0, 420.0))
+                    .open(&mut confirmation_open)
+                    .show(ctx, |ui| {
+                        ui.label(format!("Root: {}", receipt.root_path().display()));
+                        ui.label(format!("Restore {} recorded file(s) to their original names and bytes.", receipt.remaining_undo_count()));
+                        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                            for entry in receipt.entries() {
+                                if let Some(current) = entry.current_path() {
+                                    if current != entry.original_path() {
+                                        ui.label(format!(
+                                            "{} → {}",
+                                            current.display(),
+                                            entry.original_path().display()
+                                        ));
+                                    }
+                                }
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            let confirm = ui
+                                .add_enabled(
+                                    process_interactions
+                                        && runtime.journal_ready
+                                        && !runtime.operation_active,
+                                    egui::Button::new("Confirm Undo"),
+                                )
+                                .clicked();
+                            if confirm {
+                                commands.push(BatchRenameUiCommand::UndoConfirmed(
+                                    transaction_id.clone(),
+                                ));
+                                self.undo_confirmation = None;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.undo_confirmation = None;
+                            }
+                        });
+                    });
+                if !confirmation_open {
+                    self.undo_confirmation = None;
+                }
+            } else {
+                self.undo_confirmation = None;
+            }
+        }
+    }
+
+    fn cancel_apply_confirmation(&mut self) {
+        self.apply_confirmation_open = false;
+        self.pending_intent = None;
     }
 
     fn draw_header(
@@ -1571,7 +1851,7 @@ mod tests {
         let mut commands = Vec::new();
         let output = context.run_ui(input, |ctx| {
             let first_pass = ctx.current_pass_index() == 0;
-            commands = state.ui(ctx, first_pass);
+            commands = state.ui(ctx, first_pass, &RenameRuntimeSnapshot::default());
         });
         output.drop_without_applying_deltas();
         commands
@@ -1600,7 +1880,7 @@ mod tests {
             screen_input(size, vec![egui::Event::Text("beta".to_owned())]),
             |ctx| {
                 let first_pass = ctx.current_pass_index() == 0;
-                let _ = state.ui(ctx, first_pass);
+                let _ = state.ui(ctx, first_pass, &RenameRuntimeSnapshot::default());
                 if first_pass {
                     ctx.request_discard("batch rename filter edit test");
                 }
@@ -1888,6 +2168,84 @@ mod tests {
         coordinator.shutdown().unwrap();
         fs::remove_dir_all(first_root).unwrap();
         fs::remove_dir_all(second_root).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn m8d_confirmed_plan_is_frozen_and_draft_edits_revoke_apply_authority() {
+        let root = fixture_root();
+        let expected_files = ["alpha.txt", "beta.txt"]
+            .into_iter()
+            .map(|name| (name.to_owned(), fs::read(root.join(name)).unwrap()))
+            .collect::<Vec<_>>();
+        let mut state = BatchRenameDialogState::default();
+        let coordinator = RenameScanCoordinator::new().unwrap();
+        state.open();
+        state.start_scan(root.clone(), &coordinator);
+        finish_scan(&mut state);
+        state.select_visible(true);
+        state.rules.push(RuleDraft {
+            id: state.next_rule_id,
+            rule: RenameRule::Prefix("renamed-".to_owned()),
+        });
+        state.next_rule_id += 1;
+        state.rules_revision += 1;
+        state.rebuild_preview();
+
+        assert!(state.pending_intent().is_none());
+        let expected = state
+            .verified_preview
+            .as_ref()
+            .unwrap()
+            .verified_plan()
+            .unwrap()
+            .clone();
+        let frozen = state.freeze_confirmed_plan().unwrap().clone();
+        assert_eq!(frozen.canonical_root(), root);
+        assert!(!frozen.recursive_scope());
+        assert_eq!(frozen.generation(), expected.generation());
+        assert_eq!(
+            frozen.plan().rules_revision(),
+            expected.plan().rules_revision()
+        );
+        let mappings = |plan: &VerifiedRenamePlan| {
+            plan.plan()
+                .actions()
+                .iter()
+                .map(|action| {
+                    (
+                        action.source_path().to_path_buf(),
+                        action.target_path().to_path_buf(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(mappings(&frozen), mappings(&expected));
+        assert_eq!(frozen.plan().actions().len(), 2);
+
+        state.cancel_apply_confirmation();
+        assert!(state.pending_intent().is_none());
+        assert!(state.freeze_confirmed_plan().is_some());
+        let changed_selection = state
+            .scan_result
+            .as_ref()
+            .unwrap()
+            .rows()
+            .iter()
+            .find(|row| row.kind() == SnapshotEntryKind::File)
+            .unwrap()
+            .entry_ref();
+        assert!(state.set_selected(changed_selection, false));
+        assert!(state.pending_intent().is_none());
+        assert!(state.freeze_confirmed_plan().unwrap().plan().actions().len() < 2);
+
+        state.end_session();
+        assert!(state.pending_intent().is_none());
+        for (name, contents) in expected_files {
+            assert_eq!(fs::read(root.join(name)).unwrap(), contents);
+        }
+        coordinator.shutdown().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

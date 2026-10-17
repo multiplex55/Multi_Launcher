@@ -1393,6 +1393,10 @@ fn validate_target_leaf(name: &str) -> Result<(), TargetNameError> {
     Ok(())
 }
 
+pub(crate) fn is_valid_windows_filename_leaf(name: &str) -> bool {
+    validate_target_leaf(name).is_ok()
+}
+
 fn is_reserved_device_name(name: &str) -> bool {
     let base = name
         .split('.')

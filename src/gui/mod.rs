@@ -1680,8 +1680,51 @@ impl LauncherApp {
                     self.start_batch_rename_scan(root);
                 }
             }
+            BatchRenameUiCommand::ApplyConfirmed => {
+                let plan = self.batch_rename_dialog.take_pending_intent();
+                let Some(plan) = plan else {
+                    self.batch_rename_dialog.set_status_message(
+                        "The confirmed preview is no longer available. Refresh and review it again."
+                            .to_owned(),
+                    );
+                    return;
+                };
+                let Some(coordinator) = self.batch_rename_coordinator.as_ref() else {
+                    self.batch_rename_dialog.set_status_message(
+                        "The rename worker is unavailable. Refresh the preview before trying again."
+                            .to_owned(),
+                    );
+                    return;
+                };
+                match coordinator.submit_apply(plan) {
+                    Ok(()) => self.batch_rename_dialog.mark_operation_submitted(),
+                    Err(error) => self.batch_rename_dialog.set_status_message(format!(
+                        "The confirmed batch was not started: {error}"
+                    )),
+                }
+            }
+            BatchRenameUiCommand::UndoConfirmed(transaction_id) => {
+                let Some(coordinator) = self.batch_rename_coordinator.as_ref() else {
+                    self.batch_rename_dialog.set_status_message(
+                        "The rename worker is unavailable; recovery data remains saved."
+                            .to_owned(),
+                    );
+                    return;
+                };
+                match coordinator.submit_undo(transaction_id) {
+                    Ok(()) => self.batch_rename_dialog.mark_operation_submitted(),
+                    Err(error) => self.batch_rename_dialog.set_status_message(format!(
+                        "Undo was not started: {error}"
+                    )),
+                }
+            }
+            BatchRenameUiCommand::CancelOperation => {
+                if let Some(coordinator) = self.batch_rename_coordinator.as_ref() {
+                    coordinator.cancel_operation();
+                }
+            }
             BatchRenameUiCommand::Closed => {
-                self.batch_rename_dialog.end_session();
+                self.end_batch_rename_session();
                 self.panel_states.batch_rename_dialog = false;
                 self.panel_stack
                     .retain(|panel| *panel != Panel::BatchRenameDialog);
@@ -1691,7 +1734,18 @@ impl LauncherApp {
 
     fn start_batch_rename_scan(&mut self, root: PathBuf) {
         if self.batch_rename_coordinator.is_none() {
-            match crate::file_operations::RenameScanCoordinator::new() {
+            let journal_path = crate::platform::app_data::AppDataRoot::from_settings_path(
+                &self.settings_path,
+            )
+            .map(|root| {
+                root.path()
+                    .join(crate::batch_rename_transaction::RECOVERY_JOURNAL_FILE)
+            })
+            .map_err(|error| std::io::Error::other(error.to_string()));
+            let coordinator = journal_path.and_then(
+                crate::file_operations::RenameScanCoordinator::new_with_journal,
+            );
+            match coordinator {
                 Ok(coordinator) => self.batch_rename_coordinator = Some(coordinator),
                 Err(error) => {
                     self.batch_rename_dialog.fail_to_start_scan(
@@ -1711,13 +1765,32 @@ impl LauncherApp {
         if self.batch_rename_dialog.poll_scan() {
             ctx.request_repaint();
         }
+        let runtime = self.batch_rename_runtime_snapshot();
+        self.batch_rename_dialog.observe_runtime(&runtime);
         if self.batch_rename_dialog.has_pending_scan() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if runtime.operation_active {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 
-    pub(crate) fn shutdown_batch_rename_scanner(&mut self) {
+    fn batch_rename_runtime_snapshot(&self) -> crate::file_operations::RenameRuntimeSnapshot {
+        self.batch_rename_coordinator
+            .as_ref()
+            .map(crate::file_operations::RenameScanCoordinator::runtime_snapshot)
+            .unwrap_or_default()
+    }
+
+    fn end_batch_rename_session(&mut self) {
+        if let Some(coordinator) = self.batch_rename_coordinator.as_ref() {
+            coordinator.cancel_operation();
+        }
         self.batch_rename_dialog.end_session();
+    }
+
+    pub(crate) fn shutdown_batch_rename_scanner(&mut self) {
+        self.end_batch_rename_session();
         if let Some(coordinator) = self.batch_rename_coordinator.take() {
             if let Err(error) = coordinator.shutdown() {
                 tracing::warn!(%error, "batch rename scanner did not shut down cleanly");
@@ -3588,7 +3661,7 @@ impl LauncherApp {
                 self.panel_states.file_search_dialog = false;
             }
             Panel::BatchRenameDialog => {
-                self.batch_rename_dialog.end_session();
+                self.end_batch_rename_session();
                 self.panel_states.batch_rename_dialog = false;
             }
             Panel::NotesDialog => {
@@ -3831,7 +3904,7 @@ impl LauncherApp {
                 self.panel_states.file_search_dialog = false;
             }
             Panel::BatchRenameDialog => {
-                self.batch_rename_dialog.end_session();
+                self.end_batch_rename_session();
                 self.panel_states.batch_rename_dialog = false;
             }
             Panel::NotesDialog => {

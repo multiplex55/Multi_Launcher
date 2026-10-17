@@ -446,18 +446,29 @@ The improved file-search plugin does **not** include these deferred features yet
 
 ## Batch Renamer
 
-Type `rename` and choose **Open Batch Renamer** to open a read-only filename
-preview. Choose a folder explicitly; opening the dialog does not guess a root or
-start a scan. The initial scope is the root folder's direct children. Enable
-**Include subfolders** to scan recursively, or use a listed folder as a new
-bounded root.
+Type `rename` and choose **Open Batch Renamer**. Choose a folder explicitly;
+opening the dialog does not guess a root or start a scan. The initial scope is
+the root folder's direct children. Enable **Include subfolders** to scan
+recursively, or use a listed folder as a new bounded root.
 
 After a complete scan, select files and compose ordered prefix, suffix,
 numbering, literal replacement, regex replacement, or case rules. Table sorting
 and filtering only change the display; numbering keeps the scan's deterministic
 path order. File extensions are protected by default. Choose **Edit full
-filename** to include the extension in the rules. This preview does not change
-files.
+filename** to include the extension in the rules.
+
+**Confirm and apply** freezes the exact source-to-target mapping and applies it
+as one transaction. Files are staged under unique temporary names in their own
+parent directories before publication, so case-only changes and selected-file
+cycles are supported. Existing or newly occupied names are never overwritten.
+If a move cannot be safely completed or reversed, the receipt keeps the known
+recovery paths for a later explicit Undo or recovery attempt.
+
+Receipts persist across restarts, with a limit of 32. Before a new apply,
+receipts already marked Undone are dropped to make room. Undo requires the
+recorded file identity, bytes, size, and last-modified time to match, and refuses
+occupied original names. Content verification is limited to 1 GiB per file and
+4 GiB across one batch.
 
 ---
 

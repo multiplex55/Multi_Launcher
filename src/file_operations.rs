@@ -1,4 +1,4 @@
-//! Read-only, root-confined filesystem proofs shared by safe file workflows.
+//! Root-confined filesystem proofs and handle-bound file operations.
 //!
 //! The batch renamer uses this module to build a complete candidate snapshot.
 //! Paths and metadata alone never establish identity: Windows IDs are read
@@ -18,10 +18,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const MAX_RENAME_SCAN_DIRECTORIES: usize = 4_096;
 pub const MAX_RENAME_SCAN_DEPTH: usize = 256;
 pub const MAX_RENAME_SCAN_ISSUE_SAMPLES: usize = 64;
+pub(crate) const MAX_RENAME_HASH_BYTES_PER_FILE: u64 = 1 << 30;
+pub(crate) const MAX_RENAME_HASH_BYTES_PER_BATCH: u64 = 4 << 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RenameScanGeneration(pub u64);
@@ -32,7 +36,8 @@ pub enum RenameScanScope {
     Recursive,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct NativeFileIdentity {
     volume_serial_number: u64,
     file_id: [u8; 16],
@@ -99,6 +104,22 @@ impl ScanCancellation {
 
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ContentVerificationMode<'a> {
+    /// Stop at the next content chunk when the user or application requests
+    /// cancellation, before beginning another atomic namespace operation.
+    Cooperative(&'a ScanCancellation),
+    /// Finish verifying a payload that the transaction may own at a recovery
+    /// path before compensating or recording its terminal state.
+    CompleteOwnedPayload,
+}
+
+impl ContentVerificationMode<'_> {
+    pub(crate) fn is_cancelled(self) -> bool {
+        matches!(self, Self::Cooperative(cancellation) if cancellation.is_cancelled())
     }
 }
 
@@ -437,6 +458,182 @@ pub struct VerifiedRenamePlan {
     proof: Arc<ScanProof>,
 }
 
+/// A native file handle that is authorized by a verified M8 scan and remains
+/// bound to the source identity and its guarded parent chain for one rename
+/// transaction. The handle has DELETE and read rights, and denies other
+/// writers and deleters while it is retained.
+pub(crate) struct GuardedRenameFile {
+    source_ref: SnapshotEntryRef,
+    original_path: PathBuf,
+    target_path: PathBuf,
+    current_path: PathBuf,
+    parent_path: PathBuf,
+    parent_identity: NativeFileIdentity,
+    identity: NativeFileIdentity,
+    expected_length: u64,
+    expected_modified: SystemTime,
+    content_sha256: [u8; 32],
+    #[cfg(windows)]
+    source: std::fs::File,
+    #[cfg(windows)]
+    root: RootProof,
+    #[cfg(windows)]
+    parent_chain: Vec<DirectoryProof>,
+    #[cfg(windows)]
+    _root_guards: OpenDirectoryChain<std::fs::File>,
+    #[cfg(windows)]
+    _parent_guards: OpenDirectoryChain<std::fs::File>,
+}
+
+impl GuardedRenameFile {
+    pub(crate) fn source_ref(&self) -> SnapshotEntryRef {
+        self.source_ref
+    }
+
+    pub(crate) fn original_path(&self) -> &Path {
+        &self.original_path
+    }
+
+    pub(crate) fn target_path(&self) -> &Path {
+        &self.target_path
+    }
+
+    pub(crate) fn current_path(&self) -> &Path {
+        &self.current_path
+    }
+
+    pub(crate) fn parent_path(&self) -> &Path {
+        &self.parent_path
+    }
+
+    pub(crate) fn parent_identity(&self) -> NativeFileIdentity {
+        self.parent_identity
+    }
+
+    pub(crate) fn identity(&self) -> NativeFileIdentity {
+        self.identity
+    }
+
+    pub(crate) fn expected_length(&self) -> u64 {
+        self.expected_length
+    }
+
+    pub(crate) fn expected_modified(&self) -> SystemTime {
+        self.expected_modified
+    }
+
+    pub(crate) fn content_sha256(&self) -> [u8; 32] {
+        self.content_sha256
+    }
+
+    /// Atomically rename this exact opened file to a leaf in its verified
+    /// parent directory, refusing an existing destination.
+    pub(crate) fn rename_to_leaf(
+        &mut self,
+        leaf: &OsStr,
+        verification_mode: ContentVerificationMode<'_>,
+    ) -> std::io::Result<PathBuf> {
+        #[cfg(windows)]
+        {
+            let expected_path = self.current_path.clone();
+            self.verify_at(&expected_path, verification_mode)?;
+            let parent = self
+                ._parent_guards
+                .last()
+                .ok_or_else(|| std::io::Error::other("verified rename parent is missing"))?;
+            let backend = NativeRenameScanBackend;
+            backend
+                .reopen_chain(&self.parent_chain, &self.root, DirectoryOpenAccess::Enumerate)
+                .map_err(|failure| std::io::Error::other(failure.message))?;
+            rename_open_file_no_replace(&self.source, parent, leaf)?;
+            let next_path = self.parent_path.join(leaf);
+            self.current_path = next_path.clone();
+            self.verify_at(&next_path, verification_mode)?;
+            Ok(next_path)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (leaf, verification_mode);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "safe rename-by-handle is available only on Windows",
+            ))
+        }
+    }
+
+    pub(crate) fn verify_at(
+        &self,
+        expected_path: &Path,
+        verification_mode: ContentVerificationMode<'_>,
+    ) -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            let identity = native_file_identity(&self.source)?;
+            if identity != self.identity {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "opened rename file identity changed",
+                ));
+            }
+            let metadata = self.source.metadata()?;
+            if metadata.len() != self.expected_length
+                || metadata.modified().ok() != Some(self.expected_modified)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "opened rename file size or last-modified time changed",
+                ));
+            }
+            let actual_path = final_path_for_handle(&self.source)?;
+            if batch_rename::compare_paths_windows_ordinal(&actual_path, expected_path)
+                != std::cmp::Ordering::Equal
+                || actual_path.file_name() != expected_path.file_name()
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "opened rename file moved unexpectedly: expected {}, found {}",
+                        expected_path.display(),
+                        actual_path.display()
+                    ),
+                ));
+            }
+            if hash_file_contents(&self.source, verification_mode)? != self.content_sha256 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "opened rename file content changed",
+                ));
+            }
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (expected_path, verification_mode);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "safe rename-by-handle is available only on Windows",
+            ))
+        }
+    }
+}
+
+pub(crate) struct GuardedRenameBatch {
+    pub(crate) files: Vec<GuardedRenameFile>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct UndoGuardSpec {
+    pub(crate) source_ref: SnapshotEntryRef,
+    pub(crate) original_path: PathBuf,
+    pub(crate) current_path: PathBuf,
+    pub(crate) parent_path: PathBuf,
+    pub(crate) parent_identity: NativeFileIdentity,
+    pub(crate) identity: NativeFileIdentity,
+    pub(crate) expected_length: u64,
+    pub(crate) expected_modified: SystemTime,
+    pub(crate) content_sha256: [u8; 32],
+}
+
 impl VerifiedRenamePlan {
     pub fn plan(&self) -> &RenamePlan {
         &self.plan
@@ -448,6 +645,14 @@ impl VerifiedRenamePlan {
 
     pub fn root_identity(&self) -> NativeFileIdentity {
         self.proof.root.identity
+    }
+
+    pub fn canonical_root(&self) -> &Path {
+        &self.proof.root.canonical_path
+    }
+
+    pub fn recursive_scope(&self) -> bool {
+        self.proof.root.recursive
     }
 
     pub fn fresh_recheck_input(&self) -> FreshRecheckInput {
@@ -714,6 +919,12 @@ struct BackendFailure {
     kind: BackendFailureKind,
     path: Option<PathBuf>,
     message: String,
+}
+
+impl std::fmt::Display for BackendFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
 }
 
 impl BackendFailure {
@@ -1508,6 +1719,482 @@ pub fn recheck_verified_rename_plan(
     )
 }
 
+/// Acquire and retain native source and parent handles for the exact verified
+/// plan. This is a complete preflight: every source, metadata precondition,
+/// target and sibling occupancy is checked before the caller may persist a
+/// journal or move a file.
+pub(crate) fn prepare_guarded_rename_batch(
+    plan: &VerifiedRenamePlan,
+    cancellation: &ScanCancellation,
+) -> Result<GuardedRenameBatch, String> {
+    #[cfg(windows)]
+    {
+        prepare_guarded_rename_batch_native(plan, cancellation)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (plan, cancellation);
+        Err("safe rename-by-handle is available only on Windows".to_owned())
+    }
+}
+
+/// Reopen a persisted receipt using only its exact recorded paths. The
+/// journal is untrusted input; callers must validate path relationships
+/// before asking this boundary to inspect the root, parent and candidates.
+pub(crate) fn inspect_recorded_rename_file(
+    root_path: &Path,
+    root_identity: NativeFileIdentity,
+    parent_path: &Path,
+    parent_identity: NativeFileIdentity,
+    expected_identity: NativeFileIdentity,
+    expected_length: u64,
+    expected_modified: SystemTime,
+    expected_sha256: [u8; 32],
+    candidates: &[PathBuf],
+    cancellation: &ScanCancellation,
+) -> Result<Vec<PathBuf>, String> {
+    #[cfg(windows)]
+    {
+        let root = verified_root_proof(root_path, root_identity)?;
+        let parent_chain = verified_parent_chain(&root, parent_path, parent_identity)?;
+        let backend = NativeRenameScanBackend;
+        let root_guards = backend
+            .reopen_chain(&root.chain, &root, DirectoryOpenAccess::Enumerate)
+            .map_err(|error| error.to_string())?;
+        let parent_guards = backend
+            .reopen_chain(&parent_chain, &root, DirectoryOpenAccess::Enumerate)
+            .map_err(|error| error.to_string())?;
+        let parent = parent_guards
+            .last()
+            .ok_or_else(|| "verified receipt parent is missing".to_owned())?;
+        let parent_canonical_path = parent.canonical_path.clone();
+        let _retained = (root_guards, parent_guards);
+        let mut matches = Vec::new();
+        for path in candidates {
+            if cancellation.is_cancelled() {
+                return Err("recovery verification was cancelled".to_owned());
+            }
+            if path.parent().is_none_or(|actual_parent| {
+                batch_rename::compare_paths_windows_ordinal(actual_parent, parent_path)
+                    != std::cmp::Ordering::Equal
+            }) {
+                return Err(format!(
+                    "receipt candidate {} is outside its recorded parent",
+                    path.display()
+                ));
+            }
+            let Some(leaf) = path.file_name() else {
+                return Err(format!("receipt candidate {} has no filename", path.display()));
+            };
+            let opened = match open_native_verified_file(&parent_canonical_path.join(leaf)) {
+                Ok(opened) => opened,
+                Err(error) if native_error_is_not_found(&error) => continue,
+                Err(error) => return Err(error.to_string()),
+            };
+            if opened.identity == expected_identity
+                && opened.length == Some(expected_length)
+                && opened.modified == Some(expected_modified)
+                && hash_file_contents(
+                    &opened.handle,
+                    ContentVerificationMode::Cooperative(cancellation),
+                )
+                .map_err(|error| error.to_string())?
+                    == expected_sha256
+                && batch_rename::compare_paths_windows_ordinal(
+                    &opened.canonical_path,
+                    path,
+                ) == std::cmp::Ordering::Equal
+                && opened.canonical_path.file_name() == path.file_name()
+            {
+                matches.push(path.clone());
+            }
+        }
+        Ok(matches)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (
+            root_path,
+            root_identity,
+            parent_path,
+            parent_identity,
+            expected_identity,
+            expected_length,
+            expected_modified,
+            expected_sha256,
+            candidates,
+            cancellation,
+        );
+        Err("native receipt verification is available only on Windows".to_owned())
+    }
+}
+
+#[cfg(windows)]
+fn prepare_guarded_rename_batch_native(
+    plan: &VerifiedRenamePlan,
+    cancellation: &ScanCancellation,
+) -> Result<GuardedRenameBatch, String> {
+    if plan.plan.actions().is_empty() {
+        return Err("the confirmed plan contains no changed filenames".to_owned());
+    }
+    if plan.plan.actions().len() > batch_rename::MAX_SELECTED_ENTRIES {
+        return Err("the confirmed plan exceeds the selected-file limit".to_owned());
+    }
+
+    let backend = NativeRenameScanBackend;
+    let root = &plan.proof.root;
+    let root_guards = backend
+        .reopen_chain(&root.chain, root, DirectoryOpenAccess::Enumerate)
+        .map_err(|error| error.to_string())?;
+    if root_guards
+        .last()
+        .is_none_or(|directory| directory.identity != root.identity)
+    {
+        return Err("the selected root changed before apply".to_owned());
+    }
+
+    let mut files = Vec::with_capacity(plan.plan.actions().len());
+    let mut unique_identities = std::collections::HashSet::with_capacity(plan.plan.actions().len());
+    let mut total_length = 0_u64;
+    for action in plan.plan.actions() {
+        if cancellation.is_cancelled() {
+            return Err("rename was cancelled before any file was moved".to_owned());
+        }
+        let entry = plan
+            .proof
+            .entries
+            .get(&action.source_ref())
+            .ok_or_else(|| "the confirmed action has no native scan proof".to_owned())?;
+        if batch_rename::compare_paths_windows_ordinal(&entry.path, action.source_path())
+            != std::cmp::Ordering::Equal
+        {
+            return Err(format!(
+                "source path changed in the confirmed plan: {}",
+                action.source_path().display()
+            ));
+        }
+        let parent_path = action
+            .source_path()
+            .parent()
+            .ok_or_else(|| "a rename source has no parent directory".to_owned())?;
+        if action.target_path().parent().is_none_or(|target_parent| {
+            batch_rename::compare_paths_windows_ordinal(target_parent, parent_path)
+                != std::cmp::Ordering::Equal
+        }) {
+            return Err(format!(
+                "cross-directory rename is not supported: {}",
+                action.target_path().display()
+            ));
+        }
+        if !batch_rename::path_is_within_windows_ordinal(&root.canonical_path, parent_path) {
+            return Err(format!(
+                "rename parent escaped the selected root: {}",
+                parent_path.display()
+            ));
+        }
+
+        let parent_guards = backend
+            .reopen_chain(&entry.parent_chain, root, DirectoryOpenAccess::Enumerate)
+            .map_err(|error| error.to_string())?;
+        let parent = parent_guards
+            .last()
+            .ok_or_else(|| "a verified source parent is missing".to_owned())?;
+        if batch_rename::compare_paths_windows_ordinal(&parent.canonical_path, parent_path)
+            != std::cmp::Ordering::Equal
+            || parent.identity
+                != entry
+                    .parent_chain
+                    .last()
+                    .map(|proof| proof.identity)
+                    .unwrap_or(root.identity)
+        {
+            return Err(format!(
+                "source parent changed before apply: {}",
+                parent_path.display()
+            ));
+        }
+
+        let opened = open_native_mutation_file(action.source_path()).map_err(|error| {
+            format!(
+                "could not guard source {}: {error}",
+                action.source_path().display()
+            )
+        })?;
+        if opened.kind != SnapshotEntryKind::File
+            || opened.reparse_point
+            || opened.identity != entry.identity
+            || opened.length != entry.length
+            || opened.modified != entry.modified
+            || entry.length.is_none()
+            || entry.modified.is_none()
+            || batch_rename::compare_paths_windows_ordinal(
+                &opened.canonical_path,
+                action.source_path(),
+            ) != std::cmp::Ordering::Equal
+            || opened
+                .canonical_path
+                .parent()
+                .is_none_or(|actual_parent| {
+                    batch_rename::compare_paths_windows_ordinal(actual_parent, parent_path)
+                        != std::cmp::Ordering::Equal
+                })
+        {
+            return Err(format!(
+                "source changed since preview: {}",
+                action.source_path().display()
+            ));
+        }
+        if !unique_identities.insert(opened.identity) {
+            return Err(
+                "the confirmed selection contains duplicate native file identities; safe recovery would be ambiguous"
+                    .to_owned(),
+            );
+        }
+        let length = entry
+            .length
+            .ok_or_else(|| "source length is unavailable".to_owned())?;
+        let expected_modified = entry
+            .modified
+            .ok_or_else(|| "source last-modified time is unavailable".to_owned())?;
+        if length > MAX_RENAME_HASH_BYTES_PER_FILE {
+            return Err(format!(
+                "source exceeds the {MAX_RENAME_HASH_BYTES_PER_FILE}-byte content verification limit: {}",
+                action.source_path().display()
+            ));
+        }
+        total_length = total_length.saturating_add(length);
+        if total_length > MAX_RENAME_HASH_BYTES_PER_BATCH {
+            return Err(format!(
+                "selected files exceed the {MAX_RENAME_HASH_BYTES_PER_BATCH}-byte content verification limit"
+            ));
+        }
+        let content_sha256 = hash_file_contents(
+            &opened.handle,
+            ContentVerificationMode::Cooperative(cancellation),
+        )
+        .map_err(|error| {
+            format!(
+                "could not fingerprint {}: {error}",
+                action.source_path().display()
+            )
+        })?;
+        let parent_path = parent.canonical_path.clone();
+        let parent_identity = parent.identity;
+        files.push(GuardedRenameFile {
+            source_ref: action.source_ref(),
+            original_path: action.source_path().to_path_buf(),
+            target_path: action.target_path().to_path_buf(),
+            current_path: action.source_path().to_path_buf(),
+            parent_path,
+            parent_identity,
+            identity: opened.identity,
+            expected_length: length,
+            expected_modified,
+            content_sha256,
+            source: opened.handle,
+            root: root.clone(),
+            parent_chain: entry.parent_chain.clone(),
+            _root_guards: root_guards.clone(),
+            _parent_guards: parent_guards,
+        });
+    }
+    check_guarded_destinations(&backend, root, &files)?;
+    for file in &files {
+        file.verify_at(
+            &file.original_path,
+            ContentVerificationMode::Cooperative(cancellation),
+        )
+            .map_err(|error| format!("source changed during preflight: {error}"))?;
+    }
+    Ok(GuardedRenameBatch { files })
+}
+
+#[cfg(windows)]
+pub(crate) fn prepare_guarded_undo_batch(
+    root_path: &Path,
+    root_identity: NativeFileIdentity,
+    specs: &[UndoGuardSpec],
+    cancellation: &ScanCancellation,
+) -> Result<GuardedRenameBatch, String> {
+    if specs.is_empty() {
+        return Err("the recovery receipt contains no restorable entries".to_owned());
+    }
+    if specs.len() > batch_rename::MAX_SELECTED_ENTRIES {
+        return Err("the recovery receipt exceeds the selected-file limit".to_owned());
+    }
+    let root = verified_root_proof(root_path, root_identity)?;
+    let backend = NativeRenameScanBackend;
+    let root_guards = backend
+        .reopen_chain(&root.chain, &root, DirectoryOpenAccess::Enumerate)
+        .map_err(|error| error.to_string())?;
+    let mut files = Vec::with_capacity(specs.len());
+    let mut unique_identities = std::collections::HashSet::with_capacity(specs.len());
+    let mut total_length = 0_u64;
+    for spec in specs {
+        if cancellation.is_cancelled() {
+            return Err("Undo was cancelled before any file was moved".to_owned());
+        }
+        if spec.original_path.parent().is_none_or(|parent| {
+            batch_rename::compare_paths_windows_ordinal(parent, &spec.parent_path)
+                != std::cmp::Ordering::Equal
+        }) || spec.current_path.parent().is_none_or(|parent| {
+            batch_rename::compare_paths_windows_ordinal(parent, &spec.parent_path)
+                != std::cmp::Ordering::Equal
+        }) {
+            return Err("a recovery entry crossed its recorded parent directory".to_owned());
+        }
+        if spec.expected_length > MAX_RENAME_HASH_BYTES_PER_FILE {
+            return Err(format!(
+                "recovery source exceeds the {MAX_RENAME_HASH_BYTES_PER_FILE}-byte content verification limit: {}",
+                spec.current_path.display()
+            ));
+        }
+        total_length = total_length.saturating_add(spec.expected_length);
+        if total_length > MAX_RENAME_HASH_BYTES_PER_BATCH {
+            return Err(format!(
+                "recovery batch exceeds the {MAX_RENAME_HASH_BYTES_PER_BATCH}-byte content verification limit"
+            ));
+        }
+        let parent_chain = verified_parent_chain(&root, &spec.parent_path, spec.parent_identity)?;
+        let parent_guards = backend
+            .reopen_chain(&parent_chain, &root, DirectoryOpenAccess::Enumerate)
+            .map_err(|error| error.to_string())?;
+        let parent = parent_guards
+            .last()
+            .ok_or_else(|| "a recovery parent directory is missing".to_owned())?;
+        let opened = open_native_mutation_file(&spec.current_path).map_err(|error| {
+            format!(
+                "could not guard recovery source {}: {error}",
+                spec.current_path.display()
+            )
+        })?;
+        let content_sha256 = hash_file_contents(
+            &opened.handle,
+            ContentVerificationMode::Cooperative(cancellation),
+        )
+        .map_err(|error| {
+            format!(
+                "could not fingerprint recovery source {}: {error}",
+                spec.current_path.display()
+            )
+        })?;
+        if opened.kind != SnapshotEntryKind::File
+            || opened.reparse_point
+            || opened.identity != spec.identity
+            || opened.length != Some(spec.expected_length)
+            || opened.modified != Some(spec.expected_modified)
+            || content_sha256 != spec.content_sha256
+            || batch_rename::compare_paths_windows_ordinal(
+                &opened.canonical_path,
+                &spec.current_path,
+            ) != std::cmp::Ordering::Equal
+            || opened.canonical_path.file_name() != spec.current_path.file_name()
+            || parent.identity != spec.parent_identity
+        {
+            return Err(format!(
+                "recovery source identity or bytes changed: {}",
+                spec.current_path.display()
+            ));
+        }
+        if !unique_identities.insert(opened.identity) {
+            return Err(
+                "the recovery receipt contains duplicate native file identities; safe Undo would be ambiguous"
+                    .to_owned(),
+            );
+        }
+        files.push(GuardedRenameFile {
+            source_ref: spec.source_ref,
+            original_path: spec.original_path.clone(),
+            target_path: spec.original_path.clone(),
+            current_path: spec.current_path.clone(),
+            parent_path: parent.canonical_path.clone(),
+            parent_identity: parent.identity,
+            identity: opened.identity,
+            expected_length: spec.expected_length,
+            expected_modified: spec.expected_modified,
+            content_sha256,
+            source: opened.handle,
+            root: root.clone(),
+            parent_chain,
+            _root_guards: root_guards.clone(),
+            _parent_guards: parent_guards,
+        });
+    }
+    check_guarded_destinations(&backend, &root, &files)?;
+    Ok(GuardedRenameBatch { files })
+}
+
+#[cfg(not(windows))]
+pub(crate) fn prepare_guarded_undo_batch(
+    _root_path: &Path,
+    _root_identity: NativeFileIdentity,
+    _specs: &[UndoGuardSpec],
+    _cancellation: &ScanCancellation,
+) -> Result<GuardedRenameBatch, String> {
+    Err("safe rename-by-handle is available only on Windows".to_owned())
+}
+
+#[cfg(windows)]
+fn check_guarded_destinations(
+    backend: &NativeRenameScanBackend,
+    _root: &RootProof,
+    files: &[GuardedRenameFile],
+) -> Result<(), String> {
+    for file in files {
+        let Some(target_leaf) = file.target_path.file_name() else {
+            return Err("a verified destination has no filename".to_owned());
+        };
+        let Some(parent) = file._parent_guards.last() else {
+            return Err("a verified destination parent is missing".to_owned());
+        };
+        let names = backend
+            .enumerate_directory(
+                parent,
+                batch_rename::MAX_SNAPSHOT_ENTRIES,
+                &ScanCancellation::new(),
+            )
+            .map_err(|error| error.to_string())?;
+        for name in names.iter().filter(|name| {
+            batch_rename::compare_paths_windows_ordinal(
+                Path::new(&name.name),
+                Path::new(target_leaf),
+            ) == std::cmp::Ordering::Equal
+        }) {
+            let occupied_path = parent.canonical_path.join(&name.name);
+            let selected_source = files.iter().find(|source| {
+                batch_rename::compare_paths_windows_ordinal(
+                    &source.current_path,
+                    &occupied_path,
+                ) == std::cmp::Ordering::Equal
+            });
+            if let Some(source) = selected_source {
+                let occupant = open_native_occupancy_file(&occupied_path)
+                    .map_err(|error| error.to_string())?;
+                if occupant.identity != source.identity
+                    || occupant.kind != SnapshotEntryKind::File
+                    || occupant.reparse_point
+                    || batch_rename::compare_paths_windows_ordinal(
+                        &occupant.canonical_path,
+                        &source.current_path,
+                    ) != std::cmp::Ordering::Equal
+                    || occupant.canonical_path.file_name() != source.current_path.file_name()
+                {
+                    return Err(format!(
+                        "destination occupancy no longer matches the exact selected source identity: {}",
+                        occupied_path.display()
+                    ));
+                }
+                continue;
+            }
+            return Err(format!(
+                "destination is occupied by an unselected or unrelated entry: {}",
+                occupied_path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Scan one explicitly supplied root. Native identity is currently defined
 /// only for supported local Windows filesystems; other platforms fail closed.
 pub fn scan_rename_root(
@@ -1919,17 +2606,73 @@ impl RenameScanBackend for NativeRenameScanBackend {
     }
 }
 
-struct WorkerJob {
-    request: RenameScanRequest,
-    cancellation: ScanCancellation,
-    reply: mpsc::Sender<RenameScanResult>,
+enum WorkerJob {
+    Scan {
+        request: RenameScanRequest,
+        cancellation: ScanCancellation,
+        reply: mpsc::Sender<RenameScanResult>,
+    },
+    Apply {
+        plan: VerifiedRenamePlan,
+        cancellation: ScanCancellation,
+    },
+    Undo {
+        transaction_id: String,
+        cancellation: ScanCancellation,
+    },
+}
+
+impl WorkerJob {
+    fn cancellation(&self) -> &ScanCancellation {
+        match self {
+            Self::Scan { cancellation, .. }
+            | Self::Apply { cancellation, .. }
+            | Self::Undo { cancellation, .. } => cancellation,
+        }
+    }
+
+    fn is_scan(&self) -> bool {
+        matches!(self, Self::Scan { .. })
+    }
+}
+
+enum ActiveWorker {
+    Scan(RenameScanGeneration, ScanCancellation),
+    Apply(ScanCancellation),
+    Undo(ScanCancellation),
+}
+
+impl ActiveWorker {
+    fn cancellation(&self) -> &ScanCancellation {
+        match self {
+            Self::Scan(_, cancellation)
+            | Self::Apply(cancellation)
+            | Self::Undo(cancellation) => cancellation,
+        }
+    }
+
+    fn is_scan(&self) -> bool {
+        matches!(self, Self::Scan(..))
+    }
 }
 
 struct WorkerState {
     next_generation: u64,
     pending: Option<WorkerJob>,
-    active: Option<(RenameScanGeneration, ScanCancellation)>,
+    active: Option<ActiveWorker>,
+    startup_cancellation: ScanCancellation,
     shutdown: bool,
+}
+
+/// App-owned, nonblocking view of the shared scan and mutation worker.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RenameRuntimeSnapshot {
+    pub(crate) journal_ready: bool,
+    pub(crate) journal_error: Option<String>,
+    pub(crate) operation_active: bool,
+    pub(crate) progress: Option<crate::batch_rename_transaction::RenameProgress>,
+    pub(crate) receipts: Vec<crate::batch_rename_transaction::RenameRecoveryReceipt>,
+    pub(crate) last_message: Option<String>,
 }
 
 /// A single background scanner. New submissions cancel the active generation
@@ -1937,26 +2680,50 @@ struct WorkerState {
 /// unbounded queue of filesystem traversals.
 pub struct RenameScanCoordinator {
     state: Arc<(Mutex<WorkerState>, Condvar)>,
+    runtime: Arc<Mutex<RenameRuntimeSnapshot>>,
+    journal_path: Option<PathBuf>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl RenameScanCoordinator {
     pub fn new() -> std::io::Result<Self> {
+        Self::new_internal(None)
+    }
+
+    pub(crate) fn new_with_journal(journal_path: PathBuf) -> std::io::Result<Self> {
+        Self::new_internal(Some(journal_path))
+    }
+
+    fn new_internal(journal_path: Option<PathBuf>) -> std::io::Result<Self> {
+        let startup_cancellation = ScanCancellation::new();
         let state = Arc::new((
             Mutex::new(WorkerState {
                 next_generation: 1,
                 pending: None,
                 active: None,
+                startup_cancellation: startup_cancellation.clone(),
                 shutdown: false,
             }),
             Condvar::new(),
         ));
+        let runtime = Arc::new(Mutex::new(RenameRuntimeSnapshot::default()));
         let worker_state = Arc::clone(&state);
+        let worker_runtime = Arc::clone(&runtime);
+        let worker_journal_path = journal_path.clone();
         let worker = thread::Builder::new()
-            .name("rename-root-scan".into())
-            .spawn(move || scan_worker_loop(worker_state))?;
+            .name("batch-rename-worker".into())
+            .spawn(move || {
+                scan_worker_loop(
+                    worker_state,
+                    worker_runtime,
+                    worker_journal_path,
+                    startup_cancellation,
+                )
+            })?;
         Ok(Self {
             state,
+            runtime,
+            journal_path,
             worker: Some(worker),
         })
     }
@@ -1980,22 +2747,26 @@ impl RenameScanCoordinator {
                 "rename scan worker is shutting down",
             ));
         }
+        if state.active.as_ref().is_some_and(|active| !active.is_scan())
+            || state.pending.as_ref().is_some_and(|pending| !pending.is_scan())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "a batch rename operation is in progress",
+            ));
+        }
         let generation = RenameScanGeneration(state.next_generation);
         state.next_generation = state.next_generation.checked_add(1).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::Other, "rename scan generation overflow")
         })?;
-        if let Some((_, active)) = &state.active {
-            active.cancel();
+        if let Some(active) = &state.active {
+            active.cancellation().cancel();
         }
         if let Some(pending) = state.pending.take() {
-            pending.cancellation.cancel();
-            let _ = pending.reply.send(empty_scan_result(
-                &pending.request,
-                RenameScanStatus::Cancelled,
-            ));
+            cancel_pending_job(pending);
         }
         let cancellation = ScanCancellation::new();
-        state.pending = Some(WorkerJob {
+        state.pending = Some(WorkerJob::Scan {
             request: RenameScanRequest::new(root, recursive, generation),
             cancellation: cancellation.clone(),
             reply,
@@ -2006,6 +2777,164 @@ impl RenameScanCoordinator {
             cancellation,
             receiver,
         })
+    }
+
+    pub(crate) fn runtime_snapshot(&self) -> RenameRuntimeSnapshot {
+        self.runtime
+            .lock()
+            .map(|snapshot| snapshot.clone())
+            .unwrap_or_else(|_| RenameRuntimeSnapshot {
+                journal_ready: false,
+                journal_error: Some("batch rename runtime state was poisoned".to_owned()),
+                ..RenameRuntimeSnapshot::default()
+            })
+    }
+
+    pub fn submit_apply(&self, plan: VerifiedRenamePlan) -> std::io::Result<()> {
+        let journal_path = self.journal_path.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "this rename coordinator has no recovery journal",
+            )
+        })?;
+        let (lock, wake) = &*self.state;
+        let mut state = lock.lock().map_err(|_| poisoned_worker_state())?;
+        if state.shutdown {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "batch rename worker is shutting down",
+            ));
+        }
+        if state.active.is_some() || state.pending.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "the shared batch rename worker is busy",
+            ));
+        }
+        let mut runtime = self.runtime.lock().map_err(|_| poisoned_runtime_state())?;
+        if runtime.operation_active {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "the prior batch rename result is still being published",
+            ));
+        }
+        if !runtime.journal_ready {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                runtime
+                    .journal_error
+                    .clone()
+                    .unwrap_or_else(|| "rename recovery data is not ready".to_owned()),
+            ));
+        }
+        if runtime.receipts.iter().any(|receipt| {
+            matches!(
+                receipt.status(),
+                crate::batch_rename_transaction::RenameTransactionStatus::RecoveryRequired
+                    | crate::batch_rename_transaction::RenameTransactionStatus::Applying
+                    | crate::batch_rename_transaction::RenameTransactionStatus::Undoing
+            )
+        }) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "an unresolved rename recovery receipt must be handled first",
+            ));
+        }
+        let cancellation = ScanCancellation::new();
+        state.pending = Some(WorkerJob::Apply {
+            plan,
+            cancellation,
+        });
+        runtime.operation_active = true;
+        runtime.progress = None;
+        runtime.last_message = None;
+        wake.notify_one();
+        let _ = journal_path;
+        Ok(())
+    }
+
+    pub fn submit_undo(&self, transaction_id: String) -> std::io::Result<()> {
+        if self.journal_path.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "this rename coordinator has no recovery journal",
+            ));
+        }
+        let (lock, wake) = &*self.state;
+        let mut state = lock.lock().map_err(|_| poisoned_worker_state())?;
+        if state.shutdown {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "batch rename worker is shutting down",
+            ));
+        }
+        if state.active.is_some() || state.pending.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "the shared batch rename worker is busy",
+            ));
+        }
+        let mut runtime = self.runtime.lock().map_err(|_| poisoned_runtime_state())?;
+        if runtime.operation_active {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "the prior batch rename result is still being published",
+            ));
+        }
+        if !runtime.journal_ready {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                runtime
+                    .journal_error
+                    .clone()
+                    .unwrap_or_else(|| "rename recovery data is not ready".to_owned()),
+            ));
+        }
+        if !runtime.receipts.iter().any(|receipt| {
+            receipt.id() == transaction_id
+                && receipt.status().can_undo()
+                && receipt.remaining_undo_count() > 0
+        }) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the selected rename receipt has no verifiable Undo entries",
+            ));
+        }
+        let cancellation = ScanCancellation::new();
+        state.pending = Some(WorkerJob::Undo {
+            transaction_id,
+            cancellation,
+        });
+        runtime.operation_active = true;
+        runtime.progress = None;
+        runtime.last_message = None;
+        wake.notify_one();
+        Ok(())
+    }
+
+    /// Cancel a pending mutation before its first phase, or ask an active
+    /// mutation to stop at the next atomic native operation boundary.
+    pub fn cancel_operation(&self) {
+        let (lock, _) = &*self.state;
+        if let Ok(mut state) = lock.lock() {
+            if let Some(active) = &state.active {
+                if !active.is_scan() {
+                    active.cancellation().cancel();
+                }
+            }
+            if state.pending.as_ref().is_some_and(|pending| !pending.is_scan())
+                && let Some(pending) = state.pending.take()
+            {
+                pending.cancellation().cancel();
+                if let Ok(mut runtime) = self.runtime.lock() {
+                    runtime.operation_active = false;
+                    runtime.progress = None;
+                    runtime.last_message = Some(
+                        "rename was cancelled before any file was moved".to_owned(),
+                    );
+                }
+            }
+        }
     }
 
     /// Request nonblocking shutdown. Retain this coordinator and poll
@@ -2049,15 +2978,20 @@ impl RenameScanCoordinator {
         let (lock, wake) = &*self.state;
         if let Ok(mut state) = lock.lock() {
             state.shutdown = true;
-            if let Some((_, active)) = &state.active {
-                active.cancel();
+            state.startup_cancellation.cancel();
+            if let Some(active) = &state.active {
+                active.cancellation().cancel();
             }
             if let Some(pending) = state.pending.take() {
-                pending.cancellation.cancel();
-                let _ = pending.reply.send(empty_scan_result(
-                    &pending.request,
-                    RenameScanStatus::Cancelled,
-                ));
+                pending.cancellation().cancel();
+                cancel_pending_job(pending);
+                if let Ok(mut runtime) = self.runtime.lock() {
+                    runtime.operation_active = false;
+                    runtime.progress = None;
+                    runtime.last_message = Some(
+                        "pending rename work was cancelled during shutdown".to_owned(),
+                    );
+                }
             }
             wake.notify_all();
         }
@@ -2097,7 +3031,62 @@ impl RenameScanTicket {
     }
 }
 
-fn scan_worker_loop(state: Arc<(Mutex<WorkerState>, Condvar)>) {
+fn cancel_pending_job(job: WorkerJob) {
+    match job {
+        WorkerJob::Scan {
+            request,
+            cancellation,
+            reply,
+        } => {
+            cancellation.cancel();
+            let _ = reply.send(empty_scan_result(&request, RenameScanStatus::Cancelled));
+        }
+        WorkerJob::Apply { cancellation, .. } | WorkerJob::Undo { cancellation, .. } => {
+            cancellation.cancel();
+        }
+    }
+}
+
+fn poisoned_worker_state() -> std::io::Error {
+    std::io::Error::other("batch rename worker state was poisoned")
+}
+
+fn poisoned_runtime_state() -> std::io::Error {
+    std::io::Error::other("batch rename runtime state was poisoned")
+}
+
+fn scan_worker_loop(
+    state: Arc<(Mutex<WorkerState>, Condvar)>,
+    runtime: Arc<Mutex<RenameRuntimeSnapshot>>,
+    journal_path: Option<PathBuf>,
+    startup_cancellation: ScanCancellation,
+) {
+    if let Some(path) = journal_path.as_deref() {
+        match crate::batch_rename_transaction::load_and_reconcile_journal(
+            path,
+            &startup_cancellation,
+        ) {
+            Ok(receipts) => {
+                if let Ok(mut runtime) = runtime.lock() {
+                    runtime.journal_ready = true;
+                    runtime.receipts = receipts;
+                    runtime.last_message = runtime
+                        .receipts
+                        .iter()
+                        .rev()
+                        .find(|receipt| {
+                            receipt.status().blocks_new_apply()
+                        })
+                        .map(|receipt| receipt.message().to_owned());
+                }
+            }
+            Err(error) => {
+                if let Ok(mut runtime) = runtime.lock() {
+                    runtime.journal_error = Some(error);
+                }
+            }
+        }
+    }
     loop {
         let job = {
             let (lock, wake) = &*state;
@@ -2115,26 +3104,132 @@ fn scan_worker_loop(state: Arc<(Mutex<WorkerState>, Condvar)>) {
             let Some(job) = state.pending.take() else {
                 continue;
             };
-            state.active = Some((job.request.generation, job.cancellation.clone()));
+            state.active = Some(match &job {
+                WorkerJob::Scan {
+                    request,
+                    cancellation,
+                    ..
+                } => ActiveWorker::Scan(request.generation, cancellation.clone()),
+                WorkerJob::Apply { cancellation, .. } => {
+                    ActiveWorker::Apply(cancellation.clone())
+                }
+                WorkerJob::Undo { cancellation, .. } => {
+                    ActiveWorker::Undo(cancellation.clone())
+                }
+            });
             job
         };
-        let result = scan_rename_root(job.request.clone(), &job.cancellation);
-        let _ = job.reply.send(result);
+        match job {
+            WorkerJob::Scan {
+                request,
+                cancellation,
+                reply,
+            } => {
+                let generation = request.generation;
+                let result = scan_rename_root(request.clone(), &cancellation);
+                let _ = reply.send(result);
+                clear_active_worker(&state, |active| {
+                    matches!(active, ActiveWorker::Scan(active_generation, _) if *active_generation == generation)
+                });
+            }
+            WorkerJob::Apply {
+                plan,
+                cancellation,
+            } => {
+                let result = if let Some(path) = journal_path.as_deref() {
+                    let report_runtime = Arc::clone(&runtime);
+                    Some(crate::batch_rename_transaction::execute_apply(
+                        plan,
+                        path,
+                        &cancellation,
+                        move |progress| {
+                            if let Ok(mut runtime) = report_runtime.lock() {
+                                runtime.progress = Some(progress);
+                            }
+                        },
+                    ))
+                } else {
+                    None
+                };
+                clear_active_worker(&state, |active| matches!(active, ActiveWorker::Apply(_)));
+                if let Some(result) = result {
+                    publish_operation_result(&runtime, result);
+                } else if let Ok(mut runtime) = runtime.lock() {
+                    runtime.operation_active = false;
+                    runtime.last_message = Some("rename worker has no recovery journal".to_owned());
+                }
+            }
+            WorkerJob::Undo {
+                transaction_id,
+                cancellation,
+            } => {
+                let result = if let Some(path) = journal_path.as_deref() {
+                    let report_runtime = Arc::clone(&runtime);
+                    Some(crate::batch_rename_transaction::execute_undo(
+                        &transaction_id,
+                        path,
+                        &cancellation,
+                        move |progress| {
+                            if let Ok(mut runtime) = report_runtime.lock() {
+                                runtime.progress = Some(progress);
+                            }
+                        },
+                    ))
+                } else {
+                    None
+                };
+                clear_active_worker(&state, |active| matches!(active, ActiveWorker::Undo(_)));
+                if let Some(result) = result {
+                    publish_operation_result(&runtime, result);
+                } else if let Ok(mut runtime) = runtime.lock() {
+                    runtime.operation_active = false;
+                    runtime.last_message = Some("rename worker has no recovery journal".to_owned());
+                }
+            }
+        }
         let (lock, _) = &*state;
         if let Ok(mut state) = lock.lock() {
-            if state
-                .active
-                .as_ref()
-                .is_some_and(|(generation, _)| *generation == job.request.generation)
-            {
-                state.active = None;
-            }
             if state.shutdown {
                 return;
             }
         } else {
             return;
         }
+    }
+}
+
+fn clear_active_worker(
+    state: &Arc<(Mutex<WorkerState>, Condvar)>,
+    matches: impl FnOnce(&ActiveWorker) -> bool,
+) {
+    let (lock, _) = &**state;
+    if let Ok(mut state) = lock.lock()
+        && state.active.as_ref().is_some_and(matches)
+    {
+        state.active = None;
+    }
+}
+
+fn publish_operation_result(
+    runtime: &Arc<Mutex<RenameRuntimeSnapshot>>,
+    result: crate::batch_rename_transaction::RenameOperationResult,
+) {
+    if let Ok(mut runtime) = runtime.lock() {
+        if !result.receipt.entries().is_empty() {
+            if let Some(existing) = runtime
+                .receipts
+                .iter_mut()
+                .find(|receipt| receipt.id() == result.receipt.id())
+            {
+                *existing = result.receipt.clone();
+            } else if runtime.receipts.len()
+                < crate::batch_rename_transaction::MAX_RETAINED_RENAME_RECEIPTS
+            {
+                runtime.receipts.push(result.receipt.clone());
+            }
+        }
+        runtime.last_message = Some(result.message);
+        runtime.operation_active = false;
     }
 }
 
@@ -2264,6 +3359,453 @@ fn validate_local_root_spelling(path: &Path) -> Result<(), BackendFailure> {
 }
 
 #[cfg(windows)]
+fn verified_root_proof(
+    root_path: &Path,
+    expected_identity: NativeFileIdentity,
+) -> Result<RootProof, String> {
+    let root = ExplicitDirectoryRoot::new(root_path.to_path_buf())
+        .map_err(|error| format!("invalid recovery root: {error:?}"))?;
+    let request = RenameScanRequest::new(root, false, RenameScanGeneration(0));
+    let admission = NativeRenameScanBackend
+        .admit_root(&request)
+        .map_err(|error| error.to_string())?;
+    if admission.proof.identity != expected_identity
+        || batch_rename::compare_paths_windows_ordinal(
+            &admission.proof.canonical_path,
+            root_path,
+        ) != std::cmp::Ordering::Equal
+    {
+        return Err("the recorded rename root identity changed".to_owned());
+    }
+    Ok(admission.proof)
+}
+
+#[cfg(windows)]
+fn verified_parent_chain(
+    root: &RootProof,
+    parent_path: &Path,
+    expected_identity: NativeFileIdentity,
+) -> Result<Vec<DirectoryProof>, String> {
+    if !batch_rename::path_is_within_windows_ordinal(&root.canonical_path, parent_path) {
+        return Err("the recorded rename parent escaped its root".to_owned());
+    }
+    let relative = if batch_rename::compare_paths_windows_ordinal(
+        &root.canonical_path,
+        parent_path,
+    ) == std::cmp::Ordering::Equal
+    {
+        PathBuf::new()
+    } else {
+        parent_path
+            .strip_prefix(&root.canonical_path)
+            .map_err(|_| "the recorded parent is not lexically below its root".to_owned())?
+            .to_path_buf()
+    };
+    let mut chain = root.chain.clone();
+    let mut current = root.canonical_path.clone();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err("the recorded parent path contains traversal".to_owned());
+        };
+        current.push(name);
+        let opened = open_native_object(&current, true).map_err(|error| error.to_string())?;
+        if opened.kind != SnapshotEntryKind::Directory || opened.reparse_point {
+            return Err(format!(
+                "the recorded parent is not a plain directory: {}",
+                current.display()
+            ));
+        }
+        let Some(expected_parent) = chain.last() else {
+            return Err("the verified root chain is empty".to_owned());
+        };
+        if opened.canonical_path.parent().is_none_or(|actual_parent| {
+            batch_rename::compare_paths_windows_ordinal(
+                actual_parent,
+                &expected_parent.canonical_path,
+            ) != std::cmp::Ordering::Equal
+        }) {
+            return Err("the recorded parent chain changed".to_owned());
+        }
+        chain.push(DirectoryProof {
+            lookup_path: current.clone(),
+            canonical_path: opened.canonical_path,
+            identity: opened.identity,
+        });
+    }
+    if chain.last().is_none_or(|directory| {
+        directory.identity != expected_identity
+            || batch_rename::compare_paths_windows_ordinal(
+                &directory.canonical_path,
+                parent_path,
+            ) != std::cmp::Ordering::Equal
+    }) {
+        return Err("the recorded parent directory identity changed".to_owned());
+    }
+    Ok(chain)
+}
+
+#[cfg(windows)]
+fn open_native_mutation_file(path: &Path) -> std::io::Result<OpenedObject<std::fs::File>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_READ_DATA, FILE_SHARE_READ, OPEN_EXISTING,
+    };
+    use windows::core::PCWSTR;
+
+    let mut wide_path = extended_local_path(path)?;
+    wide_path.push(0);
+    let desired_access = DELETE.0 | FILE_READ_DATA.0 | FILE_READ_ATTRIBUTES.0;
+    // Deny write and delete sharing while the transaction retains this handle.
+    // This pins the content fingerprint and namespace entry through each
+    // handle-based rename operation.
+    let share_mode = FILE_SHARE_READ;
+    let flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS;
+    // SAFETY: the path is a validated local, NUL-terminated UTF-16 path. The
+    // handle is opened without following a final reparse point, and is
+    // immediately transferred into File for RAII ownership.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            desired_access,
+            share_mode,
+            None,
+            OPEN_EXISTING,
+            flags,
+            HANDLE::default(),
+        )
+    }
+    .map_err(|error| {
+        native_contextual_io_error("CreateFileW(DELETE | FILE_READ_DATA)", windows_error_to_io(error))
+    })?;
+    // SAFETY: CreateFileW returned a valid owned HANDLE which is transferred
+    // exactly once to File and closed by Drop.
+    let file = unsafe { std::fs::File::from_raw_handle(handle.0 as RawHandle) };
+    let metadata = file
+        .metadata()
+        .map_err(|error| native_contextual_io_error("File::metadata", error))?;
+    let attributes = metadata.file_attributes();
+    let reparse_point = attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
+    let is_directory = attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
+    let kind = if reparse_point {
+        SnapshotEntryKind::Other
+    } else if is_directory {
+        SnapshotEntryKind::Directory
+    } else if metadata.is_file() {
+        SnapshotEntryKind::File
+    } else {
+        SnapshotEntryKind::Other
+    };
+    let identity = native_file_identity(&file)
+        .map_err(|error| native_contextual_io_error("FILE_ID_INFO query", error))?;
+    let canonical_path = final_path_for_handle(&file)
+        .map_err(|error| native_contextual_io_error("GetFinalPathNameByHandleW", error))?;
+    Ok(OpenedObject {
+        lookup_path: path.to_path_buf(),
+        canonical_path,
+        identity,
+        kind,
+        reparse_point,
+        length: (!is_directory).then_some(metadata.len()),
+        modified: metadata.modified().ok(),
+        handle: file,
+    })
+}
+
+/// Open a recorded payload for identity and byte verification without
+/// requiring DELETE access. The short-lived handle denies writers and
+/// deleters while its fingerprint is checked, but never authorizes mutation.
+#[cfg(windows)]
+fn open_native_verified_file(path: &Path) -> std::io::Result<OpenedObject<std::fs::File>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ,
+        OPEN_EXISTING,
+    };
+    use windows::core::PCWSTR;
+
+    let mut wide_path = extended_local_path(path)?;
+    wide_path.push(0);
+    // SAFETY: the path is a validated local, NUL-terminated UTF-16 path. The
+    // handle does not follow a final reparse point and grants read-only access.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            FILE_READ_DATA.0 | FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            HANDLE::default(),
+        )
+    }
+    .map_err(|error| {
+        native_contextual_io_error("CreateFileW(read-only receipt verification)", windows_error_to_io(error))
+    })?;
+    // SAFETY: CreateFileW returned a valid owned HANDLE which is transferred
+    // exactly once to File and closed by Drop.
+    let file = unsafe { std::fs::File::from_raw_handle(handle.0 as RawHandle) };
+    let metadata = file
+        .metadata()
+        .map_err(|error| native_contextual_io_error("File::metadata", error))?;
+    let attributes = metadata.file_attributes();
+    let reparse_point = attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
+    let is_directory = attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
+    let kind = if reparse_point {
+        SnapshotEntryKind::Other
+    } else if is_directory {
+        SnapshotEntryKind::Directory
+    } else if metadata.is_file() {
+        SnapshotEntryKind::File
+    } else {
+        SnapshotEntryKind::Other
+    };
+    Ok(OpenedObject {
+        lookup_path: path.to_path_buf(),
+        canonical_path: final_path_for_handle(&file)
+            .map_err(|error| native_contextual_io_error("GetFinalPathNameByHandleW", error))?,
+        identity: native_file_identity(&file)
+            .map_err(|error| native_contextual_io_error("FILE_ID_INFO query", error))?,
+        kind,
+        reparse_point,
+        length: (!is_directory).then_some(metadata.len()),
+        modified: metadata.modified().ok(),
+        handle: file,
+    })
+}
+
+#[cfg(windows)]
+fn open_native_occupancy_file(path: &Path) -> std::io::Result<OpenedObject<std::fs::File>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        OPEN_EXISTING,
+    };
+    use windows::core::PCWSTR;
+
+    let mut wide_path = extended_local_path(path)?;
+    wide_path.push(0);
+    // The selected source handle denies delete and write sharing while this
+    // read-only handle allows the source's DELETE access to coexist.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            HANDLE::default(),
+        )
+    }
+    .map_err(|error| {
+        native_contextual_io_error(
+            "CreateFileW(FILE_READ_ATTRIBUTES occupancy check)",
+            windows_error_to_io(error),
+        )
+    })?;
+    let file = unsafe { std::fs::File::from_raw_handle(handle.0 as RawHandle) };
+    let metadata = file
+        .metadata()
+        .map_err(|error| native_contextual_io_error("File::metadata", error))?;
+    let attributes = metadata.file_attributes();
+    let reparse_point = attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
+    let is_directory = attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
+    let kind = if reparse_point {
+        SnapshotEntryKind::Other
+    } else if is_directory {
+        SnapshotEntryKind::Directory
+    } else if metadata.is_file() {
+        SnapshotEntryKind::File
+    } else {
+        SnapshotEntryKind::Other
+    };
+    Ok(OpenedObject {
+        lookup_path: path.to_path_buf(),
+        canonical_path: final_path_for_handle(&file)
+            .map_err(|error| native_contextual_io_error("GetFinalPathNameByHandleW", error))?,
+        identity: native_file_identity(&file)
+            .map_err(|error| native_contextual_io_error("FILE_ID_INFO query", error))?,
+        kind,
+        reparse_point,
+        length: (!is_directory).then_some(metadata.len()),
+        modified: metadata.modified().ok(),
+        handle: file,
+    })
+}
+
+#[cfg(windows)]
+fn rename_open_file_no_replace(
+    source: &std::fs::File,
+    parent: &OpenDirectory<std::fs::File>,
+    leaf: &OsStr,
+) -> std::io::Result<()> {
+    use std::mem::{offset_of, size_of};
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{BOOLEAN, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        FILE_RENAME_INFO, FileRenameInfo, SetFileInformationByHandle,
+    };
+
+    if Path::new(leaf).components().count() != 1
+        || !matches!(Path::new(leaf).components().next(), Some(Component::Normal(_)))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "handle-based rename requires a single filename component",
+        ));
+    }
+    let destination_path = parent.canonical_path.join(leaf);
+    let name = extended_local_path(&destination_path)?;
+    if name.is_empty() || name.iter().any(|unit| *unit == 0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "destination path is empty or contains NUL",
+        ));
+    }
+    let name_bytes = name
+        .len()
+        .checked_mul(size_of::<u16>())
+        .and_then(|length| u32::try_from(length).ok())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "filename too long"))?;
+    let terminated_name_bytes = (name_bytes as usize)
+        .checked_add(size_of::<u16>())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "rename buffer too large")
+        })?;
+    let mut name = name;
+    name.push(0);
+    let mut info = FILE_RENAME_INFO::default();
+    // SAFETY: this union member is the documented legacy BOOLEAN indicating
+    // that an existing target must not be replaced.
+    unsafe {
+        info.Anonymous.ReplaceIfExists = BOOLEAN(0);
+    }
+    // This NTFS fixture rejected a non-null RootDirectory for a relative
+    // filename with ERROR_INVALID_PARAMETER. Keep every verified parent
+    // handle alive through this operation, and build the absolute destination
+    // only from the held parent's canonical path plus the validated leaf.
+    info.RootDirectory = HANDLE::default();
+    info.FileNameLength = name_bytes;
+    let name_offset = offset_of!(FILE_RENAME_INFO, FileName);
+    let buffer_bytes = name_offset
+        .checked_add(terminated_name_bytes)
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "rename buffer too large")
+        })?;
+    let mut buffer = vec![0_u64; buffer_bytes.div_ceil(size_of::<u64>())];
+    let buffer_ptr = buffer.as_mut_ptr().cast::<u8>();
+    // SAFETY: `info` is a valid initialized FILE_RENAME_INFO prefix and the
+    // destination buffer has the exact prefix plus UTF-16 name length.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            std::ptr::from_ref(&info).cast::<u8>(),
+            buffer_ptr,
+            name_offset,
+        );
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr().cast::<u8>(),
+            buffer_ptr.add(name_offset),
+            terminated_name_bytes,
+        );
+        SetFileInformationByHandle(
+            HANDLE(source.as_raw_handle()),
+            FileRenameInfo,
+            buffer_ptr.cast(),
+            u32::try_from(buffer_bytes).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "rename buffer too large")
+            })?,
+        )
+    }
+    .map_err(|error| {
+        native_contextual_io_error(
+            "SetFileInformationByHandle(FileRenameInfo, no replace)",
+            windows_error_to_io(error),
+        )
+    })
+}
+
+fn hash_file_contents(
+    file: &std::fs::File,
+    verification_mode: ContentVerificationMode<'_>,
+) -> std::io::Result<[u8; 32]> {
+    use std::io::{Seek, SeekFrom};
+
+    let length = file.metadata()?.len();
+    if length > MAX_RENAME_HASH_BYTES_PER_FILE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file exceeds the content verification limit",
+        ));
+    }
+    let mut clone = file.try_clone()?;
+    let previous_position = clone.stream_position()?;
+    clone.seek(SeekFrom::Start(0))?;
+    let result = hash_reader(&mut clone, length, verification_mode);
+    let restore = clone.seek(SeekFrom::Start(previous_position));
+    match (result, restore) {
+        (Ok(hash), Ok(_)) => Ok(hash),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+fn hash_reader(
+    mut reader: impl std::io::Read,
+    expected_length: u64,
+    verification_mode: ContentVerificationMode<'_>,
+) -> std::io::Result<[u8; 32]> {
+    if expected_length > MAX_RENAME_HASH_BYTES_PER_FILE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file exceeds the content verification limit",
+        ));
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        if verification_mode.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "content verification was cancelled",
+            ));
+        }
+        let read = std::io::Read::read(&mut reader, &mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read as u64);
+        if total > MAX_RENAME_HASH_BYTES_PER_FILE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "file exceeds the content verification limit",
+            ));
+        }
+        hasher.update(&buffer[..read]);
+    }
+    if total != expected_length {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file length changed during content verification",
+        ));
+    }
+    Ok(hasher.finalize().into())
+}
+
+#[cfg(windows)]
 fn open_native_object(
     path: &Path,
     enumerate_children: bool,
@@ -2378,6 +3920,19 @@ fn native_raw_os_error(error: &std::io::Error) -> Option<i32> {
             .source
             .raw_os_error()
     })
+}
+
+#[cfg(windows)]
+fn native_error_is_not_found(error: &std::io::Error) -> bool {
+    matches!(native_raw_os_error(error), Some(2 | 3))
+}
+
+pub(crate) fn rename_error_is_destination_collision(error: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    let code = native_raw_os_error(error);
+    #[cfg(not(windows))]
+    let code = error.raw_os_error();
+    matches!(code, Some(80 | 183))
 }
 
 #[cfg(windows)]
@@ -2717,6 +4272,70 @@ fn classify_chain_io(path: &Path, error: std::io::Error, root: &RootProof) -> Ba
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn m8d_hash_cancellation_stops_between_chunks_and_compensation_finishes() {
+        use std::cell::Cell;
+
+        struct CancellingReader<'a> {
+            bytes: &'a [u8],
+            offset: usize,
+            cancellation: &'a ScanCancellation,
+            read_calls: &'a Cell<usize>,
+        }
+
+        impl std::io::Read for CancellingReader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.read_calls.set(self.read_calls.get() + 1);
+                let count = buffer.len().min(self.bytes.len() - self.offset);
+                if count == 0 {
+                    return Ok(0);
+                }
+                buffer[..count].copy_from_slice(&self.bytes[self.offset..self.offset + count]);
+                self.offset += count;
+                if self.offset >= 64 * 1024 {
+                    self.cancellation.cancel();
+                }
+                Ok(count)
+            }
+        }
+
+        let bytes = vec![0x5a; 2 * 64 * 1024 + 1];
+        let cooperative_token = ScanCancellation::new();
+        let cooperative_calls = Cell::new(0);
+        let result = hash_reader(
+            CancellingReader {
+                bytes: &bytes,
+                offset: 0,
+                cancellation: &cooperative_token,
+                read_calls: &cooperative_calls,
+            },
+            bytes.len() as u64,
+            ContentVerificationMode::Cooperative(&cooperative_token),
+        );
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        assert_eq!(cooperative_calls.get(), 1);
+
+        let compensation_token = ScanCancellation::new();
+        compensation_token.cancel();
+        let compensation_calls = Cell::new(0);
+        let result = hash_reader(
+            CancellingReader {
+                bytes: &bytes,
+                offset: 0,
+                cancellation: &compensation_token,
+                read_calls: &compensation_calls,
+            },
+            bytes.len() as u64,
+            ContentVerificationMode::CompleteOwnedPayload,
+        )
+        .unwrap();
+        assert_eq!(result, <[u8; 32]>::from(Sha256::digest(&bytes)));
+        assert_eq!(compensation_calls.get(), 4);
+    }
 
     #[derive(Debug, Clone)]
     struct FakeObject {

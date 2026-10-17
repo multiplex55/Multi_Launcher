@@ -4468,7 +4468,12 @@ impl LauncherApp {
         self.file_search_dialog
             .preview_dialog
             .ui(&ctx, &self.file_search_dialog.settings);
-        let batch_rename_commands = self.batch_rename_dialog.ui(&ctx, first_ui_pass);
+        let batch_rename_runtime = self.batch_rename_runtime_snapshot();
+        let batch_rename_commands = self.batch_rename_dialog.ui(
+            &ctx,
+            first_ui_pass,
+            &batch_rename_runtime,
+        );
         if first_ui_pass {
             for command in batch_rename_commands {
                 self.handle_batch_rename_ui_command(command);

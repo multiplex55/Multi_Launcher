@@ -21,6 +21,7 @@ pub mod actions_editor;
 pub mod active_window;
 pub mod annotation;
 pub mod batch_rename;
+pub(crate) mod batch_rename_transaction;
 
 pub mod clipboard_modify;
 pub mod color;

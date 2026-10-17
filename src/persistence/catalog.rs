@@ -60,10 +60,11 @@ pub enum PersistentStoreId {
     ToastLog,
     RadialDocument,
     RadialAssets,
+    BatchRenameRecovery,
 }
 
 impl PersistentStoreId {
-    pub const ALL: [Self; 38] = [
+    pub const ALL: [Self; 39] = [
         Self::Settings,
         Self::Actions,
         Self::Bookmarks,
@@ -102,6 +103,7 @@ impl PersistentStoreId {
         Self::ToastLog,
         Self::RadialDocument,
         Self::RadialAssets,
+        Self::BatchRenameRecovery,
     ];
 }
 
@@ -706,6 +708,15 @@ fn spec(id: PersistentStoreId) -> StoreSpec {
             false,
             ProbeKind::AssetsDirectory,
         ),
+        Id::BatchRenameRecovery => s(
+            "Batch rename recovery journal",
+            File,
+            Runtime,
+            SystemMetadata,
+            Session,
+            false,
+            json_value,
+        ),
     }
 }
 
@@ -831,6 +842,11 @@ fn descriptor_for(
         Id::RadialAssets => (
             root.path()
                 .join(crate::radial::model::RADIAL_ASSETS_DIRECTORY),
+            false,
+        ),
+        Id::BatchRenameRecovery => (
+            root.path()
+                .join(crate::batch_rename_transaction::RECOVERY_JOURNAL_FILE),
             false,
         ),
     };
