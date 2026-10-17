@@ -28,6 +28,7 @@ It’s designed to be “one hotkey away” from:
 - [Hot Folder](#hot-folder)
 - [Clipboard Modify](#clipboard-modify)
 - [Clipboard Snippets](#clipboard-snippets)
+- [Paste Sequences](#paste-sequences)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
 - [XML Toolkit](#xml-toolkit)
 - [Hash Generator](#hash-generator)
@@ -41,6 +42,7 @@ It’s designed to be “one hotkey away” from:
 - [MultiManager](#multimanager)
 - [Calendar](#calendar)
 - [Screenshot capture + markup editor](#screenshot-capture--markup-editor)
+- [Screenshot pinboard](#screenshot-pinboard)
 - [Screen Draw](#screen-draw)
 - [Configuration](#configuration)
 - [Data files](#data-files)
@@ -1407,6 +1409,9 @@ use it when you want those tools as well. Selecting `multi_launcher` still
 compiles the shared library that the application needs.
 
 ### Development checks and tests
+
+The productivity expansion's [checkpoint index and verification evidence](docs/plans/productivity_expansion_delivery.md)
+record the implemented feature scope, focused checks, and native UI limitations.
 
 Choose the command for the work you need:
 
