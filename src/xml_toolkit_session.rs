@@ -6,7 +6,10 @@
 //! separate output value. Callers must opt in explicitly before copying output
 //! into their editor source.
 
-use crate::xml_toolkit_engine::{MAX_XML_INPUT_BYTES, XmlEngineError, XmlFormatMode};
+use crate::xml_toolkit_engine::{
+    MAX_XML_INPUT_BYTES, XmlDocumentId, XmlEngineError, XmlFormatMode, XmlNodeDetailKind,
+    XmlNodeId, XmlTreeProjection,
+};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 #[cfg(any(windows, test))]
 use std::thread;
@@ -15,12 +18,67 @@ use std::thread::JoinHandle;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct XmlSourceRevision(u64);
 
+#[cfg(test)]
+impl XmlSourceRevision {
+    pub(crate) const fn for_test(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct XmlSelectionRequestId(u64);
+
+impl XmlSelectionRequestId {
+    pub(crate) fn from_counter(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct XmlDetailRequestId(u64);
+
+impl XmlDetailRequestId {
+    pub(crate) fn from_counter(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum XmlDetailIntent {
+    Inspect,
+    Copy,
+}
+
+/// Selection identity passed between the tree view and the async session.
+/// It is valid only for this source revision and parsed document.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct XmlNodeSelection {
+    pub revision: XmlSourceRevision,
+    pub document: XmlDocumentId,
+    pub node: XmlNodeId,
+    pub request: XmlSelectionRequestId,
+}
+
+/// A detail or explicit-copy request is bound to a specific selection and
+/// operation ID so late completion cannot be mistaken for a newer action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct XmlNodeDetailRequest {
+    pub revision: XmlSourceRevision,
+    pub document: XmlDocumentId,
+    pub node: XmlNodeId,
+    pub selection_request: XmlSelectionRequestId,
+    pub detail_request: XmlDetailRequestId,
+    pub kind: XmlNodeDetailKind,
+    pub intent: XmlDetailIntent,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum XmlSessionError {
     Engine(XmlEngineError),
     Stopped,
     StaleRevision,
     SourceNotReady,
+    SelectionUnavailable,
     RevisionExhausted,
 }
 
@@ -48,10 +106,37 @@ pub enum XmlOutputStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum XmlTreeStatus {
+    Empty,
+    Pending,
+    Ready(Arc<XmlTreeProjection>),
+    Failed(XmlEngineError),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlNodeDetailOutput {
+    pub request: XmlNodeDetailRequest,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum XmlDetailStatus {
+    Empty,
+    Pending(XmlNodeDetailRequest),
+    Ready(Arc<XmlNodeDetailOutput>),
+    Failed {
+        request: XmlNodeDetailRequest,
+        error: XmlEngineError,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct XmlSessionSnapshot {
     pub revision: Option<XmlSourceRevision>,
     pub parse: XmlParseStatus,
     pub output: XmlOutputStatus,
+    pub tree: XmlTreeStatus,
+    pub detail: XmlDetailStatus,
 }
 
 impl Default for XmlSessionSnapshot {
@@ -60,6 +145,8 @@ impl Default for XmlSessionSnapshot {
             revision: None,
             parse: XmlParseStatus::Empty,
             output: XmlOutputStatus::Empty,
+            tree: XmlTreeStatus::Empty,
+            detail: XmlDetailStatus::Empty,
         }
     }
 }
@@ -76,6 +163,7 @@ struct Mailbox {
     snapshot: Arc<XmlSessionSnapshot>,
     pending_source: Option<SourceJob>,
     pending_format: Option<FormatJob>,
+    pending_detail: Option<XmlNodeDetailRequest>,
     stopped: bool,
 }
 
@@ -95,6 +183,10 @@ struct FormatJob {
     mode: XmlFormatMode,
 }
 
+struct DetailJob {
+    request: XmlNodeDetailRequest,
+}
+
 /// One bounded source/format bridge. Its mailbox retains at most one pending
 /// source and one pending format request, so rapid edits do not queue one COM
 /// parse or spawn a worker per keystroke. `snapshot` is cheap to poll from egui.
@@ -106,11 +198,20 @@ pub struct XmlEngineSession {
 trait SessionEngine: Send + 'static {
     type Document: Copy;
 
-    fn parse(&mut self, source: String) -> Result<Self::Document, XmlEngineError>;
+    fn parse(
+        &mut self,
+        source: String,
+    ) -> Result<(Self::Document, Arc<XmlTreeProjection>), XmlEngineError>;
     fn format(
         &mut self,
         document: Self::Document,
         mode: XmlFormatMode,
+    ) -> Result<String, XmlEngineError>;
+    fn detail(
+        &mut self,
+        document: Self::Document,
+        node: XmlNodeId,
+        kind: XmlNodeDetailKind,
     ) -> Result<String, XmlEngineError>;
     fn close(&mut self, document: Self::Document);
 }
@@ -119,8 +220,20 @@ trait SessionEngine: Send + 'static {
 impl SessionEngine for crate::xml_toolkit_engine::XmlEngineWorker {
     type Document = crate::xml_toolkit_engine::XmlDocumentId;
 
-    fn parse(&mut self, source: String) -> Result<Self::Document, XmlEngineError> {
-        crate::xml_toolkit_engine::XmlEngineWorker::parse(self, source)
+    fn parse(
+        &mut self,
+        source: String,
+    ) -> Result<(Self::Document, Arc<XmlTreeProjection>), XmlEngineError> {
+        crate::xml_toolkit_engine::XmlEngineWorker::parse_with_tree(self, source)
+    }
+
+    fn detail(
+        &mut self,
+        document: Self::Document,
+        node: XmlNodeId,
+        kind: XmlNodeDetailKind,
+    ) -> Result<String, XmlEngineError> {
+        crate::xml_toolkit_engine::XmlEngineWorker::detail(self, document, node, kind)
     }
 
     fn format(
@@ -158,6 +271,7 @@ impl XmlEngineSession {
                 snapshot: Arc::new(XmlSessionSnapshot::default()),
                 pending_source: None,
                 pending_format: None,
+                pending_detail: None,
                 stopped: false,
             }),
             wake: Condvar::new(),
@@ -198,13 +312,21 @@ impl XmlEngineSession {
         } else {
             (SourceInput::Text(source), XmlParseStatus::Pending)
         };
+        let tree = if matches!(&input, SourceInput::Empty) {
+            XmlTreeStatus::Empty
+        } else {
+            XmlTreeStatus::Pending
+        };
         mailbox.snapshot = Arc::new(XmlSessionSnapshot {
             revision: Some(revision),
             parse,
             output: XmlOutputStatus::Empty,
+            tree,
+            detail: XmlDetailStatus::Empty,
         });
         mailbox.pending_source = Some(SourceJob { revision, input });
         mailbox.pending_format = None;
+        mailbox.pending_detail = None;
         self.shared.wake.notify_one();
         Ok(revision)
     }
@@ -230,6 +352,41 @@ impl XmlEngineSession {
         snapshot.output = XmlOutputStatus::Pending(mode);
         mailbox.snapshot = Arc::new(snapshot);
         mailbox.pending_format = Some(FormatJob { revision, mode });
+        self.shared.wake.notify_one();
+        Ok(())
+    }
+
+    /// Queues an exact node-value or XML-fragment read on the COM owner.
+    /// New detail requests replace older pending requests. The returned value
+    /// is never copied automatically; callers must revalidate the request
+    /// against their current selection before publishing it to a clipboard.
+    pub fn request_detail(
+        &self,
+        request: XmlNodeDetailRequest,
+    ) -> Result<(), XmlSessionError> {
+        let mut mailbox = lock(&self.shared.mailbox);
+        if mailbox.stopped {
+            return Err(XmlSessionError::Stopped);
+        }
+        if mailbox.snapshot.revision != Some(request.revision) {
+            return Err(XmlSessionError::StaleRevision);
+        }
+        if mailbox.snapshot.parse != XmlParseStatus::Ready {
+            return Err(XmlSessionError::SourceNotReady);
+        }
+        let XmlTreeStatus::Ready(projection) = &mailbox.snapshot.tree else {
+            return Err(XmlSessionError::SourceNotReady);
+        };
+        if request.node.document() != request.document
+            || projection.document != request.document
+            || projection.node(request.node).is_none()
+        {
+            return Err(XmlSessionError::SelectionUnavailable);
+        }
+        let mut snapshot = (*mailbox.snapshot).clone();
+        snapshot.detail = XmlDetailStatus::Pending(request);
+        mailbox.snapshot = Arc::new(snapshot);
+        mailbox.pending_detail = Some(request);
         self.shared.wake.notify_one();
         Ok(())
     }
@@ -283,6 +440,8 @@ impl XmlEngineSession {
         mailbox.stopped = true;
         mailbox.pending_source = None;
         mailbox.pending_format = None;
+        mailbox.pending_detail = None;
+        mailbox.snapshot = Arc::new(XmlSessionSnapshot::default());
         self.shared.wake.notify_one();
     }
 }
@@ -297,7 +456,7 @@ impl Drop for XmlEngineSession {
 
 #[cfg(any(windows, test))]
 fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
-    let mut current_document: Option<(XmlSourceRevision, E::Document)> = None;
+    let mut current_document: Option<(XmlSourceRevision, E::Document, XmlDocumentId)> = None;
     loop {
         let action = {
             let mut mailbox = lock(&shared.mailbox);
@@ -311,6 +470,9 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                 if let Some(format) = mailbox.pending_format.take() {
                     break Some(SessionAction::Format(format));
                 }
+                if let Some(request) = mailbox.pending_detail.take() {
+                    break Some(SessionAction::Detail(DetailJob { request }));
+                }
                 mailbox = shared
                     .wake
                     .wait(mailbox)
@@ -323,7 +485,7 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
         };
         match action {
             SessionAction::Source(job) => {
-                if let Some((_, document)) = current_document.take() {
+                if let Some((_, document, _)) = current_document.take() {
                     engine.close(document);
                 }
                 let result = match job.input {
@@ -337,23 +499,28 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                 let mut mailbox = lock(&shared.mailbox);
                 if mailbox.stopped || mailbox.snapshot.revision != Some(job.revision) {
                     drop(mailbox);
-                    if let Ok(document) = result {
+                    if let Ok((document, _)) = result {
                         engine.close(document);
                     }
                     continue;
                 }
                 let mut snapshot = (*mailbox.snapshot).clone();
                 match result {
-                    Ok(document) => {
+                    Ok((document, projection)) => {
                         snapshot.parse = XmlParseStatus::Ready;
-                        current_document = Some((job.revision, document));
+                        let document_id = projection.document;
+                        snapshot.tree = XmlTreeStatus::Ready(projection);
+                        current_document = Some((job.revision, document, document_id));
                     }
-                    Err(error) => snapshot.parse = XmlParseStatus::Failed(error),
+                    Err(error) => {
+                        snapshot.parse = XmlParseStatus::Failed(error.clone());
+                        snapshot.tree = XmlTreeStatus::Failed(error);
+                    }
                 }
                 mailbox.snapshot = Arc::new(snapshot);
             }
             SessionAction::Format(job) => {
-                let Some((revision, document)) = current_document else {
+                let Some((revision, document, _)) = current_document else {
                     continue;
                 };
                 if revision != job.revision {
@@ -378,9 +545,35 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                 };
                 mailbox.snapshot = Arc::new(snapshot);
             }
+            SessionAction::Detail(job) => {
+                let Some((revision, document, document_id)) = current_document else {
+                    continue;
+                };
+                let request = job.request;
+                if revision != request.revision || document_id != request.document {
+                    continue;
+                }
+                let result = engine.detail(document, request.node, request.kind);
+                let mut mailbox = lock(&shared.mailbox);
+                if mailbox.stopped
+                    || mailbox.snapshot.revision != Some(request.revision)
+                    || mailbox.snapshot.detail != XmlDetailStatus::Pending(request)
+                {
+                    continue;
+                }
+                let mut snapshot = (*mailbox.snapshot).clone();
+                snapshot.detail = match result {
+                    Ok(value) => XmlDetailStatus::Ready(Arc::new(XmlNodeDetailOutput {
+                        request,
+                        value,
+                    })),
+                    Err(error) => XmlDetailStatus::Failed { request, error },
+                };
+                mailbox.snapshot = Arc::new(snapshot);
+            }
         }
     }
-    if let Some((_, document)) = current_document.take() {
+    if let Some((_, document, _)) = current_document.take() {
         engine.close(document);
     }
     drop(engine);
@@ -390,6 +583,7 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
 enum SessionAction {
     Source(SourceJob),
     Format(FormatJob),
+    Detail(DetailJob),
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -401,6 +595,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gui::xml_toolkit_tree::XmlToolkitTreeViewState;
     use std::sync::mpsc::{self, Receiver, Sender};
     use std::time::{Duration, Instant};
 
@@ -411,12 +606,18 @@ mod tests {
         blocked_source: Option<String>,
         started: Option<Sender<()>>,
         parse_release: Option<Receiver<()>>,
+        blocked_detail_node: Option<XmlNodeId>,
+        detail_started: Option<Sender<()>>,
+        detail_release: Option<Receiver<()>>,
     }
 
     impl SessionEngine for FakeEngine {
         type Document = u64;
 
-        fn parse(&mut self, source: String) -> Result<Self::Document, XmlEngineError> {
+        fn parse(
+            &mut self,
+            source: String,
+        ) -> Result<(Self::Document, Arc<XmlTreeProjection>), XmlEngineError> {
             self.parsed_sources
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -440,7 +641,7 @@ mod tests {
             }
             let document = self.next_document;
             self.next_document = self.next_document.saturating_add(1);
-            Ok(document)
+            Ok((document, fake_projection(document)))
         }
 
         fn format(
@@ -449,6 +650,23 @@ mod tests {
             mode: XmlFormatMode,
         ) -> Result<String, XmlEngineError> {
             Ok(format!("{mode:?}:document-{document}"))
+        }
+
+        fn detail(
+            &mut self,
+            document: Self::Document,
+            node: XmlNodeId,
+            kind: XmlNodeDetailKind,
+        ) -> Result<String, XmlEngineError> {
+            if self.blocked_detail_node == Some(node) {
+                if let Some(started) = self.detail_started.take() {
+                    let _ = started.send(());
+                }
+                if let Some(release) = self.detail_release.take() {
+                    let _ = release.recv();
+                }
+            }
+            Ok(format!("full-{document}-{kind:?}"))
         }
 
         fn close(&mut self, document: Self::Document) {
@@ -491,7 +709,69 @@ mod tests {
             blocked_source,
             started,
             parse_release,
+            blocked_detail_node: None,
+            detail_started: None,
+            detail_release: None,
         }
+    }
+
+    fn fake_projection(document: u64) -> Arc<XmlTreeProjection> {
+        let document_id = XmlDocumentId::for_test(document);
+        let root_id = XmlNodeId::for_test(document_id, 1);
+        let element_id = XmlNodeId::for_test(document_id, 2);
+        let attribute_id = XmlNodeId::for_test(document_id, 3);
+        Arc::new(XmlTreeProjection::from_nodes(
+            document_id,
+            root_id,
+            vec![
+                crate::xml_toolkit_engine::XmlTreeNodeSnapshot {
+                    id: root_id,
+                    parent: None,
+                    kind: crate::xml_toolkit_engine::XmlTreeNodeKind::Document,
+                    qualified_name: "#document".into(),
+                    local_name: "#document".into(),
+                    prefix: String::new(),
+                    namespace_uri: String::new(),
+                    preview: String::new(),
+                    preview_truncated: false,
+                    attributes: Vec::new(),
+                    children: vec![element_id],
+                    has_more_attributes: false,
+                    has_more_children: false,
+                },
+                crate::xml_toolkit_engine::XmlTreeNodeSnapshot {
+                    id: element_id,
+                    parent: Some(root_id),
+                    kind: crate::xml_toolkit_engine::XmlTreeNodeKind::Element,
+                    qualified_name: "item".into(),
+                    local_name: "item".into(),
+                    prefix: String::new(),
+                    namespace_uri: String::new(),
+                    preview: String::new(),
+                    preview_truncated: false,
+                    attributes: vec![attribute_id],
+                    children: Vec::new(),
+                    has_more_attributes: false,
+                    has_more_children: false,
+                },
+                crate::xml_toolkit_engine::XmlTreeNodeSnapshot {
+                    id: attribute_id,
+                    parent: Some(element_id),
+                    kind: crate::xml_toolkit_engine::XmlTreeNodeKind::Attribute,
+                    qualified_name: "label".into(),
+                    local_name: "label".into(),
+                    prefix: String::new(),
+                    namespace_uri: String::new(),
+                    preview: "decoded & 🙂".into(),
+                    preview_truncated: false,
+                    attributes: Vec::new(),
+                    children: Vec::new(),
+                    has_more_attributes: false,
+                    has_more_children: false,
+                },
+            ],
+            None,
+        ))
     }
 
     #[test]
@@ -665,6 +945,133 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec!["valid one", "invalid", "valid two"]
+        );
+    }
+
+    #[test]
+    fn m7c_stale_copy_detail_cannot_publish_after_source_replacement() {
+        let parsed_sources = Arc::new(Mutex::new(Vec::new()));
+        let closed_documents = Arc::new(Mutex::new(Vec::new()));
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let stale_node = XmlNodeId::for_test(XmlDocumentId::for_test(1), 3);
+        let mut engine = fake_engine(
+            parsed_sources,
+            Arc::clone(&closed_documents),
+            None,
+            None,
+            None,
+        );
+        engine.blocked_detail_node = Some(stale_node);
+        engine.detail_started = Some(started_sender);
+        engine.detail_release = Some(release_receiver);
+        let session = XmlEngineSession::start_with_engine(engine).unwrap();
+
+        let revision = session.replace_source("valid".into()).unwrap();
+        let parsed = wait_for(&session, |snapshot| {
+            snapshot.revision == Some(revision) && snapshot.parse == XmlParseStatus::Ready
+        });
+        let XmlTreeStatus::Ready(projection) = &parsed.tree else {
+            panic!("the accepted document publishes its projection with parse success");
+        };
+        let request = XmlNodeDetailRequest {
+            revision,
+            document: projection.document,
+            node: stale_node,
+            selection_request: XmlSelectionRequestId::from_counter(8),
+            detail_request: XmlDetailRequestId::from_counter(12),
+            kind: XmlNodeDetailKind::AttributeValue,
+            intent: XmlDetailIntent::Copy,
+        };
+        session.request_detail(request).unwrap();
+        started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the explicit copy request reached the background engine");
+
+        let empty = session.replace_source(String::new()).unwrap();
+        let cleared = session.snapshot();
+        assert_eq!(cleared.revision, Some(empty));
+        assert_eq!(cleared.parse, XmlParseStatus::Empty);
+        assert_eq!(cleared.tree, XmlTreeStatus::Empty);
+        assert_eq!(cleared.detail, XmlDetailStatus::Empty);
+        assert_eq!(
+            session.request_detail(request),
+            Err(XmlSessionError::StaleRevision)
+        );
+
+        release_sender.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while closed_documents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+        {
+            assert!(Instant::now() < deadline, "stale source owner was not closed");
+            thread::yield_now();
+        }
+        assert_eq!(session.snapshot().detail, XmlDetailStatus::Empty);
+        session.shutdown().unwrap();
+    }
+
+    #[test]
+    fn m7c_shutdown_revokes_a_ready_explicit_copy() {
+        let parsed_sources = Arc::new(Mutex::new(Vec::new()));
+        let closed_documents = Arc::new(Mutex::new(Vec::new()));
+        let session = XmlEngineSession::start_with_engine(fake_engine(
+            parsed_sources,
+            Arc::clone(&closed_documents),
+            None,
+            None,
+            None,
+        ))
+        .unwrap();
+
+        let revision = session.replace_source("valid".into()).unwrap();
+        let parsed = wait_for(&session, |snapshot| {
+            snapshot.revision == Some(revision) && snapshot.parse == XmlParseStatus::Ready
+        });
+        let XmlTreeStatus::Ready(projection) = &parsed.tree else {
+            panic!("ready source publishes its tree projection");
+        };
+        let attribute = projection
+            .nodes
+            .iter()
+            .find(|node| node.kind == crate::xml_toolkit_engine::XmlTreeNodeKind::Attribute)
+            .expect("fake source contains an attribute")
+            .id;
+        let mut tree = XmlToolkitTreeViewState::default();
+        tree.sync(&parsed);
+        tree.select_node(attribute).unwrap();
+        let request = tree
+            .request_detail(XmlNodeDetailKind::AttributeValue, XmlDetailIntent::Copy)
+            .unwrap();
+        session.request_detail(request).unwrap();
+        let ready = wait_for(&session, |snapshot| {
+            matches!(
+                &snapshot.detail,
+                XmlDetailStatus::Ready(output) if output.request == request
+            )
+        });
+        assert!(matches!(
+            &ready.detail,
+            XmlDetailStatus::Ready(output) if output.value == "full-1-AttributeValue"
+        ));
+
+        session.request_shutdown();
+        let stopped = session.snapshot();
+        assert_eq!(*stopped, XmlSessionSnapshot::default());
+        assert!(tree.take_valid_copy_completion(&stopped).is_none());
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !session.try_reap().unwrap() {
+            assert!(Instant::now() < deadline, "closed session worker was not reapable");
+            thread::yield_now();
+        }
+        assert_eq!(
+            *closed_documents
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![1]
         );
     }
 

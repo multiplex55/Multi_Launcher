@@ -12,8 +12,13 @@ const MAX_XPATH_RESULTS: usize = 10_000;
 const MAX_XPATH_RESULT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_NAMESPACE_BINDINGS: usize = 64;
 const MAX_NAMESPACE_BYTES: usize = 32 * 1024;
+const MAX_RETAINED_XML_NODE_IDENTITIES: usize = 250_000;
 const MAX_RETAINED_DOCUMENTS: usize = 16;
 const MAX_RETAINED_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_XML_TREE_NODES: usize = 200_000;
+pub const MAX_XML_TREE_PROJECTION_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_XML_TREE_PREVIEW_CHARS: usize = 160;
+pub const MAX_XML_DETAIL_BYTES: usize = 4 * 1024 * 1024;
 const MAX_FORMAT_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FORMAT_INDENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_FORMAT_DEPTH: usize = 256;
@@ -30,6 +35,13 @@ pub enum XmlFormatMode {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct XmlDocumentId(u64);
 
+#[cfg(test)]
+impl XmlDocumentId {
+    pub(crate) const fn for_test(value: u64) -> Self {
+        Self(value)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct XmlNodeId {
     document: XmlDocumentId,
@@ -40,6 +52,97 @@ impl XmlNodeId {
     pub fn document(self) -> XmlDocumentId {
         self.document
     }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(document: XmlDocumentId, ordinal: u64) -> Self {
+        Self { document, ordinal }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum XmlTreeNodeKind {
+    Document,
+    Element,
+    Attribute,
+    Text,
+    CData,
+    Comment,
+    ProcessingInstruction,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum XmlTreeProjectionLimit {
+    NodeCount,
+    MetadataBytes,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlTreeNodeSnapshot {
+    pub id: XmlNodeId,
+    pub parent: Option<XmlNodeId>,
+    pub kind: XmlTreeNodeKind,
+    pub qualified_name: String,
+    pub local_name: String,
+    pub prefix: String,
+    pub namespace_uri: String,
+    /// A bounded decoded preview for text-like nodes and attributes.
+    pub preview: String,
+    pub preview_truncated: bool,
+    pub attributes: Vec<XmlNodeId>,
+    pub children: Vec<XmlNodeId>,
+    pub has_more_attributes: bool,
+    pub has_more_children: bool,
+}
+
+/// An immutable, bounded structural view of one accepted MSXML document.
+/// Node identities are shared with XPath results for that live document.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlTreeProjection {
+    pub document: XmlDocumentId,
+    pub root: XmlNodeId,
+    pub nodes: Vec<XmlTreeNodeSnapshot>,
+    pub truncated: Option<XmlTreeProjectionLimit>,
+    node_indexes: std::collections::HashMap<XmlNodeId, usize>,
+}
+
+impl XmlTreeProjection {
+    /// Builds an indexed projection value for engine results and focused UI
+    /// state tests. Production projections are created only by the COM owner.
+    pub(crate) fn from_nodes(
+        document: XmlDocumentId,
+        root: XmlNodeId,
+        nodes: Vec<XmlTreeNodeSnapshot>,
+        truncated: Option<XmlTreeProjectionLimit>,
+    ) -> Self {
+        let node_indexes = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.id, index))
+            .collect();
+        Self {
+            document,
+            root,
+            nodes,
+            truncated,
+            node_indexes,
+        }
+    }
+
+    pub fn node(&self, id: XmlNodeId) -> Option<&XmlTreeNodeSnapshot> {
+        self.node_indexes
+            .get(&id)
+            .and_then(|index| self.nodes.get(*index))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum XmlNodeDetailKind {
+    TextValue,
+    AttributeValue,
+    /// The complete decoded descendant text of a selected element.
+    ElementText,
+    XmlFragment,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -54,14 +157,17 @@ pub enum XmlEngineError {
     UnsupportedPlatform,
     WorkerUnavailable,
     InputTooLarge { limit: usize },
+    DetailTooLarge { limit: usize },
     RetentionLimit(&'static str),
     UnknownDocument,
     Parse(XmlDiagnostic),
     Format(String),
+    Detail(String),
     XPath(String),
     SchemaPolicy(String),
     SchemaLoad(XmlDiagnostic),
     SchemaValidation(XmlDiagnostic),
+    Tree(String),
     Io(String),
 }
 
@@ -157,11 +263,13 @@ mod windows_backend {
     use std::os::windows::io::AsRawHandle;
     use std::path::{Component, Path, Prefix};
     use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+    use std::sync::Arc;
     use std::thread::{self, JoinHandle};
     use windows::Win32::Data::Xml::MsXml::{
         DOMDocument60, IXMLDOMDocument2, IXMLDOMDocument3, IXMLDOMElement, IXMLDOMNode,
-        IXMLDOMNodeList, IXMLDOMSchemaCollection2, NODE_CDATA_SECTION, NODE_ELEMENT, NODE_TEXT,
-        XMLSchemaCache60,
+        IXMLDOMNamedNodeMap, IXMLDOMNodeList, IXMLDOMSchemaCollection2, NODE_ATTRIBUTE,
+        NODE_CDATA_SECTION, NODE_COMMENT, NODE_DOCUMENT, NODE_ELEMENT,
+        NODE_PROCESSING_INSTRUCTION, NODE_TEXT, XMLSchemaCache60,
     };
     use windows::Win32::Foundation::{HANDLE, VARIANT_BOOL};
     use windows::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, VOLUME_NAME_DOS};
@@ -174,7 +282,7 @@ mod windows_backend {
     enum Request {
         Parse {
             source: String,
-            reply: Sender<Result<XmlDocumentId, XmlEngineError>>,
+            reply: Sender<Result<(XmlDocumentId, Arc<XmlTreeProjection>), XmlEngineError>>,
         },
         Format {
             document: XmlDocumentId,
@@ -186,6 +294,12 @@ mod windows_backend {
             expression: String,
             namespaces: Vec<(String, String)>,
             reply: Sender<Result<XmlXPathResult, XmlEngineError>>,
+        },
+        Detail {
+            document: XmlDocumentId,
+            node: XmlNodeId,
+            kind: XmlNodeDetailKind,
+            reply: Sender<Result<String, XmlEngineError>>,
         },
         Validate {
             document: XmlDocumentId,
@@ -226,6 +340,15 @@ mod windows_backend {
         }
 
         pub fn parse(&self, source: String) -> Result<XmlDocumentId, XmlEngineError> {
+            self.parse_with_tree(source).map(|(document, _)| document)
+        }
+
+        /// Parses once and returns the bounded structural projection built
+        /// from that same DOM on the COM apartment thread.
+        pub fn parse_with_tree(
+            &self,
+            source: String,
+        ) -> Result<(XmlDocumentId, Arc<XmlTreeProjection>), XmlEngineError> {
             self.request(|reply| Request::Parse { source, reply })
         }
 
@@ -253,6 +376,22 @@ mod windows_backend {
                 document,
                 expression: expression.into(),
                 namespaces,
+                reply,
+            })
+        }
+
+        /// Reads an exact selected value or serializes an element fragment
+        /// from the retained DOM. The operation runs on the COM apartment.
+        pub fn detail(
+            &self,
+            document: XmlDocumentId,
+            node: XmlNodeId,
+            kind: XmlNodeDetailKind,
+        ) -> Result<String, XmlEngineError> {
+            self.request(|reply| Request::Detail {
+                document,
+                node,
+                kind,
                 reply,
             })
         }
@@ -325,6 +464,7 @@ mod windows_backend {
     struct Engine {
         documents: BTreeMap<XmlDocumentId, DocumentState>,
         nodes: HashMap<XmlNodeId, IXMLDOMNode>,
+        node_identities: HashMap<usize, XmlNodeId>,
         next_document: u64,
         next_node: u64,
         retained_source_bytes: usize,
@@ -335,13 +475,17 @@ mod windows_backend {
             Self {
                 documents: BTreeMap::new(),
                 nodes: HashMap::new(),
+                node_identities: HashMap::new(),
                 next_document: 1,
                 next_node: 1,
                 retained_source_bytes: 0,
             }
         }
 
-        fn parse(&mut self, source: String) -> Result<XmlDocumentId, XmlEngineError> {
+        fn parse(
+            &mut self,
+            source: String,
+        ) -> Result<(XmlDocumentId, Arc<XmlTreeProjection>), XmlEngineError> {
             check_input_size(&source)?;
             validate_utf8_declaration(&source)?;
             if self.documents.len() >= MAX_RETAINED_DOCUMENTS {
@@ -353,10 +497,26 @@ mod windows_backend {
             }
             let dom = secure_document(&source, XmlErrorContext::Xml)?;
             let id = XmlDocumentId(self.next_document);
-            self.next_document = self.next_document.saturating_add(1);
+            self.next_document = self
+                .next_document
+                .checked_add(1)
+                .ok_or(XmlEngineError::RetentionLimit("XML document identities"))?;
             self.retained_source_bytes = self.retained_source_bytes.saturating_add(source.len());
-            self.documents.insert(id, DocumentState { dom, source });
-            Ok(id)
+            self.documents.insert(
+                id,
+                DocumentState {
+                    dom,
+                    source,
+                },
+            );
+            let projection = match self.project_tree(id) {
+                Ok(projection) => Arc::new(projection),
+                Err(error) => {
+                    let _ = self.close_document(id);
+                    return Err(error);
+                }
+            };
+            Ok((id, projection))
         }
 
         fn format(
@@ -380,6 +540,8 @@ mod windows_backend {
                 .retained_source_bytes
                 .saturating_sub(state.source.len());
             self.nodes.retain(|id, _| id.document != document);
+            self.node_identities
+                .retain(|_, id| id.document != document);
             Ok(())
         }
 
@@ -399,25 +561,263 @@ mod windows_backend {
                     "the XSLT document() function is disabled".into(),
                 ));
             }
-            let state = self
+            let dom = self
                 .documents
                 .get(&document)
-                .ok_or(XmlEngineError::UnknownDocument)?;
-            set_xpath_namespaces(&state.dom, namespaces)?;
-            let list = match unsafe { state.dom.selectNodes(&BSTR::from(expression)) } {
+                .ok_or(XmlEngineError::UnknownDocument)?
+                .dom
+                .clone();
+            set_xpath_namespaces(&dom, namespaces)?;
+            let list = match unsafe { dom.selectNodes(&BSTR::from(expression)) } {
                 Ok(list) => list,
                 Err(_) => {
-                    return scalar_xpath(&state.dom, expression, namespaces)
+                    return scalar_xpath(&dom, expression, namespaces)
                         .map(XmlXPathResult::ScalarText);
                 }
             };
-            let count = unsafe { list.length() }
-                .map_err(|_| XmlEngineError::XPath("MSXML could not count XPath results".into()))?;
-            if self.nodes.len().saturating_add(count.max(0) as usize) > MAX_XPATH_RESULTS {
-                return Err(XmlEngineError::RetentionLimit("XPath node identities"));
-            }
-            let nodes = snapshot_nodes(document, &list, &mut self.next_node, &mut self.nodes)?;
+            let nodes = snapshot_nodes(document, &list, self)?;
             Ok(XmlXPathResult::Nodes(nodes))
+        }
+
+        fn detail(
+            &self,
+            document: XmlDocumentId,
+            node_id: XmlNodeId,
+            kind: XmlNodeDetailKind,
+        ) -> Result<String, XmlEngineError> {
+            if node_id.document != document {
+                return Err(XmlEngineError::UnknownDocument);
+            }
+            if !self.documents.contains_key(&document) {
+                return Err(XmlEngineError::UnknownDocument);
+            }
+            let node = self.nodes.get(&node_id).ok_or(XmlEngineError::UnknownDocument)?;
+            let node_type = unsafe { node.nodeType() }
+                .map_err(|_| XmlEngineError::Detail("MSXML could not inspect the selected node".into()))?;
+            let value = match kind {
+                XmlNodeDetailKind::TextValue => {
+                    if !matches!(
+                        node_type,
+                        NODE_TEXT | NODE_CDATA_SECTION | NODE_COMMENT | NODE_PROCESSING_INSTRUCTION
+                    ) {
+                        return Err(XmlEngineError::Detail(
+                            "text copy requires a text, CDATA, comment, or processing-instruction node"
+                                .into(),
+                        ));
+                    }
+                    selected_node_value(node)?
+                }
+                XmlNodeDetailKind::AttributeValue => {
+                    if node_type != NODE_ATTRIBUTE {
+                        return Err(XmlEngineError::Detail(
+                            "attribute copy requires an attribute selection".into(),
+                        ));
+                    }
+                    selected_node_value(node)?
+                }
+                XmlNodeDetailKind::ElementText => {
+                    if node_type != NODE_ELEMENT {
+                        return Err(XmlEngineError::Detail(
+                            "element text copy requires an element selection".into(),
+                        ));
+                    }
+                    unsafe { node.text() }
+                        .map(|value| value.to_string())
+                        .map_err(|_| {
+                            XmlEngineError::Detail(
+                                "MSXML could not read the selected element text".into(),
+                            )
+                        })?
+                }
+                XmlNodeDetailKind::XmlFragment => {
+                    if node_type != NODE_ELEMENT {
+                        return Err(XmlEngineError::Detail(
+                            "XML fragment copy requires an element selection".into(),
+                        ));
+                    }
+                    namespace_valid_fragment(node)?
+                }
+            };
+            if value.len() > MAX_XML_DETAIL_BYTES {
+                return Err(XmlEngineError::DetailTooLarge {
+                    limit: MAX_XML_DETAIL_BYTES,
+                });
+            }
+            Ok(value)
+        }
+
+        fn project_tree(
+            &mut self,
+            document: XmlDocumentId,
+        ) -> Result<XmlTreeProjection, XmlEngineError> {
+            let dom = self
+                .documents
+                .get(&document)
+                .ok_or(XmlEngineError::UnknownDocument)?
+                .dom
+                .clone();
+            let root_node = dom
+                .cast::<IXMLDOMNode>()
+                .map_err(|_| XmlEngineError::Tree("MSXML could not expose the document node".into()))?;
+            let root_id = self.node_id_for(document, root_node.clone())?;
+            let (root, root_bytes) = tree_node_snapshot(root_id, None, &root_node)?;
+            if root_bytes > MAX_XML_TREE_PROJECTION_BYTES {
+                return Err(XmlEngineError::RetentionLimit(
+                    "XML tree projection metadata bytes",
+                ));
+            }
+            let mut nodes = vec![root];
+            let mut node_indexes = HashMap::from([(root_id, 0usize)]);
+            let mut metadata_bytes = root_bytes;
+            let mut scheduled = 1usize;
+            let mut truncated = None;
+            let mut pending = vec![PendingTreeNode {
+                id: root_id,
+                node: root_node,
+                parent: None,
+                is_attribute: false,
+            }];
+
+            while let Some(item) = pending.pop() {
+                let is_root = item.id == root_id;
+                let (snapshot, snapshot_bytes) = if is_root {
+                    (nodes[0].clone(), 0)
+                } else {
+                    tree_node_snapshot(item.id, item.parent, &item.node)?
+                };
+                if metadata_bytes.saturating_add(snapshot_bytes) > MAX_XML_TREE_PROJECTION_BYTES {
+                    truncated = Some(XmlTreeProjectionLimit::MetadataBytes);
+                    if let Some(parent) = item.parent.and_then(|id| node_indexes.get(&id).copied()) {
+                        if item.is_attribute {
+                            nodes[parent].has_more_attributes = true;
+                        } else {
+                            nodes[parent].has_more_children = true;
+                        }
+                    }
+                    for remaining in &pending {
+                        if let Some(parent) =
+                            remaining.parent.and_then(|id| node_indexes.get(&id).copied())
+                        {
+                            if remaining.is_attribute {
+                                nodes[parent].has_more_attributes = true;
+                            } else {
+                                nodes[parent].has_more_children = true;
+                            }
+                        }
+                    }
+                    break;
+                }
+                metadata_bytes = metadata_bytes.saturating_add(snapshot_bytes);
+                let index = if is_root {
+                    0
+                } else {
+                    let index = nodes.len();
+                    node_indexes.insert(item.id, index);
+                    nodes.push(snapshot);
+                    index
+                };
+                if let Some(parent) = item.parent.and_then(|id| node_indexes.get(&id).copied()) {
+                    if item.is_attribute {
+                        nodes[parent].attributes.push(item.id);
+                    } else {
+                        nodes[parent].children.push(item.id);
+                    }
+                }
+
+                let node_type = unsafe { item.node.nodeType() }
+                    .map_err(|_| XmlEngineError::Tree("MSXML could not inspect a DOM node".into()))?;
+                if node_type == NODE_ELEMENT {
+                    let attributes = unsafe { item.node.attributes() }
+                        .map_err(|_| XmlEngineError::Tree("MSXML could not enumerate element attributes".into()))?;
+                    let attribute_count = unsafe { attributes.length() }
+                        .map_err(|_| XmlEngineError::Tree("MSXML could not count element attributes".into()))?;
+                    for attribute_index in 0..attribute_count {
+                        if scheduled >= MAX_XML_TREE_NODES {
+                            nodes[index].has_more_attributes = true;
+                            truncated = Some(XmlTreeProjectionLimit::NodeCount);
+                            break;
+                        }
+                        let attribute = unsafe { attributes.get_item(attribute_index) }
+                            .map_err(|_| XmlEngineError::Tree("MSXML could not read an element attribute".into()))?;
+                        let id = self.node_id_for(document, attribute.clone())?;
+                        let (attribute_snapshot, bytes) = tree_node_snapshot(id, Some(item.id), &attribute)?;
+                        if metadata_bytes.saturating_add(bytes) > MAX_XML_TREE_PROJECTION_BYTES {
+                            nodes[index].has_more_attributes = true;
+                            truncated = Some(XmlTreeProjectionLimit::MetadataBytes);
+                            break;
+                        }
+                        metadata_bytes = metadata_bytes.saturating_add(bytes);
+                        let attribute_index = nodes.len();
+                        node_indexes.insert(id, attribute_index);
+                        nodes[index].attributes.push(id);
+                        nodes.push(attribute_snapshot);
+                        scheduled += 1;
+                    }
+                }
+                if node_type == NODE_ATTRIBUTE {
+                    continue;
+                }
+                let children = unsafe { item.node.childNodes() }
+                    .map_err(|_| XmlEngineError::Tree("MSXML could not enumerate child nodes".into()))?;
+                let child_count = unsafe { children.length() }
+                    .map_err(|_| XmlEngineError::Tree("MSXML could not count child nodes".into()))?;
+                let mut child_tasks = Vec::new();
+                for child_index in 0..child_count {
+                    if scheduled >= MAX_XML_TREE_NODES {
+                        nodes[index].has_more_children = true;
+                        truncated = Some(XmlTreeProjectionLimit::NodeCount);
+                        break;
+                    }
+                    let child = unsafe { children.get_item(child_index) }
+                        .map_err(|_| XmlEngineError::Tree("MSXML could not read a child node".into()))?;
+                    let id = self.node_id_for(document, child.clone())?;
+                    child_tasks.push(PendingTreeNode {
+                        id,
+                        node: child,
+                        parent: Some(item.id),
+                        is_attribute: false,
+                    });
+                    scheduled += 1;
+                }
+                pending.extend(child_tasks.into_iter().rev());
+            }
+
+            Ok(XmlTreeProjection {
+                document,
+                root: root_id,
+                nodes,
+                truncated,
+                node_indexes,
+            })
+        }
+
+        fn node_id_for(
+            &mut self,
+            document: XmlDocumentId,
+            node: IXMLDOMNode,
+        ) -> Result<XmlNodeId, XmlEngineError> {
+            let identity = node
+                .cast::<IUnknown>()
+                .map_err(|_| XmlEngineError::Tree("MSXML could not identify a DOM node".into()))?;
+            let identity_key = identity.as_raw() as usize;
+            if let Some(id) = self.node_identities.get(&identity_key) {
+                return Ok(*id);
+            }
+            if self.nodes.len() >= MAX_RETAINED_XML_NODE_IDENTITIES {
+                return Err(XmlEngineError::RetentionLimit("XML DOM node identities"));
+            }
+            let ordinal = self.next_node;
+            self.next_node = self
+                .next_node
+                .checked_add(1)
+                .ok_or(XmlEngineError::RetentionLimit("XML DOM node identities"))?;
+            let id = XmlNodeId {
+                document,
+                ordinal,
+            };
+            self.node_identities.insert(identity_key, id);
+            self.nodes.insert(id, node);
+            Ok(id)
         }
 
         fn validate(
@@ -517,6 +917,14 @@ mod windows_backend {
                     reply,
                 } => {
                     let _ = reply.send(engine.query(document, &expression, &namespaces));
+                }
+                Request::Detail {
+                    document,
+                    node,
+                    kind,
+                    reply,
+                } => {
+                    let _ = reply.send(engine.detail(document, node, kind));
                 }
                 Request::Validate {
                     document,
@@ -746,11 +1154,248 @@ mod windows_backend {
             .map_err(|_| XmlEngineError::XPath("MSXML rejected the scalar XPath expression".into()))
     }
 
+    struct PendingTreeNode {
+        id: XmlNodeId,
+        node: IXMLDOMNode,
+        parent: Option<XmlNodeId>,
+        is_attribute: bool,
+    }
+
+    fn tree_node_snapshot(
+        id: XmlNodeId,
+        parent: Option<XmlNodeId>,
+        node: &IXMLDOMNode,
+    ) -> Result<(XmlTreeNodeSnapshot, usize), XmlEngineError> {
+        let node_type = unsafe { node.nodeType() }
+            .map_err(|_| XmlEngineError::Tree("MSXML could not inspect a DOM node".into()))?;
+        let kind = if node_type == NODE_DOCUMENT {
+            XmlTreeNodeKind::Document
+        } else if node_type == NODE_ELEMENT {
+            XmlTreeNodeKind::Element
+        } else if node_type == NODE_ATTRIBUTE {
+            XmlTreeNodeKind::Attribute
+        } else if node_type == NODE_TEXT {
+            XmlTreeNodeKind::Text
+        } else if node_type == NODE_CDATA_SECTION {
+            XmlTreeNodeKind::CData
+        } else if node_type == NODE_COMMENT {
+            XmlTreeNodeKind::Comment
+        } else if node_type == NODE_PROCESSING_INSTRUCTION {
+            XmlTreeNodeKind::ProcessingInstruction
+        } else {
+            XmlTreeNodeKind::Other
+        };
+        let qualified_name = unsafe { node.nodeName() }
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let local_name = unsafe { node.baseName() }
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let prefix = unsafe { node.prefix() }
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let namespace_uri = unsafe { node.namespaceURI() }
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let value = if matches!(
+            kind,
+            XmlTreeNodeKind::Attribute
+                | XmlTreeNodeKind::Text
+                | XmlTreeNodeKind::CData
+                | XmlTreeNodeKind::Comment
+                | XmlTreeNodeKind::ProcessingInstruction
+        ) {
+            selected_node_value(node)?
+        } else {
+            String::new()
+        };
+        let mut chars = value.chars();
+        let preview: String = chars.by_ref().take(MAX_XML_TREE_PREVIEW_CHARS).collect();
+        let preview_truncated = chars.next().is_some();
+        let bytes = qualified_name
+            .len()
+            .saturating_add(local_name.len())
+            .saturating_add(prefix.len())
+            .saturating_add(namespace_uri.len())
+            .saturating_add(preview.len());
+        Ok((
+            XmlTreeNodeSnapshot {
+                id,
+                parent,
+                kind,
+                qualified_name,
+                local_name,
+                prefix,
+                namespace_uri,
+                preview,
+                preview_truncated,
+                attributes: Vec::new(),
+                children: Vec::new(),
+                has_more_attributes: false,
+                has_more_children: false,
+            },
+            bytes,
+        ))
+    }
+
+    fn selected_node_value(node: &IXMLDOMNode) -> Result<String, XmlEngineError> {
+        let value = unsafe { node.nodeValue() }
+            .map_err(|_| XmlEngineError::Detail("MSXML could not read the selected node value".into()))?;
+        BSTR::try_from(&value)
+            .map(|value| value.to_string())
+            .map_err(|_| XmlEngineError::Detail("MSXML returned a non-text node value".into()))
+    }
+
+    fn namespace_valid_fragment(node: &IXMLDOMNode) -> Result<String, XmlEngineError> {
+        let mut fragment = unsafe { node.xml() }
+            .map_err(|_| XmlEngineError::Detail("MSXML could not serialize the selected element".into()))?
+            .to_string();
+        let (open_tag_end, declared_names) = fragment_open_tag(&fragment)?;
+        let mut context = BTreeMap::<String, String>::new();
+        let mut current = Some(node.clone());
+        while let Some(element) = current {
+            if unsafe { element.nodeType() }.ok() == Some(NODE_ELEMENT) {
+                let attributes = unsafe { element.attributes() }
+                    .map_err(|_| XmlEngineError::Detail("MSXML could not read namespace context".into()))?;
+                let count = unsafe { attributes.length() }
+                    .map_err(|_| XmlEngineError::Detail("MSXML could not count namespace declarations".into()))?;
+                for index in 0..count {
+                    let attribute = unsafe { attributes.get_item(index) }
+                        .map_err(|_| XmlEngineError::Detail("MSXML could not read a namespace declaration".into()))?;
+                    let name = unsafe { attribute.nodeName() }
+                        .map(|value| value.to_string())
+                        .unwrap_or_default();
+                    let prefix = if name == "xmlns" {
+                        Some(String::new())
+                    } else {
+                        name.strip_prefix("xmlns:").map(str::to_owned)
+                    };
+                    let Some(prefix) = prefix else {
+                        continue;
+                    };
+                    if prefix == "xml" || context.contains_key(&prefix) {
+                        continue;
+                    }
+                    let uri = selected_node_value(&attribute)?;
+                    // Namespace 1.0 cannot serialize a prefixed undeclaration.
+                    if !prefix.is_empty() && uri.is_empty() {
+                        continue;
+                    }
+                    context.insert(prefix, uri);
+                }
+            }
+            current = unsafe { element.parentNode() }.ok();
+        }
+
+        let mut declarations = String::new();
+        for (prefix, uri) in context {
+            let name = if prefix.is_empty() {
+                "xmlns".to_owned()
+            } else {
+                format!("xmlns:{prefix}")
+            };
+            if declared_names.contains(&name) {
+                continue;
+            }
+            declarations.push(' ');
+            declarations.push_str(&name);
+            declarations.push_str("=\"");
+            declarations.push_str(&escape_xml_attribute(&uri));
+            declarations.push('"');
+        }
+        if !declarations.is_empty() {
+            let insert_at = if fragment.as_bytes().get(open_tag_end.wrapping_sub(1)) == Some(&b'/') {
+                open_tag_end - 1
+            } else {
+                open_tag_end
+            };
+            fragment.insert_str(insert_at, &declarations);
+        }
+        Ok(fragment)
+    }
+
+    fn fragment_open_tag(fragment: &str) -> Result<(usize, BTreeSet<String>), XmlEngineError> {
+        let bytes = fragment.as_bytes();
+        if bytes.first() != Some(&b'<') {
+            return Err(XmlEngineError::Detail(
+                "MSXML returned an invalid element serialization".into(),
+            ));
+        }
+        let mut index = 1usize;
+        while bytes.get(index).is_some_and(|byte| {
+            !byte.is_ascii_whitespace() && !matches!(*byte, b'/' | b'>')
+        }) {
+            index += 1;
+        }
+        let mut names = BTreeSet::new();
+        loop {
+            while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+                index += 1;
+            }
+            match bytes.get(index) {
+                Some(b'>') => return Ok((index, names)),
+                Some(b'/') => {
+                    index += 1;
+                    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+                        index += 1;
+                    }
+                    if bytes.get(index) == Some(&b'>') {
+                        return Ok((index, names));
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    return Err(XmlEngineError::Detail(
+                        "MSXML returned an unterminated element serialization".into(),
+                    ));
+                }
+            }
+            let name_start = index;
+            while bytes.get(index).is_some_and(|byte| {
+                !byte.is_ascii_whitespace() && !matches!(*byte, b'=' | b'/' | b'>')
+            }) {
+                index += 1;
+            }
+            if name_start == index {
+                return Err(XmlEngineError::Detail(
+                    "MSXML returned an invalid element attribute".into(),
+                ));
+            }
+            names.insert(fragment[name_start..index].to_owned());
+            while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+                index += 1;
+            }
+            if bytes.get(index) != Some(&b'=') {
+                return Err(XmlEngineError::Detail(
+                    "MSXML returned an invalid element attribute".into(),
+                ));
+            }
+            index += 1;
+            while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+                index += 1;
+            }
+            let Some(quote @ (b'\'' | b'"')) = bytes.get(index).copied() else {
+                return Err(XmlEngineError::Detail(
+                    "MSXML returned an invalid element attribute value".into(),
+                ));
+            };
+            index += 1;
+            while bytes.get(index).is_some_and(|byte| *byte != quote) {
+                index += 1;
+            }
+            if bytes.get(index) != Some(&quote) {
+                return Err(XmlEngineError::Detail(
+                    "MSXML returned an unterminated element attribute value".into(),
+                ));
+            }
+            index += 1;
+        }
+    }
+
     fn snapshot_nodes(
         document: XmlDocumentId,
         list: &IXMLDOMNodeList,
-        next_node: &mut u64,
-        identities: &mut HashMap<XmlNodeId, IXMLDOMNode>,
+        engine: &mut Engine,
     ) -> Result<Vec<XmlNodeSnapshot>, XmlEngineError> {
         let count = unsafe { list.length() }
             .map_err(|_| XmlEngineError::XPath("MSXML could not count XPath results".into()))?;
@@ -760,17 +1405,11 @@ mod windows_backend {
             ));
         }
         let mut result = Vec::with_capacity(count.max(0) as usize);
-        let mut pending_identities = Vec::with_capacity(count.max(0) as usize);
-        let mut next_ordinal = *next_node;
         let mut result_bytes = 0usize;
         for index in 0..count {
             let node = unsafe { list.get_item(index) }
                 .map_err(|_| XmlEngineError::XPath("MSXML could not read XPath result".into()))?;
-            let id = XmlNodeId {
-                document,
-                ordinal: next_ordinal,
-            };
-            next_ordinal = next_ordinal.saturating_add(1);
+            let id = engine.node_id_for(document, node.clone())?;
             let value = unsafe { node.text() }
                 .map(|value| value.to_string())
                 .unwrap_or_default();
@@ -798,10 +1437,7 @@ mod windows_backend {
                 qualified_name,
                 value,
             });
-            pending_identities.push((id, node));
         }
-        *next_node = next_ordinal;
-        identities.extend(pending_identities);
         Ok(result)
     }
 
@@ -1629,6 +2265,142 @@ mod windows_backend {
             ));
         }
         Ok(parent.parent().unwrap_or_else(|| Path::new("")).join(path))
+    }
+
+    #[cfg(test)]
+    mod m7c_tests {
+        use super::*;
+
+        fn node_ids(result: XmlXPathResult) -> Vec<XmlNodeId> {
+            match result {
+                XmlXPathResult::Nodes(nodes) => nodes.into_iter().map(|node| node.id).collect(),
+                XmlXPathResult::ScalarText(value) => {
+                    panic!("expected XPath nodes but received scalar {value:?}")
+                }
+            }
+        }
+
+        #[test]
+        fn m7c_engine_tree_identity_detail_and_fragment_round_trip() {
+            let engine = XmlEngineWorker::start().expect("MSXML owner starts");
+            let long_cdata = "雪".repeat(MAX_XML_TREE_PREVIEW_CHARS + 20);
+            let source = format!(
+                r#"<r xmlns="urn:default" xmlns:p="urn:pref" label="été &amp; 🙂" p:code="x &amp; y"><p:item id="same">A &amp; B<![CDATA[{long_cdata}]]><!-- note --><?pick ok?><inside>nested</inside>tail</p:item>  <p:item id="same"/></r>"#
+            );
+            let (document, projection) = engine
+                .parse_with_tree(source)
+                .expect("source parses and projection comes from its accepted DOM");
+
+            let tree_items: Vec<_> = projection
+                .nodes
+                .iter()
+                .filter(|node| {
+                    node.kind == XmlTreeNodeKind::Element && node.qualified_name == "p:item"
+                })
+                .map(|node| node.id)
+                .collect();
+            assert_eq!(tree_items.len(), 2);
+            assert_ne!(tree_items[0], tree_items[1]);
+            let query_items = node_ids(
+                engine
+                    .query(document, "//p:item", vec![("p".into(), "urn:pref".into())])
+                    .expect("namespace-aware XPath returns actual DOM nodes"),
+            );
+            assert_eq!(query_items, tree_items);
+
+            let label_id = node_ids(
+                engine
+                    .query(document, "//@label", Vec::new())
+                    .expect("attribute selection succeeds"),
+            )[0];
+            assert_eq!(
+                engine
+                    .detail(document, label_id, XmlNodeDetailKind::AttributeValue)
+                    .expect("full decoded attribute value is available"),
+                "été & 🙂"
+            );
+            assert!(projection.nodes.iter().any(|node| {
+                node.kind == XmlTreeNodeKind::Attribute
+                    && node.qualified_name == "p:code"
+                    && node.preview == "x & y"
+            }));
+            assert!(projection.nodes.iter().any(|node| {
+                matches!(
+                    node.kind,
+                    XmlTreeNodeKind::Text
+                        | XmlTreeNodeKind::CData
+                        | XmlTreeNodeKind::Comment
+                        | XmlTreeNodeKind::ProcessingInstruction
+                )
+            }));
+            assert!(projection.nodes.iter().any(|node| {
+                node.kind == XmlTreeNodeKind::Text && node.preview == "  "
+            }));
+            let (cdata_id, cdata_preview_was_clipped) = projection
+                .nodes
+                .iter()
+                .find(|node| node.kind == XmlTreeNodeKind::CData)
+                .map(|node| (node.id, node.preview_truncated))
+                .expect("CDATA remains a separate tree node");
+            assert!(cdata_preview_was_clipped);
+            assert_eq!(
+                engine
+                    .detail(document, cdata_id, XmlNodeDetailKind::TextValue)
+                    .expect("detail reads the full DOM value rather than the preview"),
+                long_cdata
+            );
+            assert_eq!(
+                engine
+                    .detail(document, tree_items[0], XmlNodeDetailKind::ElementText)
+                    .expect("element text is an explicit value request"),
+                format!("A & B{long_cdata}nestedtail")
+            );
+            assert!(projection
+                .nodes
+                .iter()
+                .any(|node| node.kind == XmlTreeNodeKind::Comment && node.preview == " note "));
+            assert!(projection.nodes.iter().any(|node| {
+                node.kind == XmlTreeNodeKind::ProcessingInstruction
+                    && node.qualified_name == "pick"
+            }));
+
+            let fragment = engine
+                .detail(document, tree_items[0], XmlNodeDetailKind::XmlFragment)
+                .expect("selected XML is copied from the current DOM");
+            assert!(fragment.contains("xmlns:p=\"urn:pref\""));
+            assert!(fragment.contains("xmlns=\"urn:default\""));
+            let (round_trip, _) = engine
+                .parse_with_tree(fragment)
+                .expect("fragment is namespace-valid XML without changing the original DOM");
+            assert_eq!(
+                node_ids(
+                    engine
+                        .query(
+                            round_trip,
+                            "//x:inside",
+                            vec![("x".into(), "urn:default".into())],
+                        )
+                        .expect("inherited default namespace survives fragment copy"),
+                )
+                .len(),
+                1
+            );
+            assert_eq!(
+                node_ids(
+                    engine
+                        .query(
+                            document,
+                            "//x:inside",
+                            vec![("x".into(), "urn:default".into())],
+                        )
+                        .expect("fragment copy leaves the original DOM queryable"),
+                )
+                .len(),
+                1
+            );
+            engine.close_document(round_trip).unwrap();
+            engine.close_document(document).unwrap();
+        }
     }
 }
 
