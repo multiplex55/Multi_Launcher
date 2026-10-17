@@ -175,6 +175,7 @@ pub enum RectanglePurpose {
     ScreenDrawExport,
     SearchRegion,
     ReferenceImageCapture,
+    PinboardCapture,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2980,6 +2981,7 @@ mod tests {
             RectanglePurpose::CropScreenshot,
             RectanglePurpose::GeneralOcrCapture,
             RectanglePurpose::ReferenceImageCapture,
+            RectanglePurpose::PinboardCapture,
         ] {
             let (mut controller, fake, _) = controller();
             let desktop = ScreenRect::new(-100, -80, 400, 300);
@@ -3058,6 +3060,7 @@ mod tests {
             RectanglePurpose::CropScreenshot,
             RectanglePurpose::GeneralOcrCapture,
             RectanglePurpose::ReferenceImageCapture,
+            RectanglePurpose::PinboardCapture,
         ] {
             let (mut controller, fake, _) = controller();
             let id = controller.begin_rectangle_pick(purpose, ScreenRect::new(-10, -20, 100, 80));

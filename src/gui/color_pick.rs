@@ -42,7 +42,9 @@ impl LauncherApp {
     }
 
     pub(super) fn ensure_color_pick_does_not_own_root(&self) -> Result<(), String> {
-        if self.coordinate_pick_blocks_other_screen_actions() {
+        if self.pinboard_capture_busy() {
+            Err("Finish or cancel screenshot pin capture before starting Screen Draw".into())
+        } else if self.coordinate_pick_blocks_other_screen_actions() {
             Err("Finish or cancel coordinate picking before starting Screen Draw".into())
         } else if self.color_pick_owns_root() {
             Err("Finish or cancel the screen color picker before starting Screen Draw".into())
@@ -54,6 +56,11 @@ impl LauncherApp {
     }
 
     pub(super) fn begin_color_pick(&mut self) -> Result<bool, String> {
+        if self.pinboard_capture_busy() {
+            return Err(
+                "Finish or cancel screenshot pin capture before picking a screen color".into(),
+            );
+        }
         if self.color_pick_owns_root() || self.color_pick.controller.is_active() {
             return Ok(false);
         }

@@ -245,7 +245,12 @@ impl LauncherApp {
     }
 
     pub(super) fn ensure_no_coordinate_pick(&self) -> Result<(), String> {
-        if self.coordinate_pick_blocks_other_screen_actions() {
+        if self.pinboard_capture_busy() {
+            Err(
+                "Finish or cancel screenshot pin capture before starting another screen action"
+                    .into(),
+            )
+        } else if self.coordinate_pick_blocks_other_screen_actions() {
             Err("Finish or cancel coordinate picking before starting another screen capture".into())
         } else {
             Ok(())
@@ -253,6 +258,11 @@ impl LauncherApp {
     }
 
     pub(super) fn ensure_coordinate_pick_admitted(&self) -> Result<(), String> {
+        if self.pinboard_capture_busy() {
+            return Err(
+                "Finish or cancel screenshot pin capture before picking coordinates".into(),
+            );
+        }
         if self.coordinate_capture_parking.is_some() {
             return Err(
                 "Restore the launcher window before starting another coordinate pick".into(),

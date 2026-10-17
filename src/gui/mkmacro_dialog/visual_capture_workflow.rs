@@ -38,12 +38,47 @@ struct SharedOverlayClient {
     next_id: AtomicU64,
     active_id: AtomicU64,
     editor_events: Mutex<VecDeque<VisualOverlayEvent>>,
+    pinboard_selection: Mutex<PinboardSelectionOwner>,
+    pinboard_selection_id: AtomicU64,
     screen_draw_id: AtomicU64,
     screen_draw_events: Mutex<VecDeque<VisualOverlayEvent>>,
     discarded_screen_draw_ids: Mutex<HashSet<OperationId>>,
     general_ocr_control: Mutex<()>,
     general_ocr_events: Mutex<GeneralOcrEventOwner>,
+    #[cfg(test)]
+    pending_native_events_for_test: Mutex<VecDeque<VisualOverlayEvent>>,
 }
+#[derive(Default)]
+struct PinboardSelectionOwner {
+    slot: Option<PinboardSelectionSlot>,
+    retired_ids: VecDeque<OperationId>,
+    retired_operation_floor: OperationId,
+}
+struct PinboardSelectionSlot {
+    operation_id: OperationId,
+    dispatched: bool,
+    retired: bool,
+    terminal_seen: bool,
+    selector_closed: bool,
+    event: Option<VisualOverlayEvent>,
+}
+const PINBOARD_RETIRED_OPERATION_LIMIT: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PinboardSelectionBusy {
+    pub operation_id: Option<OperationId>,
+    pub reason: &'static str,
+}
+impl fmt::Display for PinboardSelectionBusy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(operation_id) = self.operation_id {
+            write!(f, "visual selection {operation_id} is still active")
+        } else {
+            f.write_str(self.reason)
+        }
+    }
+}
+impl std::error::Error for PinboardSelectionBusy {}
 #[derive(Default)]
 struct GeneralOcrEventOwner {
     current_id: Option<OperationId>,
@@ -98,7 +133,8 @@ impl SharedVisualOverlayController {
     fn sync_exclusive_owner(&self) {
         crate::hotkey::launcher_invocation::set_exclusive_owner(
             crate::hotkey::launcher_invocation::ExclusiveOwner::VisualSelection,
-            self.0.active_id.load(Ordering::Acquire) != 0,
+            self.0.active_id.load(Ordering::Acquire) != 0
+                || self.0.pinboard_selection_id.load(Ordering::Acquire) != 0,
         );
     }
     /// Creates the production owner.  This is deliberately visible only to the
@@ -132,11 +168,15 @@ impl SharedVisualOverlayController {
             next_id: AtomicU64::new(1),
             active_id: AtomicU64::new(0),
             editor_events: Mutex::new(VecDeque::new()),
+            pinboard_selection: Mutex::new(PinboardSelectionOwner::default()),
+            pinboard_selection_id: AtomicU64::new(0),
             screen_draw_id: AtomicU64::new(0),
             screen_draw_events: Mutex::new(VecDeque::new()),
             discarded_screen_draw_ids: Mutex::new(HashSet::new()),
             general_ocr_control: Mutex::new(()),
             general_ocr_events: Mutex::new(GeneralOcrEventOwner::default()),
+            #[cfg(test)]
+            pending_native_events_for_test: Mutex::new(VecDeque::new()),
         }))
     }
 
@@ -171,6 +211,26 @@ impl SharedVisualOverlayController {
     #[cfg(test)]
     pub(crate) fn inject_editor_event_for_test(&self, event: VisualOverlayEvent) {
         self.0.editor_events.lock().unwrap().push_back(event);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_pinboard_event_for_test(&self, event: VisualOverlayEvent) {
+        self.0
+            .pending_native_events_for_test
+            .lock()
+            .unwrap()
+            .push_back(event);
+    }
+
+    #[cfg(test)]
+    fn inject_native_event_for_test(&self, event: VisualOverlayEvent) {
+        let id = event_operation_id(&event);
+        let _ = self
+            .0
+            .active_id
+            .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire);
+        self.sync_exclusive_owner();
+        self.route_event(event);
     }
 
     #[cfg(test)]
@@ -220,6 +280,10 @@ impl SharedVisualOverlayController {
             let mut state = self.0.service.lock().unwrap();
             if state.terminal_shutdown {
                 Some("Visual overlay owner has shut down".to_owned())
+            } else if self.0.pinboard_selection_id.load(Ordering::Acquire) != 0
+                && self.0.pinboard_selection_id.load(Ordering::Acquire) != id
+            {
+                Some("A pinboard capture owns the shared screen selection".to_owned())
             } else {
                 let dead = state
                     .service
@@ -339,6 +403,237 @@ impl SharedVisualOverlayController {
                 virtual_desktop,
             },
         )
+    }
+
+    /// Reserves the one shared rectangle-selection slot for a pin capture
+    /// without dispatching native work. The caller must reserve its image
+    /// budget and obtain actual capture-exclusion acknowledgements before
+    /// calling `begin_reserved_pinboard_rectangle_pick`.
+    pub(crate) fn reserve_pinboard_rectangle_pick(
+        &self,
+    ) -> Result<OperationId, PinboardSelectionBusy> {
+        // Route any already-produced event to its current owner before
+        // reserving the shared selection slot.
+        self.receive_into_editor();
+        let _service = self.0.service.lock().unwrap();
+        let active_id = self.0.active_id.load(Ordering::Acquire);
+        if active_id != 0 {
+            return Err(PinboardSelectionBusy {
+                operation_id: Some(active_id),
+                reason: "another visual selection is still active",
+            });
+        }
+        if self.0.screen_draw_id.load(Ordering::Acquire) != 0 {
+            return Err(PinboardSelectionBusy {
+                operation_id: None,
+                reason: "Screen Draw still owns the shared screen selection",
+            });
+        }
+        let ocr_owner = self.0.general_ocr_events.lock().unwrap();
+        if ocr_owner.current_id.is_some() || ocr_owner.retired_id.is_some() {
+            return Err(PinboardSelectionBusy {
+                operation_id: None,
+                reason: "Screen Region OCR still owns the shared screen selection",
+            });
+        }
+        drop(ocr_owner);
+        let mut owner = self.0.pinboard_selection.lock().unwrap();
+        if owner.slot.is_some() {
+            return Err(PinboardSelectionBusy {
+                operation_id: owner.slot.as_ref().map(|slot| slot.operation_id),
+                reason: "a prior pin capture is still draining native cleanup",
+            });
+        }
+        let id = self.allocate();
+        owner.slot = Some(PinboardSelectionSlot {
+            operation_id: id,
+            dispatched: false,
+            retired: false,
+            terminal_seen: false,
+            selector_closed: false,
+            event: None,
+        });
+        self.0.pinboard_selection_id.store(id, Ordering::Release);
+        drop(owner);
+        drop(_service);
+        self.sync_exclusive_owner();
+        Ok(id)
+    }
+
+    /// Dispatches the already registered pin operation only after the caller
+    /// has verified all capture-exclusion acknowledgements.
+    pub(crate) fn begin_reserved_pinboard_rectangle_pick(
+        &self,
+        operation_id: OperationId,
+        virtual_desktop: ScreenRect,
+    ) -> Result<(), String> {
+        {
+            let mut owner = self.0.pinboard_selection.lock().unwrap();
+            let slot = owner
+                .slot
+                .as_mut()
+                .filter(|slot| slot.operation_id == operation_id)
+                .ok_or_else(|| "pinboard selection reservation is no longer owned".to_owned())?;
+            if slot.dispatched {
+                return Err("pinboard selection was already dispatched".into());
+            }
+            slot.dispatched = true;
+        }
+        self.send_with_recovery(
+            operation_id,
+            VisualOverlayCommand::BeginRectanglePick {
+                operation_id,
+                purpose: RectanglePurpose::PinboardCapture,
+                virtual_desktop,
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn poll_pinboard_rectangle_event(
+        &self,
+        expected: OperationId,
+    ) -> Option<VisualOverlayEvent> {
+        self.receive_into_editor();
+        let mut owner = self.0.pinboard_selection.lock().unwrap();
+        let slot = owner
+            .slot
+            .as_mut()
+            .filter(|slot| slot.operation_id == expected)?;
+        let event = slot.event.take()?;
+        slot.terminal_seen = true;
+        Some(event)
+    }
+
+    pub(crate) fn cancel_pinboard_rectangle_pick(&self, expected: OperationId) {
+        {
+            let mut owner = self.0.pinboard_selection.lock().unwrap();
+            if let Some(slot) = owner
+                .slot
+                .as_mut()
+                .filter(|slot| slot.operation_id == expected)
+            {
+                slot.retired = true;
+            } else {
+                return;
+            }
+        }
+        self.cancel_operation(expected);
+    }
+
+    /// Records that the consumed native terminal acknowledges selector close,
+    /// while retaining exclusive selection ownership through capture cleanup.
+    pub(crate) fn acknowledge_pinboard_rectangle_closed(&self, expected: OperationId) -> bool {
+        let mut owner = self.0.pinboard_selection.lock().unwrap();
+        let Some(slot) = owner
+            .slot
+            .as_mut()
+            .filter(|slot| slot.operation_id == expected)
+        else {
+            return false;
+        };
+        if !slot.dispatched || !slot.terminal_seen {
+            return false;
+        }
+        slot.selector_closed = true;
+        true
+    }
+
+    /// Releases the reservation only after either no native command was sent
+    /// or the terminal close was consumed and capture cleanup has completed.
+    /// Late duplicates are quarantined in a bounded tombstone set.
+    pub(crate) fn finish_pinboard_rectangle_pick(&self, expected: OperationId) -> bool {
+        let mut owner = self.0.pinboard_selection.lock().unwrap();
+        let Some(slot) = owner
+            .slot
+            .as_ref()
+            .filter(|slot| slot.operation_id == expected)
+        else {
+            return false;
+        };
+        if slot.dispatched && (!slot.terminal_seen || !slot.selector_closed) {
+            return false;
+        }
+        owner.slot = None;
+        owner.retired_ids.push_back(expected);
+        owner.retired_operation_floor = owner.retired_operation_floor.max(expected);
+        while owner.retired_ids.len() > PINBOARD_RETIRED_OPERATION_LIMIT {
+            owner.retired_ids.pop_front();
+        }
+        let _ = self.0.pinboard_selection_id.compare_exchange(
+            expected,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        drop(owner);
+        self.sync_exclusive_owner();
+        true
+    }
+
+    /// Used during application teardown. Cancellation is operation-scoped; the
+    /// caller waits on the native event channel until cleanup has produced its
+    /// terminal acknowledgement or the worker has stopped and closed the owner.
+    pub(crate) fn cancel_and_drain_pinboard_rectangle_pick(
+        &self,
+        expected: OperationId,
+    ) -> Option<VisualOverlayEvent> {
+        self.cancel_pinboard_rectangle_pick(expected);
+        loop {
+            if let Some(event) = self.poll_pinboard_rectangle_event(expected) {
+                return Some(event);
+            }
+            let (incoming, stopped_events, stopped) = {
+                let mut state = self.0.service.lock().unwrap();
+                let Some(service) = state.service.as_ref() else {
+                    return Some(VisualOverlayEvent::Error {
+                        operation_id: expected,
+                        error: VisualOverlayError {
+                            kind: OverlayErrorKind::Platform,
+                            message: "visual overlay owner stopped during pin cleanup".into(),
+                        },
+                    });
+                };
+                if service.is_finished() {
+                    let mut stopped = state.service.take().unwrap();
+                    let events = stopped.cleanup_finished();
+                    (None, events, true)
+                } else {
+                    (service.events.recv().ok(), Vec::new(), false)
+                }
+            };
+            for event in stopped_events {
+                self.route_event(event);
+            }
+            if let Some(event) = incoming {
+                self.route_event(event);
+            } else if stopped {
+                if let Some(event) = self.poll_pinboard_rectangle_event(expected) {
+                    return Some(event);
+                }
+                return Some(VisualOverlayEvent::Error {
+                    operation_id: expected,
+                    error: VisualOverlayError {
+                        kind: OverlayErrorKind::Platform,
+                        message: "visual overlay worker stopped during pin cleanup".into(),
+                    },
+                });
+            }
+        }
+    }
+
+    /// Aborts a reservation if no native rectangle command was dispatched.
+    pub(crate) fn abort_reserved_pinboard_rectangle_pick(&self, expected: OperationId) -> bool {
+        let dispatched = self
+            .0
+            .pinboard_selection
+            .lock()
+            .unwrap()
+            .slot
+            .as_ref()
+            .filter(|slot| slot.operation_id == expected)
+            .is_some_and(|slot| slot.dispatched);
+        !dispatched && self.finish_pinboard_rectangle_pick(expected)
     }
 
     /// Starts a general-purpose OCR selection and registers its identity before
@@ -517,6 +812,10 @@ impl SharedVisualOverlayController {
         if let Some(service) = self.0.service.lock().unwrap().service.as_ref() {
             incoming.extend(service.events.try_iter());
         }
+        #[cfg(test)]
+        incoming.extend(std::mem::take(
+            &mut *self.0.pending_native_events_for_test.lock().unwrap(),
+        ));
         for event in &incoming {
             let id = match event {
                 VisualOverlayEvent::PointConfirmed { operation_id, .. }
@@ -538,6 +837,21 @@ impl SharedVisualOverlayController {
 
     fn route_event(&self, event: VisualOverlayEvent) {
         let id = event_operation_id(&event);
+        {
+            let mut owner = self.0.pinboard_selection.lock().unwrap();
+            if let Some(slot) = owner.slot.as_mut().filter(|slot| slot.operation_id == id) {
+                // Every event is terminal for a rectangle selection. Keep at
+                // most one event and quarantine duplicates until the capture
+                // owner releases its reservation after cleanup.
+                if !slot.terminal_seen && slot.event.is_none() {
+                    slot.event = Some(event);
+                }
+                return;
+            }
+            if owner.retired_ids.contains(&id) {
+                return;
+            }
+        }
         {
             let mut owner = self.0.general_ocr_events.lock().unwrap();
             if owner.owns(id) {
@@ -574,6 +888,16 @@ impl SharedVisualOverlayController {
         } else if self.0.screen_draw_id.load(Ordering::Acquire) == id {
             self.0.screen_draw_events.lock().unwrap().push_back(event);
         } else {
+            drop(discarded);
+            let retired_floor = self
+                .0
+                .pinboard_selection
+                .lock()
+                .unwrap()
+                .retired_operation_floor;
+            if id <= retired_floor {
+                return;
+            }
             self.0.editor_events.lock().unwrap().push_back(event);
         }
     }
@@ -1774,5 +2098,108 @@ mod tests {
             assert_eq!(workflow.take_completed(), None);
         }
         assert_eq!(fake.lock().unwrap().calls.len(), calls);
+    }
+
+    #[test]
+    fn pinboard_terminals_survive_editor_polling_and_stale_duplicates_are_quarantined() {
+        let desktop = ScreenRect::new(-1_920, -240, 3_840, 1_320);
+        let terminal_events = [
+            VisualOverlayEvent::Cancelled { operation_id: 0 },
+            VisualOverlayEvent::Expired { operation_id: 0 },
+            VisualOverlayEvent::Error {
+                operation_id: 0,
+                error: VisualOverlayError {
+                    kind: OverlayErrorKind::Platform,
+                    message: "native selector failed".into(),
+                },
+            },
+            VisualOverlayEvent::RectangleConfirmed {
+                operation_id: 0,
+                purpose: RectanglePurpose::PinboardCapture,
+                rect: ScreenRect::new(-1_800, -100, 1_200, 700),
+            },
+        ];
+
+        for template in terminal_events {
+            let fixture = SharedVisualOverlayController::test_fixture();
+            let controller = &fixture.controller;
+            let operation_id = controller.reserve_pinboard_rectangle_pick().unwrap();
+            controller
+                .begin_reserved_pinboard_rectangle_pick(operation_id, desktop)
+                .unwrap();
+            fixture.observer.wait_for_commands(1);
+            assert!(matches!(
+                fixture.observer.commands.lock().unwrap()[0],
+                VisualOverlayCommand::BeginRectanglePick {
+                    operation_id: actual,
+                    purpose: RectanglePurpose::PinboardCapture,
+                    virtual_desktop,
+                } if actual == operation_id && virtual_desktop == desktop
+            ));
+
+            // A concurrent editor request receives its own failure and cannot
+            // replace the already reserved native selector.
+            let competing_id =
+                controller.begin_rectangle_pick(RectanglePurpose::SearchRegion, desktop);
+            assert!(controller.poll().iter().any(|event| matches!(
+                event,
+                VisualOverlayEvent::Error { operation_id, error }
+                    if *operation_id == competing_id
+                        && error.message.contains("pinboard capture owns")
+            )));
+            assert_eq!(controller.operation_id(), Some(operation_id));
+
+            let event = match template {
+                VisualOverlayEvent::Cancelled { .. } => {
+                    VisualOverlayEvent::Cancelled { operation_id }
+                }
+                VisualOverlayEvent::Expired { .. } => VisualOverlayEvent::Expired { operation_id },
+                VisualOverlayEvent::Error { error, .. } => VisualOverlayEvent::Error {
+                    operation_id,
+                    error,
+                },
+                VisualOverlayEvent::RectangleConfirmed { purpose, rect, .. } => {
+                    VisualOverlayEvent::RectangleConfirmed {
+                        operation_id,
+                        purpose,
+                        rect,
+                    }
+                }
+                VisualOverlayEvent::PointConfirmed { .. } => unreachable!(),
+            };
+            controller.inject_native_event_for_test(event.clone());
+            assert!(controller.poll().is_empty());
+            assert_eq!(
+                controller.poll_pinboard_rectangle_event(operation_id),
+                Some(event.clone())
+            );
+            assert!(!controller.finish_pinboard_rectangle_pick(operation_id));
+            assert!(controller.acknowledge_pinboard_rectangle_closed(operation_id));
+            assert!(controller.finish_pinboard_rectangle_pick(operation_id));
+
+            // Both a duplicate while retired and a duplicate delivered after
+            // release must stay out of the editor's untyped event queue.
+            controller.inject_native_event_for_test(event);
+            assert!(controller.poll().is_empty());
+        }
+
+        let fixture = SharedVisualOverlayController::test_fixture();
+        let controller = &fixture.controller;
+        let mut oldest_terminal = None;
+        for _ in 0..=PINBOARD_RETIRED_OPERATION_LIMIT {
+            let operation_id = controller.reserve_pinboard_rectangle_pick().unwrap();
+            let event = VisualOverlayEvent::Cancelled { operation_id };
+            if oldest_terminal.is_none() {
+                oldest_terminal = Some(event.clone());
+            }
+            controller.inject_native_event_for_test(event.clone());
+            assert_eq!(
+                controller.poll_pinboard_rectangle_event(operation_id),
+                Some(event)
+            );
+            assert!(controller.finish_pinboard_rectangle_pick(operation_id));
+        }
+        controller.inject_native_event_for_test(oldest_terminal.unwrap());
+        assert!(controller.poll().is_empty());
     }
 }

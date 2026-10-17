@@ -2575,6 +2575,7 @@ impl LauncherApp {
         self.macro_parameter_prompt.acquire_pending();
         self.poll_coordinate_pick(ctx);
         self.poll_color_pick(ctx);
+        self.poll_pinboard_capture(ctx);
         self.poll_ocr_selection(ctx);
         self.poll_screen_draw_capture(ctx);
         if let Some(error) = self.coordinate_tool.poll_error() {
@@ -2714,6 +2715,16 @@ impl LauncherApp {
     }
 
     fn reconcile_root_visibility(&mut self, ctx: &egui::Context) -> (u64, Option<u64>, bool, bool) {
+        if self.pinboard_capture_owns_root() {
+            let (revision, (should_be_visible, invocation_id)) =
+                self.visibility_revision.inspect(|| {
+                    (
+                        self.visible_flag.load(Ordering::SeqCst),
+                        self.visibility_revision.invocation_id(),
+                    )
+                });
+            return (revision, invocation_id, should_be_visible, false);
+        }
         let (
             visibility_request,
             (
@@ -4755,6 +4766,7 @@ impl LauncherApp {
             && !self.ocr_owns_root()
             && !self.ocr_surface_visible()
             && !self.color_pick_owns_root()
+            && !self.pinboard_capture_owns_root()
             && self.coordinate_capture_parking.is_none()
             && self.screen_draw_launcher_parking.is_none()
             && !self.action_sheet.is_open()
@@ -4776,6 +4788,7 @@ impl LauncherApp {
             && self.coordinate_capture_parking.is_none()
             && self.screen_draw_launcher_parking.is_none()
             && !self.color_pick_owns_root()
+            && !self.pinboard_capture_owns_root()
             && !self.ocr_owns_root()
             && !self.ocr_surface_visible()
             && !self.ocr_defers_launcher_query_refresh();
@@ -4871,6 +4884,7 @@ impl LauncherApp {
                 && !self.ocr_owns_root()
                 && !self.ocr_surface_visible()
                 && !self.color_pick_owns_root()
+                && !self.pinboard_capture_owns_root()
                 && self.coordinate_capture_parking.is_none()
                 && self.screen_draw_launcher_parking.is_none()
                 && !self.action_sheet.is_open()
@@ -4993,6 +5007,7 @@ impl eframe::App for LauncherApp {
             self.report_error("coordinate_tool.shutdown", error);
         }
         self.shutdown_coordinate_pick();
+        self.shutdown_pinboard_capture();
         self.shutdown_color_pick();
         self.shutdown_ocr_selection();
         self.root_window_bridge.clear();

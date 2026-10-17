@@ -44,6 +44,7 @@ mod notes_dialog;
 mod numpad_navigation;
 mod ocr;
 mod ocr_view;
+pub(crate) mod pinboard;
 mod paste_sequence_dialog;
 mod hash_generator_dialog;
 pub(crate) mod hotfolder_dispatch;
@@ -557,9 +558,8 @@ fn install_visual_capture(dialog: &mut MkMacroDialog, dependencies: VisualCaptur
 fn production_visual_capture_dependencies(
     dialog: &MkMacroDialog,
     store: Arc<crate::mkmacro::MkMacroStore>,
+    screen_backend: Arc<dyn crate::mkmacro::ScreenCaptureBackend>,
 ) -> VisualCaptureDependencies {
-    let screen_backend: Arc<dyn crate::mkmacro::ScreenCaptureBackend> =
-        Arc::new(crate::mkmacro::WindowsScreenCaptureBackend::system());
     VisualCaptureDependencies {
         overlay: Box::new(
             mkmacro_dialog::visual_capture_workflow::VisualOverlayRectangleAdapter::new(
@@ -849,6 +849,7 @@ pub struct LauncherApp {
     screen_draw_recovery_bridge: Arc<crate::screen_draw::ScreenDrawRecoveryBridge>,
     color_pick: color_pick::ColorPickLifecycle,
     ocr: ocr::OcrLifecycle,
+    pinboard_capture: pinboard::PinboardCaptureLifecycle,
     screen_draw_launcher_parking: Option<
         crate::launcher_parking::LauncherParkingTransaction<
             crate::screen_draw::ScreenDrawGeneration,
@@ -2829,9 +2830,12 @@ impl LauncherApp {
             },
         );
         mkmacro_dialog.set_macro_properties_preferences(settings.mkmacro_properties.clone());
+        let pinboard_capture_backend: Arc<dyn crate::mkmacro::ScreenCaptureBackend> =
+            Arc::new(crate::mkmacro::WindowsScreenCaptureBackend::system());
         let visual_capture_dependencies = production_visual_capture_dependencies(
             &mkmacro_dialog,
             Arc::clone(&plugins.internal_services().mkmacro_store),
+            Arc::clone(&pinboard_capture_backend),
         );
         install_visual_capture(&mut mkmacro_dialog, visual_capture_dependencies);
         mkmacro_timer.finish("startup.mkmacro");
@@ -2888,6 +2892,10 @@ impl LauncherApp {
             screen_draw_recovery_bridge,
             color_pick: color_pick::ColorPickLifecycle::default(),
             ocr: ocr::OcrLifecycle::default(),
+            pinboard_capture: pinboard::PinboardCaptureLifecycle::new(
+                mkmacro_dialog.visual_overlay_controller(),
+                pinboard_capture_backend,
+            ),
             screen_draw_launcher_parking: None,
             screen_draw_restore_publication:
                 screen_draw_restore::ScreenDrawRestorePublication::default(),

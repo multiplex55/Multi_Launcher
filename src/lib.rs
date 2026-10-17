@@ -55,6 +55,7 @@ pub mod ocr;
 pub mod paste_sequence;
 pub mod performance;
 pub mod persistence;
+pub mod pinboard;
 pub mod platform;
 pub mod plugin;
 pub mod plugin_editor;
