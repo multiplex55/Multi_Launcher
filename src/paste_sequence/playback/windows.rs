@@ -2,7 +2,6 @@ use super::{
     ClipboardRestoreOutcome, ClipboardRestorePlan, ClipboardSnapshot, ClipboardWriteFailure,
     SequencePlaybackError, SequencePlaybackPlatform, SequenceTarget, TargetObservation,
 };
-use crate::mkmacro::MkKey;
 use crate::mkmacro::input::{LiveInputOptIn, Win32InputBackend};
 use std::ptr;
 use std::time::{Duration, Instant};
@@ -37,8 +36,8 @@ impl NativeSequencePlaybackPlatform {
         }
     }
 
-    /// Shutdown is the only path that waits, and it waits on a short-lived
-    /// cleanup worker which never touches egui. The worker is always joined.
+    /// Called only by the owned shutdown worker while the close-request guard
+    /// retains the viewport/clipboard-owner HWND. Never called on the GUI thread.
     pub(crate) fn restore_after_shutdown(
         plan: ClipboardRestorePlan,
         clipboard_owner_hwnd: Option<usize>,
@@ -49,33 +48,13 @@ impl NativeSequencePlaybackPlatform {
             original,
         } = plan;
         let remaining = due.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            let mut platform = Self::new(clipboard_owner_hwnd);
-            return match platform.restore_clipboard_if_owned(expected_sequence, &original) {
-                ClipboardRestoreOutcome::Restored | ClipboardRestoreOutcome::OwnershipLost => {
-                    Ok(())
-                }
-                ClipboardRestoreOutcome::Failed => {
-                    Err(SequencePlaybackError::ClipboardRestoreFailed)
-                }
-            };
+        if !remaining.is_zero() {
+            std::thread::sleep(remaining);
         }
-
-        let worker = std::thread::Builder::new()
-            .name("paste-sequence-clipboard-cleanup".into())
-            .spawn(move || {
-                std::thread::sleep(remaining);
-                let mut platform = Self::new(clipboard_owner_hwnd);
-                platform.restore_clipboard_if_owned(expected_sequence, &original)
-            })
-            .map_err(|_| SequencePlaybackError::ClipboardRestoreFailed)?;
-        match worker.join() {
-            Ok(ClipboardRestoreOutcome::Restored | ClipboardRestoreOutcome::OwnershipLost) => {
-                Ok(())
-            }
-            Ok(ClipboardRestoreOutcome::Failed) | Err(_) => {
-                Err(SequencePlaybackError::ClipboardRestoreFailed)
-            }
+        let mut platform = Self::new(clipboard_owner_hwnd);
+        match platform.restore_clipboard_if_owned(expected_sequence, &original) {
+            ClipboardRestoreOutcome::Restored | ClipboardRestoreOutcome::OwnershipLost => Ok(()),
+            ClipboardRestoreOutcome::Failed => Err(SequencePlaybackError::ClipboardRestoreFailed),
         }
     }
 
@@ -88,6 +67,13 @@ impl NativeSequencePlaybackPlatform {
 }
 
 impl SequencePlaybackPlatform for NativeSequencePlaybackPlatform {
+    fn input_is_eligible(&mut self) -> bool {
+        let modifiers = paste_modifiers();
+        crate::hotkey::launcher_invocation::exclusive_owners() == 0
+            && !modifiers.shift
+            && !modifiers.alt
+            && !modifiers.windows
+    }
     fn now(&mut self) -> Instant {
         Instant::now()
     }
@@ -215,7 +201,14 @@ impl SequencePlaybackPlatform for NativeSequencePlaybackPlatform {
         }
 
         match write_unicode_text(text) {
-            Ok(()) => Ok(unsafe { GetClipboardSequenceNumber() }),
+            Ok(()) => {
+                let sequence = unsafe { GetClipboardSequenceNumber() };
+                if sequence == 0 {
+                    Err(fail(SequencePlaybackError::ClipboardUnavailable, None))
+                } else {
+                    Ok(sequence)
+                }
+            }
             Err(()) => {
                 // We still own the clipboard lock. Restore the previously
                 // observed text (or emptiness) before releasing it, then return
@@ -223,7 +216,8 @@ impl SequencePlaybackPlatform for NativeSequencePlaybackPlatform {
                 if let Some(previous) = rollback_text {
                     let _ = write_unicode_text(previous);
                 }
-                let owned_sequence = Some(unsafe { GetClipboardSequenceNumber() });
+                let sequence = unsafe { GetClipboardSequenceNumber() };
+                let owned_sequence = (sequence != 0).then_some(sequence);
                 Err(fail(
                     SequencePlaybackError::ClipboardWriteFailed,
                     owned_sequence,
@@ -233,8 +227,10 @@ impl SequencePlaybackPlatform for NativeSequencePlaybackPlatform {
     }
 
     fn clipboard_sequence_matches(&mut self, expected_sequence: u32) -> bool {
-        self.open_clipboard()
-            .is_ok_and(|_clipboard| (unsafe { GetClipboardSequenceNumber() }) == expected_sequence)
+        expected_sequence != 0
+            && self.open_clipboard().is_ok_and(|_clipboard| {
+                (unsafe { GetClipboardSequenceNumber() }) == expected_sequence
+            })
     }
 
     fn restore_clipboard_if_owned(
@@ -242,6 +238,9 @@ impl SequencePlaybackPlatform for NativeSequencePlaybackPlatform {
         expected_sequence: u32,
         original: &ClipboardSnapshot,
     ) -> ClipboardRestoreOutcome {
+        if expected_sequence == 0 {
+            return ClipboardRestoreOutcome::OwnershipLost;
+        }
         let Ok(_clipboard) = self.open_clipboard() else {
             return ClipboardRestoreOutcome::Failed;
         };
@@ -262,9 +261,18 @@ impl SequencePlaybackPlatform for NativeSequencePlaybackPlatform {
     }
 
     fn paste_chord(&mut self) -> Result<(), SequencePlaybackError> {
-        self.input
-            .chord(&[MkKey::Control, MkKey::Character("V".into())])
-            .map_err(|_| SequencePlaybackError::InputRejected)
+        super::paste_input::paste_chord(&self.input, paste_modifiers())
+    }
+}
+
+fn paste_modifiers() -> super::paste_input::PasteModifiers {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    let pressed = |key| unsafe { GetAsyncKeyState(key) < 0 };
+    super::paste_input::PasteModifiers {
+        control: pressed(0xA2) || pressed(0xA3),
+        shift: pressed(0xA0) || pressed(0xA1),
+        alt: pressed(0xA4) || pressed(0xA5),
+        windows: pressed(0x5B) || pressed(0x5C),
     }
 }
 

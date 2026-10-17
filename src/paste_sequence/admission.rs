@@ -107,6 +107,22 @@ fn fail(state: &mut State, reason: &'static str) {
 }
 
 impl PasteAdmissionBridge {
+    pub(crate) fn arm(&self, owner: u64, generation: u64) -> Result<(), &'static str> {
+        self.publish(owner, Some(generation), true);
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "Physical paste admission is unavailable.")?;
+        if !state.observer_live {
+            return Err(
+                "Physical paste observer is unavailable; restart after input service recovery.",
+            );
+        }
+        if state.session != Some(Session { owner, generation }) {
+            return Err("Physical paste session could not be armed; restart the sequence.");
+        }
+        Ok(())
+    }
     pub fn observer_live(&self, live: bool) {
         if let Ok(mut state) = self.state.lock() {
             state.observer_live = live;

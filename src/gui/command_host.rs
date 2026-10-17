@@ -349,21 +349,45 @@ impl DialogCommandHost for LauncherApp {
 }
 
 impl LauncherApp {
-    pub(crate) fn sync_physical_paste_admission(&self) {
+    fn execute_physical_paste_using(
+        &mut self,
+        admission: crate::paste_sequence::admission::PhysicalPasteAdmission,
+        bridge: std::sync::Arc<crate::paste_sequence::admission::PasteAdmissionBridge>,
+        platform: &mut impl crate::paste_sequence::SequencePlaybackPlatform,
+    ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
+        if admission.owner != self.event_sink.owner_id()
+            || !bridge.valid(&admission)
+            || self.sequence_exit_requested
+        {
+            return Err(crate::paste_sequence::SequencePlaybackError::InvalidState);
+        }
+        self.sequence_playback
+            .physical_paste(admission, bridge, platform)
+    }
+
+    pub(crate) fn sync_physical_paste_admission(
+        &mut self,
+    ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
         let enabled = self
             .enabled_plugins
             .as_ref()
             .is_none_or(|plugins| plugins.contains("paste_sequence"));
-        // M5-C installs the checked lazy-publication executor. Until then the
-        // production route stays unarmed rather than swallowing normal paste.
-        let executor_ready = false;
-        crate::paste_sequence::admission::physical_paste_bridge().publish(
-            self.event_sink.owner_id(),
-            enabled
-                .then(|| self.sequence_playback.physical_paste_generation())
-                .flatten(),
-            executor_ready,
-        );
+        let bridge = crate::paste_sequence::admission::physical_paste_bridge();
+        let generation = enabled
+            .then(|| self.sequence_playback.physical_paste_generation())
+            .flatten();
+        if let Some(generation) = generation {
+            if !self.event_sink.owns_live_queue()
+                || bridge.arm(self.event_sink.owner_id(), generation).is_err()
+            {
+                bridge.invalidate_owner(self.event_sink.owner_id());
+                self.sequence_playback.cancel(std::time::Instant::now());
+                return Err(crate::paste_sequence::SequencePlaybackError::ObserverUnavailable);
+            }
+        } else {
+            bridge.publish(self.event_sink.owner_id(), None, true);
+        }
+        Ok(())
     }
 
     pub(crate) fn handle_physical_paste_notice(
@@ -378,12 +402,18 @@ impl LauncherApp {
                 {
                     return;
                 }
-                physical_paste_bridge().delivery_failed();
-                self.cancel_active_paste_sequence();
-                self.report_error_message(
-                    "paste_sequence.physical",
-                    "Physical paste executor is unavailable.",
-                );
+                let mut platform =
+                    crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
+                if let Err(error) = self.execute_physical_paste_using(
+                    admission,
+                    std::sync::Arc::clone(physical_paste_bridge()),
+                    &mut platform,
+                ) {
+                    physical_paste_bridge().delivery_failed();
+                    self.cancel_active_paste_sequence();
+                    self.report_error_message("paste_sequence.physical", error.message());
+                }
+                self.schedule_sequence_playback_wake(std::time::Instant::now());
             }
             PhysicalPasteNotice::Busy { owner, generation } => {
                 if owner == self.event_sink.owner_id()
@@ -1417,10 +1447,13 @@ impl LauncherApp {
     pub(crate) fn start_sequence_playback(
         &mut self,
     ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
+        if self.sequence_exit_requested {
+            return Err(crate::paste_sequence::SequencePlaybackError::Busy);
+        }
         let mut platform =
             crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
         let result = self.sequence_playback.start(&mut platform);
-        self.sync_physical_paste_admission();
+        let result = result.and_then(|_| self.sync_physical_paste_admission());
         self.schedule_sequence_playback_wake(std::time::Instant::now());
         result
     }
@@ -1889,6 +1922,212 @@ fn allow_radial_queryexec_activation(
 #[cfg(test)]
 pub(in crate::gui) mod tests {
     use super::*;
+
+    struct PhysicalPastePlatform {
+        now: std::time::Instant,
+        sequence: u32,
+        text: String,
+        target: crate::paste_sequence::SequenceTarget,
+        pastes: usize,
+    }
+    impl crate::paste_sequence::SequencePlaybackPlatform for PhysicalPastePlatform {
+        fn now(&mut self) -> std::time::Instant {
+            self.now
+        }
+        fn capture_clipboard(
+            &mut self,
+        ) -> Result<
+            crate::paste_sequence::ClipboardSnapshot,
+            crate::paste_sequence::SequencePlaybackError,
+        > {
+            Ok(crate::paste_sequence::ClipboardSnapshot::new(
+                self.sequence,
+                Some(self.text.clone()),
+            ))
+        }
+        fn current_target(
+            &mut self,
+        ) -> Result<
+            crate::paste_sequence::SequenceTarget,
+            crate::paste_sequence::SequencePlaybackError,
+        > {
+            Ok(self.target.clone())
+        }
+        fn observe_target(
+            &mut self,
+            target: &crate::paste_sequence::SequenceTarget,
+        ) -> crate::paste_sequence::TargetObservation {
+            if target == &self.target {
+                crate::paste_sequence::TargetObservation::Target {
+                    password_control: false,
+                }
+            } else {
+                crate::paste_sequence::TargetObservation::Other
+            }
+        }
+        fn publish_text(
+            &mut self,
+            expected: u32,
+            _: Option<&str>,
+            text: &str,
+        ) -> Result<u32, crate::paste_sequence::ClipboardWriteFailure> {
+            if self.sequence != expected {
+                return Err(crate::paste_sequence::ClipboardWriteFailure {
+                    error: crate::paste_sequence::SequencePlaybackError::ClipboardChanged,
+                    owned_sequence: None,
+                });
+            }
+            self.sequence += 1;
+            self.text = text.into();
+            Ok(self.sequence)
+        }
+        fn clipboard_sequence_matches(&mut self, expected: u32) -> bool {
+            self.sequence == expected
+        }
+        fn restore_clipboard_if_owned(
+            &mut self,
+            expected: u32,
+            _: &crate::paste_sequence::ClipboardSnapshot,
+        ) -> crate::paste_sequence::ClipboardRestoreOutcome {
+            if expected != self.sequence {
+                return crate::paste_sequence::ClipboardRestoreOutcome::OwnershipLost;
+            }
+            self.sequence += 1;
+            self.text = "original".into();
+            crate::paste_sequence::ClipboardRestoreOutcome::Restored
+        }
+        fn paste_chord(&mut self) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
+            self.pastes += 1;
+            Ok(())
+        }
+    }
+
+    fn started_physical_app(root: &std::path::Path) -> (LauncherApp, PhysicalPastePlatform) {
+        use crate::paste_sequence::*;
+        let mut app = inert_test_app(root);
+        app.enabled_plugins = None;
+        let target = SequenceTarget::from_external_window(
+            crate::active_window::ExternalForegroundWindow {
+                hwnd: 91,
+                process_id: 92,
+                thread_id: 93,
+                title: None,
+            },
+            std::process::id(),
+        )
+        .unwrap();
+        let context = SequenceInvocationContext::new(
+            chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05+00:00").unwrap(),
+            None,
+            target.clone(),
+        );
+        let run = SequencePreflight::begin(
+            Sequence {
+                id: SequenceId::from_raw(1).unwrap(),
+                name: "Physical app fixture".into(),
+                hotkey: None,
+                mode: PlaybackMode::PasteToAdvance,
+                delay_ms: 0,
+                steps: vec![Step::LiteralText { text: "one".into() }],
+            },
+            &[],
+            &[],
+            context,
+        )
+        .unwrap()
+        .finish(&[], &[])
+        .unwrap();
+        app.sequence_playback.begin_preparing().unwrap();
+        app.sequence_playback.set_ready(run).unwrap();
+        let mut platform = PhysicalPastePlatform {
+            now: std::time::Instant::now(),
+            sequence: 10,
+            text: "original".into(),
+            target,
+            pastes: 0,
+        };
+        app.sequence_playback.start(&mut platform).unwrap();
+        (app, platform)
+    }
+
+    #[test]
+    fn paste_to_advance_app_requires_live_observer_then_executes_exact_owner_permit() {
+        use crate::hotkey::launcher_invocation::{InputProvenance, KeyEvent, KeyTransition};
+        use crate::paste_sequence::admission::*;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let bridge = physical_paste_bridge();
+        bridge.observer_live(false);
+        let (mut unavailable, platform) = started_physical_app(root.path());
+        assert_eq!(
+            unavailable.sync_physical_paste_admission(),
+            Err(crate::paste_sequence::SequencePlaybackError::ObserverUnavailable)
+        );
+        assert_eq!(platform.pastes, 0);
+        assert_eq!(
+            unavailable.sequence_playback.status(),
+            crate::paste_sequence::SequencePlaybackStatus::Cancelled
+        );
+        drop(unavailable);
+        let (mut app, mut platform) = started_physical_app(root.path());
+        let (wake, _rx) = std::sync::mpsc::channel();
+        bridge.install_wake(wake);
+        bridge.observer_live(true);
+        app.sync_physical_paste_admission().unwrap();
+        let mut reducer = PhysicalPasteReducer::new([false; 9]);
+        let focus = PasteFocus {
+            hwnd: 91,
+            process_id: 92,
+            thread_id: 93,
+        };
+        for vk in [0xA2, 0x56] {
+            reducer.process(
+                KeyEvent {
+                    vk,
+                    transition: KeyTransition::Down,
+                    provenance: InputProvenance::Physical,
+                    at: 0,
+                },
+                Some(focus),
+                std::process::id(),
+                true,
+                bridge,
+            );
+        }
+        let PhysicalPasteNotice::Paste(admission) = bridge.take_notice().unwrap() else {
+            panic!("expected paste")
+        };
+        let wrong_root = tempfile::tempdir().unwrap();
+        let (mut wrong_owner, _) = started_physical_app(wrong_root.path());
+        assert_eq!(
+            wrong_owner.execute_physical_paste_using(
+                admission.clone(),
+                std::sync::Arc::clone(bridge),
+                &mut platform
+            ),
+            Err(crate::paste_sequence::SequencePlaybackError::InvalidState)
+        );
+        assert_eq!(platform.pastes, 0);
+        app.execute_physical_paste_using(
+            admission.clone(),
+            std::sync::Arc::clone(bridge),
+            &mut platform,
+        )
+        .unwrap();
+        assert_eq!(platform.pastes, 1);
+        assert!(bridge.valid(&admission));
+        platform.now += std::time::Duration::from_millis(180);
+        let now = platform.now;
+        app.sequence_playback.tick(&mut platform, now);
+        app.sync_physical_paste_admission().unwrap();
+        assert!(!bridge.valid(&admission));
+        assert_eq!(platform.text, "one");
+        assert_eq!(
+            app.sequence_playback.status(),
+            crate::paste_sequence::SequencePlaybackStatus::Completed
+        );
+        bridge.observer_live(false);
+    }
 
     #[test]
     fn paste_sequence_source_loading_is_reference_driven() {

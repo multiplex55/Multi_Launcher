@@ -2520,6 +2520,9 @@ mod native_service {
                                     }
                                     ServiceCommand::ActiveMenu(active) => {
                                         if state.active_frame != active {
+                                            if active.is_some() {
+                                                crate::paste_sequence::admission::physical_paste_bridge().invalidate();
+                                            }
                                             state.active_frame = active;
                                             state.session_epoch =
                                                 state.session_epoch.wrapping_add(1);

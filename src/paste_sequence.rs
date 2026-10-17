@@ -25,9 +25,14 @@ use std::sync::Mutex;
 pub mod admission;
 mod playback;
 
+#[cfg(test)]
+pub(crate) use playback::{
+    ClipboardRestoreOutcome, ClipboardSnapshot, ClipboardWriteFailure, TargetObservation,
+};
 pub(crate) use playback::{
     ClipboardRestorePlan, NativeSequencePlaybackPlatform, SequencePlaybackController,
     SequencePlaybackError, SequencePlaybackPlatform, SequencePlaybackStatus,
+    SequenceShutdownCleanup,
 };
 
 /// Read-only acknowledgement from the main hotkey owner. This metadata never

@@ -392,6 +392,14 @@ pub struct EventSinkRegistration {
 }
 
 impl EventSinkRegistration {
+    pub(crate) fn owns_live_queue(&self) -> bool {
+        APP_EVENT_REGISTRY.lock().is_ok_and(|registry| {
+            registry
+                .sinks
+                .iter()
+                .any(|sink| sink.id == self.id && sink.wake.is_some())
+        })
+    }
     pub(crate) fn owner_id(&self) -> u64 {
         self.id
     }
@@ -971,6 +979,8 @@ pub struct LauncherApp {
     root_window_bridge: RootWindowBridge,
     snippet_origin_window: Option<crate::active_window::ExternalForegroundWindow>,
     pub(crate) sequence_playback: crate::paste_sequence::SequencePlaybackController,
+    sequence_shutdown: Option<crate::paste_sequence::SequenceShutdownCleanup>,
+    sequence_exit_requested: bool,
     pub(crate) sequence_routes: Option<crate::paste_sequence::SequenceRoutePresentation>,
     visible_flag: Arc<AtomicBool>,
     restore_flag: Arc<AtomicBool>,
@@ -3014,6 +3024,8 @@ impl LauncherApp {
             root_window_bridge: RootWindowBridge::default(),
             snippet_origin_window: None,
             sequence_playback: crate::paste_sequence::SequencePlaybackController::default(),
+            sequence_shutdown: None,
+            sequence_exit_requested: false,
             sequence_routes: None,
             visible_flag: visible_flag.clone(),
             restore_flag: restore_flag.clone(),
