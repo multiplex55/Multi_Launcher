@@ -2,14 +2,14 @@ use crate::dashboard::DashboardRefreshRequest;
 use std::sync::atomic::Ordering;
 
 use crate::commands::{
-    CalendarCommandHost, ClipboardModifyCommandHost, ColorPickCommandHost, Command, CommandError,
-    CommandInvocation, CommandOutcome, CropCommandHost, DataCommandHost, DialogCommandHost,
-    DiffCommandHost, FavoriteLogPolicy, FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy,
-    JsonUtilityCommandHost, LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost,
-    NoteCommandHost, PendingQueryPolicy, QueryPolicy, RadialCommandHost, ResultsPolicy,
-    ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDestination,
-    ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost, VisibilityPolicy,
-    XmlToolkitCommandHost,
+    BatchRenameCommandHost, CalendarCommandHost, ClipboardModifyCommandHost, ColorPickCommandHost,
+    Command, CommandError, CommandInvocation, CommandOutcome, CropCommandHost, DataCommandHost,
+    DialogCommandHost, DiffCommandHost, FavoriteLogPolicy, FileSearchCommandHost,
+    HeadlessCommandHost, HistoryPolicy, JsonUtilityCommandHost, LauncherCommandHost,
+    MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, PendingQueryPolicy,
+    QueryPolicy, RadialCommandHost, ResultsPolicy, ScreenDrawCommandHost, ScreenshotCommandHost,
+    ScreenshotCommandResult, ScreenshotDestination, ScreenshotMarkup, ScreenshotMode, ToastPolicy,
+    TodoCommandHost, VisibilityPolicy, XmlToolkitCommandHost,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions};
@@ -599,6 +599,13 @@ impl XmlToolkitCommandHost for LauncherApp {
     }
 }
 
+impl BatchRenameCommandHost for LauncherApp {
+    fn open_batch_rename(&mut self) {
+        self.batch_rename_dialog.open();
+        self.focus_panel(super::Panel::BatchRenameDialog);
+    }
+}
+
 impl FileSearchCommandHost for LauncherApp {
     fn open_file_search(&mut self) {
         self.file_search_dialog.open();
@@ -1079,6 +1086,7 @@ fn command_accepts_query_override(command: &Command) -> bool {
             | Command::ClipboardModify(_)
             | Command::JsonUtility(_)
             | Command::XmlToolkit(_)
+            | Command::BatchRename(_)
             | Command::HashGenerator(_)
             | Command::ColorPick(_)
             | Command::Ocr(_)

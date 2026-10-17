@@ -115,6 +115,10 @@ pub trait XmlToolkitCommandHost {
     fn open_xml_toolkit(&mut self);
 }
 
+pub trait BatchRenameCommandHost {
+    fn open_batch_rename(&mut self);
+}
+
 pub trait CalendarCommandHost {
     fn calendar_dashboard_enabled(&self) -> bool;
     fn calendar_preserve_command(&self) -> bool;
@@ -285,6 +289,7 @@ pub trait CommandHost:
     + CropCommandHost
     + JsonUtilityCommandHost
     + XmlToolkitCommandHost
+    + BatchRenameCommandHost
     + ColorPickCommandHost
     + OcrCommandHost
     + CalendarCommandHost
@@ -309,6 +314,7 @@ impl<T> CommandHost for T where
         + CropCommandHost
         + JsonUtilityCommandHost
         + XmlToolkitCommandHost
+        + BatchRenameCommandHost
         + ColorPickCommandHost
         + OcrCommandHost
         + CalendarCommandHost

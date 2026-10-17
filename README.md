@@ -23,6 +23,7 @@ It’s designed to be “one hotkey away” from:
 - [Cookbook examples](#cookbook-examples)
 - [Date arithmetic](#date-arithmetic)
 - [File-search plugin](#file-search-plugin)
+- [Batch Renamer](#batch-renamer)
 - [Clipboard Modify](#clipboard-modify)
 - [Clipboard Snippets](#clipboard-snippets)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
@@ -141,6 +142,7 @@ Multi Launcher is centered around a **single query box**:
 | `rs` / `osrs` | RuneScape helpers | `osrs wiki karamja gloves` |
 | `cal` | Calendar/reminders | `cal` / `cal add today 5pm Pay rent` |
 | `fs` | File-search plugin | `fs` / `fs file main` / `fs content TODO` |
+| `rename` | Read-only batch filename preview under an explicitly chosen folder; extensions are protected by default | `rename` |
 | `data` | Data health, backups, and recovery | `data` / `data health` / `data backup` / `data folder` |
 
 ---
@@ -441,6 +443,23 @@ The improved file-search plugin does **not** include these deferred features yet
 
 ---
 
+
+## Batch Renamer
+
+Type `rename` and choose **Open Batch Renamer** to open a read-only filename
+preview. Choose a folder explicitly; opening the dialog does not guess a root or
+start a scan. The initial scope is the root folder's direct children. Enable
+**Include subfolders** to scan recursively, or use a listed folder as a new
+bounded root.
+
+After a complete scan, select files and compose ordered prefix, suffix,
+numbering, literal replacement, regex replacement, or case rules. Table sorting
+and filtering only change the display; numbering keeps the scan's deterministic
+path order. File extensions are protected by default. Choose **Edit full
+filename** to include the extension in the rules. This preview does not change
+files.
+
+---
 
 ## Clipboard Modify
 

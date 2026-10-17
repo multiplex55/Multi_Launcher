@@ -283,6 +283,9 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
     if s == "xml:open" {
         return Ok(Command::XmlToolkit(XmlToolkitCommand::Open));
     }
+    if s == "rename:open" {
+        return Ok(Command::BatchRename(BatchRenameCommand::Open));
+    }
     if let Some(command) = parse_json_utility(s) {
         return Ok(Command::JsonUtility(command));
     }

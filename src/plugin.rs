@@ -5,6 +5,7 @@ use crate::common::query::{
 };
 use crate::plugins::asciiart::AsciiArtPlugin;
 use crate::plugins::base_convert::BaseConvertPlugin;
+use crate::plugins::batch_rename::BatchRenamePlugin;
 use crate::plugins::bookmarks::BookmarksPlugin;
 use crate::plugins::brightness::BrightnessPlugin;
 use crate::plugins::browser_tabs::BrowserTabsPlugin;
@@ -904,6 +905,7 @@ impl PluginManager {
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(JsonUtilityPlugin, plugin_settings);
         self.register_with_settings(XmlToolkitPlugin, plugin_settings);
+        self.register_with_settings(BatchRenamePlugin, plugin_settings);
         self.register_with_settings(HashGeneratorPlugin, plugin_settings);
         self.register_with_settings(RegexTesterPlugin, plugin_settings);
         self.register_with_settings(QrPlugin, plugin_settings);

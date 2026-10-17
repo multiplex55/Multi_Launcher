@@ -289,26 +289,7 @@ impl RenameInputSnapshot {
         entry_ref: SnapshotEntryRef,
         selected: bool,
     ) -> Result<Self, SnapshotError> {
-        let Some(index) = self
-            .entries
-            .iter()
-            .position(|entry| entry.entry_ref == entry_ref)
-        else {
-            return Err(SnapshotError::MissingEntryReference(entry_ref));
-        };
-        if self.entries[index].selected == selected {
-            return Ok(self.clone());
-        }
-        let mut updated = self.clone();
-        updated.entries[index].selected = selected;
-        updated.selection_revision = SelectionRevision(
-            self.selection_revision
-                .0
-                .checked_add(1)
-                .ok_or(SnapshotError::RevisionOverflow)?,
-        );
-        Self::validate_entries(&updated.entries)?;
-        Ok(updated)
+        self.with_entry_updates(&[(entry_ref, Some(selected), None)])
     }
 
     pub fn with_inclusion(
@@ -316,24 +297,86 @@ impl RenameInputSnapshot {
         entry_ref: SnapshotEntryRef,
         inclusion: EntryInclusion,
     ) -> Result<Self, SnapshotError> {
-        let Some(index) = self
-            .entries
-            .iter()
-            .position(|entry| entry.entry_ref == entry_ref)
-        else {
-            return Err(SnapshotError::MissingEntryReference(entry_ref));
-        };
-        if self.entries[index].inclusion == inclusion {
+        self.with_entry_updates(&[(entry_ref, None, Some(inclusion))])
+    }
+
+    /// Atomically update selection and preview inclusion for a batch of rows.
+    /// The snapshot is cloned and validated once, and a single selection
+    /// revision represents the complete update.
+    pub fn with_entry_updates(
+        &self,
+        updates: &[(SnapshotEntryRef, Option<bool>, Option<EntryInclusion>)],
+    ) -> Result<Self, SnapshotError> {
+        if updates.is_empty() {
             return Ok(self.clone());
         }
-        let mut updated = self.clone();
-        updated.entries[index].inclusion = inclusion;
-        updated.selection_revision = SelectionRevision(
+
+        let indices: HashMap<_, _> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.entry_ref, index))
+            .collect();
+        let mut changes: HashMap<usize, (Option<bool>, Option<EntryInclusion>)> =
+            HashMap::with_capacity(updates.len());
+        for (entry_ref, selected, inclusion) in updates {
+            let Some(index) = indices.get(entry_ref).copied() else {
+                return Err(SnapshotError::MissingEntryReference(*entry_ref));
+            };
+            let change = changes.entry(index).or_default();
+            if let Some(selected) = selected {
+                change.0 = Some(*selected);
+            }
+            if let Some(inclusion) = inclusion {
+                change.1 = Some(*inclusion);
+            }
+        }
+
+        let mut selected_count = self.entries.iter().filter(|entry| entry.selected).count();
+        let mut has_changes = false;
+        for (index, (selected, inclusion)) in &changes {
+            let entry = &self.entries[*index];
+            if let Some(selected) = selected
+                && entry.selected != *selected
+            {
+                selected_count = if *selected {
+                    selected_count + 1
+                } else {
+                    selected_count - 1
+                };
+                has_changes = true;
+            }
+            if inclusion.is_some_and(|inclusion| entry.inclusion != inclusion) {
+                has_changes = true;
+            }
+        }
+        if selected_count > MAX_SELECTED_ENTRIES {
+            return Err(SnapshotError::TooManySelected {
+                count: selected_count,
+                limit: MAX_SELECTED_ENTRIES,
+            });
+        }
+        if !has_changes {
+            return Ok(self.clone());
+        }
+
+        let next_revision = SelectionRevision(
             self.selection_revision
                 .0
                 .checked_add(1)
                 .ok_or(SnapshotError::RevisionOverflow)?,
         );
+        let mut updated = self.clone();
+        for (index, (selected, inclusion)) in changes {
+            if let Some(selected) = selected {
+                updated.entries[index].selected = selected;
+            }
+            if let Some(inclusion) = inclusion {
+                updated.entries[index].inclusion = inclusion;
+            }
+        }
+        updated.selection_revision = next_revision;
+        Self::validate_entries(&updated.entries)?;
         Ok(updated)
     }
 
@@ -1575,6 +1618,60 @@ mod tests {
             .unwrap()
             .to_str()
             .unwrap()
+    }
+
+    #[test]
+    fn m8c_bulk_updates_validate_once_and_reject_over_limit_atomically() {
+        let entries = (0..MAX_SNAPSHOT_ENTRIES)
+            .map(|index| {
+                RenameSnapshotEntry::new(
+                    SnapshotEntryRef(index as u64),
+                    format!(r"C:\rename-test\file-{index:05}.txt"),
+                    index as u64,
+                    EntryInclusion::Included,
+                    false,
+                )
+            })
+            .collect();
+        let snapshot = snapshot(entries);
+        let selected = (0..MAX_SELECTED_ENTRIES)
+            .map(|index| (SnapshotEntryRef(index as u64), Some(true), None))
+            .collect::<Vec<_>>();
+        let selected_snapshot = snapshot.with_entry_updates(&selected).unwrap();
+        assert_eq!(selected_snapshot.selection_revision(), SelectionRevision(1));
+        assert_eq!(
+            selected_snapshot
+                .entries()
+                .iter()
+                .filter(|entry| entry.is_selected())
+                .count(),
+            MAX_SELECTED_ENTRIES
+        );
+        let unchanged = selected_snapshot.with_entry_updates(&selected).unwrap();
+        assert_eq!(unchanged, selected_snapshot);
+        assert_eq!(unchanged.selection_revision(), SelectionRevision(1));
+
+        let rejected = selected_snapshot.with_entry_updates(&[
+            (SnapshotEntryRef(MAX_SELECTED_ENTRIES as u64), Some(true), None),
+            (
+                SnapshotEntryRef((MAX_SELECTED_ENTRIES + 1) as u64),
+                None,
+                Some(EntryInclusion::Excluded),
+            ),
+        ]);
+        assert_eq!(
+            rejected,
+            Err(SnapshotError::TooManySelected {
+                count: MAX_SELECTED_ENTRIES + 1,
+                limit: MAX_SELECTED_ENTRIES,
+            })
+        );
+        assert!(!selected_snapshot.entries()[MAX_SELECTED_ENTRIES].is_selected());
+        assert_eq!(
+            selected_snapshot.entries()[MAX_SELECTED_ENTRIES + 1].inclusion(),
+            EntryInclusion::Included
+        );
+        assert_eq!(selected_snapshot.selection_revision(), SelectionRevision(1));
     }
 
     #[test]

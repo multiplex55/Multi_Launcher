@@ -354,6 +354,10 @@ impl VerifiedRenameSnapshot {
         &self.summary
     }
 
+    pub fn selection_revision(&self) -> batch_rename::SelectionRevision {
+        self.snapshot.selection_revision()
+    }
+
     pub fn canonical_root(&self) -> &Path {
         &self.proof.root.canonical_path
     }
@@ -380,8 +384,17 @@ impl VerifiedRenameSnapshot {
         entry_ref: SnapshotEntryRef,
         inclusion: EntryInclusion,
     ) -> Result<Self, batch_rename::SnapshotError> {
+        self.with_entry_updates(&[(entry_ref, None, Some(inclusion))])
+    }
+
+    /// Apply one complete file-selection/filter interaction while retaining
+    /// the native proof that belongs to this accepted scan.
+    pub fn with_entry_updates(
+        &self,
+        updates: &[(SnapshotEntryRef, Option<bool>, Option<EntryInclusion>)],
+    ) -> Result<Self, batch_rename::SnapshotError> {
         Ok(Self {
-            snapshot: self.snapshot.with_inclusion(entry_ref, inclusion)?,
+            snapshot: self.snapshot.with_entry_updates(updates)?,
             proof: Arc::clone(&self.proof),
             generation: self.generation,
             summary: self.summary.clone(),
@@ -3450,6 +3463,48 @@ mod tests {
             root_replaced.entries()[0].source_status(),
             FreshCheckStatus::RootChanged
         );
+    }
+
+    #[test]
+    fn m8c_verified_bulk_updates_preserve_the_scan_proof_and_revision() {
+        let temp = test_root();
+        let root = temp.path();
+        let backend = FakeBackend::new_root(root);
+        backend.add_file(root, "first.txt", 2);
+        backend.add_file(root, "second.txt", 3);
+        let scanned =
+            scan_with_backend(&backend, request(root, false, 61), &ScanCancellation::new());
+        let accepted = scanned.accept(RenameScanGeneration(61)).unwrap();
+        let refs = accepted
+            .snapshot
+            .entries()
+            .iter()
+            .map(|entry| entry.entry_ref())
+            .collect::<Vec<_>>();
+
+        let updated = accepted
+            .with_entry_updates(&[
+                (refs[0], Some(true), None),
+                (refs[1], None, Some(EntryInclusion::Excluded)),
+            ])
+            .unwrap();
+        assert_eq!(
+            updated.snapshot.selection_revision(),
+            SelectionRevision(1)
+        );
+        let rules = RenameRuleSet::new(
+            batch_rename::ExtensionPolicy::Preserve,
+            vec![batch_rename::RenameRule::Suffix("-renamed".into())],
+        );
+        let plan = updated.preview(&rules).verified_plan().unwrap();
+        assert_eq!(plan.plan().actions().len(), 1);
+        let fresh = recheck_with_backend(
+            &backend,
+            &plan.fresh_recheck_input(),
+            &ScanCancellation::new(),
+        );
+        assert_eq!(fresh.root_status(), FreshCheckStatus::Current);
+        assert_eq!(fresh.entries()[0].source_status(), FreshCheckStatus::Current);
     }
 
     #[test]

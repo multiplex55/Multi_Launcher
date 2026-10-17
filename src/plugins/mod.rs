@@ -1,6 +1,7 @@
 pub mod asciiart;
 pub mod base_convert;
 pub mod bookmarks;
+pub mod batch_rename;
 pub mod brightness;
 pub mod browser_tabs;
 pub mod calc_history;

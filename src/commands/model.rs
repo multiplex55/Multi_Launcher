@@ -87,6 +87,7 @@ pub enum Command {
     Crop(CropCommand),
     JsonUtility(JsonUtilityCommand),
     XmlToolkit(XmlToolkitCommand),
+    BatchRename(BatchRenameCommand),
     HashGenerator(HashGeneratorCommand),
     ColorPick(ColorPickCommand),
     Ocr(OcrCommand),
@@ -128,6 +129,7 @@ impl Command {
             Self::Crop(_) => "crop",
             Self::JsonUtility(_) => "json_utility",
             Self::XmlToolkit(_) => "xml_toolkit",
+            Self::BatchRename(_) => "batch_rename",
             Self::HashGenerator(_) => "hash_generator",
             Self::ColorPick(_) => "color_pick",
             Self::Ocr(_) => "ocr",
@@ -168,6 +170,7 @@ impl Command {
             Self::Crop(v) => v.kind_name(),
             Self::JsonUtility(v) => v.kind_name(),
             Self::XmlToolkit(v) => v.kind_name(),
+            Self::BatchRename(v) => v.kind_name(),
             Self::HashGenerator(v) => v.kind_name(),
             Self::ColorPick(v) => v.kind_name(),
             Self::Ocr(v) => v.kind_name(),
@@ -793,6 +796,13 @@ pub enum XmlToolkitCommand {
 }
 
 kinds!(XmlToolkitCommand, Self::Open => "open");
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchRenameCommand {
+    Open,
+}
+
+kinds!(BatchRenameCommand, Self::Open => "open");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HashGeneratorCommand {

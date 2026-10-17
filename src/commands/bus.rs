@@ -1,11 +1,12 @@
 use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcome};
 use crate::commands::handlers::{
-    handle_calendar, handle_clipboard_modify_with_history_query, handle_color_pick,
-    handle_coordinate_tool, handle_crop, handle_data, handle_diff, handle_file_search,
-    handle_hash_generator, handle_headless_gui_with_history_query, handle_json_utility,
-    handle_launcher, handle_link, handle_mouse_gesture, handle_multi_manager, handle_note,
-    handle_ocr, handle_paste_sequence, handle_query, handle_radial, handle_screen_draw,
-    handle_screenshot, handle_simple_dialog, handle_snippet_run, handle_todo, handle_xml_toolkit,
+    handle_batch_rename, handle_calendar, handle_clipboard_modify_with_history_query,
+    handle_color_pick, handle_coordinate_tool, handle_crop, handle_data, handle_diff,
+    handle_file_search, handle_hash_generator, handle_headless_gui_with_history_query,
+    handle_json_utility, handle_launcher, handle_link, handle_mouse_gesture, handle_multi_manager,
+    handle_note, handle_ocr, handle_paste_sequence, handle_query, handle_radial,
+    handle_screen_draw, handle_screenshot, handle_simple_dialog, handle_snippet_run, handle_todo,
+    handle_xml_toolkit,
 };
 
 #[derive(Debug, Default)]
@@ -42,6 +43,7 @@ impl CommandBus {
             Command::Crop(command) => Ok(handle_crop(host, command)),
             Command::JsonUtility(command) => Ok(handle_json_utility(host, command)),
             Command::XmlToolkit(command) => Ok(handle_xml_toolkit(host, *command)),
+            Command::BatchRename(command) => Ok(handle_batch_rename(host, *command)),
             Command::HashGenerator(command) => Ok(handle_hash_generator(host, command)),
             Command::ColorPick(command) => handle_color_pick(host, command),
             Command::Ocr(command) => handle_ocr(host, command),
@@ -127,6 +129,7 @@ mod tests {
         ocr_requests: usize,
         json_utility_intents: Vec<crate::commands::JsonUtilityIntent>,
         xml_toolkit_opens: usize,
+        batch_rename_opens: usize,
         hash_generator_opens: usize,
         radial_calls: usize,
     }
@@ -378,6 +381,11 @@ mod tests {
     impl crate::commands::XmlToolkitCommandHost for FakeHost {
         fn open_xml_toolkit(&mut self) {
             self.xml_toolkit_opens += 1;
+        }
+    }
+    impl crate::commands::BatchRenameCommandHost for FakeHost {
+        fn open_batch_rename(&mut self) {
+            self.batch_rename_opens += 1;
         }
     }
     impl crate::commands::ClipboardModifyCommandHost for FakeHost {
@@ -825,6 +833,70 @@ mod tests {
             outcome.pending_query,
             crate::commands::PendingQueryPolicy::Keep
         );
+        assert_eq!(outcome.results, crate::commands::ResultsPolicy::Keep);
+        assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
+        assert_eq!(outcome.history, HistoryPolicy::Skip);
+    }
+
+    #[test]
+    fn m8c_batch_rename_plugin_opens_through_the_typed_bus_without_a_root_payload() {
+        let mut manager = crate::plugin::PluginManager::new_inert_for_test();
+        manager.reload_from_dirs(
+            &[],
+            10,
+            crate::settings::NetUnit::Auto,
+            false,
+            &std::collections::HashMap::new(),
+            std::sync::Arc::new(Vec::new()),
+        );
+
+        let action = manager
+            .search_filtered("rename", None, None)
+            .into_iter()
+            .find(|action| action.action == "rename:open")
+            .expect("normal plugin construction registers the batch renamer");
+        assert!(
+            action.args.is_none(),
+            "the command does not carry a root path"
+        );
+        assert!(action.desc.contains("extensions are protected by default"));
+        let plugin_description = manager
+            .plugin_infos()
+            .into_iter()
+            .find(|(name, _, _)| name == "batch_rename")
+            .map(|(_, description, _)| description)
+            .expect("the built-in plugin is discoverable in plugin metadata");
+        assert!(plugin_description.contains("explicit folder"));
+        assert!(plugin_description.contains("extensions are protected by default"));
+        let help = manager
+            .commands()
+            .into_iter()
+            .find(|command| command.action == "query:rename")
+            .expect("the plugin contributes a searchable help entry");
+        assert!(help.desc.contains("explicitly chosen folder"));
+        assert!(help.desc.contains("extensions are protected by default"));
+        assert!(
+            !manager
+                .search_filtered("rename-me", None, None)
+                .iter()
+                .any(|action| action.action == "rename:open")
+        );
+
+        let invocation = crate::commands::parse_command(
+            action,
+            Some("must not become a directory root".into()),
+            crate::commands::ActivationSource::Dashboard,
+        )
+        .expect("the plugin wire action has a typed command");
+        assert_eq!(
+            invocation.command,
+            Command::BatchRename(crate::commands::BatchRenameCommand::Open)
+        );
+        let mut host = FakeHost::default();
+        let outcome = CommandBus.dispatch(&invocation, &mut host).unwrap();
+        assert_eq!(host.batch_rename_opens, 1);
+        assert_eq!(host.headless_calls, 0);
+        assert_eq!(outcome.query, QueryPolicy::Keep);
         assert_eq!(outcome.results, crate::commands::ResultsPolicy::Keep);
         assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
         assert_eq!(outcome.history, HistoryPolicy::Skip);

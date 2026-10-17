@@ -3,6 +3,7 @@ mod actions;
 mod add_action_dialog;
 mod add_bookmark_dialog;
 mod alias_dialog;
+mod batch_rename_dialog;
 mod bookmark_alias_dialog;
 mod brightness_dialog;
 mod calendar_event_details;
@@ -98,6 +99,7 @@ pub(crate) const RADIAL_DESIGNER_WINDOW_TITLE: &str = "Radial Designer";
 pub use add_action_dialog::AddActionDialog;
 pub use add_bookmark_dialog::AddBookmarkDialog;
 pub use alias_dialog::AliasDialog;
+pub(crate) use batch_rename_dialog::{BatchRenameDialogState, BatchRenameUiCommand};
 pub use bookmark_alias_dialog::BookmarkAliasDialog;
 pub use brightness_dialog::BRIGHTNESS_QUERIES;
 pub use brightness_dialog::BrightnessDialog;
@@ -639,6 +641,7 @@ pub enum Panel {
     ClipboardModifyDialog,
     JsonUtilityDialog,
     RegexTesterDialog,
+    BatchRenameDialog,
     XmlToolkitDialog,
     QrDialog,
     ConvertPanel,
@@ -696,6 +699,7 @@ impl Panel {
             Self::ClipboardModifyDialog => "Clipboard Modify",
             Self::JsonUtilityDialog => "JSON Utility",
             Self::RegexTesterDialog => "Regex Tester",
+            Self::BatchRenameDialog => "Batch Renamer",
             Self::XmlToolkitDialog => "XML Toolkit",
             Self::QrDialog => "QR Generator",
             Self::ConvertPanel => "Converter",
@@ -754,6 +758,7 @@ struct PanelStates {
     clipboard_modify_dialog: bool,
     json_utility_dialog: bool,
     regex_tester_dialog: bool,
+    batch_rename_dialog: bool,
     xml_toolkit_dialog: bool,
     qr_dialog: bool,
     convert_panel: bool,
@@ -980,6 +985,8 @@ pub struct LauncherApp {
     file_search_dialog: FileSearchDialogState,
     pub diff_dialog: DiffDialogState,
     file_search_coordinator: SearchCoordinator,
+    batch_rename_dialog: BatchRenameDialogState,
+    batch_rename_coordinator: Option<crate::file_operations::RenameScanCoordinator>,
     notes_dialog: NotesDialog,
     note_graph_dialog: NoteGraphDialog,
     unused_assets_dialog: UnusedAssetsDialog,
@@ -1663,6 +1670,60 @@ impl LauncherApp {
         self.file_search_dialog
             .set_ui_preferences(settings.ui_preferences.clone());
         self.file_search_dialog.settings = settings;
+    }
+
+    pub(crate) fn handle_batch_rename_ui_command(&mut self, command: BatchRenameUiCommand) {
+        match command {
+            BatchRenameUiCommand::SelectRoot(root) => self.start_batch_rename_scan(root),
+            BatchRenameUiCommand::Rescan | BatchRenameUiCommand::RecursiveChanged => {
+                if let Some(root) = self.batch_rename_dialog.root_path().map(Path::to_path_buf) {
+                    self.start_batch_rename_scan(root);
+                }
+            }
+            BatchRenameUiCommand::Closed => {
+                self.batch_rename_dialog.end_session();
+                self.panel_states.batch_rename_dialog = false;
+                self.panel_stack
+                    .retain(|panel| *panel != Panel::BatchRenameDialog);
+            }
+        }
+    }
+
+    fn start_batch_rename_scan(&mut self, root: PathBuf) {
+        if self.batch_rename_coordinator.is_none() {
+            match crate::file_operations::RenameScanCoordinator::new() {
+                Ok(coordinator) => self.batch_rename_coordinator = Some(coordinator),
+                Err(error) => {
+                    self.batch_rename_dialog.fail_to_start_scan(
+                        root,
+                        format!("Could not start the directory scan: {error}"),
+                    );
+                    return;
+                }
+            }
+        }
+        if let Some(coordinator) = self.batch_rename_coordinator.as_ref() {
+            self.batch_rename_dialog.start_scan(root, coordinator);
+        }
+    }
+
+    pub(crate) fn poll_batch_rename_runtime(&mut self, ctx: &egui::Context) {
+        if self.batch_rename_dialog.poll_scan() {
+            ctx.request_repaint();
+        }
+        if self.batch_rename_dialog.has_pending_scan() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
+    pub(crate) fn shutdown_batch_rename_scanner(&mut self) {
+        self.batch_rename_dialog.end_session();
+        if let Some(coordinator) = self.batch_rename_coordinator.take() {
+            if let Err(error) = coordinator.shutdown() {
+                tracing::warn!(%error, "batch rename scanner did not shut down cleanly");
+            }
+            self.batch_rename_dialog.discard_finished_ticket();
+        }
     }
 
     pub(crate) fn save_file_search_ui_preferences_if_dirty(&mut self) {
@@ -2584,6 +2645,8 @@ impl LauncherApp {
                 ..FileSearchDialogState::default()
             },
             file_search_coordinator: SearchCoordinator::from_settings(file_search_settings),
+            batch_rename_dialog: BatchRenameDialogState::default(),
+            batch_rename_coordinator: None,
             diff_dialog: DiffDialogState::default(),
             notes_dialog: NotesDialog::default(),
             note_graph_dialog: NoteGraphDialog::default(),
@@ -3262,7 +3325,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 52] = [
+    const TRACKED_PANELS: [Panel; 53] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -3298,6 +3361,7 @@ impl LauncherApp {
         Panel::ClipboardModifyDialog,
         Panel::JsonUtilityDialog,
         Panel::RegexTesterDialog,
+        Panel::BatchRenameDialog,
         Panel::XmlToolkitDialog,
         Panel::QrDialog,
         Panel::ConvertPanel,
@@ -3354,6 +3418,7 @@ impl LauncherApp {
             Panel::ClipboardModifyDialog => self.clipboard_modify_dialog.open,
             Panel::JsonUtilityDialog => self.json_utility_dialog.open,
             Panel::RegexTesterDialog => self.regex_tester_dialog.open,
+            Panel::BatchRenameDialog => self.batch_rename_dialog.open,
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open,
             Panel::QrDialog => self.qr_dialog.open,
             Panel::ConvertPanel => self.convert_panel.open,
@@ -3521,6 +3586,10 @@ impl LauncherApp {
             Panel::FileSearchDialog => {
                 self.file_search_dialog.open = false;
                 self.panel_states.file_search_dialog = false;
+            }
+            Panel::BatchRenameDialog => {
+                self.batch_rename_dialog.end_session();
+                self.panel_states.batch_rename_dialog = false;
             }
             Panel::NotesDialog => {
                 self.notes_dialog.open = false;
@@ -3761,6 +3830,10 @@ impl LauncherApp {
                 self.file_search_dialog.open = false;
                 self.panel_states.file_search_dialog = false;
             }
+            Panel::BatchRenameDialog => {
+                self.batch_rename_dialog.end_session();
+                self.panel_states.batch_rename_dialog = false;
+            }
             Panel::NotesDialog => {
                 self.notes_dialog.open = false;
                 self.panel_states.notes_dialog = false;
@@ -3925,6 +3998,7 @@ impl LauncherApp {
             Panel::ThemeSettingsDialog => self.open_theme_settings_dialog(),
             Panel::FavDialog => self.fav_dialog.ensure_open(),
             Panel::FileSearchDialog => self.file_search_dialog.open(),
+            Panel::BatchRenameDialog => self.batch_rename_dialog.open(),
             Panel::NotesDialog => self.notes_dialog.open = true,
             Panel::NoteGraphDialog => self.note_graph_dialog.open = true,
             Panel::UnusedAssetsDialog => self.unused_assets_dialog.ensure_open(),
@@ -4088,6 +4162,7 @@ impl LauncherApp {
         check!(clipboard_modify_dialog, Panel::ClipboardModifyDialog);
         check!(json_utility_dialog, Panel::JsonUtilityDialog);
         check!(regex_tester_dialog, Panel::RegexTesterDialog);
+        check!(batch_rename_dialog, Panel::BatchRenameDialog);
         check!(xml_toolkit_dialog, Panel::XmlToolkitDialog);
         check!(qr_dialog, Panel::QrDialog);
         check!(convert_panel, Panel::ConvertPanel);
@@ -6060,6 +6135,174 @@ mod tests {
         app.force_close_panel(Panel::XmlToolkitDialog);
         assert!(!app.is_panel_open(Panel::XmlToolkitDialog));
         assert!(!app.panel_stack.contains(&Panel::XmlToolkitDialog));
+    }
+
+    #[test]
+    fn m8c_batch_rename_panel_open_close_and_reopen_do_not_start_a_scan() {
+        let ctx = egui::Context::default();
+        let directory = tempdir().unwrap();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.enabled_plugins = Some(std::collections::HashSet::new());
+        settings.dashboard.enabled = false;
+        let mut app = LauncherApp::new(
+            &ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test(),
+            directory
+                .path()
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        let open_action = crate::actions::Action {
+            label: "Open Batch Renamer".to_owned(),
+            desc: "Read-only preview".to_owned(),
+            action: "rename:open".to_owned(),
+            args: None,
+        };
+        let invocation = crate::commands::parse_command(
+            open_action,
+            None,
+            crate::commands::ActivationSource::Dashboard,
+        )
+        .unwrap();
+        crate::commands::CommandBus
+            .dispatch(&invocation, &mut app)
+            .unwrap();
+        app.update_panel_stack();
+        app.ensure_open(Panel::BatchRenameDialog);
+        app.update_panel_stack();
+        assert!(app.batch_rename_dialog.open);
+        assert!(app.batch_rename_dialog.root_path().is_none());
+        assert!(!app.batch_rename_dialog.has_pending_scan());
+        assert!(app.batch_rename_coordinator.is_none());
+        assert_eq!(
+            app.panel_stack
+                .iter()
+                .filter(|panel| **panel == Panel::BatchRenameDialog)
+                .count(),
+            1
+        );
+
+        let retained_root = directory.path().join("explicit-root");
+        app.batch_rename_dialog
+            .fail_to_start_scan(retained_root.clone(), "fixture only".to_owned());
+        assert!(app.close_front_dialog());
+        assert!(!app.is_panel_open(Panel::BatchRenameDialog));
+        assert!(!app.panel_stack.contains(&Panel::BatchRenameDialog));
+        assert_eq!(
+            app.batch_rename_dialog.root_path(),
+            Some(retained_root.as_path())
+        );
+
+        app.ensure_open(Panel::BatchRenameDialog);
+        app.update_panel_stack();
+        assert_eq!(
+            app.batch_rename_dialog.root_path(),
+            Some(retained_root.as_path())
+        );
+        assert!(app.batch_rename_coordinator.is_none());
+        app.force_close_panel(Panel::BatchRenameDialog);
+        assert!(!app.batch_rename_dialog.open);
+        assert!(!app.panel_stack.contains(&Panel::BatchRenameDialog));
+        app.shutdown_batch_rename_scanner();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn m8c_closed_batch_rename_scan_retains_its_owner_until_hidden_poll_and_shutdown() {
+        let fixture_parent = PathBuf::from("target/productivity_expansion");
+        std::fs::create_dir_all(&fixture_parent).unwrap();
+        let fixture = tempfile::Builder::new()
+            .prefix("batch_rename_app_")
+            .tempdir_in(&fixture_parent)
+            .unwrap();
+        let root = fixture.keep();
+        std::fs::write(root.join("keep.txt"), "unchanged").unwrap();
+
+        let ctx = egui::Context::default();
+        let app_directory = tempdir().unwrap();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.enabled_plugins = Some(std::collections::HashSet::new());
+        settings.dashboard.enabled = false;
+        let mut app = LauncherApp::new(
+            &ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test(),
+            app_directory
+                .path()
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            app_directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        app.ensure_open(Panel::BatchRenameDialog);
+        app.update_panel_stack();
+        app.handle_batch_rename_ui_command(BatchRenameUiCommand::SelectRoot(root.clone()));
+        assert!(app.batch_rename_dialog.has_pending_scan());
+        assert!(app.batch_rename_coordinator.is_some());
+        assert!(app.close_front_dialog());
+        assert!(app.batch_rename_coordinator.is_some());
+
+        app.request_launcher_state(Some(false), None);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.batch_rename_dialog.has_pending_scan() && std::time::Instant::now() < deadline {
+            app.poll_batch_rename_runtime(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!app.batch_rename_dialog.has_pending_scan());
+        assert!(!app.batch_rename_dialog.has_displayed_scan_result());
+        assert!(!app.batch_rename_dialog.has_accepted_snapshot());
+        assert!(app.batch_rename_coordinator.is_some());
+
+        app.ensure_open(Panel::BatchRenameDialog);
+        app.update_panel_stack();
+        assert_eq!(app.batch_rename_dialog.root_path(), Some(root.as_path()));
+        assert!(!app.batch_rename_dialog.has_pending_scan());
+        app.force_close_panel(Panel::BatchRenameDialog);
+        app.shutdown_batch_rename_scanner();
+        assert!(app.batch_rename_coordinator.is_none());
+        assert!(!app.batch_rename_dialog.has_pending_scan());
+        assert_eq!(
+            std::fs::read_to_string(root.join("keep.txt")).unwrap(),
+            "unchanged"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

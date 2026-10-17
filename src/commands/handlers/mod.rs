@@ -3,6 +3,7 @@ mod ocr;
 pub(crate) use color_pick::handle_color_pick;
 pub(crate) use ocr::handle_ocr;
 mod calendar;
+mod batch_rename;
 mod clipboard_modify;
 mod coordinate_tool;
 mod data;
@@ -24,6 +25,7 @@ mod todo;
 mod xml_toolkit;
 
 pub(crate) use calendar::handle_calendar;
+pub(crate) use batch_rename::handle_batch_rename;
 pub(crate) use clipboard_modify::{
     handle_clipboard_modify, handle_clipboard_modify_with_history_query,
 };

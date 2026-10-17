@@ -2567,6 +2567,7 @@ impl LauncherApp {
         self.poll_crop_screenshot(ctx);
         self.poll_screen_draw_region_picker(ctx);
         self.xml_toolkit_dialog.poll_closed_background(ctx);
+        self.poll_batch_rename_runtime(ctx);
         self.poll_macro_launcher_query(ctx);
         self.poll_macro_launcher_commands(ctx);
         self.acquire_macro_prompt(ctx);
@@ -4467,6 +4468,12 @@ impl LauncherApp {
         self.file_search_dialog
             .preview_dialog
             .ui(&ctx, &self.file_search_dialog.settings);
+        let batch_rename_commands = self.batch_rename_dialog.ui(&ctx, first_ui_pass);
+        if first_ui_pass {
+            for command in batch_rename_commands {
+                self.handle_batch_rename_ui_command(command);
+            }
+        }
         self.diff_dialog.ui(&ctx);
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
         notes_dlg.ui(&ctx, self);
@@ -4934,6 +4941,7 @@ impl eframe::App for LauncherApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.xml_toolkit_dialog.shutdown();
         self.hash_generator_dialog.shutdown();
+        self.shutdown_batch_rename_scanner();
         if let Some(plan) = self
             .sequence_playback
             .take_shutdown_restore_plan(std::time::Instant::now())
