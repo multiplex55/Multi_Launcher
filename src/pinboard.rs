@@ -236,7 +236,7 @@ struct TrackedRgbaImage {
 
 impl Drop for TrackedRgbaImage {
     fn drop(&mut self) {
-        let released = self.budget.allocated_bytes.fetch_update(
+        let released = self.budget.allocated_bytes.try_update(
             std::sync::atomic::Ordering::AcqRel,
             std::sync::atomic::Ordering::Acquire,
             |allocated| allocated.checked_sub(self.bytes),
@@ -261,7 +261,7 @@ impl SharedImageBudget {
 
     fn charge(&self, bytes: usize) -> Result<(), PinboardError> {
         self.allocated_bytes
-            .fetch_update(
+            .try_update(
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Acquire,
                 |allocated| {

@@ -1755,15 +1755,14 @@ fn validate_snapshot_for_preview(
                 "the captured scan contains duplicate match intervals",
             ));
         }
-        if let Some(previous) = &prior {
-            if range.start < previous.end
-                || (previous.start == previous.end && range.start == previous.start)
-            {
-                return Err(ReplacementPreviewError::new(
-                    ReplacementPreviewErrorKind::OverlappingMatches,
-                    "captured match intervals overlap or repeat a zero-width insertion point",
-                ));
-            }
+        if let Some(previous) = &prior
+            && (range.start < previous.end
+                || (previous.start == previous.end && range.start == previous.start))
+        {
+            return Err(ReplacementPreviewError::new(
+                ReplacementPreviewErrorKind::OverlappingMatches,
+                "captured match intervals overlap or repeat a zero-width insertion point",
+            ));
         }
         prior = Some(range);
     }
@@ -3457,7 +3456,7 @@ mod tests {
                 .expect("replacement for newer scan");
         assert_eq!(
             newer_scan
-                .preview_replacement(&newer_replacement, &[second_id.clone()])
+                .preview_replacement(&newer_replacement, std::slice::from_ref(&second_id))
                 .expect_err("an older scan selection is stale")
                 .kind(),
             ReplacementPreviewErrorKind::StaleSelection
@@ -3475,7 +3474,7 @@ mod tests {
                 .expect("replacement for other file");
         assert_eq!(
             other_file
-                .preview_replacement(&other_replacement, &[second_id.clone()])
+                .preview_replacement(&other_replacement, std::slice::from_ref(&second_id))
                 .expect_err("an ID from another file is foreign")
                 .kind(),
             ReplacementPreviewErrorKind::ForeignSelection
@@ -3566,14 +3565,14 @@ mod tests {
         // source may be larger than the remaining budget and still fit after
         // its selected matches shrink.
         let first_expanding = in_memory_search_result(
-            &vec![b'b'; 30],
+            &[b'b'; 30],
             "aaaa|b",
             SearchPatternMode::RustRegex,
             SearchGeneration(35),
             "expanding.txt",
         );
         let second_shrinking = in_memory_search_result(
-            &vec![b'a'; 100],
+            &[b'a'; 100],
             "aaaa|b",
             SearchPatternMode::RustRegex,
             SearchGeneration(35),

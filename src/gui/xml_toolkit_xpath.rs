@@ -642,15 +642,14 @@ impl XmlToolkitXPathViewState {
             }
             if let Some(index) = selected_row
                 && let VisibleXPathStatus::Nodes(nodes) = self.visible_status(snapshot)
+                && let Some(tree_intents) = self.navigate_to_result(index, nodes, tree)
             {
-                if let Some(tree_intents) = self.navigate_to_result(index, nodes, tree) {
-                    intents.tree = tree_intents;
-                }
+                intents.tree = tree_intents;
             }
-            if let Some((index, kind)) = node_copy_clicked {
-                if let Some(tree_intents) = self.request_result_copy(index, kind, snapshot, tree) {
-                    intents.tree = tree_intents;
-                }
+            if let Some((index, kind)) = node_copy_clicked
+                && let Some(tree_intents) = self.request_result_copy(index, kind, snapshot, tree)
+            {
+                intents.tree = tree_intents;
             }
             if scalar_copy_clicked {
                 intents.scalar_copy = self.authorize_scalar_copy(snapshot);
@@ -700,7 +699,7 @@ fn result_label(index: usize, node: &XmlNodeSnapshot) -> String {
     );
     if !node.value.is_empty() {
         label.push_str("  ");
-        label.push_str(&xml_escaped_display(&bounded_chars(
+        label.push_str(&xml_escaped_display(bounded_chars(
             &node.value,
             MAX_RESULT_VALUE_CHARS,
         )));
@@ -1137,7 +1136,7 @@ mod tests {
             },
             schema: Default::default(),
         };
-        let mut node_view = XmlToolkitXPathViewState {
+        let node_view = XmlToolkitXPathViewState {
             expression: node_request.expression.clone(),
             revision: Some(revision),
             active_request: Some(node_request),

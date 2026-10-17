@@ -508,16 +508,18 @@ impl ReplaceExecutor {
     fn operation_guard(
         &self,
         transaction_id: &str,
-    ) -> Result<std::sync::MutexGuard<'_, ()>, ReplaceOperationResult> {
-        self.operation_lock.try_lock().map_err(|error| match error {
-            std::sync::TryLockError::WouldBlock => refused_result(
-                transaction_id,
-                "another replace operation is already active".into(),
-            ),
-            std::sync::TryLockError::Poisoned(_) => refused_result(
-                transaction_id,
-                "replace operation state is unavailable".into(),
-            ),
+    ) -> Result<std::sync::MutexGuard<'_, ()>, Box<ReplaceOperationResult>> {
+        self.operation_lock.try_lock().map_err(|error| {
+            Box::new(match error {
+                std::sync::TryLockError::WouldBlock => refused_result(
+                    transaction_id,
+                    "another replace operation is already active".into(),
+                ),
+                std::sync::TryLockError::Poisoned(_) => refused_result(
+                    transaction_id,
+                    "replace operation state is unavailable".into(),
+                ),
+            })
         })
     }
 
@@ -536,7 +538,7 @@ impl ReplaceExecutor {
     ) -> ReplaceOperationResult {
         let _operation = match self.operation_guard("") {
             Ok(guard) => guard,
-            Err(result) => return result,
+            Err(result) => return *result,
         };
         if cancellation.is_cancelled() {
             return refused_result("", "replacement was cancelled before recovery setup".into());
@@ -834,7 +836,7 @@ impl ReplaceExecutor {
     ) -> ReplaceOperationResult {
         let _operation = match self.operation_guard(transaction_id) {
             Ok(guard) => guard,
-            Err(result) => return result,
+            Err(result) => return *result,
         };
         if cancellation.is_cancelled() {
             return refused_result(
@@ -861,7 +863,7 @@ impl ReplaceExecutor {
     ) -> ReplaceOperationResult {
         let _operation = match self.operation_guard(transaction_id) {
             Ok(guard) => guard,
-            Err(result) => return result,
+            Err(result) => return *result,
         };
         if cancellation.is_cancelled() {
             return refused_result(
@@ -907,13 +909,13 @@ impl ReplaceExecutor {
         let mut receipt = journal.receipts[receipt_index].clone();
         if receipt.status == ReplaceTransactionStatus::Restored {
             for entry in &receipt.entries {
-                if entry.outcome == ReplaceEntryOutcome::Restored {
-                    if let Err(message) = verify_already_restored(entry, cancellation) {
-                        return refused_receipt(
-                            receipt.clone(),
-                            format!("repeated Restore refused: {message}"),
-                        );
-                    }
+                if entry.outcome == ReplaceEntryOutcome::Restored
+                    && let Err(message) = verify_already_restored(entry, cancellation)
+                {
+                    return refused_receipt(
+                        receipt.clone(),
+                        format!("repeated Restore refused: {message}"),
+                    );
                 }
             }
             return ReplaceOperationResult {
@@ -1032,7 +1034,6 @@ impl ReplaceExecutor {
                 entry_index,
                 &mut receipt,
                 &mut journal,
-                receipt_index,
                 &journal_path,
                 &recovery_directory,
                 cancellation,
@@ -1059,13 +1060,10 @@ impl ReplaceExecutor {
                     );
                     journal.receipts[receipt_index] = receipt.clone();
                     let saved = save_replace_journal(&journal_path, &journal);
-                    if saved.is_err() {
+                    if let Err(error) = saved {
                         receipt.status = ReplaceTransactionStatus::RecoveryRequired;
-                        receipt.message = format!(
-                            "{}; receipt save failed: {}",
-                            receipt.message,
-                            saved.unwrap_err()
-                        );
+                        receipt.message =
+                            format!("{}; receipt save failed: {}", receipt.message, error);
                     }
                     return ReplaceOperationResult {
                         message: receipt.message.clone(),
@@ -1262,7 +1260,6 @@ impl ReplaceExecutor {
                     entry_index,
                     &mut receipt,
                     &mut journal,
-                    receipt_index,
                     &journal_path,
                     &recovery_directory,
                     cancellation,
@@ -1272,7 +1269,6 @@ impl ReplaceExecutor {
                     entry_index,
                     &mut receipt,
                     &mut journal,
-                    receipt_index,
                     &journal_path,
                     &recovery_directory,
                     cancellation,
@@ -2116,10 +2112,8 @@ fn validate_replace_journal(journal: &ReplaceRecoveryJournal) -> Result<(), Stri
             {
                 return Err("replacement recovery receipt contains an untrusted stage role".into());
             }
-            for message in [&entry.message] {
-                if message.chars().count() > MAX_MESSAGE_CHARS {
-                    return Err("replacement recovery entry message exceeds its size limit".into());
-                }
+            if entry.message.chars().count() > MAX_MESSAGE_CHARS {
+                return Err("replacement recovery entry message exceeds its size limit".into());
             }
         }
     }
@@ -2250,7 +2244,6 @@ fn restore_one_entry(
     entry_index: usize,
     receipt: &mut ReplaceRecoveryReceipt,
     journal: &mut ReplaceRecoveryJournal,
-    receipt_index: usize,
     journal_path: &Path,
     recovery_directory: &Path,
     cancellation: &ScanCancellation,
@@ -2746,7 +2739,6 @@ fn recover_interrupted_apply(
     entry_index: usize,
     receipt: &mut ReplaceRecoveryReceipt,
     journal: &mut ReplaceRecoveryJournal,
-    receipt_index: usize,
     journal_path: &Path,
     recovery_directory: &Path,
     cancellation: &ScanCancellation,
@@ -2770,8 +2762,8 @@ fn recover_interrupted_apply(
     }
 
     let output_identity = entry.post_identity.or(entry.output_stage_identity);
-    if let Some(output_identity) = output_identity {
-        if let Ok(published) = read_recorded_replace_path(
+    if let Some(output_identity) = output_identity
+        && let Ok(published) = read_recorded_replace_path(
             &entry,
             &entry.path(),
             output_identity,
@@ -2779,27 +2771,29 @@ fn recover_interrupted_apply(
             entry.post_modified,
             entry.output_sha256,
             cancellation,
-        ) {
-            if entry.backup_identity.is_none() {
-                return Err("published output is recorded but its durable original backup identity is missing".into());
-            }
-            entry.post_identity = Some(published.identity());
-            entry.post_modified = Some(published.modified());
-            entry.phase = ReplaceEntryPhase::Applied;
-            entry.outcome = ReplaceEntryOutcome::Applied;
-            entry.message =
-                "reconciled the exact recorded output already published at its selected path"
-                    .into();
-            persist_entry(journal, journal_path, receipt, entry_index, &entry)?;
-            if let Err(error) = cleanup_recorded_original_stage(&entry, cancellation) {
-                entry.message = bounded_message(&format!(
-                    "{}; verified original sibling stage was retained ({error})",
-                    entry.message
-                ));
-                let _ = persist_entry(journal, journal_path, receipt, entry_index, &entry);
-            }
-            return Ok(());
+        )
+    {
+        if entry.backup_identity.is_none() {
+            return Err(
+                "published output is recorded but its durable original backup identity is missing"
+                    .into(),
+            );
         }
+        entry.post_identity = Some(published.identity());
+        entry.post_modified = Some(published.modified());
+        entry.phase = ReplaceEntryPhase::Applied;
+        entry.outcome = ReplaceEntryOutcome::Applied;
+        entry.message =
+            "reconciled the exact recorded output already published at its selected path".into();
+        persist_entry(journal, journal_path, receipt, entry_index, &entry)?;
+        if let Err(error) = cleanup_recorded_original_stage(&entry, cancellation) {
+            entry.message = bounded_message(&format!(
+                "{}; verified original sibling stage was retained ({error})",
+                entry.message
+            ));
+            let _ = persist_entry(journal, journal_path, receipt, entry_index, &entry);
+        }
+        return Ok(());
     }
 
     if let Ok(original_at_target) = read_recorded_replace_path(
@@ -3023,7 +3017,6 @@ fn recover_interrupted_restore(
     entry_index: usize,
     receipt: &mut ReplaceRecoveryReceipt,
     journal: &mut ReplaceRecoveryJournal,
-    receipt_index: usize,
     journal_path: &Path,
     recovery_directory: &Path,
     cancellation: &ScanCancellation,
@@ -3041,8 +3034,8 @@ fn recover_interrupted_restore(
     )
     .map_err(|error| format!("recorded original backup is not verified: {error}"))?;
 
-    if let Some(restored_identity) = entry.restored_identity.or(entry.restore_stage_identity) {
-        if let Ok(restored) = read_recorded_replace_path(
+    if let Some(restored_identity) = entry.restored_identity.or(entry.restore_stage_identity)
+        && let Ok(restored) = read_recorded_replace_path(
             &entry,
             &entry.path(),
             restored_identity,
@@ -3050,16 +3043,16 @@ fn recover_interrupted_restore(
             entry.restored_modified,
             entry.original_sha256,
             cancellation,
-        ) {
-            entry.restored_identity = Some(restored.identity());
-            entry.restored_modified = Some(restored.modified());
-            entry.phase = ReplaceEntryPhase::Restored;
-            entry.outcome = ReplaceEntryOutcome::Restored;
-            entry.message =
-                "reconciled the exact restored original already at its selected path".into();
-            persist_entry(journal, journal_path, receipt, entry_index, &entry)?;
-            return Ok(());
-        }
+        )
+    {
+        entry.restored_identity = Some(restored.identity());
+        entry.restored_modified = Some(restored.modified());
+        entry.phase = ReplaceEntryPhase::Restored;
+        entry.outcome = ReplaceEntryOutcome::Restored;
+        entry.message =
+            "reconciled the exact restored original already at its selected path".into();
+        persist_entry(journal, journal_path, receipt, entry_index, &entry)?;
+        return Ok(());
     }
 
     let post_identity = entry
@@ -3483,13 +3476,13 @@ fn replace_worker_loop(
             } => {
                 let report_state = Arc::clone(&state);
                 let report = move |progress: ReplaceProgress| {
-                    if let Ok(mut state) = report_state.lock() {
-                        if state.snapshot.active {
-                            state.snapshot.progress = Some(ReplaceProgress {
-                                message: bounded_message(&progress.message),
-                                ..progress
-                            });
-                        }
+                    if let Ok(mut state) = report_state.lock()
+                        && state.snapshot.active
+                    {
+                        state.snapshot.progress = Some(ReplaceProgress {
+                            message: bounded_message(&progress.message),
+                            ..progress
+                        });
                     }
                 };
                 let result = match operation {
@@ -3639,7 +3632,7 @@ mod tests {
             SearchLimits::default(),
         )
         .expect("valid search request");
-        let mut coordinator = SearchCoordinator::new().expect("start bounded search worker");
+        let coordinator = SearchCoordinator::new().expect("start bounded search worker");
         let ticket = coordinator.submit(request).expect("submit A discovery");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         let result = loop {

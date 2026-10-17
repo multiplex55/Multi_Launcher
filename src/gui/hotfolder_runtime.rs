@@ -452,10 +452,10 @@ impl HotFolderRuntimeDriver {
     }
 
     pub(crate) fn join_reaper(&mut self) {
-        if let Some(reaper) = self.reaper.take() {
-            if reaper.join().is_err() {
-                tracing::warn!("Hot Folder worker reaper panicked");
-            }
+        if let Some(reaper) = self.reaper.take()
+            && reaper.join().is_err()
+        {
+            tracing::warn!("Hot Folder worker reaper panicked");
         }
     }
 }
@@ -964,7 +964,7 @@ fn enable_prepared_rule(
     control_gate: u64,
 ) -> Result<(), String> {
     ensure_store_ready(store, &true)?;
-    if rule.enabled != true {
+    if !rule.enabled {
         return Err("Hot Folder rule is no longer eligible for enable".into());
     }
     let capability = inputs.evaluate_rule(rule, adapter);

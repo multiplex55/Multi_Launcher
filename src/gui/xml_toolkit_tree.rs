@@ -529,14 +529,14 @@ impl XmlToolkitTreeViewState {
             if let Some(node) = toggle {
                 self.toggle_expansion(node);
             }
-            if let Some(node) = selection {
-                if let Some(selected) = self.select_node(node) {
-                    intents.selection = Some(selected);
-                    if let Some(kind) =
-                        default_detail_kind(projection.node(node).map(|snapshot| snapshot.kind))
-                    {
-                        intents.detail = self.request_detail(kind, XmlDetailIntent::Inspect);
-                    }
+            if let Some(node) = selection
+                && let Some(selected) = self.select_node(node)
+            {
+                intents.selection = Some(selected);
+                if let Some(kind) =
+                    default_detail_kind(projection.node(node).map(|snapshot| snapshot.kind))
+                {
+                    intents.detail = self.request_detail(kind, XmlDetailIntent::Inspect);
                 }
             }
             if selection.is_none()
@@ -606,10 +606,10 @@ impl XmlToolkitTreeViewState {
                     }
                 });
             }
-            kind if default_detail_kind(Some(kind)).is_some() => {
-                if ui.small_button("Copy complete value").clicked() {
-                    *copy_kind = default_detail_kind(Some(kind));
-                }
+            kind if default_detail_kind(Some(kind)).is_some()
+                && ui.small_button("Copy complete value").clicked() =>
+            {
+                *copy_kind = default_detail_kind(Some(kind));
             }
             _ => {}
         }

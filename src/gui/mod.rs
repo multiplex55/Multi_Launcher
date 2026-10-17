@@ -3264,13 +3264,12 @@ impl LauncherApp {
         let hotfolder_enabled = app.plugin_enabled("hotfolder");
         app.hotfolder_action_adapter.set_active(hotfolder_enabled);
         app.hotfolder_action_pump.set_active(hotfolder_enabled);
-        if hotfolder_enabled {
-            if let Err(error) = app
+        if hotfolder_enabled
+            && let Err(error) = app
                 .hotfolder_runtime
                 .start(app.hotfolder_capability_inputs())
-            {
-                tracing::warn!(reason = error, "Hot Folder runtime did not start");
-            }
+        {
+            tracing::warn!(reason = error, "Hot Folder runtime did not start");
         }
         app.recompute_query_results_layout();
         app

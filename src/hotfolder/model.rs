@@ -138,11 +138,13 @@ pub fn evaluate_rule_conditions(
     {
         return Err("sample path is not a root-relative file path");
     }
-    let trigger_matches = match (rule.trigger, event) {
-        (RuleTrigger::NewFile, HotFolderEventKind::Created | HotFolderEventKind::RenamedTo) => true,
-        (RuleTrigger::ModifiedFile, HotFolderEventKind::Modified) => true,
-        _ => false,
-    };
+    let trigger_matches = matches!(
+        (rule.trigger, event),
+        (
+            RuleTrigger::NewFile,
+            HotFolderEventKind::Created | HotFolderEventKind::RenamedTo
+        ) | (RuleTrigger::ModifiedFile, HotFolderEventKind::Modified)
+    );
     if !trigger_matches {
         return Err("event does not match the selected trigger");
     }

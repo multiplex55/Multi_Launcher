@@ -459,13 +459,12 @@ impl HotFolderRulesStore {
                 diagnostic: None,
             };
         }
-        let report = retain_last_good(
+        retain_last_good(
             &mut state,
             HotFolderLoadStatus::UnavailableRetained,
             "Hot Folder rules file disappeared after a valid snapshot was loaded".into(),
             None,
-        );
-        report
+        )
     }
 
     fn record_bytes(&self, bytes: Vec<u8>) -> HotFolderLoadReport {
@@ -522,8 +521,7 @@ impl HotFolderRulesStore {
                 ReadDocument::Missing | ReadDocument::Oversized => None,
             });
         }
-        let report = retain_last_good(&mut state, status, diagnostic, error);
-        report
+        retain_last_good(&mut state, status, diagnostic, error)
     }
 }
 

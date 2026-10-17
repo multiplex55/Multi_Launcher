@@ -127,7 +127,7 @@ pub struct HotFolderExecutionReceipt {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HotFolderRunDisposition {
-    Executed(HotFolderExecutionReceipt),
+    Executed(Box<HotFolderExecutionReceipt>),
     SuppressedDuplicate,
     SuppressedOwnOutput {
         operation_id: u128,
@@ -843,8 +843,8 @@ impl HotFolderExecutionEngine {
         let previous = state.journal.history_cleared_operation_ids.clone();
         let mut next_cleared: Vec<String> = previous
             .iter()
+            .filter(|id| terminal_ids.contains(*id))
             .cloned()
-            .filter(|id| terminal_ids.contains(id))
             .collect();
         next_cleared.extend(terminal_ids);
         next_cleared.sort();
@@ -962,7 +962,7 @@ impl HotFolderExecutionEngine {
             source_sha256: None,
             external_target: external_target_receipt(&rule.action),
             external_input: is_external_action(&rule.action)
-                .then(|| external_file_evidence_from_candidate(&candidate, None)),
+                .then(|| external_file_evidence_from_candidate(candidate, None)),
             external_run_id: None,
             outputs,
             phase,
@@ -985,7 +985,7 @@ impl HotFolderExecutionEngine {
             &candidate.path,
             &candidate.path,
         );
-        row.state = JournalState::Terminal(JournalReceipt::from_receipt(&receipt));
+        row.state = JournalState::Terminal(Box::new(JournalReceipt::from_receipt(&receipt)));
         let durable = {
             let mut state = self
                 .state
@@ -1022,9 +1022,9 @@ impl HotFolderExecutionEngine {
             }
             durable
         };
-        Ok(HotFolderRunDisposition::Executed(
+        Ok(HotFolderRunDisposition::Executed(Box::new(
             HotFolderExecutionReceipt { durable, ..receipt },
-        ))
+        )))
     }
 
     /// Claim at most one settled B candidate, revalidate the current selected
@@ -1530,7 +1530,8 @@ impl HotFolderExecutionEngine {
             reason: reason.map(sanitize_reason),
             durable: true,
         };
-        journal_row.state = JournalState::Terminal(JournalReceipt::from_receipt(&receipt));
+        journal_row.state =
+            JournalState::Terminal(Box::new(JournalReceipt::from_receipt(&receipt)));
         let durable = {
             let mut state = self
                 .state
@@ -1573,9 +1574,9 @@ impl HotFolderExecutionEngine {
                 .retain(|output| output.expires > self.clock.now());
             durable
         };
-        Ok(Some(HotFolderRunDisposition::Executed(
+        Ok(Some(HotFolderRunDisposition::Executed(Box::new(
             HotFolderExecutionReceipt { durable, ..receipt },
-        )))
+        ))))
     }
 
     fn first_matching_rule(
@@ -2293,7 +2294,7 @@ enum JournalState {
         phase: HotFolderExecutionPhase,
         outputs: Vec<JournalOutputEvidence>,
     },
-    Terminal(JournalReceipt),
+    Terminal(Box<JournalReceipt>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3516,34 +3517,38 @@ impl StoredPath {
 
     fn to_path(&self) -> Option<PathBuf> {
         #[cfg(windows)]
-        if let Self::WindowsUtf16Le(encoded) = self {
+        {
             use std::os::windows::ffi::OsStringExt;
+            let Self::WindowsUtf16Le(encoded) = self;
             let bytes = hex::decode(encoded).ok()?;
             if bytes.len() % 2 != 0 || bytes.len() > 65_536 {
                 return None;
             }
             let words = bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                 .collect::<Vec<_>>();
-            return Some(PathBuf::from(OsString::from_wide(&words)));
+            Some(PathBuf::from(OsString::from_wide(&words)))
         }
         #[cfg(unix)]
-        if let Self::UnixBytes(encoded) = self {
+        {
             use std::os::unix::ffi::OsStringExt;
+            let Self::UnixBytes(encoded) = self;
             let bytes = hex::decode(encoded).ok()?;
             if bytes.len() > 131_072 {
                 return None;
             }
-            return Some(PathBuf::from(OsString::from_vec(bytes)));
+            Some(PathBuf::from(OsString::from_vec(bytes)))
         }
         #[cfg(not(any(windows, unix)))]
-        if let Self::NativeText(encoded) = self {
+        {
+            let Self::NativeText(encoded) = self;
             if encoded.len() > 32_768 {
                 return None;
             }
-            return Some(PathBuf::from(encoded));
+            Some(PathBuf::from(encoded))
         }
-        None
     }
 }

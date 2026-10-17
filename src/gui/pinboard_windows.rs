@@ -275,10 +275,10 @@ impl PinWindowPresenter {
                 .filter(|pin_id| !active_set.contains(pin_id))
                 .collect::<Vec<_>>();
             for pin_id in stale {
-                if let Some(runtime) = registry.pins.remove(&pin_id) {
-                    if let Some(viewport_id) = retire_pin_runtime(&mut registry, runtime) {
-                        close_viewports.push(viewport_id);
-                    }
+                if let Some(runtime) = registry.pins.remove(&pin_id)
+                    && let Some(viewport_id) = retire_pin_runtime(&mut registry, runtime)
+                {
+                    close_viewports.push(viewport_id);
                 }
             }
             let destroyed_retired = registry
@@ -535,7 +535,7 @@ impl PinWindowPresenter {
                                             entry.dimensions.0,
                                             entry.dimensions.1
                                         ));
-                                        ui.label(format!("{}", entry.native_status));
+                                        ui.label(entry.native_status.to_string());
                                         ui.horizontal(|ui| {
                                             let mut topmost = entry.always_on_top;
                                             if ui
@@ -641,8 +641,8 @@ impl PinWindowPresenter {
                 }
                 PinListAction::RecoverAll => {
                     for entry in &entries {
-                        if entry.click_through {
-                            if let Err(error) = self.apply_list_control(
+                        if entry.click_through
+                            && let Err(error) = self.apply_list_control(
                                 ctx,
                                 board,
                                 entry.pin_id,
@@ -653,17 +653,15 @@ impl PinWindowPresenter {
                                 },
                                 native_api.as_ref(),
                                 root_hwnd,
-                            ) {
-                                if let Ok(registry) = self.registry.lock()
-                                    && let Some(runtime) = registry
-                                        .pins
-                                        .get(&entry.pin_id)
-                                        .filter(|runtime| runtime.lifetime == entry.lifetime)
-                                    && let Ok(mut state) = runtime.state.lock()
-                                {
-                                    state.native_error = Some(error);
-                                }
-                            }
+                            )
+                            && let Ok(registry) = self.registry.lock()
+                            && let Some(runtime) = registry
+                                .pins
+                                .get(&entry.pin_id)
+                                .filter(|runtime| runtime.lifetime == entry.lifetime)
+                            && let Ok(mut state) = runtime.state.lock()
+                        {
+                            state.native_error = Some(error);
                         }
                     }
                 }
@@ -1104,7 +1102,7 @@ fn should_suppress_pin(
     state
         .capture_visibility
         .filter(|ticket| ticket.identity == Some(identity))
-        .map_or(true, |ticket| ticket.prior_visible != Some(true))
+        .is_none_or(|ticket| ticket.prior_visible != Some(true))
 }
 
 fn registry_contains_retired(registry: &Arc<Mutex<PinWindowRegistry>>, pin_id: PinId) -> bool {
@@ -1644,14 +1642,14 @@ impl PinWindowVisibilityCoordinator for PinWindowVisibilityOwner {
         if pending {
             PinVisibilityAck::Pending
         } else {
-            if let Ok(mut registry) = self.registry.lock() {
-                if registry.restore_identity == Some(identity) {
-                    registry.restore_identity = None;
-                    registry.hide_identity = None;
-                    for runtime in registry.pins.values().chain(registry.retired.values()) {
-                        if let Ok(mut state) = runtime.state.lock() {
-                            state.capture_visibility = None;
-                        }
+            if let Ok(mut registry) = self.registry.lock()
+                && registry.restore_identity == Some(identity)
+            {
+                registry.restore_identity = None;
+                registry.hide_identity = None;
+                for runtime in registry.pins.values().chain(registry.retired.values()) {
+                    if let Ok(mut state) = runtime.state.lock() {
+                        state.capture_visibility = None;
                     }
                 }
             }
@@ -1952,8 +1950,11 @@ fn render_pin_viewport(
         root_context.request_repaint_of(egui::ViewportId::ROOT);
         return;
     }
-    if first_pass && escape && click_through && native_ready {
-        if let Err(error) = apply_pin_control_change(
+    if first_pass
+        && escape
+        && click_through
+        && native_ready
+        && let Err(error) = apply_pin_control_change(
             &ctx,
             runtime,
             native_api.as_ref(),
@@ -1962,11 +1963,10 @@ fn render_pin_viewport(
                 always_on_top: None,
                 click_through: Some(false),
             },
-        ) {
-            if let Ok(mut state) = runtime.state.lock() {
-                state.native_error = Some(error);
-            }
-        }
+        )
+        && let Ok(mut state) = runtime.state.lock()
+    {
+        state.native_error = Some(error);
     }
 
     let texture = match ensure_pin_texture(&ctx, runtime) {
@@ -2075,29 +2075,29 @@ fn render_pin_viewport(
 
     if first_pass {
         let mut request_id = None;
-        if copy_requested || save_requested {
-            if let Ok(mut state) = runtime.state.lock() {
-                if state.pending_request_id.is_none() {
-                    if let Some(next_request_id) = state.next_request_id.checked_add(1) {
-                        request_id = Some(state.next_request_id);
-                        state.next_request_id = next_request_id;
-                        state.pending_request_id = request_id;
-                        state.action_status = PinActionStatus::Pending(if copy_requested {
-                            "Copying image…".into()
-                        } else {
-                            "Choose a save location…".into()
-                        });
+        if (copy_requested || save_requested)
+            && let Ok(mut state) = runtime.state.lock()
+        {
+            if state.pending_request_id.is_none() {
+                if let Some(next_request_id) = state.next_request_id.checked_add(1) {
+                    request_id = Some(state.next_request_id);
+                    state.next_request_id = next_request_id;
+                    state.pending_request_id = request_id;
+                    state.action_status = PinActionStatus::Pending(if copy_requested {
+                        "Copying image…".into()
                     } else {
-                        state.action_status = PinActionStatus::Failed(
-                            "Pin action request IDs are exhausted; close and recapture this pin."
-                                .into(),
-                        );
-                    }
+                        "Choose a save location…".into()
+                    });
                 } else {
                     state.action_status = PinActionStatus::Failed(
-                        "Finish the current pin image action before starting another.".into(),
+                        "Pin action request IDs are exhausted; close and recapture this pin."
+                            .into(),
                     );
                 }
+            } else {
+                state.action_status = PinActionStatus::Failed(
+                    "Finish the current pin image action before starting another.".into(),
+                );
             }
         }
         if let Some(request_id) = request_id {
@@ -2123,10 +2123,9 @@ fn render_pin_viewport(
                 root_native_identity.0,
                 control_change,
             )
+            && let Ok(mut state) = runtime.state.lock()
         {
-            if let Ok(mut state) = runtime.state.lock() {
-                state.native_error = Some(error);
-            }
+            state.native_error = Some(error);
         }
         if close_clicked {
             if let Ok(mut state) = runtime.state.lock() {
@@ -2423,11 +2422,8 @@ impl PinActionWorker {
 
     fn drain_completions(&self) -> Vec<PinActionCompletion> {
         let mut completions = Vec::new();
-        loop {
-            match self.completions.try_recv() {
-                Ok(completion) => completions.push(completion),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-            }
+        while let Ok(completion) = self.completions.try_recv() {
+            completions.push(completion);
         }
         if !completions.is_empty()
             && let Ok(mut state) = self.shared.state.lock()
@@ -2530,7 +2526,7 @@ impl PinActionClient {
 fn pin_action_worker(shared: Arc<PinActionQueue>) {
     loop {
         let (job, cancellation) = {
-            let Ok(mut state) = shared.state.lock() else {
+            let Ok(state) = shared.state.lock() else {
                 return;
             };
             let mut state = match shared
@@ -2609,7 +2605,7 @@ impl PinSavePicker for NativePinSavePicker {
         }
         #[cfg(windows)]
         {
-            return native::save_pin_image(pin_id, cancellation);
+            native::save_pin_image(pin_id, cancellation)
         }
         #[cfg(not(windows))]
         {
@@ -3753,9 +3749,8 @@ mod tests {
         assert_ne!(first_runtime.viewport_id, egui::ViewportId::ROOT);
         assert_ne!(second_runtime.viewport_id, egui::ViewportId::ROOT);
         assert_ne!(first_runtime.viewport_id, second_runtime.viewport_id);
-        assert_eq!(
+        assert!(
             first_runtime.state.lock().unwrap().always_on_top,
-            true,
             "pins begin topmost"
         );
         assert!(!first_runtime.state.lock().unwrap().click_through);

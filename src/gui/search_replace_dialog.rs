@@ -202,7 +202,7 @@ fn replacement_preview_loop(shared: Arc<(Mutex<PreviewWorkerState>, Condvar)>) {
     loop {
         let job = {
             let (lock, wake) = &*shared;
-            let Ok(mut state) = lock.lock() else {
+            let Ok(state) = lock.lock() else {
                 return;
             };
             let mut state =
@@ -465,10 +465,10 @@ impl SearchReplaceDialogState {
         replace_worker: Option<&ReplaceExecutorWorker>,
     ) -> bool {
         let mut changed = false;
-        if let (Some(coordinator), Some(generation)) = (coordinator, self.current_generation) {
-            if let Some(progress) = coordinator.progress(generation) {
-                self.search_progress = Some(progress);
-            }
+        if let (Some(coordinator), Some(generation)) = (coordinator, self.current_generation)
+            && let Some(progress) = coordinator.progress(generation)
+        {
+            self.search_progress = Some(progress);
         }
         if let Some(ticket) = self.search_ticket.as_ref() {
             match ticket.try_recv() {
@@ -639,10 +639,10 @@ impl SearchReplaceDialogState {
         &mut self,
         coordinator: Option<&crate::search_replace::SearchCoordinator>,
     ) {
-        if let Some(generation) = self.current_generation {
-            if let Some(coordinator) = coordinator {
-                coordinator.cancel_generation(generation);
-            }
+        if let Some(generation) = self.current_generation
+            && let Some(coordinator) = coordinator
+        {
+            coordinator.cancel_generation(generation);
         }
         if let Some(ticket) = self.search_ticket.take() {
             ticket.cancel();

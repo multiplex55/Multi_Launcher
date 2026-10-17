@@ -1895,15 +1895,13 @@ fn scan_with_backend<B: RenameScanBackend>(
     if matches!(
         scan_status,
         RenameScanStatus::Complete | RenameScanStatus::Partial
+    ) && let Err(error) = backend.reopen_chain(
+        &admission.proof.chain,
+        &admission.proof,
+        DirectoryOpenAccess::Metadata,
     ) {
-        if let Err(error) = backend.reopen_chain(
-            &admission.proof.chain,
-            &admission.proof,
-            DirectoryOpenAccess::Metadata,
-        ) {
-            record_failure(&mut result.summary, error.clone());
-            scan_status = status_for_scan_failure(error.kind);
-        }
+        record_failure(&mut result.summary, error.clone());
+        scan_status = status_for_scan_failure(error.kind);
     }
 
     pending_rows.sort_by(|left, right| {
@@ -3513,17 +3511,17 @@ impl RenameScanBackend for NativeRenameScanBackend {
                             "the selected root or one of its ancestors is not a plain directory",
                         ));
                     }
-                    if let Some(expected_parent) = prior_canonical.as_deref() {
-                        if opened.canonical_path.parent().is_none_or(|parent| {
+                    if let Some(expected_parent) = prior_canonical.as_deref()
+                        && opened.canonical_path.parent().is_none_or(|parent| {
                             batch_rename::compare_paths_windows_ordinal(parent, expected_parent)
                                 != std::cmp::Ordering::Equal
-                        }) {
-                            return Err(BackendFailure::new(
-                                BackendFailureKind::RootChanged,
-                                Some(&current),
-                                "an ancestor resolved through a different directory chain",
-                            ));
-                        }
+                        })
+                    {
+                        return Err(BackendFailure::new(
+                            BackendFailureKind::RootChanged,
+                            Some(&current),
+                            "an ancestor resolved through a different directory chain",
+                        ));
                     }
                     volume_serial.get_or_insert(opened.identity.volume_serial_number);
                     if volume_serial != Some(opened.identity.volume_serial_number) {
@@ -3551,17 +3549,17 @@ impl RenameScanBackend for NativeRenameScanBackend {
                             "the selected root or one of its ancestors is not a plain directory",
                         ));
                     }
-                    if let Some(expected_parent) = prior_canonical.as_deref() {
-                        if opened.canonical_path.parent().is_none_or(|parent| {
+                    if let Some(expected_parent) = prior_canonical.as_deref()
+                        && opened.canonical_path.parent().is_none_or(|parent| {
                             batch_rename::compare_paths_windows_ordinal(parent, expected_parent)
                                 != std::cmp::Ordering::Equal
-                        }) {
-                            return Err(BackendFailure::new(
-                                BackendFailureKind::RootChanged,
-                                Some(&current),
-                                "an ancestor resolved through a different directory chain",
-                            ));
-                        }
+                        })
+                    {
+                        return Err(BackendFailure::new(
+                            BackendFailureKind::RootChanged,
+                            Some(&current),
+                            "an ancestor resolved through a different directory chain",
+                        ));
                     }
                     if volume_serial != Some(opened.identity.volume_serial_number) {
                         return Err(BackendFailure::new(
@@ -3678,17 +3676,16 @@ impl RenameScanBackend for NativeRenameScanBackend {
         let lookup_path = parent.canonical_path.join(name);
         let opened = open_native_object(&lookup_path, false)
             .map_err(|error| classify_child_io(&lookup_path, error))?;
-        if let Some(expected) = expected {
-            if expected.is_reparse_point != opened.reparse_point
+        if let Some(expected) = expected
+            && (expected.is_reparse_point != opened.reparse_point
                 || (!expected.is_reparse_point
-                    && expected.is_directory != (opened.kind == SnapshotEntryKind::Directory))
-            {
-                return Err(BackendFailure::new(
-                    BackendFailureKind::ObjectChanged,
-                    Some(&lookup_path),
-                    "the sibling changed type or reparse status after directory enumeration",
-                ));
-            }
+                    && expected.is_directory != (opened.kind == SnapshotEntryKind::Directory)))
+        {
+            return Err(BackendFailure::new(
+                BackendFailureKind::ObjectChanged,
+                Some(&lookup_path),
+                "the sibling changed type or reparse status after directory enumeration",
+            ));
         }
         if !batch_rename::path_is_within_windows_ordinal(
             &root.canonical_path,
@@ -3823,17 +3820,17 @@ impl RenameScanBackend for NativeRenameScanBackend {
                     "a verified directory identity changed",
                 ));
             }
-            if let Some(previous) = previous_canonical.as_deref() {
-                if opened.canonical_path.parent().is_none_or(|parent| {
+            if let Some(previous) = previous_canonical.as_deref()
+                && opened.canonical_path.parent().is_none_or(|parent| {
                     batch_rename::compare_paths_windows_ordinal(parent, previous)
                         != std::cmp::Ordering::Equal
-                }) {
-                    return Err(BackendFailure::new(
-                        BackendFailureKind::PathEscapedRoot,
-                        Some(&opened.canonical_path),
-                        "the reopened directory chain no longer has the verified parent",
-                    ));
-                }
+                })
+            {
+                return Err(BackendFailure::new(
+                    BackendFailureKind::PathEscapedRoot,
+                    Some(&opened.canonical_path),
+                    "the reopened directory chain no longer has the verified parent",
+                ));
             }
             if is_within_verified_root(root, &expected.canonical_path)
                 && !batch_rename::path_is_within_windows_ordinal(
@@ -3991,12 +3988,9 @@ impl RenameScanCoordinator {
     ) -> std::io::Result<RenameScanTicket> {
         let (reply, receiver) = mpsc::channel();
         let (lock, wake) = &*self.state;
-        let mut state = lock.lock().map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "rename scan worker state was poisoned",
-            )
-        })?;
+        let mut state = lock
+            .lock()
+            .map_err(|_| std::io::Error::other("rename scan worker state was poisoned"))?;
         if state.shutdown {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
@@ -4018,9 +4012,10 @@ impl RenameScanCoordinator {
             ));
         }
         let generation = RenameScanGeneration(state.next_generation);
-        state.next_generation = state.next_generation.checked_add(1).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "rename scan generation overflow")
-        })?;
+        state.next_generation = state
+            .next_generation
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("rename scan generation overflow"))?;
         if let Some(active) = &state.active {
             active.cancellation().cancel();
         }
@@ -4176,10 +4171,10 @@ impl RenameScanCoordinator {
     pub fn cancel_operation(&self) {
         let (lock, _) = &*self.state;
         if let Ok(mut state) = lock.lock() {
-            if let Some(active) = &state.active {
-                if !active.is_scan() {
-                    active.cancellation().cancel();
-                }
+            if let Some(active) = &state.active
+                && !active.is_scan()
+            {
+                active.cancellation().cancel();
             }
             if state
                 .pending
@@ -4440,7 +4435,7 @@ fn scan_worker_loop(
             }
         }
         let (lock, _) = &*state;
-        if let Ok(mut state) = lock.lock() {
+        if let Ok(state) = lock.lock() {
             if state.shutdown {
                 return;
             }
@@ -5235,7 +5230,7 @@ impl GuardedReplaceFile {
         #[cfg(windows)]
         {
             ensure_unnamed_stream_only(&self.native.file)?;
-            return self.native.delete_if_matches(expected_state, cancellation);
+            self.native.delete_if_matches(expected_state, cancellation)
         }
         #[cfg(not(windows))]
         {
@@ -6598,7 +6593,7 @@ impl GuardedReplaceHandle {
             None,
             cancellation,
         )?;
-        let (root_guards, parent_guards) = self.reopen_guards()?;
+        let (_root_guards, parent_guards) = self.reopen_guards()?;
         let parent = parent_guards
             .last()
             .ok_or_else(|| std::io::Error::other("replacement parent guard is missing"))?;
@@ -6816,7 +6811,7 @@ fn create_verified_replace_backup_native(
             HANDLE::default(),
         )
     }
-    .map_err(|error| windows_error_to_io(error))?;
+    .map_err(windows_error_to_io)?;
     let file = unsafe { std::fs::File::from_raw_handle(handle.0 as RawHandle) };
     let metadata = file.metadata()?;
     if !metadata.is_file()
@@ -6900,7 +6895,7 @@ fn open_verified_replace_backup_native(
             HANDLE::default(),
         )
     }
-    .map_err(|error| windows_error_to_io(error))?;
+    .map_err(windows_error_to_io)?;
     let file = unsafe { std::fs::File::from_raw_handle(handle.0 as RawHandle) };
     let metadata = file.metadata()?;
     if !metadata.is_file()
@@ -7115,7 +7110,7 @@ fn query_replace_basic_info(
             std::mem::size_of::<FILE_BASIC_INFO>() as u32,
         )
     }
-    .map_err(|error| windows_error_to_io(error))?;
+    .map_err(windows_error_to_io)?;
     Ok(info)
 }
 
@@ -7138,7 +7133,7 @@ fn set_replace_basic_info(
             std::mem::size_of::<FILE_BASIC_INFO>() as u32,
         )
     }
-    .map_err(|error| windows_error_to_io(error))
+    .map_err(windows_error_to_io)
 }
 
 #[cfg(windows)]
@@ -7242,7 +7237,7 @@ fn query_replace_security(
             &mut defaulted,
         )
     }
-    .map_err(|error| windows_error_to_io(error))?;
+    .map_err(windows_error_to_io)?;
     if dacl_present.0 == 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -7252,7 +7247,7 @@ fn query_replace_security(
     let mut control = 0_u16;
     let mut revision = 0_u32;
     unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) }
-        .map_err(|error| windows_error_to_io(error))?;
+        .map_err(windows_error_to_io)?;
     let _ = (defaulted, revision);
     Ok((
         guard,
@@ -7356,7 +7351,7 @@ fn delete_open_file(file: &std::fs::File) -> std::io::Result<()> {
             std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
         )
     }
-    .map_err(|error| windows_error_to_io(error))
+    .map_err(windows_error_to_io)
 }
 
 /// Open a content file with read access only. Write and delete sharing are
@@ -7588,7 +7583,7 @@ fn rename_open_file_no_replace(
     }
     let destination_path = parent.canonical_path.join(leaf);
     let name = extended_local_path(&destination_path)?;
-    if name.is_empty() || name.iter().any(|unit| *unit == 0) {
+    if name.is_empty() || name.contains(&0) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "destination path is empty or contains NUL",
@@ -7609,11 +7604,9 @@ fn rename_open_file_no_replace(
     let mut name = name;
     name.push(0);
     let mut info = FILE_RENAME_INFO::default();
-    // SAFETY: this union member is the documented legacy BOOLEAN indicating
-    // that an existing target must not be replaced.
-    unsafe {
-        info.Anonymous.ReplaceIfExists = BOOLEAN(0);
-    }
+    // This union member is the documented legacy BOOLEAN indicating that an
+    // existing target must not be replaced.
+    info.Anonymous.ReplaceIfExists = BOOLEAN(0);
     // This NTFS fixture rejected a non-null RootDirectory for a relative
     // filename with ERROR_INVALID_PARAMETER. Keep every verified parent
     // handle alive through this operation, and build the absolute destination
@@ -8127,7 +8120,7 @@ fn enumerate_native_directory(
                 unsafe { std::ptr::addr_of!((*record).FileNameLength).read_unaligned() } as usize;
             let attributes =
                 unsafe { std::ptr::addr_of!((*record).FileAttributes).read_unaligned() };
-            if file_name_length % std::mem::size_of::<u16>() != 0 {
+            if !file_name_length.is_multiple_of(std::mem::size_of::<u16>()) {
                 return Err(BackendFailure::new(
                     BackendFailureKind::UnsupportedIdentity,
                     Some(&directory.canonical_path),
@@ -8191,7 +8184,7 @@ fn enumerate_native_directory(
                 break;
             }
             if next_offset < offset_of!(FILE_ID_BOTH_DIR_INFO, FileName)
-                || next_offset % std::mem::align_of::<u64>() != 0
+                || !next_offset.is_multiple_of(std::mem::align_of::<u64>())
             {
                 return Err(BackendFailure::new(
                     BackendFailureKind::UnsupportedIdentity,
@@ -8613,17 +8606,16 @@ mod tests {
                 self.change_identity(&changed_parent, new_id);
             }
             let object = self.object(&path)?;
-            if let Some(expected) = expected {
-                if expected.is_reparse_point != object.reparse_point
+            if let Some(expected) = expected
+                && (expected.is_reparse_point != object.reparse_point
                     || (!expected.is_reparse_point
-                        && expected.is_directory != (object.kind == SnapshotEntryKind::Directory))
-                {
-                    return Err(BackendFailure::new(
-                        BackendFailureKind::ObjectChanged,
-                        Some(&path),
-                        "fake entry changed after enumeration",
-                    ));
-                }
+                        && expected.is_directory != (object.kind == SnapshotEntryKind::Directory)))
+            {
+                return Err(BackendFailure::new(
+                    BackendFailureKind::ObjectChanged,
+                    Some(&path),
+                    "fake entry changed after enumeration",
+                ));
             }
             self.reopen_chain(parent_chain, root, DirectoryOpenAccess::Metadata)?;
             Ok(OpenedObject {

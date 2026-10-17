@@ -29,6 +29,7 @@ pub use model::{
 };
 pub(crate) use native::NativeCoordinatePointSampler;
 pub use native::NativeCoordinateRuntimeFactory;
+pub use render::ClickEffectFrame;
 pub use settings::{
     ClickEffectPreferences, ClickEffectStyle, CoordinateOffset, CoordinateToolPreferences,
     CrosshairColor, CrosshairPreferences, HaloPreferences, HudDetail, ZoomMode, ZoomPreferences,

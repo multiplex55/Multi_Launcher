@@ -2857,7 +2857,7 @@ mod m8d_tests {
         assert_eq!(std::fs::read(&renamed).unwrap(), b"alpha bytes");
         assert_eq!(identity_at(&root, "renamed-alpha.txt"), alpha.identity);
         assert_eq!(identity_at(&root, "keep.log"), keep.identity);
-        assert!(applied.receipt.entries()[0].stage_path.exists() == false);
+        assert!(!applied.receipt.entries()[0].stage_path.exists());
 
         let undone = execute_undo(
             applied.receipt.id(),
@@ -3141,7 +3141,7 @@ mod m8d_tests {
             RenameTransactionStatus::RecoveryRequired
         );
         assert_eq!(std::fs::read(&changed).unwrap(), b"newer in-place bytes");
-        assert!(root.join("a.txt").exists() == false);
+        assert!(!root.join("a.txt").exists());
     }
 
     #[cfg(windows)]

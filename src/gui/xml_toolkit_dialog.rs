@@ -696,13 +696,12 @@ impl XmlToolkitDialogState {
             return;
         }
 
-        if intents.open_xml {
-            if let Some(path) = rfd::FileDialog::new()
+        if intents.open_xml
+            && let Some(path) = rfd::FileDialog::new()
                 .add_filter("XML document", &["xml", "xsl", "xslt"])
                 .pick_file()
-            {
-                self.request_load(ctx, path);
-            }
+        {
+            self.request_load(ctx, path);
         }
 
         let schema_intent = self.schema.take_intent();
@@ -789,12 +788,12 @@ impl XmlToolkitDialogState {
             _ => None,
         };
         if let Some(session) = active_session {
-            if let Some(revision) = intents.xpath.invalidate {
-                if let Err(error) = session.invalidate_xpath(revision) {
-                    action_errors.push(format!(
-                        "Could not invalidate stale XPath results: {error:?}"
-                    ));
-                }
+            if let Some(revision) = intents.xpath.invalidate
+                && let Err(error) = session.invalidate_xpath(revision)
+            {
+                action_errors.push(format!(
+                    "Could not invalidate stale XPath results: {error:?}"
+                ));
             }
             for tree_intents in [intents.tree, intents.xpath.tree] {
                 if let Some(detail) = tree_intents.detail
@@ -805,10 +804,10 @@ impl XmlToolkitDialogState {
                     ));
                 }
             }
-            if let Some(request) = intents.xpath.query {
-                if let Err(error) = session.request_xpath(request) {
-                    action_errors.push(format!("Could not run XPath: {error:?}"));
-                }
+            if let Some(request) = intents.xpath.query
+                && let Err(error) = session.request_xpath(request)
+            {
+                action_errors.push(format!("Could not run XPath: {error:?}"));
             }
             if let Some(text) = self
                 .xpath

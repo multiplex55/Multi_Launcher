@@ -537,7 +537,7 @@ pub(crate) fn invoke_registered_action_from_catalog(
             "registered launcher action is unavailable",
         );
     };
-    if registered.is_available() == false || registered.id != action_ids::RESULT_EXECUTE {
+    if !registered.is_available() || registered.id != action_ids::RESULT_EXECUTE {
         return failure(
             request.operation_id,
             "registered launcher action is disabled",

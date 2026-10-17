@@ -546,10 +546,10 @@ impl PinboardCaptureLifecycle {
                                 }
                                 Err(error) => set_capture_error(&mut session, error),
                             }
-                        } else if let Err(error) = result {
-                            if !session.cancelled {
-                                set_capture_error(&mut session, error);
-                            }
+                        } else if let Err(error) = result
+                            && !session.cancelled
+                        {
+                            set_capture_error(&mut session, error);
                         }
                         session.phase = PinCapturePhase::Restoring;
                     } else {

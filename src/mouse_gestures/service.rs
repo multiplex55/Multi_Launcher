@@ -436,10 +436,12 @@ impl MouseGestureService {
         if let Err(error) = self.backend.set_click_observation(None) {
             tracing::error!(?error, "failed to clear passive click observer");
         }
-        if !self.config.enabled && self.worker.is_none() && self.backend.is_installed() {
-            if let Err(error) = self.backend.uninstall() {
-                tracing::error!(?error, "failed to uninstall unused mouse hook");
-            }
+        if !self.config.enabled
+            && self.worker.is_none()
+            && self.backend.is_installed()
+            && let Err(error) = self.backend.uninstall()
+        {
+            tracing::error!(?error, "failed to uninstall unused mouse hook");
         }
         true
     }
@@ -2747,89 +2749,88 @@ unsafe extern "system" fn mouse_hook_proc(
             }
         }
 
-        if msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP || msg == WM_MOUSEWHEEL {
-            if dispatch.enabled.load(Ordering::Acquire) {
-                // If we're injecting (or the event is injected), do NOT consume it and do NOT forward to worker.
-                let info = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
+        if (msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP || msg == WM_MOUSEWHEEL)
+            && dispatch.enabled.load(Ordering::Acquire)
+        {
+            // If we're injecting (or the event is injected), do NOT consume it and do NOT forward to worker.
+            let info = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
 
-                // Flags: 0x1 = LLMHF_INJECTED, 0x2 = LLMHF_LOWER_IL_INJECTED
-                let injected_flagged = (info.flags & 0x1) != 0 || (info.flags & 0x2) != 0;
-                let injected_tagged = info.dwExtraInfo == MG_INJECT_TAG;
+            // Flags: 0x1 = LLMHF_INJECTED, 0x2 = LLMHF_LOWER_IL_INJECTED
+            let injected_flagged = (info.flags & 0x1) != 0 || (info.flags & 0x2) != 0;
+            let injected_tagged = info.dwExtraInfo == MG_INJECT_TAG;
 
-                if dispatch.is_injecting() || injected_flagged || injected_tagged {
-                    return unsafe {
-                        CallNextHookEx(
-                            windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
-                            n_code,
-                            w_param,
-                            l_param,
-                        )
-                    };
-                }
-
-                if let Some(title) = get_foreground_window_title()
-                    && dispatch.should_ignore_window_title(&title)
-                {
-                    return unsafe {
-                        CallNextHookEx(
-                            windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
-                            n_code,
-                            w_param,
-                            l_param,
-                        )
-                    };
-                }
-
-                // Only consume wheel events while a gesture is actively being tracked.
-                if msg == WM_MOUSEWHEEL {
-                    let allow = match dispatch.wheel_gate() {
-                        WheelCycleGate::Deadzone => dispatch.is_tracking(),
-                        WheelCycleGate::Shift => {
-                            use windows::Win32::UI::Input::KeyboardAndMouse::{
-                                GetAsyncKeyState, VK_SHIFT,
-                            };
-                            let shift_down = unsafe {
-                                (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0
-                            };
-                            dispatch.is_active() && shift_down
-                        }
-                    };
-                    if !allow {
-                        return unsafe {
-                            CallNextHookEx(
-                                windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
-                                n_code,
-                                w_param,
-                                l_param,
-                            )
-                        };
-                    }
-                }
-
-                if let Ok(guard) = dispatch.sender.try_lock()
-                    && let Some(sender) = guard.as_ref()
-                {
-                    if msg == WM_RBUTTONDOWN {
-                        // Wheel-cycling is only enabled after worker exceeds deadzone.
-                        dispatch.set_tracking(false);
-                        let _ = sender.send(HookEvent::RButtonDown);
-                    } else if msg == WM_RBUTTONUP {
-                        dispatch.set_tracking(false);
-                        let _ = sender.send(HookEvent::RButtonUp);
-                    } else if msg == WM_MOUSEWHEEL {
-                        // mouseData high word contains signed wheel delta (WHEEL_DELTA multiples).
-                        let delta = ((info.mouseData >> 16) & 0xFFFF) as i16;
-                        if delta > 0 {
-                            let _ = sender.send(HookEvent::CycleNext);
-                        } else if delta < 0 {
-                            let _ = sender.send(HookEvent::CyclePrev);
-                        }
-                    }
-                }
-
-                // Consume while MG is enabled (RMB always, wheel only when tracking).
-                return windows::Win32::Foundation::LRESULT(1);
+            if dispatch.is_injecting() || injected_flagged || injected_tagged {
+                return unsafe {
+                    CallNextHookEx(
+                        windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
+                        n_code,
+                        w_param,
+                        l_param,
+                    )
+                };
             }
+
+            if let Some(title) = get_foreground_window_title()
+                && dispatch.should_ignore_window_title(&title)
+            {
+                return unsafe {
+                    CallNextHookEx(
+                        windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
+                        n_code,
+                        w_param,
+                        l_param,
+                    )
+                };
+            }
+
+            // Only consume wheel events while a gesture is actively being tracked.
+            if msg == WM_MOUSEWHEEL {
+                let allow = match dispatch.wheel_gate() {
+                    WheelCycleGate::Deadzone => dispatch.is_tracking(),
+                    WheelCycleGate::Shift => {
+                        use windows::Win32::UI::Input::KeyboardAndMouse::{
+                            GetAsyncKeyState, VK_SHIFT,
+                        };
+                        let shift_down =
+                            unsafe { (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0 };
+                        dispatch.is_active() && shift_down
+                    }
+                };
+                if !allow {
+                    return unsafe {
+                        CallNextHookEx(
+                            windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
+                            n_code,
+                            w_param,
+                            l_param,
+                        )
+                    };
+                }
+            }
+
+            if let Ok(guard) = dispatch.sender.try_lock()
+                && let Some(sender) = guard.as_ref()
+            {
+                if msg == WM_RBUTTONDOWN {
+                    // Wheel-cycling is only enabled after worker exceeds deadzone.
+                    dispatch.set_tracking(false);
+                    let _ = sender.send(HookEvent::RButtonDown);
+                } else if msg == WM_RBUTTONUP {
+                    dispatch.set_tracking(false);
+                    let _ = sender.send(HookEvent::RButtonUp);
+                } else if msg == WM_MOUSEWHEEL {
+                    // mouseData high word contains signed wheel delta (WHEEL_DELTA multiples).
+                    let delta = ((info.mouseData >> 16) & 0xFFFF) as i16;
+                    if delta > 0 {
+                        let _ = sender.send(HookEvent::CycleNext);
+                    } else if delta < 0 {
+                        let _ = sender.send(HookEvent::CyclePrev);
+                    }
+                }
+            }
+
+            // Consume while MG is enabled (RMB always, wheel only when tracking).
+            return windows::Win32::Foundation::LRESULT(1);
         }
     }
 

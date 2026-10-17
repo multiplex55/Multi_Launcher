@@ -665,7 +665,7 @@ fn run_worker(
                     {
                         lock(&shared).backend_error = Some(error);
                     }
-                    update_cursor_effect_status(&shared, backend.as_ref());
+                    update_cursor_effect_status(&shared, backend.as_deref());
                     Ok(())
                 };
                 let _ = response.send(result);
@@ -683,10 +683,9 @@ fn run_worker(
                 .active_generation()
                 .is_some_and(|generation| generation != click_generation))
             && click_effects.clear()
+            && let Some(backend) = backend.as_mut()
         {
-            if let Some(backend) = backend.as_mut() {
-                let _ = backend.render_click_effects(&[]);
-            }
+            let _ = backend.render_click_effects(&[]);
         }
 
         if click_enabled && click_render_error.is_none() {
@@ -781,7 +780,7 @@ fn run_worker(
         {
             lock(&shared).backend_error = Some(error);
         }
-        update_cursor_effect_status(&shared, Some(&backend));
+        update_cursor_effect_status(&shared, Some(backend.as_ref()));
     }
 
     shutdown_cursor_runtime(&mut sampler, &mut backend, &shared)
@@ -839,7 +838,7 @@ fn clear_click_error_for_generation(error: &mut Option<(u64, String)>, generatio
 
 fn update_cursor_effect_status(
     shared: &Arc<Mutex<SharedState>>,
-    backend: Option<&Box<dyn CoordinateSurfaceBackend>>,
+    backend: Option<&dyn CoordinateSurfaceBackend>,
 ) {
     let Some(backend) = backend else {
         return;
@@ -1195,7 +1194,7 @@ mod tests {
             if !frames.is_empty()
                 && self
                     .click_render_failures
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
                         remaining.checked_sub(1)
                     })
                     .is_ok()

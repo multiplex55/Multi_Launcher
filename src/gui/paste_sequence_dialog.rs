@@ -405,21 +405,19 @@ impl PasteSequenceDialog {
                     text: String::new(),
                 });
             }
-            if ui.button("Move Up").clicked() {
-                if let Some(index) = self.selected_step
-                    && index > 0
-                {
-                    self.draft.steps.swap(index, index - 1);
-                    self.selected_step = Some(index - 1);
-                }
+            if ui.button("Move Up").clicked()
+                && let Some(index) = self.selected_step
+                && index > 0
+            {
+                self.draft.steps.swap(index, index - 1);
+                self.selected_step = Some(index - 1);
             }
-            if ui.button("Move Down").clicked() {
-                if let Some(index) = self.selected_step
-                    && index + 1 < self.draft.steps.len()
-                {
-                    self.draft.steps.swap(index, index + 1);
-                    self.selected_step = Some(index + 1);
-                }
+            if ui.button("Move Down").clicked()
+                && let Some(index) = self.selected_step
+                && index + 1 < self.draft.steps.len()
+            {
+                self.draft.steps.swap(index, index + 1);
+                self.selected_step = Some(index + 1);
             }
             if ui
                 .add_enabled(self.selected_step.is_some(), egui::Button::new("Remove"))
@@ -682,14 +680,9 @@ impl PasteSequenceDialog {
         draft.hotkey = if self.hotkey_text.trim().is_empty() {
             None
         } else {
-            match HotkeyChord::new(self.hotkey_text.clone()) {
-                Ok(chord) => Some(chord),
-                Err(_) => {
-                    // Keep the invalid text local so Save reports it below;
-                    // previews and Run intentionally do not install a route.
-                    None
-                }
-            }
+            // Keep invalid text local so Save reports it below; previews and
+            // Run intentionally do not install a route.
+            HotkeyChord::new(self.hotkey_text.clone()).ok()
         };
         draft
     }
@@ -720,7 +713,7 @@ impl PasteSequenceDialog {
                     SequenceEditorUpdate::Saved { id, draft },
                 );
             }
-            Err(error) => self.inline_error = Some(store_error_text(&error).into()),
+            Err(error) => self.inline_error = Some(store_error_text(&error)),
         }
     }
 

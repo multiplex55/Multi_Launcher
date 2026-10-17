@@ -728,7 +728,7 @@ fn prepare_eligible_rules(
     let mut eligible = Vec::with_capacity(snapshot.rules.len().min(MAX_RULES));
     let mut seen = std::collections::HashSet::with_capacity(snapshot.rules.len());
     let mut skipped = snapshot.rules.len().saturating_sub(MAX_RULES);
-    for (index, rule) in snapshot.rules.iter().take(MAX_RULES).enumerate() {
+    for rule in snapshot.rules.iter().take(MAX_RULES) {
         if !seen.insert(rule.id.clone()) {
             skipped += 1;
             record_diagnostic(
@@ -1353,17 +1353,16 @@ fn prune_ready_candidates(core: &RuntimeCore, output: &Arc<Mutex<OutputState>>) 
         .leased
         .as_ref()
         .is_some_and(|lease| !candidate_is_current(core, &lease.candidate))
+        && let Some(lease) = output.leased.take()
     {
-        if let Some(lease) = output.leased.take() {
-            push_diagnostic(
-                &mut output,
-                HotFolderDiagnostic {
-                    kind: HotFolderDiagnosticKind::LeaseExpired,
-                    rule_id: Some(lease.candidate.rule.id),
-                    path: Some(lease.candidate.path),
-                },
-            );
-        }
+        push_diagnostic(
+            &mut output,
+            HotFolderDiagnostic {
+                kind: HotFolderDiagnosticKind::LeaseExpired,
+                rule_id: Some(lease.candidate.rule.id),
+                path: Some(lease.candidate.path),
+            },
+        );
     }
 }
 
@@ -2680,7 +2679,7 @@ mod tests {
             .into_iter()
             .map(|file_id| Ok(fake_observation(&root, &path, file_id)))
             .collect();
-        let mut runtime = TestRuntime::new(&[rule.clone()], samples);
+        let mut runtime = TestRuntime::new(std::slice::from_ref(&rule), samples);
         let mut service = runtime.service();
         let (wake_sender, wake_receiver) = mpsc::sync_channel(8);
         service.worker = Some(WorkerHandle {

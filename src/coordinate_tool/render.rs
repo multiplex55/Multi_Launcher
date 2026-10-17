@@ -17,7 +17,7 @@ pub(crate) const CLICK_ANIMATION_INTERVAL: std::time::Duration =
 /// One bounded, already-rasterized physical-pixel indicator for the passive
 /// surface backend. Its identity stays stable while its animation advances.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ClickEffectFrame {
+pub struct ClickEffectFrame {
     pub id: u64,
     pub button: ClickButton,
     pub origin: PhysicalPoint,

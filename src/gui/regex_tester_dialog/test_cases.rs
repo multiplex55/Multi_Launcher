@@ -255,11 +255,9 @@ pub(super) fn show(
                                         .desired_width(ui.available_width())
                                         .hint_text("Optional case label"),
                                 );
-                                if label_response.changed() {
-                                    if process_actions {
-                                        case.label = label_value(&label);
-                                        changed = true;
-                                    }
+                                if label_response.changed() && process_actions {
+                                    case.label = label_value(&label);
+                                    changed = true;
                                 }
 
                                 ui.horizontal(|ui| {

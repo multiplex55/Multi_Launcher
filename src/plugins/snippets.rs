@@ -467,13 +467,12 @@ fn snippet_matches_query(
     if text_filter.is_empty() {
         return true;
     }
-    let text_matches = matcher.fuzzy_match(&snippet.alias, &text_filter).is_some()
-        || matcher.fuzzy_match(&snippet.text, &text_filter).is_some()
+    matcher.fuzzy_match(&snippet.alias, text_filter).is_some()
+        || matcher.fuzzy_match(&snippet.text, text_filter).is_some()
         || snippet
             .tags
             .iter()
-            .any(|tag| matcher.fuzzy_match(tag, &text_filter).is_some());
-    text_matches
+            .any(|tag| matcher.fuzzy_match(tag, text_filter).is_some())
 }
 
 fn starts_with_tag_filter(input: &str) -> bool {
@@ -1333,7 +1332,7 @@ mod persistence_tests {
         let external = snippet("external", "updated");
         std::fs::write(
             &path,
-            serde_json::to_vec_pretty(&[external.clone()]).unwrap(),
+            serde_json::to_vec_pretty(std::slice::from_ref(&external)).unwrap(),
         )
         .unwrap();
         reload_snippet_snapshot(&path_text, &data).unwrap();

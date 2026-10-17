@@ -733,10 +733,9 @@ impl BatchRenameDialogState {
         if ui
             .add_enabled(can_apply, egui::Button::new("Apply selected renames…"))
             .clicked()
+            && self.freeze_confirmed_plan().is_some()
         {
-            if self.freeze_confirmed_plan().is_some() {
-                self.apply_confirmation_open = true;
-            }
+            self.apply_confirmation_open = true;
         }
 
         if runtime.receipts.is_empty() {
@@ -857,14 +856,14 @@ impl BatchRenameDialogState {
                             .max_height(300.0)
                             .show(ui, |ui| {
                                 for entry in receipt.entries() {
-                                    if let Some(current) = entry.current_path() {
-                                        if current != entry.original_path() {
-                                            ui.label(format!(
-                                                "{} → {}",
-                                                current.display(),
-                                                entry.original_path().display()
-                                            ));
-                                        }
+                                    if let Some(current) = entry.current_path()
+                                        && current != entry.original_path()
+                                    {
+                                        ui.label(format!(
+                                            "{} → {}",
+                                            current.display(),
+                                            entry.original_path().display()
+                                        ));
                                     }
                                 }
                             });
@@ -961,7 +960,7 @@ impl BatchRenameDialogState {
             .snapshot
             .as_ref()
             .map(|snapshot| snapshot.canonical_root())
-            .or_else(|| self.root_path.as_deref());
+            .or(self.root_path.as_deref());
         ui.horizontal(|ui| {
             ui.strong("Root:");
             if let Some(root) = root {
@@ -1317,7 +1316,7 @@ impl BatchRenameDialogState {
         let mut status_column_width = 0.0;
         #[cfg(test)]
         let mut rendered_rows = 0;
-        let table_output = egui::ScrollArea::horizontal()
+        let _table_output = egui::ScrollArea::horizontal()
             .id_salt("batch_rename_table_horizontal_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -1392,7 +1391,7 @@ impl BatchRenameDialogState {
                             }
                         });
                     })
-                    .body(|mut body| {
+                    .body(|body| {
                         body.rows(PREVIEW_ROW_HEIGHT, visible_rows.len(), |mut row| {
                             #[cfg(test)]
                             {
@@ -1486,11 +1485,11 @@ impl BatchRenameDialogState {
         #[cfg(test)]
         {
             self.last_table_scroll_metrics = Some((
-                table_output.id,
-                table_output.inner_rect.width(),
-                table_output.content_size.x,
+                _table_output.id,
+                _table_output.inner_rect.width(),
+                _table_output.content_size.x,
                 status_column_width,
-                table_output.state.offset.x,
+                _table_output.state.offset.x,
             ));
             self.last_table_rendered_rows = rendered_rows;
         }
