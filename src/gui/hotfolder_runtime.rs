@@ -5,17 +5,15 @@
 
 use crate::hotfolder::{
     ActionCapability, ActionEnablement, ConfigurationFingerprint, HotFolderCapabilityContext,
-    HotFolderExecutionControl, HotFolderExecutionEngine, HotFolderExecutionProgress,
-    HotFolderExecutionSnapshot,
-    HotFolderEventKind, HotFolderRule, HotFolderRuntimeSnapshot, HotFolderStoreError,
-    HotFolderWatchService, HotFolderEnableRequest, RootAvailability, RuleAction, RuleId,
-    StrongActionConfirmation, evaluate_action_capability, evaluate_rule_conditions,
+    HotFolderEnableRequest, HotFolderEventKind, HotFolderExecutionControl,
+    HotFolderExecutionEngine, HotFolderExecutionProgress, HotFolderExecutionSnapshot,
+    HotFolderRule, HotFolderRuntimeSnapshot, HotFolderStoreError, HotFolderWatchService,
+    RootAvailability, RuleAction, RuleId, StrongActionConfirmation, evaluate_action_capability,
+    evaluate_rule_conditions,
 };
 use crate::mkmacro::MkMacroDocument;
 use crate::platform::app_data::AppDataRoot;
-use crate::universal_actions::{
-    ActionResolutionContext, ActionSurface, ResolvedActionTarget,
-};
+use crate::universal_actions::{ActionResolutionContext, ActionSurface, ResolvedActionTarget};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -214,7 +212,8 @@ impl HotFolderRuntimeDriver {
     }
 
     pub(crate) fn snapshot(&self) -> HotFolderDriverSnapshot {
-        let mut snapshot = self.snapshot
+        let mut snapshot = self
+            .snapshot
             .read()
             .map(|snapshot| snapshot.clone())
             .unwrap_or_default();
@@ -227,10 +226,7 @@ impl HotFolderRuntimeDriver {
         self.submit(DriverOperation::EnsureLoaded, None)
     }
 
-    pub(crate) fn start(
-        &self,
-        inputs: HotFolderCapabilityInputs,
-    ) -> Result<u64, &'static str> {
+    pub(crate) fn start(&self, inputs: HotFolderCapabilityInputs) -> Result<u64, &'static str> {
         self.submit(DriverOperation::Start, Some(inputs))
     }
 
@@ -340,10 +336,7 @@ impl HotFolderRuntimeDriver {
         self.submit_blocking(DriverOperation::Pause, None, false)
     }
 
-    pub(crate) fn resume(
-        &self,
-        inputs: HotFolderCapabilityInputs,
-    ) -> Result<u64, &'static str> {
+    pub(crate) fn resume(&self, inputs: HotFolderCapabilityInputs) -> Result<u64, &'static str> {
         self.submit(DriverOperation::Resume, Some(inputs))
     }
 
@@ -438,8 +431,7 @@ impl HotFolderRuntimeDriver {
                     if let Some(worker) = worker {
                         let _ = worker.join();
                     }
-                })
-            {
+                }) {
                 Ok(reaper) => self.reaper = Some(reaper),
                 Err(error) => {
                     tracing::error!(reason = %error, "Hot Folder reaper could not start; waiting at shutdown boundary");
@@ -570,7 +562,8 @@ fn driver_main(
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
 
-        if plugin_enabled && !paused
+        if plugin_enabled
+            && !paused
             && let (Some(watcher), Some(engine)) = (watcher.as_ref(), engine.as_ref())
         {
             let rules = store.snapshot();
@@ -871,7 +864,9 @@ fn process_operation(
                 .cloned()
                 .ok_or_else(|| "Hot Folder rule no longer exists".to_owned())?;
             rule.enabled = false;
-            let snapshot = store.replace_rule(expected_revision, rule).map_err(store_error)?;
+            let snapshot = store
+                .replace_rule(expected_revision, rule)
+                .map_err(store_error)?;
             pending_enables.retain(|prepared| prepared.preview.rule.id != rule_id);
             reconcile_after_edit(
                 &snapshot,
@@ -906,10 +901,11 @@ fn process_operation(
                 *watcher = Some(HotFolderWatchService::new());
             }
             let watcher_ref = watcher.as_mut().expect("watcher was created above");
-            inputs.with_context(&snapshot, adapter.as_ref(), |context| {
-                watcher_ref.resume_enabled_rules(&snapshot, &context)
-            })
-            .map_err(|error| format!("{error:?}"))?;
+            inputs
+                .with_context(&snapshot, adapter.as_ref(), |context| {
+                    watcher_ref.resume_enabled_rules(&snapshot, &context)
+                })
+                .map_err(|error| format!("{error:?}"))?;
             let engine_ref = engine
                 .as_ref()
                 .ok_or_else(|| "Hot Folder execution engine is unavailable".to_owned())?;
@@ -1029,7 +1025,9 @@ fn reconcile_after_edit(
 ) -> Result<(), String> {
     if let (Some(watcher), Some(engine)) = (watcher.as_mut(), engine.as_ref()) {
         inputs
-            .with_context(snapshot, adapter, |context| watcher.reconcile_rules(snapshot, &context))
+            .with_context(snapshot, adapter, |context| {
+                watcher.reconcile_rules(snapshot, &context)
+            })
             .map_err(|error| format!("{error:?}"))?;
         engine.reconcile_rules(snapshot);
         if !paused {
@@ -1136,19 +1134,23 @@ impl super::LauncherApp {
     pub(crate) fn render_hotfolder_manager(&mut self, ctx: &eframe::egui::Context, dispatch: bool) {
         let snapshot = self.hotfolder_runtime.snapshot();
         let root_visible = self.visible_flag.load(std::sync::atomic::Ordering::Relaxed);
-        if !self.hotfolder_dialog.needs_runtime_poll(&snapshot, root_visible) {
+        if !self
+            .hotfolder_dialog
+            .needs_runtime_poll(&snapshot, root_visible)
+        {
             return;
         }
         if self.hotfolder_dialog.needs_picker_snapshot() {
             let inputs = self.hotfolder_capability_inputs();
-            self.hotfolder_dialog.set_picker_snapshot(
-                inputs.launcher_targets,
-                inputs.mkmacro_document,
-            );
+            self.hotfolder_dialog
+                .set_picker_snapshot(inputs.launcher_targets, inputs.mkmacro_document);
         }
         let actions = self.hotfolder_dialog.ui(ctx, &snapshot);
         if dispatch {
-            self.dispatch_hotfolder_dialog_actions(actions, snapshot.store.as_ref().map(|s| s.revision));
+            self.dispatch_hotfolder_dialog_actions(
+                actions,
+                snapshot.store.as_ref().map(|s| s.revision),
+            );
         }
     }
 
@@ -1161,40 +1163,84 @@ impl super::LauncherApp {
 
         for action in actions {
             let (request, kind, undo_rule) = match action {
-                Action::EnsureLoaded => (self.hotfolder_runtime.ensure_loaded(), PendingKind::Load, None),
-                Action::SaveNew { expected_revision, rule } => (
-                    self.hotfolder_runtime.save_new(expected_revision, rule, self.hotfolder_capability_inputs()),
+                Action::EnsureLoaded => (
+                    self.hotfolder_runtime.ensure_loaded(),
+                    PendingKind::Load,
+                    None,
+                ),
+                Action::SaveNew {
+                    expected_revision,
+                    rule,
+                } => (
+                    self.hotfolder_runtime.save_new(
+                        expected_revision,
+                        rule,
+                        self.hotfolder_capability_inputs(),
+                    ),
                     PendingKind::Save,
                     None,
                 ),
-                Action::SaveEdit { expected_revision, rule } => (
-                    self.hotfolder_runtime.save_edit(expected_revision, rule, self.hotfolder_capability_inputs()),
+                Action::SaveEdit {
+                    expected_revision,
+                    rule,
+                } => (
+                    self.hotfolder_runtime.save_edit(
+                        expected_revision,
+                        rule,
+                        self.hotfolder_capability_inputs(),
+                    ),
                     PendingKind::Save,
                     None,
                 ),
-                Action::Delete { expected_revision, rule } => (
-                    self.hotfolder_runtime.delete(expected_revision, rule.id.clone(), self.hotfolder_capability_inputs()),
+                Action::Delete {
+                    expected_revision,
+                    rule,
+                } => (
+                    self.hotfolder_runtime.delete(
+                        expected_revision,
+                        rule.id.clone(),
+                        self.hotfolder_capability_inputs(),
+                    ),
                     PendingKind::Delete,
                     Some(rule),
                 ),
                 Action::UndoDelete(rule) => match current_revision {
                     Some(revision) => (
-                        self.hotfolder_runtime.save_new(revision, rule, self.hotfolder_capability_inputs()),
+                        self.hotfolder_runtime.save_new(
+                            revision,
+                            rule,
+                            self.hotfolder_capability_inputs(),
+                        ),
                         PendingKind::UndoDelete,
                         None,
                     ),
                     None => {
-                        self.hotfolder_dialog.submission_failed("Rules are not loaded yet");
+                        self.hotfolder_dialog
+                            .submission_failed("Rules are not loaded yet");
                         continue;
                     }
                 },
-                Action::PrepareEnable { expected_revision, rule_id } => (
-                    self.hotfolder_runtime.prepare_enable(expected_revision, rule_id, self.hotfolder_capability_inputs()),
+                Action::PrepareEnable {
+                    expected_revision,
+                    rule_id,
+                } => (
+                    self.hotfolder_runtime.prepare_enable(
+                        expected_revision,
+                        rule_id,
+                        self.hotfolder_capability_inputs(),
+                    ),
                     PendingKind::PrepareEnable,
                     None,
                 ),
-                Action::ConfirmEnable { preview_id, confirmation } => (
-                    self.hotfolder_runtime.confirm_enable(preview_id, confirmation, self.hotfolder_capability_inputs()),
+                Action::ConfirmEnable {
+                    preview_id,
+                    confirmation,
+                } => (
+                    self.hotfolder_runtime.confirm_enable(
+                        preview_id,
+                        confirmation,
+                        self.hotfolder_capability_inputs(),
+                    ),
                     PendingKind::ConfirmEnable,
                     None,
                 ),
@@ -1203,32 +1249,61 @@ impl super::LauncherApp {
                     PendingKind::CancelEnable,
                     None,
                 ),
-                Action::Disable { expected_revision, rule_id } => (
-                    self.hotfolder_runtime.disable(expected_revision, rule_id, self.hotfolder_capability_inputs()),
+                Action::Disable {
+                    expected_revision,
+                    rule_id,
+                } => (
+                    self.hotfolder_runtime.disable(
+                        expected_revision,
+                        rule_id,
+                        self.hotfolder_capability_inputs(),
+                    ),
                     PendingKind::Disable,
                     None,
                 ),
                 Action::Pause => (self.hotfolder_runtime.pause(), PendingKind::Pause, None),
                 Action::Resume => (
-                    self.hotfolder_runtime.resume(self.hotfolder_capability_inputs()),
+                    self.hotfolder_runtime
+                        .resume(self.hotfolder_capability_inputs()),
                     PendingKind::Resume,
                     None,
                 ),
-                Action::ClearHistory => (self.hotfolder_runtime.clear_history(), PendingKind::ClearHistory, None),
-                Action::TestRule { editor_id, rule, sample, event, draft_revision } => {
+                Action::ClearHistory => (
+                    self.hotfolder_runtime.clear_history(),
+                    PendingKind::ClearHistory,
+                    None,
+                ),
+                Action::TestRule {
+                    editor_id,
+                    rule,
+                    sample,
+                    event,
+                    draft_revision,
+                } => {
                     let inputs = self.hotfolder_capability_inputs();
                     let adapter = self.hotfolder_external_action_adapter();
                     let unhandled = self.hotfolder_dialog.start_sample_test_from_action(
-                        Action::TestRule { editor_id, rule, sample, event, draft_revision },
+                        Action::TestRule {
+                            editor_id,
+                            rule,
+                            sample,
+                            event,
+                            draft_revision,
+                        },
                         inputs,
                         adapter,
                     );
-                    debug_assert!(unhandled.is_none(), "Test Rule is handled in its read-only worker");
+                    debug_assert!(
+                        unhandled.is_none(),
+                        "Test Rule is handled in its read-only worker"
+                    );
                     continue;
                 }
             };
             match request {
-                Ok(request_id) => self.hotfolder_dialog.note_request(request_id, kind, undo_rule),
+                Ok(request_id) => self
+                    .hotfolder_dialog
+                    .note_request(request_id, kind, undo_rule),
                 Err(error) => self.hotfolder_dialog.submission_failed(error),
             }
         }
@@ -1241,12 +1316,34 @@ mod m10e_driver_lifecycle_fixtures {
     use crate::hotfolder::{
         ConfigurationFingerprint, HotFolderExecutionPhase, HotFolderExternalActionOutcome,
         HotFolderExternalActionRequest, HotFolderExternalEnableAuthorization,
-        HotFolderExternalFileEvidence, HotFolderTerminalStatus, RuleAction,
+        HotFolderExternalFileEvidence, HotFolderRule, HotFolderTerminalStatus, RuleAction,
     };
+    #[cfg(windows)]
+    use crate::hotfolder::{RuleId, SettlePolicy, StrongActionConfirmation};
     use crate::mkmacro::{MkMacro, MkMacroDocument};
+    #[cfg(windows)]
+    use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{Receiver, SyncSender};
     use std::time::Instant;
+
+    #[cfg(windows)]
+    struct NativeOnlyAdapter;
+
+    #[cfg(windows)]
+    impl crate::hotfolder::HotFolderExternalActionAdapter for NativeOnlyAdapter {
+        fn supports(&self, _action: &RuleAction) -> bool {
+            false
+        }
+
+        fn dispatch(
+            &self,
+            _request: HotFolderExternalActionRequest,
+            _cancellation: &crate::file_operations::ScanCancellation,
+        ) -> HotFolderExternalActionOutcome {
+            panic!("built-in Hot Folder actions must stay on the native file-operation path")
+        }
+    }
 
     struct BlockingExternalAdapter {
         started: SyncSender<u128>,
@@ -1302,9 +1399,153 @@ mod m10e_driver_lifecycle_fixtures {
             {
                 return snapshot;
             }
-            assert!(Instant::now() < deadline, "driver request was not acknowledged");
+            assert!(
+                Instant::now() < deadline,
+                "driver request was not acknowledged"
+            );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[cfg(windows)]
+    fn wait_for_successful_acknowledgement(
+        driver: &HotFolderRuntimeDriver,
+        request_id: u64,
+        operation: &str,
+    ) -> HotFolderDriverSnapshot {
+        let snapshot = wait_for_acknowledgement(driver, request_id);
+        let acknowledgement = snapshot
+            .acknowledgements
+            .iter()
+            .find(|ack| ack.request_id == request_id)
+            .expect("submitted runtime operation is acknowledged");
+        assert!(
+            acknowledgement.result.is_ok(),
+            "{operation} succeeds: {:?}",
+            acknowledgement.result
+        );
+        snapshot
+    }
+
+    #[cfg(windows)]
+    fn wait_for_completion_count(
+        driver: &HotFolderRuntimeDriver,
+        expected: u64,
+    ) -> HotFolderDriverSnapshot {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = driver.snapshot();
+            if snapshot
+                .execution
+                .as_ref()
+                .is_some_and(|execution| execution.completed_runs >= expected)
+            {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "native fixture action did not settle and complete"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(windows)]
+    fn observe_no_new_completions(
+        driver: &HotFolderRuntimeDriver,
+        expected: u64,
+        duration: Duration,
+    ) -> HotFolderDriverSnapshot {
+        let deadline = Instant::now() + duration;
+        loop {
+            let snapshot = driver.snapshot();
+            if let Some(execution) = snapshot.execution.as_ref() {
+                assert_eq!(
+                    execution.completed_runs, expected,
+                    "one file event must produce at most one terminal run"
+                );
+            }
+            if Instant::now() >= deadline {
+                return snapshot;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(windows)]
+    fn observe_file_unmoved(source: &Path, destination: &Path, duration: Duration) {
+        let deadline = Instant::now() + duration;
+        loop {
+            assert!(
+                source.exists(),
+                "unadmitted fixture input remains in the watched directory"
+            );
+            assert!(
+                !destination.exists(),
+                "unadmitted fixture input is not moved"
+            );
+            if Instant::now() >= deadline {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(windows)]
+    fn assert_fixture_path(actual: &Path, expected: &Path) {
+        assert_eq!(actual.file_name(), expected.file_name());
+        let actual_parent = std::fs::canonicalize(actual.parent().expect("actual fixture parent"))
+            .expect("canonical actual fixture parent");
+        let expected_parent =
+            std::fs::canonicalize(expected.parent().expect("expected fixture parent"))
+                .expect("canonical expected fixture parent");
+        assert_eq!(
+            crate::batch_rename::compare_paths_windows_ordinal(&actual_parent, &expected_parent),
+            std::cmp::Ordering::Equal,
+            "native receipt path remains inside the selected fixture directory"
+        );
+    }
+
+    #[cfg(windows)]
+    fn assert_successful_move(
+        snapshot: &HotFolderDriverSnapshot,
+        rule_id: &RuleId,
+        source: &Path,
+        destination: &Path,
+        expected_bytes: &[u8],
+    ) {
+        let execution = snapshot
+            .execution
+            .as_ref()
+            .expect("running execution history");
+        let matching = execution
+            .receipts
+            .iter()
+            .filter(|receipt| receipt.source_path.file_name() == source.file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matching.len(),
+            1,
+            "one source receives one terminal receipt"
+        );
+        let receipt = matching[0];
+        assert_fixture_path(&receipt.source_path, source);
+        assert_eq!(receipt.rule_id, *rule_id);
+        assert_eq!(
+            receipt.action,
+            crate::hotfolder::HotFolderExecutionAction::Move
+        );
+        assert_eq!(receipt.status, HotFolderTerminalStatus::Success);
+        assert_eq!(receipt.phase, HotFolderExecutionPhase::Complete);
+        assert!(receipt.durable, "the terminal receipt is persisted");
+        assert_eq!(receipt.source_length, expected_bytes.len() as u64);
+        assert_eq!(receipt.outputs.len(), 1);
+        assert_fixture_path(&receipt.outputs[0].path, destination);
+        assert_eq!(
+            std::fs::read(destination).expect("native move published the fixture bytes"),
+            expected_bytes
+        );
+        assert!(!source.exists(), "successful move removes the owned source");
     }
 
     #[test]
@@ -1351,11 +1592,7 @@ mod m10e_driver_lifecycle_fixtures {
         let data_root = AppDataRoot::from_path(fixture_root.join("app_data"));
         let store = crate::hotfolder::HotFolderRulesStore::new(&data_root);
         let empty = store.load();
-        let enabled_rule = HotFolderRule::new(
-            "restored macro",
-            &watched,
-            action,
-        );
+        let enabled_rule = HotFolderRule::new("restored macro", &watched, action);
         let disabled = store
             .add_rule(empty.snapshot.revision, enabled_rule)
             .expect("persist disabled macro rule");
@@ -1379,9 +1616,7 @@ mod m10e_driver_lifecycle_fixtures {
             inputs.evaluate_rule(&prior_snapshot.rules[0], adapter.as_ref())
         );
         let mut driver = HotFolderRuntimeDriver::new(data_root, adapter.clone());
-        let first_start = driver
-            .start(inputs.clone())
-            .expect("submit first start");
+        let first_start = driver.start(inputs.clone()).expect("submit first start");
         let first_snapshot = wait_for_acknowledgement(&driver, first_start);
         assert!(first_snapshot.running);
         assert_eq!(
@@ -1408,20 +1643,35 @@ mod m10e_driver_lifecycle_fixtures {
 
         thread::sleep(Duration::from_millis(1_200));
         assert!(existing.exists());
-        assert_eq!(adapter.dispatches.load(Ordering::SeqCst), 0,
-            "startup does not scan or backfill a file that predates the watcher");
+        assert_eq!(
+            adapter.dispatches.load(Ordering::SeqCst),
+            0,
+            "startup does not scan or backfill a file that predates the watcher"
+        );
 
         let current = driver.snapshot();
         let revision = current.store.as_ref().expect("loaded store").revision;
         let stale_save = driver
-            .save_edit(revision.saturating_sub(1), current.store.as_ref().unwrap().rules[0].clone(), inputs.clone())
+            .save_edit(
+                revision.saturating_sub(1),
+                current.store.as_ref().unwrap().rules[0].clone(),
+                inputs.clone(),
+            )
             .expect("stale save is submitted asynchronously");
         let stale_snapshot = wait_for_acknowledgement(&driver, stale_save);
-        let stale_ack = stale_snapshot.acknowledgements.iter()
-            .find(|ack| ack.request_id == stale_save).expect("stale save acknowledgement");
-        assert!(stale_ack.result.is_err(), "stale revision is rejected by the store owner");
-        assert!(!stale_snapshot.admission_blocked,
-            "failed mutation restores only its own still-current admission generation");
+        let stale_ack = stale_snapshot
+            .acknowledgements
+            .iter()
+            .find(|ack| ack.request_id == stale_save)
+            .expect("stale save acknowledgement");
+        assert!(
+            stale_ack.result.is_err(),
+            "stale revision is rejected by the store owner"
+        );
+        assert!(
+            !stale_snapshot.admission_blocked,
+            "failed mutation restores only its own still-current admission generation"
+        );
 
         let first_new = watched.join("new-one.txt");
         std::fs::write(&first_new, b"first settled input").expect("create first reported file");
@@ -1435,11 +1685,15 @@ mod m10e_driver_lifecycle_fixtures {
         let mut dialog = crate::gui::hotfolder_dialog::HotFolderDialog::default();
         dialog.open();
         let frame_started = Instant::now();
-        dialog_context.run_ui(eframe::egui::RawInput::default(), |ctx| {
-            let _ = dialog.ui(ctx, &live);
-        }).drop_without_applying_deltas();
-        assert!(frame_started.elapsed() < Duration::from_millis(500),
-            "an active synchronous C operation leaves an egui frame responsive");
+        dialog_context
+            .run_ui(eframe::egui::RawInput::default(), |ctx| {
+                let _ = dialog.ui(ctx, &live);
+            })
+            .drop_without_applying_deltas();
+        assert!(
+            frame_started.elapsed() < Duration::from_millis(500),
+            "an active synchronous C operation leaves an egui frame responsive"
+        );
 
         let queued = (0..DRIVER_QUEUE_CAPACITY)
             .map(|_| driver.ensure_loaded().expect("fill bounded control queue"))
@@ -1451,14 +1705,23 @@ mod m10e_driver_lifecycle_fixtures {
         );
         assert_eq!(full_queue, Err("Hot Folder control queue is full"));
         let after_queue_rejection = driver.snapshot();
-        assert!(!after_queue_rejection.admission_blocked,
-            "queue rejection restores admission only while its generation remains current");
-        assert!(after_queue_rejection.execution_progress.cancellation_requested,
-            "rejected mutation still truthfully reports cancellation of the owned active run");
+        assert!(
+            !after_queue_rejection.admission_blocked,
+            "queue rejection restores admission only while its generation remains current"
+        );
+        assert!(
+            after_queue_rejection
+                .execution_progress
+                .cancellation_requested,
+            "rejected mutation still truthfully reports cancellation of the owned active run"
+        );
         release_tx.send(()).expect("release first owned operation");
         let drained = wait_for_acknowledgement(&driver, *queued.last().expect("queue is nonempty"));
-        assert_eq!(drained.execution.as_ref().unwrap().receipts.len(), 1,
-            "first blocked operation publishes one terminal receipt after cancellation");
+        assert_eq!(
+            drained.execution.as_ref().unwrap().receipts.len(),
+            1,
+            "first blocked operation publishes one terminal receipt after cancellation"
+        );
 
         let second_new = watched.join("new-two.txt");
         std::fs::write(&second_new, b"second settled input").expect("create second reported file");
@@ -1473,36 +1736,75 @@ mod m10e_driver_lifecycle_fixtures {
         edited_rule.name = "saved before newer pause".into();
         let submission_started = Instant::now();
         let save_request = driver
-            .save_edit(second_live.store.as_ref().unwrap().revision, edited_rule, inputs.clone())
+            .save_edit(
+                second_live.store.as_ref().unwrap().revision,
+                edited_rule,
+                inputs.clone(),
+            )
             .expect("queue Save while the execution worker is busy");
-        let pause_request = driver.pause().expect("newer Pause closes admission immediately");
-        assert!(submission_started.elapsed() < Duration::from_millis(500),
-            "Save and Pause admission do not wait for the blocked C action");
+        let pause_request = driver
+            .pause()
+            .expect("newer Pause closes admission immediately");
+        assert!(
+            submission_started.elapsed() < Duration::from_millis(500),
+            "Save and Pause admission do not wait for the blocked C action"
+        );
         let cancellation_snapshot = driver.snapshot();
-        assert!(cancellation_snapshot.execution_progress.cancellation_requested);
+        assert!(
+            cancellation_snapshot
+                .execution_progress
+                .cancellation_requested
+        );
         let cancellation_frame_started = Instant::now();
-        dialog_context.run_ui(eframe::egui::RawInput::default(), |ctx| {
-            let _ = dialog.ui(ctx, &cancellation_snapshot);
-        }).drop_without_applying_deltas();
-        assert!(cancellation_frame_started.elapsed() < Duration::from_millis(500),
-            "the GUI can render an in-flight cancellation request without taking the C mutex");
+        dialog_context
+            .run_ui(eframe::egui::RawInput::default(), |ctx| {
+                let _ = dialog.ui(ctx, &cancellation_snapshot);
+            })
+            .drop_without_applying_deltas();
+        assert!(
+            cancellation_frame_started.elapsed() < Duration::from_millis(500),
+            "the GUI can render an in-flight cancellation request without taking the C mutex"
+        );
         release_tx.send(()).expect("release second owned operation");
         let paused = wait_for_acknowledgement(&driver, pause_request);
-        assert!(paused.acknowledgements.iter().any(|ack|
-            ack.request_id == save_request && ack.result.is_ok()));
-        assert!(paused.acknowledgements.iter().any(|ack|
-            ack.request_id == pause_request && ack.result.is_ok()));
+        assert!(
+            paused
+                .acknowledgements
+                .iter()
+                .any(|ack| ack.request_id == save_request && ack.result.is_ok())
+        );
+        assert!(
+            paused
+                .acknowledgements
+                .iter()
+                .any(|ack| ack.request_id == pause_request && ack.result.is_ok())
+        );
         assert!(paused.paused);
-        assert!(paused.admission_blocked,
-            "the older queued Save cannot reopen the newer Pause generation");
-        assert!(!paused.store.as_ref().unwrap().rules[0].enabled,
-            "saving the changed definition leaves it disabled");
+        assert!(
+            paused.admission_blocked,
+            "the older queued Save cannot reopen the newer Pause generation"
+        );
+        assert!(
+            !paused.store.as_ref().unwrap().rules[0].enabled,
+            "saving the changed definition leaves it disabled"
+        );
         let terminal = paused.execution.as_ref().unwrap();
-        assert_eq!(terminal.receipts.len(), 2, "each owned operation has one terminal receipt");
-        assert!(terminal.receipts.iter().all(|receipt|
-            receipt.status == HotFolderTerminalStatus::Cancelled));
-        assert_eq!(adapter.dispatches.load(Ordering::SeqCst), 2,
-            "the queued Save cannot admit a new action before the newer Pause is acknowledged");
+        assert_eq!(
+            terminal.receipts.len(),
+            2,
+            "each owned operation has one terminal receipt"
+        );
+        assert!(
+            terminal
+                .receipts
+                .iter()
+                .all(|receipt| receipt.status == HotFolderTerminalStatus::Cancelled)
+        );
+        assert_eq!(
+            adapter.dispatches.load(Ordering::SeqCst),
+            2,
+            "the queued Save cannot admit a new action before the newer Pause is acknowledged"
+        );
 
         // Model the main-thread completion queue at app exit. It must be
         // retired before the owned worker is joined so an outstanding reply
@@ -1510,10 +1812,11 @@ mod m10e_driver_lifecycle_fixtures {
         let macro_store = Arc::new(crate::mkmacro::MkMacroStore::empty_for_test(
             fixture_root.join("mkmacro_app_data"),
         ));
-        let (launcher_adapter, pump) = crate::gui::hotfolder_dispatch::LauncherHotFolderActionAdapter::new(
-            eframe::egui::Context::default(),
-            macro_store,
-        );
+        let (launcher_adapter, pump) =
+            crate::gui::hotfolder_dispatch::LauncherHotFolderActionAdapter::new(
+                eframe::egui::Context::default(),
+                macro_store,
+            );
         let receipt_rule = paused.store.as_ref().unwrap().rules[0].clone();
         let rule_fingerprint = ConfigurationFingerprint::of_serializable(&receipt_rule)
             .expect("current fixture rule fingerprints");
@@ -1544,12 +1847,13 @@ mod m10e_driver_lifecycle_fixtures {
                 },
             })
             .expect("main-thread reply request is pending");
-        let reply_thread = thread::spawn(move || {
-            pending_reply.receive_timeout(Duration::from_secs(5))
-        });
+        let reply_thread =
+            thread::spawn(move || pending_reply.receive_timeout(Duration::from_secs(5)));
         launcher_adapter.set_active(false);
         pump.set_active(false);
-        let retired_reply = reply_thread.join().expect("reply waiter joined")
+        let retired_reply = reply_thread
+            .join()
+            .expect("reply waiter joined")
             .expect("retirement produces a terminal reply");
         assert_eq!(retired_reply.operation_id, 8181);
         assert_eq!(retired_reply.status, HotFolderTerminalStatus::Failure);
@@ -1557,7 +1861,357 @@ mod m10e_driver_lifecycle_fixtures {
         driver.shutdown_and_reap();
         driver.join_reaper();
         assert!(driver.worker.is_none());
-        assert!(driver.reaper.is_none(), "owned driver and reaper are joined at final shutdown");
+        assert!(
+            driver.reaper.is_none(),
+            "owned driver and reaper are joined at final shutdown"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn m10f_disabled_rule_requires_strong_enable_and_moves_only_new_settled_files_across_lifecycle()
+    {
+        let fixture_parent = std::env::current_dir()
+            .expect("resolve repository root")
+            .join("target/productivity_expansion");
+        std::fs::create_dir_all(&fixture_parent).expect("create disposable fixture parent");
+        let temporary = tempfile::Builder::new()
+            .prefix("hotfolder_m10f_")
+            .tempdir_in(&fixture_parent)
+            .expect("fixture root under the repository-owned native-test directory");
+        let fixture_root = temporary.path().join("hotfolder_m10f");
+        let watched = fixture_root.join("incoming");
+        let destination = fixture_root.join("moved");
+        std::fs::create_dir_all(&watched).expect("create watched fixture directory");
+        std::fs::create_dir_all(&destination).expect("create destination fixture directory");
+        assert!(watched.starts_with(&fixture_parent));
+        assert!(destination.starts_with(&fixture_parent));
+
+        let preexisting = watched.join("before-enable.txt");
+        let outside = fixture_root.join("outside-watched-root.txt");
+        std::fs::write(&preexisting, b"already here").expect("create pre-enable input");
+        std::fs::write(&outside, b"outside remains untouched").expect("create outside-root input");
+        let data_root = AppDataRoot::from_path(fixture_root.join("app_data"));
+        let store = crate::hotfolder::HotFolderRulesStore::new(&data_root);
+        let missing = store.load();
+        let mut rule = HotFolderRule::new(
+            "M10-F fixture move",
+            &watched,
+            RuleAction::Move {
+                destination: destination.clone(),
+            },
+        );
+        rule.settle = SettlePolicy {
+            sample_interval_ms: 50,
+            stable_observations: 2,
+            timeout_ms: 1_000,
+        };
+        let disabled = store
+            .add_rule(missing.snapshot.revision, rule)
+            .expect("persist a disabled move rule through the production store");
+        let rule_id = disabled.rules[0].id.clone();
+        assert!(
+            !disabled.rules[0].enabled,
+            "new rules are persisted disabled"
+        );
+
+        let inputs = HotFolderCapabilityInputs::empty();
+        let adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter> =
+            Arc::new(NativeOnlyAdapter);
+        let mut driver = HotFolderRuntimeDriver::new(data_root.clone(), Arc::clone(&adapter));
+        let start_request = driver
+            .start(inputs.clone())
+            .expect("start the app-owned runtime");
+        let started = wait_for_successful_acknowledgement(&driver, start_request, "runtime start");
+        assert!(started.running);
+        assert_eq!(
+            started
+                .runtime
+                .as_ref()
+                .map(|runtime| (runtime.active_roots, runtime.active_rules)),
+            Some((0, 0)),
+            "loading a disabled rule does not create a native subscription"
+        );
+        let created_while_disabled = watched.join("after-start-disabled.txt");
+        let disabled_destination = destination.join("after-start-disabled.txt");
+        std::fs::write(&created_while_disabled, b"created while disabled")
+            .expect("create a new input after the disabled driver starts");
+        observe_file_unmoved(
+            &created_while_disabled,
+            &disabled_destination,
+            Duration::from_millis(350),
+        );
+        let disabled_idle = observe_no_new_completions(&driver, 0, Duration::from_millis(100));
+        assert_eq!(
+            disabled_idle
+                .execution
+                .as_ref()
+                .map_or(0, |execution| execution.receipts.len()),
+            0,
+            "a new arrival while disabled produces no terminal receipt"
+        );
+        observe_file_unmoved(
+            &preexisting,
+            &destination.join("before-enable.txt"),
+            Duration::from_millis(250),
+        );
+
+        let prepare_request = driver
+            .prepare_enable(disabled.revision, rule_id.clone(), inputs.clone())
+            .expect("submit the real validated strong-enable preflight");
+        let prepared = wait_for_successful_acknowledgement(
+            &driver,
+            prepare_request,
+            "strong-enable preflight",
+        );
+        let preview = prepared
+            .enable_previews
+            .iter()
+            .find(|preview| preview.rule.id == rule_id)
+            .expect("Move presents its current confirmation preview");
+        assert!(matches!(
+            &preview.capability,
+            ActionCapability::Supported {
+                enablement: ActionEnablement::StrongConfirmationRequired
+            }
+        ));
+        assert_eq!(preview.expected_revision, disabled.revision);
+        assert_eq!(preview.resulting_revision, disabled.revision + 1);
+        let confirmation = StrongActionConfirmation::from_explicit_confirmation(
+            preview.rule.id.clone(),
+            preview.resulting_revision,
+            preview.fingerprint.clone(),
+        );
+        let confirm_request = driver
+            .confirm_enable(preview.request_id, confirmation, inputs.clone())
+            .expect("submit the explicit revision-and-fingerprint-bound confirmation");
+        let enabled = wait_for_successful_acknowledgement(
+            &driver,
+            confirm_request,
+            "strong-enable confirmation",
+        );
+        assert!(enabled.store.as_ref().unwrap().rules[0].enabled);
+        assert_eq!(
+            enabled
+                .runtime
+                .as_ref()
+                .map(|runtime| (runtime.active_roots, runtime.active_rules)),
+            Some((1, 1)),
+            "the validated confirmation activates exactly one native watched root and rule"
+        );
+        observe_file_unmoved(
+            &preexisting,
+            &destination.join("before-enable.txt"),
+            Duration::from_millis(350),
+        );
+        observe_file_unmoved(
+            &created_while_disabled,
+            &disabled_destination,
+            Duration::from_millis(350),
+        );
+        observe_no_new_completions(&driver, 0, Duration::from_millis(350));
+
+        let first_name = "new-burst.txt";
+        let first_source = watched.join(first_name);
+        let first_destination = destination.join(first_name);
+        let first_bytes = b"first-duplicate-one-duplicate-two-duplicate-three";
+        std::fs::write(&first_source, b"first").expect("create one new event");
+        let mut burst = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&first_source)
+            .expect("reopen the same input for a duplicate notification burst");
+        for payload in [
+            &b"-duplicate-one"[..],
+            &b"-duplicate-two"[..],
+            &b"-duplicate-three"[..],
+        ] {
+            burst.write_all(payload).expect("write burst payload");
+        }
+        burst.flush().expect("flush burst payload");
+        drop(burst);
+        let reached_first_completion = wait_for_completion_count(&driver, 1);
+        assert_eq!(
+            reached_first_completion
+                .execution
+                .as_ref()
+                .unwrap()
+                .completed_runs,
+            1
+        );
+        let first_completed = observe_no_new_completions(&driver, 1, Duration::from_millis(300));
+        assert_eq!(
+            first_completed.execution.as_ref().unwrap().completed_runs,
+            1
+        );
+        assert_successful_move(
+            &first_completed,
+            &rule_id,
+            &first_source,
+            &first_destination,
+            first_bytes,
+        );
+        assert_eq!(
+            first_completed.execution.as_ref().unwrap().receipts.len(),
+            1
+        );
+        drop(first_completed);
+
+        let pause_request = driver
+            .pause()
+            .expect("close admission and pause the watcher");
+        let paused = wait_for_successful_acknowledgement(&driver, pause_request, "pause");
+        assert!(paused.paused && paused.admission_blocked);
+        let paused_source = watched.join("while-paused.txt");
+        let paused_destination = destination.join("while-paused.txt");
+        std::fs::write(&paused_source, b"paused input").expect("create input while paused");
+        observe_file_unmoved(
+            &paused_source,
+            &paused_destination,
+            Duration::from_millis(350),
+        );
+        observe_no_new_completions(&driver, 1, Duration::from_millis(100));
+
+        let resume_request = driver
+            .resume(inputs.clone())
+            .expect("revalidate and resume in a fresh watcher epoch");
+        let resumed = wait_for_successful_acknowledgement(&driver, resume_request, "resume");
+        assert!(!resumed.paused);
+        assert_eq!(
+            resumed
+                .runtime
+                .as_ref()
+                .map(|runtime| (runtime.active_roots, runtime.active_rules)),
+            Some((1, 1))
+        );
+        observe_file_unmoved(
+            &paused_source,
+            &paused_destination,
+            Duration::from_millis(350),
+        );
+        observe_no_new_completions(&driver, 1, Duration::from_millis(100));
+
+        let second_name = "after-resume.txt";
+        let second_source = watched.join(second_name);
+        let second_destination = destination.join(second_name);
+        let second_bytes = b"fresh resume epoch";
+        std::fs::write(&second_source, second_bytes).expect("create a fresh post-resume input");
+        let reached_second_completion = wait_for_completion_count(&driver, 2);
+        assert_eq!(
+            reached_second_completion
+                .execution
+                .as_ref()
+                .unwrap()
+                .completed_runs,
+            2
+        );
+        let second_completed = observe_no_new_completions(&driver, 2, Duration::from_millis(300));
+        assert_successful_move(
+            &second_completed,
+            &rule_id,
+            &second_source,
+            &second_destination,
+            second_bytes,
+        );
+        assert_eq!(
+            second_completed.execution.as_ref().unwrap().receipts.len(),
+            2
+        );
+        drop(second_completed);
+
+        let stop_request = driver.stop().expect("disable the plugin-owned watcher");
+        let stopped = wait_for_successful_acknowledgement(&driver, stop_request, "plugin stop");
+        assert!(!stopped.plugin_enabled && !stopped.running);
+        let plugin_off_source = watched.join("while-plugin-off.txt");
+        let plugin_off_destination = destination.join("while-plugin-off.txt");
+        std::fs::write(&plugin_off_source, b"plugin-off input").expect("create plugin-off input");
+        observe_file_unmoved(
+            &plugin_off_source,
+            &plugin_off_destination,
+            Duration::from_millis(250),
+        );
+
+        driver.shutdown_and_reap();
+        driver.join_reaper();
+        assert!(driver.worker.is_none());
+        assert!(
+            driver.reaper.is_none(),
+            "plugin-off driver worker and reaper are joined"
+        );
+
+        let shutdown_source = watched.join("while-shutdown.txt");
+        let shutdown_destination = destination.join("while-shutdown.txt");
+        std::fs::write(&shutdown_source, b"shutdown input").expect("create shutdown input");
+        observe_file_unmoved(
+            &shutdown_source,
+            &shutdown_destination,
+            Duration::from_millis(250),
+        );
+
+        let mut restarted = HotFolderRuntimeDriver::new(data_root, adapter);
+        let restart_request = restarted
+            .start(inputs)
+            .expect("start a new app-owned driver on the same persisted state");
+        let restored = wait_for_successful_acknowledgement(&restarted, restart_request, "restart");
+        assert!(restored.plugin_enabled && restored.running);
+        assert!(restored.store.as_ref().unwrap().rules[0].enabled);
+        assert_eq!(
+            restored
+                .runtime
+                .as_ref()
+                .map(|runtime| (runtime.active_roots, runtime.active_rules)),
+            Some((1, 1)),
+            "only the previously confirmed, still-valid rule is restored"
+        );
+        assert_eq!(restored.execution.as_ref().unwrap().completed_runs, 2);
+        for (source, target) in [
+            (&preexisting, destination.join("before-enable.txt")),
+            (&created_while_disabled, disabled_destination),
+            (&paused_source, paused_destination),
+            (&plugin_off_source, plugin_off_destination),
+            (&shutdown_source, shutdown_destination),
+        ] {
+            observe_file_unmoved(source, &target, Duration::from_millis(100));
+        }
+        observe_no_new_completions(&restarted, 2, Duration::from_millis(250));
+
+        let final_name = "after-restart.txt";
+        let final_source = watched.join(final_name);
+        let final_destination = destination.join(final_name);
+        let final_bytes = b"new event after restart";
+        std::fs::write(&final_source, final_bytes).expect("create a fresh post-restart input");
+        let reached_final_completion = wait_for_completion_count(&restarted, 3);
+        assert_eq!(
+            reached_final_completion
+                .execution
+                .as_ref()
+                .unwrap()
+                .completed_runs,
+            3
+        );
+        let final_completed = observe_no_new_completions(&restarted, 3, Duration::from_millis(300));
+        assert_successful_move(
+            &final_completed,
+            &rule_id,
+            &final_source,
+            &final_destination,
+            final_bytes,
+        );
+        assert_eq!(
+            final_completed.execution.as_ref().unwrap().receipts.len(),
+            3
+        );
+        assert_eq!(
+            std::fs::read(&outside).expect("outside watched root remains readable"),
+            b"outside remains untouched",
+            "the selected action never mutates a source outside its watched root"
+        );
+
+        restarted.shutdown_and_reap();
+        restarted.join_reaper();
+        assert!(restarted.worker.is_none());
+        assert!(
+            restarted.reaper.is_none(),
+            "restarted driver exits with no detached worker"
+        );
     }
 }
-
