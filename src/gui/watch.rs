@@ -995,15 +995,11 @@ mod tests {
         );
     }
 
-    fn track_c_expected_cached_search_entry(
-        action: &crate::actions::Action,
-        indexed_tail: bool,
-    ) -> CachedSearchEntry {
+    fn track_c_expected_cached_search_entry(action: &crate::actions::Action) -> CachedSearchEntry {
         CachedSearchEntry {
             label_lc: action.label.to_lowercase(),
             desc_lc: action.desc.to_lowercase(),
             action_lc: action.action.to_lowercase(),
-            category: crate::search_scope::catalog_action_category(action, indexed_tail),
         }
     }
 
@@ -2011,10 +2007,7 @@ mod tests {
         let expected_cache = state
             .expected_actions
             .iter()
-            .enumerate()
-            .map(|(index, action)| {
-                track_c_expected_cached_search_entry(action, index >= state.expected_custom.len())
-            })
+            .map(track_c_expected_cached_search_entry)
             .collect::<Vec<_>>();
         assert_eq!(app.action_cache, expected_cache);
         let expected_filter = state
@@ -2629,10 +2622,7 @@ mod tests {
             app.action_cache,
             expected_actions
                 .iter()
-                .enumerate()
-                .map(|(index, action)| {
-                    track_c_expected_cached_search_entry(action, index >= custom_len)
-                })
+                .map(track_c_expected_cached_search_entry)
                 .collect::<Vec<_>>()
         );
         assert_eq!(
@@ -3936,10 +3926,7 @@ mod tests {
         );
         let expected_cache = expected_actions
             .iter()
-            .enumerate()
-            .map(|(index, action)| {
-                track_c_expected_cached_search_entry(action, index >= state.custom_len)
-            })
+            .map(track_c_expected_cached_search_entry)
             .collect::<Vec<_>>();
         assert_eq!(app.action_cache, expected_cache);
         let expected_filter_metadata = expected_actions

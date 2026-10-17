@@ -960,7 +960,7 @@ mod persistence_tests {
     }
 
     #[test]
-    fn launcher_scope_cs_prefix_uses_isolated_snippets_provider() {
+    fn cs_prefix_uses_isolated_snippets_provider() {
         let _guard = TEST_MUTEX.lock().unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("snippets.json");
@@ -990,12 +990,9 @@ mod persistence_tests {
         ));
         assert!(!manager.has_enabled_query_prefix("csfoo", Some(&enabled), Some(&capabilities),));
         let legacy_adjacent_prefix =
-            manager.search_filtered_results("csfoo", Some(&enabled), Some(&capabilities));
+            manager.search_filtered("csfoo", Some(&enabled), Some(&capabilities));
         assert_eq!(legacy_adjacent_prefix.len(), 1);
-        assert_eq!(
-            legacy_adjacent_prefix[0].action.action,
-            snippet_run_action("foo")
-        );
+        assert_eq!(legacy_adjacent_prefix[0].action, snippet_run_action("foo"));
         drop(manager);
         drop(directory);
     }

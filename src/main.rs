@@ -2424,14 +2424,13 @@ fn spawn_gui(
         ),
     );
     let registration_timer = multi_launcher::performance::Timer::start();
-    plugins.reload_from_dirs_with_custom_len(
+    plugins.reload_from_dirs(
         dirs,
         settings.clipboard_limit,
         settings.net_unit,
         true,
         &plugin_settings,
         Arc::clone(&actions),
-        custom_len,
     );
     registration_timer.finish("startup.plugin_registration");
     // Ensure MG service starts even when there is no settings.json/plugin_settings entry yet.

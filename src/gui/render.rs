@@ -21679,11 +21679,6 @@ mod tests {
             .0;
         setup.drop_without_applying_deltas();
 
-        // M1-A removes only the launcher controls and key route. Search-state
-        // cleanup follows in M1-B, so keep a non-default value to prove these
-        // events no longer select a different scope or disturb the query.
-        app.search_scope = crate::search_scope::SearchScope::Applications;
-        app.last_search_scope = crate::search_scope::SearchScope::Applications;
         let query_before = app.query.clone();
         let results_before = app.results.clone();
 
@@ -21721,14 +21716,6 @@ mod tests {
                     "launcher frame must not paint scope control {scope_label:?}"
                 );
             }
-            assert_eq!(
-                app.search_scope,
-                crate::search_scope::SearchScope::Applications
-            );
-            assert_eq!(
-                app.last_search_scope,
-                crate::search_scope::SearchScope::Applications
-            );
             assert_eq!(app.query, query_before);
             assert_eq!(app.results, results_before);
             output.drop_without_applying_deltas();
@@ -24977,7 +24964,6 @@ mod tests {
         let local_only = app.search_read_only_outcome_with_plugin_snapshot(
             TRACK_C3A_QUERY,
             crate::plugin::PluginSearchSnapshotResult {
-                categories: Vec::new(),
                 actions: Vec::new(),
                 pending: false,
                 start_revision: provider_revision,

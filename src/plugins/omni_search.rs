@@ -5,7 +5,6 @@ use crate::plugins::calendar::CalendarPlugin;
 use crate::plugins::folders::FoldersPlugin;
 use crate::plugins::note::NotePlugin;
 use crate::plugins::todo::TodoPlugin;
-use crate::search_scope::{LauncherSearchResult, SearchResultCategory, catalog_action_category};
 use fst::{IntoStreamer, Map, MapBuilder, Streamer, automaton::Subsequence};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -62,7 +61,6 @@ pub struct OmniSearchPlugin {
     /// bookmarks. Cloning the `Arc` only clones the pointer so the underlying
     /// `Vec` remains shared.
     actions: Arc<Vec<Action>>,
-    action_categories: Vec<SearchResultCategory>,
     index: Option<Map<Vec<u8>>>,
 }
 
@@ -73,17 +71,6 @@ impl OmniSearchPlugin {
     /// `Arc` does not clone the `Vec` itself, so the plugin can read the shared
     /// action data without duplicating it.
     pub fn new(actions: Arc<Vec<Action>>) -> Self {
-        let custom_len = actions.len();
-        Self::new_with_custom_len(actions, custom_len)
-    }
-
-    /// Create an Omni provider with the launcher catalog's custom/indexed boundary.
-    pub fn new_with_custom_len(actions: Arc<Vec<Action>>, custom_len: usize) -> Self {
-        let action_categories = actions
-            .iter()
-            .enumerate()
-            .map(|(index, action)| catalog_action_category(action, index >= custom_len))
-            .collect();
         let mut entries: Vec<(String, u64)> = Vec::new();
         let mut seen = HashSet::new();
         for (i, a) in actions.iter().enumerate() {
@@ -134,7 +121,6 @@ impl OmniSearchPlugin {
             calendar: CalendarPlugin,
             settings: OmniSearchSettings::default(),
             actions,
-            action_categories,
             index,
         }
     }
@@ -142,13 +128,6 @@ impl OmniSearchPlugin {
 
 impl Plugin for OmniSearchPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        self.search_results_for_query(query)
-            .into_iter()
-            .map(LauncherSearchResult::into_action)
-            .collect()
-    }
-
-    fn search_results(&self, query: &str) -> Vec<LauncherSearchResult> {
         self.search_results_for_query(query)
     }
 
@@ -231,7 +210,7 @@ impl Plugin for OmniSearchPlugin {
 }
 
 impl OmniSearchPlugin {
-    fn search_results_for_query(&self, query: &str) -> Vec<LauncherSearchResult> {
+    fn search_results_for_query(&self, query: &str) -> Vec<Action> {
         const LIST_PREFIX: &str = "o list";
         if let Some(rest) = crate::common::strip_prefix_ci(query, LIST_PREFIX) {
             return self.search_all_results(rest.trim_start());
@@ -268,54 +247,29 @@ impl OmniSearchPlugin {
         }
     }
 
-    fn search_all_results(&self, rest: &str) -> Vec<LauncherSearchResult> {
+    fn search_all_results(&self, rest: &str) -> Vec<Action> {
         let mut out = Vec::new();
         // Keep source aggregation order stable for deterministic result ordering.
         if self.settings.include_folders {
-            out.extend(Self::with_category(
-                self.collect_folder_results(rest),
-                SearchResultCategory::Files,
-            ));
+            out.extend(self.collect_folder_results(rest));
         }
         if self.settings.include_bookmarks {
-            out.extend(Self::with_category(
-                self.collect_bookmark_results(rest),
-                SearchResultCategory::Commands,
-            ));
+            out.extend(self.collect_bookmark_results(rest));
         }
         if self.settings.include_apps {
             out.extend(self.collect_app_results(rest));
         }
         if self.settings.include_notes {
-            out.extend(Self::with_category(
-                self.collect_note_results(rest),
-                SearchResultCategory::Notes,
-            ));
+            out.extend(self.collect_note_results(rest));
         }
         if self.settings.include_todos {
-            out.extend(Self::with_category(
-                self.collect_todo_results(rest),
-                SearchResultCategory::Commands,
-            ));
+            out.extend(self.collect_todo_results(rest));
         }
         if self.settings.include_calendar {
-            out.extend(Self::with_category(
-                self.collect_calendar_results(rest),
-                SearchResultCategory::Commands,
-            ));
+            out.extend(self.collect_calendar_results(rest));
         }
 
         self.dedup_results(out)
-    }
-
-    fn with_category(
-        actions: Vec<Action>,
-        category: SearchResultCategory,
-    ) -> Vec<LauncherSearchResult> {
-        actions
-            .into_iter()
-            .map(|action| LauncherSearchResult::new(action, category))
-            .collect()
     }
 
     fn collect_calendar_results(&self, rest: &str) -> Vec<Action> {
@@ -360,19 +314,11 @@ impl OmniSearchPlugin {
         }
     }
 
-    fn collect_app_results(&self, rest: &str) -> Vec<LauncherSearchResult> {
+    fn collect_app_results(&self, rest: &str) -> Vec<Action> {
         let mut out = Vec::new();
         let q = rest.trim();
         if q.is_empty() {
-            out.extend(self.actions.iter().enumerate().map(|(index, action)| {
-                LauncherSearchResult::new(
-                    action.clone(),
-                    self.action_categories
-                        .get(index)
-                        .copied()
-                        .unwrap_or(SearchResultCategory::Applications),
-                )
-            }));
+            out.extend(self.actions.iter().cloned());
         } else {
             let q_lc = q.to_lowercase();
             if let Some(index) = &self.index {
@@ -383,27 +329,15 @@ impl OmniSearchPlugin {
                     if seen.insert(idx)
                         && let Some(a) = self.actions.get(idx as usize)
                     {
-                        out.push(LauncherSearchResult::new(
-                            a.clone(),
-                            self.action_categories
-                                .get(idx as usize)
-                                .copied()
-                                .unwrap_or(SearchResultCategory::Applications),
-                        ));
+                        out.push(a.clone());
                     }
                 }
             } else {
-                for (index, action) in self.actions.iter().enumerate() {
+                for action in self.actions.iter() {
                     let label = action.label.to_lowercase();
                     let desc = action.desc.to_lowercase();
                     if label.contains(&q_lc) || desc.contains(&q_lc) {
-                        out.push(LauncherSearchResult::new(
-                            action.clone(),
-                            self.action_categories
-                                .get(index)
-                                .copied()
-                                .unwrap_or(SearchResultCategory::Applications),
-                        ));
+                        out.push(action.clone());
                     }
                 }
             }
@@ -412,17 +346,17 @@ impl OmniSearchPlugin {
         out
     }
 
-    fn dedup_results(&self, results: Vec<LauncherSearchResult>) -> Vec<LauncherSearchResult> {
+    fn dedup_results(&self, results: Vec<Action>) -> Vec<Action> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
         let mut normalized_label = String::new();
         let mut dedup_key = String::new();
 
         for result in results {
-            Self::normalize_label_into(&result.action.label, &mut normalized_label);
+            Self::normalize_label_into(&result.label, &mut normalized_label);
 
             dedup_key.clear();
-            dedup_key.push_str(&result.action.action);
+            dedup_key.push_str(&result.action);
             dedup_key.push('\x1f');
             dedup_key.push_str(&normalized_label);
 
@@ -436,7 +370,7 @@ impl OmniSearchPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{LauncherSearchResult, OmniSearchPlugin, OmniSearchSettings, SearchResultCategory};
+    use super::{OmniSearchPlugin, OmniSearchSettings};
     use crate::actions::Action;
     use crate::plugin::Plugin;
     use eframe::egui;
@@ -706,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn launcher_scope_omni_results_keep_catalog_categories_and_first_source_dedup() {
+    fn omni_results_keep_catalog_order_and_first_source_dedup() {
         let actions = vec![
             Action {
                 label: "Legacy tool".into(),
@@ -727,7 +661,7 @@ mod tests {
                 args: None,
             },
         ];
-        let mut plugin = OmniSearchPlugin::new_with_custom_len(Arc::new(actions.clone()), 1);
+        let mut plugin = OmniSearchPlugin::new(Arc::new(actions.clone()));
         plugin.apply_settings(&json!({
             "include_apps": true,
             "include_notes": false,
@@ -737,37 +671,16 @@ mod tests {
             "include_bookmarks": false
         }));
 
-        let results = plugin.search_results("o list ");
-        assert_eq!(
-            results
-                .iter()
-                .map(|result| result.category)
-                .collect::<Vec<_>>(),
-            [
-                SearchResultCategory::Applications,
-                SearchResultCategory::Files,
-                SearchResultCategory::Applications,
-            ]
-        );
-        assert_eq!(
-            results
-                .iter()
-                .map(|result| result.action.clone())
-                .collect::<Vec<_>>(),
-            plugin.search("o list ")
-        );
+        assert_eq!(plugin.search("o list "), actions);
 
-        let first = LauncherSearchResult::new(actions[0].clone(), SearchResultCategory::Files);
-        let duplicate = LauncherSearchResult::new(
-            Action {
-                label: " LEGACY   TOOL ".into(),
-                ..actions[0].clone()
-            },
-            SearchResultCategory::Commands,
-        );
+        let first = actions[0].clone();
+        let duplicate = Action {
+            label: " LEGACY   TOOL ".into(),
+            ..actions[0].clone()
+        };
         let deduplicated = plugin.dedup_results(vec![first, duplicate]);
         assert_eq!(deduplicated.len(), 1);
-        assert_eq!(deduplicated[0].category, SearchResultCategory::Files);
+        assert_eq!(deduplicated[0], actions[0]);
     }
 
     #[test]

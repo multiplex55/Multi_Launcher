@@ -2960,18 +2960,6 @@ impl Plugin for NotePlugin {
         Vec::new()
     }
 
-    fn search_results(&self, query: &str) -> Vec<crate::search_scope::LauncherSearchResult> {
-        self.search(query)
-            .into_iter()
-            .map(|action| {
-                crate::search_scope::LauncherSearchResult::new(
-                    action,
-                    crate::search_scope::SearchResultCategory::Notes,
-                )
-            })
-            .collect()
-    }
-
     fn name(&self) -> &str {
         "notes"
     }

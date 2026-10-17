@@ -68,7 +68,6 @@ pub mod regex_tester;
 pub mod replace_executor;
 pub mod screen_draw;
 pub mod search_replace;
-pub mod search_scope;
 pub mod settings;
 pub mod settings_editor;
 mod settings_save;

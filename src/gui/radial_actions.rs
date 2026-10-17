@@ -4170,7 +4170,6 @@ mod tests {
         let revision = app.plugins.search_generation();
         let catalogs = crate::radial::dynamic::MutableResultCatalogVersions::current();
         crate::plugin::PluginSearchSnapshotResult {
-            categories: vec![crate::search_scope::SearchResultCategory::Commands; actions.len()],
             actions,
             pending: false,
             start_revision: revision,

@@ -463,31 +463,10 @@ pub(super) enum ProviderSearchDeferral {
 pub(crate) struct LauncherSearchOutcome {
     pub state: LauncherSearchState,
     pub actions: Vec<Action>,
-    pub categories: Vec<crate::search_scope::SearchResultCategory>,
     pub provider_revision: u64,
     pub result_catalog_versions: Option<crate::radial::dynamic::MutableResultCatalogVersions>,
     pub result_catalog_versions_stable: bool,
     pub(super) provider_deferral: ProviderSearchDeferral,
-}
-
-fn actions_in_search_scope(
-    actions: Vec<Action>,
-    categories: Vec<crate::search_scope::SearchResultCategory>,
-    scope: crate::search_scope::SearchScope,
-) -> Vec<Action> {
-    if scope == crate::search_scope::SearchScope::All {
-        return actions;
-    }
-    debug_assert_eq!(
-        actions.len(),
-        categories.len(),
-        "search result provenance stays aligned with actions"
-    );
-    actions
-        .into_iter()
-        .zip(categories)
-        .filter_map(|(action, category)| scope.includes(category).then_some(action))
-        .collect()
 }
 
 impl LauncherApp {
@@ -621,10 +600,7 @@ impl LauncherApp {
             );
             self.actions
                 .iter()
-                .enumerate()
-                .map(|(index, action)| {
-                    CachedSearchEntry::from_catalog_action(action, index >= self.custom_len)
-                })
+                .map(CachedSearchEntry::from_action)
                 .collect::<Vec<_>>()
         };
         #[cfg(test)]
@@ -760,49 +736,6 @@ impl LauncherApp {
         }
     }
 
-    pub(crate) fn set_search_scope(&mut self, scope: crate::search_scope::SearchScope) {
-        if self.search_scope == scope {
-            return;
-        }
-
-        let previous_effective_scope = self.effective_search_scope();
-        self.search_scope = scope;
-        if previous_effective_scope == self.effective_search_scope() {
-            return;
-        }
-
-        let suggestions = std::mem::take(&mut self.suggestions);
-        let autocomplete_index = self.autocomplete_index;
-        self.last_results_valid = false;
-        self.search();
-        self.suggestions = suggestions;
-        self.autocomplete_index = autocomplete_index;
-    }
-
-    pub(crate) fn effective_search_scope(&self) -> crate::search_scope::SearchScope {
-        if self.search_scope == crate::search_scope::SearchScope::All
-            || self.query.trim().is_empty()
-        {
-            return self.search_scope;
-        }
-        let explicit_g_prefix = self
-            .query
-            .trim_start()
-            .to_ascii_lowercase()
-            .starts_with("g ");
-        if explicit_g_prefix
-            || self.plugins.has_enabled_query_prefix(
-                &self.query,
-                self.enabled_plugins.as_ref(),
-                self.enabled_capabilities.as_ref(),
-            )
-        {
-            crate::search_scope::SearchScope::All
-        } else {
-            self.search_scope
-        }
-    }
-
     pub(crate) fn is_note_search_query(query: &str) -> bool {
         query.trim_start().to_lowercase().starts_with("note search")
     }
@@ -860,11 +793,7 @@ impl LauncherApp {
             .radial_suppressed_provider_query
             .take()
             .is_some_and(|query| query == self.query);
-        let effective_scope = self.effective_search_scope();
-        if self.last_results_valid
-            && self.query == self.last_search_query
-            && effective_scope == self.last_search_scope
-        {
+        if self.last_results_valid && self.query == self.last_search_query {
             self.clear_selected_after_results_replaced();
             self.record_track_c_query_search_acceptance();
             crate::performance::log_elapsed("search.cached", total_started);
@@ -887,9 +816,7 @@ impl LauncherApp {
             self.last_search_result_catalog_versions = outcome.result_catalog_versions;
             self.last_search_result_catalog_versions_stable =
                 outcome.result_catalog_versions_stable;
-            self.results =
-                actions_in_search_scope(outcome.actions, outcome.categories, effective_scope);
-            self.last_search_scope = effective_scope;
+            self.results = outcome.actions;
             self.invalidate_root_list_results();
             self.clear_selected_after_results_replaced();
             self.recompute_query_results_layout();
@@ -914,18 +841,16 @@ impl LauncherApp {
         let c2c_install_observer = c2c_install_observer::current();
         #[cfg(test)]
         let installation_started = c2c_install_observer.as_ref().map(|_| Instant::now());
-        let same_raw_query =
-            self.query == self.last_search_query && effective_scope == self.last_search_scope;
-        let scoped_actions =
-            actions_in_search_scope(outcome.actions, outcome.categories, effective_scope);
+        let same_raw_query = self.query == self.last_search_query;
+        let incoming_results = outcome.actions;
         let can_reuse_results =
-            same_raw_query && !self.results.is_empty() && !scoped_actions.is_empty();
+            same_raw_query && !self.results.is_empty() && !incoming_results.is_empty();
         #[cfg(test)]
-        let incoming_actions = scoped_actions.len();
+        let incoming_actions = incoming_results.len();
         let results_are_equal = if can_reuse_results {
             #[cfg(test)]
             let comparison_started = c2c_install_observer.as_ref().map(|_| Instant::now());
-            let equal = self.results == scoped_actions;
+            let equal = self.results == incoming_results;
             #[cfg(test)]
             if let (Some(observer), Some(started)) =
                 (c2c_install_observer.as_ref(), comparison_started)
@@ -946,7 +871,7 @@ impl LauncherApp {
         };
 
         if results_are_equal {
-            drop(scoped_actions);
+            drop(incoming_results);
             self.queue_popup_cleanup_after_preserved_results();
             #[cfg(test)]
             if let Some(observer) = c2c_install_observer.as_ref() {
@@ -957,7 +882,7 @@ impl LauncherApp {
                 );
             }
         } else {
-            self.results = scoped_actions;
+            self.results = incoming_results;
             self.invalidate_root_list_results();
             #[cfg(test)]
             if let Some(observer) = c2c_install_observer.as_ref() {
@@ -979,7 +904,6 @@ impl LauncherApp {
         }
         self.clear_selected_after_results_replaced();
         self.last_search_query = self.query.clone();
-        self.last_search_scope = effective_scope;
         self.last_results_valid = outcome.provider_deferral == ProviderSearchDeferral::None;
         let completion_started = crate::performance::started_if(perf_enabled);
         self.update_suggestions();
@@ -1032,11 +956,7 @@ impl LauncherApp {
         }
     }
 
-    fn search_actions(
-        &self,
-        query: &str,
-        _query_lc: &str,
-    ) -> Vec<(crate::search_scope::LauncherSearchResult, f32)> {
+    fn search_actions(&self, query: &str, _query_lc: &str) -> Vec<(Action, f32)> {
         let telemetry_enabled = crate::performance::enabled();
         #[cfg(test)]
         let c2a_observer = c2a_search_observer::current();
@@ -1077,13 +997,7 @@ impl LauncherApp {
                             .saturating_add(c2a_search_observer::action_payload_strings(a));
                     }
                     let cloned = a.clone();
-                    res.push((
-                        crate::search_scope::LauncherSearchResult::new(
-                            cloned,
-                            self.action_cache[i].category,
-                        ),
-                        0.0,
-                    ));
+                    res.push((cloned, 0.0));
                 }
             }
         } else {
@@ -1124,10 +1038,7 @@ impl LauncherApp {
                                 .saturating_add(c2a_search_observer::action_payload_strings(a));
                         }
                         let cloned = a.clone();
-                        res.push((
-                            crate::search_scope::LauncherSearchResult::new(cloned, cached.category),
-                            score,
-                        ));
+                        res.push((cloned, score));
                     }
                 } else {
                     let s1 = self.matcher.fuzzy_match(&a.label, query);
@@ -1142,10 +1053,7 @@ impl LauncherApp {
                                 .saturating_add(c2a_search_observer::action_payload_strings(a));
                         }
                         let cloned = a.clone();
-                        res.push((
-                            crate::search_scope::LauncherSearchResult::new(cloned, cached.category),
-                            score as f32 * self.fuzzy_weight,
-                        ));
+                        res.push((cloned, score as f32 * self.fuzzy_weight));
                     }
                 }
             }
@@ -1189,16 +1097,16 @@ impl LauncherApp {
         raw_query: &str,
         trimmed: &str,
         trimmed_lc: &str,
-    ) -> (Vec<(crate::search_scope::LauncherSearchResult, f32)>, bool) {
+    ) -> (Vec<(Action, f32)>, bool) {
         let (plugin_results, tickets) = if trimmed_lc.starts_with("g ") {
             let filter = std::collections::HashSet::from(["web_search".to_string()]);
-            self.plugins.search_filtered_results_with_tickets(
+            self.plugins.search_filtered_with_tickets(
                 raw_query,
                 Some(&filter),
                 self.enabled_capabilities.as_ref(),
             )
         } else {
-            self.plugins.search_filtered_results_with_tickets(
+            self.plugins.search_filtered_with_tickets(
                 raw_query,
                 self.enabled_plugins.as_ref(),
                 self.enabled_capabilities.as_ref(),
@@ -1215,9 +1123,9 @@ impl LauncherApp {
         raw_query: &str,
         trimmed: &str,
         trimmed_lc: &str,
-        plugin_results: Vec<crate::search_scope::LauncherSearchResult>,
+        plugin_results: Vec<Action>,
         pending: bool,
-    ) -> (Vec<(crate::search_scope::LauncherSearchResult, f32)>, bool) {
+    ) -> (Vec<(Action, f32)>, bool) {
         #[cfg(test)]
         let c2a_observer = c2a_search_observer::current();
         #[cfg(test)]
@@ -1237,9 +1145,7 @@ impl LauncherApp {
         let mut res = Vec::new();
         if trimmed_lc.starts_with("g ") {
             let query_term = trimmed_lc.split_once(' ').map(|x| x.1).unwrap_or("");
-            for result in plugin_results {
-                let category = result.category;
-                let a = result.action;
+            for a in plugin_results {
                 let cached = CachedSearchEntry::from_action(&a);
                 #[cfg(test)]
                 if c2a_observer.is_some() {
@@ -1256,17 +1162,11 @@ impl LauncherApp {
                         // returned concrete results (e.g. `note:new:*`, `note:open:*`).
                         // Re-filtering by label/desc text can hide valid plugin-resolved
                         // outputs, so keep them as-is in exact mode.
-                        res.push((
-                            crate::search_scope::LauncherSearchResult::new(a, category),
-                            0.0,
-                        ));
+                        res.push((a, 0.0));
                         continue;
                     }
                     if query_term.is_empty() {
-                        res.push((
-                            crate::search_scope::LauncherSearchResult::new(a, category),
-                            0.0,
-                        ));
+                        res.push((a, 0.0));
                     } else {
                         let alias_match = self.alias_matches_lc(&a.action, query_term);
                         let label_match = Self::matches_exact_display_text(&cached, query_term);
@@ -1274,10 +1174,7 @@ impl LauncherApp {
                         let action_match = cached.action_lc.contains(query_term);
                         if label_match || desc_match || action_match || alias_match {
                             let score = if alias_match { 1.0 } else { 0.0 };
-                            res.push((
-                                crate::search_scope::LauncherSearchResult::new(a, category),
-                                score,
-                            ));
+                            res.push((a, score));
                         }
                     }
                 } else {
@@ -1290,10 +1187,7 @@ impl LauncherApp {
                             .unwrap_or(0) as f32
                             * self.fuzzy_weight
                     };
-                    res.push((
-                        crate::search_scope::LauncherSearchResult::new(a, category),
-                        score,
-                    ));
+                    res.push((a, score));
                 }
             }
             #[cfg(test)]
@@ -1346,13 +1240,7 @@ impl LauncherApp {
                             c2a_command_fallback_clone_strings = c2a_command_fallback_clone_strings
                                 .saturating_add(c2a_search_observer::action_payload_strings(a));
                         }
-                        res.push((
-                            crate::search_scope::LauncherSearchResult::new(
-                                a.clone(),
-                                cached.category,
-                            ),
-                            score,
-                        ));
+                        res.push((a.clone(), score));
                     }
                 } else {
                     let s1 = self.matcher.fuzzy_match(&a.label, trimmed);
@@ -1368,13 +1256,7 @@ impl LauncherApp {
                             c2a_command_fallback_clone_strings = c2a_command_fallback_clone_strings
                                 .saturating_add(c2a_search_observer::action_payload_strings(a));
                         }
-                        res.push((
-                            crate::search_scope::LauncherSearchResult::new(
-                                a.clone(),
-                                cached.category,
-                            ),
-                            score as f32 * self.fuzzy_weight,
-                        ));
+                        res.push((a.clone(), score as f32 * self.fuzzy_weight));
                     }
                 }
             }
@@ -1390,9 +1272,7 @@ impl LauncherApp {
                 }
             }
             let query_term_lc = query_term.to_lowercase();
-            for result in plugin_results {
-                let category = result.category;
-                let a = result.action;
+            for a in plugin_results {
                 let cached = CachedSearchEntry::from_action(&a);
                 #[cfg(test)]
                 if c2a_observer.is_some() {
@@ -1408,17 +1288,11 @@ impl LauncherApp {
                         // Explicit plugin commands can resolve into result lists/artifacts.
                         // Preserve those resolved actions in exact mode instead of applying
                         // a second label/description exact filter in the launcher layer.
-                        res.push((
-                            crate::search_scope::LauncherSearchResult::new(a, category),
-                            0.0,
-                        ));
+                        res.push((a, 0.0));
                         continue;
                     }
                     if query_term_lc.is_empty() {
-                        res.push((
-                            crate::search_scope::LauncherSearchResult::new(a, category),
-                            0.0,
-                        ));
+                        res.push((a, 0.0));
                     } else {
                         let alias_match = self.alias_matches_lc(&a.action, &query_term_lc);
                         let label_match = Self::matches_exact_display_text(&cached, &query_term_lc);
@@ -1426,10 +1300,7 @@ impl LauncherApp {
                         let action_match = cached.action_lc.contains(&query_term_lc);
                         if label_match || desc_match || action_match || alias_match {
                             let score = if alias_match { 1.0 } else { 0.0 };
-                            res.push((
-                                crate::search_scope::LauncherSearchResult::new(a, category),
-                                score,
-                            ));
+                            res.push((a, score));
                         }
                     }
                 } else {
@@ -1442,10 +1313,7 @@ impl LauncherApp {
                             .unwrap_or(0) as f32
                             * self.fuzzy_weight
                     };
-                    res.push((
-                        crate::search_scope::LauncherSearchResult::new(a, category),
-                        score,
-                    ));
+                    res.push((a, score));
                 }
             }
         }
@@ -1511,12 +1379,6 @@ impl LauncherApp {
             return LauncherSearchOutcome {
                 state: LauncherSearchState::Results,
                 actions: results,
-                categories: self
-                    .command_cache
-                    .iter()
-                    .map(|_| crate::search_scope::SearchResultCategory::Commands)
-                    .chain(self.action_cache.iter().map(|entry| entry.category))
-                    .collect(),
                 provider_revision: self.plugins.search_generation(),
                 result_catalog_versions: Some(
                     crate::radial::dynamic::MutableResultCatalogVersions::current(),
@@ -1591,14 +1453,7 @@ impl LauncherApp {
             raw_query,
             trimmed,
             &trimmed_lc,
-            result
-                .actions
-                .into_iter()
-                .zip(result.categories)
-                .map(|(action, category)| {
-                    crate::search_scope::LauncherSearchResult::new(action, category)
-                })
-                .collect(),
+            result.actions,
             result.pending,
         );
         self.search_read_only_outcome_from_scored_plugins(
@@ -1615,7 +1470,7 @@ impl LauncherApp {
     fn search_read_only_outcome_from_scored_plugins(
         &self,
         raw_query: &str,
-        plugin_results: Vec<(crate::search_scope::LauncherSearchResult, f32)>,
+        plugin_results: Vec<(Action, f32)>,
         provider_pending: bool,
         start_revision: u64,
         provider_revision: u64,
@@ -1627,17 +1482,12 @@ impl LauncherApp {
         let trimmed = raw_query.trim();
         let trimmed_lc = trimmed.to_lowercase();
         if trimmed.is_empty() {
-            let mut results = self
-                .command_cache
-                .iter()
-                .cloned()
-                .map(crate::search_scope::LauncherSearchResult::command)
-                .collect::<Vec<_>>();
+            let mut results = self.command_cache.clone();
             #[cfg(test)]
             let mut c2a_catalog_bytes = 0_u64;
             #[cfg(test)]
             let mut c2a_catalog_strings = 0_u64;
-            results.extend(self.actions.iter().enumerate().map(|(index, action)| {
+            results.extend(self.actions.iter().map(|action| {
                 #[cfg(test)]
                 if c2a_observer.is_some() {
                     c2a_catalog_bytes = c2a_catalog_bytes
@@ -1646,15 +1496,12 @@ impl LauncherApp {
                     c2a_catalog_strings = c2a_catalog_strings
                         .saturating_add(c2a_search_observer::action_payload_strings(action));
                 }
-                crate::search_scope::LauncherSearchResult::new(
-                    Action {
-                        label: format!("app {}", action.label),
-                        desc: action.desc.clone(),
-                        action: action.action.clone(),
-                        args: action.args.clone(),
-                    },
-                    self.action_cache[index].category,
-                )
+                Action {
+                    label: format!("app {}", action.label),
+                    desc: action.desc.clone(),
+                    action: action.action.clone(),
+                    args: action.args.clone(),
+                }
             }));
             #[cfg(test)]
             if let Some(observer) = c2a_observer {
@@ -1692,11 +1539,7 @@ impl LauncherApp {
             }
             return LauncherSearchOutcome {
                 state: LauncherSearchState::Results,
-                categories: results.iter().map(|result| result.category).collect(),
-                actions: results
-                    .into_iter()
-                    .map(crate::search_scope::LauncherSearchResult::into_action)
-                    .collect(),
+                actions: results,
                 provider_revision,
                 result_catalog_versions,
                 result_catalog_versions_stable: catalog_versions_stable,
@@ -1734,11 +1577,7 @@ impl LauncherApp {
             crate::performance::track_c::Phase::SearchMoveResults,
         );
         let materialized = scored.len();
-        let (actions, categories): (Vec<Action>, Vec<crate::search_scope::SearchResultCategory>) =
-            scored
-                .into_iter()
-                .map(|(result, _)| (result.action, result.category))
-                .unzip();
+        let actions: Vec<Action> = scored.into_iter().map(|(action, _)| action).collect();
         materialize_timer.set_work_units(materialized);
         materialize_timer.finish(crate::performance::track_c::Outcome::Completed);
         let state = if provider_pending
@@ -1787,7 +1626,6 @@ impl LauncherApp {
         LauncherSearchOutcome {
             state,
             actions,
-            categories,
             provider_revision,
             result_catalog_versions,
             result_catalog_versions_stable: catalog_versions_stable,
@@ -1800,10 +1638,10 @@ impl LauncherApp {
         self.search_read_only_outcome(raw_query).actions
     }
 
-    fn apply_usage_weight(&self, res: &mut Vec<(crate::search_scope::LauncherSearchResult, f32)>) {
+    fn apply_usage_weight(&self, res: &mut Vec<(Action, f32)>) {
         for (result, score) in res.iter_mut() {
-            *score += self.usage.get(&result.action.action).cloned().unwrap_or(0) as f32
-                * self.usage_weight;
+            *score +=
+                self.usage.get(&result.action).cloned().unwrap_or(0) as f32 * self.usage_weight;
         }
     }
 }
@@ -1877,7 +1715,6 @@ mod tests {
         catalog_versions: crate::radial::dynamic::MutableResultCatalogVersions,
     ) -> crate::plugin::PluginSearchSnapshotResult {
         crate::plugin::PluginSearchSnapshotResult {
-            categories: vec![crate::search_scope::SearchResultCategory::Commands; actions.len()],
             actions,
             pending,
             start_revision,
@@ -1906,7 +1743,7 @@ mod tests {
         app
     }
 
-    fn launcher_scope_fixture_actions() -> Vec<Action> {
+    fn unified_search_fixture_actions() -> Vec<Action> {
         [
             ("Scope Marker App", "legacy:scope-marker-app"),
             ("Scope Marker File", r"folder:add:C:\Scope Marker"),
@@ -1923,9 +1760,9 @@ mod tests {
         .collect()
     }
 
-    fn new_launcher_scope_app(ctx: &egui::Context, root: &std::path::Path) -> LauncherApp {
+    fn new_unified_search_app(ctx: &egui::Context, root: &std::path::Path) -> LauncherApp {
         let mut app = new_inert_app(ctx, root);
-        let actions = launcher_scope_fixture_actions();
+        let actions = unified_search_fixture_actions();
         app.custom_len = actions.len();
         app.actions = Arc::new(actions);
         app.update_action_cache();
@@ -1934,140 +1771,10 @@ mod tests {
     }
 
     #[test]
-    fn launcher_scope_switches_filter_same_query_and_preserve_query_ui_state() {
+    fn unified_launcher_and_read_only_snapshot_keep_order() {
         let context = egui::Context::default();
         let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
-        let mut app = new_launcher_scope_app(&context, workspace.root());
-        app.query = "app scope marker".into();
-        app.search();
-        let all_results = app.results.clone();
-        assert_eq!(all_results.len(), 4);
-        assert_eq!(app.last_search_scope, crate::search_scope::SearchScope::All);
-        app.selected = Some(0);
-        app.suggestions = vec!["first suggestion".into(), "second suggestion".into()];
-        app.autocomplete_index = 1;
-        app.query_history.older("app scope marker", || {
-            vec!["recent query".into(), "older query".into()]
-        });
-        let history_digest = app.query_history.acceptance_digest();
-
-        app.set_search_scope(crate::search_scope::SearchScope::Notes);
-        assert_eq!(app.query, "app scope marker");
-        assert_eq!(app.last_search_query, "app scope marker");
-        assert_eq!(
-            app.last_search_scope,
-            crate::search_scope::SearchScope::Notes
-        );
-        assert_eq!(app.results.len(), 1);
-        assert_eq!(app.results[0].action, "note:open:scope-marker-note");
-        assert_eq!(app.selected, None);
-        assert_eq!(app.suggestions, ["first suggestion", "second suggestion"]);
-        assert_eq!(app.autocomplete_index, 1);
-        assert_eq!(app.query_history.acceptance_digest(), history_digest);
-
-        app.set_search_scope(crate::search_scope::SearchScope::Commands);
-        assert_eq!(app.query, "app scope marker");
-        assert_eq!(app.results.len(), 1);
-        assert_eq!(app.results[0].action, "query:regex");
-        app.set_search_scope(crate::search_scope::SearchScope::All);
-        assert_eq!(app.results, all_results);
-
-        // A valid same-query cache entry still has to miss when its effective
-        // scope differs from the scope used to build the visible results.
-        app.search_scope = crate::search_scope::SearchScope::Files;
-        app.last_results_valid = true;
-        app.last_search_scope = crate::search_scope::SearchScope::All;
-        app.results = all_results;
-        app.selected = Some(0);
-        app.search();
-        assert_eq!(
-            app.last_search_scope,
-            crate::search_scope::SearchScope::Files
-        );
-        assert_eq!(app.results.len(), 1);
-        assert_eq!(app.results[0].action, r"folder:add:C:\Scope Marker");
-        assert_eq!(app.selected, None);
-        drop(app);
-        drop(workspace);
-    }
-
-    #[test]
-    fn launcher_scope_empty_browse_filters_catalog_and_returns_to_all_exactly() {
-        let context = egui::Context::default();
-        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
-        let mut app = new_launcher_scope_app(&context, workspace.root());
-        app.search();
-        let all_results = app.results.clone();
-        assert_eq!(all_results.len(), 4);
-        app.selected = Some(0);
-        app.suggestions = vec!["browse suggestion".into()];
-        app.autocomplete_index = 0;
-
-        app.set_search_scope(crate::search_scope::SearchScope::Notes);
-        assert!(app.query.is_empty());
-        assert_eq!(app.results.len(), 1);
-        assert_eq!(app.results[0].action, "note:open:scope-marker-note");
-        assert_eq!(app.selected, None);
-        assert_eq!(app.suggestions, ["browse suggestion"]);
-        app.set_search_scope(crate::search_scope::SearchScope::Applications);
-        assert_eq!(app.results.len(), 1);
-        assert_eq!(app.results[0].action, "legacy:scope-marker-app");
-        app.set_search_scope(crate::search_scope::SearchScope::All);
-        assert_eq!(app.results, all_results);
-        drop(app);
-        drop(workspace);
-    }
-
-    #[test]
-    fn launcher_scope_prefix_temporarily_uses_all_and_keeps_selected_preference() {
-        let context = egui::Context::default();
-        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
-        let mut app = new_inert_app(&context, workspace.root());
-        app.plugins
-            .register(Box::new(crate::plugins::regex_tester::RegexTesterPlugin));
-        app.search_scope = crate::search_scope::SearchScope::Notes;
-        app.query = "regex ".into();
-
-        assert_eq!(
-            app.effective_search_scope(),
-            crate::search_scope::SearchScope::All
-        );
-
-        app.query = "ordinary query".into();
-        assert_eq!(
-            app.effective_search_scope(),
-            crate::search_scope::SearchScope::Notes,
-            "ordinary queries return to the selected scope after an explicit prefix"
-        );
-
-        app.query = "regex ".into();
-        app.set_search_scope(crate::search_scope::SearchScope::Files);
-        assert_eq!(app.search_scope, crate::search_scope::SearchScope::Files);
-        assert_eq!(
-            app.effective_search_scope(),
-            crate::search_scope::SearchScope::All
-        );
-        app.query = "ordinary query".into();
-        assert_eq!(
-            app.effective_search_scope(),
-            crate::search_scope::SearchScope::Files
-        );
-        app.enabled_plugins = Some(std::collections::HashSet::new());
-        app.query = "g web search".into();
-        assert_eq!(
-            app.effective_search_scope(),
-            crate::search_scope::SearchScope::All,
-            "the legacy g-prefix override remains outside the selected scope"
-        );
-        drop(app);
-        drop(workspace);
-    }
-
-    #[test]
-    fn launcher_scope_all_and_read_only_snapshot_keep_unfiltered_order() {
-        let context = egui::Context::default();
-        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
-        let mut app = new_launcher_scope_app(&context, workspace.root());
+        let mut app = new_unified_search_app(&context, workspace.root());
         app.query = "app scope marker".into();
         app.search();
 
@@ -2084,9 +1791,6 @@ mod tests {
                 "query:regex",
             ]
         );
-        assert_eq!(app.search_read_only("app scope marker"), all_actions);
-
-        app.search_scope = crate::search_scope::SearchScope::Notes;
         assert_eq!(app.search_read_only("app scope marker"), all_actions);
 
         let provider_action = Action {
@@ -2119,17 +1823,7 @@ mod tests {
         assert_eq!(
             snapshot_outcome.actions.last(),
             Some(&provider_action),
-            "the snapshot provider result remains present while a launcher scope is selected"
-        );
-        assert_eq!(
-            snapshot_outcome.categories,
-            [
-                crate::search_scope::SearchResultCategory::Applications,
-                crate::search_scope::SearchResultCategory::Files,
-                crate::search_scope::SearchResultCategory::Notes,
-                crate::search_scope::SearchResultCategory::Commands,
-                crate::search_scope::SearchResultCategory::Commands,
-            ]
+            "the snapshot provider result remains present in unified launcher search"
         );
         drop(app);
         drop(workspace);
@@ -2296,12 +1990,6 @@ mod tests {
             }));
             return LauncherSearchOutcome {
                 state: LauncherSearchState::Results,
-                categories: app
-                    .command_cache
-                    .iter()
-                    .map(|_| crate::search_scope::SearchResultCategory::Commands)
-                    .chain(app.action_cache.iter().map(|entry| entry.category))
-                    .collect(),
                 actions,
                 provider_revision: provider.provider_revision,
                 result_catalog_versions: Some(provider.catalog_versions),
@@ -2328,41 +2016,28 @@ mod tests {
                 .is_some_and(|alias| alias.contains(term))
         };
 
-        let mut scored = Vec::<(Action, f32, crate::search_scope::SearchResultCategory)>::new();
+        let mut scored = Vec::<(Action, f32)>::new();
         if !trimmed_lc.starts_with("g ") && searches_app {
-            for ((action, metadata), cached) in app
-                .actions
-                .iter()
-                .zip(app.action_filter_metadata.iter())
-                .zip(app.action_cache.iter())
-            {
+            for (action, metadata) in app.actions.iter().zip(app.action_filter_metadata.iter()) {
                 if !action_matches_filters(metadata, &filters) {
                     continue;
                 }
                 if local_text_lc.is_empty() {
-                    scored.push((action.clone(), 0.0, cached.category));
+                    scored.push((action.clone(), 0.0));
                 } else if exact_mode {
                     let alias = alias_for(&action.action, &local_text_lc);
                     let label = action.label.to_lowercase().contains(&local_text_lc);
                     let desc = action.desc.to_lowercase().contains(&local_text_lc);
                     let id = action.action.to_lowercase().contains(&local_text_lc);
                     if label || desc || id || alias {
-                        scored.push((
-                            action.clone(),
-                            if alias { 1.0 } else { 0.0 },
-                            cached.category,
-                        ));
+                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
                     }
                 } else if let Some(score) = app
                     .matcher
                     .fuzzy_match(&action.label, local_text)
                     .max(app.matcher.fuzzy_match(&action.desc, local_text))
                 {
-                    scored.push((
-                        action.clone(),
-                        score as f32 * app.fuzzy_weight,
-                        cached.category,
-                    ));
+                    scored.push((action.clone(), score as f32 * app.fuzzy_weight));
                 }
             }
         }
@@ -2372,21 +2047,21 @@ mod tests {
                 .split_once(' ')
                 .map(|value| value.1)
                 .unwrap_or("");
-            for (action, category) in provider.actions.iter().zip(provider.categories.iter()) {
+            for action in &provider.actions {
                 if exact_mode {
                     if LauncherApp::should_bypass_exact_post_filter(trimmed, &action.action) {
-                        scored.push((action.clone(), 0.0, *category));
+                        scored.push((action.clone(), 0.0));
                     } else if query_term.is_empty() {
                         // Empty terms match every provider row at neutral
                         // score; an empty alias must not promote them.
-                        scored.push((action.clone(), 0.0, *category));
+                        scored.push((action.clone(), 0.0));
                     } else if action.label.to_lowercase().contains(query_term.trim())
                         || action.desc.to_lowercase().contains(query_term)
                         || action.action.to_lowercase().contains(query_term)
                         || alias_for(&action.action, query_term)
                     {
                         let alias = alias_for(&action.action, query_term);
-                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }, *category));
+                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
                     }
                 } else {
                     let score = if raw_query.is_empty() {
@@ -2398,7 +2073,7 @@ mod tests {
                             .unwrap_or(0) as f32
                             * app.fuzzy_weight
                     };
-                    scored.push((action.clone(), score, *category));
+                    scored.push((action.clone(), score));
                 }
             }
         } else if provider.actions.is_empty() {
@@ -2409,22 +2084,14 @@ mod tests {
                     let desc = action.desc.to_lowercase().contains(&trimmed_lc);
                     let id = action.action.to_lowercase().contains(&trimmed_lc);
                     if label || desc || id || alias {
-                        scored.push((
-                            action.clone(),
-                            if alias { 1.0 } else { 0.0 },
-                            crate::search_scope::SearchResultCategory::Commands,
-                        ));
+                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
                     }
                 } else if let Some(score) = app
                     .matcher
                     .fuzzy_match(&action.label, trimmed)
                     .max(app.matcher.fuzzy_match(&action.desc, trimmed))
                 {
-                    scored.push((
-                        action.clone(),
-                        score as f32 * app.fuzzy_weight,
-                        crate::search_scope::SearchResultCategory::Commands,
-                    ));
+                    scored.push((action.clone(), score as f32 * app.fuzzy_weight));
                 }
             }
         } else {
@@ -2442,19 +2109,19 @@ mod tests {
                 }
             }
             let provider_term = provider_term.to_lowercase();
-            for (action, category) in provider.actions.iter().zip(provider.categories.iter()) {
+            for action in &provider.actions {
                 if exact_mode {
                     if LauncherApp::should_bypass_exact_post_filter(trimmed, &action.action) {
-                        scored.push((action.clone(), 0.0, *category));
+                        scored.push((action.clone(), 0.0));
                     } else if provider_term.is_empty() {
-                        scored.push((action.clone(), 0.0, *category));
+                        scored.push((action.clone(), 0.0));
                     } else if action.label.to_lowercase().contains(provider_term.trim())
                         || action.desc.to_lowercase().contains(&provider_term)
                         || action.action.to_lowercase().contains(&provider_term)
                         || alias_for(&action.action, &provider_term)
                     {
                         let alias = alias_for(&action.action, &provider_term);
-                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }, *category));
+                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
                     }
                 } else {
                     let score = app
@@ -2463,12 +2130,12 @@ mod tests {
                         .max(app.matcher.fuzzy_match(&action.desc, raw_query))
                         .unwrap_or(0) as f32
                         * app.fuzzy_weight;
-                    scored.push((action.clone(), score, *category));
+                    scored.push((action.clone(), score));
                 }
             }
         }
 
-        for (action, score, _) in &mut scored {
+        for (action, score) in &mut scored {
             *score += app.usage.get(&action.action).copied().unwrap_or(0) as f32 * app.usage_weight;
         }
         scored.sort_by(|left, right| {
@@ -2477,11 +2144,7 @@ mod tests {
                 .partial_cmp(&left.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let (actions, categories): (Vec<Action>, Vec<crate::search_scope::SearchResultCategory>) =
-            scored
-                .into_iter()
-                .map(|(action, _, category)| (action, category))
-                .unzip();
+        let actions: Vec<Action> = scored.into_iter().map(|(action, _)| action).collect();
         let state = if provider.pending
             || provider.start_revision != provider.provider_revision
             || !catalog_versions_stable
@@ -2495,7 +2158,6 @@ mod tests {
         LauncherSearchOutcome {
             state,
             actions,
-            categories,
             provider_revision: provider.provider_revision,
             result_catalog_versions: Some(provider.catalog_versions),
             result_catalog_versions_stable: catalog_versions_stable,
@@ -3180,12 +2842,6 @@ mod tests {
             }));
             return LauncherSearchOutcome {
                 state: LauncherSearchState::Results,
-                categories: app
-                    .command_cache
-                    .iter()
-                    .map(|_| crate::search_scope::SearchResultCategory::Commands)
-                    .chain(app.action_cache.iter().map(|entry| entry.category))
-                    .collect(),
                 actions,
                 provider_revision: provider.provider_revision,
                 result_catalog_versions: Some(provider.catalog_versions),
@@ -3209,46 +2865,38 @@ mod tests {
                 .and_then(Option::as_ref)
                 .is_some_and(|alias| alias.contains(&query_term))
         };
-        let mut scored = Vec::<(Action, f32, crate::search_scope::SearchResultCategory)>::new();
+        let mut scored = Vec::<(Action, f32)>::new();
         if searches_app {
-            for (action, cached) in app.actions.iter().zip(app.action_cache.iter()) {
+            for action in app.actions.iter() {
                 // Production's app-action path treats an empty app term as a
                 // score-zero catalog browse before alias matching.
                 if query_term.is_empty() {
-                    scored.push((action.clone(), 0.0, cached.category));
+                    scored.push((action.clone(), 0.0));
                 } else if exact_mode {
                     let alias = alias_matches(&action.action);
                     let label = action.label.to_lowercase().contains(&query_term);
                     let desc = action.desc.to_lowercase().contains(&query_term);
                     let id = action.action.to_lowercase().contains(&query_term);
                     if alias || label || desc || id {
-                        scored.push((
-                            action.clone(),
-                            if alias { 1.0 } else { 0.0 },
-                            cached.category,
-                        ));
+                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
                     }
                 } else if let Some(score) = app
                     .matcher
                     .fuzzy_match(&action.label, action_query)
                     .max(app.matcher.fuzzy_match(&action.desc, action_query))
                 {
-                    scored.push((
-                        action.clone(),
-                        score as f32 * app.fuzzy_weight,
-                        cached.category,
-                    ));
+                    scored.push((action.clone(), score as f32 * app.fuzzy_weight));
                 }
             }
         }
-        for (action, category) in provider.actions.iter().zip(provider.categories.iter()) {
+        for action in &provider.actions {
             if exact_mode {
                 let alias = alias_matches(&action.action);
                 let label = action.label.to_lowercase().contains(&query_term);
                 let desc = action.desc.to_lowercase().contains(&query_term);
                 let id = action.action.to_lowercase().contains(&query_term);
                 if query_term.is_empty() || alias || label || desc || id {
-                    scored.push((action.clone(), if alias { 1.0 } else { 0.0 }, *category));
+                    scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
                 }
             } else {
                 let score = app
@@ -3257,10 +2905,10 @@ mod tests {
                     .max(app.matcher.fuzzy_match(&action.desc, raw_query))
                     .unwrap_or(0) as f32
                     * app.fuzzy_weight;
-                scored.push((action.clone(), score, *category));
+                scored.push((action.clone(), score));
             }
         }
-        for (action, score, _) in &mut scored {
+        for (action, score) in &mut scored {
             *score += app.usage.get(&action.action).copied().unwrap_or(0) as f32 * app.usage_weight;
         }
         scored.sort_by(|left, right| {
@@ -3269,11 +2917,7 @@ mod tests {
                 .partial_cmp(&left.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let (actions, categories): (Vec<Action>, Vec<crate::search_scope::SearchResultCategory>) =
-            scored
-                .into_iter()
-                .map(|(action, _, category)| (action, category))
-                .unzip();
+        let actions: Vec<Action> = scored.into_iter().map(|(action, _)| action).collect();
         let stable = provider.catalog_versions_at_start == provider.catalog_versions;
         let state =
             if provider.pending || provider.start_revision != provider.provider_revision || !stable
@@ -3287,7 +2931,6 @@ mod tests {
         LauncherSearchOutcome {
             state,
             actions,
-            categories,
             provider_revision: provider.provider_revision,
             result_catalog_versions: Some(provider.catalog_versions),
             result_catalog_versions_stable: stable,
@@ -4699,17 +4342,11 @@ mod tests {
         let mut app = new_inert_app(&ctx, workspace.root());
         app.plugins.register(Box::new(crate::plugins::qr::QrPlugin));
         app.match_exact = true;
-        app.search_scope = crate::search_scope::SearchScope::Notes;
 
         let payload =
             "two  spaces \"quoted\" C:\\qr\n日本語 kind:private id:private !kind:other !id:other";
         let query = format!(" \tQR {payload}");
         app.query = query.clone();
-        assert_eq!(
-            app.effective_search_scope(),
-            crate::search_scope::SearchScope::All,
-            "an explicit enabled QR prefix bypasses the selected launcher scope"
-        );
         app.search();
 
         let synchronous = app

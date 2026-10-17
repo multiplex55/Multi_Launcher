@@ -198,7 +198,6 @@ use crate::plugin_editor::PluginEditor;
 use crate::plugins::clipboard_modify::ClipboardModifyPluginSettings;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
 use crate::plugins::snippets::{SNIPPETS_FILE, remove_snippet};
-use crate::search_scope::SearchScope;
 use crate::settings::{MultiManagerSettings, NoteSettings, QueryResultsLayoutSettings, Settings};
 use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{TOAST_LOG_FILE, append_toast_log};
@@ -1119,8 +1118,6 @@ pub struct LauncherApp {
     last_stopwatch_update: Instant,
     last_search_query: String,
     last_results_valid: bool,
-    search_scope: SearchScope,
-    last_search_scope: SearchScope,
     last_search_pending: bool,
     last_search_provider_revision: u64,
     last_search_result_catalog_versions:
@@ -1170,7 +1167,6 @@ struct CachedSearchEntry {
     label_lc: String,
     desc_lc: String,
     action_lc: String,
-    category: crate::search_scope::SearchResultCategory,
 }
 
 impl CachedSearchEntry {
@@ -1179,16 +1175,6 @@ impl CachedSearchEntry {
             label_lc: action.label.to_lowercase(),
             desc_lc: action.desc.to_lowercase(),
             action_lc: action.action.to_lowercase(),
-            category: crate::search_scope::SearchResultCategory::Commands,
-        }
-    }
-
-    fn from_catalog_action(action: &Action, indexed_tail: bool) -> Self {
-        Self {
-            label_lc: action.label.to_lowercase(),
-            desc_lc: action.desc.to_lowercase(),
-            action_lc: action.action.to_lowercase(),
-            category: crate::search_scope::catalog_action_category(action, indexed_tail),
         }
     }
 }
@@ -3171,8 +3157,6 @@ impl LauncherApp {
             last_stopwatch_update: Instant::now(),
             last_search_query: String::new(),
             last_results_valid: false,
-            search_scope: SearchScope::All,
-            last_search_scope: SearchScope::All,
             last_search_pending: false,
             last_search_provider_revision: 0,
             last_search_result_catalog_versions: None,
@@ -3739,10 +3723,7 @@ impl LauncherApp {
     }
 
     pub fn should_show_dashboard(&self, trimmed: &str) -> bool {
-        self.dashboard_enabled
-            && self.dashboard_show_when_empty
-            && trimmed.trim().is_empty()
-            && self.search_scope == SearchScope::All
+        self.dashboard_enabled && self.dashboard_show_when_empty && trimmed.trim().is_empty()
     }
 
     pub fn move_cursor_end_flag(&self) -> bool {
@@ -7469,7 +7450,6 @@ mod tests {
             label_lc: "testingeve123".into(),
             desc_lc: String::new(),
             action_lc: String::new(),
-            category: crate::search_scope::SearchResultCategory::Commands,
         };
         assert!(LauncherApp::matches_exact_display_text(
             &cached,
