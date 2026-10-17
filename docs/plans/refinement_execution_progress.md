@@ -8,7 +8,7 @@ Evidence/fixtures: ignored `target/refinement-evidence/` (owned fixtures only).
 | Milestone | Status | Checkpoints / evidence |
 | --- | --- | --- |
 | M0 | complete | M0-A: source/manifest/status inspection; Nextest 0.9.135; rustc 1.99.0, x86_64-pc-windows-msvc; commit `513e89a4ca0292017b348735ce33cb896f25cd12` |
-| M1 | in_progress | M1-A implemented in `src/gui/render.rs`: removed launcher scope strip, Ctrl+1–5 routing, scoped empty-state message and new-session scope reset; query/results layout now follows visible query geometry. `cargo nextest run --lib launcher_query_frame_has_no_scope_strip_or_ctrl_number_scope_changes`: 1 passed, 5,687 skipped. `rustfmt --edition 2024 src/gui/render.rs` and `git diff --check` passed. M1-A commit `178fb3b6`. M1-B source and scoped verification complete: unified Action-only provider/search flow, retired scope/category state and module removed; 11 launcher/provider tests and 1 radial ordering test passed (details below). M1-C help/compatibility cleanup remains pending. |
+| M1 | complete | M1-A implemented in `src/gui/render.rs`: removed launcher scope strip, Ctrl+1–5 routing, scoped empty-state message and new-session scope reset; query/results layout now follows visible query geometry. `cargo nextest run --lib launcher_query_frame_has_no_scope_strip_or_ctrl_number_scope_changes`: 1 passed, 5,687 skipped. `rustfmt --edition 2024 src/gui/render.rs` and `git diff --check` passed. M1-A commit `178fb3b6`. M1-B source and scoped verification complete: unified Action-only provider/search flow, retired scope/category state and module removed; 11 launcher/provider tests and 1 radial ordering test passed (details below). M1-C README/Quick Help cleanup complete; dashboard compatibility target 9/9 passed. |
 | M2 | pending | Shared rectangle-picker input shield |
 | M3 | pending | Ordered-step layout |
 | M4 | pending | Playback settings / atomic hotkey routes |
@@ -37,7 +37,8 @@ M8-D only: maintained-target Clippy with `-D warnings`; final successful lint is
 
 - M0-A: `513e89a4ca0292017b348735ce33cb896f25cd12`.
 - M1-A: `178fb3b6` (local).
-- M1-B: source and verification complete; parent checkpoint commit pending.
+- M1-B: `b27937cc` (local).
+- M1-C: help/compatibility closure; parent commit at this boundary.
 
 ## Limitations / unresolved issues
 
@@ -52,3 +53,7 @@ Removed launcher `SearchScope`, effective-scope/filter/cache identity, result ca
 - Adjacent radial command: `cargo nextest run --lib deferred_execute_first_uses_the_current_shared_search_order`: **1 passed, 5,682 skipped**; run `2bca522b-5aec-4dec-9985-638fc1fbe0da`.
 - Initial focused compile failed on duplicate ticketed helper and stale snippets/watch fixture API calls (E0592, E0599, E0061); corrected before the successful rerun above. No failing test assertions. Final compilation emitted existing vendor warnings only (`epaint`, `egui`, `image`); no vendor source changed.
 - Touched Rust files formatted with `rustfmt --edition 2024 --config skip_children=true`; touched/cumulative diff inspected and `git diff --check` passed. Source/tests/benches search found no retired launcher scope/category/API references; unrelated radial-editor local `search_scope` and file-search domain scopes remain. No full suite, Clippy, extra check/build or native desktop test was run for this checkpoint.
+
+## M1-C compatibility closure
+
+README and Quick Help now describe unified search and existing plugin prefixes. The targeted stale-reference search across source, tests, benches and README found no retired scope/category API or shortcut guidance. File Search Global/Directory documentation remains intact. M1-B's passing provider/snapshot and radial tests supply ordering/prefix evidence; `cargo nextest run --test dashboard_config` passed 9/9 (run `9bf5a3d5-62c8-4882-be24-84bad29160ab`; compile 5m25s, tests 0.779s), including `should_show_dashboard_when_empty_query` and `activation_applies_query_override_first`. No owned native screenshot has been captured for M1.

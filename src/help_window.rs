@@ -75,15 +75,12 @@ impl HelpWindow {
                             ui.label("Older query: Ctrl+Up");
                             ui.label("Newer query / restore draft: Ctrl+Down");
                             ui.separator();
-                            ui.label(egui::RichText::new("Launcher search scopes").strong());
+                            ui.label(egui::RichText::new("Launcher search").strong());
                             ui.label(
-                                "All (Ctrl+1), Applications (Ctrl+2), Files (Ctrl+3), Notes (Ctrl+4), Commands (Ctrl+5). Focus the query field to use the shortcuts.",
+                                "Search applications, indexed files and enabled providers in one result list. Use app <query> for the action catalog or a plugin prefix such as fs, note, o, cs, paste or replace for its commands.",
                             );
                             ui.label(
-                                "Scope selection lasts for this launcher session and resets to All when a new session opens. Enabled explicit plugin prefixes such as fs, regex, cs, mouse, and replace keep their existing command behavior; ordinary queries return to the selected scope.",
-                            );
-                            ui.label(
-                                "The existing app <query> catalog syntax and the file-search plugin's Global/Directory options are unchanged. Generic provider results without a specific category appear in Commands.",
+                                "Empty queries can show the dashboard. Pinned queries and Omni Search provider controls remain available. File Search uses its own Global/Directory search roots.",
                             );
                             ui.separator();
                             ui.label(egui::RichText::new("Snippets").strong());

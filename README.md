@@ -162,21 +162,16 @@ Multi Launcher is centered around a **single query box**:
 - Search indexed files (if enabled via `index_paths`):
   - `resume` → `Resume.pdf`
 
-### Launcher search scopes
+### Unified launcher search
 
-The main launcher can filter results with **All**, **Applications**, **Files**,
-**Notes**, and **Commands**. Press **Ctrl+1** through **Ctrl+5** while the
-query field is focused, or use the scope buttons below it. The choice lasts for
-the current launcher session and resets to **All** when a new session opens.
-**All** keeps the normal result set and ordering. A deliberately typed prefix
-for an enabled plugin, such as `fs`, `regex`, `cs`, or `mouse`, uses that
-plugin's existing command behavior regardless of the selected scope; ordinary
-queries return to the selected scope. Generic provider results without a more
-specific category appear under **Commands**.
+The launcher searches applications, indexed files and enabled providers in one
+result list. Use `app <query>` to search the action catalog, or an enabled
+plugin's prefix, such as `fs`, `note`, `o`, `cs`, `paste` or `replace`, for its
+commands. Omni Search retains its own provider controls. Empty queries can
+show the dashboard, and pinned queries keep their usual behavior.
 
-The launcher scope does not change the existing `app <query>` catalog syntax
-or the file-search plugin's **Global** and **Directory** choices. Those file
-search roots remain separate from the launcher's **Files** category.
+The file-search plugin's **Global** and **Directory** choices select its search
+roots independently.
 
 ### 2) Calculator (with history)
 - `= 12*7 + 19`
