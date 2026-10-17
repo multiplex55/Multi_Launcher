@@ -9,7 +9,8 @@ use crate::file_operations::{
     VerifiedReadSnapshot,
 };
 use regex::{Regex, RegexBuilder};
-use std::collections::BTreeMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -684,6 +685,7 @@ pub struct MatchId {
     snapshot_path: Arc<PathBuf>,
     snapshot_sha256: [u8; 32],
     search_revision: SearchRevision,
+    search_generation: SearchGeneration,
     raw_byte_range: Range<usize>,
     ordinal: u64,
 }
@@ -699,6 +701,11 @@ impl MatchId {
 
     pub fn search_revision(&self) -> SearchRevision {
         self.search_revision
+    }
+
+    /// Generation of the exact immutable scan that produced this identity.
+    pub fn search_generation(&self) -> SearchGeneration {
+        self.search_generation
     }
 
     pub fn raw_byte_range(&self) -> Range<usize> {
@@ -887,6 +894,17 @@ impl TextSearchResult {
         MatchPolicy::NonOverlappingSourceOrder
     }
 
+    /// Compute an immutable preview from this exact scan snapshot. The
+    /// candidate contains the original native evidence and complete output
+    /// bytes; this operation does not access the filesystem.
+    pub fn preview_replacement(
+        &self,
+        replacement: &CompiledReplacement,
+        selected_match_ids: &[MatchId],
+    ) -> Result<ReplacementCandidate, ReplacementPreviewError> {
+        build_replacement_candidate(self, replacement, selected_match_ids)
+    }
+
     /// Accept only the result whose cancel generation is still current.
     pub fn accept(self, current_generation: SearchGeneration) -> Result<Self, StaleSearchResult> {
         let result_generation = self.generation();
@@ -915,6 +933,1042 @@ impl StaleSearchResult {
     pub fn current_generation(self) -> SearchGeneration {
         self.current_generation
     }
+}
+
+/// A replacement edit is versioned independently from the original search
+/// revision, so editing replacement text preserves the captured A match IDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ReplacementRevision(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReplacementMode {
+    /// Every byte of the authored UTF-8 string is literal replacement text.
+    Literal,
+    /// Use the existing Rust regex crate's `$0`, `$1`, `${name}` and `$$`
+    /// capture replacement syntax against the original matched text.
+    RustRegexCaptures,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplacementSpec {
+    text: String,
+    mode: ReplacementMode,
+    revision: ReplacementRevision,
+}
+
+impl ReplacementSpec {
+    pub fn new(
+        text: impl Into<String>,
+        mode: ReplacementMode,
+        revision: ReplacementRevision,
+    ) -> Self {
+        Self {
+            text: text.into(),
+            mode,
+            revision,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn mode(&self) -> ReplacementMode {
+        self.mode
+    }
+
+    pub fn revision(&self) -> ReplacementRevision {
+        self.revision
+    }
+
+    /// Validate capture references once against the captured search pattern.
+    /// Unknown references are diagnostics instead of silently expanding to an
+    /// empty string, while unmatched optional groups retain Rust regex's empty
+    /// string behavior when a particular match is expanded.
+    pub fn compile(
+        &self,
+        pattern: &SearchPattern,
+    ) -> Result<CompiledReplacement, ReplacementDiagnostic> {
+        let text: Arc<str> = Arc::from(self.text.as_str());
+        let parts = match self.mode {
+            ReplacementMode::Literal => vec![ReplacementPart::Literal(0..text.len())],
+            ReplacementMode::RustRegexCaptures => {
+                parse_replacement_template(&text, pattern.compiled(), self.revision)?
+            }
+        };
+        Ok(CompiledReplacement {
+            text,
+            mode: self.mode,
+            revision: self.revision,
+            pattern_source: pattern.source.clone(),
+            pattern_mode: pattern.mode,
+            pattern_case_sensitive: pattern.case_sensitive,
+            parts,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CompiledReplacement {
+    text: Arc<str>,
+    mode: ReplacementMode,
+    revision: ReplacementRevision,
+    pattern_source: String,
+    pattern_mode: SearchPatternMode,
+    pattern_case_sensitive: bool,
+    parts: Vec<ReplacementPart>,
+}
+
+impl CompiledReplacement {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn mode(&self) -> ReplacementMode {
+        self.mode
+    }
+
+    pub fn revision(&self) -> ReplacementRevision {
+        self.revision
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ReplacementPart {
+    Literal(Range<usize>),
+    EscapedDollar,
+    Capture(CaptureReference),
+}
+
+#[derive(Debug, Clone)]
+enum CaptureReference {
+    Index(usize),
+    Name(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplacementDiagnosticKind {
+    UnknownCapture,
+    InvalidCaptureIndex,
+    OutputLimitExceeded,
+    AllocationFailed,
+    CapturedMatchMismatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplacementDiagnostic {
+    revision: ReplacementRevision,
+    kind: ReplacementDiagnosticKind,
+    message: String,
+}
+
+impl ReplacementDiagnostic {
+    fn new(
+        revision: ReplacementRevision,
+        kind: ReplacementDiagnosticKind,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            revision,
+            kind,
+            message: message.into(),
+        }
+    }
+
+    pub fn revision(&self) -> ReplacementRevision {
+        self.revision
+    }
+
+    pub fn kind(&self) -> ReplacementDiagnosticKind {
+        self.kind
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for ReplacementDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ReplacementDiagnostic {}
+
+fn parse_replacement_template(
+    text: &str,
+    pattern: &Regex,
+    revision: ReplacementRevision,
+) -> Result<Vec<ReplacementPart>, ReplacementDiagnostic> {
+    let bytes = text.as_bytes();
+    let mut parts = Vec::new();
+    let mut literal_start = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'$' {
+            index += 1;
+            continue;
+        }
+        if bytes.get(index + 1) == Some(&b'$') {
+            if literal_start < index {
+                parts.push(ReplacementPart::Literal(literal_start..index));
+            }
+            parts.push(ReplacementPart::EscapedDollar);
+            index += 2;
+            literal_start = index;
+            continue;
+        }
+
+        let (reference_end, reference) = if bytes.get(index + 1) == Some(&b'{') {
+            let Some(relative_end) = bytes[index + 2..].iter().position(|byte| *byte == b'}')
+            else {
+                index += 1;
+                continue;
+            };
+            let end = index + 2 + relative_end;
+            (end + 1, Some(&text[index + 2..end]))
+        } else {
+            let mut end = index + 1;
+            while bytes.get(end).is_some_and(|byte| {
+                byte.is_ascii_alphanumeric() || *byte == b'_'
+            }) {
+                end += 1;
+            }
+            if end == index + 1 {
+                index += 1;
+                continue;
+            }
+            (end, Some(&text[index + 1..end]))
+        };
+        let Some(reference) = reference else {
+            index += 1;
+            continue;
+        };
+        if literal_start < index {
+            parts.push(ReplacementPart::Literal(literal_start..index));
+        }
+        parts.push(ReplacementPart::Capture(validate_capture_reference(
+            reference, pattern, revision,
+        )?));
+        index = reference_end;
+        literal_start = index;
+    }
+    if literal_start < text.len() {
+        parts.push(ReplacementPart::Literal(literal_start..text.len()));
+    }
+    Ok(parts)
+}
+
+fn validate_capture_reference(
+    reference: &str,
+    pattern: &Regex,
+    revision: ReplacementRevision,
+) -> Result<CaptureReference, ReplacementDiagnostic> {
+    // Match the regex crate's own replacement parser: braced references are
+    // parsed as a usize first, which intentionally accepts spellings such as
+    // `${+1}` as capture index 1.
+    if let Ok(index) = reference.parse::<usize>() {
+        if index < pattern.captures_len() {
+            return Ok(CaptureReference::Index(index));
+        }
+        return Err(ReplacementDiagnostic::new(
+            revision,
+            ReplacementDiagnosticKind::InvalidCaptureIndex,
+            format!("replacement capture '${reference}' does not exist in this pattern"),
+        ));
+    }
+    if pattern
+        .capture_names()
+        .flatten()
+        .any(|name| name == reference)
+    {
+        Ok(CaptureReference::Name(reference.to_owned()))
+    } else {
+        Err(ReplacementDiagnostic::new(
+            revision,
+            ReplacementDiagnosticKind::UnknownCapture,
+            format!("replacement capture '${{{reference}}}' does not exist in this pattern"),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplacementPreviewErrorKind {
+    PatternMismatch,
+    DuplicateSelection,
+    StaleSelection,
+    ForeignSelection,
+    InconsistentSnapshot,
+    InvalidMatchRange,
+    OverlappingMatches,
+    DuplicateInterval,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplacementPreviewError {
+    kind: ReplacementPreviewErrorKind,
+    message: String,
+}
+
+impl ReplacementPreviewError {
+    fn new(kind: ReplacementPreviewErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    pub fn kind(&self) -> ReplacementPreviewErrorKind {
+        self.kind
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for ReplacementPreviewError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ReplacementPreviewError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplacementCandidateReadiness {
+    Ready,
+    NoOp,
+    IncompleteDiscovery,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplacementFileReadiness {
+    Ready,
+    NoOp,
+    Error,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplacementSummary {
+    affected_files: usize,
+    approved_matches: usize,
+    changed_matches: usize,
+    selected_noop_matches: usize,
+    failed_files: usize,
+    /// Sum of original match bytes plus replacement bytes for changed selected
+    /// matches. Unchanged selected matches and the preserved BOM are excluded.
+    estimated_changed_bytes: u64,
+}
+
+impl ReplacementSummary {
+    pub fn affected_files(&self) -> usize {
+        self.affected_files
+    }
+
+    /// Number of explicitly selected MatchIds, including those whose
+    /// replacement is byte-identical to their original match.
+    pub fn approved_matches(&self) -> usize {
+        self.approved_matches
+    }
+
+    pub fn changed_matches(&self) -> usize {
+        self.changed_matches
+    }
+
+    pub fn selected_noop_matches(&self) -> usize {
+        self.selected_noop_matches
+    }
+
+    pub fn failed_files(&self) -> usize {
+        self.failed_files
+    }
+
+    pub fn estimated_changed_bytes(&self) -> u64 {
+        self.estimated_changed_bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplacementDiffContext {
+    original_excerpt: String,
+    candidate_excerpt: String,
+    first_change_byte_offset: usize,
+    truncated: bool,
+}
+
+impl ReplacementDiffContext {
+    pub fn original_excerpt(&self) -> &str {
+        &self.original_excerpt
+    }
+
+    pub fn candidate_excerpt(&self) -> &str {
+        &self.candidate_excerpt
+    }
+
+    pub fn first_change_byte_offset(&self) -> usize {
+        self.first_change_byte_offset
+    }
+
+    /// Indicates that the bounded excerpts omit some original or candidate
+    /// text. Full candidate bytes remain separately available and exact.
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplacementFileCandidate {
+    original_snapshot: SearchFileSnapshot,
+    output_bytes: Arc<[u8]>,
+    output_sha256: [u8; 32],
+    replacement_revision: ReplacementRevision,
+    selected_match_ids: Vec<MatchId>,
+    readiness: ReplacementFileReadiness,
+    diagnostic: Option<ReplacementDiagnostic>,
+    changed_matches: Option<usize>,
+    selected_noop_matches: Option<usize>,
+    estimated_changed_bytes: Option<u64>,
+    diff_context: Option<ReplacementDiffContext>,
+}
+
+impl ReplacementFileCandidate {
+    /// Original bytes, hashes, paths, and native root/file/parent identities
+    /// remain attached to the candidate for the later confirmation boundary.
+    pub fn original_snapshot(&self) -> &SearchFileSnapshot {
+        &self.original_snapshot
+    }
+
+    pub fn output_bytes(&self) -> &Arc<[u8]> {
+        &self.output_bytes
+    }
+
+    pub fn output_sha256(&self) -> [u8; 32] {
+        self.output_sha256
+    }
+
+    pub fn replacement_revision(&self) -> ReplacementRevision {
+        self.replacement_revision
+    }
+
+    pub fn selected_match_ids(&self) -> &[MatchId] {
+        &self.selected_match_ids
+    }
+
+    pub fn readiness(&self) -> ReplacementFileReadiness {
+        self.readiness
+    }
+
+    pub fn diagnostic(&self) -> Option<&ReplacementDiagnostic> {
+        self.diagnostic.as_ref()
+    }
+
+    /// `None` means an output-limit or allocation failure prevented a complete
+    /// per-file computation; no partial output is exposed as a candidate.
+    pub fn changed_matches(&self) -> Option<usize> {
+        self.changed_matches
+    }
+
+    pub fn selected_noop_matches(&self) -> Option<usize> {
+        self.selected_noop_matches
+    }
+
+    pub fn estimated_changed_bytes(&self) -> Option<u64> {
+        self.estimated_changed_bytes
+    }
+
+    pub fn diff_context(&self) -> Option<&ReplacementDiffContext> {
+        self.diff_context.as_ref()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplacementCandidate {
+    search_revision: SearchRevision,
+    search_generation: SearchGeneration,
+    replacement_revision: ReplacementRevision,
+    discovery_complete: bool,
+    selected_match_ids: Vec<MatchId>,
+    files: Vec<ReplacementFileCandidate>,
+    summary: ReplacementSummary,
+    readiness: ReplacementCandidateReadiness,
+}
+
+impl ReplacementCandidate {
+    pub fn search_revision(&self) -> SearchRevision {
+        self.search_revision
+    }
+
+    pub fn search_generation(&self) -> SearchGeneration {
+        self.search_generation
+    }
+
+    pub fn replacement_revision(&self) -> ReplacementRevision {
+        self.replacement_revision
+    }
+
+    pub fn discovery_complete(&self) -> bool {
+        self.discovery_complete
+    }
+
+    pub fn selected_match_ids(&self) -> &[MatchId] {
+        &self.selected_match_ids
+    }
+
+    pub fn files(&self) -> &[ReplacementFileCandidate] {
+        &self.files
+    }
+
+    pub fn summary(&self) -> &ReplacementSummary {
+        &self.summary
+    }
+
+    pub fn readiness(&self) -> ReplacementCandidateReadiness {
+        self.readiness
+    }
+}
+
+struct ComputedFileOutput {
+    bytes: Arc<[u8]>,
+    sha256: [u8; 32],
+    changed_matches: usize,
+    selected_noop_matches: usize,
+    estimated_changed_bytes: u64,
+    diff_context: Option<ReplacementDiffContext>,
+}
+
+fn build_replacement_candidate(
+    result: &TextSearchResult,
+    replacement: &CompiledReplacement,
+    selected_match_ids: &[MatchId],
+) -> Result<ReplacementCandidate, ReplacementPreviewError> {
+    if replacement.pattern_source != result.request.pattern.source
+        || replacement.pattern_mode != result.request.pattern.mode
+        || replacement.pattern_case_sensitive != result.request.pattern.case_sensitive
+    {
+        return Err(ReplacementPreviewError::new(
+            ReplacementPreviewErrorKind::PatternMismatch,
+            "the replacement was compiled for a different search pattern",
+        ));
+    }
+
+    let mut requested = HashSet::with_capacity(selected_match_ids.len());
+    for id in selected_match_ids {
+        if !requested.insert(id.clone()) {
+            return Err(ReplacementPreviewError::new(
+                ReplacementPreviewErrorKind::DuplicateSelection,
+                "the selected match list contains a duplicate identity",
+            ));
+        }
+    }
+
+    let mut known = HashSet::new();
+    let mut path_set = HashSet::new();
+    let mut match_count = 0usize;
+    for file in &result.matched_files {
+        path_set.insert(file.path.clone());
+        validate_snapshot_for_preview(file, result)?;
+        for span in &file.matches {
+            if !known.insert(span.id.clone()) {
+                return Err(ReplacementPreviewError::new(
+                    ReplacementPreviewErrorKind::InconsistentSnapshot,
+                    "the captured scan contains duplicate match identities",
+                ));
+            }
+            match_count = match_count.saturating_add(1);
+        }
+    }
+    if match_count != result.summary.matches_found {
+        return Err(ReplacementPreviewError::new(
+            ReplacementPreviewErrorKind::InconsistentSnapshot,
+            "the captured match count does not agree with its search summary",
+        ));
+    }
+
+    for id in &requested {
+        if known.contains(id) {
+            continue;
+        }
+        let same_path = path_set.contains(id.snapshot_path.as_ref());
+        let current_scan_identity = id.search_revision == result.revision()
+            && id.search_generation == result.generation();
+        let (kind, message) = if same_path || !current_scan_identity {
+            (
+                ReplacementPreviewErrorKind::StaleSelection,
+                "a selected match belongs to an older search or source snapshot",
+            )
+        } else {
+            (
+                ReplacementPreviewErrorKind::ForeignSelection,
+                "a selected match does not belong to this captured search result",
+            )
+        };
+        return Err(ReplacementPreviewError::new(kind, message));
+    }
+
+    // Canonicalize selection into the immutable source order. UI selection
+    // order therefore cannot affect candidate bytes, IDs, summaries, or hash.
+    let mut canonical_selection = Vec::with_capacity(requested.len());
+    for file in &result.matched_files {
+        for span in &file.matches {
+            if requested.contains(&span.id) {
+                canonical_selection.push(span.id.clone());
+            }
+        }
+    }
+
+    let max_file_output = usize::try_from(result.request.limits.max_file_bytes)
+        .unwrap_or(usize::MAX)
+        .min(usize::try_from(MAX_HARD_FILE_BYTES).unwrap_or(usize::MAX));
+    let mut total_output_remaining = usize::try_from(result.request.limits.max_total_bytes)
+        .unwrap_or(usize::MAX)
+        .min(usize::try_from(MAX_HARD_TOTAL_BYTES).unwrap_or(usize::MAX));
+    let mut files = Vec::with_capacity(result.matched_files.len());
+    let mut summary = ReplacementSummary {
+        approved_matches: canonical_selection.len(),
+        ..ReplacementSummary::default()
+    };
+
+    for snapshot in &result.matched_files {
+        let file_selection = snapshot
+            .matches
+            .iter()
+            .filter(|span| requested.contains(&span.id))
+            .map(|span| span.id.clone())
+            .collect::<Vec<_>>();
+        let output_limit = max_file_output.min(total_output_remaining);
+        let computed = compute_file_output(
+            snapshot,
+            &file_selection,
+            &result.request.pattern,
+            replacement,
+            output_limit,
+            result.request.limits.max_context_chars_per_side,
+            result.request.limits.max_preview_chars,
+        );
+        let file_candidate = match computed {
+            Ok(computed) => {
+                let changed = computed.bytes.as_ref() != snapshot.raw_bytes.as_ref();
+                if changed {
+                    summary.affected_files = summary.affected_files.saturating_add(1);
+                }
+                summary.changed_matches = summary
+                    .changed_matches
+                    .saturating_add(computed.changed_matches);
+                summary.selected_noop_matches = summary
+                    .selected_noop_matches
+                    .saturating_add(computed.selected_noop_matches);
+                summary.estimated_changed_bytes = summary
+                    .estimated_changed_bytes
+                    .saturating_add(computed.estimated_changed_bytes);
+                total_output_remaining = total_output_remaining
+                    .saturating_sub(computed.bytes.len());
+                ReplacementFileCandidate {
+                    original_snapshot: snapshot.clone(),
+                    output_bytes: computed.bytes,
+                    output_sha256: computed.sha256,
+                    replacement_revision: replacement.revision,
+                    selected_match_ids: file_selection,
+                    readiness: if changed {
+                        ReplacementFileReadiness::Ready
+                    } else {
+                        ReplacementFileReadiness::NoOp
+                    },
+                    diagnostic: None,
+                    changed_matches: Some(computed.changed_matches),
+                    selected_noop_matches: Some(computed.selected_noop_matches),
+                    estimated_changed_bytes: Some(computed.estimated_changed_bytes),
+                    diff_context: computed.diff_context,
+                }
+            }
+            Err(diagnostic) => {
+                summary.failed_files = summary.failed_files.saturating_add(1);
+                total_output_remaining = total_output_remaining
+                    .saturating_sub(snapshot.raw_bytes.len());
+                ReplacementFileCandidate {
+                    original_snapshot: snapshot.clone(),
+                    output_bytes: Arc::clone(&snapshot.raw_bytes),
+                    output_sha256: snapshot.content_sha256,
+                    replacement_revision: replacement.revision,
+                    selected_match_ids: file_selection,
+                    readiness: ReplacementFileReadiness::Error,
+                    diagnostic: Some(diagnostic),
+                    changed_matches: None,
+                    selected_noop_matches: None,
+                    estimated_changed_bytes: None,
+                    diff_context: None,
+                }
+            }
+        };
+        files.push(file_candidate);
+    }
+
+    let discovery_complete = result.summary.match_list_complete;
+    let readiness = if !discovery_complete {
+        ReplacementCandidateReadiness::IncompleteDiscovery
+    } else if summary.failed_files > 0 {
+        ReplacementCandidateReadiness::Blocked
+    } else if summary.affected_files == 0 {
+        ReplacementCandidateReadiness::NoOp
+    } else {
+        ReplacementCandidateReadiness::Ready
+    };
+    Ok(ReplacementCandidate {
+        search_revision: result.revision(),
+        search_generation: result.generation(),
+        replacement_revision: replacement.revision,
+        discovery_complete,
+        selected_match_ids: canonical_selection,
+        files,
+        summary,
+        readiness,
+    })
+}
+
+fn validate_snapshot_for_preview(
+    snapshot: &SearchFileSnapshot,
+    result: &TextSearchResult,
+) -> Result<(), ReplacementPreviewError> {
+    let raw = snapshot.raw_bytes.as_ref();
+    if u64::try_from(raw.len()).ok() != Some(snapshot.length)
+        || <[u8; 32]>::from(Sha256::digest(raw)) != snapshot.content_sha256
+    {
+        return Err(ReplacementPreviewError::new(
+            ReplacementPreviewErrorKind::InconsistentSnapshot,
+            "the captured source bytes do not agree with their original length or hash",
+        ));
+    }
+    let Some((encoding, bom_offset, text)) = decode_supported_utf8(raw) else {
+        return Err(ReplacementPreviewError::new(
+            ReplacementPreviewErrorKind::InconsistentSnapshot,
+            "the captured source bytes are no longer valid supported UTF-8",
+        ));
+    };
+    if encoding != snapshot.encoding || bom_offset != snapshot.bom_offset {
+        return Err(ReplacementPreviewError::new(
+            ReplacementPreviewErrorKind::InconsistentSnapshot,
+            "the captured source encoding does not agree with its original metadata",
+        ));
+    }
+
+    let mut seen_intervals = HashSet::with_capacity(snapshot.matches.len());
+    let mut prior: Option<Range<usize>> = None;
+    for (index, span) in snapshot.matches.iter().enumerate() {
+        let range = span.raw_byte_range();
+        let id = &span.id;
+        if id.snapshot_path() != snapshot.path
+            || id.snapshot_sha256 != snapshot.content_sha256
+            || id.search_revision != result.revision()
+            || id.search_generation != result.generation()
+            || id.raw_byte_range != range
+            || usize::try_from(id.ordinal).ok() != Some(index)
+        {
+            return Err(ReplacementPreviewError::new(
+                ReplacementPreviewErrorKind::InconsistentSnapshot,
+                "a captured match identity does not agree with its source snapshot",
+            ));
+        }
+        if range.start < bom_offset
+            || range.start > range.end
+            || range.end > raw.len()
+            || text
+                .get(range.start.saturating_sub(bom_offset)..range.end.saturating_sub(bom_offset))
+                .is_none()
+        {
+            return Err(ReplacementPreviewError::new(
+                ReplacementPreviewErrorKind::InvalidMatchRange,
+                "a captured match contains an invalid or non-UTF-8-boundary byte range",
+            ));
+        }
+        if !seen_intervals.insert(range.clone()) {
+            return Err(ReplacementPreviewError::new(
+                ReplacementPreviewErrorKind::DuplicateInterval,
+                "the captured scan contains duplicate match intervals",
+            ));
+        }
+        if let Some(previous) = &prior {
+            if range.start < previous.end
+                || (previous.start == previous.end && range.start == previous.start)
+            {
+                return Err(ReplacementPreviewError::new(
+                    ReplacementPreviewErrorKind::OverlappingMatches,
+                    "captured match intervals overlap or repeat a zero-width insertion point",
+                ));
+            }
+        }
+        prior = Some(range);
+    }
+    Ok(())
+}
+
+fn compute_file_output(
+    snapshot: &SearchFileSnapshot,
+    selected_match_ids: &[MatchId],
+    pattern: &SearchPattern,
+    replacement: &CompiledReplacement,
+    output_limit: usize,
+    max_context_chars: usize,
+    max_preview_chars: usize,
+) -> Result<ComputedFileOutput, ReplacementDiagnostic> {
+    let revision = replacement.revision;
+    let raw = snapshot.raw_bytes.as_ref();
+    if selected_match_ids.is_empty() {
+        if raw.len() > output_limit {
+            return Err(output_limit_diagnostic(revision, output_limit));
+        }
+        return Ok(ComputedFileOutput {
+            bytes: Arc::clone(&snapshot.raw_bytes),
+            sha256: snapshot.content_sha256,
+            changed_matches: 0,
+            selected_noop_matches: 0,
+            estimated_changed_bytes: 0,
+            diff_context: None,
+        });
+    }
+
+    let body = std::str::from_utf8(&raw[snapshot.bom_offset..]).map_err(|_| {
+        ReplacementDiagnostic::new(
+            revision,
+            ReplacementDiagnosticKind::CapturedMatchMismatch,
+            "the captured source body is not valid UTF-8",
+        )
+    })?;
+    let selected = selected_match_ids.iter().collect::<HashSet<_>>();
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(raw.len().min(output_limit))
+        .map_err(|_| {
+            ReplacementDiagnostic::new(
+                revision,
+                ReplacementDiagnosticKind::AllocationFailed,
+                "unable to reserve memory for the exact replacement candidate",
+            )
+        })?;
+    let mut cursor = 0;
+    let mut changed_matches = 0usize;
+    let mut selected_noop_matches = 0usize;
+    let mut estimated_changed_bytes = 0u64;
+
+    for span in &snapshot.matches {
+        if !selected.contains(&span.id) {
+            continue;
+        }
+        let range = span.raw_byte_range();
+        append_output(&mut output, &raw[cursor..range.start], output_limit, revision)?;
+        let relative_start = range.start.checked_sub(snapshot.bom_offset).ok_or_else(|| {
+            ReplacementDiagnostic::new(
+                revision,
+                ReplacementDiagnosticKind::CapturedMatchMismatch,
+                "a selected match offset precedes the original UTF-8 body",
+            )
+        })?;
+        let relative_end = range.end.checked_sub(snapshot.bom_offset).ok_or_else(|| {
+            ReplacementDiagnostic::new(
+                revision,
+                ReplacementDiagnosticKind::CapturedMatchMismatch,
+                "a selected match end precedes the original UTF-8 body",
+            )
+        })?;
+        let captures = pattern
+            .compiled()
+            .captures_at(body, relative_start)
+            .ok_or_else(|| captured_match_mismatch(revision))?;
+        let Some(full_match) = captures.get(0) else {
+            return Err(captured_match_mismatch(revision));
+        };
+        if full_match.start() != relative_start || full_match.end() != relative_end {
+            return Err(captured_match_mismatch(revision));
+        }
+        let matched_text = &body[relative_start..relative_end];
+        let replacement_start = output.len();
+        append_expansion(&mut output, &captures, replacement, output_limit)?;
+        let inserted = std::str::from_utf8(&output[replacement_start..]).map_err(|_| {
+            ReplacementDiagnostic::new(
+                revision,
+                ReplacementDiagnosticKind::AllocationFailed,
+                "the replacement expansion produced invalid UTF-8",
+            )
+        })?;
+        if inserted == matched_text {
+            selected_noop_matches = selected_noop_matches.saturating_add(1);
+        } else {
+            changed_matches = changed_matches.saturating_add(1);
+            let replaced_bytes = u64::try_from(matched_text.len()).unwrap_or(u64::MAX);
+            let inserted_bytes = u64::try_from(inserted.len()).unwrap_or(u64::MAX);
+            estimated_changed_bytes = estimated_changed_bytes
+                .saturating_add(replaced_bytes)
+                .saturating_add(inserted_bytes);
+        }
+        cursor = range.end;
+    }
+    append_output(&mut output, &raw[cursor..], output_limit, revision)?;
+
+    if output.as_slice() == raw {
+        return Ok(ComputedFileOutput {
+            bytes: Arc::clone(&snapshot.raw_bytes),
+            sha256: snapshot.content_sha256,
+            changed_matches,
+            selected_noop_matches,
+            estimated_changed_bytes,
+            diff_context: None,
+        });
+    }
+
+    let output_sha256 = <[u8; 32]>::from(Sha256::digest(&output));
+    let output_body = std::str::from_utf8(&output[snapshot.bom_offset..]).map_err(|_| {
+        ReplacementDiagnostic::new(
+            revision,
+            ReplacementDiagnosticKind::AllocationFailed,
+            "the exact replacement candidate is not valid UTF-8",
+        )
+    })?;
+    let diff_context = make_diff_context(
+        body,
+        output_body,
+        snapshot.bom_offset,
+        max_context_chars,
+        max_preview_chars,
+    );
+    Ok(ComputedFileOutput {
+        bytes: Arc::from(output),
+        sha256: output_sha256,
+        changed_matches,
+        selected_noop_matches,
+        estimated_changed_bytes,
+        diff_context,
+    })
+}
+
+fn append_expansion(
+    output: &mut Vec<u8>,
+    captures: &regex::Captures<'_>,
+    replacement: &CompiledReplacement,
+    output_limit: usize,
+) -> Result<(), ReplacementDiagnostic> {
+    for part in &replacement.parts {
+        match part {
+            ReplacementPart::Literal(range) => append_output(
+                output,
+                replacement.text[range.clone()].as_bytes(),
+                output_limit,
+                replacement.revision,
+            )?,
+            ReplacementPart::EscapedDollar => {
+                append_output(output, b"$", output_limit, replacement.revision)?;
+            }
+            ReplacementPart::Capture(reference) => {
+                let value = match reference {
+                    CaptureReference::Index(index) => captures.get(*index),
+                    CaptureReference::Name(name) => captures.name(name),
+                };
+                if let Some(value) = value {
+                    append_output(
+                        output,
+                        value.as_str().as_bytes(),
+                        output_limit,
+                        replacement.revision,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn append_output(
+    output: &mut Vec<u8>,
+    bytes: &[u8],
+    output_limit: usize,
+    revision: ReplacementRevision,
+) -> Result<(), ReplacementDiagnostic> {
+    let new_len = output.len().checked_add(bytes.len()).ok_or_else(|| {
+        output_limit_diagnostic(revision, output_limit)
+    })?;
+    if new_len > output_limit {
+        return Err(output_limit_diagnostic(revision, output_limit));
+    }
+    output.try_reserve(bytes.len()).map_err(|_| {
+        ReplacementDiagnostic::new(
+            revision,
+            ReplacementDiagnosticKind::AllocationFailed,
+            "unable to grow memory for the exact replacement candidate",
+        )
+    })?;
+    output.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn output_limit_diagnostic(
+    revision: ReplacementRevision,
+    output_limit: usize,
+) -> ReplacementDiagnostic {
+    ReplacementDiagnostic::new(
+        revision,
+        ReplacementDiagnosticKind::OutputLimitExceeded,
+        format!("the replacement output exceeds the {output_limit}-byte candidate limit"),
+    )
+}
+
+fn captured_match_mismatch(revision: ReplacementRevision) -> ReplacementDiagnostic {
+    ReplacementDiagnostic::new(
+        revision,
+        ReplacementDiagnosticKind::CapturedMatchMismatch,
+        "the captured source bytes no longer contain the selected full match at its original range",
+    )
+}
+
+fn make_diff_context(
+    original: &str,
+    candidate: &str,
+    bom_offset: usize,
+    context_chars: usize,
+    preview_chars: usize,
+) -> Option<ReplacementDiffContext> {
+    if original == candidate {
+        return None;
+    }
+    let mut prefix = original
+        .as_bytes()
+        .iter()
+        .zip(candidate.as_bytes())
+        .take_while(|(left, right)| left == right)
+        .count();
+    while !original.is_char_boundary(prefix) || !candidate.is_char_boundary(prefix) {
+        prefix = prefix.saturating_sub(1);
+    }
+    let start = char_start_before(original, prefix, context_chars);
+    let excerpt_chars = context_chars.saturating_add(preview_chars);
+    let original_end = char_end_after(original, prefix, excerpt_chars);
+    let candidate_end = char_end_after(candidate, prefix.min(candidate.len()), excerpt_chars);
+    Some(ReplacementDiffContext {
+        original_excerpt: original[start..original_end].to_owned(),
+        candidate_excerpt: candidate[start.min(candidate.len())..candidate_end].to_owned(),
+        first_change_byte_offset: bom_offset.saturating_add(prefix),
+        truncated: start > 0 || original_end < original.len() || candidate_end < candidate.len(),
+    })
+}
+
+fn char_start_before(text: &str, offset: usize, max_chars: usize) -> usize {
+    if max_chars == 0 || offset == 0 {
+        return offset;
+    }
+    text[..offset]
+        .char_indices()
+        .rev()
+        .nth(max_chars.saturating_sub(1))
+        .map_or(0, |(index, _)| index)
+}
+
+fn char_end_after(text: &str, offset: usize, max_chars: usize) -> usize {
+    if offset >= text.len() {
+        return text.len();
+    }
+    text[offset..]
+        .char_indices()
+        .nth(max_chars)
+        .map_or(text.len(), |(index, _)| offset + index)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -997,6 +2051,7 @@ fn build_matches(
     path: &Path,
     content_sha256: [u8; 32],
     revision: SearchRevision,
+    generation: SearchGeneration,
     pattern: &SearchPattern,
     limits: SearchLimits,
     remaining_total_matches: usize,
@@ -1045,6 +2100,7 @@ fn build_matches(
             snapshot_path: Arc::clone(&snapshot_path),
             snapshot_sha256: content_sha256,
             search_revision: revision,
+            search_generation: generation,
             raw_byte_range: raw_byte_range.clone(),
             ordinal,
         };
@@ -1421,6 +2477,7 @@ fn execute_search(
                 read.path(),
                 read.content_sha256(),
                 request.revision,
+                request.generation,
                 &request.pattern,
                 request.limits,
                 remaining_matches,
@@ -1931,6 +2988,7 @@ mod tests {
             Path::new("sample.txt"),
             [9; 32],
             SearchRevision(7),
+            SearchGeneration(11),
             &pattern,
             small_limits(),
             32,
@@ -1943,6 +3001,7 @@ mod tests {
             Path::new("sample.txt"),
             [9; 32],
             SearchRevision(7),
+            SearchGeneration(11),
             &pattern,
             small_limits(),
             32,
@@ -1983,6 +3042,7 @@ mod tests {
             Path::new("sample.txt"),
             [9; 32],
             SearchRevision(7),
+            SearchGeneration(11),
             &zero_width,
             limited,
             2,
@@ -1996,6 +3056,435 @@ mod tests {
         }));
         assert_eq!(zero_matches.matches[0].raw_byte_range(), 3..3);
         assert_eq!(zero_matches.matches[1].raw_byte_range(), 15..15);
+    }
+
+    fn in_memory_search_result(
+        raw: &[u8],
+        pattern_source: &str,
+        pattern_mode: SearchPatternMode,
+        generation: SearchGeneration,
+        file_name: &str,
+    ) -> TextSearchResult {
+        let root = ExplicitDirectoryRoot::new(std::env::temp_dir()).expect("absolute test root");
+        let path = root.as_path().join(file_name);
+        let revision = SearchRevision(8);
+        let pattern = SearchPattern::compile(pattern_source, pattern_mode, true)
+            .expect("valid test pattern");
+        let (encoding, bom_offset, text) = decode_supported_utf8(raw).expect("UTF-8 fixture");
+        let cancellation = ScanCancellation::new();
+        let limits = small_limits();
+        let content_sha256 = <[u8; 32]>::from(Sha256::digest(raw));
+        let built = build_matches(
+            text,
+            raw.len(),
+            bom_offset,
+            &path,
+            content_sha256,
+            revision,
+            generation,
+            &pattern,
+            limits,
+            limits.max_matches_total(),
+            &cancellation,
+        );
+        assert_eq!(built.status, MatchBuildStatus::Complete);
+        let match_count = built.matches.len();
+        let matched_files = if built.matches.is_empty() {
+            Vec::new()
+        } else {
+            vec![SearchFileSnapshot {
+                root: root.as_path().to_path_buf(),
+                relative_path: PathBuf::from(file_name),
+                path,
+                display_path: file_name.to_owned(),
+                root_identity: NativeFileIdentity::default(),
+                file_identity: NativeFileIdentity::default(),
+                parent_identity: NativeFileIdentity::default(),
+                length: u64::try_from(raw.len()).expect("fixture length fits u64"),
+                modified: SystemTime::UNIX_EPOCH,
+                raw_bytes: Arc::from(raw.to_vec()),
+                content_sha256,
+                encoding,
+                bom_offset,
+                matches: built.matches,
+            }]
+        };
+        let request = TextSearchRequest::new(
+            vec![root],
+            SearchFilterSpec::default(),
+            pattern,
+            revision,
+            generation,
+            limits,
+        )
+        .expect("valid in-memory search request");
+        TextSearchResult {
+            request,
+            status: SearchStatus::Complete,
+            summary: SearchSummary {
+                files_examined: 1,
+                files_searched: 1,
+                files_matched: if match_count > 0 { 1 } else { 0 },
+                matches_found: match_count,
+                bytes_read: u64::try_from(raw.len()).expect("fixture length fits u64"),
+                match_list_complete: true,
+                ..SearchSummary::default()
+            },
+            matched_files,
+        }
+    }
+
+    #[test]
+    fn replacement_templates_preserve_literal_text_and_validate_rust_captures() {
+        let generation = SearchGeneration(21);
+        let result = in_memory_search_result(
+            b"cat-7 dog",
+            r"(?<word>[a-z]+)(?:-(?<number>[0-9]+))?",
+            SearchPatternMode::RustRegex,
+            generation,
+            "template.txt",
+        );
+        let matches = result.matched_files()[0].matches();
+
+        let literal = ReplacementSpec::new(
+            "$1\\path\r\n🌐\n",
+            ReplacementMode::Literal,
+            ReplacementRevision(1),
+        )
+        .compile(result.pattern())
+        .expect("literal replacement compiles without interpolation");
+        let literal_candidate = result
+            .preview_replacement(&literal, &[matches[0].id().clone()])
+            .expect("literal preview");
+        assert_eq!(
+            literal_candidate.files()[0].output_bytes().as_ref(),
+            "$1\\path\r\n🌐\n dog".as_bytes()
+        );
+
+        let captures = ReplacementSpec::new(
+            "$0|$1|${word}|${number}|$$",
+            ReplacementMode::RustRegexCaptures,
+            ReplacementRevision(2),
+        )
+        .compile(result.pattern())
+        .expect("known Rust capture references compile");
+        let capture_candidate = result
+            .preview_replacement(
+                &captures,
+                &[matches[0].id().clone(), matches[1].id().clone()],
+            )
+            .expect("capture preview");
+        assert_eq!(
+            capture_candidate.files()[0].output_bytes().as_ref(),
+            b"cat-7|cat|cat|7|$ dog|dog|dog||$"
+        );
+
+        let braced_numeric = ReplacementSpec::new(
+            "${+1}",
+            ReplacementMode::RustRegexCaptures,
+            ReplacementRevision(5),
+        )
+        .compile(result.pattern())
+        .expect("braced usize references follow Rust regex parsing");
+        let braced_numeric_candidate = result
+            .preview_replacement(
+                &braced_numeric,
+                &[matches[0].id().clone(), matches[1].id().clone()],
+            )
+            .expect("braced numeric capture preview");
+        let source = "cat-7 dog";
+        let mut expanded_by_regex = String::new();
+        let mut source_cursor = 0;
+        for captures in result.pattern().compiled().captures_iter(source) {
+            let full_match = captures.get(0).expect("full match");
+            expanded_by_regex.push_str(&source[source_cursor..full_match.start()]);
+            captures.expand("${+1}", &mut expanded_by_regex);
+            source_cursor = full_match.end();
+        }
+        expanded_by_regex.push_str(&source[source_cursor..]);
+        assert_eq!(expanded_by_regex, "cat dog");
+        assert_eq!(
+            braced_numeric_candidate.files()[0].output_bytes().as_ref(),
+            expanded_by_regex.as_bytes()
+        );
+
+        let unknown = ReplacementSpec::new(
+            "$missing",
+            ReplacementMode::RustRegexCaptures,
+            ReplacementRevision(3),
+        )
+        .compile(result.pattern())
+        .expect_err("unknown names are diagnosed before preview");
+        assert_eq!(unknown.revision(), ReplacementRevision(3));
+        assert_eq!(unknown.kind(), ReplacementDiagnosticKind::UnknownCapture);
+        let invalid_index = ReplacementSpec::new(
+            "$9",
+            ReplacementMode::RustRegexCaptures,
+            ReplacementRevision(4),
+        )
+        .compile(result.pattern())
+        .expect_err("unknown numeric groups are diagnosed before preview");
+        assert_eq!(
+            invalid_index.kind(),
+            ReplacementDiagnosticKind::InvalidCaptureIndex
+        );
+    }
+
+    #[test]
+    fn selective_preview_is_snapshot_bound_bounded_and_byte_faithful() {
+        let generation = SearchGeneration(31);
+        let raw = b"\xEF\xBB\xBFhit\r\nhit\nlast";
+        let result = in_memory_search_result(
+            raw,
+            "hit",
+            SearchPatternMode::Literal,
+            generation,
+            "mixed-lines.txt",
+        );
+        let matches = result.matched_files()[0].matches();
+        let second_id = matches[1].id().clone();
+        assert_eq!(second_id.ordinal(), 1);
+        let replacement = ReplacementSpec::new(
+            "hit!",
+            ReplacementMode::Literal,
+            ReplacementRevision(10),
+        )
+        .compile(result.pattern())
+        .expect("literal replacement");
+        let candidate = result
+            .preview_replacement(&replacement, std::slice::from_ref(&second_id))
+            .expect("selected second-match preview");
+        assert_eq!(candidate.readiness(), ReplacementCandidateReadiness::Ready);
+        assert_eq!(candidate.search_generation(), generation);
+        assert_eq!(candidate.selected_match_ids()[0].ordinal(), 1);
+        assert_eq!(
+            candidate.files()[0].output_bytes().as_ref(),
+            b"\xEF\xBB\xBFhit\r\nhit!\nlast"
+        );
+        assert!(candidate.files()[0].diff_context().is_some());
+        assert_eq!(candidate.summary().affected_files(), 1);
+        assert_eq!(candidate.summary().approved_matches(), 1);
+        assert_eq!(candidate.summary().changed_matches(), 1);
+        assert_eq!(candidate.summary().estimated_changed_bytes(), 7);
+
+        let no_op = ReplacementSpec::new(
+            "hit",
+            ReplacementMode::Literal,
+            ReplacementRevision(11),
+        )
+        .compile(result.pattern())
+        .expect("no-op replacement");
+        let no_op_candidate = result
+            .preview_replacement(&no_op, std::slice::from_ref(&second_id))
+            .expect("no-op preview");
+        assert_eq!(no_op_candidate.readiness(), ReplacementCandidateReadiness::NoOp);
+        assert!(Arc::ptr_eq(
+            no_op_candidate.files()[0].output_bytes(),
+            result.matched_files()[0].raw_bytes()
+        ));
+        assert_eq!(no_op_candidate.summary().selected_noop_matches(), 1);
+        assert_eq!(no_op_candidate.summary().affected_files(), 0);
+
+        assert_eq!(
+            result
+                .preview_replacement(&replacement, &[second_id.clone(), second_id.clone()])
+                .expect_err("duplicate selected IDs are rejected")
+                .kind(),
+            ReplacementPreviewErrorKind::DuplicateSelection
+        );
+        let newer_scan = in_memory_search_result(
+            raw,
+            "hit",
+            SearchPatternMode::Literal,
+            SearchGeneration(32),
+            "mixed-lines.txt",
+        );
+        let newer_replacement = ReplacementSpec::new(
+            "hit!",
+            ReplacementMode::Literal,
+            ReplacementRevision(12),
+        )
+        .compile(newer_scan.pattern())
+        .expect("replacement for newer scan");
+        assert_eq!(
+            newer_scan
+                .preview_replacement(&newer_replacement, &[second_id.clone()])
+                .expect_err("an older scan selection is stale")
+                .kind(),
+            ReplacementPreviewErrorKind::StaleSelection
+        );
+        let other_file = in_memory_search_result(
+            raw,
+            "hit",
+            SearchPatternMode::Literal,
+            generation,
+            "other.txt",
+        );
+        let other_replacement = ReplacementSpec::new(
+            "hit!",
+            ReplacementMode::Literal,
+            ReplacementRevision(13),
+        )
+        .compile(other_file.pattern())
+        .expect("replacement for other file");
+        assert_eq!(
+            other_file
+                .preview_replacement(&other_replacement, &[second_id.clone()])
+                .expect_err("an ID from another file is foreign")
+                .kind(),
+            ReplacementPreviewErrorKind::ForeignSelection
+        );
+
+        let mut incomplete = result.clone();
+        incomplete.summary.match_list_complete = false;
+        let incomplete_candidate = incomplete
+            .preview_replacement(&replacement, std::slice::from_ref(&second_id))
+            .expect("partial results can show a blocked preview");
+        assert_eq!(
+            incomplete_candidate.readiness(),
+            ReplacementCandidateReadiness::IncompleteDiscovery
+        );
+        assert!(!incomplete_candidate.discovery_complete());
+
+        let adjacent = in_memory_search_result(
+            b"aa",
+            "a",
+            SearchPatternMode::Literal,
+            SearchGeneration(33),
+            "adjacent.txt",
+        );
+        let adjacent_replacement = ReplacementSpec::new(
+            "X",
+            ReplacementMode::Literal,
+            ReplacementRevision(14),
+        )
+        .compile(adjacent.pattern())
+        .expect("adjacent replacement");
+        let adjacent_ids = adjacent.matched_files()[0]
+            .matches()
+            .iter()
+            .map(|span| span.id().clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            adjacent
+                .preview_replacement(&adjacent_replacement, &adjacent_ids)
+                .expect("adjacent matches remain valid")
+                .files()[0]
+                .output_bytes()
+                .as_ref(),
+            b"XX"
+        );
+
+        let zero_width = in_memory_search_result(
+            b"a\nb",
+            "(?m)^",
+            SearchPatternMode::RustRegex,
+            SearchGeneration(34),
+            "zero-width.txt",
+        );
+        let zero_width_replacement = ReplacementSpec::new(
+            ">",
+            ReplacementMode::Literal,
+            ReplacementRevision(15),
+        )
+        .compile(zero_width.pattern())
+        .expect("zero-width replacement");
+        let first_zero_width = zero_width.matched_files()[0].matches()[0].id().clone();
+        assert_eq!(
+            zero_width
+                .preview_replacement(&zero_width_replacement, &[first_zero_width])
+                .expect("zero-width insertion applies once")
+                .files()[0]
+                .output_bytes()
+                .as_ref(),
+            b">a\nb"
+        );
+
+        let limited_replacement = ReplacementSpec::new(
+            "x".repeat(129),
+            ReplacementMode::Literal,
+            ReplacementRevision(16),
+        )
+        .compile(adjacent.pattern())
+        .expect("oversized output is diagnosed during preview");
+        let limited_candidate = adjacent
+            .preview_replacement(&limited_replacement, &[adjacent_ids[0].clone()])
+            .expect("output-limit failures remain visible in the candidate");
+        assert_eq!(limited_candidate.readiness(), ReplacementCandidateReadiness::Blocked);
+        assert_eq!(
+            limited_candidate.files()[0]
+                .diagnostic()
+                .expect("file carries output-limit diagnostic")
+                .kind(),
+            ReplacementDiagnosticKind::OutputLimitExceeded
+        );
+
+        // The aggregate output budget applies to candidate bytes. A later
+        // source may be larger than the remaining budget and still fit after
+        // its selected matches shrink.
+        let first_expanding = in_memory_search_result(
+            &vec![b'b'; 30],
+            "aaaa|b",
+            SearchPatternMode::RustRegex,
+            SearchGeneration(35),
+            "expanding.txt",
+        );
+        let second_shrinking = in_memory_search_result(
+            &vec![b'a'; 100],
+            "aaaa|b",
+            SearchPatternMode::RustRegex,
+            SearchGeneration(35),
+            "shrinking.txt",
+        );
+        let mut aggregate = first_expanding.clone();
+        aggregate
+            .matched_files
+            .extend(second_shrinking.matched_files.iter().cloned());
+        aggregate.summary.files_examined = 2;
+        aggregate.summary.files_searched = 2;
+        aggregate.summary.files_matched = 2;
+        aggregate.summary.matches_found = 55;
+        aggregate.summary.bytes_read = 130;
+        aggregate.request.limits.max_total_bytes = 140;
+        let aggregate_selection = aggregate
+            .matched_files()
+            .iter()
+            .flat_map(|file| file.matches().iter().map(|span| span.id().clone()))
+            .collect::<Vec<_>>();
+        let aggregate_replacement = ReplacementSpec::new(
+            "XX",
+            ReplacementMode::Literal,
+            ReplacementRevision(17),
+        )
+        .compile(aggregate.pattern())
+        .expect("aggregate replacement");
+        let aggregate_candidate = aggregate
+            .preview_replacement(&aggregate_replacement, &aggregate_selection)
+            .expect("shrinking output fits the aggregate budget");
+        assert_eq!(aggregate_candidate.readiness(), ReplacementCandidateReadiness::Ready);
+        assert_eq!(
+            aggregate_candidate
+                .files()
+                .iter()
+                .map(|file| file.output_bytes().len())
+                .sum::<usize>(),
+            110
+        );
+
+        let mut invalid_range = result.clone();
+        let invalid_id = {
+            let span = &mut invalid_range.matched_files[0].matches[0];
+            span.raw_byte_range = 3..raw.len() + 1;
+            span.id.raw_byte_range = span.raw_byte_range.clone();
+            span.id.clone()
+        };
+        assert_eq!(
+            invalid_range
+                .preview_replacement(&replacement, &[invalid_id])
+                .expect_err("invalid original ranges are rejected")
+                .kind(),
+            ReplacementPreviewErrorKind::InvalidMatchRange
+        );
     }
 
     #[cfg(windows)]
