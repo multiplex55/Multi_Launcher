@@ -86,6 +86,7 @@ pub mod gui;
 pub mod window_manager;
 pub mod windows_layout;
 pub mod workspace;
+pub mod xml_toolkit_engine;
 
 // The shared startup owner is compiled into the library only for its
 // deterministic scanner-injection contract. Production library builds expose
