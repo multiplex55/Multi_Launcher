@@ -214,6 +214,7 @@ mod track_c3c_dispatch_receipt {
             WatchEvent::RadialConfigDiagnostic(_) => "radial_config_diagnostic",
             WatchEvent::RadialRuntimeDiagnostic(_) => "radial_runtime_diagnostic",
             WatchEvent::PasteSequenceRuntimeDiagnostic(_) => "paste_sequence_runtime_diagnostic",
+            WatchEvent::PasteSequenceRoutes(_) => "paste_sequence_routes",
             WatchEvent::RadialDiagnostic(_) => "radial_diagnostic",
             WatchEvent::RadialSubmenuPlacementFailure(_) => "radial_submenu_placement_failure",
             WatchEvent::RadialPlacementActionResult { .. } => "radial_placement_action_result",
@@ -352,6 +353,15 @@ impl LauncherApp {
                             "radial.reload",
                             format!("Radial menu configuration was not reloaded: {diagnostic}"),
                         );
+                    }
+                }
+                WatchEvent::PasteSequenceRoutes(presentation) => {
+                    if self
+                        .sequence_routes
+                        .as_ref()
+                        .is_none_or(|current| presentation.generation >= current.generation)
+                    {
+                        self.sequence_routes = Some(presentation);
                     }
                 }
                 WatchEvent::PasteSequenceRuntimeDiagnostic(diagnostic) => {
@@ -6770,6 +6780,85 @@ mod tests {
             TestWatchEvent::ClipboardModify(ClipboardModifyGuiEvent::ConfigurationReloadFailure(
                 "bad".into()
             ))
+        );
+    }
+
+    #[test]
+    fn paste_route_presentation_events_clear_old_status_and_ignore_stale_receipts() {
+        use crate::paste_sequence::{
+            SequenceRoutePresentation, SequenceShortcutPresentation as Presentation,
+        };
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = LauncherApp::new(
+            &ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test_at(directory.path()),
+            directory
+                .path()
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            Settings::default(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(
+            app.paste_sequence_shortcut_summary()
+                .contains("waiting for runtime acknowledgement")
+        );
+        let before = app.settings_editor.baseline_settings.paste_sequence.clone();
+        let omitted = SequenceRoutePresentation {
+            generation: 4,
+            next: Presentation::Active("Ctrl+F9".into()),
+            cancel: Presentation::Inactive {
+                configured: "Alt+End".into(),
+                reason: "fixture conflict".into(),
+            },
+            starts: Vec::new(),
+            tooltip_enabled: true,
+            escape_cancel_enabled: true,
+        };
+        app.event_tx
+            .send(WatchEvent::PasteSequenceRoutes(omitted.clone()))
+            .unwrap();
+        app.process_watch_events();
+        assert_eq!(app.sequence_routes.as_ref(), Some(&omitted));
+        assert!(
+            app.paste_sequence_shortcut_summary()
+                .contains("fixture conflict")
+        );
+        let clean = SequenceRoutePresentation {
+            generation: 5,
+            cancel: Presentation::Disabled,
+            tooltip_enabled: false,
+            ..omitted.clone()
+        };
+        app.event_tx
+            .send(WatchEvent::PasteSequenceRoutes(clean.clone()))
+            .unwrap();
+        app.event_tx
+            .send(WatchEvent::PasteSequenceRoutes(omitted))
+            .unwrap();
+        app.process_watch_events();
+        assert_eq!(app.sequence_routes.as_ref(), Some(&clean));
+        let summary = app.paste_sequence_shortcut_summary();
+        assert!(summary.contains("Cancel: Disabled") && summary.contains("Floating tooltip: Off"));
+        assert!(!summary.contains("fixture conflict"));
+        assert_eq!(
+            app.settings_editor.baseline_settings.paste_sequence, before,
+            "runtime presentation never writes a settings draft or acknowledgement"
         );
     }
 

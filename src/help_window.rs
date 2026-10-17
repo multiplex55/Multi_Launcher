@@ -98,9 +98,13 @@ impl HelpWindow {
                             ui.label(
                                 "Commands: paste <query>, paste:run:<id>, paste:start, paste:next, paste:cancel. Saved sequence shortcuts use the application's chord syntax.",
                             );
-                            ui.label(
-                                "Ctrl+Alt+Shift+PageDown advances a sequence; Ctrl+Alt+Shift+End cancels it. Both chords are checked against existing launcher, radial, and macro routes.",
-                            );
+                            ui.label(app.paste_sequence_shortcut_summary());
+                            if let Some(presentation) = &app.sequence_routes {
+                                for (id, chord) in &presentation.starts {
+                                    ui.label(format!("Sequence {} Start: {chord}", id.get()));
+                                }
+                            }
+                            ui.label("Settings > Paste Sequences configures playback controls. Empty shortcuts are disabled. Conflicting defaults can be inactive; custom conflicts retain the previous routes. Each saved sequence can have its own optional Start shortcut.");
                             ui.separator();
                             ui.label(egui::RichText::new("Dashboard").strong());
                             let dashboard_guidance = ui.add(

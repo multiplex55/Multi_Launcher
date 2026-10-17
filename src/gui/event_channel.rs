@@ -149,6 +149,7 @@ fn class_of(event: &WatchEvent) -> EventClass {
         | WatchEvent::RadialConfigDiagnostic(_)
         | WatchEvent::RadialRuntimeDiagnostic(_)
         | WatchEvent::PasteSequenceRuntimeDiagnostic(_)
+        | WatchEvent::PasteSequenceRoutes(_)
         | WatchEvent::RadialDiagnostic(_)
         | WatchEvent::RadialSubmenuPlacementFailure(_)
         | WatchEvent::RadialPlacementActionResult { .. }

@@ -937,6 +937,7 @@ pub struct LauncherApp {
     root_window_bridge: RootWindowBridge,
     snippet_origin_window: Option<crate::active_window::ExternalForegroundWindow>,
     pub(crate) sequence_playback: crate::paste_sequence::SequencePlaybackController,
+    pub(crate) sequence_routes: Option<crate::paste_sequence::SequenceRoutePresentation>,
     visible_flag: Arc<AtomicBool>,
     restore_flag: Arc<AtomicBool>,
     visibility_revision: crate::visibility::VisibilityRevision,
@@ -1601,6 +1602,13 @@ impl LauncherApp {
     pub(crate) fn open_paste_sequence_settings_dialog(&mut self) {
         self.open_settings_dialog();
         self.settings_editor.reveal_paste_sequence = true;
+    }
+
+    pub(crate) fn paste_sequence_shortcut_summary(&self) -> String {
+        self.sequence_routes.as_ref().map_or_else(
+            || "Playback shortcut status unavailable; waiting for runtime acknowledgement.".into(),
+            crate::paste_sequence::SequenceRoutePresentation::summary,
+        )
     }
 
     /// Opens the standalone Mouse Gesture Settings dialog.
@@ -2972,6 +2980,7 @@ impl LauncherApp {
             root_window_bridge: RootWindowBridge::default(),
             snippet_origin_window: None,
             sequence_playback: crate::paste_sequence::SequencePlaybackController::default(),
+            sequence_routes: None,
             visible_flag: visible_flag.clone(),
             restore_flag: restore_flag.clone(),
             visibility_revision: crate::visibility::VisibilityRevision::default(),
@@ -4984,6 +4993,7 @@ pub fn recv_test_event(rx: &EventReceiver) -> Option<TestWatchEvent> {
             | WatchEvent::RadialConfigDiagnostic(_)
             | WatchEvent::RadialRuntimeDiagnostic(_)
             | WatchEvent::PasteSequenceRuntimeDiagnostic(_)
+            | WatchEvent::PasteSequenceRoutes(_)
             | WatchEvent::RadialDiagnostic(_)
             | WatchEvent::RadialSubmenuPlacementFailure(_)
             | WatchEvent::RadialPlacementActionResult { .. }

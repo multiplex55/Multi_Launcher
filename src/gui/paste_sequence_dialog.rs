@@ -10,12 +10,6 @@ use std::path::PathBuf;
 const SNIPPETS_FILE: &str = crate::plugins::snippets::SNIPPETS_FILE;
 const CLIPBOARD_FILE: &str = crate::plugins::clipboard::CLIPBOARD_FILE;
 
-fn configured_shortcut_label(value: Option<&str>) -> &str {
-    value
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("Disabled")
-}
-
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 struct DialogLayout {
@@ -293,14 +287,9 @@ impl PasteSequenceDialog {
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Saved sequences");
-                            let preferences = &app.settings_editor.baseline_settings.paste_sequence;
                             if ui
                                 .button("Playback Settings")
-                                .on_hover_text(format!(
-                                    "Next: {}\nCancel: {}",
-                                    configured_shortcut_label(preferences.next_hotkey.as_deref()),
-                                    configured_shortcut_label(preferences.cancel_hotkey.as_deref()),
-                                ))
+                                .on_hover_text(app.paste_sequence_shortcut_summary())
                                 .clicked()
                             {
                                 app.open_paste_sequence_settings_dialog();

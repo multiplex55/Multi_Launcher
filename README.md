@@ -702,9 +702,27 @@ the corresponding history item is removed.
 `paste <query>` searches saved sequence names, and activating a result runs the
 sequence. `paste:run:<id>` is the payload-free stable-ID action used by saved
 results. `paste:start`, `paste:next`, and `paste:cancel` control a prepared or
-active run. Sequence hotkeys use the application's existing chord syntax; the
-default controls are **Ctrl+Alt+Shift+PageDown** for Next and
-**Ctrl+Alt+Shift+End** for Cancel. The editor shows the captured destination
+active run. Each saved sequence can have an **Optional start hotkey**, using the
+application's existing chord syntax. Content-only edits and removing an unbound
+sequence save directly. If a new Start shortcut is invalid or conflicts, valid
+content still saves with the previous binding and the editor explains the partial
+success; concurrent changes are never overwritten.
+
+Open **Settings > Paste Sequences**, or **Playback Settings** in the editor, to
+configure Next and Cancel. Defaults are **Ctrl+Alt+Shift+PageDown** and
+**Ctrl+Alt+Shift+End**. Disable either control or leave its chord empty to turn it
+off. Changes are staged until **Save** succeeds; **Cancel** discards the draft.
+Conflicts are checked against launcher, quit/help, Screen Draw, radial, MkMacro
+and other sequence shortcuts using actual co-fire rules, including a shared
+primary key with different modifiers. Conflicting optional defaults become
+inactive with a named reason; custom conflicts retain the previous active routes.
+The launcher hotkey is never changed to resolve a Paste conflict. Quick Help,
+the editor's Playback Settings hover and the Settings section show acknowledged
+active/disabled/inactive controls and saved Start bindings, so a configured chord
+is not presented as active when it was omitted.
+
+The same section stores **Show floating playback tooltip** and **Escape cancels
+active playback** preferences, both enabled by default. The editor shows the captured destination
 before start. The destination is captured before the editor takes focus, and
 the launcher stops if that exact external window is no longer available or
 focused when a step is pasted.

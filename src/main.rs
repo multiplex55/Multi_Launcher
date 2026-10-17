@@ -745,6 +745,7 @@ enum PendingLauncherRouteCompletion {
     Reconcile {
         start_legacy: bool,
         stop_service: bool,
+        paste_presentation: multi_launcher::paste_sequence::SequenceRoutePresentation,
     },
     Hotkey(Box<PendingHotkeyApplication>),
 }
@@ -834,7 +835,7 @@ struct PreparedHotkeyRoute {
     screen_draw: Option<Arc<HotkeyTrigger>>,
     emergency: Option<Arc<HotkeyTrigger>>,
     sequence_routes: Vec<PasteSequenceHotkeyRoute>,
-    sequence_omissions: Vec<String>,
+    sequence_omissions: Vec<PasteSequenceRouteOmission>,
     sequence_triggers: Vec<PasteSequenceHotkeyTrigger>,
     staged_service: Option<LauncherInvocationService>,
 }
@@ -905,10 +906,16 @@ fn validate_hotkey_route_candidate_with_sequence_bindings(
         .map(|resolved| resolved.base)
 }
 
+#[derive(Clone, Debug)]
+struct PasteSequenceRouteOmission {
+    action: PasteSequenceHotkeyAction,
+    reason: String,
+}
+
 struct ResolvedHotkeyRouteCandidate {
     base: multi_launcher::hotkey::validation::ValidatedHotkeyRoutes,
     sequences: Vec<PasteSequenceHotkeyRoute>,
-    omissions: Vec<String>,
+    omissions: Vec<PasteSequenceRouteOmission>,
 }
 
 fn resolve_hotkey_route_candidate(
@@ -992,7 +999,12 @@ fn resolve_hotkey_route_candidate_with_macro(
                 return Err(error);
             }
             sequences.pop();
-            omissions.push(format!("Paste Sequence {:?} ({}) is inactive: {error}. Choose a different shortcut in Settings > Paste Sequences.", route.action, route.chord));
+            omissions.push(PasteSequenceRouteOmission {
+                action: route.action,
+                reason: format!(
+                    "{error}. Choose a different shortcut in Settings > Paste Sequences."
+                ),
+            });
         }
     }
     Ok(ResolvedHotkeyRouteCandidate {
@@ -1002,11 +1014,110 @@ fn resolve_hotkey_route_candidate_with_macro(
     })
 }
 
-fn report_paste_sequence_route_omissions(omissions: &[String]) {
+fn paste_sequence_presentation_for_polling(
+    mut presentation: multi_launcher::paste_sequence::SequenceRoutePresentation,
+) -> multi_launcher::paste_sequence::SequenceRoutePresentation {
+    use multi_launcher::paste_sequence::SequenceShortcutPresentation;
+    let supported = |chord: &str| {
+        parse_hotkey(chord).is_some_and(|hotkey| {
+            multi_launcher::hotkey::runtime::legacy_virtual_key(hotkey.key).is_some()
+        })
+    };
+    for control in [&mut presentation.next, &mut presentation.cancel] {
+        if let SequenceShortcutPresentation::Active(chord) = control
+            && !supported(chord)
+        {
+            *control = SequenceShortcutPresentation::Inactive {
+                configured: chord.clone(),
+                reason: "The active polling listener does not support this primary key".into(),
+            };
+        }
+    }
+    presentation.starts.retain(|(_, chord)| supported(chord));
+    presentation
+}
+
+fn paste_sequence_route_presentation(
+    settings: &Settings,
+    generation: u64,
+    routes: &[PasteSequenceHotkeyRoute],
+    omissions: &[PasteSequenceRouteOmission],
+) -> multi_launcher::paste_sequence::SequenceRoutePresentation {
+    use multi_launcher::paste_sequence::{SequenceRoutePresentation, SequenceShortcutPresentation};
+    let control = |action: PasteSequenceHotkeyAction, configured: Option<&str>| {
+        let Some(chord) = configured.map(str::trim).filter(|chord| !chord.is_empty()) else {
+            return SequenceShortcutPresentation::Disabled;
+        };
+        if let Some(route) = routes.iter().find(|route| route.action == action) {
+            return SequenceShortcutPresentation::Active(route.chord.clone());
+        }
+        let reason = omissions
+            .iter()
+            .find(|omission| omission.action == action)
+            .map(|omission| omission.reason.clone())
+            .unwrap_or_else(|| {
+                if settings
+                    .enabled_plugins
+                    .as_ref()
+                    .is_some_and(|enabled| !enabled.contains("paste_sequence"))
+                {
+                    "Paste Sequences plugin is disabled".into()
+                } else {
+                    "Shortcut unavailable; see the runtime diagnostic".into()
+                }
+            });
+        SequenceShortcutPresentation::Inactive {
+            configured: chord.into(),
+            reason,
+        }
+    };
+    let presentation = SequenceRoutePresentation {
+        generation,
+        next: control(
+            PasteSequenceHotkeyAction::Next,
+            settings.paste_sequence.next_hotkey.as_deref(),
+        ),
+        cancel: control(
+            PasteSequenceHotkeyAction::Cancel,
+            settings.paste_sequence.cancel_hotkey.as_deref(),
+        ),
+        starts: routes
+            .iter()
+            .filter_map(|route| {
+                if let PasteSequenceHotkeyAction::Start(id) = route.action {
+                    Some((id, route.chord.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        tooltip_enabled: settings.paste_sequence.tooltip_enabled,
+        escape_cancel_enabled: settings.paste_sequence.escape_cancel_enabled,
+    };
+    if settings.radial.enabled && settings.radial.shared_tap_hold {
+        presentation
+    } else {
+        paste_sequence_presentation_for_polling(presentation)
+    }
+}
+
+fn publish_paste_sequence_route_presentation(
+    presentation: multi_launcher::paste_sequence::SequenceRoutePresentation,
+) {
+    multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::PasteSequenceRoutes(
+        presentation,
+    ));
+}
+
+fn report_paste_sequence_route_omissions(omissions: &[PasteSequenceRouteOmission]) {
     for omission in omissions {
-        tracing::warn!(%omission, "optional Paste Sequence shortcut omitted");
+        let message = format!(
+            "Paste Sequence {:?} is inactive: {}",
+            omission.action, omission.reason
+        );
+        tracing::warn!(%message, "optional Paste Sequence shortcut omitted");
         multi_launcher::gui::send_event(
-            multi_launcher::gui::WatchEvent::PasteSequenceRuntimeDiagnostic(omission.clone()),
+            multi_launcher::gui::WatchEvent::PasteSequenceRuntimeDiagnostic(message),
         );
     }
 }
@@ -2116,6 +2227,16 @@ impl HotkeyRuntimeCommitContext<'_> {
             service.stop();
         }
         finish_hotkey_application_error(application, self.listener, self.invocation_service, false);
+        publish_paste_sequence_route_presentation(paste_sequence_route_presentation(
+            self.settings,
+            *self.settings_generation,
+            if self.listener.is_active() {
+                self.sequence_routes
+            } else {
+                &[]
+            },
+            &[],
+        ));
     }
 
     fn commit(&mut self, mut application: PendingHotkeyApplication) {
@@ -2218,6 +2339,12 @@ impl HotkeyRuntimeCommitContext<'_> {
             self.sequence_routes,
         );
         report_paste_sequence_route_omissions(&application.prepared.sequence_omissions);
+        publish_paste_sequence_route_presentation(paste_sequence_route_presentation(
+            self.settings,
+            *self.settings_generation,
+            self.sequence_routes,
+            &application.prepared.sequence_omissions,
+        ));
         multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::RadialInvalidate);
 
         if let Some(request) = application.request.take() {
@@ -2810,11 +2937,11 @@ fn main() -> anyhow::Result<()> {
             tracing::error!(field = issue.field, message = %issue.message, "invalid radial settings at startup; radial runtime disabled fail-closed");
         }
     }
-    let mut paste_sequence_routes =
+    let (mut paste_sequence_routes, startup_sequence_omissions) =
         match resolve_hotkey_route_candidate(&settings, &radial_document, None) {
             Ok(resolved) => {
                 report_paste_sequence_route_omissions(&resolved.omissions);
-                resolved.sequences
+                (resolved.sequences, resolved.omissions)
             }
             Err(error) => {
                 multi_launcher::gui::send_event(
@@ -2822,7 +2949,7 @@ fn main() -> anyhow::Result<()> {
                         "Paste Sequence shortcuts are inactive: {error}"
                     )),
                 );
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
         };
     refresh_macro_hotkey_reservations(&settings, &radial_document, &paste_sequence_routes);
@@ -2947,6 +3074,16 @@ fn main() -> anyhow::Result<()> {
     // minimized (false).
     let visibility_revision = VisibilityRevision::default();
     let settings_save_workers = multi_launcher::gui::SettingsSaveWorkerRegistry::default();
+    publish_paste_sequence_route_presentation(paste_sequence_route_presentation(
+        &settings,
+        settings_generation,
+        if invocation_service.is_some() || listener.is_active() {
+            &paste_sequence_routes
+        } else {
+            &[]
+        },
+        &startup_sequence_omissions,
+    ));
     let startup_services = GuiStartupServices {
         settings_diagnostic: startup_settings_diagnostic,
         actions_diagnostic: startup_actions_diagnostic,
@@ -3041,7 +3178,7 @@ fn main() -> anyhow::Result<()> {
                     report_paste_sequence_route_omissions(&resolved.omissions);
                     // The shared owner changes at its acknowledged handoff. In
                     // fallback mode Paste belongs only to the polling listener.
-                    if !settings.radial.shared_tap_hold {
+                    if !(settings.radial.enabled && settings.radial.shared_tap_hold) {
                         listener.stop();
                         listener = HotkeyTrigger::start_listener(
                             legacy_listener_triggers_with_sequences(
@@ -3124,6 +3261,12 @@ fn main() -> anyhow::Result<()> {
                                     completion: PendingLauncherRouteCompletion::Reconcile {
                                         start_legacy: route_plan.start_legacy,
                                         stop_service: route_plan.stop_service,
+                                        paste_presentation: paste_sequence_route_presentation(
+                                            &settings,
+                                            settings_generation,
+                                            &paste_sequence_routes,
+                                            &resolved.omissions,
+                                        ),
                                     },
                                 });
                             }
@@ -3194,6 +3337,16 @@ fn main() -> anyhow::Result<()> {
                             ),
                             "main",
                             event_tx.clone(),
+                        );
+                    }
+                    if pending_launcher_route.is_none() {
+                        publish_paste_sequence_route_presentation(
+                            paste_sequence_route_presentation(
+                                &settings,
+                                settings_generation,
+                                &paste_sequence_routes,
+                                &resolved.omissions,
+                            ),
                         );
                     }
                     multi_launcher::gui::send_event(
@@ -3523,7 +3676,7 @@ fn main() -> anyhow::Result<()> {
                             paste_sequence_triggers =
                                 sequence_hotkey_triggers_from_routes(&paste_sequence_routes);
                             report_paste_sequence_route_omissions(&resolved.omissions);
-                            if !settings.radial.shared_tap_hold {
+                            if !(settings.radial.enabled && settings.radial.shared_tap_hold) {
                                 listener.stop();
                                 listener = HotkeyTrigger::start_listener(
                                     legacy_listener_triggers_with_sequences(
@@ -3579,6 +3732,13 @@ fn main() -> anyhow::Result<()> {
                                             completion: PendingLauncherRouteCompletion::Reconcile {
                                                 start_legacy: route_plan.start_legacy,
                                                 stop_service: route_plan.stop_service,
+                                                paste_presentation:
+                                                    paste_sequence_route_presentation(
+                                                        &settings,
+                                                        settings_generation,
+                                                        &paste_sequence_routes,
+                                                        &resolved.omissions,
+                                                    ),
                                             },
                                         });
                                     }
@@ -3606,6 +3766,16 @@ fn main() -> anyhow::Result<()> {
                                         );
                                     }
                                 }
+                            }
+                            if pending_launcher_route.is_none() {
+                                publish_paste_sequence_route_presentation(
+                                    paste_sequence_route_presentation(
+                                        &settings,
+                                        settings_generation,
+                                        &paste_sequence_routes,
+                                        &resolved.omissions,
+                                    ),
+                                );
                             }
                             radial_store
                                 .authoring_snapshot()
@@ -3699,7 +3869,7 @@ fn main() -> anyhow::Result<()> {
                             paste_sequence_triggers =
                                 sequence_hotkey_triggers_from_routes(&paste_sequence_routes);
                             report_paste_sequence_route_omissions(&resolved.omissions);
-                            if !settings.radial.shared_tap_hold {
+                            if !(settings.radial.enabled && settings.radial.shared_tap_hold) {
                                 listener.stop();
                                 listener = HotkeyTrigger::start_listener(
                                     legacy_listener_triggers_with_sequences(
@@ -3755,6 +3925,13 @@ fn main() -> anyhow::Result<()> {
                                             completion: PendingLauncherRouteCompletion::Reconcile {
                                                 start_legacy: route_plan.start_legacy,
                                                 stop_service: route_plan.stop_service,
+                                                paste_presentation:
+                                                    paste_sequence_route_presentation(
+                                                        &settings,
+                                                        settings_generation,
+                                                        &paste_sequence_routes,
+                                                        &resolved.omissions,
+                                                    ),
                                             },
                                         });
                                     }
@@ -3782,6 +3959,16 @@ fn main() -> anyhow::Result<()> {
                                         );
                                     }
                                 }
+                            }
+                            if pending_launcher_route.is_none() {
+                                publish_paste_sequence_route_presentation(
+                                    paste_sequence_route_presentation(
+                                        &settings,
+                                        settings_generation,
+                                        &paste_sequence_routes,
+                                        &resolved.omissions,
+                                    ),
+                                );
                             }
                             AuthoringReply::Published {
                                 id: request_id,
@@ -4040,6 +4227,7 @@ fn main() -> anyhow::Result<()> {
                 PendingLauncherRouteCompletion::Reconcile {
                     start_legacy,
                     stop_service,
+                    paste_presentation,
                 } if pending.settings_generation == settings_generation => match result {
                     Ok(()) => {
                         if stop_service && let Some(mut service) = invocation_service.take() {
@@ -4061,6 +4249,7 @@ fn main() -> anyhow::Result<()> {
                                 event_tx.clone(),
                             );
                         }
+                        publish_paste_sequence_route_presentation(paste_presentation);
                     }
                     Err(error) => {
                         tracing::error!(%error, "launcher route handoff failed closed");
@@ -4084,6 +4273,16 @@ fn main() -> anyhow::Result<()> {
                             "main",
                             event_tx.clone(),
                         );
+                        publish_paste_sequence_route_presentation(if listener.is_active() {
+                            paste_sequence_presentation_for_polling(paste_presentation)
+                        } else {
+                            paste_sequence_route_presentation(
+                                &settings,
+                                settings_generation,
+                                &[],
+                                &[],
+                            )
+                        });
                     }
                 },
                 PendingLauncherRouteCompletion::Reconcile { .. } => {
@@ -4725,6 +4924,16 @@ fn main() -> anyhow::Result<()> {
                     &paste_sequence_triggers,
                     &event_tx,
                 );
+                publish_paste_sequence_route_presentation(paste_sequence_route_presentation(
+                    &settings,
+                    settings_generation,
+                    if listener.is_active() {
+                        &paste_sequence_routes
+                    } else {
+                        &[]
+                    },
+                    &[],
+                ));
             }
         }
         for event in radial_controller.poll() {
@@ -6225,6 +6434,103 @@ mod tests {
     }
 
     #[test]
+    fn paste_route_presentation_never_claims_unsupported_fallback_keys_are_active() {
+        use multi_launcher::paste_sequence::SequenceShortcutPresentation as Presentation;
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = Some("F13".into());
+        let snapshot = paste_route_test_snapshot("F14");
+        let routes = paste_sequence_hotkey_routes_from_snapshot(&settings, &snapshot).unwrap();
+        let shared = paste_sequence_route_presentation(&settings, 7, &routes, &[]);
+        assert_eq!(shared.next, Presentation::Active("F13".into()));
+        assert_eq!(shared.starts.len(), 1);
+        let failed_over = paste_sequence_presentation_for_polling(shared);
+        assert!(
+            matches!(failed_over.next, Presentation::Inactive { configured, reason } if configured == "F13" && reason.contains("polling listener"))
+        );
+        assert!(failed_over.starts.is_empty());
+        settings.radial.enabled = false;
+        let fallback = paste_sequence_route_presentation(&settings, 7, &routes, &[]);
+        assert!(matches!(fallback.next, Presentation::Inactive { .. }));
+        assert!(fallback.starts.is_empty());
+        let snapshot = multi_launcher::paste_sequence::SequenceRoutePresentation {
+            starts: (0..100)
+                .map(|_| (snapshot.sequences()[0].id, "Ctrl+F8".into()))
+                .collect(),
+            ..fallback
+        };
+        assert!(snapshot.summary().contains("100 active"));
+        assert!(
+            snapshot.summary().lines().count() <= 5,
+            "hover/settings summary stays bounded"
+        );
+    }
+
+    #[test]
+    fn paste_route_presentation_tracks_omissions_reload_disable_and_clean_reenable() {
+        use multi_launcher::paste_sequence::SequenceShortcutPresentation as Presentation;
+        let mut settings = Settings {
+            hotkey: Some("Shift+Alt+Win+End".into()),
+            ..Settings::default()
+        };
+        let document = RadialDocument::starter();
+        let snapshot = paste_route_test_snapshot("Ctrl+F8");
+        let bindings = snapshot.hotkey_bindings();
+        let resolve = |settings: &Settings| {
+            resolve_hotkey_route_candidate_with_macro(settings, &document, None, Some(&bindings))
+                .unwrap()
+        };
+        let initial = resolve(&settings);
+        let displayed =
+            paste_sequence_route_presentation(&settings, 1, &initial.sequences, &initial.omissions);
+        assert!(matches!(displayed.next, Presentation::Active(_)));
+        assert!(
+            matches!(&displayed.cancel, Presentation::Inactive { configured, reason } if configured == "Ctrl+Alt+Shift+End" && reason.contains("launcher"))
+        );
+        assert_eq!(displayed.starts, vec![(bindings[0].id(), "Ctrl+F8".into())]);
+        assert!(displayed.summary().contains("inactive"));
+        // Reload with a nonconflicting configured control clears the old reason.
+        settings.paste_sequence.cancel_hotkey = Some("Ctrl+F10".into());
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.tooltip_enabled = false;
+        settings.paste_sequence.escape_cancel_enabled = false;
+        let reloaded = resolve(&settings);
+        let displayed = paste_sequence_route_presentation(
+            &settings,
+            2,
+            &reloaded.sequences,
+            &reloaded.omissions,
+        );
+        assert_eq!(displayed.next, Presentation::Disabled);
+        assert_eq!(displayed.cancel, Presentation::Active("Ctrl+F10".into()));
+        assert!(!displayed.summary().contains("inactive"));
+        assert!(!displayed.tooltip_enabled && !displayed.escape_cancel_enabled);
+        settings.enabled_plugins = Some(std::collections::HashSet::new());
+        let disabled = resolve(&settings);
+        let displayed = paste_sequence_route_presentation(
+            &settings,
+            3,
+            &disabled.sequences,
+            &disabled.omissions,
+        );
+        assert!(displayed.starts.is_empty());
+        assert!(
+            matches!(displayed.cancel, Presentation::Inactive { reason, .. } if reason.contains("plugin is disabled"))
+        );
+        settings
+            .enabled_plugins
+            .as_mut()
+            .unwrap()
+            .insert("paste_sequence".into());
+        let enabled = resolve(&settings);
+        let displayed =
+            paste_sequence_route_presentation(&settings, 4, &enabled.sequences, &enabled.omissions);
+        assert_eq!(displayed.cancel, Presentation::Active("Ctrl+F10".into()));
+        assert_eq!(displayed.starts.len(), 1);
+        assert!(!displayed.summary().contains("inactive"));
+        assert_eq!(settings.hotkey.as_deref(), Some("Shift+Alt+Win+End"));
+    }
+
+    #[test]
     fn paste_routes_default_cancel_loses_to_launcher_without_losing_next_or_start() {
         let settings = Settings {
             hotkey: Some("Shift+Alt+Win+End".into()),
@@ -6260,9 +6566,16 @@ mod tests {
                 .any(|route| route.action == PasteSequenceHotkeyAction::Cancel)
         );
         assert_eq!(resolved.omissions.len(), 1);
-        assert!(resolved.omissions[0].contains("Cancel"));
-        assert!(resolved.omissions[0].contains("launcher"));
-        assert!(resolved.omissions[0].contains("Settings > Paste Sequences"));
+        assert!(matches!(
+            resolved.omissions[0].action,
+            PasteSequenceHotkeyAction::Cancel
+        ));
+        assert!(resolved.omissions[0].reason.contains("launcher"));
+        assert!(
+            resolved.omissions[0]
+                .reason
+                .contains("Settings > Paste Sequences")
+        );
         assert_eq!(settings.hotkey, before.hotkey);
         assert_eq!(settings.paste_sequence, before.paste_sequence);
         let reserved = reserved_launcher_hotkeys_with_sequences(&settings, &resolved.sequences);
@@ -6313,7 +6626,7 @@ mod tests {
                 .iter()
                 .any(|route| route.action == PasteSequenceHotkeyAction::Next)
         );
-        assert!(resolved.omissions[0].contains("one another"));
+        assert!(resolved.omissions[0].reason.contains("one another"));
         document.custom_triggers.push(TriggerDefinition {
             id: TriggerId::new("end-route"),
             chord: "Alt+End".into(),
@@ -6328,7 +6641,7 @@ mod tests {
             resolved.sequences[0].action,
             PasteSequenceHotkeyAction::Next
         );
-        assert!(resolved.omissions[0].contains("end-route"));
+        assert!(resolved.omissions[0].reason.contains("end-route"));
         assert!(
             !reserved_launcher_hotkeys_with_sequences(&settings, &resolved.sequences)
                 .iter()
@@ -6350,7 +6663,7 @@ mod tests {
             resolved.sequences[0].action,
             PasteSequenceHotkeyAction::Cancel
         );
-        assert!(resolved.omissions[0].contains("macro 73"));
+        assert!(resolved.omissions[0].reason.contains("macro 73"));
         assert!(
             !reserved_launcher_hotkeys_with_sequences(&settings, &resolved.sequences)
                 .iter()
@@ -7165,6 +7478,9 @@ mod tests {
 
     #[test]
     fn main_hotkey_apply_publishes_runtime_before_applied_receipt() {
+        let (presentation_tx, presentation_rx) = channel();
+        let _presentation_registration =
+            multi_launcher::gui::register_event_sender(presentation_tx);
         use multi_launcher::hotkey::reconfiguration::{
             AppliedHotkeyReconfiguration, HotkeyRuntimeMessage,
         };
@@ -7183,6 +7499,8 @@ mod tests {
         };
         let mut candidate = old_settings.clone();
         candidate.hotkey = Some("Ctrl+F3".into());
+        candidate.paste_sequence.next_hotkey = Some("Ctrl+F10".into());
+        candidate.paste_sequence.tooltip_enabled = false;
         let radial_document = Arc::new(RadialDocument::starter());
         let old_trigger = Arc::new(HotkeyTrigger::new(parse_hotkey("Ctrl+F2").unwrap()));
         let mut listener = HotkeyTrigger::start_listener(
@@ -7335,6 +7653,19 @@ mod tests {
         assert_eq!(settings.hotkey, candidate.hotkey);
         assert_eq!(settings.radial_designer.zoom, 1.25);
         assert_eq!(settings_generation, 13);
+        let published = presentation_rx
+            .try_iter()
+            .find_map(|event| match event {
+                multi_launcher::gui::WatchEvent::PasteSequenceRoutes(snapshot) => Some(snapshot),
+                _ => None,
+            })
+            .expect("successful owner application publishes its acknowledged controls");
+        assert_eq!(published.generation, 13);
+        assert_eq!(
+            published.next,
+            multi_launcher::paste_sequence::SequenceShortcutPresentation::Active("Ctrl+F10".into())
+        );
+        assert!(!published.tooltip_enabled);
         assert_eq!(trigger._key, parse_hotkey("Ctrl+F3").unwrap().key);
         assert!(listener.is_active());
         assert!(pending_launcher_route.is_none());
@@ -7409,6 +7740,13 @@ mod tests {
         assert_eq!(trigger._key, parse_hotkey("Ctrl+F3").unwrap().key);
         assert!(listener.is_active());
         assert!(prepared_routes.is_empty());
+        assert!(
+            !presentation_rx.try_iter().any(|event| matches!(
+                event,
+                multi_launcher::gui::WatchEvent::PasteSequenceRoutes(_)
+            )),
+            "rejected stale Apply must not replace the acknowledged presentation"
+        );
 
         radial_controller.shutdown();
         listener.stop();

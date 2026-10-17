@@ -202,7 +202,11 @@ impl SettingsEditor {
                             } else {
                                 top_level_expand_request
                             },
-                            |ui| self.render_paste_sequence_section(ui),
+                            |ui| {
+                                ui.label(app.paste_sequence_shortcut_summary());
+                                ui.separator();
+                                self.render_paste_sequence_section(ui);
+                            },
                         );
                         if reveal_paste {
                             ui.scroll_to_rect(paste_header, Some(egui::Align::Min));

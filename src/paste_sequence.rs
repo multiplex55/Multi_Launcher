@@ -29,6 +29,54 @@ pub(crate) use playback::{
     SequencePlaybackError, SequencePlaybackPlatform, SequencePlaybackStatus,
 };
 
+/// Read-only acknowledgement from the main hotkey owner. This metadata never
+/// participates in route selection or persistence and contains no step contents.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SequenceShortcutPresentation {
+    Disabled,
+    Active(String),
+    Inactive { configured: String, reason: String },
+}
+
+impl fmt::Display for SequenceShortcutPresentation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disabled => f.write_str("Disabled"),
+            Self::Active(chord) => write!(f, "{chord} (active)"),
+            Self::Inactive { configured, reason } => write!(f, "{configured} (inactive: {reason})"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SequenceRoutePresentation {
+    /// The existing main-owned runtime generation, not a separate UI counter.
+    pub generation: u64,
+    pub next: SequenceShortcutPresentation,
+    pub cancel: SequenceShortcutPresentation,
+    pub starts: Vec<(SequenceId, String)>,
+    pub tooltip_enabled: bool,
+    pub escape_cancel_enabled: bool,
+}
+
+impl SequenceRoutePresentation {
+    pub fn summary(&self) -> String {
+        let toggle = |enabled| if enabled { "On" } else { "Off" };
+        let mut summary = format!(
+            "Next: {}\nCancel: {}\nFloating tooltip: {}\nEscape cancellation: {}",
+            self.next,
+            self.cancel,
+            toggle(self.tooltip_enabled),
+            toggle(self.escape_cancel_enabled)
+        );
+        summary.push_str(&format!(
+            "\nSaved Start shortcuts: {} active (edit in Paste Sequences)",
+            self.starts.len()
+        ));
+        summary
+    }
+}
+
 pub const PASTE_SEQUENCES_FILE: &str = "paste_sequences.json";
 pub const MAX_SEQUENCES: usize = 100;
 pub const MAX_STEPS_PER_SEQUENCE: usize = 100;
