@@ -1233,6 +1233,30 @@ fn path_windows_ordinal_cmp(left: &Path, right: &Path) -> Ordering {
     left_components.len().cmp(&right_components.len())
 }
 
+/// Compare Windows paths using the same component-wise ordinal equivalence
+/// policy used by preview conflict detection. Filesystem discovery shares this
+/// helper so it cannot drift into a different case-folding rule.
+pub(crate) fn compare_paths_windows_ordinal(left: &Path, right: &Path) -> Ordering {
+    path_windows_ordinal_cmp(left, right)
+}
+
+/// Check path containment using the rename domain's Windows ordinal
+/// component comparison. This is a lexical containment helper only; callers
+/// that cross a filesystem boundary must also validate opened object IDs.
+pub(crate) fn path_is_within_windows_ordinal(root: &Path, path: &Path) -> bool {
+    let Some(root_components) = safe_path_components(root) else {
+        return false;
+    };
+    let Some(path_components) = safe_path_components(path) else {
+        return false;
+    };
+    path_components.len() >= root_components.len()
+        && root_components
+            .iter()
+            .zip(path_components.iter())
+            .all(|(root, path)| path_component_windows_eq(root, path))
+}
+
 fn windows_ordinal_eq(left: &OsStr, right: &OsStr) -> bool {
     windows_ordinal_cmp(left, right) == Ordering::Equal
 }

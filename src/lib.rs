@@ -32,6 +32,7 @@ pub mod coordinate_tool;
 pub mod dashboard;
 pub mod date_arithmetic;
 pub mod diff;
+pub mod file_operations;
 pub mod file_search;
 pub mod help_window;
 pub mod history;
