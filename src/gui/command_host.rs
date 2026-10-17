@@ -444,6 +444,14 @@ impl LauncherApp {
         &mut self,
         action: crate::hotkey::launcher_invocation::PasteSequenceHotkeyAction,
     ) {
+        self.handle_paste_sequence_hotkey_using(action, Self::next_sequence_playback);
+    }
+
+    fn handle_paste_sequence_hotkey_using(
+        &mut self,
+        action: crate::hotkey::launcher_invocation::PasteSequenceHotkeyAction,
+        next: impl FnOnce(&mut Self) -> Result<(), crate::paste_sequence::SequencePlaybackError>,
+    ) {
         use crate::hotkey::launcher_invocation::PasteSequenceHotkeyAction as HotkeyAction;
         use crate::paste_sequence::SequencePlaybackStatus as Status;
 
@@ -456,7 +464,7 @@ impl LauncherApp {
                 }
             }
             HotkeyAction::Next if self.sequence_playback.status() == Status::AwaitAdvance => {
-                if let Err(error) = self.next_sequence_playback() {
+                if let Err(error) = next(self) {
                     self.report_error_message("paste_sequence.hotkey", error.message());
                 }
             }
@@ -1447,14 +1455,21 @@ impl LauncherApp {
     pub(crate) fn start_sequence_playback(
         &mut self,
     ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
+        let mut platform =
+            crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
+        self.start_sequence_playback_using(&mut platform)
+    }
+
+    fn start_sequence_playback_using(
+        &mut self,
+        platform: &mut impl crate::paste_sequence::SequencePlaybackPlatform,
+    ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
         if self.sequence_exit_requested {
             return Err(crate::paste_sequence::SequencePlaybackError::Busy);
         }
-        let mut platform =
-            crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
-        let result = self.sequence_playback.start(&mut platform);
+        let result = self.sequence_playback.start(platform);
         let result = result.and_then(|_| self.sync_physical_paste_admission());
-        self.schedule_sequence_playback_wake(std::time::Instant::now());
+        self.schedule_sequence_playback_wake(platform.now());
         result
     }
 
@@ -1464,8 +1479,16 @@ impl LauncherApp {
         let now = std::time::Instant::now();
         let mut platform =
             crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
-        let result = self.sequence_playback.next(&mut platform, now);
-        self.schedule_sequence_playback_wake(std::time::Instant::now());
+        self.next_sequence_playback_using(&mut platform, now)
+    }
+
+    fn next_sequence_playback_using(
+        &mut self,
+        platform: &mut impl crate::paste_sequence::SequencePlaybackPlatform,
+        now: std::time::Instant,
+    ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
+        let result = self.sequence_playback.next(platform, now);
+        self.schedule_sequence_playback_wake(platform.now());
         result
     }
 
@@ -1923,14 +1946,20 @@ fn allow_radial_queryexec_activation(
 pub(in crate::gui) mod tests {
     use super::*;
 
-    struct PhysicalPastePlatform {
+    struct AppPastePlatform {
         now: std::time::Instant,
         sequence: u32,
         text: String,
         target: crate::paste_sequence::SequenceTarget,
         pastes: usize,
+        input_eligible: bool,
+        target_error: Option<crate::paste_sequence::SequencePlaybackError>,
+        pasted: Vec<(isize, String)>,
     }
-    impl crate::paste_sequence::SequencePlaybackPlatform for PhysicalPastePlatform {
+    impl crate::paste_sequence::SequencePlaybackPlatform for AppPastePlatform {
+        fn input_is_eligible(&mut self) -> bool {
+            self.input_eligible
+        }
         fn now(&mut self) -> std::time::Instant {
             self.now
         }
@@ -1951,7 +1980,8 @@ pub(in crate::gui) mod tests {
             crate::paste_sequence::SequenceTarget,
             crate::paste_sequence::SequencePlaybackError,
         > {
-            Ok(self.target.clone())
+            self.target_error
+                .map_or_else(|| Ok(self.target.clone()), Err)
         }
         fn observe_target(
             &mut self,
@@ -1998,11 +2028,34 @@ pub(in crate::gui) mod tests {
         }
         fn paste_chord(&mut self) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
             self.pastes += 1;
+            self.pasted.push((self.target.hwnd(), self.text.clone()));
             Ok(())
         }
     }
 
-    fn started_physical_app(root: &std::path::Path) -> (LauncherApp, PhysicalPastePlatform) {
+    impl AppPastePlatform {
+        fn new(target: crate::paste_sequence::SequenceTarget) -> Self {
+            Self {
+                now: std::time::Instant::now(),
+                sequence: 10,
+                text: "original".into(),
+                target,
+                pastes: 0,
+                input_eligible: true,
+                target_error: None,
+                pasted: Vec::new(),
+            }
+        }
+    }
+
+    fn playback_settings_fixture(app: &LauncherApp) -> Vec<u8> {
+        let mut settings = app.settings_editor.baseline_settings.clone();
+        settings.paste_sequence.tooltip_enabled = false;
+        settings.save(&app.settings_path).unwrap();
+        std::fs::read(&app.settings_path).unwrap()
+    }
+
+    fn started_physical_app(root: &std::path::Path) -> (LauncherApp, AppPastePlatform) {
         use crate::paste_sequence::*;
         let mut app = inert_test_app(root);
         app.enabled_plugins = None;
@@ -2039,13 +2092,7 @@ pub(in crate::gui) mod tests {
         .unwrap();
         app.sequence_playback.begin_preparing().unwrap();
         app.sequence_playback.set_ready(run).unwrap();
-        let mut platform = PhysicalPastePlatform {
-            now: std::time::Instant::now(),
-            sequence: 10,
-            text: "original".into(),
-            target,
-            pastes: 0,
-        };
+        let mut platform = AppPastePlatform::new(target);
         app.sequence_playback.start(&mut platform).unwrap();
         (app, platform)
     }
@@ -2160,7 +2207,8 @@ pub(in crate::gui) mod tests {
     }
 
     #[test]
-    fn saved_sequence_waits_for_its_prompt_before_becoming_ready_for_playback() {
+    fn paste_sequence_modes_saved_prompt_then_configured_next_uses_current_app() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         use crate::paste_sequence::{PlaybackMode, SequenceDraft, SequenceStore, Step};
         use crate::plugins::snippets::{SnippetEntry, SnippetFieldDefinition};
 
@@ -2224,6 +2272,7 @@ pub(in crate::gui) mod tests {
         );
 
         let mut app = inert_test_app(directory.path());
+        let settings_bytes = playback_settings_fixture(&app);
         let mut context_captures = 0;
         let provided_context = context.clone();
         app.begin_paste_sequence_preflight_using_context(
@@ -2285,6 +2334,247 @@ pub(in crate::gui) mod tests {
             preview.steps[3].text.as_deref(),
             Some("One-off 🌌\nsecond line")
         );
+
+        let saved_bytes = std::fs::read(store.path()).unwrap();
+        let target_a = crate::paste_sequence::SequenceTarget::from_external_window(
+            external_window(41, "App A"),
+            std::process::id(),
+        )
+        .unwrap();
+        let target_b = crate::paste_sequence::SequenceTarget::from_external_window(
+            crate::active_window::ExternalForegroundWindow {
+                process_id: 52,
+                thread_id: 53,
+                ..external_window(51, "App B")
+            },
+            std::process::id(),
+        )
+        .unwrap();
+        let mut platform = AppPastePlatform::new(target_a);
+        let started = platform.now;
+        app.start_sequence_playback_using(&mut platform).unwrap();
+        assert_eq!(platform.pasted, [(41, "Hello Ada at 2024-01-02".into())]);
+        app.open_paste_sequence_settings_dialog();
+        assert!(app.show_settings);
+        assert!(
+            !app.settings_editor
+                .paste_sequence_preferences()
+                .tooltip_enabled
+        );
+        assert_eq!(
+            app.settings_editor
+                .paste_sequence_preferences()
+                .next_hotkey
+                .as_deref(),
+            Some("Ctrl+Alt+Shift+PageDown")
+        );
+        assert_eq!(app.sequence_playback.current_step_number(), Some((2, 4)));
+        assert_eq!(
+            app.sequence_playback.status(),
+            crate::paste_sequence::SequencePlaybackStatus::AwaitAdvance
+        );
+
+        // Actual routed Next dispatch waits while the configured chord's
+        // Ctrl+Alt+Shift modifiers remain held, then uses the user's new app.
+        platform.now = started + std::time::Duration::from_millis(275);
+        platform.input_eligible = false;
+        let now = platform.now;
+        app.handle_paste_sequence_hotkey_using(
+            crate::hotkey::launcher_invocation::PasteSequenceHotkeyAction::Next,
+            |app| app.next_sequence_playback_using(&mut platform, now),
+        );
+        assert_eq!(
+            app.sequence_playback.status(),
+            crate::paste_sequence::SequencePlaybackStatus::AwaitTarget
+        );
+        assert_eq!(platform.pastes, 1);
+        assert_eq!(app.sequence_playback.current_step_number(), Some((2, 4)));
+        platform.target = target_b;
+        platform.input_eligible = true;
+        platform.now += std::time::Duration::from_millis(100);
+        let now = platform.now;
+        app.sequence_playback.tick(&mut platform, now);
+        assert_eq!(
+            platform.pasted[1],
+            (
+                51,
+                "03:04|captured clipboard|Origin editor \u{1f58b}".into()
+            )
+        );
+        assert_eq!(
+            app.sequence_playback.status(),
+            crate::paste_sequence::SequencePlaybackStatus::AwaitAdvance
+        );
+        for expected in [history_text, "One-off \u{1f30c}\nsecond line"] {
+            platform.now += std::time::Duration::from_millis(275);
+            let now = platform.now;
+            app.handle_paste_sequence_hotkey_using(
+                crate::hotkey::launcher_invocation::PasteSequenceHotkeyAction::Next,
+                |app| app.next_sequence_playback_using(&mut platform, now),
+            );
+            assert_eq!(platform.pasted.last().unwrap(), &(51, expected.into()));
+        }
+        assert_eq!(platform.pastes, 4);
+        assert_eq!(
+            app.sequence_playback.status(),
+            crate::paste_sequence::SequencePlaybackStatus::Completed
+        );
+        platform.now += std::time::Duration::from_millis(180);
+        let now = platform.now;
+        app.sequence_playback.tick(&mut platform, now);
+        assert_eq!(platform.text, "original");
+        assert_eq!(std::fs::read(store.path()).unwrap(), saved_bytes);
+        assert_eq!(std::fs::read(&app.settings_path).unwrap(), settings_bytes);
+    }
+
+    #[test]
+    fn paste_sequence_modes_run_once_auto_wait_cancel_cleanup_and_restart_preserve_saved_bytes() {
+        use crate::paste_sequence::{
+            PlaybackMode, SequenceDraft, SequenceInvocationContext, SequencePlaybackError,
+            SequencePlaybackStatus as Status, SequencePreflightError, SequenceStore,
+            SequenceTarget, Step,
+        };
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let store = SequenceStore::new(
+            directory
+                .path()
+                .join(crate::paste_sequence::PASTE_SEQUENCES_FILE),
+        );
+        let mut saved = store.load().unwrap();
+        saved
+            .upsert(SequenceDraft::new(
+                "Saved remains unchanged",
+                vec![Step::LiteralText {
+                    text: "saved".into(),
+                }],
+            ))
+            .unwrap();
+        store.commit(&mut saved).unwrap();
+        let saved_bytes = std::fs::read(store.path()).unwrap();
+        let context = SequenceInvocationContext::new(
+            chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05+00:00").unwrap(),
+            None,
+            None,
+        );
+        let mut draft = SequenceDraft::new(
+            "Memory-only",
+            ["one", "two", "never"]
+                .into_iter()
+                .map(|text| Step::LiteralText { text: text.into() })
+                .collect(),
+        );
+        draft.mode = PlaybackMode::Automatic;
+        draft.delay_ms = 250;
+        let mut app = inert_test_app(directory.path());
+        let settings_bytes = playback_settings_fixture(&app);
+        app.begin_paste_sequence_draft_preflight_with_context(
+            draft.clone(),
+            &[],
+            &[],
+            context.clone(),
+        )
+        .unwrap();
+        assert_eq!(app.sequence_playback.status(), Status::Ready);
+        assert_eq!(std::fs::read(store.path()).unwrap(), saved_bytes);
+        let mut platform = AppPastePlatform::new(
+            SequenceTarget::from_external_window(external_window(61, "A"), std::process::id())
+                .unwrap(),
+        );
+        let started = platform.now;
+        app.start_sequence_playback_using(&mut platform).unwrap();
+        assert_eq!(platform.pasted, [(61, "one".into())]);
+        app.open_paste_sequence_settings_dialog();
+        assert!(app.show_settings);
+        assert!(
+            !app.settings_editor
+                .paste_sequence_preferences()
+                .tooltip_enabled
+        );
+        assert_eq!(app.sequence_playback.status(), Status::Running);
+        platform.now = started + std::time::Duration::from_millis(249);
+        let now = platform.now;
+        app.sequence_playback.tick(&mut platform, now);
+        assert_eq!(platform.pastes, 1);
+        // Showing/focusing the launcher at the timer boundary cannot receive
+        // the next payload or consume its index.
+        platform.target_error = Some(SequencePlaybackError::FocusChanged);
+        platform.now += std::time::Duration::from_millis(1);
+        let now = platform.now;
+        app.sequence_playback.tick(&mut platform, now);
+        assert_eq!(app.sequence_playback.status(), Status::AwaitTarget);
+        assert_eq!(app.sequence_playback.current_step_number(), Some((2, 3)));
+        assert_eq!(platform.text, "one");
+        platform.target = SequenceTarget::from_external_window(
+            crate::active_window::ExternalForegroundWindow {
+                process_id: 72,
+                thread_id: 73,
+                ..external_window(71, "B")
+            },
+            std::process::id(),
+        )
+        .unwrap();
+        platform.target_error = None;
+        platform.now += std::time::Duration::from_millis(100);
+        let now = platform.now;
+        app.sequence_playback.tick(&mut platform, now);
+        assert_eq!(platform.pasted, [(61, "one".into()), (71, "two".into())]);
+        app.handle_paste_sequence_hotkey(
+            crate::hotkey::launcher_invocation::PasteSequenceHotkeyAction::Cancel,
+        );
+        assert_eq!(app.sequence_playback.status(), Status::Cancelled);
+        assert_eq!(
+            app.begin_paste_sequence_draft_preflight_with_context(draft, &[], &[], context.clone()),
+            Err(SequencePreflightError::SequenceAlreadyActive)
+        );
+        platform.now += std::time::Duration::from_millis(180);
+        let now = platform.now;
+        app.sequence_playback.tick(&mut platform, now);
+        assert_eq!(platform.pastes, 2);
+        assert_eq!(platform.text, "original");
+        let mut restart = SequenceDraft::new(
+            "Restart",
+            vec![Step::LiteralText {
+                text: "restart".into(),
+            }],
+        );
+        restart.mode = PlaybackMode::ManualAdvance;
+        app.begin_paste_sequence_draft_preflight_with_context(
+            restart.clone(),
+            &[],
+            &[],
+            context.clone(),
+        )
+        .unwrap();
+        app.start_sequence_playback_using(&mut platform).unwrap();
+        assert_eq!(platform.pasted.last().unwrap(), &(71, "restart".into()));
+        assert_eq!(app.sequence_playback.status(), Status::Completed);
+        platform.now += std::time::Duration::from_millis(180);
+        let now = platform.now;
+        app.sequence_playback.tick(&mut platform, now);
+        for refusal in [
+            SequencePlaybackError::InvalidTarget,
+            SequencePlaybackError::PasswordField,
+        ] {
+            platform.target_error = Some(refusal);
+            app.begin_paste_sequence_draft_preflight_with_context(
+                restart.clone(),
+                &[],
+                &[],
+                context.clone(),
+            )
+            .unwrap();
+            assert_eq!(
+                app.start_sequence_playback_using(&mut platform),
+                Err(refusal)
+            );
+            assert_eq!(app.sequence_playback.status(), Status::Failed(refusal));
+            assert_eq!(platform.pastes, 3);
+            assert_eq!(platform.text, "original");
+        }
+        assert_eq!(std::fs::read(store.path()).unwrap(), saved_bytes);
+        assert_eq!(std::fs::read(&app.settings_path).unwrap(), settings_bytes);
+        assert!(!directory.path().join("actions.json").exists());
     }
 
     #[test]
