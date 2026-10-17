@@ -98,13 +98,14 @@ impl HelpWindow {
                             ui.label(
                                 "Commands: paste <query>, paste:run:<id>, paste:start, paste:next, paste:cancel. Saved sequence shortcuts use the application's chord syntax.",
                             );
+                            ui.label("Choose Automatic, Manual advance, or Paste-to-Advance (Ctrl+V). Each step uses the current eligible application; invocation context only freezes template values. Paste-to-Advance uses one real Ctrl+V per step, with time to settle between presses. After completion the final item stays on the clipboard for ordinary pasting.");
                             ui.label(app.paste_sequence_shortcut_summary());
                             if let Some(presentation) = &app.sequence_routes {
                                 for (id, chord) in &presentation.starts {
                                     ui.label(format!("Sequence {} Start: {chord}", id.get()));
                                 }
                             }
-                            ui.label("Settings > Paste Sequences configures playback controls. Empty shortcuts are disabled. Conflicting defaults can be inactive; custom conflicts retain the previous routes. Each saved sequence can have its own optional Start shortcut.");
+                            ui.label("Settings > Paste Sequences, also reached through Playback Settings in the editor, configures playback controls and optional Escape cancellation. Cancel Run or configured Cancel ends early; Esc also cancels when enabled and available. Empty shortcuts are disabled. Conflicting defaults can be inactive; custom conflicts retain the previous routes. Each saved sequence can have its own optional Start shortcut.");
                             ui.separator();
                             ui.label(egui::RichText::new("Dashboard").strong());
                             let dashboard_guidance = ui.add(

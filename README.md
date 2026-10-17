@@ -722,10 +722,29 @@ active/disabled/inactive controls and saved Start bindings, so a configured chor
 is not presented as active when it was omitted.
 
 The same section stores **Show floating playback tooltip** and **Escape cancels
-active playback** preferences, both enabled by default. The editor shows the captured destination
-before start. The destination is captured before the editor takes focus, and
-the launcher stops if that exact external window is no longer available or
-focused when a step is pasted.
+active playback** preferences, both enabled by default. **Cancel Run** or the
+configured Cancel control ends a run early; physical **Esc** also cancels when
+enabled and available for that started session.
+
+Choose **Automatic**, **Manual advance**, or **Paste-to-Advance (Ctrl+V)** in the
+editor. Automatic uses the configured delay between steps; Manual uses Next
+with that delay as its minimum cooldown. Each step uses the current eligible
+application, so you can switch applications between pastes. Template values
+remain frozen from invocation context; the origin window is not a fixed paste
+destination, and opening the editor without an external origin is valid.
+
+Paste-to-Advance waits for one real **Ctrl+V** per step. Wait for the paste to
+settle, release V, then press again for the next step. This mode ignores the
+stored delay, preserving it for the other modes. After the final step settles,
+the run completes and leaves that item on the clipboard: a fourth Ctrl+V after
+a three-step run is an ordinary paste of the final item. A newer external
+clipboard copy stops the sequence and is preserved. Hidden snippet contents
+remain masked in the preview.
+
+The optional passive playback tooltip follows the cursor and shows the sequence
+name, step progress and available actions, without step contents or window titles.
+It hides when playback ends. Early cancellation restores the original clipboard
+only while the session still owns it; newer clipboard contents are preserved.
 
 ## JSON and screen color utilities
 

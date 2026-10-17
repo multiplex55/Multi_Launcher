@@ -10,6 +10,47 @@ use std::path::PathBuf;
 const SNIPPETS_FILE: &str = crate::plugins::snippets::SNIPPETS_FILE;
 const CLIPBOARD_FILE: &str = crate::plugins::clipboard::CLIPBOARD_FILE;
 
+fn playback_mode_label(mode: PlaybackMode) -> &'static str {
+    match mode {
+        PlaybackMode::Automatic => "Automatic",
+        PlaybackMode::ManualAdvance => "Manual advance",
+        PlaybackMode::PasteToAdvance => "Paste-to-Advance (Ctrl+V)",
+    }
+}
+
+fn run_status_text(
+    status: crate::paste_sequence::SequencePlaybackStatus,
+    progress: Option<(usize, usize)>,
+) -> String {
+    use crate::paste_sequence::{SequencePlaybackError, SequencePlaybackStatus as Status};
+    let label = match status {
+        Status::Idle => "Idle".to_owned(),
+        Status::Preparing => "Preparing steps and prompts".into(),
+        Status::Ready => "Ready; no text has been pasted".into(),
+        Status::Running => "Running".into(),
+        Status::AwaitAdvance => "Waiting for Next".into(),
+        Status::AwaitTarget => {
+            "Release shortcut keys; focus an eligible application (30 second limit)".into()
+        }
+        Status::AwaitPaste => "Waiting for Ctrl+V in an eligible application".into(),
+        Status::Cancelled => "Cancelled".into(),
+        Status::Completed => "Completed".into(),
+        Status::Failed(SequencePlaybackError::ClipboardChanged) => {
+            "Clipboard changed; run stopped and newer clipboard preserved".into()
+        }
+        Status::Failed(error) => format!("Failed: {}", error.message()),
+    };
+    if matches!(
+        status,
+        Status::Running | Status::AwaitAdvance | Status::AwaitTarget | Status::AwaitPaste
+    ) && let Some((current, total)) = progress
+    {
+        format!("{label} · step {current} of {total}")
+    } else {
+        format!("Run status: {label}")
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 struct DialogLayout {
@@ -105,6 +146,8 @@ pub(crate) struct PasteSequenceDialog {
     pub(crate) open: bool,
     #[cfg(test)]
     layout: DialogLayout,
+    #[cfg(test)]
+    sources_are_test_owned: bool,
     store_path: PathBuf,
     snapshot: Option<SequenceSnapshot>,
     draft: SequenceDraft,
@@ -130,6 +173,8 @@ impl Default for PasteSequenceDialog {
             open: false,
             #[cfg(test)]
             layout: DialogLayout::default(),
+            #[cfg(test)]
+            sources_are_test_owned: false,
             store_path: PathBuf::from(PASTE_SEQUENCES_FILE),
             snapshot: None,
             draft: SequenceDraft::new("New sequence", Vec::new()),
@@ -201,6 +246,12 @@ impl PasteSequenceDialog {
     }
 
     fn load_sources(&mut self) {
+        // UI tests exercise real preparation with an owned catalog, never the
+        // user's snippet/history files or native clipboard/input.
+        #[cfg(test)]
+        if self.sources_are_test_owned {
+            return;
+        }
         match crate::plugins::snippets::load_snippets_for_reload(SNIPPETS_FILE) {
             Ok(crate::common::persistence::LoadState::Missing)
             | Ok(crate::common::persistence::LoadState::Empty) => {
@@ -475,7 +526,7 @@ impl PasteSequenceDialog {
             ui.add(egui::TextEdit::singleline(&mut self.hotkey_text).desired_width(180.0));
         });
         ui.weak("Uses the application's existing chord syntax");
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Playback");
             ui.selectable_value(&mut self.draft.mode, PlaybackMode::Automatic, "Automatic");
             ui.selectable_value(
@@ -483,11 +534,32 @@ impl PasteSequenceDialog {
                 PlaybackMode::ManualAdvance,
                 "Manual advance",
             );
+            ui.selectable_value(
+                &mut self.draft.mode,
+                PlaybackMode::PasteToAdvance,
+                "Paste-to-Advance (Ctrl+V)",
+            );
         });
-        ui.horizontal(|ui| {
-            ui.label("Delay between steps");
-            ui.add(egui::Slider::new(&mut self.draft.delay_ms, 0..=60_000).suffix(" ms"));
+        ui.add_enabled_ui(self.draft.mode != PlaybackMode::PasteToAdvance, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Delay between steps");
+                ui.add(egui::Slider::new(&mut self.draft.delay_ms, 0..=60_000).suffix(" ms"));
+            })
         });
+        ui.weak(match self.draft.mode {
+            PlaybackMode::Automatic => "Each step pastes into the current eligible application after the delay.",
+            PlaybackMode::ManualAdvance => "Next pastes into the current eligible application; the delay is the minimum cooldown between steps.",
+            PlaybackMode::PasteToAdvance => "One real Ctrl+V pastes one step into the current eligible application. Wait for it to settle, then release V and press again. The last item stays on the clipboard; the next Ctrl+V is an ordinary paste. The stored delay is unused in this mode.",
+        });
+        if app.sequence_playback.started_run().is_some() {
+            ui.weak(if app.sequence_playback.escape_cancel_available() {
+                "End early with Esc, configured Cancel, or Cancel Run."
+            } else {
+                "End early with configured Cancel or Cancel Run."
+            });
+        } else {
+            ui.weak("Cancel Run or configured Cancel ends early. Optional Esc cancellation is in Playback Settings.");
+        }
 
         ui.horizontal_wrapped(|ui| {
             ui.menu_button("Add Snippet", |ui| {
@@ -729,7 +801,7 @@ impl PasteSequenceDialog {
                                     egui::TextEdit::multiline(text)
                                         .desired_rows(2)
                                         .desired_width(ui.available_width())
-                                        .hint_text("Text pasted only when the run starts"),
+                                        .hint_text("Text pasted when this step runs"),
                                 );
                             }
                         });
@@ -774,27 +846,12 @@ impl PasteSequenceDialog {
     }
 
     fn show_run_status(&self, ui: &mut egui::Ui, app: &super::LauncherApp) {
-        use crate::paste_sequence::SequencePlaybackStatus as Status;
-        let status = app.sequence_playback.status();
-        let label = match status {
-            Status::Idle => "Idle".to_owned(),
-            Status::Preparing => "Preparing steps and prompts".into(),
-            Status::Ready => "Ready; no text has been pasted".into(),
-            Status::Running => "Running".into(),
-            Status::AwaitAdvance => "Waiting for Next".into(),
-            Status::AwaitTarget => {
-                "Focus an eligible application to continue (30 second limit)".into()
-            }
-            Status::AwaitPaste => "Ready for Ctrl+V in an eligible application".into(),
-            Status::Cancelled => "Cancelled".into(),
-            Status::Completed => "Completed".into(),
-            Status::Failed(error) => format!("Failed: {}", error.message()),
-        };
-        let message = if let Some((current, total)) = app.sequence_playback.current_step_number() {
-            format!("{label} \u{00b7} step {current} of {total}")
-        } else {
-            format!("Run status: {label}")
-        };
+        let message = run_status_text(
+            app.sequence_playback.status(),
+            app.sequence_playback
+                .progress()
+                .map(|progress| (progress.step, progress.total)),
+        );
         ui.add(egui::Label::new(&message).truncate())
             .on_hover_text(&message);
     }
@@ -802,10 +859,18 @@ impl PasteSequenceDialog {
     fn show_preview(&self, ui: &mut egui::Ui, preview: &PreparedSequencePreview) {
         ui.separator();
         ui.label(format!(
-            "Preview · {} steps · {:?} · {} ms delay",
-            preview.item_count, preview.mode, preview.delay_ms
+            "Preview · {} steps · {}",
+            preview.item_count,
+            playback_mode_label(preview.mode)
         ));
-        ui.weak(format!("Target: {}", preview.target_label));
+        if preview.mode != PlaybackMode::PasteToAdvance {
+            ui.weak(format!(
+                "Delay / minimum Next cooldown: {} ms",
+                preview.delay_ms
+            ));
+        }
+        ui.weak(format!("Paste target: {}", preview.target_label));
+        ui.weak("Template values stay frozen from invocation; the paste target may change between steps.");
         egui::ScrollArea::vertical()
             .id_salt("paste_sequence_preview")
             .max_height(112.0)
@@ -1322,6 +1387,201 @@ mod tests {
         ctx.end_pass().drop_without_applying_deltas();
     }
 
+    fn owned_editor_context() -> SequenceInvocationContext {
+        SequenceInvocationContext::new(
+            chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05+00:00").unwrap(),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn paste_sequence_editor_third_mode_preserves_delay_and_run_once_stays_prompted_memory_only() {
+        use crate::paste_sequence::SequencePlaybackStatus;
+        for size in [egui::vec2(900.0, 760.0), egui::vec2(600.0, 420.0)] {
+            let directory = tempfile::tempdir().unwrap();
+            let ctx = egui::Context::default();
+            let mut app = layout_app(&ctx, directory.path());
+            let store_path = directory.path().join(PASTE_SEQUENCES_FILE);
+            let original = b"owned unchanged saved bytes";
+            std::fs::write(&store_path, original).unwrap();
+            let inventory = || {
+                let mut entries: Vec<_> = std::fs::read_dir(directory.path())
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect();
+                entries.sort();
+                entries
+            };
+            let original_inventory = inventory();
+            let mut dialog = PasteSequenceDialog {
+                open: true,
+                store_path,
+                sources_are_test_owned: true,
+                context: Some(owned_editor_context()),
+                draft: SequenceDraft::new(
+                    "Unsaved third mode",
+                    vec![Step::SnippetRef {
+                        alias: "owned_prompt".into(),
+                    }],
+                ),
+                snippets: vec![SnippetEntry {
+                    alias: "owned_prompt".into(),
+                    text: "SECRET {{required}}".into(),
+                    hide_contents: true,
+                    prompt_for_fields: true,
+                    fields: vec![crate::plugins::snippets::SnippetFieldDefinition::new(
+                        "required",
+                    )],
+                    tags: vec![],
+                }],
+                ..Default::default()
+            };
+            dialog.draft.delay_ms = 1_234;
+            for _ in 0..3 {
+                layout_frame(&mut dialog, &ctx, &mut app, size);
+            }
+            for mode in [
+                PlaybackMode::PasteToAdvance,
+                PlaybackMode::Automatic,
+                PlaybackMode::ManualAdvance,
+                PlaybackMode::PasteToAdvance,
+            ] {
+                let label = playback_mode_label(mode);
+                for _ in 0..12 {
+                    let visible = editor_event_frame(&mut dialog, &ctx, &mut app, size, vec![]);
+                    if visible.iter().any(|(text, _)| text == label) {
+                        break;
+                    }
+                    let id = dialog.layout.body_id.unwrap();
+                    let mut state = egui::scroll_area::State::load(&ctx, id).unwrap();
+                    state.offset.y += 35.0;
+                    state.store(&ctx, id);
+                }
+                editor_click(&mut dialog, &ctx, &mut app, size, label);
+                assert_eq!(dialog.draft.mode, mode);
+                assert_eq!(
+                    dialog.draft.delay_ms, 1_234,
+                    "switches preserve stored delay"
+                );
+                assert!(dialog.layout.footer.bottom() <= size.y + 1.0);
+            }
+            editor_click(&mut dialog, &ctx, &mut app, size, "Run Once");
+            assert_eq!(
+                app.sequence_playback.status(),
+                SequencePlaybackStatus::Preparing
+            );
+            assert!(app.snippet_prompt_dialog.is_sequence_preflight());
+            assert!(app.sequence_playback.started_run().is_none());
+            assert!(dialog.status.as_deref().unwrap().contains("memory-only"));
+            assert_eq!(dialog.current_draft().mode, PlaybackMode::PasteToAdvance);
+            assert_eq!(std::fs::read(&dialog.store_path).unwrap(), original);
+            assert_eq!(inventory(), original_inventory);
+            app.cancel_active_paste_sequence();
+        }
+    }
+
+    #[test]
+    fn paste_sequence_editor_preview_masks_hidden_text_and_distinguishes_context_from_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = layout_app(&ctx, directory.path());
+        let size = egui::vec2(900.0, 760.0);
+        let mut dialog = PasteSequenceDialog {
+            open: true,
+            sources_are_test_owned: true,
+            context: Some(owned_editor_context()),
+            draft: SequenceDraft::new(
+                "Safe preview",
+                vec![Step::SnippetRef {
+                    alias: "hidden".into(),
+                }],
+            ),
+            snippets: vec![SnippetEntry {
+                alias: "hidden".into(),
+                text: "DO NOT DISCLOSE".into(),
+                hide_contents: true,
+                prompt_for_fields: false,
+                fields: vec![],
+                tags: vec![],
+            }],
+            ..Default::default()
+        };
+        dialog.draft.mode = PlaybackMode::PasteToAdvance;
+        for _ in 0..3 {
+            layout_frame(&mut dialog, &ctx, &mut app, size);
+        }
+        let visible = editor_event_frame(&mut dialog, &ctx, &mut app, size, vec![]);
+        assert!(
+            visible
+                .iter()
+                .any(|(text, _)| text.contains("No origin needed"))
+        );
+        editor_click(&mut dialog, &ctx, &mut app, size, "Preview");
+        let preview = app.sequence_playback.prepared_preview().unwrap();
+        assert!(preview.ready && preview.steps[0].hidden && preview.steps[0].text.is_none());
+        let id = dialog.layout.body_id.unwrap();
+        let mut state = egui::scroll_area::State::load(&ctx, id).unwrap();
+        state.offset.y = (dialog.layout.body_content.y - dialog.layout.body.height()).max(0.0);
+        state.store(&ctx, id);
+        for _ in 0..3 {
+            layout_frame(&mut dialog, &ctx, &mut app, size);
+        }
+        let visible = editor_event_frame(&mut dialog, &ctx, &mut app, size, vec![]);
+        assert!(
+            visible
+                .iter()
+                .any(|(text, _)| text.contains("Paste target: Current eligible"))
+        );
+        assert!(
+            visible
+                .iter()
+                .any(|(text, _)| text.contains("Template values stay frozen"))
+        );
+        assert!(
+            visible
+                .iter()
+                .any(|(text, _)| text == "Hidden snippet contents")
+        );
+        assert!(
+            !visible
+                .iter()
+                .any(|(text, _)| text.contains("DO NOT DISCLOSE"))
+        );
+        assert_eq!(
+            app.sequence_playback.status(),
+            crate::paste_sequence::SequencePlaybackStatus::Ready
+        );
+        assert!(app.sequence_playback.started_run().is_none());
+    }
+
+    #[test]
+    fn paste_sequence_editor_status_has_live_counts_and_clear_terminal_clipboard_feedback() {
+        use crate::paste_sequence::{SequencePlaybackError, SequencePlaybackStatus as Status};
+        for status in [
+            Status::Idle,
+            Status::Preparing,
+            Status::Ready,
+            Status::Completed,
+            Status::Cancelled,
+            Status::Failed(SequencePlaybackError::ClipboardChanged),
+        ] {
+            let text = run_status_text(status, Some((2, 3)));
+            assert!(!text.contains("step 2"), "terminal/preview state: {text}");
+        }
+        assert!(
+            run_status_text(Status::AwaitPaste, Some((2, 3)))
+                .contains("Waiting for Ctrl+V in an eligible application · step 2 of 3")
+        );
+        assert!(
+            run_status_text(
+                Status::Failed(SequencePlaybackError::ClipboardChanged),
+                None
+            )
+            .contains("newer clipboard preserved")
+        );
+    }
+
     #[test]
     fn paste_settings_toolbar_opens_main_section_without_losing_an_open_draft() {
         let directory = tempfile::tempdir().unwrap();
@@ -1609,7 +1869,7 @@ mod tests {
             &ctx,
             &mut app,
             size,
-            "Text pasted only when the run starts",
+            "Text pasted when this step runs",
         );
         editor_event_frame(
             &mut dialog,
@@ -1760,6 +2020,12 @@ mod tests {
         // Reopen with the owned catalog rather than reading real snippet/history files.
         dialog.open = true;
         dialog.snapshot = Some(store.load().unwrap());
+        // This fixture reopens directly rather than using a fresh window. The
+        // saved rows are above the prior short-viewport body scroll position.
+        let id = dialog.layout.body_id.unwrap();
+        let mut state = egui::scroll_area::State::load(&ctx, id).unwrap();
+        state.offset.y = 0.0;
+        state.store(&ctx, id);
         for _ in 0..3 {
             editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
         }
