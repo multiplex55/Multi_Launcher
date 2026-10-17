@@ -10,7 +10,7 @@ impl Plugin for SearchReplacePlugin {
         }
         vec![Action {
             label: "Open Search and Replace".into(),
-            desc: "Choose an explicit folder, review bounded per-match diffs, then confirm guarded replacement with durable recovery".into(),
+            desc: "Choose an explicit folder (direct children by default; enable subfolders), then filter supported extensions and root-relative include/exclude paths or globs. Search literal text or Rust regex and select exact matches individually; nothing is selected by default. Apply freezes the reviewed UTF-8 or UTF-8 BOM bytes, rechecks each source, and records durable backups. Stale files are skipped; cancellation can leave a partial batch. Restore applies to committed writes, while Recovery reconciles interrupted operations. Normal fs search is unchanged.".into(),
             action: "replace:open".into(),
             args: None,
         }]
@@ -21,7 +21,7 @@ impl Plugin for SearchReplacePlugin {
     }
 
     fn description(&self) -> &str {
-        "Search supported UTF-8 text in an explicit folder, approve exact matches, then confirm guarded replacement with Restore and recovery receipts (prefix: `replace`)"
+        "Search supported UTF-8 text in an explicit folder, filter the root-relative scope, approve exact matches, then confirm guarded replacement with durable backups, Restore, and interrupted-operation recovery receipts (prefix: `replace`)"
     }
 
     fn capabilities(&self) -> &[&str] {
@@ -35,7 +35,7 @@ impl Plugin for SearchReplacePlugin {
     fn commands(&self) -> Vec<Action> {
         vec![Action {
             label: "replace".into(),
-            desc: "Choose an explicit folder and filters; preview original and proposed text, select exact matches, then confirm guarded Apply. UTF-8 and UTF-8 BOM are supported; unchanged bytes and line endings are retained. Backups and recovery receipts remain in application data for explicit Restore or recovery.".into(),
+            desc: "Choose an explicit folder (direct children by default; enable subfolders) and filter supported extensions plus root-relative include/exclude paths or globs. Search literal text or Rust regex with capture substitutions; preview original and proposed text and select exact matches individually (none are preselected). Apply freezes the reviewed UTF-8 or UTF-8 BOM bytes, rechecks each source, and retains unchanged bytes and line endings. Stale files are skipped; cancellation can leave a partial batch. Durable backups and receipts remain in application data for explicit Restore of committed writes or Recovery of interrupted operations. Normal fs search is unchanged.".into(),
             action: "query:replace".into(),
             args: None,
         }]
@@ -87,5 +87,8 @@ mod tests {
         assert!(command.desc.contains("explicit folder"));
         assert!(command.desc.contains("exact matches"));
         assert!(command.desc.contains("Restore"));
+        assert!(command.desc.contains("direct children by default"));
+        assert!(command.desc.contains("none are preselected"));
+        assert!(command.desc.contains("Normal fs search is unchanged"));
     }
 }

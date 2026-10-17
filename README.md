@@ -487,12 +487,16 @@ occupied original names. Content verification is limited to 1 GiB per file and
 Type `replace` and choose **Open Search and Replace**. The resizable dialog
 starts without a root or an active scan. Choose a folder explicitly; the
 default scope is its direct children, with recursion available as an explicit
-option. Extension filters, root-relative include globs, excluded paths, and
-excluded globs are applied when you press **Search / Refresh**. Search patterns
-can be literal text or Rust regular expressions with an optional case-sensitive
+option. The initial extension filter contains `.rs`, `.txt`, `.md`, `.toml`, and
+`.json`; extension filters, root-relative include globs, excluded paths, and
+excluded globs are applied when you press **Search / Refresh**. Clearing the
+extension filter removes extension restrictions, including for extensionless
+files; UTF-8 and binary checks still apply. Search patterns can be literal text
+or Rust regular expressions with an optional case-sensitive
 mode. Replacement text can be literal or use Rust capture substitutions such
 as `$1`, `${name}`, and `$$`; unknown references and output limits are shown
-before Apply.
+before Apply. Matches start unchecked, so each approved match is selected
+individually or through its file row.
 
 Search reads supported UTF-8 text and UTF-8-with-BOM files. Binary and
 unsupported encodings are skipped and listed. Directories are never guessed,
@@ -509,7 +513,7 @@ line endings, and a missing final newline.
 **Review Apply** shows the roots, files, approved match counts, captured source
 hashes, and proposed output hashes. **Confirm and Apply** freezes that exact
 candidate before the guarded worker checks the current source identities and
-bytes again. A stale or inaccessible file is refused and reported; refresh and
+bytes again. A stale or inaccessible file is skipped and reported; refresh and
 review a new candidate before trying it again. Each write records a durable
 backup and receipt in the application's `replace_recovery` data directory.
 Cancellation or a failure can leave a partial batch, which the receipt reports
@@ -517,7 +521,9 @@ per file. Restore is explicit and only proceeds when the written file still
 matches its recorded post-write identity and bytes. Recovery reconciles only
 recorded staging identities; conflicting occupants are left in place and
 reported. Receipts remain available after closing the dialog or restarting the
-application.
+application. Restore handles a committed replacement; Recovery handles an
+interrupted Apply or Restore. The existing `fs` filename and content search
+commands keep their normal behavior and scope.
 
 ---
 

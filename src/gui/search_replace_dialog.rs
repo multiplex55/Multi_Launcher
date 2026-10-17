@@ -2117,6 +2117,22 @@ mod tests {
         assert!(until(state), "background search/preview did not finish");
     }
 
+    fn wait_for_app_replace<F>(
+        app: &mut crate::gui::LauncherApp,
+        ctx: &egui::Context,
+        until: F,
+    ) where
+        F: Fn(&crate::gui::LauncherApp) -> bool,
+    {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !until(app) && Instant::now() < deadline {
+            app.poll_search_replace_runtime(ctx);
+            app.submit_ready_search_replace_confirmation();
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(until(app), "launcher replacement work did not finish");
+    }
+
     #[test]
     fn m9d_selected_match_freezes_bounded_candidate_without_writing_source() {
         let fixture_parent = PathBuf::from("target/productivity_expansion");
@@ -2263,6 +2279,432 @@ mod tests {
         state.cancel_current_search(Some(&coordinator));
         preview_worker.shutdown().unwrap();
         coordinator.shutdown().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn m9e_launcher_replace_applies_only_fresh_selected_matches_and_routes_recovery_restore() {
+        use crate::commands::{ActivationSource, CommandBus, SearchReplaceCommand, parse_command};
+        use crate::plugin::Plugin;
+        use crate::plugins::file_search::FileSearchPlugin;
+        use crate::plugins::search_replace::SearchReplacePlugin;
+        use crate::settings::Settings;
+        use std::collections::HashSet;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        struct NotesDirectoryOverride(Option<std::ffi::OsString>);
+        impl NotesDirectoryOverride {
+            fn use_fixture(path: &Path) -> Self {
+                let previous = std::env::var_os("ML_NOTES_DIR");
+                unsafe { std::env::set_var("ML_NOTES_DIR", path) };
+                Self(previous)
+            }
+        }
+        impl Drop for NotesDirectoryOverride {
+            fn drop(&mut self) {
+                if let Some(previous) = self.0.take() {
+                    unsafe { std::env::set_var("ML_NOTES_DIR", previous) };
+                } else {
+                    unsafe { std::env::remove_var("ML_NOTES_DIR") };
+                }
+            }
+        }
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let fixture_parent = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("productivity_expansion");
+        std::fs::create_dir_all(&fixture_parent).unwrap();
+        let fixture = tempfile::Builder::new()
+            .prefix("replace_m9e_app_")
+            .tempdir_in(&fixture_parent)
+            .unwrap();
+        let root = fixture.path().join("project");
+        let nested = root.join("nested");
+        let excluded = root.join("excluded");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&excluded).unwrap();
+
+        let main_path = root.join("main.rs");
+        let stale_path = root.join("stale.rs");
+        let unchecked_path = root.join("unchecked.rs");
+        let nested_path = nested.join("nested.rs");
+        let excluded_path = excluded.join("ignored.rs");
+        let binary_path = root.join("binary.rs");
+        let text_path = root.join("notes.txt");
+        let outside_path = fixture.path().join("outside.rs");
+        let main_original = "\u{feff}// café Ω needle\r\nlet keep = \"needle\";".as_bytes().to_vec();
+        let stale_original = b"// stale needle\r\n".to_vec();
+        let unchecked_original = b"// leave this needle untouched\n".to_vec();
+        let nested_original = b"// nested needle\n".to_vec();
+        let excluded_original = b"// excluded needle\n".to_vec();
+        let binary_original = b"needle\0binary".to_vec();
+        let text_original = b"needle in an unsupported extension for this filter\n".to_vec();
+        let outside_original = b"needle outside the selected root\n".to_vec();
+        std::fs::write(&main_path, &main_original).unwrap();
+        std::fs::write(&stale_path, &stale_original).unwrap();
+        std::fs::write(&unchecked_path, &unchecked_original).unwrap();
+        std::fs::write(&nested_path, &nested_original).unwrap();
+        std::fs::write(&excluded_path, &excluded_original).unwrap();
+        std::fs::write(&binary_path, &binary_original).unwrap();
+        std::fs::write(&text_path, &text_original).unwrap();
+        std::fs::write(&outside_path, &outside_original).unwrap();
+        let stale_external = b"// outside edit kept needle\r\n".to_vec();
+
+        // The existing fs command continues to parse as its normal content-search action.
+        let fs_action = FileSearchPlugin::default()
+            .search("fs content needle")
+            .into_iter()
+            .next()
+            .expect("fs content search remains registered");
+        assert!(
+            fs_action.action.starts_with("file_search:start:"),
+            "the normal fs command retains its file-search route"
+        );
+
+        let app_directory = fixture.path().join("app-data");
+        let notes_directory = fixture.path().join("notes");
+        std::fs::create_dir_all(&app_directory).unwrap();
+        std::fs::create_dir_all(&notes_directory).unwrap();
+        let _notes_directory = NotesDirectoryOverride::use_fixture(&notes_directory);
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.enabled_plugins = Some(HashSet::new());
+        settings.dashboard.enabled = false;
+        settings.dashboard.config_path = Some(
+            app_directory
+                .join("dashboard.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let mut app = crate::gui::LauncherApp::new(
+            &ctx,
+            Arc::new(Vec::new()),
+            0,
+            crate::plugin::PluginManager::new_inert_for_test_at(&app_directory),
+            app_directory
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            app_directory
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        app.watchers.clear();
+        app.clipboard_modify_watcher = None;
+
+        let replace_action = SearchReplacePlugin
+            .search("replace")
+            .into_iter()
+            .next()
+            .expect("replace command is registered");
+        let invocation = parse_command(replace_action, None, ActivationSource::Dashboard).unwrap();
+        assert_eq!(invocation.command, crate::commands::Command::SearchReplace(SearchReplaceCommand::Open));
+        CommandBus.dispatch(&invocation, &mut app).unwrap();
+        assert!(app.search_replace_dialog.open);
+        assert!(app.search_replace_dialog.root.is_none());
+        assert!(app.search_replace_dialog.search_result.is_none());
+        assert_eq!(std::fs::read(&main_path).unwrap(), main_original);
+
+        app.search_replace_dialog.include_extensions = "rs, txt".into();
+        app.search_replace_dialog.include_globs = "**/*.rs".into();
+        app.search_replace_dialog.exclude_globs = "excluded/**".into();
+        app.search_replace_dialog.pattern = "needle".into();
+        app.search_replace_dialog.pattern_mode = SearchPatternMode::Literal;
+        app.search_replace_dialog.case_sensitive = false;
+        app.search_replace_dialog.replacement = "changed".into();
+        app.search_replace_dialog.replacement_mode = ReplacementMode::Literal;
+        app.search_replace_dialog.recursive = false;
+        app.handle_search_replace_ui_command(SearchReplaceUiCommand::SelectRoot(root.clone()));
+        app.handle_search_replace_ui_command(SearchReplaceUiCommand::Search);
+        wait_for_app_replace(&mut app, &ctx, |app| {
+            app.search_replace_dialog.search_result.is_some()
+                && app.search_replace_dialog.candidate.is_some()
+                && !app.search_replace_dialog.preview_pending
+        });
+        let direct = app.search_replace_dialog.search_result.as_ref().unwrap();
+        let direct_paths = direct
+            .matched_files()
+            .iter()
+            .map(|file| file.relative_path().to_path_buf())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            direct_paths,
+            HashSet::from([
+                PathBuf::from("main.rs"),
+                PathBuf::from("stale.rs"),
+                PathBuf::from("unchecked.rs"),
+            ])
+        );
+        assert!(direct
+            .summary()
+            .skipped_by_reason()
+            .contains_key(&crate::search_replace::SkippedFileReason::Binary));
+        assert_eq!(std::fs::read(&main_path).unwrap(), main_original);
+
+        // Explicit recursion includes nested files while extension/glob exclusions still apply.
+        app.search_replace_dialog.set_root(root.clone());
+        app.search_replace_dialog.recursive = true;
+        app.handle_search_replace_ui_command(SearchReplaceUiCommand::Search);
+        wait_for_app_replace(&mut app, &ctx, |app| {
+            app.search_replace_dialog.search_result.is_some()
+                && app.search_replace_dialog.candidate.is_some()
+                && !app.search_replace_dialog.preview_pending
+        });
+        let search = app.search_replace_dialog.search_result.as_ref().unwrap();
+        let relative_paths = search
+            .matched_files()
+            .iter()
+            .map(|file| file.relative_path().to_path_buf())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            relative_paths,
+            HashSet::from([
+                PathBuf::from("main.rs"),
+                PathBuf::from("stale.rs"),
+                PathBuf::from("unchecked.rs"),
+                PathBuf::from("nested/nested.rs"),
+            ])
+        );
+        let main_file = search
+            .matched_files()
+            .iter()
+            .find(|file| file.relative_path() == Path::new("main.rs"))
+            .unwrap();
+        assert_eq!(main_file.matches().len(), 2);
+        let main_match = main_file.matches()[0].id().clone();
+        let stale_match = search
+            .matched_files()
+            .iter()
+            .find(|file| file.relative_path() == Path::new("stale.rs"))
+            .unwrap()
+            .matches()[0]
+            .id()
+            .clone();
+        app.search_replace_dialog
+            .set_match_selected(&main_match, true);
+        app.search_replace_dialog
+            .set_match_selected(&stale_match, true);
+        wait_for_app_replace(&mut app, &ctx, |app| {
+            app.search_replace_dialog.candidate.as_ref().is_some_and(|candidate| {
+                candidate.readiness() == ReplacementCandidateReadiness::Ready
+                    && !app.search_replace_dialog.preview_pending
+            })
+        });
+        let candidate = app.search_replace_dialog.candidate.as_ref().unwrap();
+        assert_eq!(candidate.summary().approved_matches(), 2);
+        assert_eq!(candidate.summary().affected_files(), 2);
+        let main_candidate = candidate
+            .files()
+            .iter()
+            .find(|file| file.original_snapshot().relative_path() == Path::new("main.rs"))
+            .unwrap();
+        assert_eq!(
+            main_candidate.output_bytes().as_ref(),
+            "\u{feff}// café Ω changed\r\nlet keep = \"needle\";".as_bytes()
+        );
+        let stale_candidate = candidate
+            .files()
+            .iter()
+            .find(|file| file.original_snapshot().relative_path() == Path::new("stale.rs"))
+            .unwrap();
+        assert_eq!(stale_candidate.output_bytes().as_ref(), b"// stale changed\r\n");
+        assert_eq!(std::fs::read(&main_path).unwrap(), main_original);
+        assert_eq!(std::fs::read(&stale_path).unwrap(), stale_original);
+
+        // This edit is deliberately made after preview; C must skip it and retain the external bytes.
+        std::fs::write(&stale_path, &stale_external).unwrap();
+        app.search_replace_dialog.apply_review = app.search_replace_dialog.build_apply_review();
+        assert_eq!(
+            app.search_replace_dialog.apply_review.as_ref().unwrap().approved_matches,
+            2
+        );
+        app.search_replace_dialog.apply_confirmation_open = true;
+        app.handle_search_replace_ui_command(SearchReplaceUiCommand::ConfirmApply);
+        wait_for_app_replace(&mut app, &ctx, |app| {
+            app.search_replace_dialog
+                .receipts
+                .iter()
+                .any(|receipt| receipt.status() == ReplaceTransactionStatus::Partial)
+        });
+        let receipt = app
+            .search_replace_dialog
+            .receipts
+            .iter()
+            .find(|receipt| receipt.status() == ReplaceTransactionStatus::Partial)
+            .unwrap()
+            .clone();
+        assert_eq!(receipt.entries().len(), 2);
+        assert!(receipt
+            .entries()
+            .iter()
+            .any(|entry| entry.path() == main_path && entry.outcome() == crate::replace_executor::ReplaceEntryOutcome::Applied));
+        assert!(receipt
+            .entries()
+            .iter()
+            .any(|entry| entry.path() == stale_path && entry.outcome() == crate::replace_executor::ReplaceEntryOutcome::StaleSkipped));
+        let main_applied = "\u{feff}// café Ω changed\r\nlet keep = \"needle\";".as_bytes();
+        assert_eq!(std::fs::read(&main_path).unwrap(), main_applied);
+        assert_eq!(std::fs::read(&stale_path).unwrap(), stale_external);
+        assert_eq!(std::fs::read(&unchecked_path).unwrap(), unchecked_original);
+        assert_eq!(std::fs::read(&nested_path).unwrap(), nested_original);
+        assert_eq!(std::fs::read(&excluded_path).unwrap(), excluded_original);
+        assert_eq!(std::fs::read(&binary_path).unwrap(), binary_original);
+        assert_eq!(std::fs::read(&text_path).unwrap(), text_original);
+        assert_eq!(std::fs::read(&outside_path).unwrap(), outside_original);
+
+        let recovery_directory = app_directory
+            .join(crate::replace_executor::REPLACE_RECOVERY_DIRECTORY);
+        let backup_files = std::fs::read_dir(&recovery_directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains("-backup.stage"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(backup_files.len(), 1);
+        assert_eq!(std::fs::read(&backup_files[0]).unwrap(), main_original);
+        assert!(recovery_directory
+            .join(crate::replace_executor::REPLACE_RECOVERY_JOURNAL_FILE)
+            .is_file());
+
+        // Force the actual C receipt into its recovery-required presentation state. Its
+        // applied/stale entry evidence remains intact; Recovery must reconcile the journal
+        // without rewriting the files, while Restore must remain a distinct later action.
+        let journal_path = recovery_directory
+            .join(crate::replace_executor::REPLACE_RECOVERY_JOURNAL_FILE);
+        let mut journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&journal_path).unwrap()).unwrap();
+        let receipt_value = journal["receipts"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|value| value["id"] == receipt.id())
+            .unwrap();
+        receipt_value["status"] = serde_json::Value::String("recovery_required".into());
+        let recovery_receipt: ReplaceRecoveryReceipt =
+            serde_json::from_value(receipt_value.clone()).unwrap();
+        std::fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
+        app.search_replace_dialog.upsert_receipt(recovery_receipt);
+        app.handle_search_replace_ui_command(SearchReplaceUiCommand::ReviewRecovery(
+            receipt.id().to_owned(),
+        ));
+        assert_eq!(
+            app.search_replace_dialog
+                .recovery_review
+                .as_ref()
+                .map(|review| review.action),
+            Some(RecoveryAction::Recover)
+        );
+
+        // Root changes, an explicit refresh, and closing the dialog retain the durable receipt.
+        let alternate_root = fixture.path().join("alternate");
+        std::fs::create_dir_all(&alternate_root).unwrap();
+        std::fs::write(alternate_root.join("alternate.rs"), b"needle in another chosen root\n")
+            .unwrap();
+        app.handle_search_replace_ui_command(SearchReplaceUiCommand::SelectRoot(
+            alternate_root.clone(),
+        ));
+        assert!(app.search_replace_dialog
+            .receipts
+            .iter()
+            .any(|existing| existing.id() == receipt.id()));
+        app.handle_search_replace_ui_command(SearchReplaceUiCommand::Search);
+        wait_for_app_replace(&mut app, &ctx, |app| {
+            app.search_replace_dialog.search_result.is_some()
+                && app.search_replace_dialog.candidate.is_some()
+                && !app.search_replace_dialog.preview_pending
+        });
+        app.handle_search_replace_ui_command(SearchReplaceUiCommand::SelectRoot(root.clone()));
+        app.handle_search_replace_ui_command(SearchReplaceUiCommand::Search);
+        wait_for_app_replace(&mut app, &ctx, |app| {
+            app.search_replace_dialog.search_result.is_some()
+                && app.search_replace_dialog.candidate.is_some()
+                && !app.search_replace_dialog.preview_pending
+        });
+        assert_eq!(
+            app.search_replace_dialog
+                .search_result
+                .as_ref()
+                .unwrap()
+                .matched_files()
+                .iter()
+                .find(|file| file.path() == stale_path)
+                .unwrap()
+                .raw_bytes()
+                .as_ref(),
+            stale_external
+        );
+        app.handle_search_replace_ui_command(SearchReplaceUiCommand::Closed);
+        assert!(!app.search_replace_dialog.open);
+        assert!(app.search_replace_dialog
+            .receipts
+            .iter()
+            .any(|existing| existing.id() == receipt.id()));
+        app.ensure_open(crate::gui::Panel::SearchReplaceDialog);
+        assert!(app.search_replace_dialog.open);
+        assert!(app.search_replace_dialog
+            .receipts
+            .iter()
+            .any(|existing| existing.id() == receipt.id()));
+
+        app.handle_search_replace_ui_command(SearchReplaceUiCommand::ReviewRecovery(
+            receipt.id().to_owned(),
+        ));
+        app.handle_search_replace_ui_command(SearchReplaceUiCommand::ConfirmRecovery);
+        wait_for_app_replace(&mut app, &ctx, |app| {
+            app.search_replace_dialog
+                .receipts
+                .iter()
+                .any(|existing| {
+                    existing.id() == receipt.id()
+                        && existing.status() == ReplaceTransactionStatus::Partial
+                        && existing.message().contains("interrupted apply phases were reconciled")
+                })
+        });
+        assert_eq!(std::fs::read(&main_path).unwrap(), main_applied);
+        assert_eq!(std::fs::read(&stale_path).unwrap(), stale_external);
+
+        app.handle_search_replace_ui_command(SearchReplaceUiCommand::ReviewRestore(
+            receipt.id().to_owned(),
+        ));
+        assert_eq!(
+            app.search_replace_dialog
+                .recovery_review
+                .as_ref()
+                .map(|review| review.action),
+            Some(RecoveryAction::Restore)
+        );
+        app.handle_search_replace_ui_command(SearchReplaceUiCommand::ConfirmRestore);
+        wait_for_app_replace(&mut app, &ctx, |app| {
+            app.search_replace_dialog
+                .receipts
+                .iter()
+                .any(|existing| {
+                    existing.id() == receipt.id()
+                        && existing.status() == ReplaceTransactionStatus::Restored
+                })
+        });
+        assert_eq!(std::fs::read(&main_path).unwrap(), main_original);
+        assert_eq!(std::fs::read(&stale_path).unwrap(), stale_external);
+        assert_eq!(std::fs::read(&unchecked_path).unwrap(), unchecked_original);
+        assert_eq!(std::fs::read(&outside_path).unwrap(), outside_original);
+        app.shutdown_search_replace_runtime();
     }
 }
 
