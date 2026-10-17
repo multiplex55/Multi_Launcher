@@ -1003,7 +1003,7 @@ pub(crate) fn monitor_union(monitors: &[MonitorDescriptor]) -> Option<ScreenRect
 }
 
 pub(crate) fn overlay_is_mouse_transparent(visual: &OverlayVisual) -> bool {
-    visual.passive()
+    visual.passive() || matches!(visual, OverlayVisual::RectanglePicker { .. })
 }
 
 /// Describes the native input policy for an overlay visual. Rectangle picking
@@ -1032,19 +1032,17 @@ pub(crate) fn overlay_requires_input_shields(visual: &OverlayVisual) -> bool {
 }
 
 /// Returns one physical-monitor shield specification for every display that
-/// intersects the rectangle picker's virtual desktop. Signed monitor bounds
+/// belongs to the desktop, including monitors outside a constrained pick region. Signed monitor bounds
 /// are returned unchanged, including negative origins and irregular layouts.
 pub(crate) fn input_shield_plan(
     visual: &OverlayVisual,
     displays: &[ScreenRect],
 ) -> Vec<ScreenRect> {
-    let OverlayVisual::RectanglePicker {
-        virtual_desktop, ..
-    } = visual
-    else {
-        return vec![];
-    };
-    intersecting_monitor_bounds(displays, *virtual_desktop)
+    if overlay_requires_input_shields(visual) {
+        displays.to_vec()
+    } else {
+        vec![]
+    }
 }
 
 /// Isolates native windows, input, painting and resource ownership from the
@@ -1053,6 +1051,11 @@ pub trait OverlayRenderer: Send {
     /// Returns the physical button state without inventing an edge.
     fn left_button_down(&mut self) -> Result<bool, VisualOverlayError>;
     fn cursor_position(&mut self) -> Result<MkPoint, VisualOverlayError>;
+    /// Called only after show acknowledges complete rectangle input coverage.
+    /// The baseline must match the renderer event stream, never a pre-show sample.
+    fn rectangle_startup_left_down(&mut self) -> Result<bool, VisualOverlayError> {
+        self.left_button_down()
+    }
     fn show(
         &mut self,
         operation_id: OperationId,
@@ -1179,6 +1182,21 @@ impl VisualOverlayController {
             state = ?self.state, "starting visual overlay operation");
         match self.renderer.show(id, &visual, visual.passive()) {
             Ok(()) => {
+                let mut state = state;
+                if let VisualOverlayState::PickingRectangle { phase, .. } = &mut state {
+                    match self.renderer.rectangle_startup_left_down() {
+                        Ok(true) => *phase = RectangleInteractionPhase::AwaitingInitialRelease,
+                        Ok(false) => *phase = RectangleInteractionPhase::Armed,
+                        Err(error) => {
+                            self.renderer.close();
+                            self.events.push_back(VisualOverlayEvent::Error {
+                                operation_id: id,
+                                error,
+                            });
+                            return id;
+                        }
+                    }
+                }
                 self.operation_id = Some(id);
                 self.state = state;
             }
@@ -1258,17 +1276,6 @@ impl VisualOverlayController {
             });
             return id;
         }
-        let left_down = match self.renderer.left_button_down() {
-            Ok(left_down) => left_down,
-            Err(error) => {
-                let id = self.replace_with_id(requested_id);
-                self.events.push_back(VisualOverlayEvent::Error {
-                    operation_id: id,
-                    error,
-                });
-                return id;
-            }
-        };
         let pointer = match self.renderer.cursor_position() {
             Ok(pointer) => pointer,
             Err(error) => {
@@ -1288,11 +1295,7 @@ impl VisualOverlayController {
                 purpose,
                 virtual_desktop,
                 pointer,
-                phase: if left_down {
-                    RectangleInteractionPhase::AwaitingInitialRelease
-                } else {
-                    RectangleInteractionPhase::Armed
-                },
+                phase: RectangleInteractionPhase::AwaitingInitialRelease,
             },
             OverlayVisual::RectanglePicker {
                 virtual_desktop,
@@ -1849,6 +1852,7 @@ mod tests {
 
     struct FakeData {
         left_down: bool,
+        show_left_down: Option<bool>,
         cursor: MkPoint,
         inputs: Vec<OverlayInput>,
         calls: Vec<RecordedCall>,
@@ -1859,6 +1863,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 left_down: false,
+                show_left_down: None,
                 cursor: point(40, 50),
                 inputs: vec![],
                 calls: vec![],
@@ -1887,6 +1892,9 @@ mod tests {
                 visual: visual.clone(),
                 mouse_transparent: transparent,
             });
+            if let Some(left_down) = data.show_left_down.take() {
+                data.left_down = left_down;
+            }
             match data.show_error.take() {
                 Some(error) => Err(error),
                 None => Ok(()),
@@ -2299,6 +2307,33 @@ mod tests {
     }
 
     #[test]
+    fn rectangle_startup_baseline_is_taken_after_coverage_acknowledgement() {
+        for (before, after) in [(true, false), (false, true)] {
+            let (mut controller, fake, _) = controller();
+            {
+                let mut data = fake.lock().unwrap();
+                data.left_down = before;
+                data.show_left_down = Some(after);
+            }
+            controller.begin_rectangle_pick(
+                RectanglePurpose::SearchRegion,
+                ScreenRect::new(0, 0, 100, 100),
+            );
+            let VisualOverlayState::PickingRectangle { phase, .. } = controller.state() else {
+                panic!("picker not active")
+            };
+            assert_eq!(
+                *phase,
+                if after {
+                    RectangleInteractionPhase::AwaitingInitialRelease
+                } else {
+                    RectangleInteractionPhase::Armed
+                }
+            );
+        }
+    }
+
+    #[test]
     fn only_rectangle_picker_uses_per_monitor_input_shields() {
         let displays = vec![
             ScreenRect::new(-1920, -200, 1920, 1080),
@@ -2349,7 +2384,7 @@ mod tests {
         let picker = rectangle_picker_visual(ScreenRect::new(-2600, -400, 6200, 1600));
         assert_eq!(
             input_shield_plan(&picker, &displays),
-            displays[..3].to_vec(),
+            displays.to_vec(),
             "shield bounds retain each physical monitor's signed ScreenRect"
         );
     }
@@ -2561,7 +2596,7 @@ mod tests {
     }
 
     #[test]
-    fn picker_style_is_interactive_and_passive_styles_are_mouse_transparent() {
+    fn picker_visual_is_transparent_above_exclusive_shields() {
         let picker = OverlayVisual::RectanglePicker {
             virtual_desktop: ScreenRect::new(0, 0, 1, 1),
             selection: None,
@@ -2570,7 +2605,7 @@ mod tests {
                 pointer: point(0, 0),
             },
         };
-        assert!(!overlay_is_mouse_transparent(&picker));
+        assert!(overlay_is_mouse_transparent(&picker));
         assert!(overlay_is_mouse_transparent(
             &OverlayVisual::RectanglePreview(ScreenRect::new(0, 0, 1, 1))
         ));

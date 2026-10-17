@@ -20,17 +20,21 @@ use windows::{
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
-            Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_RETURN},
+            Input::KeyboardAndMouse::{
+                GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture, VK_ESCAPE, VK_LBUTTON,
+                VK_RETURN,
+            },
             WindowsAndMessaging::{
                 CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
-                DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW,
-                GetWindowRect, HTTRANSPARENT, HWND_TOPMOST, IsWindow, IsWindowVisible, LWA_ALPHA,
-                LWA_COLORKEY, MA_NOACTIVATE, MSG, PM_REMOVE, PeekMessageW, RegisterClassW,
-                SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_SHOWWINDOW,
-                SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-                TranslateMessage, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
-                WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WNDCLASSW, WS_EX_LAYERED,
-                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+                DestroyWindow, DispatchMessageW, GWL_EXSTYLE, GWLP_USERDATA, GetCursorPos,
+                GetWindowLongPtrW, GetWindowRect, HTTRANSPARENT, HWND_TOPMOST, IsWindow,
+                IsWindowVisible, LWA_ALPHA, LWA_COLORKEY, MA_NOACTIVATE, MSG, PM_REMOVE,
+                PeekMessageW, RegisterClassW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE,
+                SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+                ShowWindow, TranslateMessage, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
+                WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WNDCLASSW,
+                WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+                WS_EX_TRANSPARENT, WS_POPUP,
             },
         },
     },
@@ -70,6 +74,41 @@ fn full_surface_role(visual: &OverlayVisual) -> WindowRole {
     }
 }
 
+/// One input stream shared by every monitor shield. Native messages retain
+/// complete rapid transactions even when both edges arrive between UI ticks.
+#[derive(Default)]
+struct RectangleNativeInput {
+    ready: bool,
+    startup_left_down: bool,
+    left_down: bool,
+    events: Vec<OverlayInputKind>,
+}
+impl RectangleNativeInput {
+    fn acknowledge(&mut self, left_down: bool) {
+        self.events.clear();
+        self.left_down = left_down;
+        self.startup_left_down = left_down;
+        self.ready = true;
+    }
+    fn record(&mut self, msg: u32, point: MkPoint) {
+        if !self.ready {
+            return;
+        }
+        match msg {
+            WM_LBUTTONDOWN if !self.left_down => {
+                self.left_down = true;
+                self.events.push(OverlayInputKind::LeftPressed(point));
+            }
+            WM_LBUTTONUP if self.left_down => {
+                self.left_down = false;
+                self.events.push(OverlayInputKind::LeftReleased(point));
+            }
+            WM_MOUSEMOVE => self.events.push(OverlayInputKind::PointerMoved(point)),
+            _ => {}
+        }
+    }
+}
+
 struct WindowPaintState {
     bounds: ScreenRect,
     frame: Vec<OverlayFramePrimitive>,
@@ -79,6 +118,7 @@ struct WindowPaintState {
     description: &'static str,
     role: WindowRole,
     paint_count: AtomicUsize,
+    rectangle_input: Option<Arc<Mutex<RectangleNativeInput>>>,
 }
 struct OverlayWindow {
     hwnd: HWND,
@@ -93,6 +133,7 @@ pub(super) struct NativeOverlayRenderer {
     windows: Vec<OverlayWindow>,
     // Non-transparent, non-activating input consumers used only by rectangle picking.
     input_shields: Vec<OverlayWindow>,
+    rectangle_input: Option<Arc<Mutex<RectangleNativeInput>>>,
     // Small, opaque, non-activating passive resources.
     passive_edges: Vec<OverlayWindow>,
     passive_badges: Vec<OverlayWindow>,
@@ -131,6 +172,16 @@ fn win32_dimensions(
         ))
     })?;
     Ok((width, height))
+}
+
+fn shield_covers_monitor(expected: ScreenRect, actual: ScreenRect, visible: bool, ex: u32) -> bool {
+    visible
+        && expected == actual
+        && !expected.is_empty()
+        && ex & WS_EX_LAYERED.0 != 0
+        && ex & WS_EX_TRANSPARENT.0 == 0
+        && ex & WS_EX_NOACTIVATE.0 != 0
+        && ex & WS_EX_TOPMOST.0 != 0
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
@@ -181,7 +232,36 @@ unsafe extern "system" fn input_shield_wndproc(
         // These windows are intentionally hit-testable, but never activate and
         // never forward mouse messages to the application below them.
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
-        WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE => LRESULT(0),
+        WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE => {
+            let state =
+                unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WindowPaintState };
+            if !state.is_null() {
+                let state = unsafe { &*state };
+                if let Some(input) = &state.rectangle_input {
+                    // Mouse LPARAM is signed client coordinates, including captured
+                    // positions beyond this monitor. Preserve the virtual origin.
+                    let point = MkPoint {
+                        x: state.bounds.x.saturating_add(l.0 as u16 as i16 as i32),
+                        y: state
+                            .bounds
+                            .y
+                            .saturating_add((l.0 >> 16) as u16 as i16 as i32),
+                    };
+                    if let Ok(mut input) = input.lock() {
+                        input.record(msg, point);
+                    }
+                }
+            }
+            if msg == WM_LBUTTONDOWN {
+                unsafe {
+                    SetCapture(hwnd);
+                }
+            }
+            if msg == WM_LBUTTONUP && unsafe { GetCapture() } == hwnd {
+                let _ = unsafe { ReleaseCapture() };
+            }
+            LRESULT(0)
+        }
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
             let state =
@@ -395,6 +475,7 @@ impl NativeOverlayRenderer {
                 description: "input shield",
                 role: WindowRole::InputShield,
                 paint_count: AtomicUsize::new(0),
+                rectangle_input: self.rectangle_input.clone(),
             });
             let hwnd = unsafe {
                 CreateWindowExW(
@@ -517,6 +598,7 @@ impl NativeOverlayRenderer {
                 description,
                 role: WindowRole::Passive,
                 paint_count: AtomicUsize::new(0),
+                rectangle_input: None,
             });
             let width = match i32::try_from(bounds.width) { Ok(v) => v, Err(_) => return self.fail(format!("operation {operation_id} visual {visual:?} {description}: requested rectangle {bounds:?} width exceeds Win32 range")) };
             let height = match i32::try_from(bounds.height) { Ok(v) => v, Err(_) => return self.fail(format!("operation {operation_id} visual {visual:?} {description}: requested rectangle {bounds:?} height exceeds Win32 range")) };
@@ -693,6 +775,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
         }
         let input_shield_bounds = input_shield_plan(visual, &physical);
         if overlay_requires_input_shields(visual) {
+            self.rectangle_input = Some(Arc::new(Mutex::new(RectangleNativeInput::default())));
             let shield_class = windows::core::w!("MultiLauncherVisualOverlayInputShield");
             let shield_wc = WNDCLASSW {
                 hInstance: module.into(),
@@ -732,6 +815,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 description: "interactive",
                 role: full_surface_role(visual),
                 paint_count: AtomicUsize::new(0),
+                rectangle_input: None,
             });
             let mut ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
             if transparent {
@@ -821,6 +905,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 description: "tooltip",
                 role: WindowRole::Tooltip,
                 paint_count: AtomicUsize::new(0),
+                rectangle_input: None,
             });
             let hwnd = unsafe {
                 CreateWindowExW(
@@ -867,9 +952,68 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 let _ = UpdateWindow(hwnd);
             }
         }
+        if let Some(input) = &self.rectangle_input {
+            if input_shield_bounds.is_empty()
+                || self.input_shields.len() != input_shield_bounds.len()
+            {
+                return self.fail("Incomplete rectangle input shield coverage");
+            }
+            for (window, expected) in self.input_shields.iter().zip(&input_shield_bounds) {
+                let mut rect = RECT::default();
+                let valid_rect = unsafe { GetWindowRect(window.hwnd, &mut rect) }.is_ok();
+                let actual = ScreenRect::new(
+                    rect.left,
+                    rect.top,
+                    (i64::from(rect.right) - i64::from(rect.left)).max(0) as u32,
+                    (i64::from(rect.bottom) - i64::from(rect.top)).max(0) as u32,
+                );
+                let ex = unsafe { GetWindowLongPtrW(window.hwnd, GWL_EXSTYLE) } as u32;
+                if !valid_rect
+                    || !shield_covers_monitor(
+                        *expected,
+                        actual,
+                        unsafe { IsWindowVisible(window.hwnd) }.as_bool(),
+                        ex,
+                    )
+                {
+                    return self.fail("Rectangle input shield coverage acknowledgement failed");
+                }
+                // Discard pre-acknowledgement mouse transactions. No selection is
+                // armed until every monitor is covered and this baseline exists.
+                let mut msg = MSG::default();
+                while unsafe {
+                    PeekMessageW(&mut msg, window.hwnd, WM_MOUSEMOVE, WM_LBUTTONUP, PM_REMOVE)
+                }
+                .as_bool()
+                {
+                    unsafe {
+                        DispatchMessageW(&msg);
+                    }
+                }
+            }
+            let left = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
+            input
+                .lock()
+                .map_err(|_| platform("Rectangle input state lock poisoned"))?
+                .acknowledge(left);
+        }
         self.operation_id = Some(operation_id);
         self.visual = Some(visual.clone());
         Ok(())
+    }
+
+    fn rectangle_startup_left_down(&mut self) -> Result<bool, VisualOverlayError> {
+        let input = self
+            .rectangle_input
+            .as_ref()
+            .ok_or_else(|| platform("Rectangle input coverage is not installed"))?;
+        let input = input
+            .lock()
+            .map_err(|_| platform("Rectangle input state lock poisoned"))?;
+        if !input.ready {
+            return Err(platform("Rectangle input coverage is not acknowledged"));
+        }
+        Ok(input.startup_left_down)
     }
 
     fn repaint(
@@ -955,21 +1099,48 @@ impl OverlayRenderer for NativeOverlayRenderer {
         let mut p = POINT::default();
         unsafe { GetCursorPos(&mut p) }
             .map_err(|e| platform(format!("cursor query failed: {e}")))?;
-        if left && !self.left_down {
+        if let Some(input) = &self.rectangle_input {
+            let mut input = input
+                .lock()
+                .map_err(|_| platform("Rectangle input state lock poisoned"))?;
+            // A launch press can belong to another HWND's pre-existing capture.
+            // Its release only arms the picker; subsequent edges come exclusively
+            // from shield messages, so a rapid Down+Up cannot disappear.
+            if input.startup_left_down && input.left_down && !left {
+                input.record(WM_LBUTTONUP, MkPoint { x: p.x, y: p.y });
+            }
+            if !input.left_down {
+                input.startup_left_down = false;
+            }
+            out.extend(
+                std::mem::take(&mut input.events)
+                    .into_iter()
+                    .map(|kind| OverlayInput {
+                        operation_id: id,
+                        kind,
+                    }),
+            );
             out.push(OverlayInput {
                 operation_id: id,
-                kind: OverlayInputKind::LeftPressed(MkPoint { x: p.x, y: p.y }),
+                kind: OverlayInputKind::PointerMoved(MkPoint { x: p.x, y: p.y }),
             });
-        }
-        out.push(OverlayInput {
-            operation_id: id,
-            kind: OverlayInputKind::PointerMoved(MkPoint { x: p.x, y: p.y }),
-        });
-        if !left && self.left_down {
+        } else {
+            if left && !self.left_down {
+                out.push(OverlayInput {
+                    operation_id: id,
+                    kind: OverlayInputKind::LeftPressed(MkPoint { x: p.x, y: p.y }),
+                });
+            }
             out.push(OverlayInput {
                 operation_id: id,
-                kind: OverlayInputKind::LeftReleased(MkPoint { x: p.x, y: p.y }),
+                kind: OverlayInputKind::PointerMoved(MkPoint { x: p.x, y: p.y }),
             });
+            if !left && self.left_down {
+                out.push(OverlayInput {
+                    operation_id: id,
+                    kind: OverlayInputKind::LeftReleased(MkPoint { x: p.x, y: p.y }),
+                });
+            }
         }
         if esc && !self.escape_down {
             out.push(OverlayInput {
@@ -1029,6 +1200,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 paint_count=window.state.paint_count.load(Ordering::Relaxed), "destroying passive overlay window");
             destroy_overlay_window(window);
         }
+        self.rectangle_input = None;
         self.operation_id = None;
         self.visual = None;
         self.left_down = false;
@@ -1057,6 +1229,93 @@ impl Drop for NativeOverlayRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rectangle_shield_native_events_preserve_rapid_transaction_and_signed_positions() {
+        let mut input = RectangleNativeInput::default();
+        let start = MkPoint { x: -1920, y: -300 };
+        let end = MkPoint { x: 800, y: 600 };
+        input.record(WM_LBUTTONDOWN, start);
+        assert!(
+            input.events.is_empty(),
+            "pre-acknowledgement input never arms selection"
+        );
+        input.acknowledge(false);
+        input.record(WM_LBUTTONDOWN, start);
+        input.record(WM_MOUSEMOVE, end);
+        input.record(WM_LBUTTONUP, end);
+        assert_eq!(
+            input.events,
+            vec![
+                OverlayInputKind::LeftPressed(start),
+                OverlayInputKind::PointerMoved(end),
+                OverlayInputKind::LeftReleased(end)
+            ]
+        );
+        assert!(!input.left_down);
+        input.record(WM_LBUTTONUP, end);
+        assert_eq!(
+            input.events.len(),
+            3,
+            "no duplicate release from another monitor"
+        );
+    }
+
+    #[test]
+    fn rectangle_shield_startup_held_release_only_arms_next_press() {
+        let mut input = RectangleNativeInput::default();
+        let point = MkPoint { x: -40, y: 20 };
+        input.acknowledge(true);
+        input.record(WM_LBUTTONDOWN, point);
+        input.record(WM_LBUTTONUP, point);
+        input.record(WM_LBUTTONDOWN, point);
+        input.record(WM_LBUTTONUP, point);
+        assert_eq!(
+            input.events,
+            vec![
+                OverlayInputKind::LeftReleased(point),
+                OverlayInputKind::LeftPressed(point),
+                OverlayInputKind::LeftReleased(point)
+            ]
+        );
+    }
+
+    #[test]
+    fn rectangle_shield_acknowledgement_rejects_missing_invisible_or_transparent_coverage() {
+        let bounds = ScreenRect::new(-1920, -200, 1920, 1080);
+        let ex = (WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOPMOST).0;
+        assert!(shield_covers_monitor(bounds, bounds, true, ex));
+        assert!(!shield_covers_monitor(bounds, bounds, false, ex));
+        assert!(!shield_covers_monitor(
+            bounds,
+            ScreenRect::new(0, 0, 1920, 1080),
+            true,
+            ex
+        ));
+        assert!(!shield_covers_monitor(
+            bounds,
+            bounds,
+            true,
+            ex | WS_EX_TRANSPARENT.0
+        ));
+        assert!(!shield_covers_monitor(
+            bounds,
+            bounds,
+            true,
+            ex & !WS_EX_TOPMOST.0
+        ));
+        assert_eq!(
+            full_surface_role(&OverlayVisual::RectanglePicker {
+                virtual_desktop: bounds,
+                selection: None,
+                tooltip: RectangleTooltip {
+                    text: String::new(),
+                    pointer: MkPoint { x: 0, y: 0 }
+                }
+            }),
+            WindowRole::TransparentOverlay
+        );
+    }
 
     #[test]
     fn ocr_full_surface_role_is_nonactivating_and_hit_test_transparent() {

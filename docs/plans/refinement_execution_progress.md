@@ -9,7 +9,7 @@ Evidence/fixtures: ignored `target/refinement-evidence/` (owned fixtures only).
 | --- | --- | --- |
 | M0 | complete | M0-A: source/manifest/status inspection; Nextest 0.9.135; rustc 1.99.0, x86_64-pc-windows-msvc; commit `513e89a4ca0292017b348735ce33cb896f25cd12` |
 | M1 | complete | M1-A implemented in `src/gui/render.rs`: removed launcher scope strip, Ctrl+1–5 routing, scoped empty-state message and new-session scope reset; query/results layout now follows visible query geometry. `cargo nextest run --lib launcher_query_frame_has_no_scope_strip_or_ctrl_number_scope_changes`: 1 passed, 5,687 skipped. `rustfmt --edition 2024 src/gui/render.rs` and `git diff --check` passed. M1-A commit `178fb3b6`. M1-B source and scoped verification complete: unified Action-only provider/search flow, retired scope/category state and module removed; 11 launcher/provider tests and 1 radial ordering test passed (details below). M1-C README/Quick Help cleanup complete; dashboard compatibility target 9/9 passed. |
-| M2 | pending | Shared rectangle-picker input shield |
+| M2 | in_progress | M2-A input coverage/startup/native event delivery complete; 9 focused tests passed (run `204a0662-cf09-4013-8184-e9f8a906ee90`). M2-B lifecycle and M2-C native evidence pending. |
 | M3 | pending | Ordered-step layout |
 | M4 | pending | Playback settings / atomic hotkey routes |
 | M5 | pending | Cross-app playback / physical paste / tooltip |
@@ -36,14 +36,14 @@ M8-D only: maintained-target Clippy with `-D warnings`; final successful lint is
 ## Commit index
 
 - M0-A: `513e89a4ca0292017b348735ce33cb896f25cd12`.
-- M1-A: `178fb3b6` (local).
-- M1-B: `b27937cc` (local).
-- M1-C: help/compatibility closure; parent commit at this boundary.
+- M1-A: `178fb3b6` (pushed).
+- M1-B: `b27937cc` (pushed).
+- M1-C: `7e9e0a32` (pushed).
 
 ## Limitations / unresolved issues
 
 Native GUI evidence has not yet been attempted. No implementation blockers identified.
-Normal push after M0-A was rejected by automatic approval review because the remote was untrusted; successful checkpoint commits remain local. No workaround or repeated escalation was attempted.
+Initial M0-A push was rejected by automatic approval review as an untrusted remote. Parent later revalidated the intended configured remote/upstream and supplied the explicit AGENTS.md push authorization; normal push succeeded through M1-C `7e9e0a32`. M0/M1 commits are pushed.
 
 ## M1-B scoped evidence
 
@@ -57,3 +57,11 @@ Removed launcher `SearchScope`, effective-scope/filter/cache identity, result ca
 ## M1-C compatibility closure
 
 README and Quick Help now describe unified search and existing plugin prefixes. The targeted stale-reference search across source, tests, benches and README found no retired scope/category API or shortcut guidance. File Search Global/Directory documentation remains intact. M1-B's passing provider/snapshot and radial tests supply ordering/prefix evidence; `cargo nextest run --test dashboard_config` passed 9/9 (run `9bf5a3d5-62c8-4882-be24-84bad29160ab`; compile 5m25s, tests 0.779s), including `should_show_dashboard_when_empty_query` and `activation_applies_query_override_first`. No owned native screenshot has been captured for M1.
+
+## M2-A input coverage and startup
+
+Existing rectangle shields intentionally use one-alpha layered hit-testable windows. They previously discarded native mouse messages while polling reconstructed edges, losing rapid Down/Up; controller and native show also sampled separate startup baselines. M2-A gives all monitor shields one ordered native input stream, makes rectangle visual surfaces transparent above shields, and acknowledges every actual shield rectangle, visibility, layered/nontransparent/noactivate/topmost style and complete count before establishing the startup baseline and arming selection. Signed physical monitor bounds, including monitors outside constrained selection regions, remain unchanged. Creation/acknowledgement failure closes partial resources without publishing an active picker. No new hook or BlockInput.
+
+Focused command: `cargo nextest run --lib -E 'test(rectangle_shield_) | test(rectangle_startup_baseline_is_taken_after_coverage_acknowledgement) | test(only_rectangle_picker_uses_per_monitor_input_shields) | test(shield_plan_preserves_negative_origins_mixed_sizes_and_offsets) | test(held_launch_click_is_consumed_before_picker_arms) | test(rectangle_picker_full_lifecycle_records_visuals_frames_tooltips_and_cleanup) | test(picker_visual_is_transparent_above_exclusive_shields)'`: **9 passed, 5,678 skipped**; run `204a0662-cf09-4013-8184-e9f8a906ee90`, compilation 4m17s, test run 0.082s. The three native reducer/acknowledgement tests cover rapid queued Down/Move/Up, held startup release, and invisible/mismatched/transparent/not-topmost rejection; the controller test covers baseline changes during show. Existing lifecycle/geometry/style tests passed. Only existing vendor warnings were emitted. Source files formatted with `rustfmt --edition 2024 --config skip_children=true`; touched diff inspected and `git diff --check` passed. No full suite, Clippy, extra check/build, native desktop fixture or screenshot was run for A.
+
+M2-B must complete release-safe cancellation/replacement/shutdown, capture-loss/monitor-change handling, and the startup-held external-capture release/new shield Down before first poll edge. Native SetCapture assists continuation; per-monitor hit-testable coverage remains required regardless of nonactivating/background capture semantics. Real underlying-window click-through remains unverified until M2-C; deterministic acknowledgements are not native click-through evidence.
