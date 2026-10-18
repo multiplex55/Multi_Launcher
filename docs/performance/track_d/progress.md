@@ -32,7 +32,9 @@ per candidate in each of D1–D3. No baseline full tests or early Clippy.
 | D3-C–F | skipped_insufficient_evidence | No measured whole-process bottleneck |
 | D3-G | complete_blocked_environment | Four unrun scenarios with null rates in d3_idle.json |
 | D4-A/B | skipped_optional | Required native ownership/containment unavailable; no memory observation |
-| D5-A–C | pending | Focused closure; Clippy last |
+| D5-A | complete | Diff/metadata reviewed, two existing default-protocol tests PASS |
+| D5-B | in_progress | Final report and truthful budgets |
+| D5-C | pending | Touched Rust formatting; Clippy last |
 
 Raw evidence: external `$env:TEMP/Multi_Launcher/perf-track-d/`; `target/perf-track-d/` reserved for owned fixtures. No screenshots collected, no
 optimization candidates attempted, no application processes launched yet.
@@ -67,4 +69,9 @@ D2-I closure 18:39 UTC (~6 active minutes of 140; overall ~31 min, ~509 min rema
 
 D3 clock starts ~18:39:20 UTC; D2-I commit cd03ae95 local. Bounded inspection mapped Hot Folder, gesture, cursor/click and radial scheduling owners. Process CPU/wakeups/memory/handles/threads not sampled: same required containment restriction proven in D2. No repeated native retry or new polling instrumentation. D3 candidates/variants 0/0; no source edits or tests appropriate for inspection-only work. Push held under prior automatic-review rejection.
 
-D3-B/G closure ~18:42 UTC (~3 active minutes of 100): all four requested idle scenarios explicitly BLOCKED_ENVIRONMENT; actual measured duration 0, rates and memory/handles/thread/watcher counts null. No before/after, no 300 s confirmation, no responsiveness claim, no candidate/code accepted. D3-A commit c27164c9 local. D4-A gating: SKIPPED_OPTIONAL because required native containment/ownership is unavailable, despite ample time. D4-B not run, no growth/leak claim. Proceed directly to D5; no owned GUI processes need cleanup. Overall ~34 active min, ~506 min remaining. Pushes remain local under prior auto-review rejection.
+D3-B/G closure 18:41:09 UTC (1.55 active minutes of 100): all four requested idle scenarios explicitly BLOCKED_ENVIRONMENT; actual measured duration 0, rates and memory/handles/thread/watcher counts null. No before/after, no 300 s confirmation, no responsiveness claim, no candidate/code accepted. D3-A commit c27164c9 local. D4-A gating: SKIPPED_OPTIONAL because required native containment/ownership is unavailable, despite ample time. D4-B not run, no growth/leak claim. Proceed directly to D5; no owned GUI processes need cleanup. Overall 33.13 active min, ~506.87 min remaining. Pushes remain local under prior auto-review rejection.
+
+
+D5 starts at D3-G commit a8f994e9, 18:41:09 UTC. Cumulative diff inspected: only dev scripts/recipes, sanitized performance docs, and cfg(test)-only sample-limit helper. No product settings/hotkeys/input/shutdown/release/Cargo changes. cargo metadata --no-deps --offline --format-version 1 PASS: sole workspace member multi_launcher; sole ungated application bin multi_launcher; three existing smoke bins still require dev-smoke-binaries. No new binary/dependency. Exact two existing default-protocol integration unit tests PASS (measurement validation preserves all 20 default samples and revision receipts), command wall 1.99 s, Nextest 0.027 s. No full suite or unrelated plugin tests. Existing query test already validated configured 15 samples. No native GUI process ever launched; harmless root probe verified absent, RA owned tree terminated/disposed. Git status contained only intentional task files before this checkpoint.
+
+Clock reconciliation uses actual commit/run timestamps: D0 18:08:01–18:10:59 (2.97 min); D1 18:10:59–18:33:29 (22.50 min); D2 18:33:29–18:39:36 (6.12 min); D3 plus optional D4 decision 18:39:36–18:41:09 (1.55 min). Earlier rounded updates are approximate; these intervals govern accounting. Baseline manifest now distinguishes task clock start from manifest creation. D5 cap deadline 19:26:09 UTC, overall cap 03:08:01 UTC next day. No user pauses excluded.
