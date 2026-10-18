@@ -30,8 +30,8 @@ per candidate in each of D1–D3. No baseline full tests or early Clippy.
 | D3-A | complete_inspection_only | d3_owners.md; no runtime counter added |
 | D3-B | blocked_environment | Four controlled GUI idle scenarios cannot be safely launched |
 | D3-C–F | skipped_insufficient_evidence | No measured whole-process bottleneck |
-| D3-G | pending | Close with explicit missing rates |
-| D4-A/B | pending | Optional observation |
+| D3-G | complete_blocked_environment | Four unrun scenarios with null rates in d3_idle.json |
+| D4-A/B | skipped_optional | Required native ownership/containment unavailable; no memory observation |
 | D5-A–C | pending | Focused closure; Clippy last |
 
 Raw evidence: external `$env:TEMP/Multi_Launcher/perf-track-d/`; `target/perf-track-d/` reserved for owned fixtures. No screenshots collected, no
@@ -66,3 +66,5 @@ D2-C/D: d2_results.md records all five core categories with null/unmeasured nati
 D2-I closure 18:39 UTC (~6 active minutes of 140; overall ~31 min, ~509 min remaining). D2-D commit d1379783 local. Native capability summary added with true null metrics and verified harmless-probe cleanup. Zero UI optimization candidates, zero variants, zero screenshots. Only implementation is test-only sample control, validated by its focused unit and exact existing query test. No new default binary or production behavior. D3 starts next; no native retries will be repeated while the established containment boundary is unchanged.
 
 D3 clock starts ~18:39:20 UTC; D2-I commit cd03ae95 local. Bounded inspection mapped Hot Folder, gesture, cursor/click and radial scheduling owners. Process CPU/wakeups/memory/handles/threads not sampled: same required containment restriction proven in D2. No repeated native retry or new polling instrumentation. D3 candidates/variants 0/0; no source edits or tests appropriate for inspection-only work. Push held under prior automatic-review rejection.
+
+D3-B/G closure ~18:42 UTC (~3 active minutes of 100): all four requested idle scenarios explicitly BLOCKED_ENVIRONMENT; actual measured duration 0, rates and memory/handles/thread/watcher counts null. No before/after, no 300 s confirmation, no responsiveness claim, no candidate/code accepted. D3-A commit c27164c9 local. D4-A gating: SKIPPED_OPTIONAL because required native containment/ownership is unavailable, despite ample time. D4-B not run, no growth/leak claim. Proceed directly to D5; no owned GUI processes need cleanup. Overall ~34 active min, ~506 min remaining. Pushes remain local under prior auto-review rejection.
