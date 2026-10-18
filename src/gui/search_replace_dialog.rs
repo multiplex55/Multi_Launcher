@@ -36,6 +36,10 @@ struct DialogGeometry {
     offset: f32,
     files: egui::Rect,
     approvals: egui::Rect,
+    pattern_editor: egui::Rect,
+    replacement_editor: egui::Rect,
+    settings_open: bool,
+    advanced_open: bool,
 }
 
 #[cfg(test)]
@@ -51,6 +55,10 @@ impl Default for DialogGeometry {
             offset: 0.0,
             files: egui::Rect::NOTHING,
             approvals: egui::Rect::NOTHING,
+            pattern_editor: egui::Rect::NOTHING,
+            replacement_editor: egui::Rect::NOTHING,
+            settings_open: false,
+            advanced_open: false,
         }
     }
 }
@@ -1344,94 +1352,81 @@ impl SearchReplaceDialogState {
     ) {
         let mut search_changed = false;
         let mut replacement_changed = false;
-        ui.add_enabled_ui(process_interactions, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Search for");
-                search_changed |= ui
-                    .add(egui::TextEdit::singleline(&mut self.pattern).desired_width(360.0))
-                    .changed();
-                egui::ComboBox::from_id_salt("replace_pattern_mode")
-                    .selected_text(match self.pattern_mode {
-                        SearchPatternMode::Literal => "Literal",
-                        SearchPatternMode::RustRegex => "Rust regex",
-                    })
-                    .show_ui(ui, |ui| {
-                        search_changed |= ui
-                            .selectable_value(
-                                &mut self.pattern_mode,
-                                SearchPatternMode::Literal,
-                                "Literal",
-                            )
-                            .changed();
-                        search_changed |= ui
-                            .selectable_value(
-                                &mut self.pattern_mode,
-                                SearchPatternMode::RustRegex,
-                                "Rust regex",
-                            )
-                            .changed();
+        let active = [
+            &self.include_extensions,
+            &self.include_globs,
+            &self.exclude_paths,
+            &self.exclude_globs,
+        ]
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+        .count();
+        let settings = egui::CollapsingHeader::new(format!("Search and Replace settings ({active} filters active)"))
+            .id_salt("replace_search_settings")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.add_enabled_ui(process_interactions, |ui| {
+                    ui.label("Search for");
+                    let width = ui.available_width().min(520.0);
+                    let pattern = ui.add(egui::TextEdit::singleline(&mut self.pattern)
+                        .interactive(process_interactions)
+                        .id(egui::Id::new("replace_search_pattern")).desired_width(width));
+                    search_changed |= pattern.changed();
+                    #[cfg(test)] { self.geometry.pattern_editor = pattern.rect; }
+                    ui.horizontal_wrapped(|ui| {
+                        egui::ComboBox::from_id_salt("replace_pattern_mode")
+                            .selected_text(match self.pattern_mode { SearchPatternMode::Literal => "Literal", SearchPatternMode::RustRegex => "Rust regex" })
+                            .show_ui(ui, |ui| {
+                                search_changed |= ui.selectable_value(&mut self.pattern_mode, SearchPatternMode::Literal, "Literal").changed();
+                                search_changed |= ui.selectable_value(&mut self.pattern_mode, SearchPatternMode::RustRegex, "Rust regex").changed();
+                            });
+                        search_changed |= ui.checkbox(&mut self.case_sensitive, "Case sensitive").changed();
                     });
-                search_changed |= ui
-                    .checkbox(&mut self.case_sensitive, "Case sensitive")
-                    .changed();
-            });
-            ui.horizontal(|ui| {
-                ui.label("Replace with");
-                replacement_changed |= ui
-                    .add(egui::TextEdit::singleline(&mut self.replacement).desired_width(360.0))
-                    .changed();
-                egui::ComboBox::from_id_salt("replace_replacement_mode")
-                    .selected_text(match self.replacement_mode {
-                        ReplacementMode::Literal => "Literal replacement",
-                        ReplacementMode::RustRegexCaptures => "Rust capture substitution",
-                    })
-                    .show_ui(ui, |ui| {
-                        replacement_changed |= ui
-                            .selectable_value(
-                                &mut self.replacement_mode,
-                                ReplacementMode::Literal,
-                                "Literal replacement",
-                            )
-                            .changed();
-                        replacement_changed |= ui
-                            .selectable_value(
-                                &mut self.replacement_mode,
-                                ReplacementMode::RustRegexCaptures,
-                                "Rust capture substitution",
-                            )
-                            .changed();
+                    ui.label("Replace with");
+                    let replacement = ui.add(egui::TextEdit::singleline(&mut self.replacement)
+                        .interactive(process_interactions)
+                        .id(egui::Id::new("replace_replacement_text")).desired_width(width));
+                    replacement_changed |= replacement.changed();
+                    #[cfg(test)] { self.geometry.replacement_editor = replacement.rect; }
+                    ui.horizontal_wrapped(|ui| {
+                        egui::ComboBox::from_id_salt("replace_replacement_mode")
+                            .selected_text(match self.replacement_mode { ReplacementMode::Literal => "Literal replacement", ReplacementMode::RustRegexCaptures => "Rust capture substitution" })
+                            .show_ui(ui, |ui| {
+                                replacement_changed |= ui.selectable_value(&mut self.replacement_mode, ReplacementMode::Literal, "Literal replacement").changed();
+                                replacement_changed |= ui.selectable_value(&mut self.replacement_mode, ReplacementMode::RustRegexCaptures, "Rust capture substitution").changed();
+                            });
                     });
+                    ui.label("Capture substitutions use Rust regex syntax such as $1, ${name}, and $$; invalid references are shown before Apply.");
+                });
+                let advanced = egui::CollapsingHeader::new(format!("Advanced Filters ({active} active)"))
+                    .id_salt("replace_advanced_filters")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.add_enabled_ui(process_interactions, |ui| {
+                            for (label, id, value, hint) in [
+                                ("Extensions", "replace_extensions", &mut self.include_extensions, "Comma separated; empty means all supported text extensions"),
+                                ("Include globs", "replace_include_globs", &mut self.include_globs, "One root-relative path glob per line"),
+                                ("Exclude paths", "replace_exclude_paths", &mut self.exclude_paths, "Root-relative file or folder paths, one per line"),
+                                ("Exclude globs", "replace_exclude_globs", &mut self.exclude_globs, "One root-relative path glob per line"),
+                            ] {
+                                ui.label(label);
+                                let width = ui.available_width().min(520.0);
+                                search_changed |= ui.add(egui::TextEdit::singleline(value)
+                                    .interactive(process_interactions)
+                                    .id(egui::Id::new(id)).desired_width(width)).changed();
+                                ui.weak(hint);
+                            }
+                        });
+                    });
+                #[cfg(test)] { self.geometry.advanced_open = advanced.body_response.is_some(); }
+                #[cfg(not(test))] let _ = advanced;
             });
-            ui.label("Capture substitutions use Rust regex syntax such as $1, ${name}, and $$; invalid references are shown before Apply.");
-            ui.horizontal(|ui| {
-                ui.label("Extensions");
-                search_changed |= ui
-                    .add(egui::TextEdit::singleline(&mut self.include_extensions).desired_width(290.0))
-                    .changed();
-                ui.weak("comma separated; empty means all supported text extensions");
-            });
-            ui.horizontal(|ui| {
-                ui.label("Include globs");
-                search_changed |= ui
-                    .add(egui::TextEdit::singleline(&mut self.include_globs).desired_width(290.0))
-                    .changed();
-                ui.weak("one root-relative path glob per line");
-            });
-            ui.horizontal(|ui| {
-                ui.label("Exclude paths");
-                search_changed |= ui
-                    .add(egui::TextEdit::singleline(&mut self.exclude_paths).desired_width(290.0))
-                    .changed();
-                ui.weak("root-relative file or folder paths, one per line");
-            });
-            ui.horizontal(|ui| {
-                ui.label("Exclude globs");
-                search_changed |= ui
-                    .add(egui::TextEdit::singleline(&mut self.exclude_globs).desired_width(290.0))
-                    .changed();
-                ui.weak("one root-relative path glob per line");
-            });
-        });
+        #[cfg(test)]
+        {
+            self.geometry.settings_open = settings.body_response.is_some();
+        }
+        #[cfg(not(test))]
+        let _ = settings;
         if search_changed {
             self.invalidate_search(
                 "Search inputs changed. Run Search to capture a new result set.".into(),
@@ -2306,6 +2301,224 @@ mod tests {
         }
         output.drop_without_applying_deltas();
         (commands, text)
+    }
+
+    fn click_body_label(
+        state: &mut SearchReplaceDialogState,
+        ctx: &egui::Context,
+        size: egui::Vec2,
+        label: &str,
+    ) {
+        let runtime = ReplaceWorkerSnapshot::default();
+        let id = state.geometry.body_id.unwrap();
+        let mut scroll = egui::scroll_area::State::load(ctx, id).unwrap();
+        scroll.offset.y = 0.0;
+        scroll.store(ctx, id);
+        let mut position = None;
+        for _ in 0..35 {
+            let (commands, text) = layout_frame(state, ctx, size, &runtime, vec![], true);
+            assert!(commands.is_empty());
+            if let Some((_, rect)) = text.iter().find(|(text, _)| text.starts_with(label)) {
+                position = Some(rect.center());
+                break;
+            }
+            let mut scroll = egui::scroll_area::State::load(ctx, id).unwrap();
+            scroll.offset.y += 30.0;
+            scroll.store(ctx, id);
+        }
+        let pos = position.unwrap_or_else(|| panic!("missing body label {label}"));
+        for pressed in [true, false] {
+            assert!(
+                layout_frame(
+                    state,
+                    ctx,
+                    size,
+                    &runtime,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        }
+                    ],
+                    true
+                )
+                .0
+                .is_empty()
+            );
+        }
+        for _ in 0..3 {
+            layout_frame(state, ctx, size, &runtime, vec![], true);
+        }
+    }
+
+    #[test]
+    fn replace_settings_folding_preserves_snapshot_and_edits_keep_invalidation_boundaries() {
+        let parent = PathBuf::from("target/refinement-evidence");
+        std::fs::create_dir_all(&parent).unwrap();
+        let fixture = tempfile::Builder::new()
+            .prefix("replace_filters_")
+            .tempdir_in(parent)
+            .unwrap();
+        let root = fixture.path().join("explicit-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("owned.txt");
+        std::fs::write(&source, "needle\nneedle\n").unwrap();
+        let mut state = SearchReplaceDialogState::default();
+        state.open = true;
+        state.set_root(root);
+        state.pattern = "needle".into();
+        state.replacement = "replacement".into();
+        state.include_extensions = "txt".into();
+        let coordinator = crate::search_replace::SearchCoordinator::new().unwrap();
+        let worker = ReplacementPreviewWorker::new().unwrap();
+        let request = state.build_search_request().unwrap();
+        state.record_search_ticket(coordinator.submit(request).unwrap());
+        wait_for_preview(&mut state, &coordinator, &worker, |state| {
+            state.candidate.is_some() && !state.preview_pending
+        });
+        let search = state.search_result.clone().unwrap();
+        assert_eq!(search.status(), SearchStatus::Complete);
+        assert_eq!(search.matched_files().len(), 1);
+        let id = search.matched_files()[0].matches()[0].id().clone();
+        state.set_match_selected(&id, true);
+        wait_for_preview(&mut state, &coordinator, &worker, |state| {
+            state.candidate.is_some() && !state.preview_pending
+        });
+        state.apply_review = state.build_apply_review();
+        assert!(state.apply_review.is_some());
+        state.receipts.push(serde_json::from_value(serde_json::json!({
+            "id": "owned-receipt", "search_revision": 1, "search_generation": 1,
+            "replacement_revision": 1, "status": "applied", "entries": [], "message": "owned retained receipt"
+        })).unwrap());
+        let receipts = state.receipts.clone();
+        let selected = state.selected_matches.clone();
+        let before = (
+            state.search_revision,
+            state.preview_revision,
+            state.preview_result_publications,
+        );
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let size = egui::vec2(600.0, 420.0);
+        let runtime = ReplaceWorkerSnapshot::default();
+        for _ in 0..4 {
+            layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+        }
+        assert!(state.geometry.settings_open && !state.geometry.advanced_open);
+        for rect in [
+            state.geometry.pattern_editor,
+            state.geometry.replacement_editor,
+        ] {
+            assert!(
+                rect.width() >= 160.0 && rect.right() <= state.geometry.window.right(),
+                "responsive field: {rect:?}"
+            );
+        }
+        let drafts = (
+            state.pattern.clone(),
+            state.replacement.clone(),
+            state.include_extensions.clone(),
+        );
+        click_body_label(&mut state, &ctx, size, "Advanced Filters");
+        assert!(state.geometry.advanced_open);
+        click_body_label(&mut state, &ctx, size, "Advanced Filters");
+        assert!(!state.geometry.advanced_open);
+        click_body_label(&mut state, &ctx, size, "Search and Replace settings");
+        assert!(!state.geometry.settings_open);
+        click_body_label(&mut state, &ctx, size, "Search and Replace settings");
+        assert!(state.geometry.settings_open);
+        assert!(Arc::ptr_eq(state.search_result.as_ref().unwrap(), &search));
+        assert_eq!(state.selected_matches, selected);
+        assert_eq!(state.receipts, receipts);
+        assert!(state.apply_review.is_some());
+        assert_eq!(
+            (
+                state.search_revision,
+                state.preview_revision,
+                state.preview_result_publications
+            ),
+            before
+        );
+        assert_eq!(
+            (
+                state.pattern.clone(),
+                state.replacement.clone(),
+                state.include_extensions.clone()
+            ),
+            drafts
+        );
+
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("replace_replacement_text")));
+        assert!(
+            layout_frame(
+                &mut state,
+                &ctx,
+                size,
+                &runtime,
+                vec![egui::Event::Text("ignored".into())],
+                false
+            )
+            .0
+            .is_empty()
+        );
+        assert_eq!(state.replacement, drafts.1);
+        assert_eq!(state.preview_revision, before.1);
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("replace_replacement_text")));
+        assert!(
+            layout_frame(
+                &mut state,
+                &ctx,
+                size,
+                &runtime,
+                vec![egui::Event::Text("!".into())],
+                true
+            )
+            .0
+            .is_empty()
+        );
+        assert_ne!(state.replacement, drafts.1);
+        assert!(Arc::ptr_eq(state.search_result.as_ref().unwrap(), &search));
+        assert_eq!(state.selected_matches, selected);
+        assert_eq!(state.preview_revision, before.1 + 1);
+        assert!(state.preview_dirty && state.candidate.is_none());
+        assert!(
+            state.search_ticket.is_none(),
+            "editing does not launch a worker"
+        );
+
+        click_body_label(&mut state, &ctx, size, "Advanced Filters");
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("replace_exclude_globs")));
+        assert!(
+            layout_frame(
+                &mut state,
+                &ctx,
+                size,
+                &runtime,
+                vec![egui::Event::Text("**/skip/**".into())],
+                true
+            )
+            .0
+            .is_empty()
+        );
+        assert_eq!(state.exclude_globs, "**/skip/**");
+        assert!(state.search_result.is_none() && state.current_generation.is_none());
+        assert_eq!(state.preview_revision, before.1 + 2);
+        assert!(state.search_ticket.is_none());
+        click_body_label(&mut state, &ctx, size, "Advanced Filters");
+        assert!(!state.geometry.advanced_open);
+        let (_, text) = layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+        assert!(
+            text.iter()
+                .any(|(text, _)| text == "Advanced Filters (2 active)")
+        );
+        click_body_label(&mut state, &ctx, size, "Advanced Filters");
+        assert!(state.geometry.advanced_open);
+        assert_eq!(state.exclude_globs, "**/skip/**");
+        assert_eq!(state.receipts, receipts);
+        assert_eq!(std::fs::read_to_string(source).unwrap(), "needle\nneedle\n");
     }
 
     #[test]
