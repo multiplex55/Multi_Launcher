@@ -56,6 +56,17 @@ struct PreviewGeometry {
 
 #[cfg(test)]
 #[derive(Clone, Debug)]
+struct ConfirmationGeometry {
+    window: egui::Rect,
+    body: egui::Rect,
+    footer: egui::Rect,
+    content: egui::Vec2,
+    body_id: egui::Id,
+    offset: f32,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
 struct DialogGeometry {
     window: egui::Rect,
     header: egui::Rect,
@@ -79,6 +90,8 @@ struct DialogGeometry {
     file_scroll_id: Option<egui::Id>,
     match_scroll_id: Option<egui::Id>,
     preview: std::cell::RefCell<PreviewGeometry>,
+    apply_modal: Option<ConfirmationGeometry>,
+    recovery_modal: Option<ConfirmationGeometry>,
 }
 
 #[cfg(test)]
@@ -107,6 +120,8 @@ impl Default for DialogGeometry {
             file_scroll_id: None,
             match_scroll_id: None,
             preview: Default::default(),
+            apply_modal: None,
+            recovery_modal: None,
         }
     }
 }
@@ -2205,6 +2220,11 @@ impl SearchReplaceDialogState {
         allow_mutations: bool,
     ) {
         let process_interactions = allow_mutations && ctx.current_pass_index() == 0;
+        #[cfg(test)]
+        {
+            self.geometry.apply_modal = None;
+            self.geometry.recovery_modal = None;
+        }
         if self.apply_confirmation_open {
             let Some(review) = self.apply_review.as_ref() else {
                 if process_interactions {
@@ -2215,7 +2235,7 @@ impl SearchReplaceDialogState {
             let mut open = true;
             let mut confirm = false;
             let mut cancel = false;
-            egui::Window::new("Confirm Search and Replace")
+            let window = egui::Window::new("Confirm Search and Replace")
                 .id(egui::Id::new("replace_apply_confirmation"))
                 .collapsible(false)
                 .resizable(true)
@@ -2223,6 +2243,15 @@ impl SearchReplaceDialogState {
                 .min_size(egui::vec2(480.0, 320.0))
                 .open(&mut open)
                 .show(ctx, |ui| {
+                    let row = ui.spacing().interact_size.y.max(ui.text_style_height(&egui::TextStyle::Body));
+                    let body_height = (ui.available_height() - row - ui.spacing().item_spacing.y * 4.0).max(0.0);
+                    let body = egui::ScrollArea::vertical()
+                        .id_salt("replace_apply_review_files")
+                        .min_scrolled_height(0.0)
+                        .max_height(body_height)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     ui.label("This confirmation freezes the exact candidate bytes and approved match IDs. Search and preview never write files.");
                     for root in &review.roots {
                         ui.label(format!("Root: {}", root.display()));
@@ -2240,10 +2269,6 @@ impl SearchReplaceDialogState {
                     if let Some(directory) = &self.recovery_directory {
                         ui.label(format!("Recovery storage: {}", directory.display()));
                     }
-                    egui::ScrollArea::vertical()
-                        .id_salt("replace_apply_review_files")
-                        .max_height(300.0)
-                        .show(ui, |ui| {
                             for file in &review.files {
                                 ui.group(|ui| {
                                     ui.label(file.path.display().to_string());
@@ -2267,16 +2292,14 @@ impl SearchReplaceDialogState {
                                 });
                             }
                         });
+                    let footer_start = ui.cursor().min;
+                    ui.separator();
                     if self.apply_confirmation_pending {
                         ui.horizontal(|ui| {
+                            cancel = ui.add_enabled(process_interactions, egui::Button::new("Cancel before submission")).clicked();
                             ui.spinner();
-                            ui.label("Freezing the reviewed candidate on a worker before submitting it to the guarded executor…");
-                            cancel = ui
-                                .add_enabled(
-                                    process_interactions,
-                                    egui::Button::new("Cancel before submission"),
-                                )
-                                .clicked();
+                            let message = "Freezing the reviewed candidate on a worker before submitting it to the guarded executor…";
+                            ui.add(egui::Label::new(message).truncate()).on_hover_text(message);
                         });
                     } else {
                         ui.horizontal(|ui| {
@@ -2294,7 +2317,23 @@ impl SearchReplaceDialogState {
                                 .clicked();
                         });
                     }
+                    #[cfg(test)] {
+                        self.geometry.apply_modal = Some(ConfirmationGeometry {
+                            window: egui::Rect::NOTHING, body: body.inner_rect,
+                            footer: egui::Rect::from_min_max(footer_start, ui.min_rect().max),
+                            content: body.content_size, body_id: body.id, offset: body.state.offset.y,
+                        });
+                    }
+                    #[cfg(not(test))] let _ = (body, footer_start);
                 });
+            #[cfg(test)]
+            if let Some(window) = window {
+                if let Some(geometry) = self.geometry.apply_modal.as_mut() {
+                    geometry.window = window.response.rect;
+                }
+            }
+            #[cfg(not(test))]
+            let _ = window;
             if confirm {
                 commands.push(SearchReplaceUiCommand::ConfirmApply);
             } else if process_interactions && (cancel || !open) {
@@ -2310,13 +2349,23 @@ impl SearchReplaceDialogState {
                 RecoveryAction::Restore => "Confirm replacement Restore",
                 RecoveryAction::Recover => "Confirm replacement Recovery",
             };
-            egui::Window::new(title)
+            let window = egui::Window::new(title)
                 .id(egui::Id::new("replace_recovery_confirmation"))
                 .collapsible(false)
                 .resizable(true)
                 .default_size(egui::vec2(620.0, 420.0))
+                .min_size(egui::vec2(440.0, 260.0))
                 .open(&mut open)
                 .show(ctx, |ui| {
+                    let row = ui.spacing().interact_size.y.max(ui.text_style_height(&egui::TextStyle::Body));
+                    let body_height = (ui.available_height() - row - ui.spacing().item_spacing.y * 4.0).max(0.0);
+                    let body = egui::ScrollArea::vertical()
+                        .id_salt("replace_recovery_review_body")
+                        .min_scrolled_height(0.0)
+                        .max_height(body_height)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     ui.label(format!("Receipt: {}", review.transaction_id));
                     match review.action {
                         RecoveryAction::Restore => {
@@ -2327,6 +2376,11 @@ impl SearchReplaceDialogState {
                         }
                     }
                     ui.label("Per-file outcomes and any partial or recovery-required result will remain in this receipt.");
+
+                        });
+                    let footer_start = ui.cursor().min;
+                    ui.separator();
+                    ui.horizontal(|ui| {
                     if ui
                         .add_enabled(process_interactions && !runtime.active, egui::Button::new(match review.action {
                             RecoveryAction::Restore => "Confirm Restore",
@@ -2339,7 +2393,24 @@ impl SearchReplaceDialogState {
                     cancel = ui
                         .add_enabled(process_interactions, egui::Button::new("Cancel"))
                         .clicked();
+                    });
+                    #[cfg(test)] {
+                        self.geometry.recovery_modal = Some(ConfirmationGeometry {
+                            window: egui::Rect::NOTHING, body: body.inner_rect,
+                            footer: egui::Rect::from_min_max(footer_start, ui.min_rect().max),
+                            content: body.content_size, body_id: body.id, offset: body.state.offset.y,
+                        });
+                    }
+                    #[cfg(not(test))] let _ = (body, footer_start);
                 });
+            #[cfg(test)]
+            if let Some(window) = window {
+                if let Some(geometry) = self.geometry.recovery_modal.as_mut() {
+                    geometry.window = window.response.rect;
+                }
+            }
+            #[cfg(not(test))]
+            let _ = window;
             if confirm {
                 commands.push(match review.action {
                     RecoveryAction::Restore => SearchReplaceUiCommand::ConfirmRestore,
@@ -2438,12 +2509,16 @@ mod tests {
         ) {
             match shape {
                 egui::epaint::Shape::Text(value) => {
-                    let rect = value
-                        .galley
-                        .rect
-                        .translate(value.pos.to_vec2())
-                        .intersect(clip);
-                    if rect.is_positive() {
+                    let rect = value.galley.rect.translate(value.pos.to_vec2());
+                    // Keep the full galley bounds only when actually visible.
+                    // Intersecting first makes a clipped sliver indistinguishable
+                    // from a complete edge-aligned label to click helpers.
+                    if rect.is_positive()
+                        && rect.left() >= clip.left() - 0.5
+                        && rect.right() <= clip.right() + 0.5
+                        && rect.top() >= clip.top() - 0.5
+                        && rect.bottom() <= clip.bottom() + 0.5
+                    {
                         text.push((value.galley.text().into(), rect));
                     }
                 }
@@ -2463,30 +2538,37 @@ mod tests {
         (commands, text)
     }
 
-    fn click_body_label(
+    fn click_body_command(
         state: &mut SearchReplaceDialogState,
         ctx: &egui::Context,
         size: egui::Vec2,
         label: &str,
-    ) {
+    ) -> Vec<SearchReplaceUiCommand> {
         let runtime = ReplaceWorkerSnapshot::default();
         let id = state.geometry.body_id.unwrap();
         let mut scroll = egui::scroll_area::State::load(ctx, id).unwrap();
         scroll.offset.y = 0.0;
         scroll.store(ctx, id);
         let mut position = None;
-        for _ in 0..35 {
+        // Cover the actual current body range, including receipts below large
+        // result lists, rather than assuming a fixed number of scan steps.
+        let scroll_range = (state.geometry.content.y - state.geometry.body.height()).max(0.0);
+        let scan_steps = (scroll_range / 30.0).ceil() as usize + 5;
+        let mut last_visible = Vec::new();
+        for _ in 0..scan_steps {
             let (commands, text) = layout_frame(state, ctx, size, &runtime, vec![], true);
             assert!(commands.is_empty());
             let fully_visible = |rect: egui::Rect, body: egui::Rect| {
-                rect.top() > body.top() + 4.0 && rect.bottom() < body.bottom() - 4.0
+                rect.left() >= body.left() - 0.5
+                    && rect.right() <= body.right() + 0.5
+                    && rect.top() >= body.top() - 0.5
+                    && rect.bottom() <= body.bottom() + 0.5
             };
             if let Some((_, rect)) = text.iter().find(|(text, rect)| {
                 text.starts_with(label) && fully_visible(*rect, state.geometry.body)
             }) {
-                // Published clipped text can first appear at the body edge,
-                // before the new scroll offset settles. Click only a stable
-                // interior label, rather than its first painted sliver.
+                // Require full published bounds and a stable second frame.
+                // A final header may legitimately align with the content edge.
                 let prior = *rect;
                 let (commands, settled) = layout_frame(state, ctx, size, &runtime, vec![], true);
                 assert!(commands.is_empty());
@@ -2500,13 +2582,20 @@ mod tests {
                 }
                 continue;
             }
+            last_visible = text;
             let mut scroll = egui::scroll_area::State::load(ctx, id).unwrap();
             scroll.offset.y += 30.0;
             scroll.store(ctx, id);
         }
-        let pos = position.unwrap_or_else(|| panic!("missing body label {label}"));
+        let pos = position.unwrap_or_else(|| {
+            panic!(
+                "missing body label {label}; body={:?}, content={:?}, offset={}, range={scroll_range}, steps={scan_steps}, last visible={last_visible:?}",
+                state.geometry.body, state.geometry.content, state.geometry.offset
+            )
+        });
+        let mut commands = Vec::new();
         for pressed in [true, false] {
-            assert!(
+            commands.extend(
                 layout_frame(
                     state,
                     ctx,
@@ -2519,16 +2608,405 @@ mod tests {
                             button: egui::PointerButton::Primary,
                             pressed,
                             modifiers: egui::Modifiers::NONE,
-                        }
+                        },
                     ],
-                    true
+                    true,
                 )
-                .0
-                .is_empty()
+                .0,
             );
         }
         for _ in 0..3 {
             layout_frame(state, ctx, size, &runtime, vec![], true);
+        }
+        commands
+    }
+
+    fn click_body_label(
+        state: &mut SearchReplaceDialogState,
+        ctx: &egui::Context,
+        size: egui::Vec2,
+        label: &str,
+    ) {
+        assert!(click_body_command(state, ctx, size, label).is_empty());
+    }
+
+    fn click_fixed_label(
+        state: &mut SearchReplaceDialogState,
+        ctx: &egui::Context,
+        size: egui::Vec2,
+        runtime: &ReplaceWorkerSnapshot,
+        label: &str,
+        allow: bool,
+    ) -> Vec<SearchReplaceUiCommand> {
+        for _ in 0..2 {
+            assert!(
+                layout_frame(state, ctx, size, runtime, vec![], allow)
+                    .0
+                    .is_empty()
+            );
+        }
+        let (_, text) = layout_frame(state, ctx, size, runtime, vec![], allow);
+        let pos = text
+            .iter()
+            .find(|(text, _)| text == label)
+            .unwrap_or_else(|| panic!("missing fixed {label}: {text:?}"))
+            .1
+            .center();
+        let mut commands = Vec::new();
+        for pressed in [true, false] {
+            commands.extend(
+                layout_frame(
+                    state,
+                    ctx,
+                    size,
+                    runtime,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    allow,
+                )
+                .0,
+            );
+        }
+        commands
+    }
+
+    #[test]
+    fn replace_actions_and_confirmation_footers_stay_reachable_without_duplicate_submission() {
+        let parent = PathBuf::from("target/refinement-evidence");
+        std::fs::create_dir_all(&parent).unwrap();
+        let fixture = tempfile::Builder::new()
+            .prefix("replace_actions_")
+            .tempdir_in(parent)
+            .unwrap();
+        let root = fixture.path().join("explicit-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut originals = Vec::new();
+        for index in 0..20 {
+            let path = root.join(format!("owned-{index:02}.txt"));
+            let text = "needle\r\nneedle\r\n";
+            std::fs::write(&path, text).unwrap();
+            originals.push((path, text));
+        }
+        let mut state = SearchReplaceDialogState::default();
+        state.open();
+        state.set_root(root);
+        state.include_extensions = "txt".into();
+        state.pattern = "needle".into();
+        state.replacement = "changed".into();
+        let coordinator = crate::search_replace::SearchCoordinator::new().unwrap();
+        let worker = ReplacementPreviewWorker::new().unwrap();
+        let request = state.build_search_request().unwrap();
+        state.record_search_ticket(coordinator.submit(request).unwrap());
+        wait_for_preview(&mut state, &coordinator, &worker, |state| {
+            state.candidate.is_some() && !state.preview_pending
+        });
+        let search = state.search_result.clone().unwrap();
+        assert_eq!(search.status(), SearchStatus::Complete);
+        assert_eq!(search.matched_files().len(), 20);
+        let ids: HashSet<_> = search
+            .matched_files()
+            .iter()
+            .flat_map(|file| file.matches())
+            .map(|span| span.id().clone())
+            .collect();
+        for id in &ids {
+            state.set_match_selected(id, true);
+        }
+        wait_for_preview(&mut state, &coordinator, &worker, |state| {
+            state.candidate.is_some() && !state.preview_pending
+        });
+        for (id, status) in [
+            ("owned-restore", "applied"),
+            ("owned-recovery", "recovery_required"),
+        ] {
+            state.receipts.push(serde_json::from_value(serde_json::json!({
+                "id": id, "search_revision": 1, "search_generation": 1, "replacement_revision": 1,
+                "status": status, "entries": [], "message": "Owned retained receipt"
+            })).unwrap());
+        }
+        let receipts = state.receipts.clone();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let size = egui::vec2(600.0, 420.0);
+        let runtime = ReplaceWorkerSnapshot::default();
+        for _ in 0..4 {
+            layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+        }
+        assert_eq!(
+            click_fixed_label(
+                &mut state,
+                &ctx,
+                size,
+                &runtime,
+                "Review Apply\u{2026}",
+                true
+            ),
+            vec![SearchReplaceUiCommand::ReviewApply]
+        );
+        let assert_modal = |geometry: &ConfirmationGeometry, size: egui::Vec2| {
+            assert!(
+                geometry.window.width() <= size.x + 1.0 && geometry.window.height() <= size.y + 1.0,
+                "{geometry:?}"
+            );
+            assert!(
+                geometry.footer.bottom() <= size.y + 1.0
+                    && geometry.footer.top() >= geometry.body.bottom(),
+                "{geometry:?}"
+            );
+            assert!(
+                geometry.body.height() >= 80.0 && geometry.body.width() > 200.0,
+                "{geometry:?}"
+            );
+        };
+        for viewport in [size, egui::vec2(1120.0, 820.0), size] {
+            for _ in 0..4 {
+                layout_frame(&mut state, &ctx, viewport, &runtime, vec![], true);
+                assert_modal(state.geometry.apply_modal.as_ref().unwrap(), viewport);
+            }
+        }
+        let modal = state.geometry.apply_modal.clone().unwrap();
+        assert!(modal.content.y > modal.body.height());
+        let outer_offset = state.geometry.offset;
+        layout_frame(
+            &mut state,
+            &ctx,
+            size,
+            &runtime,
+            vec![
+                egui::Event::PointerMoved(modal.body.center()),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -240.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            true,
+        );
+        for _ in 0..30 {
+            layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+        }
+        assert!(state.geometry.apply_modal.as_ref().unwrap().offset > 0.0);
+        assert_eq!(
+            state.geometry.offset, outer_offset,
+            "modal wheel does not scroll disabled background"
+        );
+        let body_id = modal.body_id;
+        let mut scroll = egui::scroll_area::State::load(&ctx, body_id).unwrap();
+        scroll.offset.y = (modal.content.y - modal.body.height()).max(0.0);
+        scroll.store(&ctx, body_id);
+        assert!(
+            click_fixed_label(&mut state, &ctx, size, &runtime, "Confirm and Apply", false)
+                .is_empty()
+        );
+        let (_, text) = layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+        let pos = text
+            .iter()
+            .find(|(text, _)| text == "Confirm and Apply")
+            .unwrap()
+            .1
+            .center();
+        layout_frame(
+            &mut state,
+            &ctx,
+            size,
+            &runtime,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            true,
+        );
+        let mut commands = Vec::new();
+        let mut passes = 0;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                events: vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ctx| {
+                commands.extend(state.ui(ctx, true, &runtime));
+                passes += 1;
+                if ctx.current_pass_index() == 0 {
+                    ctx.request_discard("replace confirmation single-command guard");
+                }
+            },
+        );
+        output.drop_without_applying_deltas();
+        assert!(passes > 1);
+        assert_eq!(commands, vec![SearchReplaceUiCommand::ConfirmApply]);
+        let frozen_job = state
+            .take_confirm_job()
+            .expect("existing confirmation handoff");
+        assert!(
+            state.take_confirm_job().is_none(),
+            "one freeze job per confirmation"
+        );
+        drop(frozen_job); // No writer/executor is submitted by this UI fixture.
+        for _ in 0..3 {
+            layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+        }
+        assert_modal(state.geometry.apply_modal.as_ref().unwrap(), size);
+        assert_eq!(
+            click_fixed_label(
+                &mut state,
+                &ctx,
+                size,
+                &runtime,
+                "Cancel before submission",
+                true
+            ),
+            vec![SearchReplaceUiCommand::CancelApply]
+        );
+        assert!(!state.apply_confirmation_open && !state.apply_confirmation_pending);
+        assert!(state.take_confirmed_request().is_none());
+        assert_eq!(state.selected_matches, ids);
+        assert_eq!(state.receipts, receipts);
+
+        assert!(
+            click_fixed_label(&mut state, &ctx, size, &runtime, "Restore / Recovery", true)
+                .is_empty()
+        );
+        for _ in 0..3 {
+            layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+        }
+        for (id, action, entry, confirm, command) in [
+            (
+                "owned-restore",
+                RecoveryAction::Restore,
+                "Restore\u{2026}",
+                "Confirm Restore",
+                SearchReplaceUiCommand::ConfirmRestore,
+            ),
+            (
+                "owned-recovery",
+                RecoveryAction::Recover,
+                "Recover interrupted operation\u{2026}",
+                "Confirm Recovery",
+                SearchReplaceUiCommand::ConfirmRecovery,
+            ),
+        ] {
+            click_body_label(&mut state, &ctx, size, id);
+            let expected = if action == RecoveryAction::Restore {
+                SearchReplaceUiCommand::ReviewRestore(id.into())
+            } else {
+                SearchReplaceUiCommand::ReviewRecovery(id.into())
+            };
+            assert_eq!(
+                click_body_command(&mut state, &ctx, size, entry),
+                vec![expected]
+            );
+            state.review_recovery(id.into(), action); // Same existing owner called by the app command handler.
+            assert_eq!(state.recovery_review.as_ref().unwrap().transaction_id, id);
+            state.recovery_review.as_mut().unwrap().transaction_id =
+                "owned-long-recovery-metadata/".repeat(70);
+            for _ in 0..4 {
+                layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+                assert_modal(state.geometry.recovery_modal.as_ref().unwrap(), size);
+            }
+            let recovery = state.geometry.recovery_modal.as_ref().unwrap();
+            assert!(recovery.content.y > recovery.body.height());
+            assert!(click_fixed_label(&mut state, &ctx, size, &runtime, confirm, false).is_empty());
+            assert_eq!(
+                click_fixed_label(&mut state, &ctx, size, &runtime, confirm, true),
+                vec![command]
+            );
+            assert_eq!(
+                click_fixed_label(&mut state, &ctx, size, &runtime, "Cancel", true),
+                vec![SearchReplaceUiCommand::CancelRecoveryAction]
+            );
+            assert!(state.recovery_review.is_none());
+        }
+
+        click_body_label(&mut state, &ctx, size, "Search for");
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("replace_search_pattern")));
+        let focused = ctx.memory(|memory| memory.focused());
+        assert!(
+            layout_frame(
+                &mut state,
+                &ctx,
+                size,
+                &runtime,
+                vec![egui::Event::Key {
+                    key: egui::Key::Tab,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE
+                }],
+                true
+            )
+            .0
+            .is_empty()
+        );
+        assert_ne!(ctx.memory(|memory| memory.focused()), focused);
+        assert_eq!(state.pattern, "needle");
+        assert_eq!(state.selected_matches, ids);
+        let request = state.build_search_request().unwrap();
+        state.record_search_ticket(coordinator.submit(request).unwrap());
+        let active = ReplaceWorkerSnapshot {
+            active: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            click_fixed_label(&mut state, &ctx, size, &active, "Cancel search", true),
+            vec![SearchReplaceUiCommand::CancelSearch]
+        );
+        assert_eq!(
+            click_fixed_label(
+                &mut state,
+                &ctx,
+                size,
+                &active,
+                "Cancel between files",
+                true
+            ),
+            vec![SearchReplaceUiCommand::CancelOperation]
+        );
+        state.cancel_search();
+        assert_eq!(
+            click_fixed_label(&mut state, &ctx, size, &runtime, "Close", true),
+            vec![SearchReplaceUiCommand::Closed]
+        );
+        assert!(!state.open);
+        state.open();
+        for viewport in [egui::vec2(1120.0, 820.0), size] {
+            for _ in 0..4 {
+                assert!(
+                    layout_frame(&mut state, &ctx, viewport, &runtime, vec![], true)
+                        .0
+                        .is_empty()
+                );
+            }
+            assert!(state.geometry.footer.bottom() <= viewport.y + 1.0);
+        }
+        assert!(
+            state.search_ticket.is_none()
+                && !state.apply_confirmation_open
+                && state.recovery_review.is_none()
+        );
+        assert_eq!(state.pattern, "needle");
+        assert_eq!(state.receipts, receipts);
+        for (path, original) in originals {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), original);
         }
     }
 

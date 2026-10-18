@@ -250,6 +250,7 @@ impl HelpWindow {
                         ui.separator();
                         ui.label(egui::RichText::new("Search and Replace").strong());
                         ui.label("Type replace to open the explicit-root dialog. Opening it never starts a search. Approve stable individual match IDs, inspect each selected match's original and proposed text plus the bounded file diff, then explicitly confirm the frozen candidate. Long match previews disclose truncation. Search and preview do not write files; Apply rechecks captured sources and records durable backups and receipts. Partial outcomes remain available for explicit Restore or recovery.");
+                        ui.label("Search / Refresh and the action footer stay visible while the body scrolls. Open Advanced Filters for scope details; fold Files with Matches, File Approvals, and Original vs. Proposed Preview independently. Preview panes scroll both ways. Restore / Recovery reveals receipts. Confirmation reviews scroll above fixed Confirm and Cancel buttons.");
                         ui.label("UI linking:");
                         ui.monospace("  Notes dialog → right-click note → Link to todo");
                         ui.monospace("  Todos dialog → right-click todo → Link note");

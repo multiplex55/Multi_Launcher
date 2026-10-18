@@ -497,6 +497,15 @@ as `$1`, `${name}`, and `$$`; unknown references and output limits are shown
 before Apply. Matches start unchecked, so each approved match is selected
 individually or through its file row.
 
+The root and **Search / Refresh** stay above the scrollable body. Basic
+settings start open; **Advanced Filters** starts closed and shows the active
+filter count. **Files with Matches**, **File Approvals**, and **Original vs.
+Proposed Preview** fold independently without changing approvals. Preview panes
+scroll vertically and horizontally for long lines. The fixed footer keeps
+**Review Apply**, **Close**, active cancellation, and **Restore / Recovery**
+reachable; the latter reveals retained receipts. Apply and recovery reviews
+scroll separately from their fixed confirmation and cancellation buttons.
+
 Search reads supported UTF-8 text and UTF-8-with-BOM files. Binary and
 unsupported encodings are skipped and listed. Directories are never guessed,
 and opening or changing a filter does not silently start a search. Results
