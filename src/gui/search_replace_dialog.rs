@@ -40,6 +40,14 @@ struct DialogGeometry {
     replacement_editor: egui::Rect,
     settings_open: bool,
     advanced_open: bool,
+    files_open: bool,
+    approvals_open: bool,
+    file_rows_rendered: usize,
+    match_rows_rendered: usize,
+    first_file_row: usize,
+    first_match_row: usize,
+    file_scroll_id: Option<egui::Id>,
+    match_scroll_id: Option<egui::Id>,
 }
 
 #[cfg(test)]
@@ -59,6 +67,14 @@ impl Default for DialogGeometry {
             replacement_editor: egui::Rect::NOTHING,
             settings_open: false,
             advanced_open: false,
+            files_open: false,
+            approvals_open: false,
+            file_rows_rendered: 0,
+            match_rows_rendered: 0,
+            first_file_row: 0,
+            first_match_row: 0,
+            file_scroll_id: None,
+            match_scroll_id: None,
         }
     }
 }
@@ -1541,142 +1557,191 @@ impl SearchReplaceDialogState {
         _commands: &mut Vec<SearchReplaceUiCommand>,
         process_interactions: bool,
     ) {
+        #[cfg(test)]
+        {
+            self.geometry.files = egui::Rect::NOTHING;
+            self.geometry.approvals = egui::Rect::NOTHING;
+            self.geometry.files_open = false;
+            self.geometry.approvals_open = false;
+            self.geometry.file_rows_rendered = 0;
+            self.geometry.match_rows_rendered = 0;
+            self.geometry.first_file_row = 0;
+            self.geometry.first_match_row = 0;
+            self.geometry.file_scroll_id = None;
+            self.geometry.match_scroll_id = None;
+        }
         let Some(search) = self.search_result.as_ref().cloned() else {
             ui.weak("Search results appear here. A search only reads the chosen root and never edits files.");
             return;
         };
-        let mut path_filter_changed = false;
-        let mut sort_changed = false;
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Filter files");
-            path_filter_changed |= ui
-                .add_enabled(
-                    process_interactions,
-                    egui::TextEdit::singleline(&mut self.file_filter)
-                        .id(egui::Id::new("replace_file_filter"))
-                        .desired_width(250.0),
-                )
-                .changed();
-            let mut sort = self.file_sort;
-            ui.add_enabled_ui(process_interactions, |ui| {
-                egui::ComboBox::from_id_salt("replace_file_sort")
-                    .selected_text(match sort {
-                        FileSort::Path => "Path order",
-                        FileSort::MatchCount => "Match count",
-                    })
-                    .show_ui(ui, |ui| {
-                        sort_changed |= ui
-                            .selectable_value(&mut sort, FileSort::Path, "Path order")
-                            .changed();
-                        sort_changed |= ui
-                            .selectable_value(&mut sort, FileSort::MatchCount, "Match count")
-                            .changed();
-                    });
-            });
-            if process_interactions && sort_changed {
-                self.file_sort = sort;
-            }
-            let select = ui
-                .add_enabled(
-                    process_interactions,
-                    egui::Button::new("Select visible matches"),
-                )
-                .clicked();
-            let clear = ui
-                .add_enabled(
-                    process_interactions,
-                    egui::Button::new("Clear visible matches"),
-                )
-                .clicked();
-            if process_interactions && select {
-                self.set_visible_files_selected(true);
-            }
-            if process_interactions && clear {
-                self.set_visible_files_selected(false);
-            }
-        });
-        if path_filter_changed || sort_changed {
-            self.rebuild_visible_files();
-        }
-
         let file_count = search.matched_files().len();
-        let visible_count = self.visible_file_indices.len();
-        ui.horizontal(|ui| {
-            ui.label(format!(
-                "Files with matches: {visible_count} shown of {file_count}"
-            ));
-            ui.label(format!(
-                "Matches found: {}",
-                search.summary().matches_found()
-            ));
-        });
-        let files = egui::ScrollArea::vertical()
-            .id_salt("replace_file_results")
-            .auto_shrink([false, false])
-            .min_scrolled_height(self.panel_height(220.0))
-            .max_height(self.panel_height(220.0))
-            .show_rows(ui, FILE_ROW_HEIGHT, visible_count, |ui, rows| {
-                for visible_index in rows {
-                    let Some(file_index) = self.visible_file_indices.get(visible_index).copied()
-                    else {
-                        continue;
-                    };
-                    let Some(file) = search.matched_files().get(file_index) else {
-                        continue;
-                    };
-                    let total = file.matches().len();
-                    let selected = file
-                        .matches()
-                        .iter()
-                        .filter(|span| self.selected_matches.contains(span.id()))
-                        .count();
-                    let all_selected = total > 0 && selected == total;
-                    let some_selected = selected > 0 && selected < total;
-                    ui.horizontal(|ui| {
-                        let mut checked = all_selected;
-                        if ui
-                            .add_enabled(
-                                process_interactions,
-                                egui::Checkbox::new(&mut checked, ""),
-                            )
-                            .clicked()
+        let current = self
+            .selected_file
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map_or_else(
+                || "none".into(),
+                |name| bounded_single_line(&name.to_string_lossy(), 48),
+            );
+        let title = format!(
+            "Files with Matches ({} of {file_count} files, {} approved matches; current: {current})",
+            self.visible_file_indices.len(),
+            self.selected_matches.len()
+        );
+        let file_section = egui::CollapsingHeader::new(title)
+            .id_salt("replace_files_section")
+            .default_open(true)
+            .show(ui, |ui| {
+                let mut path_filter_changed = false;
+                let mut sort_changed = false;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Filter files");
+                    path_filter_changed |= ui
+                        .add_enabled(
+                            process_interactions,
+                            egui::TextEdit::singleline(&mut self.file_filter)
+                                .interactive(process_interactions)
+                                .id(egui::Id::new("replace_file_filter"))
+                                .desired_width(250.0),
+                        )
+                        .changed();
+                    let mut sort = self.file_sort;
+                    ui.add_enabled_ui(process_interactions, |ui| {
+                        egui::ComboBox::from_id_salt("replace_file_sort")
+                            .selected_text(match sort {
+                                FileSort::Path => "Path order",
+                                FileSort::MatchCount => "Match count",
+                            })
+                            .show_ui(ui, |ui| {
+                                sort_changed |= ui
+                                    .selectable_value(&mut sort, FileSort::Path, "Path order")
+                                    .changed();
+                                sort_changed |= ui
+                                    .selectable_value(
+                                        &mut sort,
+                                        FileSort::MatchCount,
+                                        "Match count",
+                                    )
+                                    .changed();
+                            });
+                    });
+                    if process_interactions && sort_changed {
+                        self.file_sort = sort;
+                    }
+                    let select = ui
+                        .add_enabled(
+                            process_interactions,
+                            egui::Button::new("Select visible matches"),
+                        )
+                        .clicked();
+                    let clear = ui
+                        .add_enabled(
+                            process_interactions,
+                            egui::Button::new("Clear visible matches"),
+                        )
+                        .clicked();
+                    if process_interactions && select {
+                        self.set_visible_files_selected(true);
+                    }
+                    if process_interactions && clear {
+                        self.set_visible_files_selected(false);
+                    }
+                });
+                if path_filter_changed || sort_changed {
+                    self.rebuild_visible_files();
+                }
+
+                let visible_count = self.visible_file_indices.len();
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "Files with matches: {visible_count} shown of {file_count}"
+                    ));
+                    ui.label(format!(
+                        "Matches found: {}",
+                        search.summary().matches_found()
+                    ));
+                });
+                let files = egui::ScrollArea::vertical()
+                    .id_salt("replace_file_results")
+                    .auto_shrink([false, false])
+                    .min_scrolled_height(self.panel_height(220.0))
+                    .max_height(self.panel_height(220.0))
+                    .show_rows(ui, FILE_ROW_HEIGHT, visible_count, |ui, rows| {
+                        #[cfg(test)]
                         {
-                            self.set_file_selected(file_index, !all_selected);
+                            self.geometry.file_rows_rendered = rows.len();
+                            self.geometry.first_file_row = rows.start;
                         }
-                        if some_selected {
-                            ui.weak("some");
-                        }
-                        let active = self.selected_file.as_deref() == Some(file.path());
-                        let label = format!(
-                            "{}  ·  {} match{}  ·  {}/{} approved",
-                            file.display_path(),
-                            total,
-                            if total == 1 { "" } else { "es" },
-                            selected,
-                            total
-                        );
-                        let label = bounded_single_line(&label, 220);
-                        if ui
-                            .add_enabled(
-                                process_interactions,
-                                egui::Button::selectable(active, label)
-                                    .wrap_mode(egui::TextWrapMode::Truncate),
-                            )
-                            .clicked()
-                        {
-                            self.selected_file = Some(file.path().to_path_buf());
-                            self.inspected_match = None;
+                        for visible_index in rows {
+                            let Some(file_index) =
+                                self.visible_file_indices.get(visible_index).copied()
+                            else {
+                                continue;
+                            };
+                            let Some(file) = search.matched_files().get(file_index) else {
+                                continue;
+                            };
+                            let total = file.matches().len();
+                            let selected = file
+                                .matches()
+                                .iter()
+                                .filter(|span| self.selected_matches.contains(span.id()))
+                                .count();
+                            let all_selected = total > 0 && selected == total;
+                            let some_selected = selected > 0 && selected < total;
+                            ui.horizontal(|ui| {
+                                let mut checked = all_selected;
+                                if ui
+                                    .add_enabled(
+                                        process_interactions,
+                                        egui::Checkbox::new(&mut checked, ""),
+                                    )
+                                    .clicked()
+                                {
+                                    self.set_file_selected(file_index, !all_selected);
+                                }
+                                if some_selected {
+                                    ui.weak("some");
+                                }
+                                let active = self.selected_file.as_deref() == Some(file.path());
+                                let label = format!(
+                                    "{}  ·  {} match{}  ·  {}/{} approved",
+                                    file.display_path(),
+                                    total,
+                                    if total == 1 { "" } else { "es" },
+                                    selected,
+                                    total
+                                );
+                                let label = bounded_single_line(&label, 220);
+                                if ui
+                                    .add_enabled(
+                                        process_interactions,
+                                        egui::Button::selectable(active, label)
+                                            .wrap_mode(egui::TextWrapMode::Truncate),
+                                    )
+                                    .clicked()
+                                {
+                                    self.selected_file = Some(file.path().to_path_buf());
+                                    self.inspected_match = None;
+                                }
+                            });
                         }
                     });
-                }
-            });
 
+                #[cfg(test)]
+                {
+                    self.geometry.files = files.inner_rect;
+                    self.geometry.file_scroll_id = Some(files.id);
+                }
+                #[cfg(not(test))]
+                let _ = files;
+            });
         #[cfg(test)]
         {
-            self.geometry.files = files.inner_rect;
+            self.geometry.files_open = file_section.body_response.is_some();
         }
         #[cfg(not(test))]
-        let _ = files;
+        let _ = file_section;
 
         let selected_file_index = self.selected_file.as_ref().and_then(|path| {
             search
@@ -1690,6 +1755,15 @@ impl SearchReplaceDialogState {
             return;
         };
         let file = &search.matched_files()[file_index];
+        let selected = file
+            .matches()
+            .iter()
+            .filter(|span| self.selected_matches.contains(span.id()))
+            .count();
+        let approvals_section = egui::CollapsingHeader::new(format!("File Approvals ({selected} of {} approved)", file.matches().len()))
+            .id_salt("replace_approvals_section")
+            .default_open(true)
+            .show(ui, |ui| {
         ui.separator();
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(file.display_path()).strong());
@@ -1707,6 +1781,8 @@ impl SearchReplaceDialogState {
             .min_scrolled_height(self.panel_height(190.0))
             .max_height(self.panel_height(190.0))
             .show_rows(ui, MATCH_ROW_HEIGHT, file.matches().len(), |ui, rows| {
+                #[cfg(test)] { self.geometry.match_rows_rendered = rows.len();
+                    self.geometry.first_match_row = rows.start; }
                 for match_index in rows {
                     let Some(span) = file.matches().get(match_index) else {
                         continue;
@@ -1764,9 +1840,17 @@ impl SearchReplaceDialogState {
         #[cfg(test)]
         {
             self.geometry.approvals = approvals.inner_rect;
+            self.geometry.match_scroll_id = Some(approvals.id);
         }
         #[cfg(not(test))]
         let _ = approvals;
+            });
+        #[cfg(test)]
+        {
+            self.geometry.approvals_open = approvals_section.body_response.is_some();
+        }
+        #[cfg(not(test))]
+        let _ = approvals_section;
         self.draw_diff(ui, file_index);
         if let Some(span) = file
             .matches()
@@ -2351,6 +2435,201 @@ mod tests {
         }
         for _ in 0..3 {
             layout_frame(state, ctx, size, &runtime, vec![], true);
+        }
+    }
+
+    #[test]
+    fn replace_result_folds_filter_sort_and_virtual_scroll_preserve_exact_approvals() {
+        let parent = PathBuf::from("target/refinement-evidence");
+        std::fs::create_dir_all(&parent).unwrap();
+        let fixture = tempfile::Builder::new()
+            .prefix("replace_results_")
+            .tempdir_in(parent)
+            .unwrap();
+        let root = fixture.path().join("explicit-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut originals = Vec::new();
+        for index in 0..80 {
+            let path = root.join(format!("file{index:03}.txt"));
+            let text = "needle\n".repeat(if index == 79 { 600 } else { 4 });
+            std::fs::write(&path, &text).unwrap();
+            originals.push((path, text));
+        }
+        let mut state = SearchReplaceDialogState::default();
+        state.open = true;
+        state.set_root(root);
+        state.include_extensions = "txt".into();
+        state.pattern = "needle".into();
+        state.replacement = "changed".into();
+        let coordinator = crate::search_replace::SearchCoordinator::new().unwrap();
+        let worker = ReplacementPreviewWorker::new().unwrap();
+        let request = state.build_search_request().unwrap();
+        state.record_search_ticket(coordinator.submit(request).unwrap());
+        wait_for_preview(&mut state, &coordinator, &worker, |state| {
+            state.candidate.is_some() && !state.preview_pending
+        });
+        let search = state.search_result.clone().unwrap();
+        assert_eq!(search.status(), SearchStatus::Complete);
+        assert!(search.summary().match_list_complete());
+        assert_eq!(search.matched_files().len(), 80);
+        let main_index = search
+            .matched_files()
+            .iter()
+            .position(|file| file.path().file_name().unwrap() == "file079.txt")
+            .unwrap();
+        let other_index = search
+            .matched_files()
+            .iter()
+            .position(|file| file.path().file_name().unwrap() == "file000.txt")
+            .unwrap();
+        let main = &search.matched_files()[main_index];
+        let other = &search.matched_files()[other_index];
+        assert_eq!(main.matches().len(), 600);
+        let main_ids: HashSet<_> = [0, 350, 599]
+            .into_iter()
+            .map(|index| main.matches()[index].id().clone())
+            .collect();
+        let mut expected = main_ids.clone();
+        expected.extend(other.matches().iter().take(2).map(|span| span.id().clone()));
+        state.selected_matches = expected.clone();
+        state.selected_file = Some(main.path().to_path_buf());
+        state.inspected_match = Some(main.matches()[350].id().clone());
+        let inspected = state.inspected_match.clone();
+        let before = (
+            state.search_revision,
+            state.preview_revision,
+            state.current_generation,
+        );
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let size = egui::vec2(600.0, 420.0);
+        let runtime = ReplaceWorkerSnapshot::default();
+        for _ in 0..4 {
+            layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+        }
+        assert!(state.geometry.files_open && state.geometry.approvals_open);
+        assert!((1..80).contains(&state.geometry.file_rows_rendered));
+        assert!((1..600).contains(&state.geometry.match_rows_rendered));
+        let file_id = state.geometry.file_scroll_id.unwrap();
+        let match_id = state.geometry.match_scroll_id.unwrap();
+        for (id, offset) in [
+            (file_id, FILE_ROW_HEIGHT * 70.0),
+            (match_id, MATCH_ROW_HEIGHT * 550.0),
+        ] {
+            let mut scroll = egui::scroll_area::State::load(&ctx, id).unwrap();
+            scroll.offset.y = offset;
+            scroll.store(&ctx, id);
+        }
+        for _ in 0..3 {
+            layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+        }
+        assert!(state.geometry.first_file_row > 50 && state.geometry.first_match_row > 400);
+        assert!((1..80).contains(&state.geometry.file_rows_rendered));
+        assert!((1..600).contains(&state.geometry.match_rows_rendered));
+
+        click_body_label(&mut state, &ctx, size, "Files with Matches");
+        assert!(!state.geometry.files_open && state.geometry.approvals_open);
+        assert_eq!(state.geometry.files, egui::Rect::NOTHING);
+        assert_eq!(state.geometry.file_rows_rendered, 0);
+        click_body_label(&mut state, &ctx, size, "Files with Matches");
+        click_body_label(&mut state, &ctx, size, "File Approvals");
+        assert!(state.geometry.files_open && !state.geometry.approvals_open);
+        assert_eq!(state.geometry.approvals, egui::Rect::NOTHING);
+        assert_eq!(state.geometry.match_rows_rendered, 0);
+        click_body_label(&mut state, &ctx, size, "File Approvals");
+        assert_eq!(state.geometry.file_scroll_id, Some(file_id));
+        assert_eq!(state.geometry.match_scroll_id, Some(match_id));
+        assert_eq!(state.selected_matches, expected);
+        assert_eq!(state.selected_file.as_deref(), Some(main.path()));
+        assert_eq!(state.inspected_match, inspected);
+
+        click_body_label(&mut state, &ctx, size, "Path order");
+        let (_, text) = layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+        let pos = text
+            .iter()
+            .find(|(text, _)| text == "Match count")
+            .expect("actual sort popup")
+            .1
+            .center();
+        for pressed in [true, false] {
+            assert!(
+                layout_frame(
+                    &mut state,
+                    &ctx,
+                    size,
+                    &runtime,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE
+                        }
+                    ],
+                    true
+                )
+                .0
+                .is_empty()
+            );
+        }
+        assert_eq!(state.file_sort, FileSort::MatchCount);
+        assert_eq!(state.visible_file_indices[0], main_index);
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("replace_file_filter")));
+        assert!(
+            layout_frame(
+                &mut state,
+                &ctx,
+                size,
+                &runtime,
+                vec![egui::Event::Text("file000".into())],
+                true
+            )
+            .0
+            .is_empty()
+        );
+        assert_eq!(state.visible_file_indices, vec![other_index]);
+        assert_eq!(
+            state.selected_file.as_deref(),
+            Some(main.path()),
+            "filtering does not rebind current file"
+        );
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("replace_file_filter")));
+        layout_frame(
+            &mut state,
+            &ctx,
+            size,
+            &runtime,
+            vec![egui::Event::Text("ignored".into())],
+            false,
+        );
+        assert_eq!(state.file_filter, "file000");
+        assert_eq!(state.selected_matches, expected);
+        assert!(Arc::ptr_eq(state.search_result.as_ref().unwrap(), &search));
+        assert_eq!(
+            (
+                state.search_revision,
+                state.preview_revision,
+                state.current_generation
+            ),
+            before
+        );
+
+        click_body_label(&mut state, &ctx, size, "Clear visible matches");
+        assert_eq!(
+            state.selected_matches, main_ids,
+            "only filtered file IDs clear"
+        );
+        click_body_label(&mut state, &ctx, size, "Select visible matches");
+        expected = main_ids;
+        expected.extend(other.matches().iter().map(|span| span.id().clone()));
+        assert_eq!(
+            state.selected_matches, expected,
+            "only filtered file IDs approve"
+        );
+        assert!(state.search_ticket.is_none());
+        for (path, original) in originals {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), original);
         }
     }
 
