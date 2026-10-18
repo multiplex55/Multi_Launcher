@@ -414,10 +414,8 @@ impl LauncherApp {
         {
             return Err(crate::paste_sequence::SequencePlaybackError::InvalidState);
         }
-        let result = self
-            .sequence_playback
-            .physical_paste(admission, bridge, platform);
-        result
+        self.sequence_playback
+            .physical_paste(admission, bridge, platform)
     }
 
     pub(crate) fn sync_physical_paste_admission(

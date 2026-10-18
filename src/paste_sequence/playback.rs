@@ -589,12 +589,11 @@ impl SequencePlaybackController {
                 .session
                 .as_ref()
                 .ok_or(SequencePlaybackError::InvalidState)?;
-            let text = session
+            session
                 .run
                 .step_text(session.next_step)
                 .ok_or(SequencePlaybackError::InvalidState)?
-                .to_owned();
-            text
+                .to_owned()
         };
 
         check_lease()?;
