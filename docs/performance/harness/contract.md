@@ -1,0 +1,38 @@
+# Bounded workload and evidence contract
+
+All fixtures are synthetic. No launcher startup, settings load, clipboard,
+hotkey, desktop inventory or external action is part of a CPU probe.
+
+| Scenario | Owner / intended measurement | Initial disposition |
+|---|---|---|
+| hotfolder_disabled | `gui::hotfolder_runtime::driver_main` idle worker | access/lifetime inspection required; otherwise unsupported |
+| hotfolder_enabled_zero_rules | same real driver, empty isolated store | access/lifetime inspection required; otherwise unsupported |
+| radial_8 | `radial::geometry::layout_menu` + `radial::render::build_scene` | supported CPU candidate |
+| radial_32 | same, 32 cells | supported CPU candidate |
+| radial_128 | same, 128 cells | supported CPU candidate |
+| dashboard_minimal | real dashboard/widget egui construction | side-effect boundary inspection required; otherwise unsupported |
+| dashboard_typical | same, synthetic bounded widgets | same |
+| dashboard_dense | same, synthetic bounded widgets | same |
+
+Radial uses the starter document's fixed default skin, one ring with stable
+synthetic cell IDs/labels, scale 1, anchor (0,0), work area +/-10000 and angle
+0.25, matching the existing radial benchmark's layout inputs. Validate cell
+identities/count and nonempty scene output. Geometry/scene timing excludes
+fixture allocation and records no font rasterization or native presentation.
+
+Default 3 warmups, 20 recorded samples; hard maximum 20 samples, 3 warmups,
+90 seconds. One smoke batch per scenario. Timing is monotonic wall duration
+of real CPU computation, not process CPU percentage or native responsiveness.
+Native metrics remain null until checked Job Object containment is proven.
+
+One shared feature-only recorder owns unique ignored evidence directories,
+schema/versioned events and atomic summary publication. Strict CLI parsing
+precedes fixture mutation. Fixed statuses: success, error, timeout, unsupported,
+blocked_environment, blocked_desktop, truncated. Missing metrics use null and
+reasons. Raw logs <=32 MiB/run and aggregate <=100 MiB; no raw logs in Git.
+Panic/error completion is best effort; a runner watchdog owns forced-terminal
+reporting when a child cannot flush. No shell evaluation by the native runner.
+
+Only opt-in `perf-harness` targets may be added; production startup, existing
+smoke gates, profiles and algorithms remain unchanged. H0–H4 checkpoint order
+and exact limits are defined by the approved master plan.

@@ -19,6 +19,14 @@ No native execution or performance metrics yet. Track D reports moved into
 
 Checkpoint commit/push results are recorded by subsequent ledger entries.
 
+## H0-B — complete
+
+Contract: `contract.md`. Inspected manifest, existing owned runner, Track B
+argument-array measurement and archived Track D denial/owner map. Radial's
+existing public production paths provide the CPU success candidate; private
+worker/widget owners require bounded access inspection before implementation.
+H0-A commit `b90182c3` pushed successfully. No measurements claimed.
+
 ## Pending
 
-H0-B; H1-A/B/C; H2-A/B/C; H3-A/B; H4-A/B/C.
+H1-A/B/C; H2-A/B/C; H3-A/B; H4-A/B/C.
