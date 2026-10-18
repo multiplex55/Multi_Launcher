@@ -25,7 +25,7 @@ per candidate in each of D1–D3. No baseline full tests or early Clippy.
 | D2-B | partial_environment | Query measured; native startup/hotkey blocked |
 | D2-C | blocked_environment | Dashboard/radial native timing unavailable; no substitute claim |
 | D2-D | complete | Rank internal observations, insufficient evidence for root-cause candidate |
-| D2-I | pending | Close responsiveness track |
+| D2-I | complete_partial_environment | CPU baseline retained; native categories explicitly unmeasured |
 | D2-E–H | skipped_insufficient_evidence | Zero candidates/variants; no native guardrail or release attribution |
 | D3-A–G | pending | Idle |
 | D4-A/B | pending | Optional observation |
@@ -59,3 +59,5 @@ D2-A: dedicated sample-bound/default unit test PASS (0.016 s case, 0.026 s test 
 D2-B: query CPU-frame exact ignored test PASS; command wall 89.11 s includes fixture setup outside timed owners. 5 warmups +15 measurements for each 100/1000/10000 synthetic catalogs. p50/p95 ms: 1.0947/4.2427, 1.6240/2.9170, 6.2323/6.7161. Stable outputs/receipts validated by existing oracle. Instrumented fast-dev CPU-only, overhead unmeasured; no end-to-end or release claim. Source 78f5b16c (D2-A committed); no query text or user content in source-controlled evidence. D2 candidates remain 0.
 
 D2-C/D: d2_results.md records all five core categories with null/unmeasured native metrics. Updated fixture manifest v2 pins actual reused 100/1000/10000 CPU catalogs; original native fixtures remain planned only. Manifest SHA256 1cc076d159fd8a1580d12cfbd3db391c2205db398ab2b146ac307357b1cf47ca. D2-B commit f2f59779 local; push held under prior rejection. No Criterion run without causal trace; no synthetic result mislabeled native.
+
+D2-I closure 18:39 UTC (~6 active minutes of 140; overall ~31 min, ~509 min remaining). D2-D commit d1379783 local. Native capability summary added with true null metrics and verified harmless-probe cleanup. Zero UI optimization candidates, zero variants, zero screenshots. Only implementation is test-only sample control, validated by its focused unit and exact existing query test. No new default binary or production behavior. D3 starts next; no native retries will be repeated while the established containment boundary is unchanged.
