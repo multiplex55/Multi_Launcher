@@ -213,6 +213,10 @@ impl Default for PasteSequenceDialog {
 }
 
 impl PasteSequenceDialog {
+    pub(crate) fn sequence_store_path(&self) -> &std::path::Path {
+        self.store_path.as_path()
+    }
+
     pub(crate) fn open_with_context(
         &mut self,
         context: Result<SequenceInvocationContext, crate::paste_sequence::SequencePreflightError>,

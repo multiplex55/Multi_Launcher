@@ -225,10 +225,11 @@ impl DialogCommandHost for LauncherApp {
         id: crate::paste_sequence::SequenceId,
         source: crate::commands::ActivationSource,
     ) -> Result<(), String> {
-        let snapshot =
-            crate::paste_sequence::SequenceStore::new(crate::paste_sequence::PASTE_SEQUENCES_FILE)
-                .load()
-                .map_err(|error| format!("Saved sequence could not be loaded: {error}"))?;
+        let snapshot = crate::paste_sequence::SequenceStore::new(
+            self.paste_sequence_dialog.sequence_store_path(),
+        )
+        .load()
+        .map_err(|error| format!("Saved sequence could not be loaded: {error}"))?;
         let sequence = snapshot
             .sequence(id)
             .cloned()
@@ -2420,6 +2421,248 @@ pub(in crate::gui) mod tests {
             crate::paste_sequence::SequencePlaybackStatus::Completed
         );
         bridge.observer_live(false);
+    }
+
+    #[test]
+    fn saved_paste_to_advance_run_repeats_three_times_through_app_and_physical_admission() {
+        use crate::hotkey::launcher_invocation::{InputProvenance, KeyEvent, KeyTransition};
+        use crate::paste_sequence::admission::{
+            PasteAdmissionBridge, PhysicalPasteAdmission, PhysicalPasteNotice,
+            PhysicalPasteReducer, physical_paste_bridge,
+        };
+        use crate::paste_sequence::{
+            PlaybackMode, SequenceDraft, SequenceId, SequenceRoutePresentation,
+            SequenceShortcutPresentation, SequenceStore, SequenceTarget, Step,
+        };
+        use std::time::Duration;
+
+        struct ObserverReset(std::sync::Arc<PasteAdmissionBridge>);
+        impl Drop for ObserverReset {
+            fn drop(&mut self) {
+                self.0.observer_live(false);
+            }
+        }
+
+        fn physical_paste(
+            app: &mut LauncherApp,
+            reducer: &mut PhysicalPasteReducer,
+            bridge: &std::sync::Arc<PasteAdmissionBridge>,
+            platform: &mut AppPastePlatform,
+            generation: u64,
+        ) -> PhysicalPasteAdmission {
+            let focus = crate::paste_sequence::admission::PasteFocus {
+                hwnd: platform.target.hwnd(),
+                process_id: platform.target.process_id(),
+                thread_id: platform.target.thread_id(),
+            };
+            for (vk, transition, consumed) in [
+                (0xA2, KeyTransition::Down, false),
+                (0x56, KeyTransition::Down, true),
+            ] {
+                assert_eq!(
+                    reducer.process(
+                        KeyEvent {
+                            vk,
+                            transition,
+                            provenance: InputProvenance::Physical,
+                            at: 0,
+                        },
+                        Some(focus),
+                        std::process::id(),
+                        true,
+                        bridge,
+                    ),
+                    consumed
+                );
+            }
+            let PhysicalPasteNotice::Paste(admission) = bridge
+                .take_notice()
+                .expect("eligible physical Ctrl+V creates one admission")
+            else {
+                panic!("expected physical paste admission");
+            };
+            assert_eq!(admission.owner, app.event_sink.owner_id());
+            assert_eq!(admission.generation, generation);
+            assert!(bridge.valid(&admission));
+            for (vk, transition, consumed) in [
+                (0x56, KeyTransition::Up, true),
+                (0xA2, KeyTransition::Up, false),
+            ] {
+                assert_eq!(
+                    reducer.process(
+                        KeyEvent {
+                            vk,
+                            transition,
+                            provenance: InputProvenance::Physical,
+                            at: 0,
+                        },
+                        Some(focus),
+                        std::process::id(),
+                        true,
+                        bridge,
+                    ),
+                    consumed
+                );
+            }
+            app.execute_physical_paste_using(
+                admission.clone(),
+                std::sync::Arc::clone(bridge),
+                platform,
+            )
+            .unwrap();
+            admission
+        }
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let store = SequenceStore::new(
+            directory
+                .path()
+                .join(crate::paste_sequence::PASTE_SEQUENCES_FILE),
+        );
+        let mut saved = store.load().unwrap();
+        let mut draft = SequenceDraft::new(
+            "Repeatable saved run",
+            vec![
+                Step::LiteralText {
+                    text: "first run step".into(),
+                },
+                Step::LiteralText {
+                    text: "final run step".into(),
+                },
+            ],
+        );
+        draft.mode = PlaybackMode::PasteToAdvance;
+        let id = saved.upsert(draft).unwrap();
+        store.commit(&mut saved).unwrap();
+
+        let bridge = physical_paste_bridge();
+        bridge.observer_live(false);
+        bridge.allow_test_routes();
+        let (wake, _wake_rx) = std::sync::mpsc::channel();
+        bridge.install_wake(wake);
+        bridge.observer_live(true);
+        let _observer_reset = ObserverReset(std::sync::Arc::clone(bridge));
+
+        for keep_visible in [false, true] {
+            let mut app = inert_test_app(directory.path());
+            app.enabled_plugins = None;
+            app.paste_sequence_dialog
+                .use_test_data_sources(store.path().to_path_buf());
+            app.sequence_routes = Some(SequenceRoutePresentation {
+                generation: 1,
+                physical_paste: Default::default(),
+                next: SequenceShortcutPresentation::Disabled,
+                cancel: SequenceShortcutPresentation::Disabled,
+                starts: Vec::new(),
+                escape_cancel_enabled: true,
+                keep_dialog_visible_during_playback: keep_visible,
+            });
+            app.settings_editor
+                .baseline_settings
+                .paste_sequence
+                .keep_dialog_visible_during_playback = !keep_visible;
+            app.visible_flag.store(true, Ordering::SeqCst);
+            let owner = app.event_sink.owner_id();
+            let target = SequenceTarget::from_external_window(
+                crate::active_window::ExternalForegroundWindow {
+                    hwnd: 91,
+                    process_id: 92,
+                    thread_id: 93,
+                    title: None,
+                },
+                std::process::id(),
+            )
+            .unwrap();
+            let mut platform = AppPastePlatform::new(target);
+            let mut reducer = PhysicalPasteReducer::new([false; 9]);
+            let mut previous_generation = None;
+            let invocation = CommandInvocation {
+                command: Command::PasteSequence(crate::commands::PasteSequenceCommand::Run(id)),
+                original_action: crate::actions::Action {
+                    label: format!("Run saved sequence {}", id.get()),
+                    desc: "Paste sequence".into(),
+                    action: format!("paste:run:{}", id.get()),
+                    args: None,
+                },
+                query_override: None,
+                source: crate::commands::ActivationSource::Hotkey,
+            };
+
+            for run_index in 0..3 {
+                app.dispatch_command_invocation(invocation.clone());
+
+                let generation = app
+                    .sequence_playback
+                    .started_run()
+                    .expect("saved Run starts a physical session")
+                    .generation;
+                assert_eq!(
+                    app.sequence_playback.status(),
+                    crate::paste_sequence::SequencePlaybackStatus::AwaitPaste,
+                    "run {} starts ready for its first physical paste",
+                    run_index + 1
+                );
+                assert_eq!(
+                    app.sequence_playback.current_step_number(),
+                    Some((1, 2)),
+                    "every saved Run restarts at Step 1"
+                );
+                assert!(previous_generation.is_none_or(|previous| generation > previous));
+                previous_generation = Some(generation);
+                assert!(bridge.session_execution_valid(owner, generation));
+                assert_eq!(app.paste_sequence_dialog.open, keep_visible);
+                assert_eq!(app.panel_states.paste_sequence_dialog, keep_visible);
+                assert_eq!(app.visible_flag.load(Ordering::SeqCst), keep_visible);
+                assert_eq!(platform.publications, run_index * 2);
+
+                let mut terminal_admission = None;
+                for step in 0..2 {
+                    let admission =
+                        physical_paste(&mut app, &mut reducer, bridge, &mut platform, generation);
+                    assert_eq!(platform.publications, run_index * 2 + step + 1);
+                    assert_eq!(platform.pastes, run_index * 2 + step + 1);
+                    assert_eq!(
+                        platform.text,
+                        if step == 0 {
+                            "first run step"
+                        } else {
+                            "final run step"
+                        }
+                    );
+                    terminal_admission = Some(admission);
+
+                    platform.now += Duration::from_millis(180);
+                    let now = platform.now;
+                    app.sequence_playback.tick(&mut platform, now);
+                    app.sync_physical_paste_admission().unwrap();
+                    if step == 0 {
+                        assert_eq!(
+                            app.sequence_playback.status(),
+                            crate::paste_sequence::SequencePlaybackStatus::AwaitPaste
+                        );
+                        assert_eq!(app.sequence_playback.current_step_number(), Some((2, 2)));
+                    }
+                }
+
+                assert_eq!(
+                    app.sequence_playback.status(),
+                    crate::paste_sequence::SequencePlaybackStatus::Completed
+                );
+                assert!(app.sequence_playback.started_run().is_none());
+                assert!(app.sequence_playback.current_step_number().is_none());
+                assert!(!app.sequence_playback.has_input_lease());
+                assert!(!app.sequence_playback.needs_tick());
+                assert_eq!(platform.text, "final run step");
+                let terminal_admission = terminal_admission.unwrap();
+                assert!(!bridge.valid(&terminal_admission));
+                assert!(!bridge.session_execution_valid(owner, generation));
+                assert!(bridge.take_notice().is_none());
+            }
+
+            assert_eq!(platform.publications, 6);
+            assert_eq!(platform.pastes, 6);
+        }
     }
 
     #[test]
