@@ -18,6 +18,16 @@ fn playback_mode_label(mode: PlaybackMode) -> &'static str {
     }
 }
 
+fn saved_run_status_text(saved_run: Option<&SavedRunPresentation>, status: String) -> String {
+    saved_run.map_or(status.clone(), |run| {
+        format!(
+            "Saved sequence ‘{}’ (ID {}) · {status}",
+            run.name,
+            run.id.get()
+        )
+    })
+}
+
 fn run_status_text(
     status: crate::paste_sequence::SequencePlaybackStatus,
     progress: Option<(usize, usize)>,
@@ -139,6 +149,11 @@ enum RouteActivationFailure {
     Uncertain(String),
 }
 
+struct SavedRunPresentation {
+    id: SequenceId,
+    name: String,
+}
+
 pub(crate) struct PasteSequenceDialog {
     suspended_for_playback: bool,
     pub(crate) open: bool,
@@ -163,6 +178,7 @@ pub(crate) struct PasteSequenceDialog {
     history_error: Option<String>,
     autostart_when_ready: bool,
     hotkey_update: Option<std::sync::mpsc::Receiver<HotkeyUpdateCompletion>>,
+    saved_run: Option<SavedRunPresentation>,
 }
 
 impl Default for PasteSequenceDialog {
@@ -191,6 +207,7 @@ impl Default for PasteSequenceDialog {
             history_error: None,
             autostart_when_ready: false,
             hotkey_update: None,
+            saved_run: None,
         }
     }
 }
@@ -220,6 +237,25 @@ impl PasteSequenceDialog {
         self.open = true;
     }
 
+    pub(crate) fn present_saved_run(
+        &mut self,
+        sequence: &crate::paste_sequence::Sequence,
+        context: SequenceInvocationContext,
+    ) {
+        if !self.open && !self.suspended_for_playback {
+            self.begin_session();
+            self.select_saved_sequence(sequence);
+        }
+        self.suspended_for_playback = false;
+        self.context = Some(context);
+        self.saved_run = Some(SavedRunPresentation {
+            id: sequence.id,
+            name: sequence.name.clone(),
+        });
+        self.status = Some("Saved sequence is preparing to run.".into());
+        self.open = true;
+    }
+
     fn begin_session(&mut self) {
         let store_error = match SequenceStore::new(&self.store_path).load() {
             Ok(snapshot) => {
@@ -242,6 +278,7 @@ impl PasteSequenceDialog {
         self.status = None;
         self.autostart_when_ready = false;
         self.hotkey_update = None;
+        self.saved_run = None;
         self.open = true;
     }
 
@@ -303,6 +340,7 @@ impl PasteSequenceDialog {
         self.history_error = None;
         self.autostart_when_ready = false;
         self.hotkey_update = None;
+        self.saved_run = None;
     }
 
     pub(crate) fn close_from_window(&mut self, app: &mut super::LauncherApp) {
@@ -320,7 +358,11 @@ impl PasteSequenceDialog {
 
     pub(crate) fn note_playback_started(&mut self) {
         if self.open {
-            self.status = Some("Sequence started.".into());
+            self.status = Some(if self.saved_run.is_some() {
+                "Saved sequence started.".into()
+            } else {
+                "Sequence started.".into()
+            });
         }
     }
 
@@ -445,20 +487,24 @@ impl PasteSequenceDialog {
                         )
                         .clicked()
                     {
-                        self.draft = SequenceDraft::from_sequence(&sequence);
-                        self.selected_id = Some(sequence.id);
-                        self.selected_step = None;
-                        self.reveal_step = None;
-                        self.remove_confirmation = None;
-                        self.hotkey_text = sequence
-                            .hotkey
-                            .as_ref()
-                            .map(|chord| chord.as_str().to_owned())
-                            .unwrap_or_default();
+                        self.select_saved_sequence(&sequence);
                         self.inline_error = None;
                     }
                 }
             });
+    }
+
+    fn select_saved_sequence(&mut self, sequence: &crate::paste_sequence::Sequence) {
+        self.draft = SequenceDraft::from_sequence(sequence);
+        self.selected_id = Some(sequence.id);
+        self.selected_step = None;
+        self.reveal_step = None;
+        self.remove_confirmation = None;
+        self.hotkey_text = sequence
+            .hotkey
+            .as_ref()
+            .map(|chord| chord.as_str().to_owned())
+            .unwrap_or_default();
     }
 
     fn saved_sequence_remove_confirmation(
@@ -874,10 +920,11 @@ impl PasteSequenceDialog {
     }
 
     fn show_run_status(&self, ui: &mut egui::Ui, app: &super::LauncherApp) {
-        let message = run_status_text(
+        let status = run_status_text(
             app.sequence_playback.status(),
             app.sequence_playback.current_step_number(),
         );
+        let message = saved_run_status_text(self.saved_run.as_ref(), status);
         ui.add(egui::Label::new(&message).truncate())
             .on_hover_text(&message);
     }
@@ -950,6 +997,7 @@ impl PasteSequenceDialog {
         );
         match result {
             Ok(()) => {
+                self.saved_run = None;
                 let prompt_open = app.snippet_prompt_dialog.is_open();
                 self.status = Some(if run_once {
                     "Run Once is memory-only; nothing was written to the saved sequence file."
@@ -993,6 +1041,12 @@ impl PasteSequenceDialog {
             HotkeyChord::new(self.hotkey_text.clone()).ok()
         };
         draft
+    }
+
+    #[cfg(test)]
+    pub(crate) fn use_test_data_sources(&mut self, store_path: PathBuf) {
+        self.store_path = store_path;
+        self.sources_are_test_owned = true;
     }
 
     fn save_draft(&mut self, ctx: &egui::Context, app: &mut super::LauncherApp) {
@@ -1440,6 +1494,80 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn saved_run_presentation_selects_fresh_content_and_preserves_open_or_suspended_drafts() {
+        use crate::paste_sequence::{PlaybackMode, Sequence, SequenceId, Step};
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut dialog = PasteSequenceDialog::default();
+        dialog.use_test_data_sources(directory.path().join(PASTE_SEQUENCES_FILE));
+        let first = Sequence {
+            id: SequenceId::from_raw(11).unwrap(),
+            name: "Grid sequence".into(),
+            hotkey: None,
+            mode: PlaybackMode::PasteToAdvance,
+            delay_ms: 0,
+            steps: vec![Step::LiteralText {
+                text: "saved step".into(),
+            }],
+        };
+
+        dialog.present_saved_run(&first, owned_editor_context());
+
+        assert!(dialog.open);
+        assert!(!dialog.suspended_for_playback);
+        assert_eq!(dialog.selected_id, Some(first.id));
+        assert_eq!(dialog.draft.id, Some(first.id));
+        assert_eq!(dialog.draft.name, first.name);
+        assert_eq!(dialog.draft.steps, first.steps);
+        assert_eq!(dialog.saved_run.as_ref().map(|run| run.id), Some(first.id));
+
+        let unsaved = SequenceDraft::new(
+            "Unsaved draft",
+            vec![
+                Step::LiteralText {
+                    text: "draft one".into(),
+                },
+                Step::LiteralText {
+                    text: "draft two".into(),
+                },
+            ],
+        );
+        dialog.draft = unsaved.clone();
+        dialog.selected_id = None;
+        dialog.selected_step = Some(1);
+        let second = Sequence {
+            id: SequenceId::from_raw(12).unwrap(),
+            name: "Other grid sequence".into(),
+            hotkey: None,
+            mode: PlaybackMode::Automatic,
+            delay_ms: 0,
+            steps: vec![Step::LiteralText {
+                text: "other saved step".into(),
+            }],
+        };
+
+        dialog.present_saved_run(&second, owned_editor_context());
+
+        assert_eq!(dialog.draft, unsaved);
+        assert_eq!(dialog.selected_id, None);
+        assert_eq!(dialog.selected_step, Some(1));
+        assert_eq!(dialog.saved_run.as_ref().map(|run| run.id), Some(second.id));
+        assert_eq!(
+            saved_run_status_text(dialog.saved_run.as_ref(), "Waiting for Ctrl+V".into()),
+            "Saved sequence ‘Other grid sequence’ (ID 12) · Waiting for Ctrl+V"
+        );
+
+        dialog.suspend_for_playback();
+        assert!(!dialog.open);
+        assert!(dialog.suspended_for_playback);
+        dialog.present_saved_run(&first, owned_editor_context());
+        assert!(dialog.open);
+        assert!(!dialog.suspended_for_playback);
+        assert_eq!(dialog.draft, unsaved);
+        assert_eq!(dialog.saved_run.as_ref().map(|run| run.id), Some(first.id));
     }
 
     #[test]

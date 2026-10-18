@@ -255,17 +255,28 @@ impl DialogCommandHost for LauncherApp {
         } else {
             Vec::new()
         };
-        self.paste_sequence_dialog.set_autostart_when_ready(true);
-        if let Err(error) =
-            self.begin_paste_sequence_preflight(sequence, &snippets, &history, source)
-        {
+        let presentation_sequence = sequence.clone();
+        if let Err(error) = self.begin_paste_sequence_preflight_using_context_after_capture(
+            sequence,
+            &snippets,
+            &history,
+            source,
+            |app, source| app.capture_sequence_context(source),
+            move |app, context| {
+                if app.should_keep_paste_sequence_dialog_visible_during_playback() {
+                    app.present_saved_paste_sequence_run(&presentation_sequence, context.clone());
+                }
+            },
+        ) {
             self.paste_sequence_dialog.set_autostart_when_ready(false);
             return Err(format!("Paste sequence could not be prepared: {error:?}"));
         }
+        self.paste_sequence_dialog.set_autostart_when_ready(true);
         if !self.snippet_prompt_dialog.is_open() {
             self.paste_sequence_dialog.set_autostart_when_ready(false);
             self.start_sequence_playback()
                 .map_err(|error| error.message().to_owned())?;
+            self.paste_sequence_dialog.note_playback_started();
         }
         Ok(())
     }
@@ -1328,6 +1339,25 @@ fn command_accepts_query_override(command: &Command) -> bool {
 }
 
 impl LauncherApp {
+    fn present_saved_paste_sequence_run(
+        &mut self,
+        sequence: &crate::paste_sequence::Sequence,
+        context: crate::paste_sequence::SequenceInvocationContext,
+    ) {
+        self.paste_sequence_dialog
+            .present_saved_run(sequence, context);
+        self.panel_states.paste_sequence_dialog = true;
+        if !self
+            .panel_stack
+            .contains(&super::Panel::PasteSequenceDialog)
+        {
+            self.panel_stack.push(super::Panel::PasteSequenceDialog);
+        }
+        if !self.visible_flag.load(Ordering::SeqCst) {
+            self.request_launcher_visibility(true);
+        }
+    }
+
     pub(crate) fn cancel_active_paste_sequence(&mut self) -> bool {
         use crate::paste_sequence::SequencePlaybackStatus as Status;
 
@@ -1415,6 +1445,31 @@ impl LauncherApp {
             crate::paste_sequence::SequencePreflightError,
         >,
     ) -> Result<(), crate::paste_sequence::SequencePreflightError> {
+        self.begin_paste_sequence_preflight_using_context_after_capture(
+            sequence,
+            snippets,
+            history,
+            source,
+            capture_context,
+            |_, _| {},
+        )
+    }
+
+    fn begin_paste_sequence_preflight_using_context_after_capture(
+        &mut self,
+        sequence: crate::paste_sequence::Sequence,
+        snippets: &[crate::plugins::snippets::SnippetEntry],
+        history: &[String],
+        source: crate::commands::ActivationSource,
+        capture_context: impl FnOnce(
+            &mut Self,
+            crate::commands::ActivationSource,
+        ) -> Result<
+            crate::paste_sequence::SequenceInvocationContext,
+            crate::paste_sequence::SequencePreflightError,
+        >,
+        after_capture: impl FnOnce(&mut Self, &crate::paste_sequence::SequenceInvocationContext),
+    ) -> Result<(), crate::paste_sequence::SequencePreflightError> {
         if self.snippet_prompt_dialog.is_open() {
             return Err(crate::paste_sequence::SequencePreflightError::SequenceAlreadyActive);
         }
@@ -1428,6 +1483,7 @@ impl LauncherApp {
                 return Err(error);
             }
         };
+        after_capture(self, &context);
         let preflight = match crate::paste_sequence::SequencePreflight::begin(
             sequence, snippets, history, context,
         ) {
@@ -2814,7 +2870,7 @@ pub(in crate::gui) mod tests {
     }
 
     #[test]
-    fn prompted_start_uses_applied_visibility_only_for_an_open_sequence_editor() {
+    fn saved_run_prompt_continuation_opens_closed_grid_route_and_keeps_root_visible() {
         use crate::paste_sequence::{
             PlaybackMode, Sequence, SequenceId, SequenceInvocationContext,
             SequenceRoutePresentation, SequenceShortcutPresentation, SequenceTarget, Step,
@@ -2839,10 +2895,26 @@ pub(in crate::gui) mod tests {
         bridge.allow_test_routes();
         bridge.observer_live(true);
 
+        let baseline_directory = tempfile::tempdir().unwrap();
+        let mut baseline_app = inert_test_app(baseline_directory.path());
+        baseline_app
+            .settings_editor
+            .baseline_settings
+            .paste_sequence
+            .keep_dialog_visible_during_playback = true;
+        assert!(baseline_app.should_keep_paste_sequence_dialog_visible_during_playback());
+        assert!(!baseline_app.paste_sequence_dialog.open);
+        assert!(!baseline_app.panel_states.paste_sequence_dialog);
+
         for editor_open in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let mut app = inert_test_app(directory.path());
             app.enabled_plugins = None;
+            app.paste_sequence_dialog.use_test_data_sources(
+                directory
+                    .path()
+                    .join(crate::paste_sequence::PASTE_SEQUENCES_FILE),
+            );
             app.visible_flag.store(editor_open, Ordering::SeqCst);
             app.settings_editor
                 .paste_sequence
@@ -2890,8 +2962,27 @@ pub(in crate::gui) mod tests {
                 None,
                 Some(target),
             );
-            app.begin_paste_sequence_preflight_with_context(sequence, &snippets, &[], context)
-                .unwrap();
+            assert!(app.should_keep_paste_sequence_dialog_visible_during_playback());
+            let presentation_sequence = sequence.clone();
+            app.begin_paste_sequence_preflight_using_context_after_capture(
+                sequence,
+                &snippets,
+                &[],
+                crate::commands::ActivationSource::Click,
+                |_, _| Ok(context.clone()),
+                move |app, context| {
+                    app.present_saved_paste_sequence_run(&presentation_sequence, context.clone());
+                },
+            )
+            .unwrap();
+            app.paste_sequence_dialog.set_autostart_when_ready(true);
+            assert!(app.visible_flag.load(Ordering::SeqCst));
+            assert!(app.paste_sequence_dialog.open);
+            assert!(app.panel_states.paste_sequence_dialog);
+            assert!(
+                app.panel_stack
+                    .contains(&super::super::Panel::PasteSequenceDialog)
+            );
             assert!(app.snippet_prompt_dialog.is_sequence_preflight());
             app.snippet_prompt_dialog.set_value("name", "Ada".into());
             app.submit_sequence_prompt_using(|| Ok(snippets.clone()), || Ok(Vec::new()))
@@ -2901,14 +2992,28 @@ pub(in crate::gui) mod tests {
                 app.sequence_playback.status(),
                 crate::paste_sequence::SequencePlaybackStatus::AwaitPaste
             );
-            assert_eq!(app.visible_flag.load(Ordering::SeqCst), editor_open);
-            assert_eq!(app.panel_states.paste_sequence_dialog, editor_open);
-            assert_eq!(app.paste_sequence_dialog.open, editor_open);
-            assert_eq!(
+            assert!(app.visible_flag.load(Ordering::SeqCst));
+            assert!(app.panel_states.paste_sequence_dialog);
+            assert!(app.paste_sequence_dialog.open);
+            assert!(
                 app.panel_stack
-                    .contains(&super::super::Panel::PasteSequenceDialog),
-                editor_open
+                    .contains(&super::super::Panel::PasteSequenceDialog)
             );
+            let invocation = crate::commands::CommandInvocation {
+                command: crate::commands::Command::PasteSequence(
+                    crate::commands::PasteSequenceCommand::Run(SequenceId::from_raw(1).unwrap()),
+                ),
+                original_action: crate::actions::Action {
+                    label: "Prompted visibility".into(),
+                    desc: "Paste sequence".into(),
+                    action: "paste:run:1".into(),
+                    args: None,
+                },
+                query_override: None,
+                source: crate::commands::ActivationSource::Click,
+            };
+            app.apply_command_outcome(crate::commands::CommandOutcome::default(), &invocation);
+            assert!(app.visible_flag.load(Ordering::SeqCst));
             app.cancel_sequence_playback();
         }
     }
