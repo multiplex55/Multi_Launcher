@@ -1018,15 +1018,12 @@ mod tests {
         let mut controller =
             ready_controller(prepared_run(PlaybackMode::PasteToAdvance, 0, texts));
         let mut platform = FakePlatform::at(Instant::now());
-        controller.start(&mut platform).unwrap();
         let bridge = std::sync::Arc::new(PasteAdmissionBridge::default());
         let (wake, rx) = std::sync::mpsc::channel();
         bridge.install_wake(wake);
         bridge.allow_test_routes();
         bridge.observer_live(true);
-        bridge
-            .arm(4, controller.physical_paste_generation().unwrap())
-            .unwrap();
+        start_ready_physical_run(&mut controller, &mut platform, &bridge);
         let mut reducer = PhysicalPasteReducer::new([false; 9]);
         physical_event(
             &mut reducer,
@@ -1036,6 +1033,49 @@ mod tests {
             crate::hotkey::launcher_invocation::KeyTransition::Down,
         );
         (controller, platform, bridge, reducer, rx)
+    }
+
+    fn start_ready_physical_run(
+        controller: &mut SequencePlaybackController,
+        platform: &mut FakePlatform,
+        bridge: &std::sync::Arc<crate::paste_sequence::admission::PasteAdmissionBridge>,
+    ) -> u64 {
+        use crate::paste_sequence::admission::SessionCapabilities;
+        let mut generation = None;
+        controller
+            .start_with_admission(platform, |run| {
+                generation = Some(run.generation);
+                bridge
+                    .configure_session(
+                        4,
+                        run.generation,
+                        SessionCapabilities {
+                            paste: true,
+                            escape: false,
+                        },
+                    )
+                    .map_err(|_| super::SequencePlaybackError::ObserverUnavailable)?;
+                Ok(Some(super::SessionInputLease {
+                    owner: 4,
+                    generation: run.generation,
+                    bridge: std::sync::Arc::clone(bridge),
+                }))
+            })
+            .unwrap();
+        generation.unwrap()
+    }
+
+    fn prepare_and_start_physical_run(
+        controller: &mut SequencePlaybackController,
+        platform: &mut FakePlatform,
+        bridge: &std::sync::Arc<crate::paste_sequence::admission::PasteAdmissionBridge>,
+        texts: &[&str],
+    ) -> u64 {
+        controller.begin_preparing().unwrap();
+        controller
+            .set_ready(prepared_run(PlaybackMode::PasteToAdvance, 0, texts))
+            .unwrap();
+        start_ready_physical_run(controller, platform, bridge)
     }
 
     fn physical_event(
@@ -1097,6 +1137,47 @@ mod tests {
         }
     }
 
+    fn physical_ctrl_v(
+        reducer: &mut crate::paste_sequence::admission::PhysicalPasteReducer,
+        bridge: &std::sync::Arc<crate::paste_sequence::admission::PasteAdmissionBridge>,
+        target: &SequenceTarget,
+    ) -> crate::paste_sequence::admission::PhysicalPasteAdmission {
+        use crate::hotkey::launcher_invocation::KeyTransition;
+        assert!(!physical_event(
+            reducer,
+            bridge,
+            target,
+            0xA2,
+            KeyTransition::Down
+        ));
+        let admission = human_paste(reducer, bridge, target);
+        assert!(!physical_event(
+            reducer,
+            bridge,
+            target,
+            0xA2,
+            KeyTransition::Up
+        ));
+        admission
+    }
+
+    fn ordinary_ctrl_v(
+        reducer: &mut crate::paste_sequence::admission::PhysicalPasteReducer,
+        bridge: &std::sync::Arc<crate::paste_sequence::admission::PasteAdmissionBridge>,
+        target: &SequenceTarget,
+    ) {
+        use crate::hotkey::launcher_invocation::KeyTransition;
+        for (vk, transition) in [
+            (0xA2, KeyTransition::Down),
+            (0x56, KeyTransition::Down),
+            (0x56, KeyTransition::Up),
+            (0xA2, KeyTransition::Up),
+        ] {
+            assert!(!physical_event(reducer, bridge, target, vk, transition));
+        }
+        assert!(bridge.take_notice().is_none());
+    }
+
     #[test]
     fn sequence_progress_snapshot_is_started_only_and_never_contains_payload_or_title() {
         for mode in [
@@ -1132,13 +1213,15 @@ mod tests {
         use crate::hotkey::launcher_invocation::KeyTransition;
         use crate::paste_sequence::admission::PhysicalPasteNotice;
         let (mut controller, mut platform, bridge, mut reducer, _wake) = physical_fixture();
+        let first_generation = controller.physical_paste_generation().unwrap();
         assert_eq!(platform.publication_count(), 0);
         assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
         for index in 0..3 {
             if index == 1 {
                 platform.foreground = other_target(40);
             }
-            let admission = human_paste(&mut reducer, &bridge, &platform.foreground);
+            let admission = physical_ctrl_v(&mut reducer, &bridge, &platform.foreground);
+            assert_eq!(admission.generation, first_generation);
             controller
                 .physical_paste(
                     admission.clone(),
@@ -1155,6 +1238,13 @@ mod tests {
                 platform.clipboard.as_deref(),
                 Some(format!("Step {}", index + 1).as_str())
             );
+            assert!(!physical_event(
+                &mut reducer,
+                &bridge,
+                &platform.foreground,
+                0xA2,
+                KeyTransition::Down
+            ));
             assert!(physical_event(
                 &mut reducer,
                 &bridge,
@@ -1167,6 +1257,13 @@ mod tests {
                 &bridge,
                 &platform.foreground,
                 0x56,
+                KeyTransition::Up
+            ));
+            assert!(!physical_event(
+                &mut reducer,
+                &bridge,
+                &platform.foreground,
+                0xA2,
                 KeyTransition::Up
             ));
             assert!(matches!(
@@ -1205,19 +1302,107 @@ mod tests {
         assert_eq!(platform.paste_count(), 3);
         assert_eq!(platform.clipboard.as_deref(), Some("Step 3"));
         assert!(controller.session.is_none());
-        assert!(!physical_event(
-            &mut reducer,
-            &bridge,
-            &platform.foreground,
-            0x56,
-            KeyTransition::Down
-        ));
-        assert!(bridge.take_notice().is_none());
+        ordinary_ctrl_v(&mut reducer, &bridge, &platform.foreground);
         assert_eq!(
             platform.clipboard.as_deref(),
             Some("Step 3"),
             "fourth OS paste retains final text"
         );
+        let mut prior_generation = first_generation;
+        for run_index in 1..3 {
+            let generation = prepare_and_start_physical_run(
+                &mut controller,
+                &mut platform,
+                &bridge,
+                &["ALPHA", "BRAVO"],
+            );
+            assert!(generation > prior_generation);
+            prior_generation = generation;
+            assert_eq!(controller.status(), SequencePlaybackStatus::AwaitPaste);
+            for index in 0..2 {
+                if index == 0 {
+                    platform.foreground = target();
+                } else if index == 1 {
+                    platform.foreground = other_target(40 + run_index as isize);
+                }
+                let admission = physical_ctrl_v(&mut reducer, &bridge, &platform.foreground);
+                assert_eq!(admission.generation, generation);
+                controller
+                    .physical_paste(
+                        admission.clone(),
+                        std::sync::Arc::clone(&bridge),
+                        &mut platform,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    platform.clipboard.as_deref(),
+                    Some(["ALPHA", "BRAVO"][index])
+                );
+                let at = platform.clock;
+                tick(
+                    &mut controller,
+                    &mut platform,
+                    at + Duration::from_millis(180),
+                );
+                assert_eq!(
+                    controller.status(),
+                    if index == 1 {
+                        SequencePlaybackStatus::Completed
+                    } else {
+                        SequencePlaybackStatus::AwaitPaste
+                    }
+                );
+                assert!(!bridge.valid(&admission));
+            }
+            assert!(controller.session.is_none());
+            assert_eq!(platform.clipboard.as_deref(), Some("BRAVO"));
+            if run_index == 1 {
+                // A completed session leaves the ordinary OS paste available.
+                ordinary_ctrl_v(&mut reducer, &bridge, &platform.foreground);
+                assert_eq!(platform.clipboard.as_deref(), Some("BRAVO"));
+            }
+        }
+
+        let cancelled_generation = prepare_and_start_physical_run(
+            &mut controller,
+            &mut platform,
+            &bridge,
+            &["ALPHA", "BRAVO"],
+        );
+        controller.cancel(platform.clock);
+        assert_eq!(controller.status(), SequencePlaybackStatus::Cancelled);
+        assert!(controller.session.is_none());
+
+        let restarted_generation = prepare_and_start_physical_run(
+            &mut controller,
+            &mut platform,
+            &bridge,
+            &["ALPHA", "BRAVO"],
+        );
+        assert!(restarted_generation > cancelled_generation);
+        for (index, text) in ["ALPHA", "BRAVO"].into_iter().enumerate() {
+            let admission = physical_ctrl_v(&mut reducer, &bridge, &platform.foreground);
+            assert_eq!(admission.generation, restarted_generation);
+            controller
+                .physical_paste(admission, std::sync::Arc::clone(&bridge), &mut platform)
+                .unwrap();
+            assert_eq!(platform.clipboard.as_deref(), Some(text));
+            let at = platform.clock;
+            tick(
+                &mut controller,
+                &mut platform,
+                at + Duration::from_millis(180),
+            );
+            assert_eq!(
+                controller.status(),
+                if index == 0 {
+                    SequencePlaybackStatus::AwaitPaste
+                } else {
+                    SequencePlaybackStatus::Completed
+                }
+            );
+        }
+        assert!(controller.session.is_none());
     }
 
     #[test]
