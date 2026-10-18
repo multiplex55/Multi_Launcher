@@ -14,7 +14,7 @@ mod windows_runner;
 #[path = "perf_probe_runner/non_windows.rs"]
 mod windows_runner;
 
-const USAGE: &str = "Usage:\n  perf_probe_runner --probe <radial|hotfolder|dashboard> --scenario <fixed-name> [--out target/perf-harness] [--warmups 3] [--samples 1..20] [--timeout-seconds 1..90]\n  perf_probe_runner --self-test batch\n\nThe runner accepts only registered sibling probes and fixed scenarios. Self-test runs bounded, internal exit, nonzero, timeout, and descendant fixtures. All child processes are launched directly and assigned to a kill-on-close Windows Job Object before resume.\n";
+const USAGE: &str = "Usage:\n  perf_probe_runner --probe <radial|hotfolder|dashboard> --scenario <fixed-name> [--out target/perf-harness] [--warmups 3] [--samples 1..20] [--timeout-seconds 1..90]\n  perf_probe_runner --self-test batch\n\nThe runner accepts only registered sibling probes and fixed scenarios. Self-test runs bounded, internal exit, nonzero, timeout, and descendant fixtures. All child processes are launched directly and assigned to a kill-on-close Windows Job Object before resume. Registered probes reserve exit code 3 for blocked_environment.\n";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Probe {
@@ -312,7 +312,7 @@ fn self_test(workspace: &Path) -> ExitCode {
         ),
         (
             "deadline-timeout",
-            vec!["--fixture-child", "sleep", "5000"],
+            vec!["--fixture-child", "root-sleep", "5000"],
             ProbeStatus::Timeout,
         ),
         (
@@ -417,29 +417,76 @@ fn fixture_child(arguments: &[String]) -> Option<ExitCode> {
             eprintln!("fixture stderr: exit {code}");
             Some(ExitCode::from(code as u8))
         }
-        "sleep" if arguments.len() == 3 => {
+        "root-sleep" if arguments.len() == 3 => {
             let Some(millis) = parse_internal_number(&arguments[2], 1, 30_000) else {
                 return Some(ExitCode::from(2));
             };
             std::thread::sleep(Duration::from_millis(millis as u64));
-            println!("fixture stdout: sleep completed");
+            println!("fixture stdout: root sleep completed");
             Some(ExitCode::SUCCESS)
         }
-        "descendant" if arguments.len() == 3 => {
+        "sleep" if arguments.len() == 5 && arguments[3] == "--owned-job" => {
             let Some(millis) = parse_internal_number(&arguments[2], 1, 30_000) else {
                 return Some(ExitCode::from(2));
             };
-            let Ok(executable) = std::env::current_exe() else {
-                return Some(ExitCode::from(3));
+            let job_name = &arguments[4];
+            if !windows_runner::valid_fixture_job_name(job_name) {
+                eprintln!("owned-job guard rejected an invalid bounded job name");
+                return Some(ExitCode::from(2));
+            }
+            if let Err(error) = windows_runner::verify_fixture_job(job_name) {
+                eprintln!("{}", error.reason);
+                return Some(ExitCode::from(if error.blocked_environment {
+                    3
+                } else {
+                    1
+                }));
+            }
+            std::thread::sleep(Duration::from_millis(millis as u64));
+            println!("fixture stdout: guarded descendant sleep completed");
+            Some(ExitCode::SUCCESS)
+        }
+        "descendant"
+            if arguments.len() == 5
+                && arguments[3] == "--owned-job"
+                && windows_runner::valid_fixture_job_name(&arguments[4]) =>
+        {
+            let Some(millis) = parse_internal_number(&arguments[2], 1, 30_000) else {
+                return Some(ExitCode::from(2));
             };
+            let job_name = &arguments[4];
+            if let Err(error) = windows_runner::verify_fixture_job(job_name) {
+                eprintln!("{}", error.reason);
+                return Some(ExitCode::from(if error.blocked_environment {
+                    3
+                } else {
+                    1
+                }));
+            }
+            let Ok(executable) = std::env::current_exe() else {
+                eprintln!("fixture descendant could not resolve its own executable");
+                return Some(ExitCode::from(1));
+            };
+            let millis_text = millis.to_string();
             let child = std::process::Command::new(executable)
-                .args(["--fixture-child", "sleep", &millis.to_string()])
+                .args([
+                    "--fixture-child",
+                    "sleep",
+                    millis_text.as_str(),
+                    "--owned-job",
+                    job_name,
+                ])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn();
-            if child.is_err() {
-                return Some(ExitCode::from(4));
+            if let Err(error) = child {
+                eprintln!("fixture descendant spawn failed: {error}");
+                return Some(ExitCode::from(if error.raw_os_error() == Some(5) {
+                    3
+                } else {
+                    1
+                }));
             }
             println!("fixture stdout: descendant started");
             Some(ExitCode::SUCCESS)
@@ -617,5 +664,13 @@ mod tests {
         ] {
             assert!(parse(&values).is_err(), "accepted {values:?}");
         }
+    }
+
+    #[test]
+    fn descendant_modes_without_owned_job_are_rejected_before_spawn() {
+        let bare_descendant = vec!["--fixture-child".into(), "descendant".into(), "10".into()];
+        let bare_sleep = vec!["--fixture-child".into(), "sleep".into(), "10".into()];
+        assert!(fixture_child(&bare_descendant).is_none());
+        assert!(fixture_child(&bare_sleep).is_none());
     }
 }

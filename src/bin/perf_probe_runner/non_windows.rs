@@ -20,6 +20,30 @@ pub struct ChildOutcome {
     pub failure: Option<ProbeFailure>,
 }
 
+pub struct FixtureJobError {
+    pub blocked_environment: bool,
+    pub reason: String,
+}
+
+pub fn valid_fixture_job_name(name: &str) -> bool {
+    name.len() <= 128
+        && name
+            .strip_prefix("Local\\MultiLauncherPerf-")
+            .is_some_and(|suffix| {
+                !suffix.is_empty()
+                    && suffix
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+}
+
+pub fn verify_fixture_job(_name: &str) -> Result<(), FixtureJobError> {
+    Err(FixtureJobError {
+        blocked_environment: false,
+        reason: "owned-job fixture verification requires Windows Job Objects".into(),
+    })
+}
+
 pub fn run_owned(
     _workspace: &Path,
     _target: LaunchTarget,

@@ -10,15 +10,16 @@ use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{
-    BOOL, CloseHandle, FILETIME, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation,
-    WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    BOOL, CloseHandle, FILETIME, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS,
+    SetHandleInformation, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::Storage::FileSystem::ReadFile;
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+    JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation, OpenJobObjectW,
     QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
 use windows::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
@@ -32,7 +33,12 @@ use windows::Win32::System::Threading::{
 use windows::core::{Error as WindowsError, PCWSTR, PWSTR};
 
 const ERROR_ACCESS_DENIED_CODE: u32 = 5;
+const ERROR_ALREADY_EXISTS_CODE: u32 = 183;
 const ERROR_INSUFFICIENT_BUFFER_CODE: u32 = 122;
+// JOB_OBJECT_QUERY is 0x0004 in the Windows SDK; windows 0.58 exposes the API
+// but not this access-right constant.
+const JOB_OBJECT_QUERY_ACCESS: u32 = 0x0004;
+const FIXTURE_JOB_PREFIX: &str = "Local\\MultiLauncherPerf-";
 const MAX_CAPTURE_BYTES: usize = 30 * 1024 * 1024;
 const ROOT_WAIT_SLICE: Duration = Duration::from_millis(100);
 const CLEANUP_WAIT: Duration = Duration::from_secs(5);
@@ -60,6 +66,25 @@ impl LaunchTarget {
     fn is_fixture(&self) -> bool {
         matches!(self, Self::RunnerFixture(_))
     }
+
+    fn requests_descendant_fixture(&self) -> bool {
+        matches!(self, Self::RunnerFixture(arguments)
+            if arguments.first().is_some_and(|value| value == "--fixture-child")
+                && arguments.get(1).is_some_and(|value| value == "descendant"))
+    }
+
+    fn is_valid_descendant_fixture(&self) -> bool {
+        matches!(self, Self::RunnerFixture(arguments)
+            if arguments.len() == 3
+                && arguments.first().is_some_and(|value| value == "--fixture-child")
+                && arguments.get(1).is_some_and(|value| value == "descendant")
+                && arguments[2].bytes().all(|byte| byte.is_ascii_digit())
+                && arguments[2].parse::<u32>().is_ok_and(|millis| (1..=30_000).contains(&millis)))
+    }
+
+    fn is_trusted_descendant_fixture(&self) -> bool {
+        self.is_valid_descendant_fixture()
+    }
 }
 
 pub struct ChildOutcome {
@@ -71,6 +96,11 @@ pub struct ChildOutcome {
     pub process_cpu_ms: Option<f64>,
     pub process_cpu_reason: Option<String>,
     pub failure: Option<ProbeFailure>,
+}
+
+pub struct FixtureJobError {
+    pub blocked_environment: bool,
+    pub reason: String,
 }
 
 #[derive(Clone)]
@@ -145,6 +175,16 @@ pub fn run_owned(
         Ok(layout) => layout,
         Err(error) => return failed_before_spawn(manifest, error, started.elapsed()),
     };
+    if target.requests_descendant_fixture() && !target.is_valid_descendant_fixture() {
+        return failed_before_spawn(
+            manifest,
+            ApiFailure {
+                status: ProbeStatus::Error,
+                reason: "descendant fixture arguments are malformed; refusing to launch".into(),
+            },
+            started.elapsed(),
+        );
+    }
     let executable = if target.is_fixture() {
         layout.runner_executable.clone()
     } else {
@@ -159,7 +199,19 @@ pub fn run_owned(
         Err(error) => return failed_before_spawn(manifest, error, started.elapsed()),
     }
 
-    let job_handle = match create_configured_job() {
+    let owned_job_name = if target.is_valid_descendant_fixture() {
+        match unique_fixture_job_name() {
+            Ok(name) => Some(name),
+            Err(error) => {
+                manifest.process_containment = containment_for(&error);
+                manifest.process_containment_reason = error.reason.clone();
+                return failed_before_spawn(manifest, error, started.elapsed());
+            }
+        }
+    } else {
+        None
+    };
+    let job_handle = match create_configured_job(owned_job_name.as_deref()) {
         Ok(job) => job,
         Err(error) => {
             manifest.process_containment = containment_for(&error);
@@ -198,7 +250,12 @@ pub fn run_owned(
     startup.lpAttributeList = attribute_list.as_ptr();
 
     let mut process_info = PROCESS_INFORMATION::default();
-    let mut command_line = match build_command_line(&executable, target.arguments()) {
+    let mut child_arguments = target.arguments().to_vec();
+    if let Some(job_name) = owned_job_name.as_ref() {
+        child_arguments.push("--owned-job".into());
+        child_arguments.push(job_name.clone());
+    }
+    let mut command_line = match build_command_line(&executable, &child_arguments) {
         Ok(command_line) => command_line,
         Err(error) => return failed_before_spawn(manifest, error, started.elapsed()),
     };
@@ -504,7 +561,26 @@ pub fn run_owned(
                 "child exited while its Job Object still contained descendants; the tree was terminated and verified empty",
             ));
         } else if let Some(code) = exit_code {
-            if code != 0 {
+            // Registered probe binaries reserve exit code 3 for
+            // blocked_environment. The internal descendant fixture reserves
+            // it only for an actual Win32 access-denied guard/spawn failure.
+            if code == 3
+                && (matches!(target, LaunchTarget::Probe(_, _))
+                    || target.is_trusted_descendant_fixture())
+            {
+                let detail = String::from_utf8_lossy(&stderr);
+                let detail = detail.trim();
+                failure = Some(ProbeFailure::new(
+                    ProbeStatus::BlockedEnvironment,
+                    if detail.is_empty() {
+                        "registered child reserved exit code 3 for blocked_environment".into()
+                    } else {
+                        format!(
+                            "registered child reserved exit code 3 for blocked_environment: {detail}"
+                        )
+                    },
+                ));
+            } else if code != 0 {
                 failure = Some(ProbeFailure::error(format!(
                     "child exited with code {code}"
                 )));
@@ -729,10 +805,43 @@ fn hash_file(path: &Path) -> Result<String, ApiFailure> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn create_configured_job() -> Result<OwnedHandle, ApiFailure> {
-    let raw = unsafe { CreateJobObjectW(None, PCWSTR::null()) }
-        .map_err(|error| ApiFailure::from_windows("CreateJobObjectW", error))?;
-    let job = OwnedHandle::new(raw);
+fn create_configured_job(named: Option<&str>) -> Result<OwnedHandle, ApiFailure> {
+    let raw = if let Some(name) = named {
+        if !valid_fixture_job_name(name) {
+            return Err(ApiFailure {
+                status: ProbeStatus::Error,
+                reason: "internal named Job Object name is invalid".into(),
+            });
+        }
+        let wide_name = wide_nul(OsStr::new(name));
+        let created = unsafe { CreateJobObjectW(None, PCWSTR::from_raw(wide_name.as_ptr())) };
+        // Capture this immediately: ERROR_ALREADY_EXISTS means this handle
+        // refers to a pre-existing object, which must never be mutated.
+        let last_error = unsafe { GetLastError().0 };
+        let raw = created.map_err(|error| {
+            if last_error != 0 {
+                ApiFailure::from_win32("CreateJobObjectW(named fixture job)", last_error)
+            } else {
+                ApiFailure::from_windows("CreateJobObjectW(named fixture job)", error)
+            }
+        })?;
+        let handle = OwnedHandle::new(raw);
+        if last_error == ERROR_ALREADY_EXISTS_CODE {
+            return Err(ApiFailure::from_win32(
+                "CreateJobObjectW(named fixture job collision)",
+                last_error,
+            ));
+        }
+        return configure_job(handle);
+    } else {
+        let raw = unsafe { CreateJobObjectW(None, PCWSTR::null()) }
+            .map_err(|error| ApiFailure::from_windows("CreateJobObjectW", error))?;
+        OwnedHandle::new(raw)
+    };
+    configure_job(raw)
+}
+
+fn configure_job(job: OwnedHandle) -> Result<OwnedHandle, ApiFailure> {
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     unsafe {
@@ -747,6 +856,115 @@ fn create_configured_job() -> Result<OwnedHandle, ApiFailure> {
         ApiFailure::from_windows("SetInformationJobObject(KILL_ON_JOB_CLOSE)", error)
     })?;
     Ok(job)
+}
+
+pub fn valid_fixture_job_name(name: &str) -> bool {
+    name.len() <= 128
+        && name.strip_prefix(FIXTURE_JOB_PREFIX).is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
+fn unique_fixture_job_name() -> Result<String, ApiFailure> {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let ticks = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| ApiFailure {
+            status: ProbeStatus::Error,
+            reason: format!("system clock could not create fixture Job Object identity: {error}"),
+        })?
+        .as_nanos();
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = format!(
+        "{FIXTURE_JOB_PREFIX}{:08x}-{ticks:032x}-{sequence:x}",
+        unsafe { windows::Win32::System::Threading::GetCurrentProcessId() }
+    );
+    if !valid_fixture_job_name(&name) {
+        return Err(ApiFailure {
+            status: ProbeStatus::Error,
+            reason: "generated fixture Job Object name exceeded its bounded format".into(),
+        });
+    }
+    Ok(name)
+}
+
+pub fn verify_fixture_job(name: &str) -> Result<(), FixtureJobError> {
+    let fail = |status: ProbeStatus, reason: String| FixtureJobError {
+        blocked_environment: status == ProbeStatus::BlockedEnvironment,
+        reason,
+    };
+    if !valid_fixture_job_name(name) {
+        return Err(fail(
+            ProbeStatus::Error,
+            "owned-job guard rejected an invalid or unbounded Job Object name".into(),
+        ));
+    }
+    let wide_name = wide_nul(OsStr::new(name));
+    let raw = unsafe {
+        OpenJobObjectW(
+            JOB_OBJECT_QUERY_ACCESS,
+            BOOL(0),
+            PCWSTR::from_raw(wide_name.as_ptr()),
+        )
+    }
+    .map_err(|error| {
+        let failure = ApiFailure::from_windows("OpenJobObjectW(owned-job query)", error);
+        fail(failure.status, failure.reason)
+    })?;
+    let query_handle = OwnedHandle::new(raw);
+    let mut in_job = BOOL(0);
+    unsafe {
+        IsProcessInJob(
+            windows::Win32::System::Threading::GetCurrentProcess(),
+            query_handle.raw(),
+            &mut in_job,
+        )
+    }
+    .map_err(|error| {
+        let failure = ApiFailure::from_windows("IsProcessInJob(owned-job guard)", error);
+        fail(failure.status, failure.reason)
+    })?;
+    if in_job.0 == 0 {
+        return Err(fail(
+            ProbeStatus::Error,
+            "owned-job guard found the fixture process outside the named Job Object".into(),
+        ));
+    }
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    unsafe {
+        QueryInformationJobObject(
+            query_handle.raw(),
+            JobObjectExtendedLimitInformation,
+            (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            None,
+        )
+    }
+    .map_err(|error| {
+        let failure =
+            ApiFailure::from_windows("QueryInformationJobObject(owned-job limits)", error);
+        fail(failure.status, failure.reason)
+    })?;
+    let flags = limits.BasicLimitInformation.LimitFlags.0;
+    if flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.0 == 0 {
+        return Err(fail(
+            ProbeStatus::Error,
+            "owned-job guard requires KILL_ON_JOB_CLOSE".into(),
+        ));
+    }
+    if flags & (JOB_OBJECT_LIMIT_BREAKAWAY_OK.0 | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK.0) != 0 {
+        return Err(fail(
+            ProbeStatus::Error,
+            "owned-job guard rejects breakaway Job Object limits".into(),
+        ));
+    }
+    // Drop the noninheritable query handle before the fixture performs any
+    // std::process::Command::spawn call.
+    drop(query_handle);
+    Ok(())
 }
 
 struct PipePair {

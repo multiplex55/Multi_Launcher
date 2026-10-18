@@ -27,9 +27,9 @@ existing public production paths provide the CPU success candidate; private
 worker/widget owners require bounded access inspection before implementation.
 H0-A commit `b90182c3` pushed successfully. No measurements claimed.
 
-## Pending
+## Current state
 
-H1-A/B/C; H2-A/B/C; H3-A/B; H4-A/B/C.
+H0–H3 complete (initial H1-A compile issues resolved in H1-C); H4 in progress.
 
 ## H1-A — partial (implementation complete; focused test compile pending)
 
@@ -248,3 +248,35 @@ link. No new shell/process owner. All four executable `--help` commands returned
 and `Started: false`. `git diff --check` passed. Existing H2 smoke evidence is
 reused; no scenario batch repeated. All current workload scenarios are headless;
 native presentation and screenshots remain unverified.
+
+## H4-A — complete
+
+H3-B `3a3a0dbb` pushed. Reused H2's one-batch-per-scenario CPU/native evidence;
+no workload reruns. Repaired the concrete hidden-descendant ownership gap with
+a collision-checked named Job only for that fixture. Explicit membership and
+KILL_ON_CLOSE/no-breakaway limits must verify, and the temporary query handle
+closes before spawn. Parent Job handle remains noninheritable. Bare fixture
+arguments reject before spawn; non-Windows unsupported helpers remain present.
+Registered probe/guard reserved exit 3 preserves blocked_environment and stderr.
+Read-only independent Windows review found no remaining containment blocker.
+
+Passed targeted `cargo check --offline --features perf-harness --bin perf_probe_runner`;
+`cargo nextest run --offline --features perf-harness --bin perf_probe_runner descendant_modes_without_owned_job_are_rejected_before_spawn` (1 passed);
+`cargo build --offline --features perf-harness --bin perf_probe_runner`;
+touched-file rustfmt and `git diff --check`. No unrelated validation or Clippy.
+
+One remaining authorized repair batch:
+`target/debug/perf_probe_runner.exe --self-test batch` returned 0, 4.12 s.
+All four roots assigned while suspended, resumed afterward, verified cleanup:
+
+| Case | Raw runner_self_test run ID | Status / root exit | Outcome |
+|---|---|---|---|
+| exit-zero | run-1792363814902126000-0 | success / 0 | verified empty |
+| nonzero | run-1792363815338391700-0 | error / 23 | exact failure retained |
+| deadline | run-1792363815707410200-0 | timeout / 1 | owned Job terminated and empty |
+| descendant | run-1792363818154312500-0 | expected error / 0 | total 3, active at root exit 2; teardown verified empty |
+
+Descendant's error intentionally reports a root that left descendants, even
+though cleanup succeeded. Captured stdout confirms descendant started; no guard
+failure or Access denied. This was native batch 2; no further attempts. Existing
+CIM denial remains final. No native viewport, screenshots or desktop input.
