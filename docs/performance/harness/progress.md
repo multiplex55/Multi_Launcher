@@ -222,3 +222,18 @@ internal descendant invocation could spawn without proving membership in our
 owned Job. Actual recorded batches were contained. H4-A will add explicit job
 identity proof before descendant spawning and use the remaining repair batch;
 no unsafe direct descendant invocation was executed.
+
+## H3-A — complete
+
+H2-C `c33e6b81` pushed. Added `dev/perf_harness/README.md` recipes that reuse
+Track B command telemetry for dev/fast-dev builds, Nextest compilation-only,
+and external RA version measurement. No new script/target/dependency.
+Track B has no deadline: optional RA analysis remains unavailable here rather
+than launching an unbounded command or weakening the probe allowlist. Its
+external evidence-directory rule is explicit; no new outside-tree write run.
+
+Safe dry run `./dev/track_b/cargo.ps1 -Preset debug -PrintCommand` printed the
+exact cargo build argv and `Started: false`; no compiler or benchmark campaign.
+The combined inspection shell returned 1 because a later optional rg search
+had no match, not because the dry run failed. No RA analysis/version launched.
+Documented future gated target addition without adding a fifth bin.
