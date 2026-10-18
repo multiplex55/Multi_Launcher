@@ -26,6 +26,36 @@ const MAX_INSPECTED_MATCH_CHARS: usize = 4096;
 
 #[cfg(test)]
 #[derive(Clone, Debug)]
+struct PaneGeometry {
+    id: egui::Id,
+    rect: egui::Rect,
+    content: egui::Vec2,
+    offset: egui::Vec2,
+}
+
+#[cfg(test)]
+fn pane_geometry<T>(output: &egui::scroll_area::ScrollAreaOutput<T>) -> PaneGeometry {
+    PaneGeometry {
+        id: output.id,
+        rect: output.inner_rect,
+        content: output.content_size,
+        offset: output.state.offset,
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+struct PreviewGeometry {
+    open: bool,
+    original: Option<PaneGeometry>,
+    proposed: Option<PaneGeometry>,
+    unified: Option<PaneGeometry>,
+    inspected_original: Option<PaneGeometry>,
+    inspected_proposed: Option<PaneGeometry>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
 struct DialogGeometry {
     window: egui::Rect,
     header: egui::Rect,
@@ -48,6 +78,7 @@ struct DialogGeometry {
     first_match_row: usize,
     file_scroll_id: Option<egui::Id>,
     match_scroll_id: Option<egui::Id>,
+    preview: std::cell::RefCell<PreviewGeometry>,
 }
 
 #[cfg(test)]
@@ -75,6 +106,7 @@ impl Default for DialogGeometry {
             first_match_row: 0,
             file_scroll_id: None,
             match_scroll_id: None,
+            preview: Default::default(),
         }
     }
 }
@@ -1155,35 +1187,52 @@ impl SearchReplaceDialogState {
         ui.columns(2, |columns| {
             columns[0].label(egui::RichText::new("Original").strong());
             columns[1].label(egui::RichText::new("Proposed").strong());
-            egui::ScrollArea::vertical()
+            let original = egui::ScrollArea::both()
                 .id_salt(("replace_diff_original", snapshot.path()))
+                .auto_shrink([false, false])
                 .min_scrolled_height(self.panel_height(150.0))
                 .max_height(self.panel_height(150.0))
                 .show(&mut columns[0], |ui| {
-                    ui.label(
-                        egui::RichText::new(context.original_excerpt())
-                            .monospace()
-                            .color(ui.visuals().error_fg_color),
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(context.original_excerpt())
+                                .monospace()
+                                .color(ui.visuals().error_fg_color),
+                        )
+                        .wrap_mode(egui::TextWrapMode::Extend),
                     );
                 });
-            egui::ScrollArea::vertical()
+            let proposed = egui::ScrollArea::both()
                 .id_salt(("replace_diff_candidate", snapshot.path()))
+                .auto_shrink([false, false])
                 .min_scrolled_height(self.panel_height(150.0))
                 .max_height(self.panel_height(150.0))
                 .show(&mut columns[1], |ui| {
-                    ui.label(
-                        egui::RichText::new(context.candidate_excerpt())
-                            .monospace()
-                            .color(ui.visuals().strong_text_color()),
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(context.candidate_excerpt())
+                                .monospace()
+                                .color(ui.visuals().strong_text_color()),
+                        )
+                        .wrap_mode(egui::TextWrapMode::Extend),
                     );
                 });
+            #[cfg(test)]
+            {
+                let mut geometry = self.geometry.preview.borrow_mut();
+                geometry.original = Some(pane_geometry(&original));
+                geometry.proposed = Some(pane_geometry(&proposed));
+            }
+            #[cfg(not(test))]
+            let _ = (original, proposed);
         });
         let Some(diff) = self.candidate_unified_diffs.get(snapshot.path()) else {
             ui.weak("The bounded unified diff is still being prepared on the preview worker.");
             return;
         };
-        egui::ScrollArea::vertical()
+        let unified = egui::ScrollArea::both()
             .id_salt(("replace_unified_diff", snapshot.path()))
+            .auto_shrink([false, false])
             .min_scrolled_height(self.panel_height(125.0))
             .max_height(self.panel_height(125.0))
             .show(ui, |ui| {
@@ -1195,9 +1244,18 @@ impl SearchReplaceDialogState {
                     } else {
                         ui.visuals().weak_text_color()
                     };
-                    ui.colored_label(color, egui::RichText::new(line).monospace());
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(line).monospace().color(color))
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                    );
                 }
             });
+        #[cfg(test)]
+        {
+            self.geometry.preview.borrow_mut().unified = Some(pane_geometry(&unified));
+        }
+        #[cfg(not(test))]
+        let _ = unified;
     }
 
     pub(crate) fn ui(
@@ -1569,6 +1627,7 @@ impl SearchReplaceDialogState {
             self.geometry.first_match_row = 0;
             self.geometry.file_scroll_id = None;
             self.geometry.match_scroll_id = None;
+            *self.geometry.preview.get_mut() = PreviewGeometry::default();
         }
         let Some(search) = self.search_result.as_ref().cloned() else {
             ui.weak("Search results appear here. A search only reads the chosen root and never edits files.");
@@ -1851,16 +1910,23 @@ impl SearchReplaceDialogState {
         }
         #[cfg(not(test))]
         let _ = approvals_section;
-        self.draw_diff(ui, file_index);
-        if let Some(span) = file
-            .matches()
-            .iter()
-            .find(|span| self.inspected_match.as_ref() == Some(span.id()))
+        let preview = egui::CollapsingHeader::new("Original vs. Proposed Preview")
+            .id_salt(("replace_preview_section", file.path()))
+            .default_open(true)
+            .show(ui, |ui| {
+                self.draw_diff(ui, file_index);
+                if let Some(span) = file.matches().iter().find(|span| self.inspected_match.as_ref() == Some(span.id())) {
+                    self.draw_match_inspector(ui, file.path(), span);
+                } else {
+                    ui.weak("Select a match row to inspect its original and proposed text. Long values are bounded here and disclose the omitted character count.");
+                }
+            });
+        #[cfg(test)]
         {
-            self.draw_match_inspector(ui, file.path(), span);
-        } else {
-            ui.weak("Select a match row to inspect its original and proposed text. Long values are bounded here and disclose the omitted character count.");
+            self.geometry.preview.borrow_mut().open = preview.body_response.is_some();
         }
+        #[cfg(not(test))]
+        let _ = preview;
         self.draw_candidate_summary(ui);
     }
 
@@ -1895,26 +1961,36 @@ impl SearchReplaceDialogState {
                     columns[1].label(egui::RichText::new("Proposed").strong());
                     columns[0].weak(format!("{} bytes", output.original_text().len()));
                     columns[1].weak(format!("{} bytes", output.proposed_text().len()));
-                    egui::ScrollArea::vertical()
+                    let original = egui::ScrollArea::both()
                         .id_salt(("replace_match_original", path, span.id()))
+                        .auto_shrink([false, false])
                         .min_scrolled_height(self.panel_height(130.0))
             .max_height(self.panel_height(130.0))
                         .show(&mut columns[0], |ui| {
-                            ui.label(egui::RichText::new(original).monospace());
+                            ui.add(egui::Label::new(egui::RichText::new(original).monospace())
+                                .wrap_mode(egui::TextWrapMode::Extend));
                             if original_truncated {
                                 ui.weak(format!("Preview truncated after {MAX_INSPECTED_MATCH_CHARS} characters."));
                             }
                         });
-                    egui::ScrollArea::vertical()
+                    let proposed = egui::ScrollArea::both()
                         .id_salt(("replace_match_proposed", path, span.id()))
+                        .auto_shrink([false, false])
                         .min_scrolled_height(self.panel_height(130.0))
             .max_height(self.panel_height(130.0))
                         .show(&mut columns[1], |ui| {
-                            ui.label(egui::RichText::new(proposed).monospace());
+                            ui.add(egui::Label::new(egui::RichText::new(proposed).monospace())
+                                .wrap_mode(egui::TextWrapMode::Extend));
                             if proposed_truncated {
                                 ui.weak(format!("Preview truncated after {MAX_INSPECTED_MATCH_CHARS} characters; the exact candidate remains retained for confirmation."));
                             }
                         });
+                    #[cfg(test)] {
+                        let mut geometry = self.geometry.preview.borrow_mut();
+                        geometry.inspected_original = Some(pane_geometry(&original));
+                        geometry.inspected_proposed = Some(pane_geometry(&proposed));
+                    }
+                    #[cfg(not(test))] let _ = (original, proposed);
                 });
             },
         );
@@ -2402,9 +2478,27 @@ mod tests {
         for _ in 0..35 {
             let (commands, text) = layout_frame(state, ctx, size, &runtime, vec![], true);
             assert!(commands.is_empty());
-            if let Some((_, rect)) = text.iter().find(|(text, _)| text.starts_with(label)) {
-                position = Some(rect.center());
-                break;
+            let fully_visible = |rect: egui::Rect, body: egui::Rect| {
+                rect.top() > body.top() + 4.0 && rect.bottom() < body.bottom() - 4.0
+            };
+            if let Some((_, rect)) = text.iter().find(|(text, rect)| {
+                text.starts_with(label) && fully_visible(*rect, state.geometry.body)
+            }) {
+                // Published clipped text can first appear at the body edge,
+                // before the new scroll offset settles. Click only a stable
+                // interior label, rather than its first painted sliver.
+                let prior = *rect;
+                let (commands, settled) = layout_frame(state, ctx, size, &runtime, vec![], true);
+                assert!(commands.is_empty());
+                if let Some((_, rect)) = settled.iter().find(|(text, rect)| {
+                    text.starts_with(label) && fully_visible(*rect, state.geometry.body)
+                }) && (rect.top() - prior.top()).abs() < 1.0
+                    && (rect.left() - prior.left()).abs() < 1.0
+                {
+                    position = Some(rect.center());
+                    break;
+                }
+                continue;
             }
             let mut scroll = egui::scroll_area::State::load(ctx, id).unwrap();
             scroll.offset.y += 30.0;
@@ -2436,6 +2530,269 @@ mod tests {
         for _ in 0..3 {
             layout_frame(state, ctx, size, &runtime, vec![], true);
         }
+    }
+
+    #[test]
+    fn replace_preview_folding_keeps_exact_multiline_candidate_and_independent_long_line_scrolls() {
+        let parent = PathBuf::from("target/refinement-evidence");
+        std::fs::create_dir_all(&parent).unwrap();
+        let fixture = tempfile::Builder::new()
+            .prefix("replace_preview_")
+            .tempdir_in(parent)
+            .unwrap();
+        let root = fixture.path().join("explicit-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("owned.txt");
+        let other_source = root.join("other.txt");
+        let long = "漢".repeat(4_500);
+        let filler = "unchanged\r\n".repeat(300);
+        let original = format!("\u{feff}{long} needle\r\nfirst\r\nsecond\r\n{filler}{long} needle");
+        std::fs::write(&source, original.as_bytes()).unwrap();
+        std::fs::write(&other_source, "漢 needle").unwrap();
+        let replacement = "置".repeat(5_000);
+        let mut state = SearchReplaceDialogState::default();
+        state.open = true;
+        state.set_root(root);
+        state.include_extensions = "txt".into();
+        state.pattern = r"漢+ needle|first\r\nsecond".into();
+        state.pattern_mode = SearchPatternMode::RustRegex;
+        state.replacement = replacement.clone();
+        let coordinator = crate::search_replace::SearchCoordinator::new().unwrap();
+        let worker = ReplacementPreviewWorker::new().unwrap();
+        let request = state.build_search_request().unwrap();
+        state.record_search_ticket(coordinator.submit(request).unwrap());
+        wait_for_preview(&mut state, &coordinator, &worker, |state| {
+            state.candidate.is_some() && !state.preview_pending
+        });
+        let search = state.search_result.clone().unwrap();
+        assert_eq!(search.status(), SearchStatus::Complete);
+        let main = search
+            .matched_files()
+            .iter()
+            .find(|file| file.path().file_name().unwrap() == "owned.txt")
+            .unwrap();
+        let other = search
+            .matched_files()
+            .iter()
+            .find(|file| file.path().file_name().unwrap() == "other.txt")
+            .unwrap();
+        assert_eq!(main.matches().len(), 3);
+        let ids: Vec<_> = main
+            .matches()
+            .iter()
+            .map(|span| span.id().clone())
+            .collect();
+        for id in &ids {
+            state.set_match_selected(id, true);
+        }
+        wait_for_preview(&mut state, &coordinator, &worker, |state| {
+            state.candidate.is_some() && !state.preview_pending
+        });
+        state.selected_file = Some(main.path().to_path_buf());
+        state.inspected_match = Some(ids[2].clone());
+        let candidate_file = state
+            .candidate
+            .as_ref()
+            .unwrap()
+            .files()
+            .iter()
+            .find(|file| file.original_snapshot().path() == main.path())
+            .unwrap();
+        assert_eq!(
+            candidate_file
+                .match_output(&ids[1])
+                .unwrap()
+                .original_text(),
+            "first\r\nsecond"
+        );
+        assert_eq!(
+            candidate_file
+                .match_output(&ids[1])
+                .unwrap()
+                .proposed_text(),
+            replacement
+        );
+        assert_eq!(
+            candidate_file
+                .match_output(&ids[2])
+                .unwrap()
+                .original_text(),
+            format!("{long} needle")
+        );
+        assert_eq!(
+            candidate_file
+                .match_output(&ids[2])
+                .unwrap()
+                .proposed_text(),
+            replacement
+        );
+        let bytes = candidate_file.output_bytes().clone();
+        assert_eq!(
+            bytes.as_ref(),
+            format!("\u{feff}{replacement}\r\n{replacement}\r\n{filler}{replacement}").as_bytes()
+        );
+        assert!(candidate_file.diff_context().unwrap().truncated());
+        let cache = state
+            .candidate_unified_diffs
+            .get(main.path())
+            .unwrap()
+            .clone();
+        let revisions = (
+            state.preview_revision,
+            state.preview_result_publications,
+            state.current_generation,
+        );
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let size = egui::vec2(600.0, 420.0);
+        let runtime = ReplaceWorkerSnapshot::default();
+        for _ in 0..4 {
+            assert!(
+                layout_frame(&mut state, &ctx, size, &runtime, vec![], true)
+                    .0
+                    .is_empty()
+            );
+            assert!(
+                state.geometry.window.width() <= size.x + 1.0
+                    && state.geometry.window.height() <= size.y + 1.0
+            );
+        }
+        let panes = state.geometry.preview.borrow().clone();
+        assert!(panes.open);
+        let left = panes.original.unwrap();
+        let right = panes.proposed.unwrap();
+        let unified = panes.unified.unwrap();
+        for pane in [&left, &right, &unified] {
+            assert!(
+                pane.rect.width() > 40.0
+                    && pane.rect.height() > 40.0
+                    && pane.rect.height() <= 151.0
+            );
+            assert!(
+                pane.content.x > pane.rect.width() + 200.0,
+                "long lines scroll instead of widening dialog: {pane:?}"
+            );
+        }
+        assert_ne!(left.id, right.id);
+        for (id, x) in [(left.id, 200.0), (right.id, 80.0), (unified.id, 120.0)] {
+            let mut scroll = egui::scroll_area::State::load(&ctx, id).unwrap();
+            scroll.offset.x = x;
+            scroll.store(&ctx, id);
+        }
+        for _ in 0..3 {
+            layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+        }
+        let panes = state.geometry.preview.borrow().clone();
+        assert!((panes.original.unwrap().offset.x - 200.0).abs() < 1.0);
+        assert!((panes.proposed.unwrap().offset.x - 80.0).abs() < 1.0);
+        assert!((panes.unified.unwrap().offset.x - 120.0).abs() < 1.0);
+
+        click_body_label(&mut state, &ctx, size, "Inspect match 3");
+        let panes = state.geometry.preview.borrow().clone();
+        let inspected = panes.inspected_original.unwrap();
+        let proposed = panes.inspected_proposed.unwrap();
+        assert!(
+            inspected.content.x > inspected.rect.width()
+                && proposed.content.x > proposed.rect.width()
+        );
+        assert_ne!(inspected.id, proposed.id);
+        click_body_label(&mut state, &ctx, size, "Preview truncated after");
+        let (_, visible) = layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+        assert!(
+            visible
+                .iter()
+                .any(|(text, _)| text.contains("Preview truncated after 4096 characters"))
+        );
+        click_body_label(&mut state, &ctx, size, "Original vs. Proposed Preview");
+        let closed = state.geometry.preview.borrow().clone();
+        assert!(!closed.open && closed.original.is_none() && closed.inspected_original.is_none());
+        click_body_label(&mut state, &ctx, size, "Original vs. Proposed Preview");
+        assert_eq!(
+            state
+                .geometry
+                .preview
+                .borrow()
+                .original
+                .as_ref()
+                .unwrap()
+                .id,
+            left.id
+        );
+        assert_eq!(
+            state
+                .geometry
+                .preview
+                .borrow()
+                .inspected_original
+                .as_ref()
+                .unwrap()
+                .id,
+            inspected.id
+        );
+        assert!(Arc::ptr_eq(&search, state.search_result.as_ref().unwrap()));
+        assert!(Arc::ptr_eq(
+            &cache,
+            state.candidate_unified_diffs.get(main.path()).unwrap()
+        ));
+        let current = state
+            .candidate
+            .as_ref()
+            .unwrap()
+            .files()
+            .iter()
+            .find(|file| file.original_snapshot().path() == main.path())
+            .unwrap();
+        assert!(Arc::ptr_eq(&bytes, current.output_bytes()));
+        assert_eq!(
+            (
+                state.preview_revision,
+                state.preview_result_publications,
+                state.current_generation
+            ),
+            revisions
+        );
+        assert_eq!(
+            state.selected_matches,
+            ids.iter().cloned().collect::<HashSet<_>>()
+        );
+
+        state.inspected_match = Some(ids[1].clone());
+        click_body_label(&mut state, &ctx, size, "Inspect match 2");
+        assert_ne!(
+            state
+                .geometry
+                .preview
+                .borrow()
+                .inspected_original
+                .as_ref()
+                .unwrap()
+                .id,
+            inspected.id
+        );
+        state.selected_file = Some(other.path().to_path_buf());
+        layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+        let other_geometry = state.geometry.preview.borrow().clone();
+        assert!(other_geometry.original.is_none() && other_geometry.inspected_original.is_none());
+        state.selected_file = None;
+        layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+        assert!(!state.geometry.preview.borrow().open);
+        state.selected_file = Some(main.path().to_path_buf());
+        state.queue_candidate_recompute();
+        state.candidate_error = Some("Owned stale preview failure".into());
+        layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+        let stale = state.geometry.preview.borrow().clone();
+        assert!(
+            stale.original.is_none()
+                && stale.proposed.is_none()
+                && stale.unified.is_none()
+                && stale.inspected_original.is_none()
+        );
+        assert!(state.candidate_unified_diffs.is_empty());
+        state.invalidate_search("Owned source revision invalidation".into());
+        layout_frame(&mut state, &ctx, size, &runtime, vec![], true);
+        assert!(!state.geometry.preview.borrow().open);
+        assert_eq!(std::fs::read(source).unwrap(), original.as_bytes());
+        assert_eq!(std::fs::read_to_string(other_source).unwrap(), "漢 needle");
     }
 
     #[test]
