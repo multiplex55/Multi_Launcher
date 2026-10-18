@@ -12,7 +12,7 @@ use windows::{
     Win32::{
         Foundation::{
             COLORREF, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, RECT,
-            WPARAM,
+            SetLastError, WIN32_ERROR, WPARAM,
         },
         Graphics::Gdi::{
             BeginPaint, CreatePen, CreateSolidBrush, DeleteObject, EndPaint, EnumDisplayMonitors,
@@ -23,6 +23,7 @@ use windows::{
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
+            HiDpi::{GetDpiForWindow, GetThreadDpiAwarenessContext, GetWindowDpiAwarenessContext},
             Input::KeyboardAndMouse::{
                 GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture, VK_ESCAPE, VK_LBUTTON,
                 VK_RETURN,
@@ -222,14 +223,113 @@ fn win32_dimensions(
     Ok((width, height))
 }
 
-fn shield_covers_monitor(expected: ScreenRect, actual: ScreenRect, visible: bool, ex: u32) -> bool {
-    visible
-        && expected == actual
-        && !expected.is_empty()
-        && ex & WS_EX_LAYERED.0 != 0
-        && ex & WS_EX_TRANSPARENT.0 == 0
-        && ex & WS_EX_NOACTIVATE.0 != 0
-        && ex & WS_EX_TOPMOST.0 != 0
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShieldFailure {
+    MissingShield,
+    WindowRectQueryFailed,
+    StyleQueryFailed,
+    RectMismatch,
+    WindowNotVisible,
+    LayeredMissing,
+    NoactivateMissing,
+    TopmostMissing,
+    UnexpectedTransparent,
+}
+
+impl ShieldFailure {
+    fn description(self) -> &'static str {
+        match self {
+            Self::MissingShield => "missing shield",
+            Self::WindowRectQueryFailed => "GetWindowRect failed",
+            Self::StyleQueryFailed => "GetWindowLongPtrW failed",
+            Self::RectMismatch => "window position/size mismatch",
+            Self::WindowNotVisible => "window is not visible",
+            Self::LayeredMissing => "layered style missing",
+            Self::NoactivateMissing => "nonactivating style missing",
+            Self::TopmostMissing => "topmost style missing",
+            Self::UnexpectedTransparent => "unexpected click-through style",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ShieldProbe {
+    actual: Option<ScreenRect>,
+    rect_error: Option<u32>,
+    visible: bool,
+    ex: u32,
+    style_error: Option<u32>,
+    thread_dpi_context: isize,
+    window_dpi_context: isize,
+    window_dpi: u32,
+}
+impl ShieldProbe {
+    fn failures(&self, expected: ScreenRect) -> Vec<ShieldFailure> {
+        let mut reasons = Vec::new();
+        if self.actual.is_none() {
+            reasons.push(ShieldFailure::WindowRectQueryFailed);
+        }
+        if self.style_error.is_some() {
+            reasons.push(ShieldFailure::StyleQueryFailed);
+        }
+        if self
+            .actual
+            .is_some_and(|actual| actual != expected || expected.is_empty())
+        {
+            reasons.push(ShieldFailure::RectMismatch);
+        }
+        if !self.visible {
+            reasons.push(ShieldFailure::WindowNotVisible);
+        }
+        for (flag, reason) in [
+            (WS_EX_LAYERED.0, ShieldFailure::LayeredMissing),
+            (WS_EX_NOACTIVATE.0, ShieldFailure::NoactivateMissing),
+            (WS_EX_TOPMOST.0, ShieldFailure::TopmostMissing),
+        ] {
+            if self.ex & flag == 0 {
+                reasons.push(reason);
+            }
+        }
+        if self.ex & WS_EX_TRANSPARENT.0 != 0 {
+            reasons.push(ShieldFailure::UnexpectedTransparent);
+        }
+        reasons
+    }
+}
+
+fn probe_shield(hwnd: HWND) -> ShieldProbe {
+    let mut rect = RECT::default();
+    let result = unsafe { GetWindowRect(hwnd, &mut rect) };
+    // Capture before another Win32 call can replace the error.
+    let rect_error = result.err().map(|_| unsafe { GetLastError().0 });
+    let actual = rect_error.is_none().then(|| {
+        ScreenRect::new(
+            rect.left,
+            rect.top,
+            (i64::from(rect.right) - i64::from(rect.left)).max(0) as u32,
+            (i64::from(rect.bottom) - i64::from(rect.top)).max(0) as u32,
+        )
+    });
+    unsafe {
+        SetLastError(WIN32_ERROR(0));
+    }
+    let ex = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+    let style_error = if ex == 0 {
+        let error = unsafe { GetLastError().0 };
+        (error != 0).then_some(error)
+    } else {
+        None
+    };
+    ShieldProbe {
+        actual,
+        rect_error,
+        ex,
+        style_error,
+        visible: unsafe { IsWindowVisible(hwnd) }.as_bool(),
+        thread_dpi_context: unsafe { GetThreadDpiAwarenessContext() }.0 as isize,
+        window_dpi_context: unsafe { GetWindowDpiAwarenessContext(hwnd) }.0 as isize,
+        window_dpi: unsafe { GetDpiForWindow(hwnd) },
+    }
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
@@ -629,32 +729,61 @@ impl NativeOverlayRenderer {
                 &missing,
             )?;
         }
-        for bounds in &physical {
-            let covered = self.input_shields.iter().any(|window| {
-                let mut actual = RECT::default();
-                unsafe { GetWindowRect(window.hwnd, &mut actual) }.is_ok()
-                    && shield_covers_monitor(
-                        *bounds,
-                        ScreenRect::new(
-                            actual.left,
-                            actual.top,
-                            (i64::from(actual.right) - i64::from(actual.left)).max(0) as u32,
-                            (i64::from(actual.bottom) - i64::from(actual.top)).max(0) as u32,
-                        ),
-                        unsafe { IsWindowVisible(window.hwnd) }.as_bool(),
-                        unsafe { GetWindowLongPtrW(window.hwnd, GWL_EXSTYLE) } as u32,
-                    )
-            });
-            if !covered {
-                return Err(platform(
-                    "Rectangle shield coverage could not be restored after display change",
-                ));
-            }
-        }
+        self.verify_shield_coverage(&physical, "display_change")?;
         // Retain old shields through release; never destroy the old capture
         // owner first while repairing coverage for a changed topology.
         Ok(())
     }
+    fn verify_shield_coverage(
+        &self,
+        bounds: &[ScreenRect],
+        stage: &'static str,
+    ) -> Result<(), VisualOverlayError> {
+        for (monitor, expected) in bounds.iter().enumerate() {
+            let mut rejected = None;
+            let covered = self
+                .input_shields
+                .iter()
+                .filter(|window| window.state.bounds == *expected)
+                .any(|window| {
+                    let probe = probe_shield(window.hwnd);
+                    let reasons = probe.failures(*expected);
+                    if reasons.is_empty() {
+                        true
+                    } else {
+                        rejected = Some((window, probe, reasons));
+                        false
+                    }
+                });
+            if covered {
+                continue;
+            }
+            let Some((window, probe, reasons)) = rejected else {
+                tracing::error!(operation_id=?self.operation_id.or_else(|| self.input_shields.first().map(|w| w.state.operation_id)), stage, monitor, ?expected,
+                    reason=?ShieldFailure::MissingShield, "rectangle shield acknowledgement failed");
+                return Err(platform(format!(
+                    "Rectangle input shield monitor {}: {}",
+                    monitor + 1,
+                    ShieldFailure::MissingShield.description()
+                )));
+            };
+            tracing::error!(operation_id=window.state.operation_id, stage, monitor, hwnd=?window.hwnd,
+                    ?expected, actual=?probe.actual, get_window_rect_error=?probe.rect_error,
+                    get_window_long_ptr_error=?probe.style_error, visible=probe.visible, ex=probe.ex,
+                    thread_dpi_context=probe.thread_dpi_context, window_dpi_context=probe.window_dpi_context,
+                    window_dpi=probe.window_dpi, ?reasons, "rectangle shield acknowledgement failed");
+            return Err(platform(format!(
+                "Rectangle input shield monitor {}: {}",
+                monitor + 1,
+                reasons[0].description()
+            )));
+        }
+        if bounds.is_empty() {
+            return Err(platform("Incomplete rectangle input shield coverage"));
+        }
+        Ok(())
+    }
+
     fn show_input_shields(
         &mut self,
         module: windows::Win32::Foundation::HMODULE,
@@ -1160,26 +1289,10 @@ impl OverlayRenderer for NativeOverlayRenderer {
             {
                 return self.fail("Incomplete rectangle input shield coverage");
             }
-            for (window, expected) in self.input_shields.iter().zip(&input_shield_bounds) {
-                let mut rect = RECT::default();
-                let valid_rect = unsafe { GetWindowRect(window.hwnd, &mut rect) }.is_ok();
-                let actual = ScreenRect::new(
-                    rect.left,
-                    rect.top,
-                    (i64::from(rect.right) - i64::from(rect.left)).max(0) as u32,
-                    (i64::from(rect.bottom) - i64::from(rect.top)).max(0) as u32,
-                );
-                let ex = unsafe { GetWindowLongPtrW(window.hwnd, GWL_EXSTYLE) } as u32;
-                if !valid_rect
-                    || !shield_covers_monitor(
-                        *expected,
-                        actual,
-                        unsafe { IsWindowVisible(window.hwnd) }.as_bool(),
-                        ex,
-                    )
-                {
-                    return self.fail("Rectangle input shield coverage acknowledgement failed");
-                }
+            if let Err(error) = self.verify_shield_coverage(&input_shield_bounds, "startup") {
+                return self.fail(error.message);
+            }
+            for window in &self.input_shields {
                 // Discard pre-acknowledgement mouse transactions. No selection is
                 // armed until every monitor is covered and this baseline exists.
                 let mut msg = MSG::default();
@@ -1573,26 +1686,54 @@ mod tests {
     fn rectangle_shield_acknowledgement_rejects_missing_invisible_or_transparent_coverage() {
         let bounds = ScreenRect::new(-1920, -200, 1920, 1080);
         let ex = (WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOPMOST).0;
-        assert!(shield_covers_monitor(bounds, bounds, true, ex));
-        assert!(!shield_covers_monitor(bounds, bounds, false, ex));
-        assert!(!shield_covers_monitor(
-            bounds,
-            ScreenRect::new(0, 0, 1920, 1080),
-            true,
-            ex
-        ));
-        assert!(!shield_covers_monitor(
-            bounds,
-            bounds,
-            true,
-            ex | WS_EX_TRANSPARENT.0
-        ));
-        assert!(!shield_covers_monitor(
-            bounds,
-            bounds,
-            true,
-            ex & !WS_EX_TOPMOST.0
-        ));
+        let mut probe = ShieldProbe {
+            actual: Some(bounds),
+            rect_error: None,
+            visible: true,
+            ex,
+            style_error: None,
+            thread_dpi_context: 0,
+            window_dpi_context: 0,
+            window_dpi: 96,
+        };
+        assert!(probe.failures(bounds).is_empty());
+        probe.visible = false;
+        assert_eq!(probe.failures(bounds), [ShieldFailure::WindowNotVisible]);
+        probe.visible = true;
+        probe.actual = Some(ScreenRect::new(0, 0, 1920, 1080));
+        assert_eq!(probe.failures(bounds), [ShieldFailure::RectMismatch]);
+        probe.actual = None;
+        probe.rect_error = Some(5);
+        assert_eq!(
+            probe.failures(bounds),
+            [ShieldFailure::WindowRectQueryFailed]
+        );
+        probe.actual = Some(bounds);
+        probe.rect_error = None;
+        probe.style_error = Some(5);
+        assert_eq!(probe.failures(bounds), [ShieldFailure::StyleQueryFailed]);
+        probe.style_error = None;
+        for (flag, reason) in [
+            (WS_EX_LAYERED.0, ShieldFailure::LayeredMissing),
+            (WS_EX_NOACTIVATE.0, ShieldFailure::NoactivateMissing),
+            (WS_EX_TOPMOST.0, ShieldFailure::TopmostMissing),
+        ] {
+            probe.ex = ex & !flag;
+            assert_eq!(probe.failures(bounds), [reason]);
+        }
+        probe.ex = ex | WS_EX_TRANSPARENT.0;
+        assert_eq!(
+            probe.failures(bounds),
+            [ShieldFailure::UnexpectedTransparent]
+        );
+        let renderer = NativeOverlayRenderer::default();
+        assert!(
+            renderer
+                .verify_shield_coverage(&[bounds], "test")
+                .unwrap_err()
+                .message
+                .contains("missing shield")
+        );
         assert_eq!(
             full_surface_role(&OverlayVisual::RectanglePicker {
                 virtual_desktop: bounds,
@@ -1695,4 +1836,38 @@ mod rectangle_input_smoke;
 
 pub(super) fn run_rectangle_input_isolation_smoke_test() -> Result<(), VisualOverlayError> {
     rectangle_input_smoke::run()
+}
+
+/// No cursor queries or input injection; exercise the production readiness gate.
+pub(super) fn run_rectangle_shield_probe() -> Result<(), VisualOverlayError> {
+    let bounds = displays()?;
+    let desktop = bounds
+        .first()
+        .copied()
+        .ok_or_else(|| platform("No physical monitor"))?;
+    let visual = OverlayVisual::RectanglePicker {
+        virtual_desktop: desktop,
+        selection: None,
+        tooltip: RectangleTooltip {
+            text: String::new(),
+            pointer: MkPoint {
+                x: desktop.x,
+                y: desktop.y,
+            },
+        },
+    };
+    let mut renderer = NativeOverlayRenderer::default();
+    let result = renderer.show(1, &visual, false);
+    for (monitor, window) in renderer.input_shields.iter().enumerate() {
+        eprintln!(
+            "shield-probe: monitor={} expected={:?} probe={:?}",
+            monitor + 1,
+            window.state.bounds,
+            probe_shield(window.hwnd)
+        );
+    }
+    renderer.close();
+    result?;
+    eprintln!("shield-probe: startup acknowledged; cleanup complete");
+    Ok(())
 }

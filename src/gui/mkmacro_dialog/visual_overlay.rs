@@ -911,6 +911,16 @@ pub fn run_rectangle_input_isolation_smoke_test() -> Result<(), VisualOverlayErr
     Err(VisualOverlayError::unsupported())
 }
 
+/// No-input diagnostic for native rectangle coverage and cleanup.
+#[cfg(windows)]
+pub fn run_rectangle_shield_probe() -> Result<(), VisualOverlayError> {
+    native::run_rectangle_shield_probe()
+}
+#[cfg(not(windows))]
+pub fn run_rectangle_shield_probe() -> Result<(), VisualOverlayError> {
+    Err(VisualOverlayError::unsupported())
+}
+
 /// Platform-neutral description of the pixels a native overlay must produce.
 /// The clear is deliberately first so repainting cannot leave an old drag
 /// rectangle behind.
@@ -2650,6 +2660,35 @@ mod tests {
         wait_until(|| shared.poll_app_exit(false) == Some(true));
         assert_eq!(close_count(&data), 1);
         assert_eq!(shared.poll_app_exit(false), Some(true));
+    }
+
+    #[test]
+    fn rectangle_guard_shield_rejection_cleans_partial_start_and_allows_retry() {
+        let (mut controller, data, _) = controller();
+        let message = "Rectangle input shield monitor 2: window position/size mismatch";
+        data.lock().unwrap().show_error = Some(platform_error(message));
+        let desktop = ScreenRect::new(-1920, -200, 4480, 1440);
+        let failed = controller.begin_rectangle_pick(RectanglePurpose::PinboardCapture, desktop);
+        assert_eq!(controller.state(), &VisualOverlayState::Idle);
+        assert_eq!(controller.operation_id(), None);
+        assert_eq!(controller.virtual_desktop, None);
+        assert_eq!(controller.picker_pointer, None);
+        assert_eq!(close_count(&data), 1);
+        assert!(matches!(controller.drain_events().as_slice(),
+            [VisualOverlayEvent::Error { operation_id, error }]
+                if *operation_id == failed && error.message == message));
+        assert!(advance_and_drain(&mut controller).is_empty());
+        let retry = controller.begin_rectangle_pick(RectanglePurpose::PinboardCapture, desktop);
+        assert_ne!(retry, failed);
+        assert_eq!(controller.operation_id(), Some(retry));
+        assert!(matches!(
+            controller.state(),
+            VisualOverlayState::PickingRectangle {
+                phase: RectangleInteractionPhase::Armed,
+                ..
+            }
+        ));
+        assert!(controller.drain_events().is_empty());
     }
 
     #[test]
