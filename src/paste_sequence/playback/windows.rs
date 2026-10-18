@@ -1,27 +1,24 @@
 use super::{
-    ClipboardRestoreOutcome, ClipboardRestorePlan, ClipboardSnapshot, ClipboardWriteFailure,
-    SequencePlaybackError, SequencePlaybackPlatform, SequenceTarget, TargetObservation,
+    ClipboardWriteFailure, SequencePlaybackError, SequencePlaybackPlatform, SequenceTarget,
+    TargetObservation,
 };
 use crate::mkmacro::input::{LiveInputOptIn, Win32InputBackend};
 use std::ptr;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use windows::Win32::Foundation::{
     ERROR_SUCCESS, GetLastError, GlobalFree, HGLOBAL, HWND, SetLastError,
 };
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
-    GetClipboardSequenceNumber, OpenClipboard, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard, SetClipboardData,
 };
-use windows::Win32::System::Memory::{
-    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
-};
-use windows::Win32::System::Ole::{CF_LOCALE, CF_OEMTEXT, CF_TEXT, CF_UNICODETEXT};
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::UI::WindowsAndMessaging::{
     ES_PASSWORD, GUITHREADINFO, GWL_STYLE, GetForegroundWindow, GetGUIThreadInfo,
     GetWindowLongPtrW, GetWindowThreadProcessId, IsWindow,
 };
 
-const MAX_PRESERVED_TEXT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
 
 pub(crate) struct NativeSequencePlaybackPlatform {
     clipboard_owner: Option<HWND>,
@@ -33,28 +30,6 @@ impl NativeSequencePlaybackPlatform {
         Self {
             clipboard_owner: clipboard_owner_hwnd.map(|hwnd| HWND(hwnd as *mut std::ffi::c_void)),
             input: Win32InputBackend::system(LiveInputOptIn::production()),
-        }
-    }
-
-    /// Called only by the owned shutdown worker while the close-request guard
-    /// retains the viewport/clipboard-owner HWND. Never called on the GUI thread.
-    pub(crate) fn restore_after_shutdown(
-        plan: ClipboardRestorePlan,
-        clipboard_owner_hwnd: Option<usize>,
-    ) -> Result<(), SequencePlaybackError> {
-        let ClipboardRestorePlan {
-            due,
-            expected_sequence,
-            original,
-        } = plan;
-        let remaining = due.saturating_duration_since(Instant::now());
-        if !remaining.is_zero() {
-            std::thread::sleep(remaining);
-        }
-        let mut platform = Self::new(clipboard_owner_hwnd);
-        match platform.restore_clipboard_if_owned(expected_sequence, &original) {
-            ClipboardRestoreOutcome::Restored | ClipboardRestoreOutcome::OwnershipLost => Ok(()),
-            ClipboardRestoreOutcome::Failed => Err(SequencePlaybackError::ClipboardRestoreFailed),
         }
     }
 
@@ -78,46 +53,13 @@ impl SequencePlaybackPlatform for NativeSequencePlaybackPlatform {
         Instant::now()
     }
 
-    fn capture_clipboard(&mut self) -> Result<ClipboardSnapshot, SequencePlaybackError> {
+    fn clipboard_revision(&mut self) -> Result<u32, SequencePlaybackError> {
         let _clipboard = self.open_clipboard()?;
-        let sequence_number = unsafe { GetClipboardSequenceNumber() };
-        if sequence_number == 0 {
+        let revision = unsafe { GetClipboardSequenceNumber() };
+        if revision == 0 {
             return Err(SequencePlaybackError::ClipboardUnavailable);
         }
-
-        let mut current = 0;
-        let mut has_unicode_text = false;
-        loop {
-            unsafe { SetLastError(ERROR_SUCCESS) };
-            let next = unsafe { EnumClipboardFormats(current) };
-            if next == 0 {
-                let error = unsafe { GetLastError() };
-                if error != ERROR_SUCCESS {
-                    return Err(SequencePlaybackError::ClipboardUnavailable);
-                }
-                break;
-            }
-            current = next;
-            match next {
-                format if format == u32::from(CF_UNICODETEXT.0) => has_unicode_text = true,
-                format
-                    if format == u32::from(CF_TEXT.0)
-                        || format == u32::from(CF_OEMTEXT.0)
-                        || format == u32::from(CF_LOCALE.0) => {}
-                _ => return Err(SequencePlaybackError::UnsupportedClipboard),
-            }
-        }
-
-        let text = if has_unicode_text {
-            Some(read_unicode_text()?)
-        } else if current == 0 {
-            None
-        } else {
-            // CF_TEXT-only clipboard data can depend on a code page. Refuse it
-            // rather than silently changing bytes when restoring as Unicode.
-            return Err(SequencePlaybackError::UnsupportedClipboard);
-        };
-        Ok(ClipboardSnapshot::new(sequence_number, text))
+        Ok(revision)
     }
 
     fn observe_target(&mut self, target: &SequenceTarget) -> TargetObservation {
@@ -210,9 +152,8 @@ impl SequencePlaybackPlatform for NativeSequencePlaybackPlatform {
                 }
             }
             Err(()) => {
-                // We still own the clipboard lock. Restore the previously
-                // observed text (or emptiness) before releasing it, then return
-                // the resulting sequence number for conditional final cleanup.
+                // We still own the clipboard lock. Roll back only sequence-authored
+                // text. The pre-run payload is intentionally never captured.
                 if let Some(previous) = rollback_text {
                     let _ = write_unicode_text(previous);
                 }
@@ -231,33 +172,6 @@ impl SequencePlaybackPlatform for NativeSequencePlaybackPlatform {
             && self.open_clipboard().is_ok_and(|_clipboard| {
                 (unsafe { GetClipboardSequenceNumber() }) == expected_sequence
             })
-    }
-
-    fn restore_clipboard_if_owned(
-        &mut self,
-        expected_sequence: u32,
-        original: &ClipboardSnapshot,
-    ) -> ClipboardRestoreOutcome {
-        if expected_sequence == 0 {
-            return ClipboardRestoreOutcome::OwnershipLost;
-        }
-        let Ok(_clipboard) = self.open_clipboard() else {
-            return ClipboardRestoreOutcome::Failed;
-        };
-        if unsafe { GetClipboardSequenceNumber() } != expected_sequence {
-            return ClipboardRestoreOutcome::OwnershipLost;
-        }
-        if unsafe { EmptyClipboard() }.is_err() {
-            return ClipboardRestoreOutcome::Failed;
-        }
-        if original
-            .text
-            .as_deref()
-            .is_some_and(|text| write_unicode_text(text).is_err())
-        {
-            return ClipboardRestoreOutcome::Failed;
-        }
-        ClipboardRestoreOutcome::Restored
     }
 
     fn paste_chord(&mut self) -> Result<(), SequencePlaybackError> {
@@ -295,43 +209,11 @@ impl Drop for ClipboardGuard {
     }
 }
 
-struct GlobalLockGuard(HGLOBAL);
-
-impl Drop for GlobalLockGuard {
-    fn drop(&mut self) {
-        let _ = unsafe { GlobalUnlock(self.0) };
-    }
-}
-
-fn read_unicode_text() -> Result<String, SequencePlaybackError> {
-    let data = unsafe { GetClipboardData(u32::from(CF_UNICODETEXT.0)) }
-        .map_err(|_| SequencePlaybackError::UnsupportedClipboard)?;
-    let memory = HGLOBAL(data.0);
-    let size = unsafe { GlobalSize(memory) };
-    if size < std::mem::size_of::<u16>() || size > MAX_PRESERVED_TEXT_BYTES {
-        return Err(SequencePlaybackError::UnsupportedClipboard);
-    }
-    let pointer = unsafe { GlobalLock(memory) }.cast::<u16>();
-    if pointer.is_null() {
-        return Err(SequencePlaybackError::ClipboardUnavailable);
-    }
-    let _locked = GlobalLockGuard(memory);
-    let length = size / std::mem::size_of::<u16>();
-    // SAFETY: GlobalSize bounds the locked HGLOBAL and the pointer is valid
-    // until GlobalUnlock in the guard's Drop.
-    let units = unsafe { std::slice::from_raw_parts(pointer, length) };
-    let end = units
-        .iter()
-        .position(|unit| *unit == 0)
-        .ok_or(SequencePlaybackError::UnsupportedClipboard)?;
-    String::from_utf16(&units[..end]).map_err(|_| SequencePlaybackError::UnsupportedClipboard)
-}
-
 fn write_unicode_text(text: &str) -> Result<(), ()> {
     let mut units = text.encode_utf16().collect::<Vec<_>>();
     units.push(0);
     let byte_count = units.len().saturating_mul(std::mem::size_of::<u16>());
-    if byte_count > MAX_PRESERVED_TEXT_BYTES {
+    if byte_count > MAX_TEXT_BYTES {
         return Err(());
     }
     let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, byte_count) }.map_err(|_| ())?;

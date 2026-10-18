@@ -4827,36 +4827,11 @@ impl LauncherApp {
             self.sequence_exit_requested = true;
             crate::paste_sequence::admission::physical_paste_bridge()
                 .invalidate_owner(self.event_sink.owner_id());
-            if let Some(plan) = self
-                .sequence_playback
-                .take_shutdown_restore_plan(std::time::Instant::now())
-            {
-                let wake = ctx.clone();
-                match crate::paste_sequence::SequenceShutdownCleanup::begin(
-                    plan,
-                    self.launcher_hwnd,
-                    move || wake.request_repaint(),
-                ) {
-                    Ok(cleanup) => self.sequence_shutdown = Some(cleanup),
-                    Err(error) => {
-                        self.report_error_message("paste_sequence.shutdown", error.message())
-                    }
-                }
-            }
+            self.sequence_playback.cancel(std::time::Instant::now());
         }
         let overlay = self.mkmacro_dialog.visual_overlay.poll_app_exit(requested);
-        if let Some(result) = self
-            .sequence_shutdown
-            .as_mut()
-            .and_then(|cleanup| cleanup.poll())
-        {
-            self.sequence_shutdown = None;
-            if let Err(error) = result {
-                self.report_error_message("paste_sequence.shutdown", error.message());
-            }
-        }
         if self.sequence_exit_requested || overlay.is_some() {
-            let ready = overlay.unwrap_or(true) && self.sequence_shutdown.is_none();
+            let ready = overlay.unwrap_or(true);
             ctx.send_viewport_cmd(if ready {
                 egui::ViewportCommand::Close
             } else {
@@ -4908,26 +4883,7 @@ impl eframe::App for LauncherApp {
         self.hash_generator_dialog.shutdown();
         self.shutdown_batch_rename_scanner();
         self.shutdown_search_replace_runtime();
-        if let Some(plan) = self
-            .sequence_playback
-            .take_shutdown_restore_plan(std::time::Instant::now())
-        {
-            // Normal Close has already completed this work with the HWND alive.
-            // An unexpected forced exit must neither join on the GUI thread nor
-            // silently drop the pending owned cleanup operation.
-            tracing::warn!("paste-sequence exit bypassed the close-request cleanup guard");
-            match crate::paste_sequence::SequenceShutdownCleanup::begin(
-                plan,
-                self.launcher_hwnd,
-                || {},
-            ) {
-                Ok(cleanup) => self.sequence_shutdown = Some(cleanup),
-                Err(error) => tracing::warn!(
-                    reason = error.message(),
-                    "paste-sequence fallback cleanup could not start"
-                ),
-            }
-        }
+        self.sequence_playback.cancel(std::time::Instant::now());
         if let Err(error) = self.shutdown_indexing() {
             self.report_error_message("index.shutdown", error.to_string());
         }
@@ -5740,61 +5696,20 @@ impl LauncherApp {
 mod tests {
     use super::*;
     #[test]
-    fn paste_to_advance_close_guard_keeps_viewport_until_owned_cleanup_finishes() {
+    fn paste_to_advance_close_guard_has_no_clipboard_restore_job() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let mut app = crate::gui::command_host::tests::inert_test_app(root.path());
         let ctx = app.egui_ctx.clone();
-        let (release, wait) = std::sync::mpsc::channel();
-        let (done, observed) = std::sync::mpsc::channel();
         app.sequence_exit_requested = true;
-        app.sequence_shutdown = Some(crate::paste_sequence::SequenceShutdownCleanup::test_worker(
-            move || {
-                wait.recv().unwrap();
-                done.send(()).unwrap();
-                Ok(())
-            },
-        ));
-        let mut blocked = ctx.run_ui(egui::RawInput::default(), |_| {
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {
             app.guard_overlay_app_exit(&ctx)
         });
         assert!(
-            blocked.viewport_output[&egui::ViewportId::ROOT]
-                .commands
-                .iter()
-                .any(|command| matches!(command, egui::ViewportCommand::CancelClose))
-        );
-        assert!(app.sequence_shutdown.is_some());
-        blocked.textures_delta.clear();
-        release.send(()).unwrap();
-        observed.recv().unwrap();
-        // Completion is a native worker signal, not a sleep or an input event.
-        let ready = loop {
-            let mut output = ctx.run_ui(egui::RawInput::default(), |_| {
-                app.guard_overlay_app_exit(&ctx)
-            });
-            output.textures_delta.clear();
-            if app.sequence_shutdown.is_none() {
-                break output;
-            }
-            assert!(
-                output.viewport_output[&egui::ViewportId::ROOT]
-                    .commands
-                    .iter()
-                    .any(|command| matches!(command, egui::ViewportCommand::CancelClose))
-            );
-            std::thread::yield_now();
-        };
-        assert!(
-            ready.viewport_output[&egui::ViewportId::ROOT]
+            output.viewport_output[&egui::ViewportId::ROOT]
                 .commands
                 .iter()
                 .any(|command| matches!(command, egui::ViewportCommand::Close))
-        );
-        assert!(
-            app.sequence_playback
-                .take_shutdown_restore_plan(std::time::Instant::now())
-                .is_none()
         );
     }
     use crate::{

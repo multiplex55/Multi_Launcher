@@ -2076,17 +2076,11 @@ pub(in crate::gui) mod tests {
         fn now(&mut self) -> std::time::Instant {
             self.now
         }
-        fn capture_clipboard(
+        fn clipboard_revision(
             &mut self,
-        ) -> Result<
-            crate::paste_sequence::ClipboardSnapshot,
-            crate::paste_sequence::SequencePlaybackError,
-        > {
+        ) -> Result<u32, crate::paste_sequence::SequencePlaybackError> {
             self.captures += 1;
-            Ok(crate::paste_sequence::ClipboardSnapshot::new(
-                self.sequence,
-                Some(self.text.clone()),
-            ))
+            Ok(self.sequence)
         }
         fn current_target(
             &mut self,
@@ -2130,18 +2124,6 @@ pub(in crate::gui) mod tests {
         }
         fn clipboard_sequence_matches(&mut self, expected: u32) -> bool {
             self.sequence == expected
-        }
-        fn restore_clipboard_if_owned(
-            &mut self,
-            expected: u32,
-            _: &crate::paste_sequence::ClipboardSnapshot,
-        ) -> crate::paste_sequence::ClipboardRestoreOutcome {
-            if expected != self.sequence {
-                return crate::paste_sequence::ClipboardRestoreOutcome::OwnershipLost;
-            }
-            self.sequence += 1;
-            self.text = "original".into();
-            crate::paste_sequence::ClipboardRestoreOutcome::Restored
         }
         fn paste_chord(&mut self) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
             self.pastes += 1;
@@ -3045,7 +3027,7 @@ pub(in crate::gui) mod tests {
         platform.now += std::time::Duration::from_millis(180);
         let now = platform.now;
         app.sequence_playback.tick(&mut platform, now);
-        assert_eq!(platform.text, "original");
+        assert_eq!(platform.text, "One-off \u{1f30c}\nsecond line");
         assert_eq!(std::fs::read(store.path()).unwrap(), saved_bytes);
         assert_eq!(std::fs::read(&app.settings_path).unwrap(), settings_bytes);
     }
@@ -3154,7 +3136,7 @@ pub(in crate::gui) mod tests {
         let now = platform.now;
         app.sequence_playback.tick(&mut platform, now);
         assert_eq!(platform.pastes, 2);
-        assert_eq!(platform.text, "original");
+        assert_eq!(platform.text, "two");
         let mut restart = SequenceDraft::new(
             "Restart",
             vec![Step::LiteralText {
@@ -3193,7 +3175,7 @@ pub(in crate::gui) mod tests {
             );
             assert_eq!(app.sequence_playback.status(), Status::Failed(refusal));
             assert_eq!(platform.pastes, 3);
-            assert_eq!(platform.text, "original");
+            assert_eq!(platform.text, "restart");
         }
         assert_eq!(std::fs::read(store.path()).unwrap(), saved_bytes);
         assert_eq!(std::fs::read(&app.settings_path).unwrap(), settings_bytes);

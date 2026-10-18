@@ -14,13 +14,11 @@ pub(crate) enum SequencePlaybackError {
     InvalidState,
     TooSoon,
     ClipboardUnavailable,
-    UnsupportedClipboard,
     InvalidTarget,
     FocusChanged,
     PasswordField,
     ClipboardChanged,
     ClipboardWriteFailed,
-    ClipboardRestoreFailed,
     InputRejected,
     ObserverUnavailable,
     RouteConflict,
@@ -32,9 +30,8 @@ impl SequencePlaybackError {
             Self::Busy => "Another paste sequence is already active.",
             Self::InvalidState => "The paste sequence is not ready for that action.",
             Self::TooSoon => "Wait for the current clipboard step before advancing.",
-            Self::ClipboardUnavailable => "The clipboard could not be captured or opened.",
-            Self::UnsupportedClipboard => {
-                "The current clipboard contains data that cannot be safely preserved."
+            Self::ClipboardUnavailable => {
+                "The clipboard revision could not be read or the clipboard opened."
             }
             Self::InvalidTarget => "The current destination window is no longer valid.",
             Self::FocusChanged => {
@@ -45,7 +42,6 @@ impl SequencePlaybackError {
                 "The clipboard changed during playback; remaining steps were stopped."
             }
             Self::ClipboardWriteFailed => "Sequence text could not be published to the clipboard.",
-            Self::ClipboardRestoreFailed => "The original clipboard could not be restored.",
             Self::InputRejected => "The paste keystroke was rejected by Windows.",
             Self::RouteConflict => {
                 "Paste-to-Advance cannot start because Ctrl+V ownership is unavailable; see active shortcut details."
@@ -71,31 +67,6 @@ pub(crate) enum SequencePlaybackStatus {
     Failed(SequencePlaybackError),
 }
 
-#[derive(Clone)]
-pub(crate) struct ClipboardSnapshot {
-    sequence_number: u32,
-    text: Option<String>,
-}
-
-impl ClipboardSnapshot {
-    pub(crate) fn new(sequence_number: u32, text: Option<String>) -> Self {
-        Self {
-            sequence_number,
-            text,
-        }
-    }
-}
-
-impl std::fmt::Debug for ClipboardSnapshot {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ClipboardSnapshot")
-            .field("sequence_available", &(self.sequence_number != 0))
-            .field("text_available", &self.text.is_some())
-            .finish()
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TargetObservation {
     Target { password_control: bool },
@@ -107,16 +78,8 @@ pub(crate) enum TargetObservation {
 
 pub(crate) struct ClipboardWriteFailure {
     pub(crate) error: SequencePlaybackError,
-    /// The clipboard sequence number after this process changed it. Cleanup
-    /// can still restore the captured value when an in-lock rollback failed.
+    /// Revision after a partial publication, used only for the consumption cooldown.
     pub(crate) owned_sequence: Option<u32>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ClipboardRestoreOutcome {
-    Restored,
-    OwnershipLost,
-    Failed,
 }
 
 /// Minimal platform boundary for the playback state machine. Tests supply a
@@ -126,7 +89,7 @@ pub(crate) trait SequencePlaybackPlatform {
         true
     }
     fn now(&mut self) -> Instant;
-    fn capture_clipboard(&mut self) -> Result<ClipboardSnapshot, SequencePlaybackError>;
+    fn clipboard_revision(&mut self) -> Result<u32, SequencePlaybackError>;
     fn observe_target(&mut self, target: &SequenceTarget) -> TargetObservation;
     /// Capture the actual foreground identity without reading its title.
     fn current_target(&mut self) -> Result<SequenceTarget, SequencePlaybackError>;
@@ -137,11 +100,6 @@ pub(crate) trait SequencePlaybackPlatform {
         text: &str,
     ) -> Result<u32, ClipboardWriteFailure>;
     fn clipboard_sequence_matches(&mut self, expected_sequence: u32) -> bool;
-    fn restore_clipboard_if_owned(
-        &mut self,
-        expected_sequence: u32,
-        original: &ClipboardSnapshot,
-    ) -> ClipboardRestoreOutcome;
     fn paste_chord(&mut self) -> Result<(), SequencePlaybackError>;
 }
 
@@ -151,7 +109,7 @@ struct PlaybackSession {
     generation: u64,
     run: PreparedSequenceRun,
     next_step: usize,
-    original_clipboard: ClipboardSnapshot,
+    initial_clipboard_revision: u32,
     last_clipboard_sequence: Option<u32>,
     last_clipboard_text: Option<String>,
     last_paste_at: Option<Instant>,
@@ -360,8 +318,8 @@ impl SequencePlaybackController {
             self.status = SequencePlaybackStatus::Failed(SequencePlaybackError::InvalidState);
             return Err(SequencePlaybackError::InvalidState);
         };
-        let original_clipboard = match platform.capture_clipboard() {
-            Ok(snapshot) if snapshot.sequence_number != 0 => snapshot,
+        let initial_clipboard_revision = match platform.clipboard_revision() {
+            Ok(revision) if revision != 0 => revision,
             Ok(_) | Err(SequencePlaybackError::ClipboardUnavailable) => {
                 self.status =
                     SequencePlaybackStatus::Failed(SequencePlaybackError::ClipboardUnavailable);
@@ -379,7 +337,7 @@ impl SequencePlaybackController {
             generation: self.generation,
             run,
             next_step: 0,
-            original_clipboard,
+            initial_clipboard_revision,
             last_clipboard_sequence: None,
             last_clipboard_text: None,
             last_paste_at: None,
@@ -537,7 +495,7 @@ impl SequencePlaybackController {
             .and_then(|session| session.cleanup_at)
             .is_some_and(|deadline| deadline <= now)
         {
-            self.cleanup(platform);
+            self.cleanup();
         }
         if self.status == SequencePlaybackStatus::Cancelled
             && self.session.as_ref().is_some_and(|session| {
@@ -567,25 +525,6 @@ impl SequencePlaybackController {
             .flatten()
             .min()?;
         Some(deadline.saturating_duration_since(now))
-    }
-
-    /// Stop future steps and extract the one pending conditional restore for
-    /// shutdown. The close-request guard polls the owned cleanup worker and
-    /// keeps the clipboard-owner viewport alive until that work completes.
-    pub(crate) fn take_shutdown_restore_plan(
-        &mut self,
-        now: Instant,
-    ) -> Option<ClipboardRestorePlan> {
-        self.cancel(now);
-        let session = self.session.take()?;
-        let expected_sequence = session.last_clipboard_sequence?;
-        Some(ClipboardRestorePlan {
-            due: session
-                .cleanup_at
-                .unwrap_or_else(|| Self::safe_cleanup_deadline(&session, now)),
-            expected_sequence,
-            original: session.original_clipboard,
-        })
     }
 
     fn paste_next_step(
@@ -716,11 +655,8 @@ impl SequencePlaybackController {
             (
                 session
                     .last_clipboard_sequence
-                    .unwrap_or(session.original_clipboard.sequence_number),
-                session
-                    .last_clipboard_text
-                    .clone()
-                    .or_else(|| session.original_clipboard.text.clone()),
+                    .unwrap_or(session.initial_clipboard_revision),
+                session.last_clipboard_text.clone(),
                 text,
             )
         };
@@ -916,137 +852,17 @@ impl SequencePlaybackController {
             .unwrap_or(now + CLIPBOARD_CONSUMPTION_SETTLE)
     }
 
-    fn cleanup(&mut self, platform: &mut impl SequencePlaybackPlatform) {
-        let Some(session) = self.session.as_ref() else {
-            return;
-        };
-        let outcome = session.last_clipboard_sequence.map(|sequence| {
-            platform.restore_clipboard_if_owned(sequence, &session.original_clipboard)
-        });
-        if outcome == Some(ClipboardRestoreOutcome::Failed)
-            && !matches!(self.status, SequencePlaybackStatus::Failed(_))
-        {
-            self.status =
-                SequencePlaybackStatus::Failed(SequencePlaybackError::ClipboardRestoreFailed);
-        }
+    // Keep the consumption cooldown, but never mutate the clipboard on cleanup.
+    fn cleanup(&mut self) {
         self.session = None;
-    }
-}
-
-/// Payload-bearing state used only to finish one final conditional clipboard
-/// restore after the GUI begins shutting down. Debug output remains redacted.
-pub(crate) struct ClipboardRestorePlan {
-    due: Instant,
-    expected_sequence: u32,
-    original: ClipboardSnapshot,
-}
-
-impl std::fmt::Debug for ClipboardRestorePlan {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ClipboardRestorePlan")
-            .field("due", &self.due)
-            .field("sequence_available", &(self.expected_sequence != 0))
-            .field("original", &self.original)
-            .finish()
-    }
-}
-
-/// Close-request owner: the viewport remains alive until this worker completes.
-/// Polling joins only an already-finished thread; unexpected teardown transfers
-/// its handle to the existing bounded completion reaper.
-pub(crate) struct SequenceShutdownCleanup {
-    worker: Option<std::thread::JoinHandle<()>>,
-    result: std::sync::mpsc::Receiver<Result<(), SequencePlaybackError>>,
-    reaper: Option<crate::thread_reaper::ReapPermit>,
-}
-
-impl SequenceShutdownCleanup {
-    #[cfg(test)]
-    pub(crate) fn test_worker(
-        work: impl FnOnce() -> Result<(), SequencePlaybackError> + Send + 'static,
-    ) -> Self {
-        Self::spawn(work, || {}).unwrap()
-    }
-    pub(crate) fn begin(
-        plan: ClipboardRestorePlan,
-        hwnd: Option<usize>,
-        wake: impl FnOnce() + Send + 'static,
-    ) -> Result<Self, SequencePlaybackError> {
-        Self::spawn(
-            move || NativeSequencePlaybackPlatform::restore_after_shutdown(plan, hwnd),
-            wake,
-        )
-    }
-
-    fn spawn(
-        work: impl FnOnce() -> Result<(), SequencePlaybackError> + Send + 'static,
-        wake: impl FnOnce() + Send + 'static,
-    ) -> Result<Self, SequencePlaybackError> {
-        let reaper = crate::thread_reaper::reserve()
-            .map_err(|_| SequencePlaybackError::ClipboardRestoreFailed)?;
-        let notifier = reaper.completion_notifier();
-        let (tx, result) = std::sync::mpsc::sync_channel(1);
-        let worker = std::thread::Builder::new()
-            .name("paste-sequence-clipboard-cleanup".into())
-            .spawn(move || {
-                let _completion = notifier;
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
-                    .unwrap_or(Err(SequencePlaybackError::ClipboardRestoreFailed));
-                if let Err(error) = outcome {
-                    tracing::warn!(
-                        reason = error.message(),
-                        "paste-sequence shutdown cleanup failed"
-                    );
-                }
-                let _ = tx.send(outcome);
-                wake();
-            })
-            .map_err(|_| SequencePlaybackError::ClipboardRestoreFailed)?;
-        Ok(Self {
-            worker: Some(worker),
-            result,
-            reaper: Some(reaper),
-        })
-    }
-
-    pub(crate) fn poll(&mut self) -> Option<Result<(), SequencePlaybackError>> {
-        if !self.worker.as_ref()?.is_finished() {
-            return None;
-        }
-        let result = self
-            .result
-            .try_recv()
-            .unwrap_or(Err(SequencePlaybackError::ClipboardRestoreFailed));
-        if self
-            .worker
-            .take()
-            .is_some_and(|worker| worker.join().is_err())
-        {
-            return Some(Err(SequencePlaybackError::ClipboardRestoreFailed));
-        }
-        self.reaper.take();
-        Some(result)
-    }
-}
-
-impl Drop for SequenceShutdownCleanup {
-    fn drop(&mut self) {
-        if let Some(worker) = self.worker.take()
-            && let Some(reaper) = self.reaper.take()
-            && let Err(error) = reaper.reap(worker)
-        {
-            tracing::warn!(%error, "paste-sequence cleanup completion owner could not be supervised");
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ClipboardRestoreOutcome, ClipboardSnapshot, ClipboardWriteFailure,
-        SequencePlaybackController, SequencePlaybackError, SequencePlaybackPlatform,
-        SequencePlaybackStatus, TargetObservation,
+        ClipboardWriteFailure, SequencePlaybackController, SequencePlaybackError,
+        SequencePlaybackPlatform, SequencePlaybackStatus, TargetObservation,
     };
     use crate::active_window::ExternalForegroundWindow;
     use crate::paste_sequence::{
@@ -1064,8 +880,6 @@ mod tests {
         Publish,
         CheckSequence,
         Paste,
-        Restore,
-        RestoreSkipped,
     }
 
     struct FakePlatform {
@@ -1161,15 +975,12 @@ mod tests {
             self.clock
         }
 
-        fn capture_clipboard(&mut self) -> Result<ClipboardSnapshot, SequencePlaybackError> {
+        fn clipboard_revision(&mut self) -> Result<u32, SequencePlaybackError> {
             self.events.push(Event::Capture);
             if let Some(error) = self.capture_error {
                 return Err(error);
             }
-            Ok(ClipboardSnapshot::new(
-                self.sequence,
-                self.clipboard.clone(),
-            ))
+            Ok(self.sequence)
         }
 
         fn observe_target(&mut self, expected: &SequenceTarget) -> TargetObservation {
@@ -1255,21 +1066,6 @@ mod tests {
                 self.foreground = target;
             }
             self.sequence == expected_sequence
-        }
-
-        fn restore_clipboard_if_owned(
-            &mut self,
-            expected_sequence: u32,
-            original: &ClipboardSnapshot,
-        ) -> ClipboardRestoreOutcome {
-            if self.sequence != expected_sequence {
-                self.events.push(Event::RestoreSkipped);
-                return ClipboardRestoreOutcome::OwnershipLost;
-            }
-            self.events.push(Event::Restore);
-            self.sequence += 1;
-            self.clipboard = original.text.clone();
-            ClipboardRestoreOutcome::Restored
         }
 
         fn paste_chord(&mut self) -> Result<(), SequencePlaybackError> {
@@ -1550,11 +1346,7 @@ mod tests {
         assert_eq!(platform.pasted_targets, vec![10, 40, 40]);
         assert_eq!(platform.paste_count(), 3);
         assert_eq!(platform.clipboard.as_deref(), Some("Step 3"));
-        assert!(
-            controller
-                .take_shutdown_restore_plan(platform.clock)
-                .is_none()
-        );
+        assert!(controller.session.is_none());
         assert!(!physical_event(
             &mut reducer,
             &bridge,
@@ -1590,7 +1382,14 @@ mod tests {
             assert_eq!(platform.publication_count(), usize::from(boundary != 0));
             let at = platform.clock + Duration::from_millis(180);
             tick(&mut controller, &mut platform, at);
-            assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
+            assert_eq!(
+                platform.clipboard.as_deref(),
+                if boundary == 0 {
+                    Some("user clipboard")
+                } else {
+                    Some("Step 1")
+                }
+            );
             assert!(!controller.needs_tick());
         }
     }
@@ -1663,7 +1462,7 @@ mod tests {
                 &mut platform,
                 at + Duration::from_millis(180),
             );
-            assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
+            assert_eq!(platform.clipboard.as_deref(), Some("Step 1"));
             assert!(!controller.needs_tick());
         }
         let (mut controller, mut platform, bridge, mut reducer, _wake) = physical_fixture();
@@ -1675,7 +1474,7 @@ mod tests {
         );
         let at = platform.clock + Duration::from_millis(180);
         tick(&mut controller, &mut platform, at);
-        assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
+        assert_eq!(platform.clipboard, None);
     }
 
     #[test]
@@ -1761,7 +1560,7 @@ mod tests {
             );
             let at = platform.clock + Duration::from_millis(180);
             tick(&mut controller, &mut platform, at);
-            assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
+            assert_eq!(platform.clipboard.as_deref(), Some("one"));
             assert!(!controller.needs_tick());
         }
     }
@@ -1906,11 +1705,7 @@ mod tests {
                     .is_err()
             );
             assert_eq!(platform.paste_count(), 0);
-            assert!(
-                controller
-                    .take_shutdown_restore_plan(platform.clock)
-                    .is_none()
-            );
+            assert!(controller.session.is_none());
             platform.external_copy("external after unknown publication");
             let at = platform.clock + Duration::from_millis(500);
             tick(&mut controller, &mut platform, at);
@@ -1918,40 +1713,14 @@ mod tests {
                 platform.clipboard.as_deref(),
                 Some("external after unknown publication")
             );
-            assert!(!platform.events.contains(&Event::Restore));
+            assert!(!controller.needs_tick());
         }
     }
 
     #[test]
-    fn paste_to_advance_checked_arm_and_shutdown_completion_owner_are_nonblocking() {
+    fn paste_to_advance_checked_arm_rejects_unavailable_observer() {
         let bridge = crate::paste_sequence::admission::PasteAdmissionBridge::default();
         assert!(bridge.arm(4, 7).is_err());
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let (woke_tx, woke_rx) = std::sync::mpsc::channel();
-        let mut cleanup = super::SequenceShutdownCleanup::spawn(
-            move || {
-                release_rx.recv().unwrap();
-                Ok(())
-            },
-            move || {
-                woke_tx.send(()).unwrap();
-            },
-        )
-        .unwrap();
-        assert!(
-            cleanup.poll().is_none(),
-            "pending cleanup never joins/waits on caller"
-        );
-        release_tx.send(()).unwrap();
-        woke_rx.recv().unwrap();
-        while cleanup
-            .worker
-            .as_ref()
-            .is_some_and(|worker| !worker.is_finished())
-        {
-            std::thread::yield_now();
-        }
-        assert_eq!(cleanup.poll(), Some(Ok(())));
     }
 
     #[test]
@@ -2092,58 +1861,39 @@ mod tests {
                 &mut platform,
                 start + Duration::from_millis(1_005),
             );
-            assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
+            assert_eq!(platform.clipboard.as_deref(), Some(expected[3]));
         }
     }
 
     #[test]
-    fn shutdown_restore_plan_restores_only_if_sequence_still_owns_clipboard() {
-        let start = Instant::now();
-        let mut controller = ready_controller(prepared_run(
-            PlaybackMode::ManualAdvance,
-            0,
-            &["sequence text", "not pasted after shutdown"],
-        ));
-        let mut platform = FakePlatform::at(start);
-        controller.start(&mut platform).unwrap();
-        assert_eq!(platform.clipboard.as_deref(), Some("sequence text"));
-
-        let plan = controller
-            .take_shutdown_restore_plan(start + Duration::from_millis(40))
-            .expect("shutdown must retain one conditional restore");
-        assert!(plan.due >= start + Duration::from_millis(180));
-        assert_eq!(controller.status(), SequencePlaybackStatus::Cancelled);
-        assert_eq!(platform.paste_count(), 1);
-        assert_eq!(
-            platform.restore_clipboard_if_owned(plan.expected_sequence, &plan.original),
-            ClipboardRestoreOutcome::Restored
-        );
-        assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
-
-        let mut interrupted = ready_controller(prepared_run(
-            PlaybackMode::ManualAdvance,
-            0,
-            &["sequence text", "not pasted after shutdown"],
-        ));
-        let mut interrupted_platform = FakePlatform::at(start);
-        interrupted.start(&mut interrupted_platform).unwrap();
-        let plan = interrupted
-            .take_shutdown_restore_plan(start + Duration::from_millis(40))
-            .unwrap();
-        interrupted_platform.external_copy("user replacement");
-        assert_eq!(
-            interrupted_platform.restore_clipboard_if_owned(plan.expected_sequence, &plan.original),
-            ClipboardRestoreOutcome::OwnershipLost
-        );
-        assert_eq!(
-            interrupted_platform.clipboard.as_deref(),
-            Some("user replacement")
-        );
-        assert_eq!(interrupted_platform.paste_count(), 1);
+    fn shutdown_cancellation_leaves_latest_clipboard_untouched() {
+        for external in [false, true] {
+            let start = Instant::now();
+            let mut controller = ready_controller(prepared_run(
+                PlaybackMode::ManualAdvance,
+                0,
+                &["sequence text", "never"],
+            ));
+            let mut platform = FakePlatform::at(start);
+            controller.start(&mut platform).unwrap();
+            if external {
+                platform.external_copy("new user data");
+            }
+            let expected = platform.clipboard.clone();
+            controller.cancel(start);
+            tick(
+                &mut controller,
+                &mut platform,
+                start + Duration::from_secs(1),
+            );
+            assert_eq!(platform.clipboard, expected);
+            assert_eq!(platform.paste_count(), 1);
+            assert!(!controller.needs_tick());
+        }
     }
 
     #[test]
-    fn automatic_playback_obeys_deadlines_and_restores_owned_clipboard_once() {
+    fn automatic_playback_obeys_deadlines_and_retains_final_text() {
         let start = Instant::now();
         let mut controller = ready_controller(prepared_run(
             PlaybackMode::Automatic,
@@ -2186,28 +1936,14 @@ mod tests {
             &mut platform,
             start + Duration::from_millis(360),
         );
-        assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
-        assert_eq!(
-            platform
-                .events
-                .iter()
-                .filter(|event| **event == Event::Restore)
-                .count(),
-            1
-        );
+        assert_eq!(platform.clipboard.as_deref(), Some("second"));
+        assert!(!controller.needs_tick());
         tick(
             &mut controller,
             &mut platform,
             start + Duration::from_secs(1),
         );
-        assert_eq!(
-            platform
-                .events
-                .iter()
-                .filter(|event| **event == Event::Restore)
-                .count(),
-            1
-        );
+        assert!(!controller.needs_tick());
     }
 
     #[test]
@@ -2251,7 +1987,7 @@ mod tests {
             &mut platform,
             start + Duration::from_millis(600),
         );
-        assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
+        assert_eq!(platform.clipboard.as_deref(), Some("second"));
     }
 
     #[test]
@@ -2309,7 +2045,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_stops_future_steps_and_defers_conditional_restore() {
+    fn cancellation_stops_future_steps_and_retains_last_text() {
         let start = Instant::now();
         let mut controller = ready_controller(prepared_run(
             PlaybackMode::Automatic,
@@ -2338,7 +2074,7 @@ mod tests {
             &mut platform,
             start + Duration::from_millis(180),
         );
-        assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
+        assert_eq!(platform.clipboard.as_deref(), Some("first"));
         assert_eq!(controller.status(), SequencePlaybackStatus::Cancelled);
     }
 
@@ -2412,14 +2148,7 @@ mod tests {
             start + Duration::from_secs(2),
         );
         assert_eq!(platform.clipboard.as_deref(), Some("same"));
-        assert_eq!(
-            platform
-                .events
-                .iter()
-                .filter(|event| **event == Event::RestoreSkipped)
-                .count(),
-            1
-        );
+        assert!(!controller.needs_tick());
         assert_eq!(platform.paste_count(), 1);
     }
 
@@ -2428,10 +2157,10 @@ mod tests {
         let start = Instant::now();
         let mut unavailable = ready_controller(prepared_run(PlaybackMode::Automatic, 0, &["one"]));
         let mut unavailable_platform = FakePlatform::at(start);
-        unavailable_platform.capture_error = Some(SequencePlaybackError::UnsupportedClipboard);
+        unavailable_platform.capture_error = Some(SequencePlaybackError::ClipboardUnavailable);
         assert_eq!(
             unavailable.start(&mut unavailable_platform),
-            Err(SequencePlaybackError::UnsupportedClipboard)
+            Err(SequencePlaybackError::ClipboardUnavailable)
         );
         assert_eq!(unavailable_platform.publication_count(), 0);
 
@@ -2453,20 +2182,13 @@ mod tests {
             &mut input_platform,
             start + Duration::from_millis(180),
         );
-        assert_eq!(input_platform.clipboard.as_deref(), Some("user clipboard"));
+        assert_eq!(input_platform.clipboard.as_deref(), Some("one"));
         assert_eq!(input_platform.paste_count(), 1);
-        assert_eq!(
-            input_platform
-                .events
-                .iter()
-                .filter(|event| **event == Event::Restore)
-                .count(),
-            1
-        );
+        assert!(!input_failure.needs_tick());
     }
 
     #[test]
-    fn failed_clipboard_write_keeps_cleanup_ownership_even_if_in_lock_rollback_fails() {
+    fn failed_clipboard_write_does_not_restore_original_or_retry() {
         let start = Instant::now();
         let mut controller = ready_controller(prepared_run(PlaybackMode::Automatic, 0, &["one"]));
         let mut platform = FakePlatform::at(start);
@@ -2492,15 +2214,8 @@ mod tests {
             &mut platform,
             start + Duration::from_millis(180),
         );
-        assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
-        assert_eq!(
-            platform
-                .events
-                .iter()
-                .filter(|event| **event == Event::Restore)
-                .count(),
-            1
-        );
+        assert_eq!(platform.clipboard.as_deref(), None);
+        assert!(!controller.needs_tick());
         assert_eq!(platform.paste_count(), 0);
     }
 
@@ -2615,7 +2330,7 @@ mod tests {
                 &mut platform,
                 start + Duration::from_millis(180),
             );
-            assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
+            assert_eq!(platform.clipboard.as_deref(), Some("do not paste"));
         }
     }
 
@@ -2651,6 +2366,42 @@ mod tests {
     }
 
     #[test]
+    fn payloadless_clipboard_starts_all_modes_and_new_copy_before_first_paste_is_preserved() {
+        for mode in [
+            PlaybackMode::Automatic,
+            PlaybackMode::ManualAdvance,
+            PlaybackMode::PasteToAdvance,
+        ] {
+            let start = Instant::now();
+            let mut controller = ready_controller(prepared_run(mode, 0, &["one", "two"]));
+            let mut platform = FakePlatform::at(start);
+            platform.clipboard = None; // Empty/non-text: only the revision is exposed to playback.
+            platform.target = TargetObservation::Launcher;
+            controller.start(&mut platform).unwrap();
+            assert_eq!(platform.publication_count(), 0);
+            assert!(controller.started_run().is_some());
+            platform.external_copy("new copy after Run");
+            platform.target = TargetObservation::Target {
+                password_control: false,
+            };
+            if mode != PlaybackMode::PasteToAdvance {
+                tick(
+                    &mut controller,
+                    &mut platform,
+                    start + Duration::from_millis(100),
+                );
+                assert_eq!(
+                    controller.status(),
+                    SequencePlaybackStatus::Failed(SequencePlaybackError::ClipboardChanged)
+                );
+            }
+            controller.cancel(platform.clock);
+            assert_eq!(platform.clipboard.as_deref(), Some("new copy after Run"));
+            assert_eq!(platform.paste_count(), 0);
+        }
+    }
+
+    #[test]
     fn paste_to_advance_start_only_arms_without_publication_or_input() {
         let start = Instant::now();
         let mut controller = ready_controller(prepared_run(
@@ -2673,7 +2424,7 @@ mod tests {
         );
         controller.cancel(start);
         assert_eq!(controller.status(), SequencePlaybackStatus::Cancelled);
-        assert!(controller.take_shutdown_restore_plan(start).is_none());
+        assert!(controller.session.is_none());
     }
 }
 
@@ -2691,13 +2442,6 @@ impl NativeSequencePlaybackPlatform {
     pub(crate) fn new(_: Option<usize>) -> Self {
         Self
     }
-
-    pub(crate) fn restore_after_shutdown(
-        _: ClipboardRestorePlan,
-        _: Option<usize>,
-    ) -> Result<(), SequencePlaybackError> {
-        Err(SequencePlaybackError::ClipboardUnavailable)
-    }
 }
 
 #[cfg(not(windows))]
@@ -2706,7 +2450,7 @@ impl SequencePlaybackPlatform for NativeSequencePlaybackPlatform {
         Instant::now()
     }
 
-    fn capture_clipboard(&mut self) -> Result<ClipboardSnapshot, SequencePlaybackError> {
+    fn clipboard_revision(&mut self) -> Result<u32, SequencePlaybackError> {
         Err(SequencePlaybackError::ClipboardUnavailable)
     }
 
@@ -2732,14 +2476,6 @@ impl SequencePlaybackPlatform for NativeSequencePlaybackPlatform {
 
     fn clipboard_sequence_matches(&mut self, _: u32) -> bool {
         false
-    }
-
-    fn restore_clipboard_if_owned(
-        &mut self,
-        _: u32,
-        _: &ClipboardSnapshot,
-    ) -> ClipboardRestoreOutcome {
-        ClipboardRestoreOutcome::Failed
     }
 
     fn paste_chord(&mut self) -> Result<(), SequencePlaybackError> {

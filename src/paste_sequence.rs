@@ -27,13 +27,10 @@ mod playback;
 pub(crate) mod progress;
 
 #[cfg(test)]
+pub(crate) use playback::{ClipboardWriteFailure, TargetObservation};
 pub(crate) use playback::{
-    ClipboardRestoreOutcome, ClipboardSnapshot, ClipboardWriteFailure, TargetObservation,
-};
-pub(crate) use playback::{
-    ClipboardRestorePlan, NativeSequencePlaybackPlatform, SequencePlaybackController,
-    SequencePlaybackError, SequencePlaybackPlatform, SequencePlaybackStatus,
-    SequenceShutdownCleanup, SessionInputLease, StartedSequence,
+    NativeSequencePlaybackPlatform, SequencePlaybackController, SequencePlaybackError,
+    SequencePlaybackPlatform, SequencePlaybackStatus, SessionInputLease, StartedSequence,
 };
 
 /// Read-only acknowledgement from the main hotkey owner. This metadata never
