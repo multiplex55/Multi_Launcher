@@ -54,6 +54,8 @@ pub mod notes_markdown;
 pub mod ocr;
 pub mod paste_sequence;
 pub mod performance;
+#[cfg(feature = "perf-harness")]
+pub mod perf_harness;
 pub mod persistence;
 pub mod pinboard;
 pub mod platform;
