@@ -3436,13 +3436,15 @@ mod tests {
     #[test]
     fn all_rectangle_purposes_have_identical_picker_presentation() {
         let mut presentations = Vec::new();
-        for purpose in [
+        let purposes = [
             RectanglePurpose::SearchRegion,
             RectanglePurpose::CropScreenshot,
             RectanglePurpose::GeneralOcrCapture,
             RectanglePurpose::ReferenceImageCapture,
             RectanglePurpose::PinboardCapture,
-        ] {
+        ];
+        let expected_presentations = purposes.len();
+        for purpose in purposes {
             let (mut controller, fake, _) = controller();
             let id = controller.begin_rectangle_pick(purpose, ScreenRect::new(-10, -20, 100, 80));
             fake.lock().unwrap().inputs = vec![
@@ -3475,7 +3477,7 @@ mod tests {
                     .collect::<Vec<_>>(),
             );
         }
-        assert_eq!(presentations.len(), 4);
+        assert_eq!(presentations.len(), expected_presentations);
         assert!(presentations.windows(2).all(|pair| pair[0] == pair[1]));
     }
 

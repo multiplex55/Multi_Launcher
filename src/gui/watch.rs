@@ -4542,7 +4542,7 @@ mod tests {
     }
 
     struct TrackC3CPrepared {
-        state: TrackC3CState,
+        state: Box<TrackC3CState>,
         handler_report_index: usize,
         setup_accepted: usize,
         setup_dequeued: usize,
@@ -4659,7 +4659,7 @@ mod tests {
             assert_eq!(queue.expected_event_count, 8);
             assert_eq!(queue.owner.app.rx.queued_depth(), Some(8));
             assert_eq!(queue.age_recorder.successful_sends(), 8);
-            (TrackC3CState::StaleIndex(stale), 8, 0)
+            (Box::new(TrackC3CState::StaleIndex(stale)), 8, 0)
         } else {
             let (mut owner, age_recorder, registry_guard) =
                 make_track_c_actions_owner_state_with_recorder(fixture, RECORDER_CAPACITY);
@@ -4683,11 +4683,11 @@ mod tests {
             age_recorder.reset();
             crate::performance::track_c::reset();
             (
-                TrackC3CState::Actions {
+                Box::new(TrackC3CState::Actions {
                     owner,
                     age_recorder,
                     _registry_guard: registry_guard,
-                },
+                }),
                 setup_accepted,
                 setup_dequeued,
             )

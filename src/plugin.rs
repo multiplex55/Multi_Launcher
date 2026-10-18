@@ -1413,7 +1413,7 @@ mod tests {
             );
         }
         let inventory = manager.search_filtered("mouse", Some(&enabled), Some(&search_caps));
-        assert_eq!(inventory.len(), 20);
+        assert_eq!(inventory.len(), 25);
         assert_eq!(inventory, MousePlugin.commands());
         assert_eq!(inventory[0].action, "mouse:settings");
     }
