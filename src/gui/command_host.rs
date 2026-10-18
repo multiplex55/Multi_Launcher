@@ -405,7 +405,6 @@ impl LauncherApp {
         let result = self
             .sequence_playback
             .physical_paste(admission, bridge, platform);
-        self.refresh_sequence_progress_tooltip(&self.egui_ctx.clone());
         result
     }
 
@@ -1585,7 +1584,6 @@ impl LauncherApp {
                 self.restore_flag.store(false, Ordering::SeqCst);
             });
         }
-        self.refresh_sequence_progress_tooltip(&self.egui_ctx.clone());
         self.schedule_sequence_playback_wake(platform.now());
         result
     }
@@ -1612,7 +1610,6 @@ impl LauncherApp {
         } else {
             result
         };
-        self.refresh_sequence_progress_tooltip(&self.egui_ctx.clone());
         self.schedule_sequence_playback_wake(platform.now());
         result
     }
@@ -1622,7 +1619,6 @@ impl LauncherApp {
             .invalidate_owner(self.event_sink.owner_id());
         let now = std::time::Instant::now();
         self.sequence_playback.cancel(now);
-        self.refresh_sequence_progress_tooltip(&self.egui_ctx.clone());
         self.schedule_sequence_playback_wake(now);
     }
 
@@ -2149,8 +2145,7 @@ pub(in crate::gui) mod tests {
     }
 
     fn playback_settings_fixture(app: &LauncherApp) -> Vec<u8> {
-        let mut settings = app.settings_editor.baseline_settings.clone();
-        settings.paste_sequence.tooltip_enabled = false;
+        let settings = app.settings_editor.baseline_settings.clone();
         settings.save(&app.settings_path).unwrap();
         std::fs::read(&app.settings_path).unwrap()
     }
@@ -2239,7 +2234,6 @@ pub(in crate::gui) mod tests {
             next: SequenceShortcutPresentation::Disabled,
             cancel: SequenceShortcutPresentation::Disabled,
             starts: vec![],
-            tooltip_enabled: false,
             escape_cancel_enabled: true,
             keep_dialog_visible_during_playback: false,
         });
@@ -2439,7 +2433,8 @@ pub(in crate::gui) mod tests {
             SequencePlaybackStatus::Ready
         );
         assert!(!app.sequence_playback.has_input_lease());
-        assert!(app.sequence_playback.progress().is_none());
+        assert!(app.sequence_playback.started_run().is_none());
+        assert!(app.sequence_playback.current_step_number().is_none());
         assert!(
             bridge
                 .route_availability()
@@ -2511,7 +2506,6 @@ pub(in crate::gui) mod tests {
             next: SequenceShortcutPresentation::Disabled,
             cancel: SequenceShortcutPresentation::Active("Ctrl+F9".into()),
             starts: vec![],
-            tooltip_enabled: false,
             escape_cancel_enabled: true,
             keep_dialog_visible_during_playback: false,
         });
@@ -2657,7 +2651,14 @@ pub(in crate::gui) mod tests {
                 app.sequence_playback.current_step_number(),
                 Some((index + 1, 3))
             );
-            let metadata = format!("{:?}", app.sequence_playback.progress().unwrap());
+            let metadata = format!(
+                "{:?}",
+                (
+                    app.sequence_playback.status(),
+                    app.sequence_playback.started_run(),
+                    app.sequence_playback.current_step_number(),
+                )
+            );
             assert!(
                 !metadata.contains("Ada")
                     && !metadata.contains("invocation clipboard")
@@ -2740,7 +2741,7 @@ pub(in crate::gui) mod tests {
         assert!(app.sequence_playback.started_run().is_none());
         assert!(!app.sequence_playback.has_input_lease());
         assert!(!app.sequence_playback.escape_cancel_available());
-        assert!(app.sequence_playback.progress().is_none());
+        assert!(app.sequence_playback.current_step_number().is_none());
         assert!(bridge.take_notice().is_none());
         assert!(!app.sequence_playback.needs_tick());
         assert_eq!(platform.publications, 3);
@@ -2852,7 +2853,6 @@ pub(in crate::gui) mod tests {
                 next: SequenceShortcutPresentation::Disabled,
                 cancel: SequenceShortcutPresentation::Disabled,
                 starts: Vec::new(),
-                tooltip_enabled: true,
                 escape_cancel_enabled: false,
                 keep_dialog_visible_during_playback: true,
             });
@@ -3063,11 +3063,6 @@ pub(in crate::gui) mod tests {
         assert_eq!(platform.pasted, [(41, "Hello Ada at 2024-01-02".into())]);
         app.open_paste_sequence_settings_dialog();
         assert!(app.show_settings);
-        assert!(
-            !app.settings_editor
-                .paste_sequence_preferences()
-                .tooltip_enabled
-        );
         assert_eq!(
             app.settings_editor
                 .paste_sequence_preferences()
@@ -3193,11 +3188,6 @@ pub(in crate::gui) mod tests {
         assert_eq!(platform.pasted, [(61, "one".into())]);
         app.open_paste_sequence_settings_dialog();
         assert!(app.show_settings);
-        assert!(
-            !app.settings_editor
-                .paste_sequence_preferences()
-                .tooltip_enabled
-        );
         assert_eq!(app.sequence_playback.status(), Status::Running);
         platform.now = started + std::time::Duration::from_millis(249);
         let now = platform.now;

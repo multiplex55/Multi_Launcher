@@ -730,10 +730,12 @@ the editor's Playback Settings hover and the Settings section show acknowledged
 active/disabled/inactive controls and saved Start bindings, so a configured chord
 is not presented as active when it was omitted.
 
-The same section stores **Show floating playback tooltip** and **Escape cancels
-active playback** preferences, both enabled by default. **Cancel Run** or the
-configured Cancel control ends a run early; physical **Esc** also cancels when
-enabled and available for that started session.
+The same section stores **Escape cancels active playback** (enabled by default)
+and **Keep Paste Sequences dialog visible during playback** (disabled by
+default). Follow the current state and step count in the dialog's **Run status**;
+enable this setting to leave the dialog open while switching to the target
+application. **Cancel Run** or the configured Cancel control ends a run early;
+physical **Esc** also cancels when enabled and available for that started session.
 
 Choose **Automatic**, **Manual advance**, or **Paste-to-Advance (Ctrl+V)** in the
 editor. Automatic uses the configured delay between steps; Manual uses Next
@@ -754,10 +756,8 @@ If another active control can also fire on Ctrl+V, Paste-to-Advance refuses
 Start and names the conflicting control. Existing saved shortcuts stay unchanged;
 Automatic and Manual advance remain available.
 
-The optional passive playback tooltip follows the cursor and shows the sequence
-name, step progress and available actions, without step contents or window titles.
-It hides when playback ends. Early cancellation restores the original clipboard
-only while the session still owns it; newer clipboard contents are preserved.
+Early cancellation restores the original clipboard only while the session still
+owns it; newer clipboard contents are preserved.
 
 ## JSON and screen color utilities
 

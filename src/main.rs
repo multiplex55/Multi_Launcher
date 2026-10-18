@@ -1237,7 +1237,6 @@ fn paste_sequence_route_presentation(
                 }
             })
             .collect(),
-        tooltip_enabled: settings.paste_sequence.tooltip_enabled,
         escape_cancel_enabled: settings.paste_sequence.escape_cancel_enabled,
         keep_dialog_visible_during_playback: settings
             .paste_sequence
@@ -6857,7 +6856,6 @@ mod tests {
         // Reload with a nonconflicting configured control clears the old reason.
         settings.paste_sequence.cancel_hotkey = Some("Ctrl+F10".into());
         settings.paste_sequence.next_hotkey = None;
-        settings.paste_sequence.tooltip_enabled = false;
         settings.paste_sequence.escape_cancel_enabled = false;
         settings.paste_sequence.keep_dialog_visible_during_playback = true;
         let reloaded = resolve(&settings);
@@ -6871,7 +6869,7 @@ mod tests {
         assert_eq!(displayed.next, Presentation::Disabled);
         assert_eq!(displayed.cancel, Presentation::Active("Ctrl+F10".into()));
         assert!(!displayed.summary().contains("inactive"));
-        assert!(!displayed.tooltip_enabled && !displayed.escape_cancel_enabled);
+        assert!(!displayed.escape_cancel_enabled);
         assert!(displayed.keep_dialog_visible_during_playback);
         settings.enabled_plugins = Some(std::collections::HashSet::new());
         let disabled = resolve(&settings);
@@ -7974,7 +7972,6 @@ mod tests {
         let mut candidate = old_settings.clone();
         candidate.hotkey = Some("Ctrl+F3".into());
         candidate.paste_sequence.next_hotkey = Some("Ctrl+F10".into());
-        candidate.paste_sequence.tooltip_enabled = false;
         let radial_document = Arc::new(RadialDocument::starter());
         let old_trigger = Arc::new(HotkeyTrigger::new(parse_hotkey("Ctrl+F2").unwrap()));
         let mut listener = HotkeyTrigger::start_listener(
@@ -8151,7 +8148,6 @@ mod tests {
             published.next,
             multi_launcher::paste_sequence::SequenceShortcutPresentation::Active("Ctrl+F10".into())
         );
-        assert!(!published.tooltip_enabled);
         assert_eq!(trigger._key, parse_hotkey("Ctrl+F3").unwrap().key);
         assert!(listener.is_active());
         assert!(pending_launcher_route.is_none());

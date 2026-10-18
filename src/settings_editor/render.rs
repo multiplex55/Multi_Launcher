@@ -297,10 +297,6 @@ impl SettingsEditor {
             &mut self.paste_sequence.cancel_hotkey,
         );
         ui.checkbox(
-            &mut self.paste_sequence.tooltip_enabled,
-            "Show floating playback tooltip",
-        );
-        ui.checkbox(
             &mut self.paste_sequence.escape_cancel_enabled,
             "Escape cancels active playback",
         );
@@ -1328,8 +1324,6 @@ mod settings_shell_tests {
                 .as_deref(),
             Some("Ctrl+F10")
         );
-        paste_settings_click(&ctx, &mut app, "Show floating playback tooltip");
-        assert!(!app.settings_editor.paste_sequence.tooltip_enabled);
         paste_settings_click(&ctx, &mut app, "Escape cancels active playback");
         assert!(!app.settings_editor.paste_sequence.escape_cancel_enabled);
         paste_settings_click(

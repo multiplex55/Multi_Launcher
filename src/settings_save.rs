@@ -1452,7 +1452,6 @@ mod tests {
         before.paste_sequence.next_hotkey = Some("Alt+F8".into());
         let mut desired = before.clone();
         desired.paste_sequence.next_hotkey = None;
-        desired.paste_sequence.tooltip_enabled = false;
         let intent = SettingsSaveIntent::general(desired.clone(), &before);
         let mut written = before.clone();
         intent.apply(&mut written);
@@ -1498,7 +1497,6 @@ mod tests {
         app.open_paste_sequence_settings_dialog();
         app.settings_editor.paste_sequence.next_hotkey = Some("Ctrl+F9".into());
         app.settings_editor.paste_cancel_enabled = false;
-        app.settings_editor.paste_sequence.tooltip_enabled = false;
         app.settings_editor.paste_sequence.escape_cancel_enabled = false;
         app.settings_editor
             .paste_sequence
@@ -1546,7 +1544,7 @@ mod tests {
         let reopened = &app.settings_editor.paste_sequence;
         assert_eq!(reopened.next_hotkey.as_deref(), Some("Ctrl+F9"));
         assert!(reopened.cancel_hotkey.is_none());
-        assert!(!reopened.tooltip_enabled && !reopened.escape_cancel_enabled);
+        assert!(!reopened.escape_cancel_enabled);
         assert!(reopened.keep_dialog_visible_during_playback);
         assert!(
             Settings::load(&path)

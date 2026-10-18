@@ -19,7 +19,6 @@ mod tests {
         let mut settings = Settings::default();
         settings.paste_sequence.next_hotkey = Some("Alt+F9".into());
         settings.paste_sequence.cancel_hotkey = None;
-        settings.paste_sequence.tooltip_enabled = false;
         settings.paste_sequence.escape_cancel_enabled = false;
         let mut editor = SettingsEditor::from_settings(&settings);
         editor.show_launcher_title = !settings.show_launcher_title;

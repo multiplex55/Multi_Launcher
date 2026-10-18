@@ -24,7 +24,6 @@ use std::sync::Mutex;
 
 pub mod admission;
 mod playback;
-pub(crate) mod progress;
 
 #[cfg(test)]
 pub(crate) use playback::TargetObservation;
@@ -60,7 +59,6 @@ pub struct SequenceRoutePresentation {
     pub next: SequenceShortcutPresentation,
     pub cancel: SequenceShortcutPresentation,
     pub starts: Vec<(SequenceId, String)>,
-    pub tooltip_enabled: bool,
     pub escape_cancel_enabled: bool,
     pub keep_dialog_visible_during_playback: bool,
 }
@@ -69,10 +67,9 @@ impl SequenceRoutePresentation {
     pub fn summary(&self) -> String {
         let toggle = |enabled| if enabled { "On" } else { "Off" };
         let mut summary = format!(
-            "Next: {}\nCancel: {}\nFloating tooltip: {}; Escape cancellation: {}",
+            "Next: {}\nCancel: {}\nEscape cancellation: {}",
             self.next,
             self.cancel,
-            toggle(self.tooltip_enabled),
             toggle(self.escape_cancel_enabled)
         );
         summary.push_str(&format!(

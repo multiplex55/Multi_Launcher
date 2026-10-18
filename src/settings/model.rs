@@ -561,7 +561,6 @@ impl Default for MultiManagerSettings {
 pub struct PasteSequencePreferences {
     pub next_hotkey: Option<String>,
     pub cancel_hotkey: Option<String>,
-    pub tooltip_enabled: bool,
     pub escape_cancel_enabled: bool,
     pub keep_dialog_visible_during_playback: bool,
 }
@@ -571,7 +570,6 @@ impl Default for PasteSequencePreferences {
         Self {
             next_hotkey: Some("Ctrl+Alt+Shift+PageDown".into()),
             cancel_hotkey: Some("Ctrl+Alt+Shift+End".into()),
-            tooltip_enabled: true,
             escape_cancel_enabled: true,
             keep_dialog_visible_during_playback: false,
         }
@@ -620,10 +618,19 @@ mod paste_sequence_preferences_tests {
         assert_eq!(loaded.plugin_settings["unknown"]["keep"], 42);
 
         legacy["paste_sequence"] = serde_json::json!({"tooltip_enabled": false});
-        let partial: Settings = serde_json::from_value(legacy).unwrap();
-        assert!(!partial.paste_sequence.tooltip_enabled);
+        let legacy_paste_bytes = serde_json::to_vec(&legacy).unwrap();
+        std::fs::write(&path, &legacy_paste_bytes).unwrap();
+        let partial = Settings::load(path.to_str().unwrap()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), legacy_paste_bytes);
+        assert_eq!(partial.paste_sequence, PasteSequencePreferences::default());
         assert!(partial.paste_sequence.escape_cancel_enabled);
         assert!(!partial.paste_sequence.keep_dialog_visible_during_playback);
+        let serialized = serde_json::to_value(&partial).unwrap();
+        assert!(
+            serialized["paste_sequence"]
+                .get("tooltip_enabled")
+                .is_none()
+        );
         assert_eq!(
             partial.paste_sequence.next_hotkey,
             loaded.paste_sequence.next_hotkey

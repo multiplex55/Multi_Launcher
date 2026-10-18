@@ -363,7 +363,6 @@ impl LauncherApp {
                         .is_none_or(|current| presentation.generation >= current.generation)
                     {
                         self.sequence_routes = Some(presentation);
-                        self.refresh_sequence_progress_tooltip(&self.egui_ctx.clone());
                     }
                 }
                 WatchEvent::PasteSequenceRuntimeDiagnostic(diagnostic) => {
@@ -6833,7 +6832,6 @@ mod tests {
                 reason: "fixture conflict".into(),
             },
             starts: Vec::new(),
-            tooltip_enabled: true,
             escape_cancel_enabled: true,
             keep_dialog_visible_during_playback: false,
         };
@@ -6850,7 +6848,6 @@ mod tests {
             generation: 5,
             physical_paste: Default::default(),
             cancel: Presentation::Disabled,
-            tooltip_enabled: false,
             ..omitted.clone()
         };
         app.event_tx
@@ -6871,7 +6868,9 @@ mod tests {
         app.process_watch_events();
         assert!(app.should_keep_paste_sequence_dialog_visible_during_playback());
         let summary = app.paste_sequence_shortcut_summary();
-        assert!(summary.contains("Cancel: Disabled") && summary.contains("Floating tooltip: Off"));
+        assert!(
+            summary.contains("Cancel: Disabled") && summary.contains("Escape cancellation: On")
+        );
         assert!(!summary.contains("fixture conflict"));
         assert_eq!(
             app.settings_editor.baseline_settings.paste_sequence, before,

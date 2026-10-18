@@ -876,9 +876,7 @@ impl PasteSequenceDialog {
     fn show_run_status(&self, ui: &mut egui::Ui, app: &super::LauncherApp) {
         let message = run_status_text(
             app.sequence_playback.status(),
-            app.sequence_playback
-                .progress()
-                .map(|progress| (progress.step, progress.total)),
+            app.sequence_playback.current_step_number(),
         );
         ui.add(egui::Label::new(&message).truncate())
             .on_hover_text(&message);
@@ -1476,7 +1474,6 @@ mod tests {
                         next: crate::paste_sequence::SequenceShortcutPresentation::Disabled,
                         cancel: crate::paste_sequence::SequenceShortcutPresentation::Disabled,
                         starts: Vec::new(),
-                        tooltip_enabled: true,
                         escape_cancel_enabled: true,
                         keep_dialog_visible_during_playback: keep_visible,
                     });
@@ -1539,7 +1536,15 @@ mod tests {
                             PlaybackMode::ManualAdvance => Status::AwaitAdvance,
                         }
                     );
-                    assert!(app.sequence_playback.progress().is_some());
+                    assert!(app.sequence_playback.started_run().is_some());
+                    let current_step = match mode {
+                        PlaybackMode::PasteToAdvance => 1,
+                        PlaybackMode::Automatic | PlaybackMode::ManualAdvance => 2,
+                    };
+                    assert_eq!(
+                        app.sequence_playback.current_step_number(),
+                        Some((current_step, 2))
+                    );
                     assert!(!dialog.store_path.exists());
                     app.paste_sequence_dialog = dialog;
                     if !keep_visible {
