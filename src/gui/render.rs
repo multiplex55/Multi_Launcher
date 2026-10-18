@@ -5702,7 +5702,7 @@ mod tests {
         let mut app = crate::gui::command_host::tests::inert_test_app(root.path());
         let ctx = app.egui_ctx.clone();
         app.sequence_exit_requested = true;
-        let output = ctx.run_ui(egui::RawInput::default(), |_| {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {
             app.guard_overlay_app_exit(&ctx)
         });
         assert!(
@@ -5711,6 +5711,7 @@ mod tests {
                 .iter()
                 .any(|command| matches!(command, egui::ViewportCommand::Close))
         );
+        output.textures_delta.clear();
     }
     use crate::{
         gui::numpad_navigation::{
