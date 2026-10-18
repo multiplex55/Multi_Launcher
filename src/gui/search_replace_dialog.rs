@@ -1327,6 +1327,7 @@ impl SearchReplaceDialogState {
                             self.reveal_receipts = false;
                         }
                     });
+                #[cfg(test)]
                 let footer_start = ui.cursor().min;
                 ui.separator();
                 self.draw_operation_status(ui, runtime, &mut commands, process_interactions);
