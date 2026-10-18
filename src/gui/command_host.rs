@@ -1531,7 +1531,7 @@ impl LauncherApp {
         self.start_sequence_playback_using(&mut platform)
     }
 
-    fn start_sequence_playback_using(
+    pub(super) fn start_sequence_playback_using(
         &mut self,
         platform: &mut impl crate::paste_sequence::SequencePlaybackPlatform,
     ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
@@ -1570,6 +1570,19 @@ impl LauncherApp {
             && !self.sequence_playback.escape_cancel_available()
         {
             self.report_error_message("paste_sequence.escape", "Session Escape cancellation is unavailable. Use the configured Cancel shortcut or Cancel Run.");
+        }
+        if result.is_ok()
+            && self.sequence_playback.status()
+                != crate::paste_sequence::SequencePlaybackStatus::Cancelled
+        {
+            self.paste_sequence_dialog.suspend_for_playback();
+            self.panel_states.paste_sequence_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::PasteSequenceDialog);
+            self.visibility_revision.request(|| {
+                self.visible_flag.store(false, Ordering::SeqCst);
+                self.restore_flag.store(false, Ordering::SeqCst);
+            });
         }
         self.refresh_sequence_progress_tooltip(&self.egui_ctx.clone());
         self.schedule_sequence_playback_wake(platform.now());
@@ -2058,7 +2071,7 @@ fn allow_radial_queryexec_activation(
 pub(in crate::gui) mod tests {
     use super::*;
 
-    struct AppPastePlatform {
+    pub(crate) struct AppPastePlatform {
         now: std::time::Instant,
         sequence: u32,
         text: String,
@@ -2133,7 +2146,7 @@ pub(in crate::gui) mod tests {
     }
 
     impl AppPastePlatform {
-        fn new(target: crate::paste_sequence::SequenceTarget) -> Self {
+        pub(crate) fn new(target: crate::paste_sequence::SequenceTarget) -> Self {
             Self {
                 now: std::time::Instant::now(),
                 sequence: 10,
@@ -2737,11 +2750,7 @@ pub(in crate::gui) mod tests {
         assert!(!app.sequence_playback.escape_cancel_available());
         assert!(app.sequence_playback.progress().is_none());
         assert!(bridge.take_notice().is_none());
-        assert!(
-            app.sequence_playback
-                .take_shutdown_restore_plan(platform.now)
-                .is_none()
-        );
+        assert!(!app.sequence_playback.needs_tick());
         assert_eq!(platform.sequence, 13);
         for transition in [KeyTransition::Down, KeyTransition::Up] {
             assert!(!input(
