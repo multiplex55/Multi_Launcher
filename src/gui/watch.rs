@@ -6835,6 +6835,7 @@ mod tests {
             starts: Vec::new(),
             tooltip_enabled: true,
             escape_cancel_enabled: true,
+            keep_dialog_visible_during_playback: false,
         };
         app.event_tx
             .send(WatchEvent::PasteSequenceRoutes(omitted.clone()))
@@ -6860,6 +6861,15 @@ mod tests {
             .unwrap();
         app.process_watch_events();
         assert_eq!(app.sequence_routes.as_ref(), Some(&clean));
+        app.panel_states.paste_sequence_dialog = true;
+        assert!(!app.should_keep_paste_sequence_dialog_visible_during_playback());
+        let mut keep_visible = clean.clone();
+        keep_visible.keep_dialog_visible_during_playback = true;
+        app.event_tx
+            .send(WatchEvent::PasteSequenceRoutes(keep_visible))
+            .unwrap();
+        app.process_watch_events();
+        assert!(app.should_keep_paste_sequence_dialog_visible_during_playback());
         let summary = app.paste_sequence_shortcut_summary();
         assert!(summary.contains("Cancel: Disabled") && summary.contains("Floating tooltip: Off"));
         assert!(!summary.contains("fixture conflict"));

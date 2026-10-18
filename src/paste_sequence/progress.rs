@@ -353,6 +353,7 @@ mod tests {
             starts: Vec::new(),
             tooltip_enabled: true,
             escape_cancel_enabled: true,
+            keep_dialog_visible_during_playback: false,
         }
     }
     fn progress(mode: PlaybackMode) -> PlaybackProgress<'static> {

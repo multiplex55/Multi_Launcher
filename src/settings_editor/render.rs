@@ -304,6 +304,14 @@ impl SettingsEditor {
             &mut self.paste_sequence.escape_cancel_enabled,
             "Escape cancels active playback",
         );
+        ui.checkbox(
+            &mut self.paste_sequence.keep_dialog_visible_during_playback,
+            "Keep Paste Sequences dialog visible during playback",
+        );
+        crate::gui::theme::widgets::secondary_help(
+            ui,
+            "When started from this dialog, leave it open while you paste into another application.",
+        );
         crate::gui::theme::widgets::secondary_help(
             ui,
             "Empty shortcuts are disabled. Shortcut conflicts are checked on Save. Changes take effect after Save succeeds.",
@@ -1324,6 +1332,16 @@ mod settings_shell_tests {
         assert!(!app.settings_editor.paste_sequence.tooltip_enabled);
         paste_settings_click(&ctx, &mut app, "Escape cancels active playback");
         assert!(!app.settings_editor.paste_sequence.escape_cancel_enabled);
+        paste_settings_click(
+            &ctx,
+            &mut app,
+            "Keep Paste Sequences dialog visible during playback",
+        );
+        assert!(
+            app.settings_editor
+                .paste_sequence
+                .keep_dialog_visible_during_playback
+        );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert_eq!(
             app.settings_editor.baseline_settings.paste_sequence,

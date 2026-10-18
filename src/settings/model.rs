@@ -563,6 +563,7 @@ pub struct PasteSequencePreferences {
     pub cancel_hotkey: Option<String>,
     pub tooltip_enabled: bool,
     pub escape_cancel_enabled: bool,
+    pub keep_dialog_visible_during_playback: bool,
 }
 
 impl Default for PasteSequencePreferences {
@@ -572,6 +573,7 @@ impl Default for PasteSequencePreferences {
             cancel_hotkey: Some("Ctrl+Alt+Shift+End".into()),
             tooltip_enabled: true,
             escape_cancel_enabled: true,
+            keep_dialog_visible_during_playback: false,
         }
     }
 }
@@ -621,6 +623,7 @@ mod paste_sequence_preferences_tests {
         let partial: Settings = serde_json::from_value(legacy).unwrap();
         assert!(!partial.paste_sequence.tooltip_enabled);
         assert!(partial.paste_sequence.escape_cancel_enabled);
+        assert!(!partial.paste_sequence.keep_dialog_visible_during_playback);
         assert_eq!(
             partial.paste_sequence.next_hotkey,
             loaded.paste_sequence.next_hotkey
@@ -629,6 +632,22 @@ mod paste_sequence_preferences_tests {
             partial.paste_sequence.cancel_hotkey,
             loaded.paste_sequence.cancel_hotkey
         );
+    }
+
+    #[test]
+    fn paste_dialog_visibility_preference_defaults_false_and_round_trips_true() {
+        let old: PasteSequencePreferences = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!old.keep_dialog_visible_during_playback);
+
+        let enabled: PasteSequencePreferences = serde_json::from_value(serde_json::json!({
+            "keep_dialog_visible_during_playback": true
+        }))
+        .unwrap();
+        assert!(enabled.keep_dialog_visible_during_playback);
+        let encoded = serde_json::to_value(&enabled).unwrap();
+        assert_eq!(encoded["keep_dialog_visible_during_playback"], true);
+        let round_trip: PasteSequencePreferences = serde_json::from_value(encoded).unwrap();
+        assert!(round_trip.keep_dialog_visible_during_playback);
     }
 
     #[test]

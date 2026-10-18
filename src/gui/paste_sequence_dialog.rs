@@ -318,6 +318,19 @@ impl PasteSequenceDialog {
         self.autostart_when_ready = value;
     }
 
+    pub(crate) fn note_playback_started(&mut self) {
+        if self.open {
+            self.status = Some("Sequence started.".into());
+        }
+    }
+
+    pub(crate) fn note_playback_start_error(&mut self, message: &str) {
+        if self.open {
+            self.inline_error = Some(message.into());
+            self.autostart_when_ready = false;
+        }
+    }
+
     pub(crate) fn ui(&mut self, ctx: &egui::Context, app: &mut super::LauncherApp) {
         if !self.open {
             return;
@@ -711,7 +724,9 @@ impl PasteSequenceDialog {
                     Ok(()) => {
                         self.status = Some("Sequence started.".into());
                         // Rendering temporarily takes the dialog out of LauncherApp.
-                        self.suspend_for_playback();
+                        if !app.should_keep_paste_sequence_dialog_visible_during_playback() {
+                            self.suspend_for_playback();
+                        }
                     }
                     Err(error) => self.inline_error = Some(error.message().into()),
                 }
@@ -947,11 +962,14 @@ impl PasteSequenceDialog {
                     "Preview is ready; no text has been pasted.".into()
                 });
                 if autostart && !prompt_open {
+                    self.autostart_when_ready = false;
                     match start(app) {
                         Ok(()) => {
                             self.status = Some("Sequence started.".into());
                             // Rendering temporarily takes the dialog out of LauncherApp.
-                            self.suspend_for_playback();
+                            if !app.should_keep_paste_sequence_dialog_visible_during_playback() {
+                                self.suspend_for_playback();
+                            }
                         }
                         Err(error) => {
                             self.inline_error = Some(error.message().into());
@@ -1427,7 +1445,7 @@ mod tests {
     }
 
     #[test]
-    fn paste_sequence_run_and_run_once_hide_taken_editor_preserve_draft_and_arm_all_modes() {
+    fn paste_sequence_run_and_run_once_respect_visibility_preference_and_restart_all_modes() {
         use crate::paste_sequence::{
             SequencePlaybackStatus as Status, admission::physical_paste_bridge,
         };
@@ -1438,80 +1456,143 @@ mod tests {
         bridge.install_wake(wake);
         bridge.allow_test_routes();
         bridge.observer_live(true);
-        for run_once in [false, true] {
-            for mode in [
-                PlaybackMode::PasteToAdvance,
-                PlaybackMode::Automatic,
-                PlaybackMode::ManualAdvance,
-            ] {
-                let directory = tempfile::tempdir().unwrap();
-                let mut app = super::super::command_host::tests::inert_test_app(directory.path());
-                app.enabled_plugins = None;
-                app.visible_flag.store(true, Ordering::SeqCst);
-                app.panel_states.paste_sequence_dialog = true;
-                app.panel_stack
-                    .push(super::super::Panel::PasteSequenceDialog);
-                app.paste_sequence_dialog = PasteSequenceDialog {
-                    open: true,
-                    sources_are_test_owned: true,
-                    store_path: directory.path().join(PASTE_SEQUENCES_FILE),
-                    context: Some(owned_editor_context()),
-                    draft: SequenceDraft::new(
-                        "Unsaved text",
-                        vec![
-                            Step::LiteralText {
-                                text: "first".into(),
-                            },
-                            Step::LiteralText {
-                                text: "second".into(),
-                            },
-                        ],
-                    ),
-                    ..Default::default()
-                };
-                app.paste_sequence_dialog.draft.mode = mode;
-                let target = crate::paste_sequence::SequenceTarget::from_external_window(
-                    crate::active_window::ExternalForegroundWindow {
-                        hwnd: 91,
-                        process_id: 92,
-                        thread_id: 93,
-                        title: None,
-                    },
-                    std::process::id(),
-                )
-                .unwrap();
-                let mut platform = super::super::command_host::tests::AppPastePlatform::new(target);
-                // Use the render path's taken-dialog ownership and existing platform fake.
-                let mut dialog = std::mem::take(&mut app.paste_sequence_dialog);
-                dialog.prepare_current_using(&mut app, true, run_once, |app| {
-                    app.start_sequence_playback_using(&mut platform)
-                });
-                assert!(dialog.inline_error.is_none(), "{:?}", dialog.inline_error);
-                assert!(!dialog.open);
-                assert!(dialog.suspended_for_playback);
-                assert!(!app.visible_flag.load(Ordering::SeqCst));
-                assert!(!app.panel_states.paste_sequence_dialog);
-                assert!(
-                    !app.panel_stack
-                        .contains(&super::super::Panel::PasteSequenceDialog)
-                );
-                assert_eq!(
-                    app.sequence_playback.status(),
-                    match mode {
-                        PlaybackMode::PasteToAdvance => Status::AwaitPaste,
-                        PlaybackMode::Automatic => Status::Running,
-                        PlaybackMode::ManualAdvance => Status::AwaitAdvance,
+        for keep_visible in [false, true] {
+            for run_once in [false, true] {
+                for mode in [
+                    PlaybackMode::PasteToAdvance,
+                    PlaybackMode::Automatic,
+                    PlaybackMode::ManualAdvance,
+                ] {
+                    let directory = tempfile::tempdir().unwrap();
+                    let mut app =
+                        super::super::command_host::tests::inert_test_app(directory.path());
+                    app.enabled_plugins = None;
+                    app.settings_editor
+                        .paste_sequence
+                        .keep_dialog_visible_during_playback = !keep_visible;
+                    app.sequence_routes = Some(crate::paste_sequence::SequenceRoutePresentation {
+                        generation: 1,
+                        physical_paste: Default::default(),
+                        next: crate::paste_sequence::SequenceShortcutPresentation::Disabled,
+                        cancel: crate::paste_sequence::SequenceShortcutPresentation::Disabled,
+                        starts: Vec::new(),
+                        tooltip_enabled: true,
+                        escape_cancel_enabled: true,
+                        keep_dialog_visible_during_playback: keep_visible,
+                    });
+                    app.visible_flag.store(true, Ordering::SeqCst);
+                    app.panel_states.paste_sequence_dialog = true;
+                    app.panel_stack
+                        .push(super::super::Panel::PasteSequenceDialog);
+                    app.paste_sequence_dialog = PasteSequenceDialog {
+                        open: true,
+                        sources_are_test_owned: true,
+                        store_path: directory.path().join(PASTE_SEQUENCES_FILE),
+                        context: Some(owned_editor_context()),
+                        draft: SequenceDraft::new(
+                            "Unsaved text",
+                            vec![
+                                Step::LiteralText {
+                                    text: "first".into(),
+                                },
+                                Step::LiteralText {
+                                    text: "second".into(),
+                                },
+                            ],
+                        ),
+                        selected_step: Some(1),
+                        ..Default::default()
+                    };
+                    app.paste_sequence_dialog.draft.mode = mode;
+                    let target = crate::paste_sequence::SequenceTarget::from_external_window(
+                        crate::active_window::ExternalForegroundWindow {
+                            hwnd: 91,
+                            process_id: 92,
+                            thread_id: 93,
+                            title: None,
+                        },
+                        std::process::id(),
+                    )
+                    .unwrap();
+                    let mut platform =
+                        super::super::command_host::tests::AppPastePlatform::new(target);
+                    // Use the render path's taken-dialog ownership and existing platform fake.
+                    let mut dialog = std::mem::take(&mut app.paste_sequence_dialog);
+                    dialog.prepare_current_using(&mut app, true, run_once, |app| {
+                        app.start_sequence_playback_using(&mut platform)
+                    });
+                    assert!(dialog.inline_error.is_none(), "{:?}", dialog.inline_error);
+                    assert_eq!(dialog.open, keep_visible);
+                    assert_eq!(dialog.suspended_for_playback, !keep_visible);
+                    assert_eq!(app.visible_flag.load(Ordering::SeqCst), keep_visible);
+                    assert_eq!(app.panel_states.paste_sequence_dialog, keep_visible);
+                    assert!(
+                        app.panel_stack
+                            .contains(&super::super::Panel::PasteSequenceDialog)
+                            == keep_visible
+                    );
+                    assert_eq!(
+                        app.sequence_playback.status(),
+                        match mode {
+                            PlaybackMode::PasteToAdvance => Status::AwaitPaste,
+                            PlaybackMode::Automatic => Status::Running,
+                            PlaybackMode::ManualAdvance => Status::AwaitAdvance,
+                        }
+                    );
+                    assert!(app.sequence_playback.progress().is_some());
+                    assert!(!dialog.store_path.exists());
+                    app.paste_sequence_dialog = dialog;
+                    if !keep_visible {
+                        app.paste_sequence_dialog
+                            .open_with_context(Ok(owned_editor_context()));
                     }
-                );
-                assert!(app.sequence_playback.progress().is_some());
-                assert!(!dialog.store_path.exists());
-                app.paste_sequence_dialog = dialog;
-                app.paste_sequence_dialog
-                    .open_with_context(Ok(owned_editor_context()));
-                assert_eq!(app.paste_sequence_dialog.draft.name, "Unsaved text");
-                assert_eq!(app.paste_sequence_dialog.draft.steps.len(), 2);
-                assert!(!app.paste_sequence_dialog.take_autostart_when_ready());
-                app.cancel_sequence_playback();
+                    assert_eq!(app.paste_sequence_dialog.draft.name, "Unsaved text");
+                    assert_eq!(app.paste_sequence_dialog.draft.steps.len(), 2);
+                    if keep_visible {
+                        assert_eq!(app.paste_sequence_dialog.selected_step, Some(1));
+                        assert_eq!(
+                            app.paste_sequence_dialog.status.as_deref(),
+                            Some("Sequence started.")
+                        );
+                    }
+                    assert!(!app.paste_sequence_dialog.take_autostart_when_ready());
+                    if keep_visible && mode == PlaybackMode::Automatic {
+                        let completion_time =
+                            std::time::Instant::now() + std::time::Duration::from_millis(500);
+                        let _ = app.sequence_playback.tick(&mut platform, completion_time);
+                        assert_eq!(app.sequence_playback.status(), Status::Completed);
+                        let _ = app.sequence_playback.tick(&mut platform, completion_time);
+                        assert!(app.paste_sequence_dialog.open);
+                        assert!(app.visible_flag.load(Ordering::SeqCst));
+                        assert!(app.panel_states.paste_sequence_dialog);
+                        assert_eq!(
+                            app.paste_sequence_dialog.status.as_deref(),
+                            Some("Sequence started.")
+                        );
+                    } else {
+                        app.cancel_sequence_playback();
+                    }
+                    if keep_visible {
+                        let mut dialog = std::mem::take(&mut app.paste_sequence_dialog);
+                        dialog.prepare_current_using(&mut app, true, run_once, |app| {
+                            app.start_sequence_playback_using(&mut platform)
+                        });
+                        assert!(dialog.inline_error.is_none(), "{:?}", dialog.inline_error);
+                        assert!(dialog.open);
+                        assert_eq!(
+                            app.sequence_playback.status(),
+                            match mode {
+                                PlaybackMode::PasteToAdvance => Status::AwaitPaste,
+                                PlaybackMode::Automatic => Status::Running,
+                                PlaybackMode::ManualAdvance => Status::AwaitAdvance,
+                            }
+                        );
+                        assert!(app.visible_flag.load(Ordering::SeqCst));
+                        assert!(app.panel_states.paste_sequence_dialog);
+                        app.paste_sequence_dialog = dialog;
+                        app.cancel_sequence_playback();
+                    }
+                }
             }
         }
         bridge.observer_live(false);

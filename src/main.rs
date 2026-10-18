@@ -1200,6 +1200,9 @@ fn paste_sequence_route_presentation(
             .collect(),
         tooltip_enabled: settings.paste_sequence.tooltip_enabled,
         escape_cancel_enabled: settings.paste_sequence.escape_cancel_enabled,
+        keep_dialog_visible_during_playback: settings
+            .paste_sequence
+            .keep_dialog_visible_during_playback,
     };
     if settings.radial.enabled && settings.radial.shared_tap_hold {
         presentation
@@ -6768,6 +6771,7 @@ mod tests {
             &initial.omissions,
             initial.physical_paste.clone(),
         );
+        assert!(!displayed.keep_dialog_visible_during_playback);
         assert!(matches!(displayed.next, Presentation::Active(_)));
         assert!(
             matches!(&displayed.cancel, Presentation::Inactive { configured, reason } if configured == "Ctrl+Alt+Shift+End" && reason.contains("launcher"))
@@ -6779,6 +6783,7 @@ mod tests {
         settings.paste_sequence.next_hotkey = None;
         settings.paste_sequence.tooltip_enabled = false;
         settings.paste_sequence.escape_cancel_enabled = false;
+        settings.paste_sequence.keep_dialog_visible_during_playback = true;
         let reloaded = resolve(&settings);
         let displayed = paste_sequence_route_presentation(
             &settings,
@@ -6791,6 +6796,7 @@ mod tests {
         assert_eq!(displayed.cancel, Presentation::Active("Ctrl+F10".into()));
         assert!(!displayed.summary().contains("inactive"));
         assert!(!displayed.tooltip_enabled && !displayed.escape_cancel_enabled);
+        assert!(displayed.keep_dialog_visible_during_playback);
         settings.enabled_plugins = Some(std::collections::HashSet::new());
         let disabled = resolve(&settings);
         let displayed = paste_sequence_route_presentation(

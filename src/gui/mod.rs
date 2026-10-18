@@ -1655,6 +1655,17 @@ impl LauncherApp {
         )
     }
 
+    pub(crate) fn should_keep_paste_sequence_dialog_visible_during_playback(&self) -> bool {
+        let keep_visible = self.sequence_routes.as_ref().map_or(
+            self.settings_editor
+                .baseline_settings
+                .paste_sequence
+                .keep_dialog_visible_during_playback,
+            |routes| routes.keep_dialog_visible_during_playback,
+        );
+        keep_visible && (self.panel_states.paste_sequence_dialog || self.paste_sequence_dialog.open)
+    }
+
     /// Opens the standalone Mouse Gesture Settings dialog.
     ///
     /// This is exposed so non-`gui` modules (e.g. `settings_editor`) can

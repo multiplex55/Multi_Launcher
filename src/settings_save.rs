@@ -1500,6 +1500,9 @@ mod tests {
         app.settings_editor.paste_cancel_enabled = false;
         app.settings_editor.paste_sequence.tooltip_enabled = false;
         app.settings_editor.paste_sequence.escape_cancel_enabled = false;
+        app.settings_editor
+            .paste_sequence
+            .keep_dialog_visible_during_playback = true;
         let desired = app.settings_editor.to_settings(&baseline);
         let (client, owner, _wake) = crate::hotkey::reconfiguration::test_reconfiguration_runtime();
         app.begin_settings_save_with_prepare(
@@ -1533,12 +1536,24 @@ mod tests {
             app.settings_editor.paste_sequence.next_hotkey.as_deref(),
             Some("Ctrl+F9")
         );
+        assert!(
+            app.settings_editor
+                .paste_sequence
+                .keep_dialog_visible_during_playback
+        );
         app.show_settings = false;
         app.open_paste_sequence_settings_dialog();
         let reopened = &app.settings_editor.paste_sequence;
         assert_eq!(reopened.next_hotkey.as_deref(), Some("Ctrl+F9"));
         assert!(reopened.cancel_hotkey.is_none());
         assert!(!reopened.tooltip_enabled && !reopened.escape_cancel_enabled);
+        assert!(reopened.keep_dialog_visible_during_playback);
+        assert!(
+            Settings::load(&path)
+                .unwrap()
+                .paste_sequence
+                .keep_dialog_visible_during_playback
+        );
         assert_eq!(Settings::load(&path).unwrap().hotkey, baseline.hotkey);
     }
 

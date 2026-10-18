@@ -1574,6 +1574,7 @@ impl LauncherApp {
         if result.is_ok()
             && self.sequence_playback.status()
                 != crate::paste_sequence::SequencePlaybackStatus::Cancelled
+            && !self.should_keep_paste_sequence_dialog_visible_during_playback()
         {
             self.paste_sequence_dialog.suspend_for_playback();
             self.panel_states.paste_sequence_dialog = false;
@@ -1672,10 +1673,15 @@ impl LauncherApp {
             self.sequence_playback.set_ready(run).map_err(|_| {
                 super::snippet_prompt_dialog::SnippetPromptError::SequencePreflightFailed
             })?;
-            if self.paste_sequence_dialog.take_autostart_when_ready()
-                && let Err(error) = self.start_sequence_playback()
-            {
-                self.report_error_message("paste_sequence.playback", error.message());
+            if self.paste_sequence_dialog.take_autostart_when_ready() {
+                match self.start_sequence_playback() {
+                    Ok(()) => self.paste_sequence_dialog.note_playback_started(),
+                    Err(error) => {
+                        self.paste_sequence_dialog
+                            .note_playback_start_error(error.message());
+                        self.report_error_message("paste_sequence.playback", error.message());
+                    }
+                }
             }
         }
         Ok(())
@@ -2235,6 +2241,7 @@ pub(in crate::gui) mod tests {
             starts: vec![],
             tooltip_enabled: false,
             escape_cancel_enabled: true,
+            keep_dialog_visible_during_playback: false,
         });
         app.sync_physical_paste_admission().unwrap();
         assert!(app.sequence_playback.escape_cancel_available());
@@ -2506,6 +2513,7 @@ pub(in crate::gui) mod tests {
             starts: vec![],
             tooltip_enabled: false,
             escape_cancel_enabled: true,
+            keep_dialog_visible_during_playback: false,
         });
         app.begin_paste_sequence_preflight_using_context(
             sequence,
@@ -2802,6 +2810,107 @@ pub(in crate::gui) mod tests {
             ],
         };
         assert_eq!(sequence_source_requirements(&referenced), (true, true));
+    }
+
+    #[test]
+    fn prompted_start_uses_applied_visibility_only_for_an_open_sequence_editor() {
+        use crate::paste_sequence::{
+            PlaybackMode, Sequence, SequenceId, SequenceInvocationContext,
+            SequenceRoutePresentation, SequenceShortcutPresentation, SequenceTarget, Step,
+            admission::physical_paste_bridge,
+        };
+        use std::sync::atomic::Ordering;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let bridge = physical_paste_bridge();
+        struct ObserverReset(
+            std::sync::Arc<crate::paste_sequence::admission::PasteAdmissionBridge>,
+        );
+        impl Drop for ObserverReset {
+            fn drop(&mut self) {
+                self.0.observer_live(false);
+            }
+        }
+        bridge.observer_live(false);
+        let _reset = ObserverReset(std::sync::Arc::clone(bridge));
+        let (wake, _receive) = std::sync::mpsc::channel();
+        bridge.install_wake(wake);
+        bridge.allow_test_routes();
+        bridge.observer_live(true);
+
+        for editor_open in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut app = inert_test_app(directory.path());
+            app.enabled_plugins = None;
+            app.visible_flag.store(editor_open, Ordering::SeqCst);
+            app.settings_editor
+                .paste_sequence
+                .keep_dialog_visible_during_playback = false;
+            app.sequence_routes = Some(SequenceRoutePresentation {
+                generation: 3,
+                physical_paste: Default::default(),
+                next: SequenceShortcutPresentation::Disabled,
+                cancel: SequenceShortcutPresentation::Disabled,
+                starts: Vec::new(),
+                tooltip_enabled: true,
+                escape_cancel_enabled: false,
+                keep_dialog_visible_during_playback: true,
+            });
+            if editor_open {
+                app.panel_states.paste_sequence_dialog = true;
+                app.panel_stack
+                    .push(super::super::Panel::PasteSequenceDialog);
+                app.paste_sequence_dialog.open = true;
+            }
+            app.paste_sequence_dialog.set_autostart_when_ready(true);
+
+            let sequence = Sequence {
+                id: SequenceId::from_raw(1).unwrap(),
+                name: "Prompted visibility".into(),
+                hotkey: None,
+                mode: PlaybackMode::PasteToAdvance,
+                delay_ms: 0,
+                steps: vec![Step::SnippetRef {
+                    alias: "ticketreply".into(),
+                }],
+            };
+            let snippets = vec![prompted_entry()];
+            let target = SequenceTarget::from_external_window(
+                crate::active_window::ExternalForegroundWindow {
+                    hwnd: 91,
+                    process_id: std::process::id() + 1,
+                    thread_id: 93,
+                    title: Some("External target".into()),
+                },
+                std::process::id(),
+            )
+            .unwrap();
+            let context = SequenceInvocationContext::new(
+                chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05+00:00").unwrap(),
+                None,
+                Some(target),
+            );
+            app.begin_paste_sequence_preflight_with_context(sequence, &snippets, &[], context)
+                .unwrap();
+            assert!(app.snippet_prompt_dialog.is_sequence_preflight());
+            app.snippet_prompt_dialog.set_value("name", "Ada".into());
+            app.submit_sequence_prompt_using(|| Ok(snippets.clone()), || Ok(Vec::new()))
+                .unwrap();
+
+            assert_eq!(
+                app.sequence_playback.status(),
+                crate::paste_sequence::SequencePlaybackStatus::AwaitPaste
+            );
+            assert_eq!(app.visible_flag.load(Ordering::SeqCst), editor_open);
+            assert_eq!(app.panel_states.paste_sequence_dialog, editor_open);
+            assert_eq!(app.paste_sequence_dialog.open, editor_open);
+            assert_eq!(
+                app.panel_stack
+                    .contains(&super::super::Panel::PasteSequenceDialog),
+                editor_open
+            );
+            app.cancel_sequence_playback();
+        }
     }
 
     #[test]

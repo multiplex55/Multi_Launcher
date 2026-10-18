@@ -62,6 +62,7 @@ pub struct SequenceRoutePresentation {
     pub starts: Vec<(SequenceId, String)>,
     pub tooltip_enabled: bool,
     pub escape_cancel_enabled: bool,
+    pub keep_dialog_visible_during_playback: bool,
 }
 
 impl SequenceRoutePresentation {
