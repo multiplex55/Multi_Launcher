@@ -10,9 +10,9 @@ hotkey, desktop inventory or external action is part of a CPU probe.
 | radial_8 | `radial::geometry::layout_menu` + `radial::render::build_scene` | verified direct CPU, 20 samples |
 | radial_32 | same, 32 cells | verified direct CPU, 20 samples |
 | radial_128 | same, 128 cells | verified direct CPU, 20 samples |
-| dashboard_minimal | real dashboard/widget egui construction | side-effect boundary inspection required; otherwise unsupported |
-| dashboard_typical | same, synthetic bounded widgets | same |
-| dashboard_dense | same, synthetic bounded widgets | same |
+| dashboard_minimal | real dashboard/widget egui construction | verified CPU: 1 safe synthetic widget / 20 samples |
+| dashboard_typical | same, synthetic bounded widgets | verified CPU: 4 widgets / 20 samples; pinned placeholder |
+| dashboard_dense | same, synthetic bounded widgets | verified CPU: 9 widgets / 20 samples; pinned placeholders |
 
 Radial uses the starter document's fixed default skin, one ring with stable
 synthetic cell IDs/labels, scale 1, anchor (0,0), work area +/-10000 and
@@ -25,7 +25,10 @@ the result covers geometry and unprepared scene construction, not full rendering
 Default 3 warmups, 20 recorded samples; hard maximum 20 samples, 3 warmups,
 90 seconds. One smoke batch per scenario. Timing is monotonic wall duration
 of real CPU computation, not process CPU percentage or native responsiveness.
-Native metrics remain null until checked Job Object containment is proven.
+Native presentation remains null: Job containment alone does not prove desktop
+access or a visible frame. Dashboard uses fixed 1280x720 points, scale 1, synthetic
+time increments and no input. Safe widget types are quick_tools, pinned_commands
+(empty placeholder), and frequent_commands; other widget paths are excluded.
 
 One shared feature-only recorder owns unique ignored evidence directories,
 schema/versioned events and atomic summary publication. Strict CLI parsing

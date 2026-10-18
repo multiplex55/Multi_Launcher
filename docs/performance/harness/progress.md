@@ -280,3 +280,24 @@ Descendant's error intentionally reports a root that left descendants, even
 though cleanup succeeded. Captured stdout confirms descendant started; no guard
 failure or Access denied. This was native batch 2; no further attempts. Existing
 CIM denial remains final. No native viewport, screenshots or desktop input.
+
+## H4-B — complete
+
+H4-A `ddd10f8f` pushed. Added sanitized results table/checkpoint map and updated
+contract dispositions. `cargo metadata --offline --no-deps --format-version 1`
+captured once after additions in `target/perf-harness/metadata-after.json`.
+Compared to the single before capture: dependencies identical; default features
+empty; only `multi_launcher` ungated; three old dev-smoke targets unchanged;
+four new bins all require perf-harness. Profiles/Cargo.lock unchanged.
+
+Reused passing scoped protocol, CLI, adapters and target-specific checks; the
+only new behavior's rejection test and actual owned teardown passed in H4-A.
+No full suite, default-build matrix, pixel campaign, or repeated workload batch.
+Audited all 8 workload receipt sets: 22 ordered JSONL events each, consistent
+monotonic/UTC order, success, 20 valid / 0 invalid, fixture hash. Saved ignored
+`h4-receipt-audit.json`. Retained raw evidence below 0.5 MiB, max file below
+40 KiB, none tracked; root remains ignored. Source review/diff confirms real
+owners, feature-only seams and no default algorithm/profile changes. Touched
+Rust rustfmt and cumulative diff checks passed; non-Windows stubs inspected,
+no cross-platform compilation claimed. Independent dashboard review clear.
+Final single maintained-target Clippy is the only remaining check.
