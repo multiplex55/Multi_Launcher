@@ -30,6 +30,8 @@ mod hash_generator_dialog;
 pub(crate) mod hotfolder_dialog;
 pub(crate) mod hotfolder_dispatch;
 pub(crate) mod hotfolder_runtime;
+#[cfg(feature = "perf-harness")]
+pub use hotfolder_runtime::HotFolderIdleFixture;
 pub mod image_crop_editor;
 mod image_panel;
 mod indexing;

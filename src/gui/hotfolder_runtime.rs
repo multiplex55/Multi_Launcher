@@ -467,6 +467,260 @@ impl Drop for HotFolderRuntimeDriver {
     }
 }
 
+#[cfg(feature = "perf-harness")]
+struct InertHotFolderActionAdapter {
+    dispatches: AtomicU64,
+}
+
+#[cfg(feature = "perf-harness")]
+impl crate::hotfolder::HotFolderExternalActionAdapter for InertHotFolderActionAdapter {
+    fn supports(&self, _action: &crate::hotfolder::RuleAction) -> bool {
+        false
+    }
+
+    fn dispatch(
+        &self,
+        request: crate::hotfolder::HotFolderExternalActionRequest,
+        _cancellation: &crate::file_operations::ScanCancellation,
+    ) -> crate::hotfolder::HotFolderExternalActionOutcome {
+        self.dispatches.fetch_add(1, Ordering::SeqCst);
+        crate::hotfolder::HotFolderExternalActionOutcome {
+            operation_id: request.operation_id,
+            macro_run_id: None,
+            status: crate::hotfolder::HotFolderTerminalStatus::Failure,
+            phase: crate::hotfolder::HotFolderExecutionPhase::Admission,
+            reason: Some("the performance fixture rejects all external actions".into()),
+        }
+    }
+}
+
+/// Feature-gated owner for a real Hot Folder driver with a fresh empty store.
+/// The fixture exposes only state validation and explicit worker shutdown.
+#[cfg(feature = "perf-harness")]
+pub struct HotFolderIdleFixture {
+    driver: HotFolderRuntimeDriver,
+    scenario: crate::perf_harness::Scenario,
+    adapter: Arc<InertHotFolderActionAdapter>,
+}
+
+#[cfg(feature = "perf-harness")]
+impl HotFolderIdleFixture {
+    pub fn new(
+        run_output_dir: &Path,
+        scenario: crate::perf_harness::Scenario,
+    ) -> Result<Self, crate::perf_harness::ProbeFailure> {
+        use crate::perf_harness::{ProbeFailure, ProbeStatus, Scenario};
+
+        if !matches!(
+            scenario,
+            Scenario::HotfolderDisabled | Scenario::HotfolderEnabledZeroRules
+        ) {
+            return Err(ProbeFailure::error(
+                "Hot Folder fixture accepts only disabled or enabled-zero-rules scenarios",
+            ));
+        }
+        if !run_output_dir.is_absolute() {
+            return Err(ProbeFailure::error(
+                "Hot Folder fixture output directory must be absolute",
+            ));
+        }
+        let canonical_run_dir = run_output_dir
+            .canonicalize()
+            .map_err(|error| fixture_io_failure("canonicalize run output directory", error))?;
+        let fixture_dir = canonical_run_dir.join("fixture");
+        std::fs::create_dir(&fixture_dir).map_err(|error| {
+            fixture_io_failure("create fresh isolated fixture directory", error)
+        })?;
+        let fixture_dir = fixture_dir.canonicalize().map_err(|error| {
+            fixture_io_failure("canonicalize isolated fixture directory", error)
+        })?;
+        if !fixture_dir.starts_with(&canonical_run_dir) {
+            return Err(ProbeFailure::new(
+                ProbeStatus::Error,
+                "canonical Hot Folder fixture directory escaped this run's output directory",
+            ));
+        }
+        let settings_path = fixture_dir.join("settings.json");
+        let data_root = AppDataRoot::from_settings_path(settings_path).map_err(|error| {
+            let reason = format!("derive isolated Hot Folder data root: {error}");
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io_error| io_error.raw_os_error() == Some(5))
+            {
+                ProbeFailure::new(ProbeStatus::BlockedEnvironment, reason)
+            } else {
+                ProbeFailure::error(reason)
+            }
+        })?;
+
+        let adapter = Arc::new(InertHotFolderActionAdapter {
+            dispatches: AtomicU64::new(0),
+        });
+        let driver_adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter> =
+            adapter.clone();
+        let driver = HotFolderRuntimeDriver::new(data_root, driver_adapter);
+        let request_id = match scenario {
+            Scenario::HotfolderDisabled => driver.ensure_loaded(),
+            Scenario::HotfolderEnabledZeroRules => driver.start(HotFolderCapabilityInputs::empty()),
+            _ => unreachable!("scenario was validated above"),
+        }
+        .map_err(|error| {
+            ProbeFailure::error(format!("submit Hot Folder fixture request: {error}"))
+        })?;
+        let snapshot = wait_for_fixture_acknowledgement(&driver, request_id)?;
+        validate_hotfolder_idle_snapshot(&snapshot, scenario)?;
+        let fixture = Self {
+            driver,
+            scenario,
+            adapter,
+        };
+        fixture.validate()?;
+        Ok(fixture)
+    }
+
+    pub fn validate(&self) -> Result<(), crate::perf_harness::ProbeFailure> {
+        use crate::perf_harness::ProbeFailure;
+
+        validate_hotfolder_idle_snapshot(&self.driver.snapshot(), self.scenario)?;
+        if self.adapter.dispatches.load(Ordering::SeqCst) != 0 {
+            return Err(ProbeFailure::error(
+                "inert Hot Folder fixture received an external action dispatch",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn shutdown(&mut self) {
+        self.driver.shutdown_and_reap();
+        self.driver.join_reaper();
+    }
+}
+
+#[cfg(feature = "perf-harness")]
+impl Drop for HotFolderIdleFixture {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+#[cfg(feature = "perf-harness")]
+fn fixture_io_failure(operation: &str, error: std::io::Error) -> crate::perf_harness::ProbeFailure {
+    let status = if error.raw_os_error() == Some(5) {
+        crate::perf_harness::ProbeStatus::BlockedEnvironment
+    } else {
+        crate::perf_harness::ProbeStatus::Error
+    };
+    crate::perf_harness::ProbeFailure::new(status, format!("{operation} failed: {error}"))
+}
+
+#[cfg(feature = "perf-harness")]
+fn wait_for_fixture_acknowledgement(
+    driver: &HotFolderRuntimeDriver,
+    request_id: u64,
+) -> Result<HotFolderDriverSnapshot, crate::perf_harness::ProbeFailure> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let snapshot = driver.snapshot();
+        if let Some(acknowledgement) = snapshot
+            .acknowledgements
+            .iter()
+            .find(|acknowledgement| acknowledgement.request_id == request_id)
+        {
+            acknowledgement.result.as_ref().map_err(|error| {
+                crate::perf_harness::ProbeFailure::error(format!(
+                    "Hot Folder fixture request failed: {error}"
+                ))
+            })?;
+            return Ok(snapshot);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(crate::perf_harness::ProbeFailure::timeout(
+                "Hot Folder fixture request was not acknowledged within 3 seconds",
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(feature = "perf-harness")]
+fn validate_hotfolder_idle_snapshot(
+    snapshot: &HotFolderDriverSnapshot,
+    scenario: crate::perf_harness::Scenario,
+) -> Result<(), crate::perf_harness::ProbeFailure> {
+    use crate::perf_harness::{ProbeFailure, Scenario};
+
+    if let Some(error) = snapshot.error.as_deref() {
+        return Err(ProbeFailure::error(format!(
+            "Hot Folder driver reported an error: {error}"
+        )));
+    }
+    if !snapshot.loaded {
+        return Err(ProbeFailure::error("Hot Folder store is not loaded"));
+    }
+    let store = snapshot
+        .store
+        .as_ref()
+        .ok_or_else(|| ProbeFailure::error("Hot Folder store snapshot is unavailable"))?;
+    if !store.rules.is_empty() {
+        return Err(ProbeFailure::error(
+            "isolated Hot Folder fixture unexpectedly contains rules",
+        ));
+    }
+
+    match scenario {
+        Scenario::HotfolderDisabled => {
+            if snapshot.plugin_enabled
+                || snapshot.running
+                || snapshot.runtime.is_some()
+                || snapshot.execution.is_some()
+            {
+                return Err(ProbeFailure::error(
+                    "disabled Hot Folder fixture unexpectedly owns runtime or execution workers",
+                ));
+            }
+        }
+        Scenario::HotfolderEnabledZeroRules => {
+            if !snapshot.plugin_enabled || !snapshot.running || snapshot.paused {
+                return Err(ProbeFailure::error(
+                    "zero-rule Hot Folder fixture is not enabled and running",
+                ));
+            }
+            let runtime = snapshot
+                .runtime
+                .as_ref()
+                .ok_or_else(|| ProbeFailure::error("Hot Folder runtime snapshot is unavailable"))?;
+            if runtime.active_roots != 0
+                || runtime.active_rules != 0
+                || runtime.pending_files != 0
+                || runtime.ready_candidates != 0
+                || runtime.lease_active
+            {
+                return Err(ProbeFailure::error(
+                    "zero-rule Hot Folder runtime contains active roots, rules, files, candidates, or leases",
+                ));
+            }
+            let execution = snapshot.execution.as_ref().ok_or_else(|| {
+                ProbeFailure::error("Hot Folder execution snapshot is unavailable")
+            })?;
+            if execution.active
+                || execution.completed_runs != 0
+                || execution.recovery_required != 0
+                || execution.journal_error.is_some()
+            {
+                return Err(ProbeFailure::error(
+                    "zero-rule Hot Folder execution state is active, recovered, or unhealthy",
+                ));
+            }
+        }
+        _ => {
+            return Err(ProbeFailure::error(
+                "Hot Folder validator received an unsupported scenario",
+            ));
+        }
+    }
+    Ok(())
+}
+
 struct PreparedEnable {
     preview: HotFolderEnablePreview,
 }
@@ -1326,6 +1580,43 @@ mod m10e_driver_lifecycle_fixtures {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{Receiver, SyncSender};
     use std::time::Instant;
+
+    #[cfg(feature = "perf-harness")]
+    #[test]
+    fn perf_harness_idle_fixtures_validate_and_reap_without_external_dispatch() {
+        use crate::perf_harness::Scenario;
+
+        let temporary = tempfile::tempdir().expect("temporary fixture root");
+        for (index, scenario) in [
+            Scenario::HotfolderDisabled,
+            Scenario::HotfolderEnabledZeroRules,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let run_dir = temporary.path().join(format!("run-{index}"));
+            std::fs::create_dir(&run_dir).expect("create owned run directory");
+            let mut fixture = HotFolderIdleFixture::new(&run_dir, scenario)
+                .expect("construct inert Hot Folder driver fixture");
+            fixture.validate().expect("fixture state remains empty");
+            assert_eq!(fixture.adapter.dispatches.load(Ordering::SeqCst), 0);
+            fixture.shutdown();
+            assert!(fixture.driver.worker.is_none());
+            assert!(fixture.driver.reaper.is_none());
+        }
+
+        let preexisting_run = temporary.path().join("preexisting");
+        std::fs::create_dir(&preexisting_run).expect("create run directory");
+        let existing_fixture = preexisting_run.join("fixture");
+        std::fs::create_dir(&existing_fixture).expect("create pre-existing fixture directory");
+        let sentinel = existing_fixture.join("settings.json");
+        std::fs::write(&sentinel, b"owned sentinel").expect("write sentinel");
+        assert!(HotFolderIdleFixture::new(&preexisting_run, Scenario::HotfolderDisabled).is_err());
+        assert_eq!(
+            std::fs::read(sentinel).expect("sentinel remains untouched"),
+            b"owned sentinel"
+        );
+    }
 
     #[cfg(windows)]
     struct NativeOnlyAdapter;

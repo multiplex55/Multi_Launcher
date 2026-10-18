@@ -416,6 +416,12 @@ pub struct SourceProvenance {
     source_dirty_reason: Option<String>,
     build_profile: Option<String>,
     build_profile_reason: Option<String>,
+    rustc_version: Option<String>,
+    rustc_version_reason: Option<String>,
+    cargo_version: Option<String>,
+    cargo_version_reason: Option<String>,
+    session_provenance: Option<String>,
+    session_provenance_reason: Option<String>,
 }
 
 impl SourceProvenance {
@@ -448,6 +454,16 @@ impl SourceProvenance {
             build_profile_reason: build_profile
                 .is_none()
                 .then(|| "Cargo profile name was not supplied by the caller or environment".into()),
+            rustc_version: None,
+            rustc_version_reason: Some(
+                "not supplied; recorder launches no version commands".into(),
+            ),
+            cargo_version: None,
+            cargo_version_reason: Some(
+                "not supplied; recorder launches no version commands".into(),
+            ),
+            session_provenance: None,
+            session_provenance_reason: Some("no desktop/session inventory collected".into()),
             baseline_sha,
             source_dirty,
             build_profile,
@@ -460,6 +476,8 @@ impl SourceProvenance {
         let sha = std::env::var("PERF_HARNESS_BASELINE_SHA").ok();
         let dirty = std::env::var("PERF_HARNESS_SOURCE_DIRTY").ok();
         let profile = std::env::var("PERF_HARNESS_PROFILE").ok();
+        let rustc_version = std::env::var("PERF_HARNESS_RUSTC_VERSION").ok();
+        let cargo_version = std::env::var("PERF_HARNESS_CARGO_VERSION").ok();
 
         let mut result = Self::new(None, None, None).expect("empty provenance is valid");
         match sha {
@@ -500,7 +518,44 @@ impl SourceProvenance {
             }
             None => {}
         }
+        apply_bounded_version(
+            rustc_version,
+            "PERF_HARNESS_RUSTC_VERSION",
+            &mut result.rustc_version,
+            &mut result.rustc_version_reason,
+        );
+        apply_bounded_version(
+            cargo_version,
+            "PERF_HARNESS_CARGO_VERSION",
+            &mut result.cargo_version,
+            &mut result.cargo_version_reason,
+        );
         result
+    }
+}
+
+fn apply_bounded_version(
+    value: Option<String>,
+    variable: &str,
+    version: &mut Option<String>,
+    reason: &mut Option<String>,
+) {
+    const MAX_VERSION_BYTES: usize = 128;
+    match value {
+        Some(value)
+            if !value.is_empty()
+                && value.len() <= MAX_VERSION_BYTES
+                && value.chars().all(|character| !character.is_control()) =>
+        {
+            *version = Some(value);
+            *reason = None;
+        }
+        Some(_) => {
+            *reason = Some(format!(
+                "{variable} was present but was empty, contained control characters, or exceeded {MAX_VERSION_BYTES} bytes"
+            ));
+        }
+        None => {}
     }
 }
 
@@ -615,6 +670,53 @@ impl ProbeFailure {
     }
 }
 
+/// Read cumulative CPU time for the current process from its process handle.
+/// The value includes all of this process's threads; callers may report sample
+/// deltas, but must not describe them as isolated worker CPU.
+#[cfg(windows)]
+pub fn owned_process_cpu_ticks_100ns() -> Result<Option<u64>, ProbeFailure> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+
+    // SAFETY: GetCurrentProcess returns a borrowed pseudo-handle for this
+    // process. It is not a separately owned handle and must not be closed.
+    let process = unsafe { GetCurrentProcess() };
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    if let Err(error) =
+        unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) }
+    {
+        let hresult = error.code().0 as u32;
+        let win32_code = (hresult & 0xFFFF_0000 == 0x8007_0000).then_some(hresult & 0xFFFF);
+        let status = if win32_code == Some(5) {
+            ProbeStatus::BlockedEnvironment
+        } else {
+            ProbeStatus::Error
+        };
+        let reason = match win32_code {
+            Some(code) => format!(
+                "GetProcessTimes(GetCurrentProcess) failed with Win32 error {code} (HRESULT 0x{hresult:08X})"
+            ),
+            None => {
+                format!("GetProcessTimes(GetCurrentProcess) failed with HRESULT 0x{hresult:08X}")
+            }
+        };
+        return Err(ProbeFailure::new(status, reason));
+    }
+
+    let ticks = |time: FILETIME| ((time.dwHighDateTime as u64) << 32) | time.dwLowDateTime as u64;
+    Ok(Some(ticks(kernel).saturating_add(ticks(user))))
+}
+
+/// Current-process CPU time is unavailable when the platform has no Windows
+/// process handle API. The caller records that metric as null with a reason.
+#[cfg(not(windows))]
+pub fn owned_process_cpu_ticks_100ns() -> Result<Option<u64>, ProbeFailure> {
+    Ok(None)
+}
+
 impl From<RecorderError> for ProbeFailure {
     fn from(error: RecorderError) -> Self {
         Self::error(error.to_string())
@@ -705,6 +807,12 @@ pub struct RunSummary {
     pub source_dirty_reason: Option<String>,
     pub build_profile: Option<String>,
     pub build_profile_reason: Option<String>,
+    pub rustc_version: Option<String>,
+    pub rustc_version_reason: Option<String>,
+    pub cargo_version: Option<String>,
+    pub cargo_version_reason: Option<String>,
+    pub session_provenance: Option<String>,
+    pub session_provenance_reason: Option<String>,
     pub debug_assertions: bool,
     pub fixture_sha256: Option<String>,
     pub fixture_hash_reason: Option<String>,
@@ -1372,6 +1480,12 @@ impl RunRecorder {
             source_dirty_reason: self.provenance.source_dirty_reason.clone(),
             build_profile: self.provenance.build_profile.clone(),
             build_profile_reason: self.provenance.build_profile_reason.clone(),
+            rustc_version: self.provenance.rustc_version.clone(),
+            rustc_version_reason: self.provenance.rustc_version_reason.clone(),
+            cargo_version: self.provenance.cargo_version.clone(),
+            cargo_version_reason: self.provenance.cargo_version_reason.clone(),
+            session_provenance: self.provenance.session_provenance.clone(),
+            session_provenance_reason: self.provenance.session_provenance_reason.clone(),
             debug_assertions: cfg!(debug_assertions),
             fixture_sha256: self.fixture_sha256.clone(),
             fixture_hash_reason: self.fixture_hash_reason.clone(),
@@ -1802,6 +1916,21 @@ mod tests {
         );
         assert_eq!(summary.source_dirty, Some(false));
         assert_eq!(summary.build_profile.as_deref(), Some("fast-dev"));
+        assert_eq!(summary.rustc_version, None);
+        assert_eq!(
+            summary.rustc_version_reason.as_deref(),
+            Some("not supplied; recorder launches no version commands")
+        );
+        assert_eq!(summary.cargo_version, None);
+        assert_eq!(
+            summary.cargo_version_reason.as_deref(),
+            Some("not supplied; recorder launches no version commands")
+        );
+        assert_eq!(summary.session_provenance, None);
+        assert_eq!(
+            summary.session_provenance_reason.as_deref(),
+            Some("no desktop/session inventory collected")
+        );
         assert_eq!(
             summary.fixture_sha256.as_deref(),
             Some(fixture_sha256(fixture).as_str())
@@ -1847,6 +1976,21 @@ mod tests {
         )
         .expect("summary is valid JSON");
         assert_eq!(persisted["scenario"], "radial_8");
+        assert_eq!(persisted["rustc_version"], serde_json::Value::Null);
+        assert_eq!(
+            persisted["rustc_version_reason"],
+            "not supplied; recorder launches no version commands"
+        );
+        assert_eq!(persisted["cargo_version"], serde_json::Value::Null);
+        assert_eq!(
+            persisted["cargo_version_reason"],
+            "not supplied; recorder launches no version commands"
+        );
+        assert_eq!(persisted["session_provenance"], serde_json::Value::Null);
+        assert_eq!(
+            persisted["session_provenance_reason"],
+            "no desktop/session inventory collected"
+        );
     }
 
     #[test]

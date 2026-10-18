@@ -30,6 +30,11 @@ name = "perf_probe_runner"
 path = "src/bin/perf_probe_runner.rs"
 required-features = ["perf-harness"]
 
+[[bin]]
+name = "perf_hotfolder_probe"
+path = "src/bin/perf_hotfolder_probe.rs"
+required-features = ["perf-harness"]
+
 [dependencies]
 eframe = {
     version = "0.36.2",

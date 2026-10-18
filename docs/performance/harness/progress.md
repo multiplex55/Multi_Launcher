@@ -119,3 +119,40 @@ Raw fixture receipts: `target/perf-harness/runner_self_test/run-1792360843518494
 screenshots remain untested. Root CPU is GetProcessTimes per-process time,
 unnormalized and quantized (observed 0/15.625 ms), not worker CPU or latency.
 All production algorithms, profiles and smoke gates remain unchanged.
+
+## H2-A — complete
+
+Added separately gated `perf_hotfolder_probe` and a feature-only private-owner
+bridge. Fresh fixture creation rejects preexisting directories; all rules,
+roots, candidates, leases, completed runs and external dispatches remain zero.
+The production driver, watcher/executor owners and 80 ms cadence are unchanged.
+One bounded sleep per observation window avoids adding a 100 Hz harness poller.
+Added owned-process CPU helper and explicit optional toolchain/session nulls.
+
+Verification passed:
+`cargo check --offline --features perf-harness --bin perf_hotfolder_probe`;
+`cargo nextest run --offline --features perf-harness --lib -E 'test(perf_harness_idle_fixtures_validate_and_reap_without_external_dispatch) | test(successful_run_writes_ordered_events_summary_provenance_and_fixture_hash)'`
+(2 passed, 5771 skipped); `cargo build --offline --features perf-harness --bin perf_hotfolder_probe`
+(1m30s); side-effect-free `--help`; touched-file rustfmt; `git diff --check`.
+An initial positional Nextest filter selected zero tests, then the corrected
+explicit expression above passed. No broader tests were run.
+
+One batch per scenario, each command:
+`target/debug/perf_probe_runner.exe --probe hotfolder --scenario <name> --warmups 3 --samples 20 --timeout-seconds 90 --out target/perf-harness`.
+Both returned exit 0 with verified owned-job cleanup; 20 valid / 0 invalid CPU
+samples each. Baseline/profile/dirty provenance supplied; Cargo version reused
+from the existing owned capability receipt; Rust version/session remain null
+with reasons. No further Hot Folder smoke runs are needed in this task.
+
+| Scenario | CPU child run ID | Elapsed s | Window p50/p95 ms | CPU p50/p95 ms |
+|---|---|---:|---:|---:|
+| hotfolder_disabled | run-1792361736248888800-0 | 23.502 | 1000.713 / 1001.020 | 0 / 0 |
+| hotfolder_enabled_zero_rules | run-1792361787594119500-0 | 23.061 | 1000.706 / 1000.887 | 0 / 0 |
+
+Raw records live below `target/perf-harness/<scenario>/`; matching runner run
+IDs are `run-1792361735060378200-0` and `run-1792361786472204400-0`.
+CPU is all probe threads during the observation windows, quantized by Windows;
+zeros do not establish zero cost. Wall values are observation intervals, not
+latency. Driver wakeup/publication/work counters are null: production counters
+are not instrumented. No visibility/GPU metrics or screenshots were collected.
+No optimization conclusion follows from these infrastructure smoke samples.

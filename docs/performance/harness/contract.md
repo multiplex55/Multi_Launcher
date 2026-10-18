@@ -3,10 +3,10 @@
 All fixtures are synthetic. No launcher startup, settings load, clipboard,
 hotkey, desktop inventory or external action is part of a CPU probe.
 
-| Scenario | Owner / intended measurement | Initial disposition |
+| Scenario | Owner / intended measurement | Current disposition |
 |---|---|---|
-| hotfolder_disabled | `gui::hotfolder_runtime::driver_main` idle worker | access/lifetime inspection required; otherwise unsupported |
-| hotfolder_enabled_zero_rules | same real driver, empty isolated store | access/lifetime inspection required; otherwise unsupported |
+| hotfolder_disabled | `gui::hotfolder_runtime::driver_main` idle worker | supported real driver with fresh fixture; run through owned Job runner |
+| hotfolder_enabled_zero_rules | same real driver, empty isolated store | supported real driver; no watched roots or actions |
 | radial_8 | `radial::geometry::layout_menu` + `radial::render::build_scene` | supported CPU candidate |
 | radial_32 | same, 32 cells | supported CPU candidate |
 | radial_128 | same, 128 cells | supported CPU candidate |
