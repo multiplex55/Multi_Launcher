@@ -1,0 +1,454 @@
+{
+  "version": 1,
+  "track": "D1",
+  "scenario": "selected developer commands",
+  "baseline_sha": "cbe104abc10ff03af2fd9897e88a4a331a7f4197",
+  "candidate_sha_or_diff": "no production changes; controlled comments described in developer_loop.ps1",
+  "profile": "per sample",
+  "settings_hash": null,
+  "host": {
+    "arch": "x86_64-pc-windows-msvc",
+    "power": null,
+    "logical_processors": 8,
+    "os": "Microsoft Windows NT 10.0.19045.0",
+    "nextest": "0.9.135",
+    "rust": "1.99.0",
+    "ram": null
+  },
+  "samples": [
+    {
+      "scenario": "d1-check-initial",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "check",
+        "--lib",
+        "--offline",
+        "--timings"
+      ],
+      "profile": "dev",
+      "cache": "unknown",
+      "started_utc": "2026-10-18T14:10:59.3059526-04:00",
+      "wall_seconds": 69.94197,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-check-dev-noop-1",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "check",
+        "--lib",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "warmed",
+      "started_utc": "2026-10-18T14:12:28.0911889-04:00",
+      "wall_seconds": 0.956523,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-check-dev-noop-2",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "check",
+        "--lib",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "warmed",
+      "started_utc": "2026-10-18T14:12:29.2598953-04:00",
+      "wall_seconds": 0.998344,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-check-dev-noop-3",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "check",
+        "--lib",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "warmed",
+      "started_utc": "2026-10-18T14:12:30.4334239-04:00",
+      "wall_seconds": 0.971818,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-check-dev-edit-1-1",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "check",
+        "--lib",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "warmed",
+      "started_utc": "2026-10-18T14:12:31.563162-04:00",
+      "wall_seconds": 12.340317,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-check-dev-edit-2-1",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "check",
+        "--lib",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "warmed",
+      "started_utc": "2026-10-18T14:12:44.1612247-04:00",
+      "wall_seconds": 12.262142,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-test-build-dev-preparation-0",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "--lib",
+        "--offline",
+        "-E",
+        "test(=history::tests::pin_roundtrip_and_toggle)",
+        "--no-run",
+        "--cargo-profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "unknown",
+      "started_utc": "2026-10-18T14:13:12.5314985-04:00",
+      "wall_seconds": 46.891887,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-test-build-dev-noop-1",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "--lib",
+        "--offline",
+        "-E",
+        "test(=history::tests::pin_roundtrip_and_toggle)",
+        "--no-run",
+        "--cargo-profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "warmed",
+      "started_utc": "2026-10-18T14:13:59.6280163-04:00",
+      "wall_seconds": 2.018756,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-test-build-dev-noop-2",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "--lib",
+        "--offline",
+        "-E",
+        "test(=history::tests::pin_roundtrip_and_toggle)",
+        "--no-run",
+        "--cargo-profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "warmed",
+      "started_utc": "2026-10-18T14:14:01.8391338-04:00",
+      "wall_seconds": 1.93471,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-test-build-dev-noop-3",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "--lib",
+        "--offline",
+        "-E",
+        "test(=history::tests::pin_roundtrip_and_toggle)",
+        "--no-run",
+        "--cargo-profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "warmed",
+      "started_utc": "2026-10-18T14:14:03.9293054-04:00",
+      "wall_seconds": 1.910483,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-test-build-dev-edit-1-1",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "--lib",
+        "--offline",
+        "-E",
+        "test(=history::tests::pin_roundtrip_and_toggle)",
+        "--no-run",
+        "--cargo-profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "warmed",
+      "started_utc": "2026-10-18T14:14:06.0126246-04:00",
+      "wall_seconds": 46.904552,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-test-build-dev-edit-2-1",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "--lib",
+        "--offline",
+        "-E",
+        "test(=history::tests::pin_roundtrip_and_toggle)",
+        "--no-run",
+        "--cargo-profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "warmed",
+      "started_utc": "2026-10-18T14:14:53.1587685-04:00",
+      "wall_seconds": 45.891162,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-test-execution-dev",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "--lib",
+        "--offline",
+        "-E",
+        "test(=history::tests::pin_roundtrip_and_toggle)",
+        "--cargo-profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "warmed",
+      "started_utc": "2026-10-18T14:15:39.2309572-04:00",
+      "wall_seconds": 47.210068,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-app-build-dev-preparation-0",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "build",
+        "--bin",
+        "multi_launcher",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "unknown",
+      "started_utc": "2026-10-18T14:16:33.8678004-04:00",
+      "wall_seconds": 250.812539,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-app-build-dev-noop-1",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "build",
+        "--bin",
+        "multi_launcher",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "warmed",
+      "started_utc": "2026-10-18T14:20:44.9033293-04:00",
+      "wall_seconds": 1.060895,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-app-build-dev-noop-2",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "build",
+        "--bin",
+        "multi_launcher",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "warmed",
+      "started_utc": "2026-10-18T14:20:46.1372747-04:00",
+      "wall_seconds": 1.190774,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-app-build-dev-noop-3",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "build",
+        "--bin",
+        "multi_launcher",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "warmed",
+      "started_utc": "2026-10-18T14:20:47.4863865-04:00",
+      "wall_seconds": 1.125443,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-app-build-dev-edit-1-1",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "build",
+        "--bin",
+        "multi_launcher",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "warmed",
+      "started_utc": "2026-10-18T14:20:48.7769934-04:00",
+      "wall_seconds": 42.706148,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    },
+    {
+      "scenario": "d1-app-build-dev-edit-2-1",
+      "source_sha": "6e945b88403ade6f0a8a81cd8810ff4ccd233360",
+      "command": [
+        "cargo",
+        "build",
+        "--bin",
+        "multi_launcher",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev"
+      ],
+      "profile": "dev",
+      "cache": "warmed",
+      "started_utc": "2026-10-18T14:21:31.7112525-04:00",
+      "wall_seconds": 47.613284,
+      "exit_code": 0,
+      "success": true,
+      "fixture_hashes": []
+    }
+  ],
+  "metrics": [
+    {
+      "scenario": "d1-app-build-dev",
+      "count": 3,
+      "median_seconds": 1.125443,
+      "min_seconds": 1.060895,
+      "max_seconds": 1.190774
+    },
+    {
+      "scenario": "d1-check-dev",
+      "count": 3,
+      "median_seconds": 0.971818,
+      "min_seconds": 0.956523,
+      "max_seconds": 0.998344
+    },
+    {
+      "scenario": "d1-test-build-dev",
+      "count": 3,
+      "median_seconds": 1.93471,
+      "min_seconds": 1.910483,
+      "max_seconds": 2.018756
+    }
+  ],
+  "limitations": [
+    "Process wall time is not isolated linking or test execution.",
+    "CIM inventory denied; RAM and power unavailable.",
+    "Three no-op observations do not estimate population p95.",
+    "Early check/test samples predate per-file hash capture; exact restored comment recipe is recorded."
+  ],
+  "decision": "BASELINE_ONLY"
+}
