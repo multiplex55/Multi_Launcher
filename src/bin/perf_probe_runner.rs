@@ -544,3 +544,78 @@ fn main() -> ExitCode {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(values: &[&str]) -> Result<Action, String> {
+        parse_args(
+            &values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn accepts_only_fixed_bounded_invocations() {
+        assert!(matches!(parse(&["--help"]), Ok(Action::Help)));
+        assert!(matches!(
+            parse(&["--self-test", "batch"]),
+            Ok(Action::SelfTest)
+        ));
+        assert!(matches!(
+            parse(&[
+                "--probe",
+                "radial",
+                "--scenario",
+                "radial_8",
+                "--samples",
+                "20"
+            ]),
+            Ok(Action::Probe {
+                probe: Probe::Radial,
+                scenario: Scenario::Radial8,
+                samples: 20,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_unregistered_targets_mismatched_scenarios_and_unbounded_flags() {
+        for values in [
+            vec!["--probe", "multi_launcher", "--scenario", "radial_8"],
+            vec!["--probe", "radial", "--scenario", "hotfolder_disabled"],
+            vec![
+                "--probe",
+                "radial",
+                "--scenario",
+                "radial_8",
+                "--samples",
+                "21",
+            ],
+            vec![
+                "--probe",
+                "radial",
+                "--scenario",
+                "radial_8",
+                "--timeout-seconds",
+                "0",
+            ],
+            vec![
+                "--probe",
+                "radial",
+                "--scenario",
+                "radial_8",
+                "--out",
+                "../outside",
+            ],
+            vec!["--help", "--self-test", "batch"],
+            vec!["--self-test", "arbitrary"],
+        ] {
+            assert!(parse(&values).is_err(), "accepted {values:?}");
+        }
+    }
+}

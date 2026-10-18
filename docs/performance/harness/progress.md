@@ -90,3 +90,32 @@ launched; no containment, desktop or performance metric is claimed yet.
 
 Next: `cargo build --offline --features perf-harness --bin perf_probe_runner`,
 four recorder tests plus runner parser tests, then one `--self-test batch`.
+
+## H1-C — complete
+
+H1-B `ab243ce4` pushed. Final-source verification:
+
+- `cargo nextest run --offline --features perf-harness --lib --bin perf_probe_runner -E 'test(perf_harness::tests::) | binary(perf_probe_runner)'`:
+  first run 3/4 passed; exposed actual serde `radial8` vs required `radial_8`.
+  Fixed explicit serialization names for all three radial scenarios; retained
+  assertion. Added two pure allowlist/bounds runner parser tests. Final run
+  **6 passed**, 5768 skipped, build 1m27s. H1-A verification is now complete.
+- `cargo build --offline --features perf-harness --bin perf_probe_runner`:
+  exit 0, 2m51s.
+- `target/debug/perf_probe_runner.exe --self-test batch`: exit 0, 3.86s;
+  one native batch, no repair/retry. Exit 0, exact exit 23, two-second timeout,
+  inherited descendant all had assigned/resumed owned jobs and verified cleanup.
+  Descendant receipt records successful root exit, job total 3, active 2 at
+  root exit, followed by verified empty job. No process inventory was used.
+- Unregistered probe command: exit 2 before child creation; separate ignored
+  `target/perf-harness/cli-rejection.json` receipt. `git check-ignore` confirms it.
+- Checked all four event streams: started/terminal ordering, monotonic elapsed,
+  valid UTC bounds. Raw root contains 29 files / 50,977 bytes at this checkpoint.
+
+Raw fixture receipts: `target/perf-harness/runner_self_test/run-1792360843518494200-0`
+(exit 0), `run-1792360843867080400-0` (exit 23),
+`run-1792360844189831100-0` (timeout), `run-1792360846590963000-0`
+(descendant). Successful ownership is confirmed; native desktop visibility and
+screenshots remain untested. Root CPU is GetProcessTimes per-process time,
+unnormalized and quantized (observed 0/15.625 ms), not worker CPU or latency.
+All production algorithms, profiles and smoke gates remain unchanged.

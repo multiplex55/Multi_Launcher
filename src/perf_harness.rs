@@ -35,8 +35,11 @@ const MAX_UNIT_BYTES: usize = 32;
 pub enum Scenario {
     HotfolderDisabled,
     HotfolderEnabledZeroRules,
+    #[serde(rename = "radial_8")]
     Radial8,
+    #[serde(rename = "radial_32")]
     Radial32,
+    #[serde(rename = "radial_128")]
     Radial128,
     DashboardMinimal,
     DashboardTypical,
