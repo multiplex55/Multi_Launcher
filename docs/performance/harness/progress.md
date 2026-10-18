@@ -156,3 +156,34 @@ zeros do not establish zero cost. Wall values are observation intervals, not
 latency. Driver wakeup/publication/work counters are null: production counters
 are not instrumented. No visibility/GPU metrics or screenshots were collected.
 No optimization conclusion follows from these infrastructure smoke samples.
+
+## H2-B — complete
+
+H2-A `1056f1dc` pushed. Added only the gated `perf_radial_probe` manifest target
+and its bin source. Reuses public production `layout_menu` and `build_scene`
+as in `benches/radial_runtime.rs`; no production source changed. The last layout
+argument is minimum scale 0.25 (corrected the contract's earlier angle label).
+Fixture hashes cover serialized actual menus and the exact layout constants.
+Validation outside capture checks cell identity/order/count and finite geometry.
+
+Passed `cargo check --offline --features perf-harness --bin perf_radial_probe`;
+`cargo nextest run --offline --features perf-harness --bin perf_radial_probe radial_fixture_hash_and_scene_invariants_hold_for_supported_counts`
+(1 passed); `cargo build --offline --features perf-harness --bin perf_radial_probe`;
+`--help`, touched-file rustfmt and `git diff --check`. Existing vendor warnings only.
+
+Direct command once per scenario:
+`target/debug/perf_radial_probe.exe --scenario <name> --warmups 3 --samples 20 --timeout-seconds 90 --out target/perf-harness`.
+All returned 0; each has 20 valid / 0 invalid samples and 22 ordered JSONL events.
+
+| Scenario | Run ID | Run elapsed ms | Construction p50/p95 ms | Cells/primitives |
+|---|---|---:|---:|---:|
+| radial_8 | run-1792362314906006800-0 | 18.174 | 0.02810 / 0.05090 | 8 / 20 |
+| radial_32 | run-1792362315197214300-0 | 16.182 | 0.04010 / 0.07095 | 32 / 68 |
+| radial_128 | run-1792362315325060000-0 | 44.658 | 0.18535 / 0.28426 | 128 / 260 |
+
+Raw evidence: `target/perf-harness/<scenario>/<run-id>/`. These `cpu_headless`
+samples measure layout plus **unprepared** scene wall construction in dev,
+excluding fixture creation, output validation, text shaping, asset preparation,
+compositing, GPU and physical presentation. Process CPU and visibility are null
+with reasons. This proves the H2 minimum real-algorithm CPU floor; it is not an
+optimization comparison or live responsiveness measurement.
