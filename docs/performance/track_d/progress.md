@@ -15,7 +15,7 @@ per candidate in each of D1–D3. No baseline full tests or early Clippy.
 |---|---|---|
 | D0-A | complete | Branch created and SHA verified; baseline_manifest.json |
 | D0-B | complete | Existing runner reused; cargo --version dry run exit 0, 0.050 s. One setup correction: runner requires external evidence. |
-| D0-C | pending | Synthetic fixture manifest |
+| D0-C | complete | Deterministic manifest SHA256: 14cb37c63e2b42cbf4873ba83f5b61ed6fa5b43c6e9bccd309979c215791994a; materialization gated on isolation |
 | D1-A–G | pending | Developer loop measurements |
 | D2-A–I | pending | Responsiveness |
 | D3-A–G | pending | Idle |
@@ -26,3 +26,5 @@ Raw evidence: external `$env:TEMP/Multi_Launcher/perf-track-d/`; `target/perf-tr
 optimization candidates attempted, no application processes launched yet.
 
 `D0-B`: ~7 active minutes through runner dry run; no optimization experiments. Toolchain: Rust/Cargo 1.99.0, Nextest 0.9.135, Windows 10.0.19045 x64, 8 logical processors. CIM OS/CPU inventory denied; RAM/power unmeasured. Rust Analyzer 1.99.0 available. Files: ledger, baseline manifest, runner recipe. No Rust source changed.
+
+`D0-B` commit: a3bf2959; push rejected by automatic approval review: external destination/payload trust not established. No bypass/retry. D0-C: counts, event semantics and safety boundaries pinned in fixtures.json. D0 total approximately 8 active minutes. D1 starts next; no optimization candidates yet.
