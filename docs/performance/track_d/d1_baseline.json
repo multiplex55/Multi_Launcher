@@ -1,19 +1,23 @@
 {
   "version": 1,
   "track": "D1",
+  "measurement_window": {
+    "end_utc": "2026-10-18T18:22:40.0000000+00:00",
+    "start_utc": "2026-10-18T18:10:59.0000000+00:00"
+  },
   "scenario": "selected developer commands",
   "baseline_sha": "cbe104abc10ff03af2fd9897e88a4a331a7f4197",
   "candidate_sha_or_diff": "no production changes; controlled comments described in developer_loop.ps1",
   "profile": "per sample",
   "settings_hash": null,
   "host": {
-    "arch": "x86_64-pc-windows-msvc",
     "power": null,
+    "nextest": "0.9.135",
+    "ram": null,
     "logical_processors": 8,
     "os": "Microsoft Windows NT 10.0.19045.0",
-    "nextest": "0.9.135",
     "rust": "1.99.0",
-    "ram": null
+    "arch": "x86_64-pc-windows-msvc"
   },
   "samples": [
     {
@@ -423,21 +427,21 @@
   ],
   "metrics": [
     {
-      "scenario": "d1-app-build-dev",
+      "scenario": "d1-app-build-dev:6e945b88403ade6f0a8a81cd8810ff4ccd233360:build|--bin|multi_launcher|--offline|--timings|--profile|dev",
       "count": 3,
       "median_seconds": 1.125443,
       "min_seconds": 1.060895,
       "max_seconds": 1.190774
     },
     {
-      "scenario": "d1-check-dev",
+      "scenario": "d1-check-dev:6e945b88403ade6f0a8a81cd8810ff4ccd233360:check|--lib|--offline|--timings|--profile|dev",
       "count": 3,
       "median_seconds": 0.971818,
       "min_seconds": 0.956523,
       "max_seconds": 0.998344
     },
     {
-      "scenario": "d1-test-build-dev",
+      "scenario": "d1-test-build-dev:6e945b88403ade6f0a8a81cd8810ff4ccd233360:nextest|run|--lib|--offline|-E|test(=history::tests::pin_roundtrip_and_toggle)|--no-run|--cargo-profile|dev",
       "count": 3,
       "median_seconds": 1.93471,
       "min_seconds": 1.910483,
@@ -448,7 +452,7 @@
     "Process wall time is not isolated linking or test execution.",
     "CIM inventory denied; RAM and power unavailable.",
     "Three no-op observations do not estimate population p95.",
-    "Early check/test samples predate per-file hash capture; exact restored comment recipe is recorded."
+    "All original dev baseline samples predate per-file hash capture; exact restored comment recipe is recorded."
   ],
   "decision": "BASELINE_ONLY"
 }

@@ -18,7 +18,7 @@ per candidate in each of D1–D3. No baseline full tests or early Clippy.
 | D0-C | complete | Deterministic manifest SHA256: 14cb37c63e2b42cbf4873ba83f5b61ed6fa5b43c6e9bccd309979c215791994a; materialization gated on isolation |
 | D1-A | complete | Three command families; d1_baseline.json and developer_loop.ps1 |
 | D1-B | complete | d1_attribution.md; headless RA timed out at 60.07 s |
-| D1-C/D | in_progress | One existing fast-dev workflow comparison; no product source edits |
+| D1-C/D | complete_keep_recipe | Existing fast-dev: edits save 15.05/20.79 s; functional guard PASS |
 | D1-E/F | skipped_no_candidate | No independent measured small owner |
 | D1-G | pending | Close developer loop findings |
 | D2-A–I | pending | Responsiveness |
@@ -39,3 +39,9 @@ Clock correction: initial approximate D0 durations were overestimates; commit/ru
 D1-A finished 18:22 UTC (~11 minutes into D1; total ~14 minutes). App initial preparation 250.81 s; no-op 1.06/1.19/1.13 s; edits history 42.71 s, GUI 47.61 s. Test edits 46.90/45.89 s; test case PASS 0.028 s, Nextest run 0.039 s (full command 47.21 s includes restoration rebuild). Fixtures restored byte-for-byte; no product source diff. Compile/check and exact selected library test passed. Parser check and harmless summarizer run passed. No cold-cache build requested or cache deleted. Only existing cache used. Summary fingerprints include source SHA, command/profile/cache; early samples lack per-file hashes but exact appended comment recipe and restoration are recorded. Raw logs remain external. Candidates/variants: 0/0. Push held under prior auto-review rejection.
 
 D1-A commit 030e4868 (local). D1-B: RA database load 25.94 s, 1283 MB reported internally; headless history analysis did not finish in 60.07 s and its owned process tree was killed/disposed. RA_NOT_MEASURED for interactive response; no editor config changed. D1 elapsed 13.1 min at 18:24:05 UTC. Candidate 1 starts after attribution commit, max 55 min; current variants 0. Push remains held under prior automatic-review rejection.
+
+D1-C candidate 1 clock starts 18:24:19 UTC, deadline 19:19:19 UTC. Variant 1 is existing fast-dev; no Cargo.toml edit. Its previously absent target/fast-dev cache is the one new-profile cache population in D1; existing dev/release caches retained. Baseline C/D paired workloads are history and GUI comment edits, with >=15% AND >=10 s needed in each comparison; no-op guard tracked independently. Candidate 2 remains skipped. No CARGO_PROFILE_*, CARGO_INCREMENTAL, RUSTFLAGS, CARGO_ENCODED_RUSTFLAGS or CARGO_TARGET_DIR environment overrides were present.
+
+Bounded read-only reviewer pass found stale-session mixing risk in the summarizer; corrected with required UTC window and source/command grouping. Rebuilt original baseline summary using 18:10:59–18:22:40 UTC: 19 samples, exactly 3 per no-op group, same numeric observations. Corrected missing-hash limitation to all original baseline samples. No extra Cargo run. This is the single evidence-tool correction for this checkpoint.
+
+D1-D completed ~18:33 UTC: one candidate/one variant, ~9 minutes incl guard. Two edited pairs save 35.24%/43.66% (15.052/20.790 s). No-op +0.229 s /20.32% documented guard exception, outweighed by recurring edit gain. Existing opt-in recipe retained; no product source or profile changed. Exact fast-dev test guard PASS 0.032 s, Nextest run 0.050 s. d1_results.md, d1_profile_comparison.json and corrected baseline/summarizer are evidence. D1-B commit fe84cd10 local; pushes held under previous rejection. Review findings resolved; no extra review loop.
