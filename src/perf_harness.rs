@@ -41,10 +41,11 @@ pub enum Scenario {
     DashboardMinimal,
     DashboardTypical,
     DashboardDense,
+    RunnerSelfTest,
 }
 
 impl Scenario {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::HotfolderDisabled,
         Self::HotfolderEnabledZeroRules,
         Self::Radial8,
@@ -53,6 +54,7 @@ impl Scenario {
         Self::DashboardMinimal,
         Self::DashboardTypical,
         Self::DashboardDense,
+        Self::RunnerSelfTest,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -65,6 +67,7 @@ impl Scenario {
             Self::DashboardMinimal => "dashboard_minimal",
             Self::DashboardTypical => "dashboard_typical",
             Self::DashboardDense => "dashboard_dense",
+            Self::RunnerSelfTest => "runner_self_test",
         }
     }
 
@@ -534,6 +537,15 @@ pub struct ProcessManifest {
     /// user input, a command line, or a personal path.
     pub argv_redacted: Vec<String>,
     pub child_pid: Option<u32>,
+    /// Creation FILETIME read from the owned process handle. This disambiguates
+    /// a PID from a later process that may reuse the same numeric identifier.
+    pub child_creation_time_100ns: Option<u64>,
+    pub child_creation_time_reason: Option<String>,
+    /// CPU time for the root child only, read from its owned process handle.
+    pub root_process_cpu_ms: Option<f64>,
+    pub root_process_cpu_reason: Option<String>,
+    pub job_total_processes: Option<u32>,
+    pub job_active_processes_at_root_exit: Option<u32>,
     pub job_created: Option<bool>,
     pub job_assigned: Option<bool>,
     pub resumed: Option<bool>,
@@ -553,6 +565,12 @@ impl ProcessManifest {
             executable_sha256: None,
             argv_redacted: Vec::new(),
             child_pid: None,
+            child_creation_time_100ns: None,
+            child_creation_time_reason: Some("no child process was created".into()),
+            root_process_cpu_ms: None,
+            root_process_cpu_reason: Some("no owned process handle was available".into()),
+            job_total_processes: None,
+            job_active_processes_at_root_exit: None,
             job_created: None,
             job_assigned: None,
             resumed: None,
@@ -1480,6 +1498,7 @@ where
     )?;
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(&mut recorder)));
+    let callback_succeeded = matches!(&result, Ok(Ok(())));
     let (mut workload_status, mut reason) = match result {
         Ok(Ok(())) => {
             if recorder.deadline_reached() {
@@ -1503,7 +1522,7 @@ where
         Err(_) => (ProbeStatus::Error, Some("probe panicked".into())),
     };
 
-    if recorder.deadline_reached() && workload_status != ProbeStatus::Timeout {
+    if callback_succeeded && recorder.deadline_reached() {
         workload_status = ProbeStatus::Timeout;
         reason = Some("run exceeded its requested wall-time deadline".into());
     }
@@ -1800,14 +1819,14 @@ mod tests {
         assert!(
             summary
                 .output_dir
-                .starts_with(workspace.path().join(EVIDENCE_ROOT))
+                .starts_with(workspace.path().canonicalize().unwrap().join(EVIDENCE_ROOT))
         );
         assert!(summary.output_dir.join("stdout.log").exists());
         assert!(summary.output_dir.join("stderr.log").exists());
         assert!(summary.output_dir.join("run.json").exists());
-        assert!(
-            nested_dir.is_some_and(|path| path.starts_with(workspace.path().join(EVIDENCE_ROOT)))
-        );
+        assert!(nested_dir.is_some_and(|path| {
+            path.starts_with(workspace.path().canonicalize().unwrap().join(EVIDENCE_ROOT))
+        }));
         let events = jsonl(&summary.output_dir);
         assert_eq!(events.len(), 4);
         assert_eq!(events[0]["event"], "started");
@@ -1874,6 +1893,30 @@ mod tests {
         assert_eq!(
             jsonl(&error.output_dir).last().unwrap()["event"],
             "terminal"
+        );
+
+        let mut late_config = config(1);
+        late_config.timeout_seconds = 1;
+        let late_failure = run_recorded(
+            workspace.path(),
+            late_config,
+            MeasurementKind::CpuHeadless,
+            provenance(),
+            None,
+            ProcessManifest::not_attempted("no child"),
+            |recorder| {
+                recorder.started = Instant::now() - Duration::from_secs(2);
+                Err(ProbeFailure::new(
+                    ProbeStatus::BlockedEnvironment,
+                    "controlled access denied fixture",
+                ))
+            },
+        )
+        .expect("explicit native failure remains recorded");
+        assert_eq!(late_failure.status, ProbeStatus::BlockedEnvironment);
+        assert_eq!(
+            late_failure.termination_reason.as_deref(),
+            Some("controlled access denied fixture")
         );
 
         let panic = run_recorded(

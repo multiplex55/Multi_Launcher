@@ -47,6 +47,13 @@ before mutation; returned and persisted failure summaries retain identical
 reason/timestamps. Windows reparse paths are rejected. H1-A's 20-minute edit
 budget ends here; pending compilation does not justify more recorder features.
 
+Original focused command finished after 7m37s: 4 tests selected, 3 passed,
+1 failed, 5768 skipped. Failure was the success test's comparison of canonical
+output paths against a noncanonical Windows temporary directory path. Correct
+the assertion to canonicalize the expected root; no receipt path escape was
+observed. This build started before the final review changes, so final-source
+verification remains H1-C. H1-A commit `32014fbd` pushed successfully.
+
 ## H1 observations (in progress)
 
 H0-B commit `19bb2fa3` pushed. Source inspection confirmed Hot Folder can use
@@ -60,3 +67,26 @@ Runner exit 1; exact receipt reason `containment monitor failure: Access denied 
 child exit 0, RootAlive false, PostCleanup `Absent`. Raw evidence is ignored at
 `target/perf-harness/legacy-capability/result.json`. No repeated CIM diagnosis.
 This does not establish Job Object capability or desktop access.
+
+## H1-B — complete (implementation/check; native capability pending H1-C)
+
+Added checked Windows suspended creation, explicit inherited stdio-handle
+list, kill-on-close Job Object assignment before resume, bounded pipe polling,
+owned-root and job-empty verification, executable hashing, creation identity,
+root CPU time and fixed fixture dispatch. Native API features are enabled only
+by `perf-harness`. Non-Windows runner reports unsupported. No new dependency.
+
+Repeated target-specific `cargo check --features perf-harness --bin perf_probe_runner`
+ultimately passed exit 0. Initial compilation exposed API/type errors and one
+unambiguous mutability correction; subsequent narrow checks covered review fixes.
+Only existing vendor warnings remained. Touched Rust formatted; diff inspected.
+
+Independent read-only review confirmed corrections for bounded draining after
+cleanup failures, inherited-handle storage lifetime, fixture dispatch, real
+descendant accounting and explicit hard-error preservation after deadlines.
+Parent additionally corrected default Windows feature leakage and ensured
+the batch stops on first denial/unverified ownership. No native fixture has
+launched; no containment, desktop or performance metric is claimed yet.
+
+Next: `cargo build --offline --features perf-harness --bin perf_probe_runner`,
+four recorder tests plus runner parser tests, then one `--self-test batch`.
