@@ -925,9 +925,9 @@ alter the effect output. A screenshot or stream is not guaranteed to contain the
 same composed pixels visible on the desktop; API success and saved readbacks
 alone do not prove that composition was included.
 
-For an opt-in native runtime check, run `cargo run --bin coordinate_tool_smoke`
+For an opt-in native runtime check, run `cargo run --features dev-smoke-binaries --bin coordinate_tool_smoke`
 on an interactive Windows desktop for the existing passive/capture fixture, or
-`cargo run --bin coordinate_tool_smoke -- --cursor-effects` for the cursor
+`cargo run --features dev-smoke-binaries --bin coordinate_tool_smoke -- --cursor-effects` for the cursor
 effects fixture. The latter opens an ordinary controlled scene with a palette,
 checkerboard, text and a changing marker. F1 toggles the HUD, F2 the crosshair,
 F3 the halo, F4 the magnifier, and F5 turns effects off while retaining the HUD.
@@ -941,7 +941,7 @@ magnifier-composited output, so inspect any saved image and treat the parent
 desktop observation as the native visual check.
 
 For a finite controller-driven observation sequence, use
-`cargo run --bin coordinate_tool_smoke -- --cursor-effects-auto`. It holds each
+`cargo run --features dev-smoke-binaries --bin coordinate_tool_smoke -- --cursor-effects-auto`. It holds each
 named mode/appearance stage for about 1.4 seconds, logs foreground and native
 window diagnostics, saves bounded readbacks for halo strengths and zoom modes,
 then turns effects off and shuts down. It does not synthesize input or move the
@@ -1441,17 +1441,27 @@ Restore and reset are explicit, confirmed, staged operations. They do not replac
 
 ### Build and run the launcher
 
-For the normal application workflow, select the launcher explicitly:
+Ordinary debug and release builds select `multi_launcher` as the only application
+binary. Cargo still builds its shared library, dependencies and build script:
 
 ```powershell
-cargo build --release --bin multi_launcher
-cargo run --bin multi_launcher
+cargo build
+cargo build --release
+cargo run
 ```
 
-The package also contains auxiliary smoke and acceptance executables. An
-unqualified `cargo build --release` intentionally builds every binary target;
-use it when you want those tools as well. Selecting `multi_launcher` still
-compiles the shared library that the application needs.
+The three developer smoke and acceptance binaries require the nondefault
+`dev-smoke-binaries` feature and remain explicitly selectable:
+
+```powershell
+cargo build --features dev-smoke-binaries --bin coordinate_tool_smoke
+cargo build --features dev-smoke-binaries --bin passive_overlay_smoke
+cargo build --features dev-smoke-binaries --bin radial_acceptance
+```
+
+To run one, use `cargo run --features dev-smoke-binaries --bin <name>` and
+place its arguments after `--`. Add `--release` when needed. Tests and benches
+retain normal Cargo discovery; the developer feature is not required for them.
 
 ### Development checks and tests
 

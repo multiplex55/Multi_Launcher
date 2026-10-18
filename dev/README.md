@@ -203,6 +203,6 @@ The existing helper supports the same target boundary via `lib-test` or
 `--lib` and `--test` choose Cargo targets; `-E` chooses cases within the built
 targets. A bare case filter can still compile unrelated executables. Integration
 targets may retain normal binary prerequisites. Use unrestricted `cargo nextest
-run` deliberately for broad coverage, and `cargo build --bin
-coordinate_tool_smoke` when that auxiliary binary is relevant. No targets or
+run` deliberately for broad coverage, and `cargo build --features
+dev-smoke-binaries --bin coordinate_tool_smoke` when that auxiliary binary is relevant. No targets or
 logical cases were removed to provide these recipes.

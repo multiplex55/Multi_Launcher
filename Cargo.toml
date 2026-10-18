@@ -3,6 +3,27 @@ name = "multi_launcher"
 version = "0.1.0"
 edition = "2024"
 build = "build.rs"
+autobins = false
+default-run = "multi_launcher"
+
+[[bin]]
+name = "multi_launcher"
+path = "src/main.rs"
+
+[[bin]]
+name = "coordinate_tool_smoke"
+path = "src/bin/coordinate_tool_smoke.rs"
+required-features = ["dev-smoke-binaries"]
+
+[[bin]]
+name = "passive_overlay_smoke"
+path = "src/bin/passive_overlay_smoke.rs"
+required-features = ["dev-smoke-binaries"]
+
+[[bin]]
+name = "radial_acceptance"
+path = "src/bin/radial_acceptance.rs"
+required-features = ["dev-smoke-binaries"]
 
 [dependencies]
 eframe = {
@@ -151,6 +172,7 @@ qrcode = { version = "0.14.1", default-features = false }
 [features]
 unstable_grab = ["rdev/unstable_grab"]
 qa-framebuffer-capture = []
+dev-smoke-binaries = []
 
 [dev-dependencies]
 image = { version = "0.24", default-features = false, features = ["jpeg"] }
