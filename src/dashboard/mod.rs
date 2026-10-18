@@ -6,6 +6,8 @@ pub mod layout;
 pub mod repaint;
 pub mod widgets;
 
+#[cfg(feature = "perf-harness")]
+pub use dashboard::perf_fixture::{DashboardCpuFixture, DashboardFrame};
 pub use dashboard::{Dashboard, DashboardContext, DashboardEvent, WidgetActivation};
 pub use data_cache::{
     DashboardDataCache, DashboardDataSnapshot, DashboardRefreshRequest, DashboardRuntime,

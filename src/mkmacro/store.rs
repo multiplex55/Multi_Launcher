@@ -65,7 +65,7 @@ pub struct MkMacroStore {
     _watcher: Option<JsonWatcher>,
 }
 impl MkMacroStore {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "perf-harness"))]
     pub(crate) fn empty_for_test(directory: impl AsRef<Path>) -> Self {
         let inner = Arc::new(Inner {
             path: directory.as_ref().join(MKMACROS_FILE),

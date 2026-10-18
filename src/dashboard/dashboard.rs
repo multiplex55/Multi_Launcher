@@ -476,6 +476,9 @@ impl Dashboard {
     }
 }
 
+#[cfg(feature = "perf-harness")]
+pub mod perf_fixture;
+
 const PERIODIC_WIDGETS: &[&str] = &[
     "browser_tabs",
     "calendar",

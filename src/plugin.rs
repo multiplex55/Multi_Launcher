@@ -568,6 +568,14 @@ impl PluginManager {
         Self::from_macro_store(store)
     }
 
+    /// Build an empty manager for the isolated headless dashboard fixture.
+    /// This avoids loading plugin files or installing the process-global macro runtime.
+    #[cfg(feature = "perf-harness")]
+    pub(crate) fn new_for_dashboard_fixture(directory: impl AsRef<std::path::Path>) -> Self {
+        let store = Arc::new(crate::mkmacro::MkMacroStore::empty_for_test(directory));
+        Self::from_macro_store(store)
+    }
+
     /// Construct the empty manager used by isolated headless tests without
     /// installing process-global macro runtimes or native hotkey pollers.
     #[cfg(test)]

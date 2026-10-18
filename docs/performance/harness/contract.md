@@ -15,7 +15,7 @@ hotkey, desktop inventory or external action is part of a CPU probe.
 | dashboard_dense | same, synthetic bounded widgets | same |
 
 Radial uses the starter document's fixed default skin, one ring with stable
-synthetic cell IDs/labels, scale 1, anchor (0,0), work area +/-10000 and angle
+synthetic cell IDs/labels, scale 1, anchor (0,0), work area +/-10000 and
 minimum scale 0.25, matching the existing radial benchmark's layout inputs. Validate cell
 identities/count and nonempty scene output. Geometry/scene timing excludes
 fixture allocation and records no font rasterization or native presentation.

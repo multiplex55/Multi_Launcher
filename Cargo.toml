@@ -40,6 +40,11 @@ name = "perf_radial_probe"
 path = "src/bin/perf_radial_probe.rs"
 required-features = ["perf-harness"]
 
+[[bin]]
+name = "perf_dashboard_probe"
+path = "src/bin/perf_dashboard_probe.rs"
+required-features = ["perf-harness"]
+
 [dependencies]
 eframe = {
     version = "0.36.2",

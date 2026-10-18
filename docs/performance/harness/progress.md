@@ -187,3 +187,38 @@ excluding fixture creation, output validation, text shaping, asset preparation,
 compositing, GPU and physical presentation. Process CPU and visibility are null
 with reasons. This proves the H2 minimum real-algorithm CPU floor; it is not an
 optimization comparison or live responsiveness measurement.
+
+## H2-C — complete
+
+H2-B `748230f2` pushed. Added gated dashboard bin and a feature-only adapter
+at the existing Dashboard owner. Uses real `Context::run_ui` / `Dashboard::ui`,
+fixed 1280x720 points / scale 1, and 1/4/9 synthetic safe widget slots.
+The inert plugin factory loads no plugin files or global macro runtime;
+pinned-command slots deliberately render the empty placeholder. No events,
+network, system polling, clipboard reads, native viewport or presentation.
+
+Passed `cargo check --offline --features perf-harness --bin perf_dashboard_probe`;
+`cargo nextest run --offline --features perf-harness --bin perf_dashboard_probe dashboard_fixtures_render_expected_safe_topologies_and_reject_existing_paths`
+(1 passed); `cargo build --offline --features perf-harness --bin perf_dashboard_probe`;
+`--help`, touched-file rustfmt and `git diff --check`. A module visibility compile
+error was corrected at the feature-only owner boundary; no default path changed.
+
+One direct invocation per scenario:
+`target/debug/perf_dashboard_probe.exe --scenario <name> --warmups 3 --samples 20 --timeout-seconds 90 --out target/perf-harness`.
+All exit 0, 20 valid / 0 invalid samples, 22 ordered events, fixture hashes.
+
+| Scenario | Run ID | Run elapsed ms | Frame p50/p95 ms | Widgets/shapes |
+|---|---|---:|---:|---:|
+| dashboard_minimal | run-1792363308041892800-0 | 69.686 | 0.35515 / 0.593335 | 1 / 18 |
+| dashboard_typical | run-1792363308210060100-0 | 105.690 | 1.00300 / 1.207725 | 4 / 64 |
+| dashboard_dense | run-1792363308399074100-0 | 119.750 | 2.00095 / 2.268355 | 9 / 138 |
+
+Raw `target/perf-harness/<scenario>/<run-id>/`. CPU construction wall duration
+only, after 3 warm-up frames. Own-process CPU, native present and session are
+null with reasons. No screenshot. No optimization or comparison conclusion.
+
+Read-only review identified a hidden runner fixture ownership defect: direct
+internal descendant invocation could spawn without proving membership in our
+owned Job. Actual recorded batches were contained. H4-A will add explicit job
+identity proof before descendant spawning and use the remaining repair batch;
+no unsafe direct descendant invocation was executed.
