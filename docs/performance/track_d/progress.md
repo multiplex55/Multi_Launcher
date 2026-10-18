@@ -27,7 +27,10 @@ per candidate in each of D1–D3. No baseline full tests or early Clippy.
 | D2-D | complete | Rank internal observations, insufficient evidence for root-cause candidate |
 | D2-I | complete_partial_environment | CPU baseline retained; native categories explicitly unmeasured |
 | D2-E–H | skipped_insufficient_evidence | Zero candidates/variants; no native guardrail or release attribution |
-| D3-A–G | pending | Idle |
+| D3-A | complete_inspection_only | d3_owners.md; no runtime counter added |
+| D3-B | blocked_environment | Four controlled GUI idle scenarios cannot be safely launched |
+| D3-C–F | skipped_insufficient_evidence | No measured whole-process bottleneck |
+| D3-G | pending | Close with explicit missing rates |
 | D4-A/B | pending | Optional observation |
 | D5-A–C | pending | Focused closure; Clippy last |
 
@@ -61,3 +64,5 @@ D2-B: query CPU-frame exact ignored test PASS; command wall 89.11 s includes fix
 D2-C/D: d2_results.md records all five core categories with null/unmeasured native metrics. Updated fixture manifest v2 pins actual reused 100/1000/10000 CPU catalogs; original native fixtures remain planned only. Manifest SHA256 1cc076d159fd8a1580d12cfbd3db391c2205db398ab2b146ac307357b1cf47ca. D2-B commit f2f59779 local; push held under prior rejection. No Criterion run without causal trace; no synthetic result mislabeled native.
 
 D2-I closure 18:39 UTC (~6 active minutes of 140; overall ~31 min, ~509 min remaining). D2-D commit d1379783 local. Native capability summary added with true null metrics and verified harmless-probe cleanup. Zero UI optimization candidates, zero variants, zero screenshots. Only implementation is test-only sample control, validated by its focused unit and exact existing query test. No new default binary or production behavior. D3 starts next; no native retries will be repeated while the established containment boundary is unchanged.
+
+D3 clock starts ~18:39:20 UTC; D2-I commit cd03ae95 local. Bounded inspection mapped Hot Folder, gesture, cursor/click and radial scheduling owners. Process CPU/wakeups/memory/handles/threads not sampled: same required containment restriction proven in D2. No repeated native retry or new polling instrumentation. D3 candidates/variants 0/0; no source edits or tests appropriate for inspection-only work. Push held under prior automatic-review rejection.
