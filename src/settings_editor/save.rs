@@ -191,6 +191,11 @@ impl SettingsEditor {
         app.settings_editor.baseline_settings = new_settings.clone();
         app.settings_editor
             .sync_paste_sequence_preferences(&new_settings.paste_sequence);
+        if let Some(routes) = app.sequence_routes.as_mut() {
+            routes.keep_dialog_visible_during_playback = new_settings
+                .paste_sequence
+                .keep_dialog_visible_during_playback;
+        }
         if show_success_toast && app.enable_toasts {
             app.add_toast(Toast {
                 text: "Settings saved".into(),

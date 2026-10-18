@@ -1571,6 +1571,10 @@ mod tests {
                         );
                     } else {
                         app.cancel_sequence_playback();
+                        let cleanup_time =
+                            std::time::Instant::now() + std::time::Duration::from_millis(500);
+                        let _ = app.sequence_playback.tick(&mut platform, cleanup_time);
+                        assert!(!app.sequence_playback.needs_tick());
                     }
                     if keep_visible {
                         let mut dialog = std::mem::take(&mut app.paste_sequence_dialog);
@@ -1777,8 +1781,11 @@ mod tests {
                 .contains("Waiting for Ctrl+V in an eligible application · step 2 of 3")
         );
         assert!(
-            run_status_text(Status::Failed(SequencePlaybackError::ClipboardUnavailable), None)
-                .contains("The clipboard could not be opened")
+            run_status_text(
+                Status::Failed(SequencePlaybackError::ClipboardUnavailable),
+                None
+            )
+            .contains("The clipboard could not be opened")
         );
     }
 

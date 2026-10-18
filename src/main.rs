@@ -894,6 +894,45 @@ impl HotkeyRouteDependencies {
     }
 }
 
+fn keep_dialog_visibility_only_changed(previous: &Settings, candidate: &Settings) -> bool {
+    let previous_value = previous.paste_sequence.keep_dialog_visible_during_playback;
+    if previous_value == candidate.paste_sequence.keep_dialog_visible_during_playback {
+        return false;
+    }
+
+    let mut comparable = candidate.clone();
+    comparable
+        .paste_sequence
+        .keep_dialog_visible_during_playback = previous_value;
+    match (
+        serde_json::to_value(previous),
+        serde_json::to_value(comparable),
+    ) {
+        (Ok(previous), Ok(candidate)) => previous == candidate,
+        _ => false,
+    }
+}
+
+fn active_hotkey_route_dependencies(
+    settings: &Settings,
+    radial_document: &RadialDocument,
+    sequence_routes: &[PasteSequenceHotkeyRoute],
+) -> Option<HotkeyRouteDependencies> {
+    let macro_document =
+        multi_launcher::mkmacro::runtime::shared_hotkey_document_snapshot().ok()?;
+    let routes = multi_launcher::hotkey::validation::validate_hotkey_routes(
+        settings,
+        radial_document,
+        macro_document.as_deref(),
+    )
+    .ok()?;
+    Some(HotkeyRouteDependencies::from_routes(
+        settings,
+        &routes,
+        sequence_routes,
+    ))
+}
+
 fn validate_hotkey_route_candidate(
     settings: &Settings,
     radial_document: &RadialDocument,
@@ -1970,8 +2009,8 @@ struct HotkeyApplicationStart<'a> {
         multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationId,
         PreparedHotkeyRoute,
     >,
-    settings: &'a Settings,
-    settings_generation: u64,
+    settings: &'a mut Settings,
+    settings_generation: &'a mut u64,
     sequence_routes: &'a mut Vec<PasteSequenceHotkeyRoute>,
     radial_document: &'a RadialDocument,
     event_tx: &'a Sender<()>,
@@ -2000,6 +2039,7 @@ fn begin_hotkey_application_with_issuer(
         invocation_service,
         pending_launcher_route,
     } = start;
+    let current_settings_generation = *settings_generation;
     use multi_launcher::hotkey::reconfiguration::{
         HotkeyReconfigurationError, HotkeyRuntimeGeneration,
     };
@@ -2009,7 +2049,7 @@ fn begin_hotkey_application_with_issuer(
         application_error(request, HotkeyReconfigurationError::InvalidPhase);
         return;
     };
-    let Some(expected_generation) = settings_generation.checked_add(1) else {
+    let Some(expected_generation) = current_settings_generation.checked_add(1) else {
         application_error(
             request,
             HotkeyReconfigurationError::RuntimeTransition(
@@ -2079,6 +2119,42 @@ fn begin_hotkey_application_with_issuer(
         return;
     }
 
+    let presentation_only = keep_dialog_visibility_only_changed(settings, &prepared.settings)
+        && active_hotkey_route_dependencies(settings, radial_document, sequence_routes)
+            .is_some_and(|active| active == candidate_dependencies);
+    if presentation_only {
+        if let Some(mut listener) = prepared.listener.take() {
+            listener.stop();
+        }
+        if let Some(mut service) = prepared.staged_service.take() {
+            service.stop();
+        }
+
+        *settings = prepared.settings.clone();
+        let physical_paste = PhysicalPastePolicy {
+            revision: physical_paste_bridge().route_revision(),
+            availability: physical_paste_bridge().route_availability(),
+        };
+        let presentation = paste_sequence_route_presentation(
+            settings,
+            current_settings_generation,
+            sequence_routes,
+            &prepared.sequence_omissions,
+            physical_paste,
+        );
+        multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::PasteSequenceRoutes(
+            presentation,
+        ));
+        let request_id = request.request_id();
+        let _ = request.complete_applied(
+            multi_launcher::hotkey::reconfiguration::AppliedHotkeyReconfiguration {
+                request_id,
+                generation: HotkeyRuntimeGeneration(current_settings_generation),
+            },
+        );
+        return;
+    }
+
     let fallback_listener = match HotkeyTrigger::prepare_listener(
         listener.triggers().to_vec(),
         "hotkey-rollback",
@@ -2099,7 +2175,7 @@ fn begin_hotkey_application_with_issuer(
         request: Some(request),
         prepared,
         old_settings: settings.clone(),
-        old_generation: settings_generation,
+        old_generation: current_settings_generation,
         candidate_generation: expected_generation,
         old_service_existed,
         old_sequence_routes: sequence_routes.clone(),
@@ -2149,7 +2225,7 @@ fn begin_hotkey_application_with_issuer(
         // through the same owner state machine so cancellation can still win
         // before terminal Applied is published.
         *pending_launcher_route = Some(PendingLauncherRoute {
-            settings_generation,
+            settings_generation: current_settings_generation,
             handoff: None,
             policy_applied: None,
             completion: PendingLauncherRouteCompletion::Hotkey(Box::new(application)),
@@ -2160,7 +2236,7 @@ fn begin_hotkey_application_with_issuer(
     match handoff {
         Ok(handoff) => {
             *pending_launcher_route = Some(PendingLauncherRoute {
-                settings_generation,
+                settings_generation: current_settings_generation,
                 handoff: Some(handoff),
                 policy_applied: None,
                 completion: PendingLauncherRouteCompletion::Hotkey(Box::new(application)),
@@ -3610,8 +3686,8 @@ fn main() -> anyhow::Result<()> {
                     begin_hotkey_application(HotkeyApplicationStart {
                         request,
                         prepared_routes: &mut prepared_hotkey_routes,
-                        settings: &settings,
-                        settings_generation,
+                        settings: &mut settings,
+                        settings_generation: &mut settings_generation,
                         sequence_routes: &mut paste_sequence_routes,
                         radial_document: &radial_document,
                         event_tx: &event_tx,
@@ -7805,13 +7881,14 @@ mod tests {
         let mut pending_launcher_route = None;
         let mut invocation_service = None;
         let mut sequence_routes = Vec::new();
+        let mut settings_generation = 4;
         let mut route_handoff_issuer = TestHotkeyHandoffIssuer::successful();
         begin_hotkey_application_with_issuer(
             HotkeyApplicationStart {
                 request,
                 prepared_routes: &mut prepared_routes,
-                settings: &settings,
-                settings_generation: 4,
+                settings: &mut settings,
+                settings_generation: &mut settings_generation,
                 sequence_routes: &mut sequence_routes,
                 radial_document: &radial_document,
                 event_tx: &wake_tx,
@@ -7947,8 +8024,8 @@ mod tests {
             HotkeyApplicationStart {
                 request,
                 prepared_routes: &mut prepared_routes,
-                settings: &settings,
-                settings_generation,
+                settings: &mut settings,
+                settings_generation: &mut settings_generation,
                 sequence_routes: &mut sequence_routes,
                 radial_document: &radial_document,
                 event_tx: &wake_tx,
@@ -8128,8 +8205,8 @@ mod tests {
             HotkeyApplicationStart {
                 request,
                 prepared_routes: &mut prepared_routes,
-                settings: &settings,
-                settings_generation,
+                settings: &mut settings,
+                settings_generation: &mut settings_generation,
                 sequence_routes: &mut sequence_routes,
                 radial_document: &radial_document,
                 event_tx: &wake_tx,
