@@ -33,7 +33,7 @@ per candidate in each of D1–D3. No baseline full tests or early Clippy.
 | D3-G | complete_blocked_environment | Four unrun scenarios with null rates in d3_idle.json |
 | D4-A/B | skipped_optional | Required native ownership/containment unavailable; no memory observation |
 | D5-A | complete | Diff/metadata reviewed, two existing default-protocol tests PASS |
-| D5-B | in_progress | Final report and truthful budgets |
+| D5-B | complete | results.md, per-track evidence and at most three follow-ups |
 | D5-C | pending | Touched Rust formatting; Clippy last |
 
 Raw evidence: external `$env:TEMP/Multi_Launcher/perf-track-d/`; `target/perf-track-d/` reserved for owned fixtures. No screenshots collected, no
@@ -75,3 +75,5 @@ D3-B/G closure 18:41:09 UTC (1.55 active minutes of 100): all four requested idl
 D5 starts at D3-G commit a8f994e9, 18:41:09 UTC. Cumulative diff inspected: only dev scripts/recipes, sanitized performance docs, and cfg(test)-only sample-limit helper. No product settings/hotkeys/input/shutdown/release/Cargo changes. cargo metadata --no-deps --offline --format-version 1 PASS: sole workspace member multi_launcher; sole ungated application bin multi_launcher; three existing smoke bins still require dev-smoke-binaries. No new binary/dependency. Exact two existing default-protocol integration unit tests PASS (measurement validation preserves all 20 default samples and revision receipts), command wall 1.99 s, Nextest 0.027 s. No full suite or unrelated plugin tests. Existing query test already validated configured 15 samples. No native GUI process ever launched; harmless root probe verified absent, RA owned tree terminated/disposed. Git status contained only intentional task files before this checkpoint.
 
 Clock reconciliation uses actual commit/run timestamps: D0 18:08:01–18:10:59 (2.97 min); D1 18:10:59–18:33:29 (22.50 min); D2 18:33:29–18:39:36 (6.12 min); D3 plus optional D4 decision 18:39:36–18:41:09 (1.55 min). Earlier rounded updates are approximate; these intervals govern accounting. Baseline manifest now distinguishes task clock start from manifest creation. D5 cap deadline 19:26:09 UTC, overall cap 03:08:01 UTC next day. No user pauses excluded.
+
+D5-B report finalized before final lint, including all local checkpoint hashes, no accepted production optimization, confirmed existing recipe benefit/no-op exception, CPU-only query baseline, null native/idle results, optional memory skip and three future follow-ups. Corrected settings_hash fields to null where settings-object hashes were not measured; kept deterministic fixture signatures/manifest hash explicitly labeled. D5-A commit 3abf406f local. Next: touched Rust formatting, then exactly one maintained-workspace all-target Clippy sweep; no additional tests afterward unless an owned lint correction requires it. Pushes remain held under the same automatic-review denial.

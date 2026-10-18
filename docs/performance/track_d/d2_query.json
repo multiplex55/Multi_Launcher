@@ -19,7 +19,7 @@
     "test(=gui::render::tests::track_c_benchmark_root_query_to_usable_cpu_frame)"
   ],
   "profile": "fast-dev",
-  "settings_hash": "per-row deterministic fixture signature and settings label",
+  "settings_hash": null,
   "host": {
     "os": "Microsoft Windows NT 10.0.19045.0",
     "logical_processors": 8,
@@ -139,7 +139,8 @@
     "Instrumentation overhead not separately measured; instrumented_only.",
     "Unoptimized fast-dev; not release latency.",
     "Nearest-rank p95 of 15 equals maximum; one batch, no before/after claim.",
-    "Required process containment denied; no native fixture launched."
+    "Required process containment denied; no native fixture launched.",
+    "Settings object hash unmeasured; exact static settings label, action fixture signatures and source-pinned constructor recorded."
   ],
   "decision": "INCONCLUSIVE_FOR_PRODUCT_OPTIMIZATION"
 }
