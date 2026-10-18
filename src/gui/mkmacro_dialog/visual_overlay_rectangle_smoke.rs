@@ -410,7 +410,7 @@ impl Receiver {
             std::slice::from_raw_parts(bits as *const u8, width as usize * height as usize * 4)
         }
         .to_vec();
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
             pixel[3] = 255;
         }

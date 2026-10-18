@@ -282,12 +282,11 @@ unsafe extern "system" fn input_shield_wndproc(
         WM_CAPTURECHANGED | WM_DISPLAYCHANGE => {
             let state =
                 unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WindowPaintState };
-            if !state.is_null() {
-                if let Some(input) = unsafe { &*state }.rectangle_input.as_ref() {
-                    if let Ok(mut input) = input.lock() {
-                        input.record_system_message(msg);
-                    }
-                }
+            if !state.is_null()
+                && let Some(input) = unsafe { &*state }.rectangle_input.as_ref()
+                && let Ok(mut input) = input.lock()
+            {
+                input.record_system_message(msg);
             }
             LRESULT(0)
         }

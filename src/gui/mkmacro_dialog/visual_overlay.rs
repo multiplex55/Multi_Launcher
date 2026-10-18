@@ -1221,10 +1221,10 @@ impl VisualOverlayController {
         } else {
             self.events.extend(self.pending_terminals.drain(..));
         }
-        if let Some((id, state, visual)) = self.pending_start.take() {
-            if !self.shut_down {
-                self.start_replaced(id, state, visual);
-            }
+        if let Some((id, state, visual)) = self.pending_start.take()
+            && !self.shut_down
+        {
+            self.start_replaced(id, state, visual);
         }
     }
     fn replace(&mut self) -> OperationId {

@@ -2328,10 +2328,10 @@ impl SearchReplaceDialogState {
                     #[cfg(not(test))] let _ = (body, footer_start);
                 });
             #[cfg(test)]
-            if let Some(window) = window {
-                if let Some(geometry) = self.geometry.apply_modal.as_mut() {
-                    geometry.window = window.response.rect;
-                }
+            if let Some(window) = window
+                && let Some(geometry) = self.geometry.apply_modal.as_mut()
+            {
+                geometry.window = window.response.rect;
             }
             #[cfg(not(test))]
             let _ = window;
@@ -2405,10 +2405,10 @@ impl SearchReplaceDialogState {
                     #[cfg(not(test))] let _ = (body, footer_start);
                 });
             #[cfg(test)]
-            if let Some(window) = window {
-                if let Some(geometry) = self.geometry.recovery_modal.as_mut() {
-                    geometry.window = window.response.rect;
-                }
+            if let Some(window) = window
+                && let Some(geometry) = self.geometry.recovery_modal.as_mut()
+            {
+                geometry.window = window.response.rect;
             }
             #[cfg(not(test))]
             let _ = window;
