@@ -29,7 +29,8 @@ H0-A commit `b90182c3` pushed successfully. No measurements claimed.
 
 ## Current state
 
-H0–H3 complete (initial H1-A compile issues resolved in H1-C); H4 in progress.
+H0–H4 complete. Initial H1-A compile issues resolved in H1-C. Final Clippy
+failed on two proven pre-existing lints; no lint-clean claim.
 
 ## H1-A — partial (implementation complete; focused test compile pending)
 
@@ -301,3 +302,24 @@ owners, feature-only seams and no default algorithm/profile changes. Touched
 Rust rustfmt and cumulative diff checks passed; non-Windows stubs inspected,
 no cross-platform compilation claimed. Independent dashboard review clear.
 Final single maintained-target Clippy is the only remaining check.
+
+## H4-C — complete (known baseline lint failures recorded)
+
+H4-B `7b29bb19` pushed. After source/docs and all other checks, ran exactly once:
+`cargo clippy --workspace --all-targets --offline -- -D warnings`.
+Exit **101**: `clippy::let_and_return` at
+`src/paste_sequence/playback.rs:597` and `src/gui/command_host.rs:420`.
+Both paths are unchanged against baseline (empty path diff), and `git show
+3a989d56:<path>` confirms the identical let/return code. Archived Track D also
+records these two findings. Existing vendor/image warnings appeared. No unrelated
+lint fix or repeat Clippy; default-feature maintained-target sweep is not a
+claim that every gated harness target is lint-clean. Their scoped check/test
+results remain separate. Raw log/exit under ignored target/perf-harness.
+
+All required checkpoints completed within the total and stage budgets. No OS
+privilege/security changes, broad process enumeration retry, personal data,
+GUI interaction, screenshots, full Nextest or optimization campaign. Native
+Job containment works; desktop/visibility remains unverified. Legacy CIM and
+RA-analysis limitations are recorded, not worked around. No follow-up starts.
+Final documentation-only checkpoint commit receives one normal push attempt;
+its resulting HEAD and pushed state are reported in the final handoff.

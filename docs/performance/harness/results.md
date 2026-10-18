@@ -21,6 +21,7 @@ Rust version and desktop/session inventory are null with explicit reasons.
 | H3-A external recipes | b00087cf |
 | H3-B usage | 3a3a0dbb |
 | H4-A execution and ownership repair | ddd10f8f |
+| H4-B capability matrix | 7b29bb19 |
 
 Later H4 commits and final HEAD are recorded in the ledger and Git history.
 
@@ -110,6 +111,17 @@ checks passed. H4 audited all eight receipts for monotonic/UTC order, 22 events,
 far below the 100 MiB aggregate cap; no raw file is tracked. Final Clippy outcome
 is appended before handoff. Non-Windows fallback helpers were source-reviewed;
 no cross-platform build was available or claimed.
+
+Final single maintained-target invocation:
+`cargo clippy --workspace --all-targets --offline -- -D warnings` returned
+**101**, with `clippy::let_and_return` at `src/paste_sequence/playback.rs:597`
+and `src/gui/command_host.rs:420`. Both files have an empty diff against baseline
+`3a989d56`; `git show` confirms the same bindings/returns there. These match the
+previous Track D report. Existing vendored image warnings also appeared. Raw log
+and exit: `target/perf-harness/final-clippy.log`, `final-clippy-exit.txt`.
+No unrelated source fix or repeat Clippy. The prescribed command uses default
+features, so gated harness targets were checked/tested separately above; this
+failed sweep does not establish lint cleanliness of all targets/features.
 
 No production optimization was attempted: Hot Folder's 80 ms scheduling,
 radial/dashboard production algorithms, launcher behavior, Cargo profiles and
