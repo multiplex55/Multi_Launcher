@@ -82,14 +82,15 @@ Verification actually performed:
   three existing smoke binaries still gated by dev-smoke-binaries.
 - Cumulative diff inspected; source fixtures restored, no user changes, only
   test-only source instrumentation. No whole Nextest suite required or run.
-- Touched Rust formatting and maintained-target Clippy: pending final D5-C.
+- Touched Rust formatting passed: rustfmt --edition 2024 --check src/performance/track_c_workloads.rs.
+- Final cargo clippy --workspace --all-targets --offline -- -D warnings failed (exit 101, 137.95 s): existing clippy::let_and_return at src/paste_sequence/playback.rs:597 and src/gui/command_host.rs:420. Both files are unchanged from the baseline, verified by empty path diff and baseline source inspection. No new owned lint reported; remaining sweep is not claimed clean. No unrelated fixes or second Clippy run.
 
 Reproduce selected workloads using `dev/perf_track_d/README.md`; do not broaden
 them to a historical acceptance matrix. Active clock began 18:08:01 UTC on
 2026-10-18. Commit/run reconciled D0 2.97 min, D1 22.50 min, D2 6.12 min,
 D3 plus D4 skip decision 1.55 min; D5 started 18:41:09 UTC (45-minute cap).
 Overall hard ceiling 540 minutes; no candidate approached its per-track cap.
-Final time/lint outcome is appended by D5-C.
+D5-C closed at approximately 18:47:30 UTC: total active elapsed about 39.5 minutes, D5 about 6.35 minutes, all below caps. No user pauses excluded. Final validation has the precise Clippy limitation above.
 
 Bounded future backlog (outside this completed pass):
 
@@ -117,3 +118,4 @@ Checkpoint commits (all local; subjects are stage-tagged in `git log`):
 | D3-A | c27164c9 | Idle ownership inspection |
 | D3-G | a8f994e9 | Blocked idle / optional memory skip |
 | D5-A | 3abf406f | Focused protocol/target verification |
+| D5-B | f8137e27 | Final report before last formatting/lint |

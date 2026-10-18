@@ -34,7 +34,7 @@ per candidate in each of D1–D3. No baseline full tests or early Clippy.
 | D4-A/B | skipped_optional | Required native ownership/containment unavailable; no memory observation |
 | D5-A | complete | Diff/metadata reviewed, two existing default-protocol tests PASS |
 | D5-B | complete | results.md, per-track evidence and at most three follow-ups |
-| D5-C | pending | Touched Rust formatting; Clippy last |
+| D5-C | closed_preexisting_lint_failure | Touched Rust formatting PASS; final Clippy exit 101, two baseline lints |
 
 Raw evidence: external `$env:TEMP/Multi_Launcher/perf-track-d/`; `target/perf-track-d/` reserved for owned fixtures. No screenshots collected, no
 optimization candidates attempted, no application processes launched yet.
@@ -77,3 +77,6 @@ D5 starts at D3-G commit a8f994e9, 18:41:09 UTC. Cumulative diff inspected: only
 Clock reconciliation uses actual commit/run timestamps: D0 18:08:01–18:10:59 (2.97 min); D1 18:10:59–18:33:29 (22.50 min); D2 18:33:29–18:39:36 (6.12 min); D3 plus optional D4 decision 18:39:36–18:41:09 (1.55 min). Earlier rounded updates are approximate; these intervals govern accounting. Baseline manifest now distinguishes task clock start from manifest creation. D5 cap deadline 19:26:09 UTC, overall cap 03:08:01 UTC next day. No user pauses excluded.
 
 D5-B report finalized before final lint, including all local checkpoint hashes, no accepted production optimization, confirmed existing recipe benefit/no-op exception, CPU-only query baseline, null native/idle results, optional memory skip and three future follow-ups. Corrected settings_hash fields to null where settings-object hashes were not measured; kept deterministic fixture signatures/manifest hash explicitly labeled. D5-A commit 3abf406f local. Next: touched Rust formatting, then exactly one maintained-workspace all-target Clippy sweep; no additional tests afterward unless an owned lint correction requires it. Pushes remain held under the same automatic-review denial.
+
+
+D5-C: rustfmt --edition 2024 --check src/performance/track_c_workloads.rs PASS before last Rust verification. cargo clippy --workspace --all-targets --offline -- -D warnings ran once, exit 101 after 137.95 s. Errors: clippy::let_and_return at src/paste_sequence/playback.rs:597 and src/gui/command_host.rs:420. Both paths have empty diff from immutable baseline and exact baseline source confirms both bindings. These are pre-existing, unrelated; no broad cleanup/retry. Remaining all-target lint coverage not claimed clean. No source/test changes or Rust validation after Clippy. Existing dependency warnings in vendored image also retained only in raw logs. D5-B commit f8137e27 local. Final checkpoint contains documentation only, all task source fixtures restored. Required native scenarios remain blocked, optional D4 skipped, no newly accepted production optimization. Bounded initiative is closed, not native-qualified. Final total around 39.5 active minutes (540 cap), D5 about 6.35 minutes (45 cap). All commits retained locally; push trust denial remains, no bypass or repeated retry.
