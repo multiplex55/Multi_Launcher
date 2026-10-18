@@ -29,3 +29,13 @@ Source-controlled summary schema: version, track, scenario, baseline_sha,
 candidate_sha_or_diff, profile, settings_hash, host, samples, metrics,
 limitations, decision. Unavailable metrics are null with an explanation.
 No raw command logs, personal paths, query text or screenshots in summaries.
+
+Track D's current-checkout results are in
+`docs/performance/track_d/d1_results.md`. Existing fast-dev edited launcher
+builds saved 15–21 seconds in two controlled replays; no-op median grew by
+0.229 seconds. This remains an opt-in debug-information tradeoff. Profile
+settings and release semantics are unchanged. Use `developer_loop.ps1 -Family
+app-build -Profile fast-dev` for the selected comparison; it performs one
+preparation, three no-ops, and two byte-restored comment edits. Do not treat
+preparation as an edit speedup. `summarize.ps1` requires explicit UTC start/end
+bounds so unrelated sessions cannot be pooled.

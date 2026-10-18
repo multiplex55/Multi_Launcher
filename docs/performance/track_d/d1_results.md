@@ -55,4 +55,3 @@ preparation/no-op/edits separate. Summarization requires explicit UTC bounds;
 it groups by measured source SHA and complete command to avoid stale-session
 mixing. Raw runs are external; sanitized per-sample records are in the adjacent
 JSON summaries. All source edits were byte-restored and hash-checked.
-

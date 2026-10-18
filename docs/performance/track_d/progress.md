@@ -20,7 +20,7 @@ per candidate in each of D1–D3. No baseline full tests or early Clippy.
 | D1-B | complete | d1_attribution.md; headless RA timed out at 60.07 s |
 | D1-C/D | complete_keep_recipe | Existing fast-dev: edits save 15.05/20.79 s; functional guard PASS |
 | D1-E/F | skipped_no_candidate | No independent measured small owner |
-| D1-G | pending | Close developer loop findings |
+| D1-G | complete | D1 complete with confirmed existing recipe; no production optimization |
 | D2-A–I | pending | Responsiveness |
 | D3-A–G | pending | Idle |
 | D4-A/B | pending | Optional observation |
@@ -45,3 +45,5 @@ D1-C candidate 1 clock starts 18:24:19 UTC, deadline 19:19:19 UTC. Variant 1 is 
 Bounded read-only reviewer pass found stale-session mixing risk in the summarizer; corrected with required UTC window and source/command grouping. Rebuilt original baseline summary using 18:10:59–18:22:40 UTC: 19 samples, exactly 3 per no-op group, same numeric observations. Corrected missing-hash limitation to all original baseline samples. No extra Cargo run. This is the single evidence-tool correction for this checkpoint.
 
 D1-D completed ~18:33 UTC: one candidate/one variant, ~9 minutes incl guard. Two edited pairs save 35.24%/43.66% (15.052/20.790 s). No-op +0.229 s /20.32% documented guard exception, outweighed by recurring edit gain. Existing opt-in recipe retained; no product source or profile changed. Exact fast-dev test guard PASS 0.032 s, Nextest run 0.050 s. d1_results.md, d1_profile_comparison.json and corrected baseline/summarizer are evidence. D1-B commit fe84cd10 local; pushes held under previous rejection. Review findings resolved; no extra review loop.
+
+D1-G closure 18:33 UTC: approximately 22 active minutes of 180; one candidate, one variant, no new production optimization. Current-checkout recipe documented under dev/perf_track_d. D1-D commit 75b38c12 local. An extra blank EOF line reported by diff-check during D1-D was removed in this closure. D2 starts next; overall remaining budget approximately 515 minutes. No owned GUI process or screenshot yet.
