@@ -1770,6 +1770,10 @@ mod tests {
         assert!(!controller.runtime_state().halo_enabled());
         assert!(!controller.runtime_state().has_active_mode());
         assert!(!controller.is_running());
+        // Backend initialization precedes the nested sampler DPI context.
+        // A failed backend must not construct a sampler at all.
+        assert_eq!(factory.count(&factory.sampler_creations), 0);
+        assert_eq!(factory.count(&factory.backend_creations), 1);
 
         assert_eq!(
             controller.set_zoom_enabled(true).unwrap_err(),
@@ -1777,7 +1781,7 @@ mod tests {
         );
         assert!(!controller.runtime_state().zoom_enabled());
         assert!(!controller.runtime_state().has_active_mode());
-        assert_eq!(factory.count(&factory.sampler_creations), 2);
+        assert_eq!(factory.count(&factory.sampler_creations), 0);
         assert_eq!(factory.count(&factory.backend_creations), 2);
         controller.shutdown().unwrap();
     }
@@ -2150,6 +2154,14 @@ mod tests {
             point: moved_sample.desktop_point,
             text: "700,800".into(),
         });
+
+        // Emit once while the worker is paused outside its shared-state lock.
+        // The hook sink intentionally drops visual-only input under contention.
+        controller.set_click_enabled(true).unwrap();
+        assert_eq!(hook.install_count(), 1, "clicks share the gesture hook");
+        let point = PhysicalPoint::new(-1510, 620);
+        let press_started = Instant::now();
+        assert!(hook.emit_physical_button_down(ClickButton::Right, point, false, false));
         release_failure.send(()).unwrap();
         let failed_frame = receive_matching(&rendered, |frame| {
             frame.current_sample.is_none()
@@ -2162,12 +2174,6 @@ mod tests {
         assert!(failed_frame.runtime_state.is_frozen());
         assert_eq!(failed_frame.displayed_sample, Some(moved_sample.clone()));
 
-        controller.set_click_enabled(true).unwrap();
-
-        assert_eq!(hook.install_count(), 1, "clicks share the gesture hook");
-        let point = PhysicalPoint::new(-1510, 620);
-        let press_started = Instant::now();
-        assert!(hook.emit_physical_button_down(ClickButton::Right, point, false, false));
         let press = receive_click(&controller);
         let press_finished = Instant::now();
         assert_eq!(press.button, ClickButton::Right);
