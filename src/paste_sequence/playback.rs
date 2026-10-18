@@ -23,6 +23,7 @@ pub(crate) enum SequencePlaybackError {
     ClipboardRestoreFailed,
     InputRejected,
     ObserverUnavailable,
+    RouteConflict,
 }
 
 impl SequencePlaybackError {
@@ -46,6 +47,9 @@ impl SequencePlaybackError {
             Self::ClipboardWriteFailed => "Sequence text could not be published to the clipboard.",
             Self::ClipboardRestoreFailed => "The original clipboard could not be restored.",
             Self::InputRejected => "The paste keystroke was rejected by Windows.",
+            Self::RouteConflict => {
+                "Paste-to-Advance cannot start because Ctrl+V ownership is unavailable; see active shortcut details."
+            }
             Self::ObserverUnavailable => {
                 "Physical paste input is unavailable. Restart the sequence after the input service is available."
             }
@@ -338,6 +342,10 @@ impl SequencePlaybackController {
         platform: &mut impl SequencePlaybackPlatform,
     ) -> Result<(), SequencePlaybackError> {
         self.start_with_admission(platform, |_| Ok(None))
+    }
+
+    pub(crate) fn prepared_mode(&self) -> Option<PlaybackMode> {
+        self.prepared.as_ref().map(PreparedSequenceRun::mode)
     }
 
     pub(crate) fn start_with_admission(
@@ -1360,6 +1368,7 @@ mod tests {
         let bridge = std::sync::Arc::new(PasteAdmissionBridge::default());
         let (wake, rx) = std::sync::mpsc::channel();
         bridge.install_wake(wake);
+        bridge.allow_test_routes();
         bridge.observer_live(true);
         bridge
             .arm(4, controller.physical_paste_generation().unwrap())
@@ -1683,6 +1692,7 @@ mod tests {
             let bridge = std::sync::Arc::new(PasteAdmissionBridge::default());
             let (wake, _rx) = std::sync::mpsc::channel();
             bridge.install_wake(wake);
+            bridge.allow_test_routes();
             bridge.observer_live(true);
             let mut controller = ready_controller(prepared_run(mode, 0, &["one", "two"]));
             assert!(controller.started_run().is_none());
@@ -1770,6 +1780,7 @@ mod tests {
             let bridge = std::sync::Arc::new(PasteAdmissionBridge::default());
             let (wake, _rx) = std::sync::mpsc::channel();
             bridge.install_wake(wake);
+            bridge.allow_test_routes();
             bridge.observer_live(true);
             let mut controller = ready_controller(prepared_run(mode, 0, &["one", "two"]));
             let mut platform = FakePlatform::at(Instant::now());

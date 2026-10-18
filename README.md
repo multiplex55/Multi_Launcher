@@ -741,6 +741,10 @@ a three-step run is an ordinary paste of the final item. A newer external
 clipboard copy stops the sequence and is preserved. Hidden snippet contents
 remain masked in the preview.
 
+If another active control can also fire on Ctrl+V, Paste-to-Advance refuses
+Start and names the conflicting control. Existing saved shortcuts stay unchanged;
+Automatic and Manual advance remain available.
+
 The optional passive playback tooltip follows the cursor and shows the sequence
 name, step progress and available actions, without step contents or window titles.
 It hides when playback ends. Early cancellation restores the original clipboard

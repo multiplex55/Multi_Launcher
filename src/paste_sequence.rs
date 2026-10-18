@@ -59,6 +59,7 @@ impl fmt::Display for SequenceShortcutPresentation {
 pub struct SequenceRoutePresentation {
     /// The existing main-owned runtime generation, not a separate UI counter.
     pub generation: u64,
+    pub physical_paste: admission::PhysicalPastePolicy,
     pub next: SequenceShortcutPresentation,
     pub cancel: SequenceShortcutPresentation,
     pub starts: Vec<(SequenceId, String)>,
@@ -70,12 +71,19 @@ impl SequenceRoutePresentation {
     pub fn summary(&self) -> String {
         let toggle = |enabled| if enabled { "On" } else { "Off" };
         let mut summary = format!(
-            "Next: {}\nCancel: {}\nFloating tooltip: {}\nEscape cancellation: {}",
+            "Next: {}\nCancel: {}\nFloating tooltip: {}; Escape cancellation: {}",
             self.next,
             self.cancel,
             toggle(self.tooltip_enabled),
             toggle(self.escape_cancel_enabled)
         );
+        summary.push_str(&format!(
+            "\nPaste-to-Advance: {}",
+            self.physical_paste
+                .availability
+                .reason()
+                .unwrap_or_else(|| "Ctrl+V available".into())
+        ));
         summary.push_str(&format!(
             "\nSaved Start shortcuts: {} active (edit in Paste Sequences)",
             self.starts.len()

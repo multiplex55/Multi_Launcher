@@ -1317,6 +1317,7 @@ impl LauncherInvocationService {
         related: Vec<RelatedBinding>,
         reason: LifecycleCancellation,
     ) -> Result<RouteHandoff, String> {
+        crate::paste_sequence::admission::physical_paste_bridge().suspend_route_policy();
         let (policy_acknowledge, policy_applied) = std::sync::mpsc::sync_channel(1);
         let (acknowledge, completion) = std::sync::mpsc::sync_channel(1);
         #[cfg(all(windows, not(test)))]

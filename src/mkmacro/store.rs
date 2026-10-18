@@ -44,6 +44,10 @@ pub enum LoadDisposition {
     Loaded,
     NeedsUserRecovery { error: String },
 }
+pub struct DocumentPublicationObserver {
+    pub before: Arc<dyn Fn() + Send + Sync>,
+    pub after: Arc<dyn Fn() + Send + Sync>,
+}
 struct Inner {
     path: PathBuf,
     /// Orders the entire disk-read/write and publication transaction. In particular,
@@ -52,6 +56,7 @@ struct Inner {
     /// Serializes image writes with publication of the corresponding PNG.
     asset_authoring: Mutex<()>,
     snapshot: RwLock<Arc<MkMacroDocument>>,
+    publication_observer: RwLock<Option<Arc<DocumentPublicationObserver>>>,
     diagnostics: RwLock<Arc<[MkDiagnostic]>>,
     last_external_error: RwLock<Option<String>>,
 }
@@ -67,6 +72,7 @@ impl MkMacroStore {
             transaction: Mutex::new(()),
             asset_authoring: Mutex::new(()),
             snapshot: RwLock::new(Arc::new(MkMacroDocument::default())),
+            publication_observer: RwLock::new(None),
             diagnostics: RwLock::new(Arc::from([])),
             last_external_error: RwLock::new(None),
         });
@@ -129,6 +135,7 @@ impl MkMacroStore {
             transaction: Mutex::new(()),
             asset_authoring: Mutex::new(()),
             snapshot: RwLock::new(Arc::new(MkMacroDocument::default())),
+            publication_observer: RwLock::new(None),
             diagnostics: RwLock::new(Arc::from([])),
             last_external_error: RwLock::new(None),
         });
@@ -165,6 +172,15 @@ impl MkMacroStore {
             },
             disposition,
         ))
+    }
+    pub fn set_publication_observer(&self, observer: Arc<DocumentPublicationObserver>) {
+        // Serialize observer installation with publication. The caller derives
+        // its first policy from a subsequent snapshot, never a preinstall Arc.
+        let _snapshot = self.inner.snapshot.write().unwrap();
+        (observer.before)();
+        *self.inner.publication_observer.write().unwrap() = Some(Arc::clone(&observer));
+        drop(_snapshot);
+        (observer.after)();
     }
     pub fn snapshot(&self) -> Arc<MkMacroDocument> {
         self.inner.snapshot.read().unwrap().clone()
@@ -626,7 +642,18 @@ fn publish(i: &Inner, d: MkMacroDocument) {
         i.path.parent().map(|p| p.join(ASSET_DIRECTORY)).as_deref(),
     );
     *i.diagnostics.write().unwrap() = ds.into();
-    *i.snapshot.write().unwrap() = Arc::new(d)
+    let mut snapshot = i.snapshot.write().unwrap();
+    let observer = i.publication_observer.read().unwrap().clone();
+    // Fence input before the polling service can observe the new Arc. Keeping
+    // this write lock through the fence makes revision-before-snapshot reads safe.
+    if let Some(observer) = &observer {
+        (observer.before)();
+    }
+    *snapshot = Arc::new(d);
+    drop(snapshot);
+    if let Some(observer) = observer {
+        (observer.after)();
+    }
 }
 fn persist(path: &Path, d: &MkMacroDocument) -> Result<()> {
     save_atomic(path, &serde_json::to_vec_pretty(d)?)
@@ -2464,6 +2491,62 @@ mod tests {
         let (_, x) = MkMacroStore::open(d.path()).unwrap();
         assert!(matches!(x, LoadDisposition::NeedsUserRecovery { .. }))
     }
+    #[test]
+    fn macro_publication_fences_input_before_new_snapshot_and_closes_revision() {
+        use crate::paste_sequence::admission::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(MkMacroStore::empty_for_test(root.path()));
+        let bridge = Arc::new(PasteAdmissionBridge::default());
+        let before_count = Arc::new(AtomicUsize::new(0));
+        let after_count = Arc::new(AtomicUsize::new(0));
+        let weak = Arc::downgrade(&store);
+        let fence = Arc::clone(&bridge);
+        let before = Arc::clone(&before_count);
+        let after = Arc::clone(&after_count);
+        let finish = Arc::clone(&bridge);
+        store.set_publication_observer(Arc::new(DocumentPublicationObserver {
+            before: Arc::new(move || {
+                fence.begin_source_publication();
+                assert!(
+                    weak.upgrade().unwrap().inner.snapshot.try_read().is_err(),
+                    "fence runs under source write ownership"
+                );
+                before.fetch_add(1, Ordering::SeqCst);
+            }),
+            after: Arc::new(move || {
+                finish.finish_source_publication();
+                after.fetch_add(1, Ordering::SeqCst);
+            }),
+        }));
+        bridge.allow_test_routes();
+        let old_snapshot = store.snapshot();
+        let stale = PhysicalPastePolicy {
+            revision: bridge.route_revision(),
+            availability: PhysicalPasteAvailability::Available,
+        };
+        store.save(document()).unwrap();
+        assert!(!Arc::ptr_eq(&old_snapshot, &store.snapshot()));
+        assert_eq!(before_count.load(Ordering::SeqCst), 2);
+        assert_eq!(after_count.load(Ordering::SeqCst), 2);
+        assert!(!bridge.acknowledge_route_policy(&stale));
+        bridge.allow_test_routes();
+        // Disk reload converges through the identical fenced publication path.
+        fs::write(
+            root.path().join(MKMACROS_FILE),
+            serde_json::to_vec(&MkMacroDocument::default()).unwrap(),
+        )
+        .unwrap();
+        reload_from_disk(&store.inner);
+        assert!(store.snapshot().macros.is_empty());
+        assert_eq!(before_count.load(Ordering::SeqCst), 3);
+        assert_eq!(after_count.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            bridge.route_availability(),
+            PhysicalPasteAvailability::Unknown
+        );
+    }
+
     #[test]
     fn round_trip_reorder_preserves_ids() {
         let d = tempfile::tempdir().unwrap();

@@ -347,6 +347,7 @@ mod tests {
     fn routes() -> SequenceRoutePresentation {
         SequenceRoutePresentation {
             generation: 7,
+            physical_paste: Default::default(),
             next: Shortcut::Active("Ctrl+F8".into()),
             cancel: Shortcut::Active("Ctrl+F9".into()),
             starts: Vec::new(),

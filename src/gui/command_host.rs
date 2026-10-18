@@ -1538,6 +1538,15 @@ impl LauncherApp {
         if self.sequence_exit_requested {
             return Err(crate::paste_sequence::SequencePlaybackError::Busy);
         }
+        if self.sequence_playback.prepared_mode()
+            == Some(crate::paste_sequence::PlaybackMode::PasteToAdvance)
+            && let Some(reason) = crate::paste_sequence::admission::physical_paste_bridge()
+                .route_availability()
+                .reason()
+        {
+            self.report_error_message("paste_sequence.physical", &reason);
+            return Err(crate::paste_sequence::SequencePlaybackError::RouteConflict);
+        }
         let owner = self.event_sink.owner_id();
         let queue_live = self.event_sink.owns_live_queue();
         let enabled = self.plugin_enabled("paste_sequence");
@@ -2055,6 +2064,7 @@ pub(in crate::gui) mod tests {
         text: String,
         target: crate::paste_sequence::SequenceTarget,
         pastes: usize,
+        captures: usize,
         input_eligible: bool,
         target_error: Option<crate::paste_sequence::SequencePlaybackError>,
         pasted: Vec<(isize, String)>,
@@ -2072,6 +2082,7 @@ pub(in crate::gui) mod tests {
             crate::paste_sequence::ClipboardSnapshot,
             crate::paste_sequence::SequencePlaybackError,
         > {
+            self.captures += 1;
             Ok(crate::paste_sequence::ClipboardSnapshot::new(
                 self.sequence,
                 Some(self.text.clone()),
@@ -2090,7 +2101,10 @@ pub(in crate::gui) mod tests {
             &mut self,
             target: &crate::paste_sequence::SequenceTarget,
         ) -> crate::paste_sequence::TargetObservation {
-            if target == &self.target {
+            if target.hwnd() == self.target.hwnd()
+                && target.process_id() == self.target.process_id()
+                && target.thread_id() == self.target.thread_id()
+            {
                 crate::paste_sequence::TargetObservation::Target {
                     password_control: false,
                 }
@@ -2144,6 +2158,7 @@ pub(in crate::gui) mod tests {
                 text: "original".into(),
                 target,
                 pastes: 0,
+                captures: 0,
                 input_eligible: true,
                 target_error: None,
                 pasted: Vec::new(),
@@ -2227,6 +2242,7 @@ pub(in crate::gui) mod tests {
         let bridge = physical_paste_bridge();
         let (wake, _rx) = std::sync::mpsc::channel();
         bridge.install_wake(wake);
+        bridge.allow_test_routes();
         bridge.observer_live(true);
         let (mut app, _) = started_physical_app(root.path());
         app.settings_editor
@@ -2237,6 +2253,7 @@ pub(in crate::gui) mod tests {
         assert!(!app.sequence_playback.escape_cancel_available());
         app.sequence_routes = Some(SequenceRoutePresentation {
             generation: 9,
+            physical_paste: Default::default(),
             next: SequenceShortcutPresentation::Disabled,
             cancel: SequenceShortcutPresentation::Disabled,
             starts: vec![],
@@ -2314,6 +2331,7 @@ pub(in crate::gui) mod tests {
         let (mut app, mut platform) = started_physical_app(root.path());
         let (wake, _rx) = std::sync::mpsc::channel();
         bridge.install_wake(wake);
+        bridge.allow_test_routes();
         bridge.observer_live(true);
         app.sync_physical_paste_admission().unwrap();
         let mut reducer = PhysicalPasteReducer::new([false; 9]);
@@ -2369,6 +2387,416 @@ pub(in crate::gui) mod tests {
             crate::paste_sequence::SequencePlaybackStatus::Completed
         );
         bridge.observer_live(false);
+    }
+
+    #[test]
+    fn physical_paste_start_conflict_refuses_before_clipboard_and_keeps_ordinary_routes() {
+        use crate::paste_sequence::{admission::*, *};
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut app = inert_test_app(root.path());
+        app.enabled_plugins = None;
+        let target = SequenceTarget::from_external_window(
+            crate::active_window::ExternalForegroundWindow {
+                hwnd: 91,
+                process_id: std::process::id() + 1,
+                thread_id: 93,
+                title: None,
+            },
+            std::process::id(),
+        )
+        .unwrap();
+        let run = SequencePreflight::begin(
+            Sequence {
+                id: SequenceId::from_raw(1).unwrap(),
+                name: "Conflict fixture".into(),
+                hotkey: None,
+                mode: PlaybackMode::PasteToAdvance,
+                delay_ms: 0,
+                steps: vec![Step::LiteralText {
+                    text: "owned dummy".into(),
+                }],
+            },
+            &[],
+            &[],
+            SequenceInvocationContext::new(
+                chrono::Local::now().fixed_offset(),
+                None,
+                target.clone(),
+            ),
+        )
+        .unwrap()
+        .finish(&[], &[])
+        .unwrap();
+        app.sequence_playback.begin_preparing().unwrap();
+        app.sequence_playback.set_ready(run).unwrap();
+        let mut platform = AppPastePlatform::new(target);
+        let bridge = physical_paste_bridge();
+        bridge.invalidate_route_policy();
+        assert_eq!(
+            app.start_sequence_playback_using(&mut platform),
+            Err(SequencePlaybackError::RouteConflict)
+        );
+        assert_eq!(platform.captures, 0);
+        assert!(bridge.acknowledge_route_policy(&PhysicalPastePolicy {
+            revision: bridge.route_revision(),
+            availability: PhysicalPasteAvailability::Conflict {
+                owner: "Paste Sequence Cancel".into()
+            }
+        }));
+        assert_eq!(
+            app.start_sequence_playback_using(&mut platform),
+            Err(SequencePlaybackError::RouteConflict)
+        );
+        assert_eq!(platform.captures, 0);
+        assert_eq!(platform.sequence, 10);
+        assert_eq!(platform.pastes, 0);
+        assert_eq!(platform.text, "original");
+        assert_eq!(
+            app.sequence_playback.status(),
+            SequencePlaybackStatus::Ready
+        );
+        assert!(!app.sequence_playback.has_input_lease());
+        assert!(app.sequence_playback.progress().is_none());
+        assert!(
+            bridge
+                .route_availability()
+                .reason()
+                .unwrap()
+                .contains("Cancel")
+        );
+    }
+
+    #[test]
+    fn paste_sequence_acceptance_prompted_three_steps_across_apps_and_fourth_normal_paste() {
+        use crate::hotkey::launcher_invocation::{InputProvenance, KeyEvent, KeyTransition};
+        use crate::paste_sequence::{admission::*, *};
+        use crate::plugins::snippets::{SnippetEntry, SnippetFieldDefinition};
+        use std::time::Duration;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let history_text = "history \u{96ea}\nsecond line";
+        let temporary_text = "temporary \u{1f30c}\nfinal line";
+        let store = SequenceStore::new(root.path().join(PASTE_SEQUENCES_FILE));
+        let mut saved = store.load().unwrap();
+        let mut draft = SequenceDraft::new(
+            "Three mixed steps",
+            vec![
+                Step::SnippetRef {
+                    alias: "private_reply".into(),
+                },
+                Step::clipboard_history_reference(history_text),
+                Step::LiteralText {
+                    text: temporary_text.into(),
+                },
+            ],
+        );
+        draft.mode = PlaybackMode::PasteToAdvance;
+        let id = saved.upsert(draft).unwrap();
+        store.commit(&mut saved).unwrap();
+        let saved_bytes = std::fs::read(store.path()).unwrap();
+        let sequence = store.load().unwrap().sequence(id).unwrap().clone();
+        let mut snippets = vec![SnippetEntry {
+            alias: "private_reply".into(),
+            text: "Hello {{name}} at {{sys.time:%H:%M}}|{{sys.clipboard}}|{{sys.window_title}}"
+                .into(),
+            hide_contents: true,
+            prompt_for_fields: true,
+            fields: vec![SnippetFieldDefinition::new("name")],
+            tags: Vec::new(),
+        }];
+        let mut history = vec![history_text.to_owned()];
+        let origin = SequenceTarget::from_external_window(
+            crate::active_window::ExternalForegroundWindow {
+                hwnd: 91,
+                process_id: std::process::id() + 1,
+                thread_id: 93,
+                title: Some("Frozen origin".into()),
+            },
+            std::process::id(),
+        )
+        .unwrap();
+        let context = SequenceInvocationContext::new(
+            chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05+00:00").unwrap(),
+            Some("invocation clipboard".into()),
+            origin,
+        );
+        let mut app = inert_test_app(root.path());
+        app.enabled_plugins = None;
+        app.sequence_routes = Some(SequenceRoutePresentation {
+            generation: 7,
+            physical_paste: Default::default(),
+            next: SequenceShortcutPresentation::Disabled,
+            cancel: SequenceShortcutPresentation::Active("Ctrl+F9".into()),
+            starts: vec![],
+            tooltip_enabled: false,
+            escape_cancel_enabled: true,
+        });
+        app.begin_paste_sequence_preflight_using_context(
+            sequence,
+            &snippets,
+            &history,
+            crate::commands::ActivationSource::Hotkey,
+            |_, _| Ok(context),
+        )
+        .unwrap();
+        assert!(app.snippet_prompt_dialog.is_sequence_preflight());
+        assert!(app.sequence_playback.started_run().is_none());
+        app.snippet_prompt_dialog.set_value("name", "Ada".into());
+        app.submit_sequence_prompt_using(|| Ok(snippets.clone()), || Ok(history.clone()))
+            .unwrap();
+        assert_eq!(
+            app.sequence_playback.status(),
+            SequencePlaybackStatus::Ready
+        );
+        let preview = app.sequence_playback.prepared_preview().unwrap();
+        assert!(preview.steps[0].hidden && preview.steps[0].text.is_none());
+        // Future source changes and foreground titles cannot alter this run.
+        snippets[0].text = "changed after preflight".into();
+        history.clear();
+        let make_target = |hwnd, process_id, thread_id, title: &str| {
+            SequenceTarget::from_external_window(
+                crate::active_window::ExternalForegroundWindow {
+                    hwnd,
+                    process_id,
+                    thread_id,
+                    title: Some(title.into()),
+                },
+                std::process::id(),
+            )
+            .unwrap()
+        };
+        let target_a = make_target(101, std::process::id() + 2, 103, "Current A");
+        let target_b = make_target(201, std::process::id() + 3, 203, "Current B");
+        let mut platform = AppPastePlatform::new(target_a);
+        let bridge = physical_paste_bridge();
+        struct ObserverReset(std::sync::Arc<PasteAdmissionBridge>);
+        impl Drop for ObserverReset {
+            fn drop(&mut self) {
+                self.0.observer_live(false);
+            }
+        }
+        bridge.observer_live(false);
+        let _reset = ObserverReset(std::sync::Arc::clone(bridge));
+        let (wake, _receive) = std::sync::mpsc::channel();
+        bridge.install_wake(wake);
+        bridge.allow_test_routes();
+        bridge.observer_live(true);
+        app.start_sequence_playback_using(&mut platform).unwrap();
+        assert_eq!(platform.pastes, 0);
+        assert_eq!(
+            platform.sequence, 10,
+            "Start never publishes Step 1 ahead of a press"
+        );
+        assert_eq!(platform.text, "original");
+        assert!(app.sequence_playback.has_input_lease());
+        assert!(app.sequence_playback.escape_cancel_available());
+        let mut reducer = PhysicalPasteReducer::new([false; 9]);
+        fn input(
+            reducer: &mut PhysicalPasteReducer,
+            bridge: &std::sync::Arc<PasteAdmissionBridge>,
+            platform: &AppPastePlatform,
+            vk: u32,
+            transition: KeyTransition,
+            provenance: InputProvenance,
+        ) -> bool {
+            reducer.process(
+                KeyEvent {
+                    vk,
+                    transition,
+                    provenance,
+                    at: 0,
+                },
+                Some(PasteFocus {
+                    hwnd: platform.target.hwnd(),
+                    process_id: platform.target.process_id(),
+                    thread_id: platform.target.thread_id(),
+                }),
+                std::process::id(),
+                true,
+                bridge,
+            )
+        }
+        assert!(!input(
+            &mut reducer,
+            bridge,
+            &platform,
+            0xA2,
+            KeyTransition::Down,
+            InputProvenance::Physical
+        ));
+        let expected = [
+            "Hello Ada at 03:04|invocation clipboard|Frozen origin",
+            history_text,
+            temporary_text,
+        ];
+        for (index, expected) in expected.iter().enumerate() {
+            if index == 1 {
+                platform.target = target_b.clone();
+            }
+            let before = platform.sequence;
+            for transition in [
+                KeyTransition::Down,
+                KeyTransition::Down,
+                KeyTransition::Repeat,
+            ] {
+                assert!(input(
+                    &mut reducer,
+                    bridge,
+                    &platform,
+                    0x56,
+                    transition,
+                    InputProvenance::Physical
+                ));
+            }
+            let PhysicalPasteNotice::Paste(admission) = bridge.take_notice().unwrap() else {
+                panic!("expected one admitted paste");
+            };
+            assert!(bridge.take_notice().is_none(), "held V produces one permit");
+            assert!(input(
+                &mut reducer,
+                bridge,
+                &platform,
+                0x56,
+                KeyTransition::Up,
+                InputProvenance::Physical
+            ));
+            app.execute_physical_paste_using(
+                admission.clone(),
+                std::sync::Arc::clone(bridge),
+                &mut platform,
+            )
+            .unwrap();
+            assert_eq!(platform.sequence, before + 1);
+            assert_eq!(platform.text, *expected);
+            assert_eq!(platform.pastes, index + 1);
+            assert_eq!(
+                app.sequence_playback.current_step_number(),
+                Some((index + 1, 3))
+            );
+            let metadata = format!("{:?}", app.sequence_playback.progress().unwrap());
+            assert!(
+                !metadata.contains("Ada")
+                    && !metadata.contains("invocation clipboard")
+                    && !metadata.contains("Frozen origin")
+            );
+            for provenance in [
+                InputProvenance::SelfInjected,
+                InputProvenance::ExternalInjected,
+            ] {
+                for (vk, transition) in [
+                    (0xA2, KeyTransition::Down),
+                    (0x56, KeyTransition::Down),
+                    (0x56, KeyTransition::Up),
+                    (0xA2, KeyTransition::Up),
+                ] {
+                    assert!(!input(
+                        &mut reducer,
+                        bridge,
+                        &platform,
+                        vk,
+                        transition,
+                        provenance
+                    ));
+                }
+            }
+            assert!(
+                bridge.take_notice().is_none(),
+                "injected replay cannot reenter playback"
+            );
+            // External modifier injection invalidates the physical baseline.
+            // A real release and fresh press reestablish it before retrying.
+            for transition in [KeyTransition::Up, KeyTransition::Down] {
+                assert!(!input(
+                    &mut reducer,
+                    bridge,
+                    &platform,
+                    0xA2,
+                    transition,
+                    InputProvenance::Physical
+                ));
+            }
+            for transition in [KeyTransition::Down, KeyTransition::Up] {
+                assert!(input(
+                    &mut reducer,
+                    bridge,
+                    &platform,
+                    0x56,
+                    transition,
+                    InputProvenance::Physical
+                ));
+            }
+            let busy = bridge.take_notice().unwrap();
+            assert!(matches!(busy, PhysicalPasteNotice::Busy { .. }));
+            app.handle_physical_paste_notice(busy);
+            let dispatched = platform.now;
+            platform.now = dispatched + Duration::from_millis(179);
+            let now = platform.now;
+            app.sequence_playback.tick(&mut platform, now);
+            assert_eq!(
+                platform.sequence,
+                before + 1,
+                "later text is not published during the current paste read guard"
+            );
+            assert_eq!(platform.pastes, index + 1);
+            assert!(bridge.valid(&admission));
+            platform.now = dispatched + Duration::from_millis(180);
+            let now = platform.now;
+            app.sequence_playback.tick(&mut platform, now);
+            app.sync_physical_paste_admission().unwrap();
+            assert!(!bridge.valid(&admission));
+        }
+        assert_eq!(
+            app.sequence_playback.status(),
+            SequencePlaybackStatus::Completed
+        );
+        assert!(app.sequence_playback.started_run().is_none());
+        assert!(!app.sequence_playback.has_input_lease());
+        assert!(!app.sequence_playback.escape_cancel_available());
+        assert!(app.sequence_playback.progress().is_none());
+        assert!(bridge.take_notice().is_none());
+        assert!(
+            app.sequence_playback
+                .take_shutdown_restore_plan(platform.now)
+                .is_none()
+        );
+        assert_eq!(platform.sequence, 13);
+        for transition in [KeyTransition::Down, KeyTransition::Up] {
+            assert!(!input(
+                &mut reducer,
+                bridge,
+                &platform,
+                0x56,
+                transition,
+                InputProvenance::Physical
+            ));
+        }
+        assert!(bridge.take_notice().is_none());
+        // The unclaimed fourth human chord follows the fake ordinary OS path,
+        // consuming the unchanged final clipboard instead of a sequence step.
+        SequencePlaybackPlatform::paste_chord(&mut platform).unwrap();
+        assert_eq!(
+            platform.pasted,
+            vec![
+                (101, expected[0].into()),
+                (201, history_text.into()),
+                (201, temporary_text.into()),
+                (201, temporary_text.into())
+            ]
+        );
+        assert_eq!(platform.sequence, 13);
+        assert_eq!(platform.text, temporary_text);
+        assert!(!input(
+            &mut reducer,
+            bridge,
+            &platform,
+            0xA2,
+            KeyTransition::Up,
+            InputProvenance::Physical
+        ));
+        assert_eq!(std::fs::read(store.path()).unwrap(), saved_bytes);
+        assert!(!root.path().join("settings.json").exists());
+        assert!(!root.path().join("actions.json").exists());
     }
 
     #[test]

@@ -5,6 +5,36 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak, mpsc};
 
+/// Main's acknowledged route policy for the fixed physical Ctrl+V chord.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum PhysicalPasteAvailability {
+    #[default]
+    Unknown,
+    Available,
+    Conflict {
+        owner: String,
+    },
+}
+impl PhysicalPasteAvailability {
+    pub fn reason(&self) -> Option<String> {
+        match self {
+            Self::Available => None,
+            Self::Unknown => Some(
+                "Paste-to-Advance is unavailable until active shortcut ownership is acknowledged."
+                    .into(),
+            ),
+            Self::Conflict { owner } => Some(format!(
+                "Paste-to-Advance is unavailable: Ctrl+V can also trigger {owner}. Change that shortcut before starting this mode."
+            )),
+        }
+    }
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PhysicalPastePolicy {
+    pub revision: u64,
+    pub availability: PhysicalPasteAvailability,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PasteFocus {
     pub hwnd: isize,
@@ -36,6 +66,7 @@ pub(crate) struct SessionCapabilities {
 #[derive(Default)]
 struct State {
     observer_live: bool,
+    route_policy: PhysicalPasteAvailability,
     session: Option<Session>,
     capabilities: SessionCapabilities,
     cancelled: Option<Session>,
@@ -55,6 +86,8 @@ struct State {
 pub struct PasteAdmissionBridge {
     state: Mutex<State>,
     armed: AtomicBool,
+    route_revision: AtomicU64,
+    source_publications: AtomicU64,
     published_epoch: AtomicU64,
     escape_epoch: AtomicU64,
     cancel_epoch: AtomicU64,
@@ -127,12 +160,75 @@ fn fail(state: &mut State, reason: &'static str) {
 }
 
 impl PasteAdmissionBridge {
+    pub fn route_revision(&self) -> u64 {
+        self.route_revision.load(Ordering::Acquire)
+    }
+    pub fn route_availability(&self) -> PhysicalPasteAvailability {
+        self.state
+            .lock()
+            .map(|state| state.route_policy.clone())
+            .unwrap_or_default()
+    }
+    /// Source publication calls this while holding its snapshot write lock,
+    /// before exposing the new Arc. Readers capture revision before snapshot.
+    pub fn invalidate_route_policy(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            self.route_revision.fetch_add(1, Ordering::AcqRel);
+            Self::suspend_policy(&mut state, &self.armed, &self.escape_epoch);
+        }
+    }
+    pub fn begin_source_publication(&self) {
+        self.source_publications.fetch_add(1, Ordering::AcqRel);
+        self.invalidate_route_policy();
+    }
+    pub fn finish_source_publication(&self) {
+        // Closing the revision also rejects a snapshot read from an old service
+        // during source replacement, even if acknowledgement is delayed.
+        if let Ok(_state) = self.state.lock() {
+            self.route_revision.fetch_add(1, Ordering::AcqRel);
+            self.source_publications.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+    pub fn suspend_route_policy(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            Self::suspend_policy(&mut state, &self.armed, &self.escape_epoch);
+        }
+    }
+    fn suspend_policy(state: &mut State, armed: &AtomicBool, escape_epoch: &AtomicU64) {
+        state.route_policy = PhysicalPasteAvailability::Unknown;
+        if state.capabilities.paste {
+            armed.store(false, Ordering::Release);
+            escape_epoch.store(0, Ordering::Release);
+            fail(
+                state,
+                "Ctrl+V shortcut ownership changed; restart after routes are acknowledged.",
+            );
+        }
+    }
+    pub fn acknowledge_route_policy(&self, policy: &PhysicalPastePolicy) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if self.route_revision() != policy.revision
+            || self.source_publications.load(Ordering::Acquire) != 0
+        {
+            return false;
+        }
+        if policy.availability != PhysicalPasteAvailability::Available {
+            Self::suspend_policy(&mut state, &self.armed, &self.escape_epoch);
+        }
+        state.route_policy = policy.availability.clone();
+        true
+    }
     pub(crate) fn configure_session(
         &self,
         owner: u64,
         generation: u64,
         requested: SessionCapabilities,
     ) -> Result<SessionCapabilities, &'static str> {
+        if requested.paste && self.route_availability() != PhysicalPasteAvailability::Available {
+            return Err("Ctrl+V shortcut ownership does not permit Paste-to-Advance.");
+        }
         self.publish_session(owner, Some(generation), requested);
         let state = self
             .state
@@ -169,6 +265,13 @@ impl PasteAdmissionBridge {
             && self.state.lock().is_ok_and(|state| {
                 state.session == Some(Session { owner, generation }) && state.capabilities.escape
             })
+    }
+    #[cfg(test)]
+    pub(crate) fn allow_test_routes(&self) {
+        assert!(self.acknowledge_route_policy(&PhysicalPastePolicy {
+            revision: self.route_revision(),
+            availability: PhysicalPasteAvailability::Available,
+        }));
     }
     #[cfg(test)]
     pub(crate) fn arm(&self, owner: u64, generation: u64) -> Result<(), &'static str> {
@@ -237,7 +340,9 @@ impl PasteAdmissionBridge {
         let live = state.observer_live && state.wake.is_some();
         state.capabilities = if candidate.is_some() {
             SessionCapabilities {
-                paste: requested.paste && live,
+                paste: requested.paste
+                    && live
+                    && state.route_policy == PhysicalPasteAvailability::Available,
                 escape: requested.escape && live,
             }
         } else {
@@ -671,6 +776,7 @@ mod tests {
         let bridge = Arc::new(PasteAdmissionBridge::default());
         let (tx, rx) = mpsc::channel();
         bridge.install_wake(tx);
+        bridge.allow_test_routes();
         bridge.observer_live(true);
         bridge.publish(4, Some(7), true);
         (bridge, PhysicalPasteReducer::new([false; 9]), rx)
@@ -711,6 +817,71 @@ mod tests {
             PhysicalPasteNotice::Paste(admission) => admission,
             other => panic!("expected paste, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn physical_paste_policy_fences_stale_permits_and_drains_held_v() {
+        let bridge = Arc::new(PasteAdmissionBridge::default());
+        let (wake, _rx) = mpsc::channel();
+        bridge.install_wake(wake);
+        bridge.observer_live(true);
+        assert!(bridge.arm(4, 7).is_err(), "Unknown must fail closed");
+        // Automatic/Manual's independent optional Escape remains available.
+        assert!(
+            bridge
+                .configure_session(
+                    4,
+                    6,
+                    SessionCapabilities {
+                        paste: false,
+                        escape: true
+                    }
+                )
+                .unwrap()
+                .escape
+        );
+        bridge.publish_session(4, None, SessionCapabilities::default());
+        bridge.allow_test_routes();
+        bridge.arm(4, 7).unwrap();
+        let mut reducer = PhysicalPasteReducer::new([false; 9]);
+        assert!(!physical(&mut reducer, &bridge, 0xA2, KeyTransition::Down));
+        assert!(physical(&mut reducer, &bridge, 0x56, KeyTransition::Down));
+        let admission = take_paste(&bridge);
+        let stale = PhysicalPastePolicy {
+            revision: bridge.route_revision(),
+            availability: PhysicalPasteAvailability::Available,
+        };
+        bridge.begin_source_publication();
+        assert!(!bridge.valid(&admission));
+        let during_publication = PhysicalPastePolicy {
+            revision: bridge.route_revision(),
+            availability: PhysicalPasteAvailability::Available,
+        };
+        assert!(!bridge.acknowledge_route_policy(&during_publication));
+        bridge.finish_source_publication();
+        assert!(!bridge.acknowledge_route_policy(&stale));
+        assert!(
+            !bridge.acknowledge_route_policy(&during_publication),
+            "a delayed old-service snapshot cannot outlive the closing revision"
+        );
+        assert!(physical(&mut reducer, &bridge, 0x56, KeyTransition::Repeat));
+        assert!(physical(&mut reducer, &bridge, 0x56, KeyTransition::Up));
+        assert!(!physical(&mut reducer, &bridge, 0x56, KeyTransition::Down));
+        assert!(bridge.acknowledge_route_policy(&PhysicalPastePolicy {
+            revision: bridge.route_revision(),
+            availability: PhysicalPasteAvailability::Conflict {
+                owner: "Paste Sequence Cancel".into()
+            }
+        }));
+        assert!(bridge.arm(4, 8).is_err());
+        assert!(
+            bridge
+                .route_availability()
+                .reason()
+                .unwrap()
+                .contains("Cancel")
+        );
+        assert!(!bridge.valid(&admission));
     }
 
     #[test]

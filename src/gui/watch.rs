@@ -6826,6 +6826,7 @@ mod tests {
         let before = app.settings_editor.baseline_settings.paste_sequence.clone();
         let omitted = SequenceRoutePresentation {
             generation: 4,
+            physical_paste: Default::default(),
             next: Presentation::Active("Ctrl+F9".into()),
             cancel: Presentation::Inactive {
                 configured: "Alt+End".into(),
@@ -6846,6 +6847,7 @@ mod tests {
         );
         let clean = SequenceRoutePresentation {
             generation: 5,
+            physical_paste: Default::default(),
             cancel: Presentation::Disabled,
             tooltip_enabled: false,
             ..omitted.clone()

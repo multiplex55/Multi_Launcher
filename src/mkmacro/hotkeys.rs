@@ -732,6 +732,12 @@ impl MkMacroHotkeyService {
     /// Returns the immutable authoring snapshot used by this service, so a
     /// proposed launcher binding can be checked without refreshing or
     /// disabling any existing macro hotkeys.
+    pub fn set_publication_observer(
+        &self,
+        observer: Arc<super::store::DocumentPublicationObserver>,
+    ) {
+        self.store.set_publication_observer(observer);
+    }
     pub fn document_snapshot(&self) -> Arc<MkMacroDocument> {
         self.store.snapshot()
     }

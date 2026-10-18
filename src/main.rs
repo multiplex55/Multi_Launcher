@@ -14,6 +14,9 @@ use multi_launcher::hotkey::launcher_invocation::{
 };
 use multi_launcher::hotkey::{HotkeyListener, HotkeyTrigger, parse_hotkey};
 use multi_launcher::logging;
+use multi_launcher::paste_sequence::admission::{
+    PhysicalPasteAvailability, PhysicalPastePolicy, physical_paste_bridge,
+};
 use multi_launcher::platform::{
     app_data::AppDataRoot,
     single_instance::{SingleInstanceAcquire, SingleInstanceGuard},
@@ -395,6 +398,7 @@ fn refresh_macro_hotkey_reservations(
     document: &RadialDocument,
     sequence_routes: &[PasteSequenceHotkeyRoute],
 ) {
+    physical_paste_bridge().suspend_route_policy();
     let mut owned = reserved_launcher_hotkeys_with_sequences(settings, sequence_routes);
     owned.extend(radial_global_hotkey_reservations(settings, document));
     let borrowed = owned
@@ -841,6 +845,7 @@ struct PreparedHotkeyRoute {
     emergency: Option<Arc<HotkeyTrigger>>,
     sequence_routes: Vec<PasteSequenceHotkeyRoute>,
     sequence_omissions: Vec<PasteSequenceRouteOmission>,
+    physical_paste: PhysicalPastePolicy,
     sequence_triggers: Vec<PasteSequenceHotkeyTrigger>,
     staged_service: Option<LauncherInvocationService>,
 }
@@ -921,6 +926,7 @@ struct ResolvedHotkeyRouteCandidate {
     base: multi_launcher::hotkey::validation::ValidatedHotkeyRoutes,
     sequences: Vec<PasteSequenceHotkeyRoute>,
     omissions: Vec<PasteSequenceRouteOmission>,
+    physical_paste: PhysicalPastePolicy,
 }
 
 fn resolve_hotkey_route_candidate(
@@ -931,14 +937,17 @@ fn resolve_hotkey_route_candidate(
     ResolvedHotkeyRouteCandidate,
     multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError,
 > {
+    let revision = physical_paste_bridge().route_revision();
     let macro_document = multi_launcher::mkmacro::runtime::shared_hotkey_document_snapshot()
         .map_err(multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::Validation)?;
-    resolve_hotkey_route_candidate_with_macro(
+    let mut resolved = resolve_hotkey_route_candidate_with_macro(
         settings,
         radial_document,
         macro_document.as_deref(),
         sequence_bindings,
-    )
+    )?;
+    resolved.physical_paste.revision = revision;
+    Ok(resolved)
 }
 
 fn resolve_hotkey_route_candidate_with_macro(
@@ -1012,11 +1021,102 @@ fn resolve_hotkey_route_candidate_with_macro(
             });
         }
     }
+    let physical_paste = PhysicalPastePolicy {
+        revision: physical_paste_bridge().route_revision(),
+        availability: physical_paste_availability(
+            settings,
+            radial_document,
+            macro_document,
+            &sequences,
+        ),
+    };
     Ok(ResolvedHotkeyRouteCandidate {
         base,
         sequences,
         omissions,
+        physical_paste,
     })
+}
+
+/// Fixed Ctrl+V has no Shift/Alt/Win. Existing routes accept extra Control,
+/// so both V and Ctrl+V can co-fire; routes requiring other modifiers cannot.
+fn physical_paste_availability(
+    settings: &Settings,
+    radial_document: &RadialDocument,
+    macro_document: Option<&multi_launcher::mkmacro::MkMacroDocument>,
+    sequences: &[PasteSequenceHotkeyRoute],
+) -> PhysicalPasteAvailability {
+    let mut reserved = reserved_launcher_hotkeys_with_sequences(settings, sequences);
+    if settings.radial.enabled {
+        reserved.extend(radial_global_hotkey_reservations(settings, radial_document));
+    }
+    for (owner, chord) in reserved {
+        if parse_hotkey(&chord).is_some_and(|hotkey| {
+            hotkey.key == multi_launcher::hotkey::Key::KeyV
+                && !hotkey.shift
+                && !hotkey.alt
+                && !hotkey.alt_gr
+                && !hotkey.win
+        }) {
+            return PhysicalPasteAvailability::Conflict { owner };
+        }
+    }
+    if let Some(document) = macro_document {
+        let mut hotkeys = document
+            .macros
+            .iter()
+            .filter(|entry| entry.enabled)
+            .filter_map(|entry| {
+                entry
+                    .hotkey
+                    .as_ref()
+                    .map(|hotkey| (format!("macro {} ({})", entry.id, entry.name), hotkey))
+            })
+            .collect::<Vec<_>>();
+        hotkeys.push((
+            "MkMacro recording toggle".into(),
+            &document.settings.record_toggle_hotkey,
+        ));
+        for (name, hotkey) in [
+            (
+                "MkMacro recorder pause/resume",
+                document.settings.recorder.pause_resume_hotkey.as_ref(),
+            ),
+            (
+                "MkMacro recorder marker",
+                document.settings.recorder.marker_hotkey.as_ref(),
+            ),
+        ] {
+            if let Some(hotkey) = hotkey {
+                hotkeys.push((name.into(), hotkey));
+            }
+        }
+        for (owner, hotkey) in hotkeys {
+            if matches!(
+                multi_launcher::mkmacro::hotkeys::canonical_hotkey(hotkey).as_str(),
+                "V" | "CONTROL+V"
+            ) {
+                return PhysicalPasteAvailability::Conflict { owner };
+            }
+        }
+    }
+    PhysicalPasteAvailability::Available
+}
+fn active_physical_paste_policy(
+    settings: &Settings,
+    document: &RadialDocument,
+    sequences: &[PasteSequenceHotkeyRoute],
+) -> PhysicalPastePolicy {
+    // Capture BEFORE acquiring the store snapshot; publication fences under its
+    // write lock. A stale snapshot can therefore never re-acknowledge Available.
+    let revision = physical_paste_bridge().route_revision();
+    let availability = multi_launcher::mkmacro::runtime::shared_hotkey_document_snapshot()
+        .map(|macros| physical_paste_availability(settings, document, macros.as_deref(), sequences))
+        .unwrap_or_default();
+    PhysicalPastePolicy {
+        revision,
+        availability,
+    }
 }
 
 fn paste_sequence_presentation_for_polling(
@@ -1047,6 +1147,7 @@ fn paste_sequence_route_presentation(
     generation: u64,
     routes: &[PasteSequenceHotkeyRoute],
     omissions: &[PasteSequenceRouteOmission],
+    physical_paste: PhysicalPastePolicy,
 ) -> multi_launcher::paste_sequence::SequenceRoutePresentation {
     use multi_launcher::paste_sequence::{SequenceRoutePresentation, SequenceShortcutPresentation};
     let control = |action: PasteSequenceHotkeyAction, configured: Option<&str>| {
@@ -1078,6 +1179,7 @@ fn paste_sequence_route_presentation(
     };
     let presentation = SequenceRoutePresentation {
         generation,
+        physical_paste,
         next: control(
             PasteSequenceHotkeyAction::Next,
             settings.paste_sequence.next_hotkey.as_deref(),
@@ -1107,8 +1209,14 @@ fn paste_sequence_route_presentation(
 }
 
 fn publish_paste_sequence_route_presentation(
-    presentation: multi_launcher::paste_sequence::SequenceRoutePresentation,
+    mut presentation: multi_launcher::paste_sequence::SequenceRoutePresentation,
 ) {
+    if !physical_paste_bridge().acknowledge_route_policy(&presentation.physical_paste) {
+        presentation.physical_paste = PhysicalPastePolicy {
+            revision: physical_paste_bridge().route_revision(),
+            availability: PhysicalPasteAvailability::Unknown,
+        };
+    }
     multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::PasteSequenceRoutes(
         presentation,
     ));
@@ -1798,6 +1906,7 @@ fn prepare_hotkey_runtime_message(
                 screen_draw,
                 emergency,
                 sequence_routes,
+                physical_paste: resolved.physical_paste,
                 sequence_omissions: resolved.omissions,
                 sequence_triggers,
                 staged_service,
@@ -1940,6 +2049,7 @@ fn begin_hotkey_application_with_issuer(
     // still match and whose candidate remains valid against current inputs.
     prepared.settings = candidate;
     prepared.sequence_routes = candidate_sequence_routes;
+    prepared.physical_paste = resolved.physical_paste;
     prepared.sequence_omissions = resolved.omissions;
     if pending_launcher_route.is_some() {
         application_error(
@@ -1980,6 +2090,7 @@ fn begin_hotkey_application_with_issuer(
             return;
         }
     };
+    physical_paste_bridge().suspend_route_policy();
     let old_service_existed = invocation_service.is_some();
     let mut application = PendingHotkeyApplication {
         request: Some(request),
@@ -2298,6 +2409,7 @@ impl HotkeyRuntimeCommitContext<'_> {
                 &[]
             },
             &[],
+            active_physical_paste_policy(self.settings, self.radial_document, self.sequence_routes),
         ));
     }
 
@@ -2406,6 +2518,7 @@ impl HotkeyRuntimeCommitContext<'_> {
             *self.settings_generation,
             self.sequence_routes,
             &application.prepared.sequence_omissions,
+            application.prepared.physical_paste.clone(),
         ));
         multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::RadialInvalidate);
 
@@ -2973,6 +3086,28 @@ fn main() -> anyhow::Result<()> {
     let manager_timer = multi_launcher::performance::Timer::start();
     let plugins = PluginManager::new_with_reserved_hotkeys(&startup_reservation_refs);
     manager_timer.finish("startup.plugin_manager");
+    let macro_policy_dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let macro_dirty = Arc::clone(&macro_policy_dirty);
+    let macro_wake = event_tx.clone();
+    let observer = Arc::new(
+        multi_launcher::mkmacro::store::DocumentPublicationObserver {
+            before: Arc::new(|| physical_paste_bridge().begin_source_publication()),
+            after: Arc::new(move || {
+                physical_paste_bridge().finish_source_publication();
+                macro_dirty.store(true, Ordering::Release);
+                let _ = macro_wake.send(());
+            }),
+        },
+    );
+    physical_paste_bridge().begin_source_publication();
+    match multi_launcher::mkmacro::runtime::observe_shared_document_publication(observer) {
+        Ok(()) => physical_paste_bridge().finish_source_publication(),
+        Err(error) => {
+            // Keep the fence closed: no unfenced macro source may coexist
+            // with a physical-paste lease.
+            tracing::warn!(%error, "physical paste shortcut policy unavailable without macro publication fencing");
+        }
+    }
     let startup_radial_issues = multi_launcher::radial::settings::validate(
         &settings.radial,
         &radial_document,
@@ -3145,6 +3280,7 @@ fn main() -> anyhow::Result<()> {
             &[]
         },
         &startup_sequence_omissions,
+        active_physical_paste_policy(&settings, &radial_document, &paste_sequence_routes),
     ));
     let startup_services = GuiStartupServices {
         settings_diagnostic: startup_settings_diagnostic,
@@ -3328,6 +3464,7 @@ fn main() -> anyhow::Result<()> {
                                             settings_generation,
                                             &paste_sequence_routes,
                                             &resolved.omissions,
+                                            resolved.physical_paste.clone(),
                                         ),
                                     },
                                 });
@@ -3408,6 +3545,7 @@ fn main() -> anyhow::Result<()> {
                                 settings_generation,
                                 &paste_sequence_routes,
                                 &resolved.omissions,
+                                resolved.physical_paste.clone(),
                             ),
                         );
                     }
@@ -3800,6 +3938,7 @@ fn main() -> anyhow::Result<()> {
                                                         settings_generation,
                                                         &paste_sequence_routes,
                                                         &resolved.omissions,
+                                                        resolved.physical_paste.clone(),
                                                     ),
                                             },
                                         });
@@ -3836,6 +3975,7 @@ fn main() -> anyhow::Result<()> {
                                         settings_generation,
                                         &paste_sequence_routes,
                                         &resolved.omissions,
+                                        resolved.physical_paste.clone(),
                                     ),
                                 );
                             }
@@ -3993,6 +4133,7 @@ fn main() -> anyhow::Result<()> {
                                                         settings_generation,
                                                         &paste_sequence_routes,
                                                         &resolved.omissions,
+                                                        resolved.physical_paste.clone(),
                                                     ),
                                             },
                                         });
@@ -4029,6 +4170,7 @@ fn main() -> anyhow::Result<()> {
                                         settings_generation,
                                         &paste_sequence_routes,
                                         &resolved.omissions,
+                                        resolved.physical_paste.clone(),
                                     ),
                                 );
                             }
@@ -4343,6 +4485,11 @@ fn main() -> anyhow::Result<()> {
                                 settings_generation,
                                 &[],
                                 &[],
+                                active_physical_paste_policy(
+                                    &settings,
+                                    &radial_document,
+                                    &paste_sequence_routes,
+                                ),
                             )
                         });
                     }
@@ -4998,6 +5145,11 @@ fn main() -> anyhow::Result<()> {
                         &[]
                     },
                     &[],
+                    active_physical_paste_policy(
+                        &settings,
+                        &radial_document,
+                        &paste_sequence_routes,
+                    ),
                 ));
             }
         }
@@ -5184,6 +5336,16 @@ fn main() -> anyhow::Result<()> {
             {
                 c.request_repaint();
             }
+        }
+
+        if pending_launcher_route.is_none() && macro_policy_dirty.swap(false, Ordering::AcqRel) {
+            publish_paste_sequence_route_presentation(paste_sequence_route_presentation(
+                &settings,
+                settings_generation,
+                &paste_sequence_routes,
+                &[],
+                active_physical_paste_policy(&settings, &radial_document, &paste_sequence_routes),
+            ));
         }
 
         // Consolidate every fail-closed path through the same demand owner.
@@ -6547,7 +6709,13 @@ mod tests {
         settings.paste_sequence.next_hotkey = Some("F13".into());
         let snapshot = paste_route_test_snapshot("F14");
         let routes = paste_sequence_hotkey_routes_from_snapshot(&settings, &snapshot).unwrap();
-        let shared = paste_sequence_route_presentation(&settings, 7, &routes, &[]);
+        let shared = paste_sequence_route_presentation(
+            &settings,
+            7,
+            &routes,
+            &[],
+            PhysicalPastePolicy::default(),
+        );
         assert_eq!(shared.next, Presentation::Active("F13".into()));
         assert_eq!(shared.starts.len(), 1);
         let failed_over = paste_sequence_presentation_for_polling(shared);
@@ -6556,7 +6724,13 @@ mod tests {
         );
         assert!(failed_over.starts.is_empty());
         settings.radial.enabled = false;
-        let fallback = paste_sequence_route_presentation(&settings, 7, &routes, &[]);
+        let fallback = paste_sequence_route_presentation(
+            &settings,
+            7,
+            &routes,
+            &[],
+            PhysicalPastePolicy::default(),
+        );
         assert!(matches!(fallback.next, Presentation::Inactive { .. }));
         assert!(fallback.starts.is_empty());
         let snapshot = multi_launcher::paste_sequence::SequenceRoutePresentation {
@@ -6587,8 +6761,13 @@ mod tests {
                 .unwrap()
         };
         let initial = resolve(&settings);
-        let displayed =
-            paste_sequence_route_presentation(&settings, 1, &initial.sequences, &initial.omissions);
+        let displayed = paste_sequence_route_presentation(
+            &settings,
+            1,
+            &initial.sequences,
+            &initial.omissions,
+            initial.physical_paste.clone(),
+        );
         assert!(matches!(displayed.next, Presentation::Active(_)));
         assert!(
             matches!(&displayed.cancel, Presentation::Inactive { configured, reason } if configured == "Ctrl+Alt+Shift+End" && reason.contains("launcher"))
@@ -6606,6 +6785,7 @@ mod tests {
             2,
             &reloaded.sequences,
             &reloaded.omissions,
+            reloaded.physical_paste.clone(),
         );
         assert_eq!(displayed.next, Presentation::Disabled);
         assert_eq!(displayed.cancel, Presentation::Active("Ctrl+F10".into()));
@@ -6618,6 +6798,7 @@ mod tests {
             3,
             &disabled.sequences,
             &disabled.omissions,
+            disabled.physical_paste.clone(),
         );
         assert!(displayed.starts.is_empty());
         assert!(
@@ -6629,12 +6810,108 @@ mod tests {
             .unwrap()
             .insert("paste_sequence".into());
         let enabled = resolve(&settings);
-        let displayed =
-            paste_sequence_route_presentation(&settings, 4, &enabled.sequences, &enabled.omissions);
+        let displayed = paste_sequence_route_presentation(
+            &settings,
+            4,
+            &enabled.sequences,
+            &enabled.omissions,
+            enabled.physical_paste.clone(),
+        );
         assert_eq!(displayed.cancel, Presentation::Active("Ctrl+F10".into()));
         assert_eq!(displayed.starts.len(), 1);
         assert!(!displayed.summary().contains("inactive"));
         assert_eq!(settings.hotkey.as_deref(), Some("Shift+Alt+Win+End"));
+    }
+
+    #[test]
+    fn physical_paste_policy_preserves_configured_v_routes_and_ignores_context_only_radial() {
+        use multi_launcher::radial::model::{TriggerDefinition, TriggerId, TriggerScope};
+        let mut settings = Settings::default();
+        settings.radial.enabled = false;
+        settings.hotkey = Some("Ctrl+V".into());
+        let mut document = RadialDocument::starter();
+        let candidate =
+            resolve_hotkey_route_candidate_with_macro(&settings, &document, None, Some(&[]))
+                .unwrap();
+        assert!(
+            candidate
+                .physical_paste
+                .availability
+                .reason()
+                .unwrap()
+                .contains("launcher toggle")
+        );
+        assert_eq!(settings.hotkey.as_deref(), Some("Ctrl+V"));
+        settings.hotkey = Some("F2".into());
+        settings.paste_sequence.cancel_hotkey = Some("V".into());
+        let candidate =
+            resolve_hotkey_route_candidate_with_macro(&settings, &document, None, Some(&[]))
+                .unwrap();
+        assert!(
+            candidate
+                .physical_paste
+                .availability
+                .reason()
+                .unwrap()
+                .contains("Cancel")
+        );
+        assert!(
+            candidate
+                .sequences
+                .iter()
+                .any(|route| route.action == PasteSequenceHotkeyAction::Cancel)
+        );
+        settings.paste_sequence.cancel_hotkey = None;
+        let macros: multi_launcher::mkmacro::MkMacroDocument = serde_json::from_value(serde_json::json!({"macros": [{"id": 73, "name": "V owner", "enabled": true, "hotkey": {"key": {"character":"V"}, "modifiers": ["control"]}}]})).unwrap();
+        assert!(
+            physical_paste_availability(&settings, &document, Some(&macros), &[])
+                .reason()
+                .unwrap()
+                .contains("macro 73")
+        );
+        let mut disabled = macros.clone();
+        disabled.macros[0].enabled = false;
+        assert_eq!(
+            physical_paste_availability(&settings, &document, Some(&disabled), &[]),
+            PhysicalPasteAvailability::Available
+        );
+        disabled.settings.recorder.marker_hotkey = macros.macros[0].hotkey.clone();
+        assert!(
+            physical_paste_availability(&settings, &document, Some(&disabled), &[])
+                .reason()
+                .unwrap()
+                .contains("recorder marker")
+        );
+        document.custom_triggers.push(TriggerDefinition {
+            id: TriggerId::new("v-menu"),
+            chord: "Ctrl+V".into(),
+            menu_id: document.default_menu_id.clone(),
+            scope: TriggerScope::Global,
+        });
+        assert_eq!(
+            physical_paste_availability(&settings, &document, None, &[]),
+            PhysicalPasteAvailability::Available,
+            "disabled radial cannot reserve a live route"
+        );
+        settings.radial.enabled = true;
+        assert!(
+            physical_paste_availability(&settings, &document, None, &[])
+                .reason()
+                .unwrap()
+                .contains("v-menu")
+        );
+        document.custom_triggers[0].scope = TriggerScope::MenuLocal;
+        assert_eq!(
+            physical_paste_availability(&settings, &document, None, &[]),
+            PhysicalPasteAvailability::Available,
+            "menu/context-only selection has no fresh global V route"
+        );
+        assert!(
+            !reserved_launcher_hotkeys_with_sequences(&settings, &[])
+                .iter()
+                .any(|(_, chord)| chord == "Ctrl+V"),
+            "policy never installs a permanent reservation"
+        );
     }
 
     #[test]
@@ -7464,6 +7741,8 @@ mod tests {
             HotkeyTrigger::start_listener(vec![existing_trigger], "existing-test", old_wake_tx);
         assert!(existing_listener.is_active());
 
+        let policy_before = physical_paste_bridge().route_availability();
+        let revision_before = physical_paste_bridge().route_revision();
         let mut ticket = multi_launcher::hotkey::reconfiguration::prepare_hotkey_reconfiguration(
             candidate.clone(),
         )
@@ -7485,6 +7764,8 @@ mod tests {
             &mut prepared_routes,
         );
 
+        assert_eq!(physical_paste_bridge().route_availability(), policy_before);
+        assert_eq!(physical_paste_bridge().route_revision(), revision_before);
         let prepared = ticket.try_complete().unwrap().unwrap();
         assert_eq!(prepared.generation.0, 5);
         assert_eq!(prepared.request_id, ticket.request_id());
@@ -7774,6 +8055,14 @@ mod tests {
                 _ => None,
             })
             .expect("successful owner application publishes its acknowledged controls");
+        assert_eq!(
+            published.physical_paste.availability,
+            PhysicalPasteAvailability::Available
+        );
+        assert_eq!(
+            physical_paste_bridge().route_availability(),
+            PhysicalPasteAvailability::Available
+        );
         assert_eq!(published.generation, 13);
         assert_eq!(
             published.next,

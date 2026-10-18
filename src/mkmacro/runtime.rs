@@ -1692,6 +1692,9 @@ static RUNTIME: Lazy<RwLock<Option<Arc<MacroRuntime>>>> = Lazy::new(|| RwLock::n
 static RECORDER: Lazy<RwLock<Option<Arc<RecorderRuntime>>>> = Lazy::new(|| RwLock::new(None));
 static HOTKEYS: Lazy<RwLock<Option<Arc<super::hotkeys::MkMacroHotkeyService>>>> =
     Lazy::new(|| RwLock::new(None));
+static DOCUMENT_PUBLICATION_OBSERVER: Lazy<
+    RwLock<Option<Arc<super::store::DocumentPublicationObserver>>>,
+> = Lazy::new(|| RwLock::new(None));
 static RECORDER_HOTKEYS: Lazy<RwLock<Option<Arc<super::recorder_hotkeys::RecorderHotkeyService>>>> =
     Lazy::new(|| RwLock::new(None));
 #[derive(Clone)]
@@ -1785,6 +1788,23 @@ pub fn shared_hotkey_document_snapshot() -> Result<Option<Arc<MkMacroDocument>>,
         .map_err(|_| "shared macro hotkey service lock is poisoned".to_string())?;
     Ok(service.as_ref().map(|service| service.document_snapshot()))
 }
+/// Install the main owner's publication fence on the same store used by both
+/// macro hotkey and recorder polling. This does not query or resolve routes.
+pub fn observe_shared_document_publication(
+    observer: Arc<super::store::DocumentPublicationObserver>,
+) -> Result<(), String> {
+    *DOCUMENT_PUBLICATION_OBSERVER
+        .write()
+        .map_err(|_| "macro publication observer lock is poisoned".to_string())? =
+        Some(Arc::clone(&observer));
+    let service = HOTKEYS
+        .read()
+        .map_err(|_| "shared macro hotkey service lock is poisoned".to_string())?;
+    if let Some(service) = service.as_ref() {
+        service.set_publication_observer(observer);
+    }
+    Ok(())
+}
 /// Installs a shared runtime with injected effects (intended for tests).
 pub fn set_shared_store_with_backends(store: Arc<MkMacroStore>, backends: Backends) {
     set_shared_store_with_backends_and_reserved(store, backends, &[])
@@ -1816,6 +1836,11 @@ fn set_shared_store_components(
         Box<dyn EventEnricher>,
     )>,
 ) {
+    let publication_observer = DOCUMENT_PUBLICATION_OBSERVER.read().unwrap().clone();
+    if let Some(observer) = &publication_observer {
+        (observer.before)();
+        store.set_publication_observer(Arc::clone(observer));
+    }
     // Stop pollers before taking stop coordination; a poller callback may be
     // in the process of enqueuing the current recording's Stop occurrence.
     if let Some(old) = HOTKEYS.write().unwrap().take() {
@@ -1868,6 +1893,9 @@ fn set_shared_store_components(
         *RECORDER_HOTKEYS.write().unwrap() = Some(Arc::new(
             super::recorder_hotkeys::RecorderHotkeyService::system(store),
         ));
+    }
+    if let Some(observer) = publication_observer {
+        (observer.after)();
     }
 }
 fn global() -> Result<Arc<MacroRuntime>> {
