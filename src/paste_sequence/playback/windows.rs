@@ -1,7 +1,4 @@
-use super::{
-    ClipboardWriteFailure, SequencePlaybackError, SequencePlaybackPlatform, SequenceTarget,
-    TargetObservation,
-};
+use super::{SequencePlaybackError, SequencePlaybackPlatform, SequenceTarget, TargetObservation};
 use crate::mkmacro::input::{LiveInputOptIn, Win32InputBackend};
 use std::ptr;
 use std::time::Instant;
@@ -9,7 +6,7 @@ use windows::Win32::Foundation::{
     ERROR_SUCCESS, GetLastError, GlobalFree, HGLOBAL, HWND, SetLastError,
 };
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard, SetClipboardData,
+    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
@@ -51,15 +48,6 @@ impl SequencePlaybackPlatform for NativeSequencePlaybackPlatform {
     }
     fn now(&mut self) -> Instant {
         Instant::now()
-    }
-
-    fn clipboard_revision(&mut self) -> Result<u32, SequencePlaybackError> {
-        let _clipboard = self.open_clipboard()?;
-        let revision = unsafe { GetClipboardSequenceNumber() };
-        if revision == 0 {
-            return Err(SequencePlaybackError::ClipboardUnavailable);
-        }
-        Ok(revision)
     }
 
     fn observe_target(&mut self, target: &SequenceTarget) -> TargetObservation {
@@ -124,54 +112,12 @@ impl SequencePlaybackPlatform for NativeSequencePlaybackPlatform {
         .map_err(|_| SequencePlaybackError::InvalidTarget)
     }
 
-    fn publish_text(
-        &mut self,
-        expected_sequence: u32,
-        rollback_text: Option<&str>,
-        text: &str,
-    ) -> Result<u32, ClipboardWriteFailure> {
-        let fail = |error, owned_sequence| ClipboardWriteFailure {
-            error,
-            owned_sequence,
-        };
-        let _clipboard = self.open_clipboard().map_err(|error| fail(error, None))?;
-        if unsafe { GetClipboardSequenceNumber() } != expected_sequence {
-            return Err(fail(SequencePlaybackError::ClipboardChanged, None));
-        }
+    fn publish_text(&mut self, text: &str) -> Result<(), SequencePlaybackError> {
+        let _clipboard = self.open_clipboard()?;
         if unsafe { EmptyClipboard() }.is_err() {
-            return Err(fail(SequencePlaybackError::ClipboardWriteFailed, None));
+            return Err(SequencePlaybackError::ClipboardWriteFailed);
         }
-
-        match write_unicode_text(text) {
-            Ok(()) => {
-                let sequence = unsafe { GetClipboardSequenceNumber() };
-                if sequence == 0 {
-                    Err(fail(SequencePlaybackError::ClipboardUnavailable, None))
-                } else {
-                    Ok(sequence)
-                }
-            }
-            Err(()) => {
-                // We still own the clipboard lock. Roll back only sequence-authored
-                // text. The pre-run payload is intentionally never captured.
-                if let Some(previous) = rollback_text {
-                    let _ = write_unicode_text(previous);
-                }
-                let sequence = unsafe { GetClipboardSequenceNumber() };
-                let owned_sequence = (sequence != 0).then_some(sequence);
-                Err(fail(
-                    SequencePlaybackError::ClipboardWriteFailed,
-                    owned_sequence,
-                ))
-            }
-        }
-    }
-
-    fn clipboard_sequence_matches(&mut self, expected_sequence: u32) -> bool {
-        expected_sequence != 0
-            && self.open_clipboard().is_ok_and(|_clipboard| {
-                (unsafe { GetClipboardSequenceNumber() }) == expected_sequence
-            })
+        write_unicode_text(text).map_err(|()| SequencePlaybackError::ClipboardWriteFailed)
     }
 
     fn paste_chord(&mut self) -> Result<(), SequencePlaybackError> {

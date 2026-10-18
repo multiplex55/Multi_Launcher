@@ -563,7 +563,7 @@ mod tests {
         for terminal in [
             SequencePlaybackStatus::Completed,
             SequencePlaybackStatus::Cancelled,
-            SequencePlaybackStatus::Failed(SequencePlaybackError::ClipboardChanged),
+            SequencePlaybackStatus::Failed(SequencePlaybackError::ClipboardWriteFailed),
         ] {
             let state = PlaybackProgress {
                 generation: terminal_generation(terminal),

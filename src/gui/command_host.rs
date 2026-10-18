@@ -2073,11 +2073,10 @@ pub(in crate::gui) mod tests {
 
     pub(crate) struct AppPastePlatform {
         now: std::time::Instant,
-        sequence: u32,
+        publications: usize,
         text: String,
         target: crate::paste_sequence::SequenceTarget,
         pastes: usize,
-        captures: usize,
         input_eligible: bool,
         target_error: Option<crate::paste_sequence::SequencePlaybackError>,
         pasted: Vec<(isize, String)>,
@@ -2088,12 +2087,6 @@ pub(in crate::gui) mod tests {
         }
         fn now(&mut self) -> std::time::Instant {
             self.now
-        }
-        fn clipboard_revision(
-            &mut self,
-        ) -> Result<u32, crate::paste_sequence::SequencePlaybackError> {
-            self.captures += 1;
-            Ok(self.sequence)
         }
         fn current_target(
             &mut self,
@@ -2121,22 +2114,11 @@ pub(in crate::gui) mod tests {
         }
         fn publish_text(
             &mut self,
-            expected: u32,
-            _: Option<&str>,
             text: &str,
-        ) -> Result<u32, crate::paste_sequence::ClipboardWriteFailure> {
-            if self.sequence != expected {
-                return Err(crate::paste_sequence::ClipboardWriteFailure {
-                    error: crate::paste_sequence::SequencePlaybackError::ClipboardChanged,
-                    owned_sequence: None,
-                });
-            }
-            self.sequence += 1;
+        ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
+            self.publications += 1;
             self.text = text.into();
-            Ok(self.sequence)
-        }
-        fn clipboard_sequence_matches(&mut self, expected: u32) -> bool {
-            self.sequence == expected
+            Ok(())
         }
         fn paste_chord(&mut self) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
             self.pastes += 1;
@@ -2149,11 +2131,10 @@ pub(in crate::gui) mod tests {
         pub(crate) fn new(target: crate::paste_sequence::SequenceTarget) -> Self {
             Self {
                 now: std::time::Instant::now(),
-                sequence: 10,
+                publications: 0,
                 text: "original".into(),
                 target,
                 pastes: 0,
-                captures: 0,
                 input_eligible: true,
                 target_error: None,
                 pasted: Vec::new(),
@@ -2432,7 +2413,7 @@ pub(in crate::gui) mod tests {
             app.start_sequence_playback_using(&mut platform),
             Err(SequencePlaybackError::RouteConflict)
         );
-        assert_eq!(platform.captures, 0);
+        assert_eq!(platform.publications, 0);
         assert!(bridge.acknowledge_route_policy(&PhysicalPastePolicy {
             revision: bridge.route_revision(),
             availability: PhysicalPasteAvailability::Conflict {
@@ -2443,8 +2424,7 @@ pub(in crate::gui) mod tests {
             app.start_sequence_playback_using(&mut platform),
             Err(SequencePlaybackError::RouteConflict)
         );
-        assert_eq!(platform.captures, 0);
-        assert_eq!(platform.sequence, 10);
+        assert_eq!(platform.publications, 0);
         assert_eq!(platform.pastes, 0);
         assert_eq!(platform.text, "original");
         assert_eq!(
@@ -2580,7 +2560,7 @@ pub(in crate::gui) mod tests {
         app.start_sequence_playback_using(&mut platform).unwrap();
         assert_eq!(platform.pastes, 0);
         assert_eq!(
-            platform.sequence, 10,
+            platform.publications, 0,
             "Start never publishes Step 1 ahead of a press"
         );
         assert_eq!(platform.text, "original");
@@ -2629,7 +2609,7 @@ pub(in crate::gui) mod tests {
             if index == 1 {
                 platform.target = target_b.clone();
             }
-            let before = platform.sequence;
+            let before = platform.publications;
             for transition in [
                 KeyTransition::Down,
                 KeyTransition::Down,
@@ -2662,7 +2642,7 @@ pub(in crate::gui) mod tests {
                 &mut platform,
             )
             .unwrap();
-            assert_eq!(platform.sequence, before + 1);
+            assert_eq!(platform.publications, before + 1);
             assert_eq!(platform.text, *expected);
             assert_eq!(platform.pastes, index + 1);
             assert_eq!(
@@ -2729,9 +2709,9 @@ pub(in crate::gui) mod tests {
             let now = platform.now;
             app.sequence_playback.tick(&mut platform, now);
             assert_eq!(
-                platform.sequence,
+                platform.publications,
                 before + 1,
-                "later text is not published during the current paste read guard"
+                "later text is not published during the current step settle window"
             );
             assert_eq!(platform.pastes, index + 1);
             assert!(bridge.valid(&admission));
@@ -2739,6 +2719,10 @@ pub(in crate::gui) mod tests {
             let now = platform.now;
             app.sequence_playback.tick(&mut platform, now);
             app.sync_physical_paste_admission().unwrap();
+            assert_eq!(
+                app.sequence_playback.current_step_number(),
+                Some(((index + 2).min(3), 3))
+            );
             assert!(!bridge.valid(&admission));
         }
         assert_eq!(
@@ -2751,7 +2735,7 @@ pub(in crate::gui) mod tests {
         assert!(app.sequence_playback.progress().is_none());
         assert!(bridge.take_notice().is_none());
         assert!(!app.sequence_playback.needs_tick());
-        assert_eq!(platform.sequence, 13);
+        assert_eq!(platform.publications, 3);
         for transition in [KeyTransition::Down, KeyTransition::Up] {
             assert!(!input(
                 &mut reducer,
@@ -2775,7 +2759,7 @@ pub(in crate::gui) mod tests {
                 (201, temporary_text.into())
             ]
         );
-        assert_eq!(platform.sequence, 13);
+        assert_eq!(platform.publications, 3);
         assert_eq!(platform.text, temporary_text);
         assert!(!input(
             &mut reducer,

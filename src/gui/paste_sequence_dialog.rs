@@ -35,9 +35,6 @@ fn run_status_text(
         Status::AwaitPaste => "Waiting for Ctrl+V in an eligible application".into(),
         Status::Cancelled => "Cancelled".into(),
         Status::Completed => "Completed".into(),
-        Status::Failed(SequencePlaybackError::ClipboardChanged) => {
-            "Clipboard changed; run stopped and newer clipboard preserved".into()
-        }
         Status::Failed(error) => format!("Failed: {}", error.message()),
     };
     if matches!(
@@ -1681,7 +1678,7 @@ mod tests {
     }
 
     #[test]
-    fn paste_sequence_editor_status_has_live_counts_and_clear_terminal_clipboard_feedback() {
+    fn paste_sequence_editor_status_has_live_counts_and_clear_terminal_failure_feedback() {
         use crate::paste_sequence::{SequencePlaybackError, SequencePlaybackStatus as Status};
         for status in [
             Status::Idle,
@@ -1689,7 +1686,7 @@ mod tests {
             Status::Ready,
             Status::Completed,
             Status::Cancelled,
-            Status::Failed(SequencePlaybackError::ClipboardChanged),
+            Status::Failed(SequencePlaybackError::ClipboardUnavailable),
         ] {
             let text = run_status_text(status, Some((2, 3)));
             assert!(!text.contains("step 2"), "terminal/preview state: {text}");
@@ -1699,11 +1696,8 @@ mod tests {
                 .contains("Waiting for Ctrl+V in an eligible application · step 2 of 3")
         );
         assert!(
-            run_status_text(
-                Status::Failed(SequencePlaybackError::ClipboardChanged),
-                None
-            )
-            .contains("newer clipboard preserved")
+            run_status_text(Status::Failed(SequencePlaybackError::ClipboardUnavailable), None)
+                .contains("The clipboard could not be opened")
         );
     }
 

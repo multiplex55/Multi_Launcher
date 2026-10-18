@@ -27,7 +27,7 @@ mod playback;
 pub(crate) mod progress;
 
 #[cfg(test)]
-pub(crate) use playback::{ClipboardWriteFailure, TargetObservation};
+pub(crate) use playback::TargetObservation;
 pub(crate) use playback::{
     NativeSequencePlaybackPlatform, SequencePlaybackController, SequencePlaybackError,
     SequencePlaybackPlatform, SequencePlaybackStatus, SessionInputLease, StartedSequence,
