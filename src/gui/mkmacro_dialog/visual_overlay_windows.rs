@@ -552,6 +552,57 @@ unsafe fn draw_label(dc: HDC, origin: ScreenRect, bounds: ScreenRect, index: usi
     };
 }
 
+#[derive(Default)]
+struct MonitorEnumeration {
+    bounds: Vec<ScreenRect>,
+    failure: Option<VisualOverlayError>,
+}
+impl MonitorEnumeration {
+    fn record(&mut self, rect: Result<RECT, u32>) -> bool {
+        if self.failure.is_some() {
+            return false;
+        }
+        let monitor = self.bounds.len() + 1;
+        let rect = match rect {
+            Ok(rect) => rect,
+            Err(error) => {
+                self.failure = Some(platform(format!(
+                    "GetMonitorInfoW failed for monitor {monitor}: Win32 error {error}"
+                )));
+                return false;
+            }
+        };
+        if rect.right <= rect.left || rect.bottom <= rect.top {
+            self.failure = Some(platform(format!(
+                "Monitor {monitor} has invalid screen bounds: {rect:?}"
+            )));
+            return false;
+        }
+        self.bounds.push(ScreenRect::new(
+            rect.left,
+            rect.top,
+            (i64::from(rect.right) - i64::from(rect.left)) as u32,
+            (i64::from(rect.bottom) - i64::from(rect.top)) as u32,
+        ));
+        true
+    }
+    fn finish(self, enumeration_error: Option<u32>) -> Result<Vec<ScreenRect>, VisualOverlayError> {
+        // Never turn a partially enumerated desktop into complete coverage.
+        if let Some(error) = self.failure {
+            return Err(error);
+        }
+        if let Some(error) = enumeration_error {
+            return Err(platform(format!(
+                "EnumDisplayMonitors failed: Win32 error {error}"
+            )));
+        }
+        if self.bounds.is_empty() {
+            return Err(platform("No active physical monitor is available"));
+        }
+        Ok(self.bounds)
+    }
+}
+
 fn displays() -> Result<Vec<ScreenRect>, VisualOverlayError> {
     unsafe extern "system" fn collect(
         monitor: HMONITOR,
@@ -559,25 +610,19 @@ fn displays() -> Result<Vec<ScreenRect>, VisualOverlayError> {
         _: *mut RECT,
         data: LPARAM,
     ) -> windows::Win32::Foundation::BOOL {
-        let out = unsafe { &mut *(data.0 as *mut Vec<ScreenRect>) };
+        let out = unsafe { &mut *(data.0 as *mut MonitorEnumeration) };
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
-        if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
-            let r = info.rcMonitor;
-            if r.right > r.left && r.bottom > r.top {
-                out.push(ScreenRect::new(
-                    r.left,
-                    r.top,
-                    (r.right - r.left) as u32,
-                    (r.bottom - r.top) as u32,
-                ));
-            }
-        }
-        true.into()
+        let result = if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+            Ok(info.rcMonitor)
+        } else {
+            Err(unsafe { GetLastError().0 })
+        };
+        out.record(result).into()
     }
-    let mut result = vec![];
+    let mut result = MonitorEnumeration::default();
     let ok = unsafe {
         EnumDisplayMonitors(
             None,
@@ -585,15 +630,10 @@ fn displays() -> Result<Vec<ScreenRect>, VisualOverlayError> {
             Some(collect),
             LPARAM(&mut result as *mut _ as isize),
         )
-    };
-    if !ok.as_bool() {
-        Err(platform(format!(
-            "Could not enumerate physical monitors: {}",
-            unsafe { GetLastError().0 }
-        )))
-    } else {
-        Ok(result)
     }
+    .as_bool();
+    let error = (!ok).then(|| unsafe { GetLastError().0 });
+    result.finish(error)
 }
 
 impl NativeOverlayRenderer {
@@ -711,7 +751,7 @@ impl NativeOverlayRenderer {
             .filter(|bounds| {
                 !self.input_shields.iter().any(|window| {
                     window.state.bounds == *bounds
-                        && unsafe { IsWindowVisible(window.hwnd) }.as_bool()
+                        && probe_shield(window.hwnd).failures(*bounds).is_empty()
                 })
             })
             .collect();
@@ -1287,7 +1327,18 @@ impl OverlayRenderer for NativeOverlayRenderer {
             if input_shield_bounds.is_empty()
                 || self.input_shields.len() != input_shield_bounds.len()
             {
-                return self.fail("Incomplete rectangle input shield coverage");
+                tracing::error!(
+                    operation_id,
+                    stage = "startup",
+                    expected_count = input_shield_bounds.len(),
+                    actual_count = self.input_shields.len(),
+                    "incomplete rectangle input shield coverage"
+                );
+                return self.fail(format!(
+                    "Incomplete rectangle input shield coverage: expected {} shields, found {}",
+                    input_shield_bounds.len(),
+                    self.input_shields.len()
+                ));
             }
             if let Err(error) = self.verify_shield_coverage(&input_shield_bounds, "startup") {
                 return self.fail(error.message);
@@ -1683,6 +1734,46 @@ mod tests {
     }
 
     #[test]
+    fn rectangle_shield_monitor_query_failure_never_accepts_partial_enumeration() {
+        let first = RECT {
+            left: -1920,
+            top: -200,
+            right: 0,
+            bottom: 880,
+        };
+        for (failure, expected) in [
+            (
+                Err(5),
+                "GetMonitorInfoW failed for monitor 2: Win32 error 5",
+            ),
+            (Ok(RECT::default()), "Monitor 2 has invalid screen bounds"),
+        ] {
+            let mut enumeration = MonitorEnumeration::default();
+            assert!(enumeration.record(Ok(first)));
+            assert!(!enumeration.record(failure));
+            assert!(!enumeration.record(Ok(first)), "failure remains terminal");
+            // Even success from the outer API cannot erase a callback failure.
+            assert!(
+                enumeration
+                    .finish(None)
+                    .unwrap_err()
+                    .message
+                    .contains(expected)
+            );
+        }
+        let mut enumeration = MonitorEnumeration::default();
+        assert!(enumeration.record(Ok(first)));
+        assert!(
+            enumeration
+                .finish(Some(87))
+                .unwrap_err()
+                .message
+                .contains("EnumDisplayMonitors failed")
+        );
+        assert!(MonitorEnumeration::default().finish(None).is_err());
+    }
+
+    #[test]
     fn rectangle_shield_acknowledgement_rejects_missing_invisible_or_transparent_coverage() {
         let bounds = ScreenRect::new(-1920, -200, 1920, 1080);
         let ex = (WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOPMOST).0;
@@ -1857,7 +1948,7 @@ pub(super) fn run_rectangle_shield_probe() -> Result<(), VisualOverlayError> {
         },
     };
     let mut renderer = NativeOverlayRenderer::default();
-    let result = renderer.show(1, &visual, false);
+    renderer.show(1, &visual, false)?;
     for (monitor, window) in renderer.input_shields.iter().enumerate() {
         eprintln!(
             "shield-probe: monitor={} expected={:?} probe={:?}",
@@ -1866,8 +1957,54 @@ pub(super) fn run_rectangle_shield_probe() -> Result<(), VisualOverlayError> {
             probe_shield(window.hwnd)
         );
     }
+    // Deliberately uncover exactly one column on this owned window. Neither
+    // startup nor topology repair may accept this as full monitor coverage.
+    let window = renderer
+        .input_shields
+        .first()
+        .ok_or_else(|| platform("Probe missing first shield"))?;
+    let (width, height) = win32_dimensions(window.state.bounds, "probe shield")?;
+    if width <= 1 {
+        return Err(platform("Probe monitor is too narrow"));
+    }
+    unsafe {
+        SetWindowPos(
+            window.hwnd,
+            HWND_TOPMOST,
+            window.state.bounds.x,
+            window.state.bounds.y,
+            width - 1,
+            height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        )
+    }
+    .map_err(|error| platform(format!("Probe shield fault placement: {error}")))?;
+    match renderer.verify_shield_coverage(&bounds, "owned_probe_fault") {
+        Err(error) if error.message.contains("position/size mismatch") => {
+            eprintln!("shield-probe: strict rejection: {error}")
+        }
+        Err(error) => return Err(error),
+        Ok(()) => return Err(platform("Probe incorrectly accepted one uncovered column")),
+    }
+    renderer.refresh_shield_coverage()?;
+    eprintln!(
+        "shield-probe: topology repair acknowledged; retained shields={}",
+        renderer.input_shields.len()
+    );
+    let handles: Vec<_> = renderer
+        .input_shields
+        .iter()
+        .chain(&renderer.windows)
+        .chain(renderer.tooltip.iter())
+        .map(|window| window.hwnd)
+        .collect();
     renderer.close();
-    result?;
-    eprintln!("shield-probe: startup acknowledged; cleanup complete");
+    if handles
+        .iter()
+        .any(|hwnd| unsafe { IsWindow(*hwnd) }.as_bool())
+    {
+        return Err(platform("Probe cleanup left an owned HWND alive"));
+    }
+    eprintln!("shield-probe: startup/repair acknowledged; all owned HWNDs destroyed");
     Ok(())
 }
