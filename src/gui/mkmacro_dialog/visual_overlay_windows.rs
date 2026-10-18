@@ -567,7 +567,7 @@ impl MonitorEnumeration {
             Ok(rect) => rect,
             Err(error) => {
                 self.failure = Some(platform(format!(
-                    "GetMonitorInfoW failed for monitor {monitor}: Win32 error {error}"
+                    "GetMonitorInfoW failed for monitor {monitor}; last-error context: {error}"
                 )));
                 return false;
             }
@@ -593,7 +593,7 @@ impl MonitorEnumeration {
         }
         if let Some(error) = enumeration_error {
             return Err(platform(format!(
-                "EnumDisplayMonitors failed: Win32 error {error}"
+                "EnumDisplayMonitors failed; last-error context: {error}"
             )));
         }
         if self.bounds.is_empty() {
@@ -615,6 +615,11 @@ fn displays() -> Result<Vec<ScreenRect>, VisualOverlayError> {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
+        // This API does not promise an extended error code. Retain immediate
+        // last-error context without attributing stale thread state to it.
+        unsafe {
+            SetLastError(WIN32_ERROR(0));
+        }
         let result = if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
             Ok(info.rcMonitor)
         } else {
@@ -623,6 +628,9 @@ fn displays() -> Result<Vec<ScreenRect>, VisualOverlayError> {
         out.record(result).into()
     }
     let mut result = MonitorEnumeration::default();
+    unsafe {
+        SetLastError(WIN32_ERROR(0));
+    }
     let ok = unsafe {
         EnumDisplayMonitors(
             None,
@@ -799,7 +807,7 @@ impl NativeOverlayRenderer {
                 continue;
             }
             let Some((window, probe, reasons)) = rejected else {
-                tracing::error!(operation_id=?self.operation_id.or_else(|| self.input_shields.first().map(|w| w.state.operation_id)), stage, monitor, ?expected,
+                tracing::error!(operation_id=?self.operation_id.or_else(|| self.input_shields.first().map(|w| w.state.operation_id)), stage, monitor=monitor + 1, ?expected,
                     reason=?ShieldFailure::MissingShield, "rectangle shield acknowledgement failed");
                 return Err(platform(format!(
                     "Rectangle input shield monitor {}: {}",
@@ -807,7 +815,7 @@ impl NativeOverlayRenderer {
                     ShieldFailure::MissingShield.description()
                 )));
             };
-            tracing::error!(operation_id=window.state.operation_id, stage, monitor, hwnd=?window.hwnd,
+            tracing::error!(operation_id=window.state.operation_id, stage, monitor=monitor + 1, hwnd=?window.hwnd,
                     ?expected, actual=?probe.actual, get_window_rect_error=?probe.rect_error,
                     get_window_long_ptr_error=?probe.style_error, visible=probe.visible, ex=probe.ex,
                     thread_dpi_context=probe.thread_dpi_context, window_dpi_context=probe.window_dpi_context,
@@ -1744,7 +1752,11 @@ mod tests {
         for (failure, expected) in [
             (
                 Err(5),
-                "GetMonitorInfoW failed for monitor 2: Win32 error 5",
+                "GetMonitorInfoW failed for monitor 2; last-error context: 5",
+            ),
+            (
+                Err(0),
+                "GetMonitorInfoW failed for monitor 2; last-error context: 0",
             ),
             (Ok(RECT::default()), "Monitor 2 has invalid screen bounds"),
         ] {
@@ -1817,6 +1829,30 @@ mod tests {
             probe.failures(bounds),
             [ShieldFailure::UnexpectedTransparent]
         );
+        probe.ex = ex;
+        for dpi in [96, 120, 144] {
+            // DPI metadata must never justify rescaling away a physical gap.
+            let width = 1920 * dpi / 96;
+            let height = 1080 * dpi / 96;
+            let physical = ScreenRect::new(-(width as i32), -200, width, height);
+            probe.window_dpi = dpi;
+            probe.actual = Some(physical);
+            assert!(probe.failures(physical).is_empty(), "DPI {dpi}");
+            probe.actual = Some(ScreenRect::new(physical.x, physical.y, width - 1, height));
+            assert_eq!(
+                probe.failures(physical),
+                [ShieldFailure::RectMismatch],
+                "DPI {dpi}: one uncovered column"
+            );
+            if dpi != 96 {
+                probe.actual = Some(ScreenRect::new(physical.x, physical.y, 1920, 1080));
+                assert_eq!(
+                    probe.failures(physical),
+                    [ShieldFailure::RectMismatch],
+                    "DPI {dpi}: logical-sized bounds"
+                );
+            }
+        }
         let renderer = NativeOverlayRenderer::default();
         assert!(
             renderer
