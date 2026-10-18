@@ -39,3 +39,16 @@ app-build -Profile fast-dev` for the selected comparison; it performs one
 preparation, three no-ops, and two byte-restored comment edits. Do not treat
 preparation as an edit speedup. `summarize.ps1` requires explicit UTC start/end
 bounds so unrelated sessions cannot be pooled.
+
+For the isolated Track C root-query CPU-frame test, set
+`ML_TRACK_C_MEASURED_SAMPLES=15`, `ML_TRACK_C_BENCH_MODE=full`,
+`MULTI_LAUNCHER_PERF=1`, `ML_SKIP_CLIPBOARD_SYNC=1`, and provenance switches
+`ML_TRACK_C_SOURCE_SHA` / `ML_TRACK_C_PROFILE=fast-dev` in the measurement
+runner's EnvironmentOverrides. The sample override affects only the shared
+`measure_owner` / `emit_samples` test helper; dedicated historical protocols
+with their own loops are unchanged. Default shared-helper sampling remains 20.
+Use the exact ignored test
+`gui::render::tests::track_c_benchmark_root_query_to_usable_cpu_frame` with
+Nextest `--run-ignored only --nocapture --cargo-profile fast-dev --lib -E`.
+This is synthetic CPU usability evidence, not native visibility or release
+performance. No clipboard or native input is needed.

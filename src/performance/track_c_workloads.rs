@@ -18,6 +18,28 @@ pub use super::workloads::StableSignature;
 pub const WARMUPS: usize = 5;
 pub const MEASURED_SAMPLES: usize = 20;
 
+// Preserve the historical protocol by default while allowing bounded follow-up
+// investigations to request fewer samples in their dedicated test process.
+fn parse_sample_count(value: Option<&str>) -> Result<usize, String> {
+    let Some(value) = value else {
+        return Ok(MEASURED_SAMPLES);
+    };
+    let count = value
+        .parse::<usize>()
+        .map_err(|_| "ML_TRACK_C_MEASURED_SAMPLES must be an integer".to_owned())?;
+    if !(1..=MEASURED_SAMPLES).contains(&count) {
+        return Err(format!(
+            "ML_TRACK_C_MEASURED_SAMPLES must be in 1..={MEASURED_SAMPLES}"
+        ));
+    }
+    Ok(count)
+}
+
+fn measured_sample_count() -> usize {
+    let value = std::env::var("ML_TRACK_C_MEASURED_SAMPLES").ok();
+    parse_sample_count(value.as_deref()).expect("valid opt-in benchmark sample count")
+}
+
 /// Keeps a test-owned egui frame output inspectable through validation, then
 /// discards renderer deltas when the owner result is dropped.
 #[cfg(test)]
@@ -301,8 +323,9 @@ pub fn measure_owner<S, O>(
         let _ = validate(&mut state, &output);
     }
 
-    let mut samples = Vec::with_capacity(MEASURED_SAMPLES);
-    for _ in 0..MEASURED_SAMPLES {
+    let sample_count = measured_sample_count();
+    let mut samples = Vec::with_capacity(sample_count);
+    for _ in 0..sample_count {
         let mut state = make_state();
         let started = Instant::now();
         let output = run_owner(&mut state);
@@ -351,7 +374,7 @@ pub struct ReportMetadata {
 /// is injected by the parent process; uncommitted harness code is identified
 /// truthfully when no source SHA was supplied.
 pub fn emit_samples(metadata: ReportMetadata, samples: &[SampleRecord]) {
-    assert_eq!(samples.len(), MEASURED_SAMPLES);
+    assert_eq!(samples.len(), measured_sample_count());
     for (field, value) in [
         ("owner", metadata.owner),
         ("fixture", metadata.fixture_name),
@@ -455,6 +478,15 @@ pub fn emit_samples(metadata: ReportMetadata, samples: &[SampleRecord]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn benchmark_sample_override_preserves_default_and_enforces_bound() {
+        assert_eq!(parse_sample_count(None), Ok(20));
+        assert_eq!(parse_sample_count(Some("15")), Ok(15));
+        for invalid in ["0", "21", "invalid"] {
+            assert!(parse_sample_count(Some(invalid)).is_err());
+        }
+    }
 
     #[test]
     fn track_c_test_frame_output_discards_pending_texture_deltas_on_drop() {

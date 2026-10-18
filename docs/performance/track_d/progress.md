@@ -21,7 +21,9 @@ per candidate in each of D1–D3. No baseline full tests or early Clippy.
 | D1-C/D | complete_keep_recipe | Existing fast-dev: edits save 15.05/20.79 s; functional guard PASS |
 | D1-E/F | skipped_no_candidate | No independent measured small owner |
 | D1-G | complete | D1 complete with confirmed existing recipe; no production optimization |
-| D2-A–I | pending | Responsiveness |
+| D2-A | complete | Test-only sample override; bound/default test PASS, native containment blocked |
+| D2-B/C/D/I | pending | Internal evidence and explicit native limitations |
+| D2-E–H | pending | Candidates only after baseline |
 | D3-A–G | pending | Idle |
 | D4-A/B | pending | Optional observation |
 | D5-A–C | pending | Focused closure; Clippy last |
@@ -47,3 +49,7 @@ Bounded read-only reviewer pass found stale-session mixing risk in the summarize
 D1-D completed ~18:33 UTC: one candidate/one variant, ~9 minutes incl guard. Two edited pairs save 35.24%/43.66% (15.052/20.790 s). No-op +0.229 s /20.32% documented guard exception, outweighed by recurring edit gain. Existing opt-in recipe retained; no product source or profile changed. Exact fast-dev test guard PASS 0.032 s, Nextest run 0.050 s. d1_results.md, d1_profile_comparison.json and corrected baseline/summarizer are evidence. D1-B commit fe84cd10 local; pushes held under previous rejection. Review findings resolved; no extra review loop.
 
 D1-G closure 18:33 UTC: approximately 22 active minutes of 180; one candidate, one variant, no new production optimization. Current-checkout recipe documented under dev/perf_track_d. D1-D commit 75b38c12 local. An extra blank EOF line reported by diff-check during D1-D was removed in this closure. D2 starts next; overall remaining budget approximately 515 minutes. No owned GUI process or screenshot yet.
+
+D2 began 18:33:36 UTC. D1-G commit 06f5e0b5 local. Native normal attempt: existing owned-process runner with harmless cargo --version returned exit 1, reason containment monitor failure: Access denied; cargo exit 0, root absent, cleanup verified. One diagnostic retry: exact current-PID CIM query also access denied. Computer Use initialized and window inventory succeeded; no screenshots/input/user content collected. Native GUI fixtures not launched because required descendant containment cannot be established. Native retry allowance exhausted; do not bypass via another process runner. Test-only sample override planned for existing isolated Track C measure_owner/emit_samples, default 20 preserved, Track D requests 15; no runtime allocations or production instrumentation changes.
+
+D2-A: dedicated sample-bound/default unit test PASS (0.016 s case, 0.026 s test run; full build command 67.42 s). Rustfmt applied only to touched test fixture file. Production module excludes this helper with cfg(test). Existing hand-rolled Track C protocols remain unchanged and will not be run at 20 samples. No new executable, observer, production dependency or runtime polling. D2 elapsed ~2.5 min; candidates 0, variants 0. Docs show the exact limited CPU-only path.
