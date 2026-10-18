@@ -1,5 +1,8 @@
 # Owned Windows process runs
 
+For opt-in benchmark probes and bounded Job Object execution, see the
+[performance harness](perf_harness/README.md).
+
 Use `run_owned_process.ps1` for bounded test executables and native probes.
 Requires Windows, PowerShell 7, and access to process inventory and Application
 events (elevation may be needed). Use a fresh evidence directory for each run.

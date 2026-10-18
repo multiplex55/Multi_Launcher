@@ -237,3 +237,14 @@ exact cargo build argv and `Started: false`; no compiler or benchmark campaign.
 The combined inspection shell returned 1 because a later optional rg search
 had no match, not because the dry run failed. No RA analysis/version launched.
 Documented future gated target addition without adding a fifth bin.
+
+## H3-B — complete
+
+H3-A `b00087cf` pushed. Published build-once/direct-run examples, exact fixed
+scenario names, provenance environment, unique ignored output allocation,
+metric meanings, caps and fail-closed permission behavior. Added one dev/README
+link. No new shell/process owner. All four executable `--help` commands returned
+0 without workload execution; Track B `-Preset debug -PrintCommand` returned 0
+and `Started: false`. `git diff --check` passed. Existing H2 smoke evidence is
+reused; no scenario batch repeated. All current workload scenarios are headless;
+native presentation and screenshots remain unverified.
