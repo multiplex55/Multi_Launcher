@@ -1,8 +1,12 @@
 //! Native child viewports and actions for the session-only screenshot pinboard.
 
 use crate::mkmacro::ScreenRect;
+use crate::pinboard::live::{
+    PinLiveChildWake, PinLiveFrameLease, PinLiveFrameSource, PinLiveStatus,
+};
 use crate::pinboard::{
-    PinId, PinImageHandle, PinVisibilityAck, PinWindowVisibilityCoordinator, Pinboard,
+    ImageBudgetReservation, PinId, PinImageHandle, PinVisibilityAck,
+    PinWindowVisibilityCoordinator, Pinboard,
 };
 use eframe::egui;
 use image::ImageEncoder;
@@ -36,19 +40,486 @@ enum PinActionStatus {
     Failed(String),
 }
 
+#[derive(Clone)]
+enum PinWindowImageSource {
+    Static(PinImageHandle),
+    Live(Arc<LiveDisplayPreparation>),
+}
+
+impl PinWindowImageSource {
+    fn current_image_snapshot(&self) -> Option<PinImageHandle> {
+        match self {
+            Self::Static(image) => Some(image.clone()),
+            Self::Live(preparation) => preparation.current_image_snapshot(),
+        }
+    }
+
+    fn live_preparation(&self) -> Option<&Arc<LiveDisplayPreparation>> {
+        match self {
+            Self::Static(_) => None,
+            Self::Live(preparation) => Some(preparation),
+        }
+    }
+}
+
+struct PreparedLiveImage {
+    sequence: u64,
+    color_image: Arc<egui::ColorImage>,
+    _reservation: ImageBudgetReservation,
+}
+
+#[derive(Default)]
+struct LiveDisplayPreparedState {
+    frame: Option<Arc<PreparedLiveImage>>,
+    retired_uploads: Vec<Arc<PreparedLiveImage>>,
+    error: Option<String>,
+    cancelled: bool,
+}
+
+#[derive(Default)]
+struct LiveDisplayWakeState {
+    pending: bool,
+    cancelled: bool,
+}
+
+struct LiveDisplayPreparation {
+    source: PinLiveFrameSource,
+    pin_id: PinId,
+    lifetime: u64,
+    expected_dimensions: (u32, u32),
+    prepared: Arc<Mutex<LiveDisplayPreparedState>>,
+    prepared_change: Arc<(Mutex<u64>, Condvar)>,
+    wake: Arc<(Mutex<LiveDisplayWakeState>, Condvar)>,
+    child_wake: Arc<Mutex<Option<PinLiveChildWake>>>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl LiveDisplayPreparation {
+    fn new(
+        source: PinLiveFrameSource,
+        pin_id: PinId,
+        lifetime: u64,
+        expected_dimensions: (u32, u32),
+    ) -> Arc<Self> {
+        let preparation = Arc::new(Self {
+            source: source.clone(),
+            pin_id,
+            lifetime,
+            expected_dimensions,
+            prepared: Arc::new(Mutex::new(LiveDisplayPreparedState::default())),
+            prepared_change: Arc::new((Mutex::new(0), Condvar::new())),
+            wake: Arc::new((Mutex::new(LiveDisplayWakeState::default()), Condvar::new())),
+            child_wake: Arc::new(Mutex::new(None)),
+            worker: Mutex::new(None),
+        });
+        let worker = spawn_live_display_preparation(
+            source,
+            expected_dimensions,
+            Arc::clone(&preparation.prepared),
+            Arc::clone(&preparation.prepared_change),
+            Arc::clone(&preparation.wake),
+            Arc::clone(&preparation.child_wake),
+            pin_id,
+            lifetime,
+        );
+        match worker {
+            Ok(worker) => {
+                if let Ok(mut slot) = preparation.worker.lock() {
+                    *slot = Some(worker);
+                }
+                preparation.wake();
+            }
+            Err(error) => {
+                if let Ok(mut state) = preparation.prepared.lock() {
+                    state.error = Some(format!("could not prepare live pin display: {error}"));
+                }
+            }
+        }
+        preparation
+    }
+
+    fn wake(&self) {
+        let (state, changed) = &*self.wake;
+        if let Ok(mut state) = state.lock()
+            && !state.cancelled
+        {
+            state.pending = true;
+            changed.notify_one();
+        }
+    }
+
+    fn set_child_wake(&self, notifier: PinLiveChildWake) {
+        if let Ok(mut child_wake) = self.child_wake.lock() {
+            *child_wake = Some(notifier);
+        }
+    }
+
+    fn notify_child(&self) {
+        let notifier = self
+            .child_wake
+            .lock()
+            .ok()
+            .and_then(|notifier| notifier.clone());
+        if let Some(notifier) = notifier {
+            notifier();
+        }
+    }
+
+    fn frame(&self) -> Option<Arc<PreparedLiveImage>> {
+        let state = self.prepared.lock().ok()?;
+        (!state.cancelled).then(|| state.frame.clone()).flatten()
+    }
+
+    fn error(&self) -> Option<String> {
+        self.prepared.lock().ok()?.error.clone()
+    }
+
+    fn current_image_snapshot(&self) -> Option<PinImageHandle> {
+        self.source.current_frame().map(|frame| frame.image)
+    }
+
+    fn status(&self) -> PinLiveStatus {
+        self.source.status()
+    }
+
+    fn is_paused(&self) -> bool {
+        matches!(self.status(), PinLiveStatus::Paused)
+    }
+
+    fn is_terminal(&self) -> bool {
+        matches!(
+            self.status(),
+            PinLiveStatus::SourceClosed | PinLiveStatus::Error(_)
+        )
+    }
+
+    fn pause(&self) -> bool {
+        self.source.pause()
+    }
+
+    fn resume(&self) -> bool {
+        self.source.resume()
+    }
+
+    fn cancel(&self) {
+        {
+            let (state, changed) = &*self.wake;
+            if let Ok(mut state) = state.lock() {
+                state.cancelled = true;
+                state.pending = false;
+                changed.notify_all();
+            }
+        }
+        self.source.set_child_wake_notifier(None);
+        if let Ok(mut state) = self.prepared.lock() {
+            state.cancelled = true;
+            state.error = None;
+        }
+        if let Ok(mut child_wake) = self.child_wake.lock() {
+            *child_wake = None;
+        }
+    }
+
+    fn cancel_and_join(&self) -> Result<(), String> {
+        self.cancel();
+        let worker = self
+            .worker
+            .lock()
+            .map_err(|_| "live display worker lock was poisoned".to_owned())?
+            .take();
+        if let Some(worker) = worker {
+            worker.join().map_err(|_| {
+                "live display preparation worker terminated unexpectedly".to_owned()
+            })?;
+        }
+        Ok(())
+    }
+
+    fn reap_retired_uploads(&self) -> usize {
+        let Ok(mut state) = self.prepared.lock() else {
+            return 0;
+        };
+        if state.cancelled
+            && state
+                .frame
+                .as_ref()
+                .is_some_and(|frame| Arc::strong_count(&frame.color_image) == 1)
+        {
+            state.frame = None;
+        }
+        state
+            .retired_uploads
+            .retain(|frame| Arc::strong_count(&frame.color_image) > 1);
+        state.retired_uploads.len()
+    }
+
+    fn has_retained_uploads(&self) -> bool {
+        let Ok(state) = self.prepared.lock() else {
+            return true;
+        };
+        state
+            .frame
+            .as_ref()
+            .is_some_and(|frame| !state.cancelled || Arc::strong_count(&frame.color_image) > 1)
+            || !state.retired_uploads.is_empty()
+    }
+
+    fn worker_finished(&self) -> bool {
+        self.worker
+            .lock()
+            .is_ok_and(|worker| worker.as_ref().is_none_or(JoinHandle::is_finished))
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.prepared.lock().is_ok_and(|state| state.cancelled)
+    }
+
+    #[cfg(test)]
+    fn retained_upload_count(&self) -> usize {
+        self.prepared
+            .lock()
+            .map(|state| state.retired_uploads.len())
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    fn wait_for_sequence(&self, sequence: u64) -> bool {
+        let (current, changed) = &*self.prepared_change;
+        current
+            .lock()
+            .ok()
+            .and_then(|current| {
+                changed
+                    .wait_timeout_while(current, std::time::Duration::from_secs(2), |current| {
+                        *current < sequence
+                    })
+                    .ok()
+            })
+            .is_some_and(|(current, _)| *current >= sequence)
+    }
+}
+
+impl Drop for LiveDisplayPreparation {
+    fn drop(&mut self) {
+        self.cancel();
+        if let Ok(worker) = self.worker.get_mut()
+            && let Some(worker) = worker.take()
+            && worker.join().is_err()
+        {
+            tracing::error!("live pin display preparation worker terminated unexpectedly");
+        }
+    }
+}
+
+fn spawn_live_display_preparation(
+    source: PinLiveFrameSource,
+    expected_dimensions: (u32, u32),
+    prepared: Arc<Mutex<LiveDisplayPreparedState>>,
+    prepared_change: Arc<(Mutex<u64>, Condvar)>,
+    wake: Arc<(Mutex<LiveDisplayWakeState>, Condvar)>,
+    child_wake: Arc<Mutex<Option<PinLiveChildWake>>>,
+    pin_id: PinId,
+    lifetime: u64,
+) -> Result<JoinHandle<()>, String> {
+    thread::Builder::new()
+        .name(format!("pin-display-{}-{lifetime}", pin_id.get()))
+        .spawn(move || {
+            'worker: loop {
+                let (state, changed) = &*wake;
+                let Ok(mut state) = state.lock() else {
+                    break;
+                };
+                while !state.cancelled && !state.pending {
+                    let has_retired = prepared
+                        .lock()
+                        .is_ok_and(|state| !state.retired_uploads.is_empty());
+                    let result = if has_retired {
+                        changed
+                            .wait_timeout(state, std::time::Duration::from_millis(100))
+                            .ok()
+                            .map(|(next, _)| next)
+                    } else {
+                        changed.wait(state).ok()
+                    };
+                    let Some(next) = result else { return };
+                    state = next;
+                    if !state.cancelled {
+                        state.pending = true;
+                    }
+                }
+                if state.cancelled {
+                    drop(state);
+                    break 'worker;
+                }
+                state.pending = false;
+                drop(state);
+
+                let retained_uploads = if let Ok(mut state) = prepared.lock() {
+                    state
+                        .retired_uploads
+                        .retain(|frame| Arc::strong_count(&frame.color_image) > 1);
+                    state.retired_uploads.len()
+                } else {
+                    break;
+                };
+
+                let Some(frame) = source.current_frame() else {
+                    continue;
+                };
+                if prepared
+                    .lock()
+                    .ok()
+                    .and_then(|state| state.frame.as_ref().map(|current| current.sequence))
+                    .is_some_and(|sequence| sequence >= frame.sequence)
+                {
+                    continue;
+                }
+                let dimensions = frame.image.pixels().dimensions();
+                if dimensions != expected_dimensions {
+                    set_live_display_error(
+                        &prepared,
+                        format!(
+                            "live source changed size from {}×{} to {}×{}; display is suspended",
+                            expected_dimensions.0,
+                            expected_dimensions.1,
+                            dimensions.0,
+                            dimensions.1
+                        ),
+                    );
+                    notify_live_display_child(&child_wake);
+                    continue;
+                }
+                let cannot_replace = prepared.lock().is_ok_and(|state| {
+                    state
+                        .frame
+                        .as_ref()
+                        .is_some_and(|current| Arc::strong_count(&current.color_image) > 1)
+                        && retained_uploads >= MAX_RETIRED_LIVE_UPLOADS
+                });
+                if cannot_replace {
+                    set_live_display_error(
+                        &prepared,
+                        "live display is waiting for the renderer to release an older frame".into(),
+                    );
+                    notify_live_display_child(&child_wake);
+                    continue;
+                }
+                let reservation = match frame
+                    .image
+                    .reserve_related_image_bytes(frame.image.image_bytes())
+                {
+                    Ok(reservation) => reservation,
+                    Err(error) => {
+                        set_live_display_error(
+                            &prepared,
+                            format!("live display is waiting for image memory: {error}"),
+                        );
+                        notify_live_display_child(&child_wake);
+                        continue;
+                    }
+                };
+                let pixels = frame.image.pixels();
+                let color_image = Arc::new(egui::ColorImage::from_rgba_unmultiplied(
+                    [dimensions.0 as usize, dimensions.1 as usize],
+                    pixels.as_raw(),
+                ));
+                let prepared_frame = Arc::new(PreparedLiveImage {
+                    sequence: frame.sequence,
+                    color_image,
+                    _reservation: reservation,
+                });
+                let published_sequence = prepared_frame.sequence;
+                drop(frame);
+
+                if source.is_cancelled() {
+                    continue;
+                }
+                if let Ok(mut state) = prepared.lock() {
+                    if state.cancelled {
+                        continue;
+                    }
+                    if state
+                        .frame
+                        .as_ref()
+                        .is_none_or(|current| current.sequence < prepared_frame.sequence)
+                    {
+                        if let Some(current) = state.frame.take()
+                            && Arc::strong_count(&current.color_image) > 1
+                        {
+                            if state.retired_uploads.len() >= MAX_RETIRED_LIVE_UPLOADS {
+                                state.frame = Some(current);
+                                state.error = Some(
+                                "live display is waiting for the renderer to release an older frame"
+                                    .into(),
+                            );
+                                continue 'worker;
+                            }
+                            state.retired_uploads.push(current);
+                        }
+                        state.frame = Some(prepared_frame);
+                        state.error = None;
+                    }
+                }
+                if let Ok(mut sequence) = prepared_change.0.lock() {
+                    *sequence = (*sequence).max(published_sequence);
+                    prepared_change.1.notify_all();
+                }
+                notify_live_display_child(&child_wake);
+            }
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn is_terminal_live_status(status: &PinLiveStatus) -> bool {
+    matches!(
+        status,
+        PinLiveStatus::SourceClosed | PinLiveStatus::Error(_)
+    )
+}
+
+fn live_status_label(status: &PinLiveStatus) -> String {
+    match status {
+        PinLiveStatus::Live => "Live".into(),
+        PinLiveStatus::Paused => "Paused".into(),
+        PinLiveStatus::TemporarilyUnavailable(reason) => {
+            format!("Temporarily unavailable · {reason}")
+        }
+        PinLiveStatus::SourceClosed => "Source closed · frozen frame".into(),
+        PinLiveStatus::Error(error) => format!("Error · {error}"),
+    }
+}
+
+fn set_live_display_error(prepared: &Mutex<LiveDisplayPreparedState>, error: String) {
+    if let Ok(mut state) = prepared.lock()
+        && !state.cancelled
+    {
+        state.error = Some(error);
+    }
+}
+
+fn notify_live_display_child(child_wake: &Mutex<Option<PinLiveChildWake>>) {
+    let notifier = child_wake.lock().ok().and_then(|notifier| notifier.clone());
+    if let Some(notifier) = notifier {
+        notifier();
+    }
+}
+
 struct PinWindowRuntime {
     pin_id: PinId,
     lifetime: u64,
     process_id: u32,
     viewport_id: egui::ViewportId,
     title: String,
-    image: PinImageHandle,
+    image_source: PinWindowImageSource,
     dimensions: (u32, u32),
     state: Mutex<PinWindowState>,
 }
 
+const MAX_RETIRED_LIVE_UPLOADS: usize = 3;
+
 struct PinWindowState {
     texture: Option<egui::TextureHandle>,
+    texture_sequence: Option<u64>,
     scale_mode: PinScaleMode,
     zoom: f32,
     display_bounds: ScreenRect,
@@ -84,6 +555,9 @@ struct PinListEntry {
     texture: Option<egui::TextureHandle>,
     native_status: String,
     controls_available: bool,
+    live_status: Option<String>,
+    live_paused: bool,
+    live_terminal: bool,
 }
 
 enum PinListAction {
@@ -96,6 +570,11 @@ enum PinListAction {
     Close {
         pin_id: PinId,
         lifetime: u64,
+    },
+    LiveControl {
+        pin_id: PinId,
+        lifetime: u64,
+        pause: bool,
     },
     CloseAll,
 }
@@ -160,6 +639,7 @@ struct CaptureVisibilityState {
 struct PinWindowRegistry {
     pins: BTreeMap<PinId, Arc<PinWindowRuntime>>,
     retired: BTreeMap<PinId, Arc<PinWindowRuntime>>,
+    live_preparations: BTreeMap<(PinId, u64), Arc<LiveDisplayPreparation>>,
     native_api: Arc<dyn PinNativeApi>,
     root_context: Option<egui::Context>,
     root_native_identity: (usize, u64),
@@ -174,6 +654,9 @@ struct PinWindowRegistry {
 pub(crate) struct PinWindowPresenter {
     registry: Arc<Mutex<PinWindowRegistry>>,
     actions: PinActionWorker,
+    capture_feedback: Option<String>,
+    capture_feedback_closed: Arc<AtomicBool>,
+    capture_feedback_viewport_id: egui::ViewportId,
     pending_parent_cleanup: bool,
     pin_list_focus_requested: bool,
     #[cfg(test)]
@@ -209,14 +692,16 @@ impl PinWindowPresenter {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
+        let session_id = now ^ u128::from(process_id);
         let registry = Arc::new(Mutex::new(PinWindowRegistry {
             pins: BTreeMap::new(),
             retired: BTreeMap::new(),
+            live_preparations: BTreeMap::new(),
             native_api,
             root_context: None,
             root_native_identity: (0, 0),
             process_id,
-            session_id: now ^ u128::from(process_id),
+            session_id,
             hide_identity: None,
             restore_identity: None,
             shutting_down: false,
@@ -224,6 +709,13 @@ impl PinWindowPresenter {
         Self {
             registry,
             actions: PinActionWorker::with_action_targets(save_picker, clipboard),
+            capture_feedback: None,
+            capture_feedback_closed: Arc::new(AtomicBool::new(false)),
+            capture_feedback_viewport_id: egui::ViewportId::from_hash_of((
+                "pinboard-capture-feedback",
+                process_id,
+                session_id,
+            )),
             pending_parent_cleanup: false,
             pin_list_focus_requested: false,
             #[cfg(test)]
@@ -241,6 +733,51 @@ impl PinWindowPresenter {
         if let Ok(mut registry) = self.registry.lock() {
             registry.root_native_identity = identity;
         }
+    }
+
+    pub(crate) fn queue_capture_feedback(&mut self, message: String) {
+        if self.capture_feedback.as_ref() != Some(&message) {
+            self.capture_feedback = Some(message);
+            self.capture_feedback_closed.store(false, Ordering::Release);
+        }
+    }
+
+    pub(crate) fn show_capture_feedback(&mut self, ctx: &egui::Context) {
+        if ctx.embed_viewports() {
+            return;
+        }
+        if self.capture_feedback_closed.load(Ordering::Acquire) {
+            self.capture_feedback = None;
+            return;
+        }
+        let Some(message) = self.capture_feedback.clone() else {
+            return;
+        };
+        let viewport_id = self.capture_feedback_viewport_id;
+        let closed = Arc::clone(&self.capture_feedback_closed);
+        let builder = egui::ViewportBuilder::default()
+            .with_title("Live pin capture")
+            .with_inner_size([390.0, 130.0])
+            .with_resizable(false)
+            .with_active(false)
+            .with_window_level(egui::WindowLevel::AlwaysOnTop);
+        ctx.show_viewport_deferred(viewport_id, builder, move |ui, class| {
+            if class != egui::ViewportClass::Deferred || ui.ctx().embed_viewports() {
+                return;
+            }
+            let child_ctx = ui.ctx().clone();
+            let native_close = child_ctx.input(|input| input.viewport().close_requested());
+            let mut dismiss = false;
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.label("Live screenshot capture could not be completed.");
+                ui.label(&message);
+                dismiss = ui.button("Dismiss").clicked();
+            });
+            if native_close || dismiss {
+                closed.store(true, Ordering::Release);
+                child_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        });
     }
 
     /// Updates the owner from the domain model and registers its retained child callbacks.
@@ -299,24 +836,41 @@ impl PinWindowPresenter {
             let restore_identity = registry.restore_identity;
             let shutting_down = registry.shutting_down;
             for pin in board.pins() {
-                let Some(image) = pin.current_image_handle() else {
-                    continue;
-                };
-                let dimensions = image.pixels().dimensions();
-                let runtime = registry.pins.entry(pin.id()).or_insert_with(|| {
+                let is_new = !registry.pins.contains_key(&pin.id());
+                if is_new {
                     let lifetime = pin.id().get();
                     let viewport_id = pin_viewport_id(pin.id(), lifetime);
                     let title = pin_native_title(process_id, session_id, pin.id(), lifetime);
-                    Arc::new(PinWindowRuntime {
+                    let (image_source, dimensions) = if let Some(source) = pin.live_frame_source() {
+                        let Some(frame) = source.current_frame() else {
+                            continue;
+                        };
+                        let dimensions = frame.image.pixels().dimensions();
+                        drop(frame);
+                        let preparation =
+                            LiveDisplayPreparation::new(source, pin.id(), lifetime, dimensions);
+                        registry
+                            .live_preparations
+                            .insert((pin.id(), lifetime), Arc::clone(&preparation));
+                        (PinWindowImageSource::Live(preparation), dimensions)
+                    } else {
+                        let Some(image) = pin.current_image_handle() else {
+                            continue;
+                        };
+                        let dimensions = image.pixels().dimensions();
+                        (PinWindowImageSource::Static(image), dimensions)
+                    };
+                    let runtime = Arc::new(PinWindowRuntime {
                         pin_id: pin.id(),
                         lifetime,
                         process_id,
                         viewport_id,
                         title,
-                        image,
+                        image_source,
                         dimensions,
                         state: Mutex::new(PinWindowState {
                             texture: None,
+                            texture_sequence: None,
                             scale_mode: PinScaleMode::Fit,
                             zoom: pin.zoom().clamp(0.1, 8.0),
                             display_bounds: pin.display_bounds(),
@@ -335,8 +889,34 @@ impl PinWindowPresenter {
                             native_destroyed: false,
                             capture_visibility: None,
                         }),
-                    })
-                });
+                    });
+                    if let Some(preparation) = runtime.image_source.live_preparation() {
+                        let child_ctx = ctx.clone();
+                        let weak_runtime = Arc::downgrade(&runtime);
+                        let weak_preparation = Arc::downgrade(preparation);
+                        let notifier: PinLiveChildWake = Arc::new(move || {
+                            let Some(runtime) = weak_runtime.upgrade() else {
+                                return;
+                            };
+                            let is_open = runtime.state.lock().is_ok_and(|state| {
+                                !state.close_requested && !state.native_destroyed
+                            });
+                            if !is_open {
+                                return;
+                            }
+                            if let Some(preparation) = weak_preparation.upgrade() {
+                                preparation.wake();
+                            }
+                            child_ctx.request_repaint_of(runtime.viewport_id);
+                        });
+                        preparation.set_child_wake(Arc::clone(&notifier));
+                        pin.set_live_child_wake_notifier(Some(notifier));
+                    }
+                    registry.pins.insert(pin.id(), runtime);
+                }
+                let Some(runtime) = registry.pins.get(&pin.id()).cloned() else {
+                    continue;
+                };
                 if let Ok(mut state) = runtime.state.lock() {
                     state.display_bounds = pin.display_bounds();
                     if runtime.viewport_id == egui::ViewportId::ROOT
@@ -361,8 +941,8 @@ impl PinWindowPresenter {
                     state.root_registered = true;
                 }
                 let suppress =
-                    should_suppress_pin(runtime, hide_identity, restore_identity, shutting_down);
-                callbacks.push((Arc::clone(runtime), suppress));
+                    should_suppress_pin(&runtime, hide_identity, restore_identity, shutting_down);
+                callbacks.push((runtime, suppress));
             }
             (
                 registry.root_native_identity,
@@ -432,6 +1012,10 @@ impl PinWindowPresenter {
                 .filter_map(|pin| {
                     let runtime = registry.pins.get(&pin.id())?;
                     let state = runtime.state.lock().ok()?;
+                    let live_status = runtime
+                        .image_source
+                        .live_preparation()
+                        .map(|preparation| preparation.status());
                     Some(PinListEntry {
                         pin_id: pin.id(),
                         lifetime: runtime.lifetime,
@@ -453,6 +1037,15 @@ impl PinWindowPresenter {
                             && !state.close_requested
                             && !state.native_destroyed
                             && state.native.is_some(),
+                        live_paused: matches!(live_status.as_ref(), Some(PinLiveStatus::Paused)),
+                        live_terminal: live_status.as_ref().is_some_and(is_terminal_live_status),
+                        live_status: live_status.map(|status| {
+                            runtime
+                                .image_source
+                                .live_preparation()
+                                .and_then(|preparation| preparation.error())
+                                .map_or_else(|| live_status_label(&status), |error| error)
+                        }),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -540,6 +1133,31 @@ impl PinWindowPresenter {
                                             entry.dimensions.1
                                         ));
                                         ui.label(entry.native_status.to_string());
+                                        if let Some(status) = &entry.live_status {
+                                            ui.label(status);
+                                            ui.horizontal(|ui| {
+                                                let label = if entry.live_paused {
+                                                    "Resume"
+                                                } else {
+                                                    "Pause"
+                                                };
+                                                if ui
+                                                    .add_enabled(
+                                                        entry.controls_available
+                                                            && !entry.live_terminal
+                                                            && !shutting_down,
+                                                        egui::Button::new(label),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    actions.push(PinListAction::LiveControl {
+                                                        pin_id: entry.pin_id,
+                                                        lifetime: entry.lifetime,
+                                                        pause: !entry.live_paused,
+                                                    });
+                                                }
+                                            });
+                                        }
                                         ui.horizontal(|ui| {
                                             let mut topmost = entry.always_on_top;
                                             if ui
@@ -672,6 +1290,31 @@ impl PinWindowPresenter {
                 PinListAction::Close { pin_id, lifetime } => {
                     self.close_lifetime(board, pin_id, lifetime);
                 }
+                PinListAction::LiveControl {
+                    pin_id,
+                    lifetime,
+                    pause,
+                } => {
+                    let current = self.registry.lock().is_ok_and(|registry| {
+                        registry
+                            .pins
+                            .get(&pin_id)
+                            .is_some_and(|runtime| runtime.lifetime == lifetime)
+                    });
+                    if current && !shutting_down {
+                        let changed = if pause {
+                            board.pause_live(pin_id)
+                        } else {
+                            board.resume_live(pin_id)
+                        };
+                        if changed
+                            && let Ok(registry) = self.registry.lock()
+                            && let Some(runtime) = registry.pins.get(&pin_id)
+                        {
+                            ctx.request_repaint_of(runtime.viewport_id);
+                        }
+                    }
+                }
                 PinListAction::CloseAll => {
                     for entry in &entries {
                         self.close_lifetime(board, entry.pin_id, entry.lifetime);
@@ -782,6 +1425,10 @@ impl PinWindowPresenter {
     }
 
     pub(crate) fn needs_viewport_bootstrap(&self, board: &Pinboard) -> bool {
+        if self.capture_feedback.is_some() && !self.capture_feedback_closed.load(Ordering::Acquire)
+        {
+            return true;
+        }
         let Ok(registry) = self.registry.lock() else {
             return false;
         };
@@ -800,13 +1447,14 @@ impl PinWindowPresenter {
     }
 
     pub(crate) fn needs_root_ui_when_hidden(&self, board: &Pinboard) -> bool {
-        self.registry.lock().is_ok_and(|registry| {
-            !registry.shutting_down
-                && (self.pending_parent_cleanup
-                    || !board.is_empty()
-                    || !registry.pins.is_empty()
-                    || !registry.retired.is_empty())
-        })
+        (self.capture_feedback.is_some() && !self.capture_feedback_closed.load(Ordering::Acquire))
+            || self.registry.lock().is_ok_and(|registry| {
+                !registry.shutting_down
+                    && (self.pending_parent_cleanup
+                        || !board.is_empty()
+                        || !registry.pins.is_empty()
+                        || !registry.retired.is_empty())
+            })
     }
 
     /// Applies child lifecycle and worker receipts on the launcher logic tick.
@@ -965,14 +1613,45 @@ impl PinWindowPresenter {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
 
+        let mut finished_preparations = Vec::new();
+        if let Ok(registry) = self.registry.lock() {
+            for (key, preparation) in &registry.live_preparations {
+                if preparation.is_cancelled() {
+                    preparation.reap_retired_uploads();
+                    if preparation.worker_finished() && !preparation.has_retained_uploads() {
+                        finished_preparations.push(*key);
+                    }
+                }
+            }
+        }
+        if !finished_preparations.is_empty()
+            && let Ok(mut registry) = self.registry.lock()
+        {
+            for key in finished_preparations {
+                if let Some(preparation) = registry.live_preparations.remove(&key)
+                    && let Err(error) = preparation.cancel_and_join()
+                {
+                    tracing::error!(%error, "could not join retired live display worker");
+                }
+            }
+        }
+
         let has_pending_action = self.actions.has_pending_work();
         let has_visibility_work = self.registry.lock().is_ok_and(|registry| {
             registry.hide_identity.is_some()
                 || registry.restore_identity.is_some()
                 || !registry.retired.is_empty()
         });
+        let has_retired_live_display = self.registry.lock().is_ok_and(|registry| {
+            registry
+                .live_preparations
+                .values()
+                .any(|preparation| preparation.is_cancelled())
+        });
         if has_pending_action || has_visibility_work {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        } else if has_retired_live_display {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 
@@ -1041,15 +1720,40 @@ impl PinWindowPresenter {
             }
         }
         let action_result = self.actions.shutdown_and_join();
+        let preparations = self
+            .registry
+            .lock()
+            .map(|registry| {
+                registry
+                    .live_preparations
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut preparation_errors = Vec::new();
+        for preparation in &preparations {
+            if let Err(error) = preparation.cancel_and_join() {
+                preparation_errors.push(error);
+            }
+            preparation.reap_retired_uploads();
+        }
         if let Ok(mut registry) = self.registry.lock() {
             registry.pins.clear();
             registry.retired.clear();
+            registry
+                .live_preparations
+                .retain(|_, preparation| preparation.has_retained_uploads());
             registry.hide_identity = None;
             registry.restore_identity = None;
             registry.root_context = None;
         }
         self.pending_parent_cleanup = false;
-        action_result
+        match (action_result, preparation_errors.is_empty()) {
+            (Err(error), _) => Err(error),
+            (Ok(()), false) => Err(preparation_errors.join("; ")),
+            (Ok(()), true) => Ok(()),
+        }
     }
 }
 
@@ -1065,6 +1769,9 @@ fn retire_pin_runtime(
     runtime: Arc<PinWindowRuntime>,
 ) -> Option<egui::ViewportId> {
     let pin_id = runtime.pin_id;
+    if let Some(preparation) = runtime.image_source.live_preparation() {
+        preparation.cancel();
+    }
     let mut should_close = false;
     if let Ok(mut state) = runtime.state.lock() {
         state.close_requested = true;
@@ -1984,6 +2691,7 @@ fn render_pin_viewport(
     let mut close_clicked = false;
     let mut copy_requested = false;
     let mut save_requested = false;
+    let mut live_pause_change = None;
     let mut control_change = PinControlChange::default();
     let mut next_mode = scale_mode;
     let mut next_zoom = zoom;
@@ -2014,6 +2722,20 @@ fn render_pin_viewport(
                         .logarithmic(true)
                         .text("Zoom"),
                 );
+            }
+            if let Some(preparation) = runtime.image_source.live_preparation() {
+                let status = preparation.status();
+                if let Some(error) = preparation.error() {
+                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                } else {
+                    ui.label(live_status_label(&status));
+                }
+                if !is_terminal_live_status(&status) {
+                    let paused = matches!(status, PinLiveStatus::Paused);
+                    if ui.button(if paused { "Resume" } else { "Pause" }).clicked() && first_pass {
+                        live_pause_change = Some(!paused);
+                    }
+                }
             }
             if ui.button("Copy Image").clicked() && first_pass {
                 copy_requested = true;
@@ -2073,7 +2795,13 @@ fn render_pin_viewport(
         egui::ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.add(egui::Image::new((texture.id(), image_size)));
+                if let Some(texture) = &texture {
+                    ui.add(egui::Image::new((texture.id(), image_size)));
+                } else {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("Waiting for a prepared source frame…");
+                    });
+                }
             });
     });
 
@@ -2112,6 +2840,18 @@ fn render_pin_viewport(
             }
             root_context.request_repaint_of(egui::ViewportId::ROOT);
         }
+        if let Some(pause) = live_pause_change
+            && let Some(preparation) = runtime.image_source.live_preparation()
+        {
+            let changed = if pause {
+                preparation.pause()
+            } else {
+                preparation.resume()
+            };
+            if changed {
+                ctx.request_repaint_of(runtime.viewport_id);
+            }
+        }
         if next_mode != scale_mode || (next_mode == PinScaleMode::Custom && next_zoom != zoom) {
             if let Ok(mut state) = runtime.state.lock() {
                 state.scale_mode = next_mode;
@@ -2145,40 +2885,90 @@ fn render_pin_viewport(
 fn ensure_pin_texture(
     ctx: &egui::Context,
     runtime: &PinWindowRuntime,
-) -> Result<egui::TextureHandle, String> {
-    if let Some(texture) = runtime
-        .state
-        .lock()
-        .map_err(|_| "pin texture state lock was poisoned".to_owned())?
-        .texture
-        .as_ref()
-        .cloned()
-    {
-        return Ok(texture);
-    }
-    let image = runtime.image.pixels();
-    let color_image = egui::ColorImage::from_rgba_unmultiplied(
-        [runtime.dimensions.0 as usize, runtime.dimensions.1 as usize],
-        image.as_raw(),
-    );
-    let texture = ctx.load_texture(
-        format!(
-            "screenshot-pin-{}-{}",
-            runtime.pin_id.get(),
-            runtime.lifetime
-        ),
-        color_image,
-        egui::TextureOptions::NEAREST,
-    );
-    let mut state = runtime
-        .state
-        .lock()
-        .map_err(|_| "pin texture state lock was poisoned".to_owned())?;
-    if let Some(existing) = state.texture.as_ref() {
-        Ok(existing.clone())
-    } else {
-        state.texture = Some(texture.clone());
-        Ok(texture)
+) -> Result<Option<egui::TextureHandle>, String> {
+    match &runtime.image_source {
+        PinWindowImageSource::Static(image) => {
+            if let Some(texture) = runtime
+                .state
+                .lock()
+                .map_err(|_| "pin texture state lock was poisoned".to_owned())?
+                .texture
+                .as_ref()
+                .cloned()
+            {
+                return Ok(Some(texture));
+            }
+            let pixels = image.pixels();
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                [runtime.dimensions.0 as usize, runtime.dimensions.1 as usize],
+                pixels.as_raw(),
+            );
+            let texture = ctx.load_texture(
+                format!(
+                    "screenshot-pin-{}-{}",
+                    runtime.pin_id.get(),
+                    runtime.lifetime
+                ),
+                color_image,
+                egui::TextureOptions::NEAREST,
+            );
+            let mut state = runtime
+                .state
+                .lock()
+                .map_err(|_| "pin texture state lock was poisoned".to_owned())?;
+            if let Some(existing) = state.texture.as_ref() {
+                Ok(Some(existing.clone()))
+            } else {
+                state.texture = Some(texture.clone());
+                Ok(Some(texture))
+            }
+        }
+        PinWindowImageSource::Live(preparation) => {
+            let Some(frame) = preparation.frame() else {
+                return Ok(None);
+            };
+            let texture = {
+                let mut state = runtime
+                    .state
+                    .lock()
+                    .map_err(|_| "pin texture state lock was poisoned".to_owned())?;
+                if state.texture_sequence == Some(frame.sequence) {
+                    return Ok(state.texture.clone());
+                }
+                if let Some(texture) = state.texture.as_mut() {
+                    texture.set(
+                        egui::ImageData::Color(Arc::clone(&frame.color_image)),
+                        egui::TextureOptions::NEAREST,
+                    );
+                    state.texture_sequence = Some(frame.sequence);
+                    return Ok(state.texture.clone());
+                }
+                None
+            };
+            if let Some(texture) = texture {
+                return Ok(Some(texture));
+            }
+            let texture = ctx.load_texture(
+                format!(
+                    "screenshot-pin-{}-{}",
+                    runtime.pin_id.get(),
+                    runtime.lifetime
+                ),
+                egui::ImageData::Color(Arc::clone(&frame.color_image)),
+                egui::TextureOptions::NEAREST,
+            );
+            let mut state = runtime
+                .state
+                .lock()
+                .map_err(|_| "pin texture state lock was poisoned".to_owned())?;
+            if let Some(existing) = state.texture.as_ref() {
+                Ok(Some(existing.clone()))
+            } else {
+                state.texture_sequence = Some(frame.sequence);
+                state.texture = Some(texture.clone());
+                Ok(Some(texture))
+            }
+        }
     }
 }
 
@@ -2207,17 +2997,35 @@ fn submit_pin_action(
     request_id: u64,
     kind: PinActionKind,
 ) {
-    let job = PinActionJob {
-        pin_id: runtime.pin_id,
-        lifetime: runtime.lifetime,
-        request_id,
-        image: runtime.image.clone(),
-        kind,
+    let job = match build_pin_action_job(runtime, request_id, kind) {
+        Ok(job) => job,
+        Err(error) => {
+            set_action_failure(runtime, request_id, error);
+            return;
+        }
     };
     match client.submit(job) {
         Ok(()) => {}
         Err(error) => set_action_failure(runtime, request_id, error),
     }
+}
+
+fn build_pin_action_job(
+    runtime: &PinWindowRuntime,
+    request_id: u64,
+    kind: PinActionKind,
+) -> Result<PinActionJob, String> {
+    let image = runtime
+        .image_source
+        .current_image_snapshot()
+        .ok_or_else(|| "No completed live frame is available yet".to_owned())?;
+    Ok(PinActionJob {
+        pin_id: runtime.pin_id,
+        lifetime: runtime.lifetime,
+        request_id,
+        image,
+        kind,
+    })
 }
 
 fn set_action_failure(runtime: &PinWindowRuntime, request_id: u64, error: String) {
@@ -3122,9 +3930,12 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pinboard::PinCaptureOperationId;
+    use crate::pinboard::live::{PinLiveCaptureBackend, test_support::FakePinLiveCaptureBackend};
+    use crate::pinboard::source::{PinSourceBinding, PinSourceCrop, PinSourceWindowIdentity};
+    use crate::pinboard::{PinCaptureGeneration, PinCaptureOperationId, PinboardLimits};
     use image::{Rgba, RgbaImage};
     use std::sync::mpsc;
+    use std::time::{Duration, Instant};
 
     const ROOT_HWND: usize = 0x100;
 
@@ -3353,6 +4164,64 @@ mod tests {
             )
             .unwrap();
         board.commit_capture(identity).unwrap()
+    }
+
+    fn add_live_pin(
+        board: &mut Pinboard,
+        index: u64,
+    ) -> (
+        PinId,
+        PinCaptureGeneration,
+        mpsc::Sender<crate::pinboard::live::test_support::FakeFrame>,
+    ) {
+        let identity = board
+            .reserve_live_capture(PinCaptureOperationId::new(index).unwrap())
+            .unwrap();
+        let rect = ScreenRect::new(0, 0, 2, 2);
+        board.reserve_selected_rect(identity, rect).unwrap();
+        let binding = PinSourceBinding {
+            window: PinSourceWindowIdentity {
+                hwnd: 51,
+                process_id: 52,
+                thread_id: 53,
+            },
+            captured_bounds: ScreenRect::new(0, 0, 2, 2),
+            crop: PinSourceCrop {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+        };
+        let (frame_tx, frame_rx) = mpsc::channel();
+        let backend = FakePinLiveCaptureBackend {
+            first_image: RgbaImage::from_pixel(2, 2, Rgba([11, 12, 13, 255])),
+            first_content_size: (2, 2),
+            stream: Mutex::new(Some(frame_rx)),
+            first_frame_gate: None,
+        };
+        let mut session = backend
+            .start(
+                binding,
+                identity.generation,
+                board.take_live_reservation(identity).unwrap(),
+                board.gpu_budget(),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(result) = session.try_first_frame_result() {
+                result.unwrap();
+                break;
+            }
+            assert!(Instant::now() < deadline, "fake live first frame timed out");
+            thread::yield_now();
+        }
+        board
+            .stage_live_capture(identity, binding, session)
+            .unwrap();
+        let pin_id = board.commit_capture(identity).unwrap();
+        (pin_id, identity.generation, frame_tx)
     }
 
     fn child_input(viewport_id: egui::ViewportId, pixels_per_point: f32) -> egui::RawInput {
@@ -3726,6 +4595,202 @@ mod tests {
             .collect();
         output.drop_without_applying_deltas();
         callbacks
+    }
+
+    fn publish_fake_live_frame(
+        frames: &mpsc::Sender<crate::pinboard::live::test_support::FakeFrame>,
+        generation: PinCaptureGeneration,
+        sequence: u64,
+        color: Rgba<u8>,
+    ) {
+        let (processed_tx, processed_rx) = mpsc::sync_channel(1);
+        frames
+            .send(crate::pinboard::live::test_support::FakeFrame {
+                generation,
+                sequence,
+                content_size: (2, 2),
+                image: RgbaImage::from_pixel(2, 2, color),
+                processed: processed_tx,
+            })
+            .unwrap();
+        processed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fake source worker should acknowledge the frame");
+    }
+
+    fn delta_image(
+        output: &egui::FullOutput,
+        texture_id: egui::TextureId,
+    ) -> Arc<egui::ColorImage> {
+        let delta = output
+            .textures_delta
+            .set
+            .iter()
+            .find(|(id, _)| **id == texture_id)
+            .and_then(|(_, deltas)| deltas.last())
+            .map(|delta| &delta.image)
+            .expect("the expected live texture has an update");
+        match delta {
+            egui::ImageData::Color(image) => image.clone(),
+        }
+    }
+
+    #[test]
+    fn pinboard_live_presenter_reuses_texture_and_charges_retained_uploads() {
+        let mut board = Pinboard::with_limits(PinboardLimits::new(2, 256, 64)).unwrap();
+        let (pin_id, generation, frames) = add_live_pin(&mut board, 1);
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let fake_native = Arc::new(FakePinNativeApi::default());
+        let native_api: Arc<dyn PinNativeApi> = fake_native.clone();
+        let mut presenter = PinWindowPresenter::with_native_api(native_api);
+        let repaint_ids = Arc::new(Mutex::new(Vec::new()));
+        let repaint_ids_callback = Arc::clone(&repaint_ids);
+        ctx.set_request_repaint_callback(move |info| {
+            repaint_ids_callback.lock().unwrap().push(info.viewport_id);
+        });
+        let callbacks = pin_callbacks(&ctx, &mut presenter, &board);
+        let runtime = presenter.registry.lock().unwrap().pins[&pin_id].clone();
+        fake_native.add_window(&runtime, 0x501, true, ScreenRect::new(0, 0, 2, 2));
+        let preparation = runtime.image_source.live_preparation().unwrap().clone();
+        assert!(preparation.wait_for_sequence(1));
+        repaint_ids.lock().unwrap().clear();
+
+        let callback = callbacks[&pin_id].clone();
+        let first_output = ctx.run_ui(child_input(runtime.viewport_id, 1.0), |ui| callback(ui));
+        let first_texture_id = runtime.state.lock().unwrap().texture.as_ref().unwrap().id();
+        let retained_first_upload = delta_image(&first_output, first_texture_id);
+        assert_eq!(
+            retained_first_upload.pixels[0],
+            egui::Color32::from_rgba_unmultiplied(11, 12, 13, 255)
+        );
+        first_output.drop_without_applying_deltas();
+
+        assert!(board.pause_live(pin_id));
+        assert_eq!(preparation.status(), PinLiveStatus::Paused);
+        let paused_copy = build_pin_action_job(&runtime, 1, PinActionKind::Copy).unwrap();
+        let paused_save = build_pin_action_job(&runtime, 2, PinActionKind::SaveAs).unwrap();
+        publish_fake_live_frame(&frames, generation, 2, Rgba([201, 202, 203, 255]));
+        assert_eq!(board.get(pin_id).unwrap().live_frame().unwrap().sequence, 1);
+        assert!(board.resume_live(pin_id));
+        assert_eq!(preparation.status(), PinLiveStatus::Live);
+        for _ in 0..4 {
+            let _ = ctx.run_logic(&root_input(Vec::new()), |_| {});
+            let _ = ctx.run_logic(&child_input(runtime.viewport_id, 1.0), |_| {});
+            if !ctx.has_requested_repaint_for(&runtime.viewport_id)
+                && !ctx.has_requested_repaint_for(&egui::ViewportId::ROOT)
+            {
+                break;
+            }
+        }
+        assert!(!ctx.has_requested_repaint_for(&runtime.viewport_id));
+        assert!(!ctx.has_requested_repaint_for(&egui::ViewportId::ROOT));
+        repaint_ids.lock().unwrap().clear();
+
+        publish_fake_live_frame(&frames, generation, 3, Rgba([201, 202, 203, 255]));
+        assert!(preparation.wait_for_sequence(3));
+        assert!(ctx.has_requested_repaint_for(&runtime.viewport_id));
+        assert!(!ctx.has_requested_repaint_for(&egui::ViewportId::ROOT));
+        let child_repaints = repaint_ids.lock().unwrap().clone();
+        assert!(
+            child_repaints
+                .iter()
+                .all(|viewport| *viewport == runtime.viewport_id)
+        );
+
+        let second_output = ctx.run_ui(child_input(runtime.viewport_id, 1.0), |ui| callback(ui));
+        assert_eq!(
+            runtime.state.lock().unwrap().texture.as_ref().unwrap().id(),
+            first_texture_id
+        );
+        let second_upload = delta_image(&second_output, first_texture_id);
+        assert_eq!(
+            second_upload.pixels[0],
+            egui::Color32::from_rgba_unmultiplied(201, 202, 203, 255)
+        );
+        second_output.drop_without_applying_deltas();
+        assert_eq!(preparation.retained_upload_count(), 1);
+        assert_eq!(
+            board.image_bytes(),
+            64,
+            "source and both retained display snapshots are budgeted"
+        );
+
+        let clipboard = RecordingPinClipboard::default();
+        run_pin_action_with_targets(&paused_copy, &clipboard, || Ok(None)).unwrap();
+        let save_dir = fixture_directory();
+        let save_path = save_dir.path().join("paused-frame.png");
+        run_pin_action_with_targets(&paused_save, &clipboard, || Ok(Some(save_path.clone())))
+            .unwrap();
+        assert_eq!(
+            clipboard.images.lock().unwrap()[0].get_pixel(0, 0),
+            &Rgba([11, 12, 13, 255])
+        );
+        assert_eq!(
+            image::open(&save_path).unwrap().to_rgba8().get_pixel(0, 0),
+            &Rgba([11, 12, 13, 255])
+        );
+        drop(paused_copy);
+        drop(paused_save);
+        drop(retained_first_upload);
+
+        let release_deadline = Instant::now() + Duration::from_secs(2);
+        while preparation.retained_upload_count() != 0 && Instant::now() < release_deadline {
+            thread::yield_now();
+        }
+        assert_eq!(preparation.retained_upload_count(), 0);
+        assert_eq!(board.image_bytes(), 32);
+
+        let retained_upload_across_cancel = Arc::clone(&second_upload);
+        presenter.close(pin_id, &mut board);
+        assert!(preparation.cancel_and_join().is_ok());
+        preparation.reap_retired_uploads();
+        assert!(preparation.has_retained_uploads());
+        assert_eq!(
+            board.image_bytes(),
+            32,
+            "the renderer-held upload and current source frame remain charged after close"
+        );
+        drop(retained_upload_across_cancel);
+        drop(second_upload);
+        preparation.reap_retired_uploads();
+        assert!(!preparation.has_retained_uploads());
+        assert_eq!(
+            board.image_bytes(),
+            16,
+            "only the shared source slot remains charged"
+        );
+        presenter.shutdown().unwrap();
+    }
+
+    #[test]
+    fn pinboard_live_presenter_capture_feedback_re_registers_until_dismissed() {
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let mut presenter = PinWindowPresenter::new();
+        presenter.queue_capture_feedback("the source closed before a frame was available".into());
+        let viewport_id = presenter.capture_feedback_viewport_id;
+
+        for _ in 0..2 {
+            let output = ctx.run_ui(root_input(Vec::new()), |root| {
+                presenter.show_capture_feedback(root.ctx());
+            });
+            assert!(
+                output.viewport_output.contains_key(&viewport_id),
+                "feedback viewport must be registered on every root pass until dismissed"
+            );
+            output.drop_without_applying_deltas();
+        }
+
+        presenter
+            .capture_feedback_closed
+            .store(true, Ordering::Release);
+        let output = ctx.run_ui(root_input(Vec::new()), |root| {
+            presenter.show_capture_feedback(root.ctx());
+        });
+        assert!(presenter.capture_feedback.is_none());
+        assert!(!output.viewport_output.contains_key(&viewport_id));
+        output.drop_without_applying_deltas();
     }
 
     #[test]

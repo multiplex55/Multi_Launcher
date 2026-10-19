@@ -236,6 +236,7 @@ pub(super) struct PinboardCaptureLifecycle {
     windows: PinWindowPresenter,
     pin_windows: Box<dyn PinWindowVisibilityCoordinator>,
     session: Option<PinCaptureSession>,
+    pending_live_capture_error: Option<String>,
 }
 
 impl PinboardCaptureLifecycle {
@@ -255,6 +256,7 @@ impl PinboardCaptureLifecycle {
             windows,
             pin_windows,
             session: None,
+            pending_live_capture_error: None,
         }
     }
 
@@ -291,6 +293,10 @@ impl PinboardCaptureLifecycle {
         root_identity: (usize, u64),
     ) {
         self.windows.set_root_native_identity(root_identity);
+        if let Some(error) = self.pending_live_capture_error.take() {
+            self.windows.queue_capture_feedback(error);
+        }
+        self.windows.show_capture_feedback(ctx);
         self.windows.show(ctx, &self.board);
     }
 
@@ -303,11 +309,13 @@ impl PinboardCaptureLifecycle {
     }
 
     pub(super) fn pin_windows_need_bootstrap(&self) -> bool {
-        self.windows.needs_viewport_bootstrap(&self.board)
+        self.pending_live_capture_error.is_some()
+            || self.windows.needs_viewport_bootstrap(&self.board)
     }
 
     pub(super) fn pin_windows_need_hidden_root_ui(&self) -> bool {
-        self.windows.needs_root_ui_when_hidden(&self.board)
+        self.pending_live_capture_error.is_some()
+            || self.windows.needs_root_ui_when_hidden(&self.board)
     }
 
     pub(super) fn close_pin(&mut self, id: crate::pinboard::PinId) -> bool {
@@ -783,8 +791,11 @@ impl PinboardCaptureLifecycle {
             );
         }
 
+        let defer_hidden_live_error = session.intent == PinCaptureIntent::Live
+            && !session.initial_visible
+            && !session.cleanup_complete;
         let report = session.error.as_ref().and_then(|error| {
-            if session.error_reported {
+            if session.error_reported || defer_hidden_live_error {
                 None
             } else {
                 session.error_reported = true;
@@ -792,6 +803,12 @@ impl PinboardCaptureLifecycle {
             }
         });
         let completed = session.cleanup_complete;
+        if session.intent == PinCaptureIntent::Live
+            && !session.initial_visible
+            && let Some(error) = report.as_ref()
+        {
+            self.pending_live_capture_error = Some(error.clone());
+        }
         if !completed {
             self.session = Some(session);
         }
@@ -2090,6 +2107,134 @@ mod tests {
         );
         assert_eq!(lifecycle.pinboard().len(), 1);
         assert_eq!(lifecycle.pinboard().pending_bytes(), 0);
+
+        let restore_polls_before_error = log.lock().unwrap().pin_restore_polls;
+        lifecycle.set_adapters_for_test(
+            Arc::new(FakeParkingFactory {
+                log: Arc::clone(&log),
+                acknowledge_after: Some(1),
+            }),
+            Box::new(FakePinWindows {
+                log: Arc::clone(&log),
+                hide_ack_after: 1,
+                restore_ack_after: restore_polls_before_error + 2,
+                hide_failure: None,
+            }),
+        );
+        lifecycle.set_live_backend_for_test(Arc::new(
+            crate::pinboard::live::test_support::FakePinLiveCaptureBackend {
+                first_image: RgbaImage::from_pixel(299, 200, image::Rgba([19, 23, 29, 255])),
+                first_content_size: (800, 700),
+                stream: Mutex::new(None),
+                first_frame_gate: None,
+            },
+        ));
+        assert!(
+            lifecycle
+                .begin_with_intent(
+                    PinCaptureIntent::Live,
+                    true,
+                    false,
+                    false,
+                    visibility.current(),
+                    RootFocusIntent::PreserveForeground,
+                    Some(79),
+                    Some(native_identity.0),
+                    native_identity,
+                )
+                .unwrap()
+        );
+        let error_operation = lifecycle.session.as_ref().unwrap().overlay_operation_id;
+        poll_lifecycle(
+            &context,
+            &mut lifecycle,
+            &visibility,
+            &visible,
+            &restore,
+            &mut last_visible,
+            native_identity,
+        );
+        poll_lifecycle(
+            &context,
+            &mut lifecycle,
+            &visibility,
+            &visible,
+            &restore,
+            &mut last_visible,
+            native_identity,
+        );
+        overlay_fixture.observer.wait_for_commands(3);
+        let error_selection = ScreenRect::new(-100, 100, 300, 200);
+        overlay_fixture.controller.inject_pinboard_event_for_test(
+            VisualOverlayEvent::RectangleConfirmed {
+                operation_id: error_operation,
+                purpose: RectanglePurpose::PinboardCapture,
+                rect: error_selection,
+            },
+        );
+        assert!(overlay_fixture.controller.poll().is_empty());
+        poll_lifecycle(
+            &context,
+            &mut lifecycle,
+            &visibility,
+            &visible,
+            &restore,
+            &mut last_visible,
+            native_identity,
+        );
+        let error_deadline = Instant::now() + Duration::from_secs(2);
+        let mut reported_error = None;
+        while lifecycle.is_busy() && Instant::now() < error_deadline {
+            let error = poll_lifecycle(
+                &context,
+                &mut lifecycle,
+                &visibility,
+                &visible,
+                &restore,
+                &mut last_visible,
+                native_identity,
+            );
+            let restore_polls = log.lock().unwrap().pin_restore_polls;
+            if restore_polls < restore_polls_before_error + 2 {
+                assert!(
+                    error.is_none(),
+                    "hidden-root feedback must wait for native restoration acknowledgements"
+                );
+            }
+            reported_error = error.or(reported_error);
+            thread::yield_now();
+        }
+        assert!(
+            !lifecycle.is_busy(),
+            "failed live startup did not restore ROOT"
+        );
+        assert!(
+            reported_error
+                .as_deref()
+                .is_some_and(|error| error.contains("invalid first crop size"))
+        );
+        assert!(
+            lifecycle.pending_live_capture_error.is_some(),
+            "the hidden-root error should be retained for its independent viewport"
+        );
+        assert!(!visible.load(Ordering::SeqCst));
+        assert!(!last_visible);
+
+        let feedback_context = eframe::egui::Context::default();
+        feedback_context.set_embed_viewports(false);
+        let output = feedback_context.run_ui(eframe::egui::RawInput::default(), |root| {
+            lifecycle.show_pin_windows(root.ctx(), native_identity);
+        });
+        assert!(lifecycle.pending_live_capture_error.is_none());
+        let root_commands = &output.viewport_output[&eframe::egui::ViewportId::ROOT].commands;
+        assert!(!root_commands.iter().any(|command| {
+            matches!(
+                command,
+                eframe::egui::ViewportCommand::Focus | eframe::egui::ViewportCommand::Visible(true)
+            )
+        }));
+        output.drop_without_applying_deltas();
+        assert!(lifecycle.shutdown_pin_windows().is_ok());
         assert!(lifecycle.board.shutdown_live_sessions_and_join().is_ok());
         drop(cancel_release_tx);
         drop(static_release_tx);

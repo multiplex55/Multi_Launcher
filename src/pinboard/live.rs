@@ -9,6 +9,7 @@ use crate::pinboard::PinCaptureGeneration;
 use crate::pinboard::source::{PinSourceBinding, PinSourceCrop};
 use image::RgbaImage;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -115,7 +116,8 @@ impl PinLiveFrameSlot {
     }
 
     fn current_frame(&self) -> Option<PinLiveFrameLease> {
-        self.state.lock().ok()?.frame.clone()
+        let state = self.state.lock().ok()?;
+        (!state.cancelled).then(|| state.frame.clone()).flatten()
     }
 
     fn status(&self) -> PinLiveStatus {
@@ -358,6 +360,57 @@ impl From<&WorkerFlags> for WorkerFlagsSnapshot {
     }
 }
 
+/// Cloneable, generation-scoped access to a live pin's single frame slot and
+/// controls. The capture session remains the sole worker owner; UI consumers
+/// never retain an initial seed image or a second frame source.
+#[derive(Clone)]
+pub(crate) struct PinLiveFrameSource {
+    generation: PinCaptureGeneration,
+    slot: Arc<PinLiveFrameSlot>,
+    signal: Arc<WorkerSignal>,
+    worker_running: Arc<AtomicBool>,
+}
+
+impl PinLiveFrameSource {
+    pub(crate) fn current_frame(&self) -> Option<PinLiveFrameLease> {
+        self.slot.current_frame()
+    }
+
+    pub(crate) fn status(&self) -> PinLiveStatus {
+        self.slot.status()
+    }
+
+    pub(crate) fn set_child_wake_notifier(&self, notifier: Option<PinLiveChildWake>) {
+        self.slot.set_child_wake_notifier(notifier);
+    }
+
+    pub(crate) fn pause(&self) -> bool {
+        if !self.worker_running.load(Ordering::Acquire)
+            || is_terminal_status(&self.status())
+            || !self.slot.has_frame()
+        {
+            return false;
+        }
+        let changed = self.signal.set_paused(true);
+        changed && self.slot.set_status(self.generation, PinLiveStatus::Paused)
+    }
+
+    pub(crate) fn resume(&self) -> bool {
+        if !self.worker_running.load(Ordering::Acquire)
+            || is_terminal_status(&self.status())
+            || !self.slot.has_frame()
+        {
+            return false;
+        }
+        let changed = self.signal.set_paused(false);
+        changed && self.slot.set_status(self.generation, PinLiveStatus::Live)
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.signal.snapshot().cancelled
+    }
+}
+
 type LiveWorker = Box<
     dyn FnOnce(
             PinSourceBinding,
@@ -374,10 +427,8 @@ type LiveWorker = Box<
 /// One source-bound live capture lifetime. The worker owns native objects and
 /// stops publishing as soon as this session is cancelled or its pin closes.
 pub(crate) struct PinLiveCaptureSession {
-    generation: PinCaptureGeneration,
     binding: PinSourceBinding,
-    slot: Arc<PinLiveFrameSlot>,
-    signal: Arc<WorkerSignal>,
+    source: PinLiveFrameSource,
     first_frame: Receiver<Result<(), String>>,
     first_frame_reported: bool,
     worker: Option<JoinHandle<()>>,
@@ -386,9 +437,9 @@ pub(crate) struct PinLiveCaptureSession {
 impl fmt::Debug for PinLiveCaptureSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PinLiveCaptureSession")
-            .field("generation", &self.generation.get())
+            .field("generation", &self.source.generation.get())
             .field("binding", &self.binding)
-            .field("status", &self.slot.status())
+            .field("status", &self.source.status())
             .finish_non_exhaustive()
     }
 }
@@ -403,10 +454,12 @@ impl PinLiveCaptureSession {
     ) -> Result<Self, String> {
         let slot = Arc::new(PinLiveFrameSlot::new(generation));
         let signal = Arc::new(WorkerSignal::new());
+        let worker_running = Arc::new(AtomicBool::new(true));
         let (first_frame_tx, first_frame) = mpsc::sync_channel(1);
         let thread_binding = binding;
         let thread_slot = Arc::clone(&slot);
         let thread_signal = Arc::clone(&signal);
+        let thread_worker_running = Arc::clone(&worker_running);
         let join = thread::Builder::new()
             .name(format!("pin-live-{}", generation.get()))
             .spawn(move || {
@@ -434,13 +487,17 @@ impl PinLiveCaptureSession {
                         PinLiveStatus::TemporarilyUnavailable("live capture worker stopped".into()),
                     );
                 }
+                thread_worker_running.store(false, Ordering::Release);
             })
             .map_err(|error| format!("could not start the live capture worker: {error}"))?;
         Ok(Self {
-            generation,
             binding,
-            slot,
-            signal,
+            source: PinLiveFrameSource {
+                generation,
+                slot,
+                signal,
+                worker_running,
+            },
             first_frame,
             first_frame_reported: false,
             worker: Some(join),
@@ -452,19 +509,23 @@ impl PinLiveCaptureSession {
     }
 
     pub(crate) fn current_frame(&self) -> Option<PinLiveFrameLease> {
-        self.slot.current_frame()
+        self.source.current_frame()
     }
 
     pub(crate) fn status(&self) -> PinLiveStatus {
-        self.slot.status()
+        self.source.status()
     }
 
     pub(crate) fn set_child_wake_notifier(&self, notifier: Option<PinLiveChildWake>) {
-        self.slot.set_child_wake_notifier(notifier);
+        self.source.set_child_wake_notifier(notifier);
+    }
+
+    pub(crate) fn frame_source(&self) -> PinLiveFrameSource {
+        self.source.clone()
     }
 
     pub(crate) fn has_first_frame(&self) -> bool {
-        self.slot.has_frame()
+        self.source.slot.has_frame()
     }
 
     pub(crate) fn try_first_frame_result(&mut self) -> Option<Result<(), String>> {
@@ -488,45 +549,25 @@ impl PinLiveCaptureSession {
 
     pub(crate) fn activate(&self) -> bool {
         if !self.has_first_frame()
-            || !self.worker_is_running()
+            || !self.source.worker_running.load(Ordering::Acquire)
             || is_terminal_status(&self.status())
         {
             return false;
         }
-        self.signal.activate()
+        self.source.signal.activate()
     }
 
     pub(crate) fn pause(&self) -> bool {
-        if !self.worker_is_running() || is_terminal_status(&self.status()) {
-            return false;
-        }
-        let changed = self.signal.set_paused(true);
-        if changed {
-            return self.slot.set_status(self.generation, PinLiveStatus::Paused);
-        }
-        false
+        self.source.pause()
     }
 
     pub(crate) fn resume(&self) -> bool {
-        if !self.worker_is_running() || is_terminal_status(&self.status()) {
-            return false;
-        }
-        let changed = self.signal.set_paused(false);
-        if changed {
-            return self.slot.set_status(self.generation, PinLiveStatus::Live);
-        }
-        false
-    }
-
-    fn worker_is_running(&self) -> bool {
-        self.worker
-            .as_ref()
-            .is_some_and(|worker| !worker.is_finished())
+        self.source.resume()
     }
 
     pub(crate) fn cancel(&self) {
-        self.signal.cancel();
-        self.slot.cancel(self.generation);
+        self.source.signal.cancel();
+        self.source.slot.cancel(self.source.generation);
     }
 
     pub(crate) fn cancel_and_join(&mut self) -> Result<(), String> {

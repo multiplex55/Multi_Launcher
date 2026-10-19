@@ -14,7 +14,8 @@ radial presentation policy, explicit action settings, and note persistence.
 | M1-A/B | Measure action effects separately from presentation; fix demonstrated gaps in existing dispatch owners | complete | Compact parity cases, directly affected paste/radial tests; combine tests/fix if needed |
 | M2-A | Typed live intent through existing selector/parking lifecycle; unambiguous external window binding | complete | Parser/handler and selection/restoration tests; static path unchanged |
 | M2-B | Window-content capture and bounded latest-frame sessions owned by pinboard | complete | Fake stream/budget/pause/identity/cancellation tests; Windows compile |
-| M2-C/D | Child texture updates, status, Pause/Resume, latest-frame copy/save and cleanup | pending | Presenter/model/lifecycle tests, mixed static/live limits and shutdown |
+| M2-C | Child texture updates, status, Pause/Resume and latest-frame copy/save | complete | Focused presenter/lifecycle tests; exact native ownership and hidden-root error feedback |
+| M2-D | Native source smoke and remaining direct lifetime/resource gate | pending | One owned-window WGC smoke; reuse B/C coverage without duplicate tests |
 | M3-A | Per-panel Unicode-safe source matching and navigation | pending | Literal case-insensitive range/navigation tests; no content changes |
 | M3-B | Find strip, scoped keys, Edit/Preview/Split navigation | pending | Targeted note-panel interactions, honest source-only fallback |
 | M4 | Independent focused review and user documentation | pending | Final targeted integration, fmt, one Clippy attempt; report native smoke limitations |
@@ -199,3 +200,36 @@ Final delayed-restore variant passed the same 2-test filter: no live pin commits
 while native pin restoration acknowledgement is pending. The expected restore
 poll count was updated from 1 to 2 for that intentionally delayed test fixture.
 Touched Rust formatting passes; ledger EOF whitespace repaired by parent.
+
+M2-B checkpoint: 8dad8ebc feat(pinboard): [M2-B] stream bounded source-window frames — normal push succeeded to origin/live-pinboard.
+
+M2-C implementation review: presentation conversion uses a coalescing per-pin
+worker and shared image-budget reservations. Joined workers must terminate
+independently of renderer-held upload Arcs; retained upload reservations stay
+owned after worker exit until the renderer releases those pixels. A focused
+retained-upload cancellation test is required for this concrete shutdown risk.
+
+M2-C implementation: explicit Static vs Live presentation sources remove the
+permanent live seed lease. A coalescing per-pin worker prepares ColorImage off
+UI; sequence changes update the same TextureHandle. Prepared and bounded retired
+upload buffers hold shared image-budget reservations. Cancellation joins workers
+without waiting for renderer-held Arcs; presenter retains charged upload buffers
+until release. Source/status notifications target the exact child viewport.
+Child/list Pause/Resume preserve native identity. Copy/Save admit one immutable
+latest-completed-frame lease. Hidden-root startup errors wait for cleanup and
+native restoration, then remain reachable in a dedicated non-modal viewport.
+
+M2-C verification: initial combined fast-dev Nextest batch compiled after fixing
+new Condvar/Arc/texture-delta/test setup errors. Five of six tests passed; the
+presenter repaint recorder failed because egui coalesces pending repaint requests.
+The exact list test was initially omitted by a filter typo; it passed separately:
+`cargo nextest run --cargo-profile fast-dev --lib -E 'test(pin_list_is_keyboard_focusable_and_stale_rows_cannot_reopen_closed_pins)'`.
+The presenter test also required borrowed ViewportId arguments, and setup repaint
+isolation: egui requires two passes; rendering no-op UI can create more work.
+A bounded Context::run_logic drain establishes a clean baseline, without changing
+production behavior or weakening child-only assertions. Final presenter recheck
+passed (1/1): `cargo nextest run --cargo-profile fast-dev --lib -E 'test(pinboard_live_presenter_reuses_texture_and_charges_retained_uploads)'`.
+Initial five passing cases were feedback persistence, exact native controls,
+retained child texture/zoom, command recovery, and delayed live restoration/error.
+All seven distinct selected cases have passed across these runs. No full suite
+was run. Actual native pin UI remains unverified; M2-D provides backend evidence.

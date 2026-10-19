@@ -240,6 +240,13 @@ impl PinImageHandle {
     pub fn image_bytes(&self) -> usize {
         self.0.bytes
     }
+
+    pub(crate) fn reserve_related_image_bytes(
+        &self,
+        bytes: usize,
+    ) -> Result<ImageBudgetReservation, PinboardError> {
+        self.0._reservation.budget.reserve(bytes)
+    }
 }
 
 struct TrackedRgbaImage {
@@ -392,6 +399,13 @@ impl Pin {
         match &self.content {
             PinContent::Static(_) => None,
             PinContent::Live(session) => Some(session.status()),
+        }
+    }
+
+    pub(crate) fn live_frame_source(&self) -> Option<live::PinLiveFrameSource> {
+        match &self.content {
+            PinContent::Static(_) => None,
+            PinContent::Live(session) => Some(session.frame_source()),
         }
     }
 
