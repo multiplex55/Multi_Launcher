@@ -45,6 +45,12 @@ name = "perf_dashboard_probe"
 path = "src/bin/perf_dashboard_probe.rs"
 required-features = ["perf-harness"]
 
+# Isolated fixture generation and typed safety checks for the M01 GUI harness.
+[[bin]]
+name = "jump_mode_fixture"
+path = "dev/jump_mode/fixture_generator/src/main.rs"
+required-features = ["dev-smoke-binaries"]
+
 [dependencies]
 eframe = {
     version = "0.36.2",

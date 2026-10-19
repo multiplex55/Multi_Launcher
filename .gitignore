@@ -17,3 +17,6 @@ todo.json
 dashboard.json
 /notes
 snippets.json
+
+# Jump Mode GUI runs are local evidence and must not be committed wholesale.
+/dev/jump_mode/evidence/
