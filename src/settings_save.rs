@@ -112,6 +112,7 @@ define_general_settings_fields!(
     always_on_top,
     show_launcher_icon,
     show_launcher_title,
+    experimental_jump_mode_enabled,
     timer_refresh,
     disable_timer_updates,
     preserve_command,
@@ -1444,6 +1445,34 @@ mod tests {
         );
         assert!(latest.mkmacro_properties.master_open);
         assert!(latest.mkmacro_properties.focus_steps);
+    }
+
+    #[test]
+    fn jump_mode_general_save_acknowledges_and_rolls_back_owned_setting() {
+        let mut before = Settings::default();
+        before.theme.mode = crate::settings::ThemeMode::Light;
+        assert!(!before.experimental_jump_mode_enabled);
+
+        let mut desired = before.clone();
+        desired.experimental_jump_mode_enabled = true;
+        let intent = SettingsSaveIntent::general(desired, &before);
+
+        let mut written = before.clone();
+        intent.apply(&mut written);
+        assert!(written.experimental_jump_mode_enabled);
+
+        let mut published = before.clone();
+        published.theme.mode = crate::settings::ThemeMode::Dark;
+        intent.overlay_applied(&mut published, &written);
+        assert!(published.experimental_jump_mode_enabled);
+        assert_eq!(published.theme.mode, crate::settings::ThemeMode::Dark);
+
+        let mut rolled_back = written.clone();
+        rolled_back.theme.mode = crate::settings::ThemeMode::Dark;
+        let conflicts = intent.rollback_owned(&mut rolled_back, &before, &written);
+        assert!(conflicts.is_empty());
+        assert!(!rolled_back.experimental_jump_mode_enabled);
+        assert_eq!(rolled_back.theme.mode, crate::settings::ThemeMode::Dark);
     }
 
     #[test]

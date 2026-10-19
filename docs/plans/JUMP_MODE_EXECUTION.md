@@ -8,17 +8,17 @@
 - Git branch creation needed sandbox escalation because .git is read-only in the normal sandbox; authorized creation succeeded.
 - Current milestone: M05-A next; M02–M04 complete; M01-B populated baseline incomplete.
 - Latest evidence: pending baseline run.
-- Latest checkpoint: c3549759 — feat(jump): [M03-A] add typed prefix-free hint engine.
-- Push status: M00, M01-A, M02 and M03 all pushed successfully to origin; upstream configured.
+- Latest checkpoint: b151ff00 — feat(jump): [M04-A] register scoped targets and hand off focus safely.
+- Push status: M00, M01-A, M02, M03 and M04 all pushed successfully to origin; upstream configured.
 
 | Milestone | State | Checkpoint / verification | Evidence or dependency |
 |---|---|---|---|
 | M00 | complete | Branch from recorded HEAD; verified source map | Clean initial tree; existing fixture isolation seam |
 | M01 | in_progress | M01-A scaffold verified; real capture/cleanup demonstrated | M01-B populated dashboard readiness incomplete |
-| M02 | complete | 3/3 targeted Nextest tests; touched-file fmt/diff pass | Legacy false; explicit serde/editor/runtime apply |
+| M02 | complete | M02-A 3 tests + M02-B ownership regression passed | Real general apply/publication/rollback covered |
 | M03 | complete | 10/10 targeted Nextest tests; scoped fmt/diff | Typed IDs, frozen mapping, prefix-free matching |
 | M04 | complete | 24/24 all-Jump Nextest; scoped fmt/diff clean | Copied responses, multipass retention, one-shot intents |
-| M05 | pending | Input lifecycle and overlay | M02–M04 |
+| M05 | in_progress | M05-A input lifecycle; M05-B painter/native pending | M02–M04 verified |
 | M06 | pending | Grid integration | M05 |
 | M07 | pending | Dashboard integration | M05 |
 | M08 | pending | Native keyboard acceptance | M01, M06–M07 |
@@ -52,7 +52,7 @@ Parent owns branch, ledger, commits and one best-effort push per checkpoint. Pla
 
 ## Next action
 
-Checkpoint M01-A, then implement M02 default-off settings gate. Return to M01-B dashboard readiness through M08 observer; continue independent engine work without claiming M01 complete.
+Verify/checkpoint M02-B save-ownership repair, then resume M05-A early input lifecycle. M05-B painter/native evidence follows. Return to M01-B semantic fixture/readiness through the native observer; do not claim its populated dashboard baseline complete.
 
 
 
@@ -100,3 +100,9 @@ Safe actual-root test seam: `forced_discard_dispatches_the_root_action_and_histo
 - DashboardContext has a public opaque optional scope, slot-scoped across header/body; all six repository constructors migrated. Configuration generation guards slot reloads. Root hidden/disabled/ownership guards clear navigation. Parameter-prompt ownership accessor is generally available.
 - Bridge is the single runtime enabled-state owner; App gate delegates to it. Ambiguous distinct non-root surfaces fail closed; root dashboard/results may coexist. Disabled, hover-only, clipped, blocked and wrong-viewport targets excluded. Queueing after pass start returns false; intent remains single-path/one-shot.
 - cargo nextest run --lib -E 'test(jump_mode)': exit 0, 24 passed / 5808 skipped. Scoped rustfmt and diff checks pass, no project/private-interface warnings. Test-fixture mutability/capture, modal rejection classification and selectable-label setup were corrected through focused feedback; no assertions weakened.
+
+## M02-B persistence correction / M05-A baseline
+- Parent found src/settings_save.rs define_general_settings_fields! lacks experimental_jump_mode_enabled. Real general save would drop editor toggle even though serialization/mapping/direct runtime tests passed. Reopened M02; single active writer repairing whitelist and focused apply/publication/owned rollback test before input hooks. No broad persistence refactor.
+- M05-A pre-hook CPU baseline completed on b151ff00660976aefd4d12b780f9fcefd7aa6dbb, test profile, 100 actions / grid3 / 960x640 / 9 warmups / 20 samples. Raw output: dev/jump_mode/evidence/cpu-baseline/m05-a-root-list-baseline.log. Diagnostic source remains uncommitted for M05-A; M02-B commit will contain only its repair/tests/docs.
+
+- M02-B repair verified: cargo nextest run --lib -E 'test(jump_mode_general_save_acknowledges_and_rolls_back_owned_setting)' exit 0, 1 passed / 5833 skipped. Added experimental flag to GENERAL_SETTINGS_FIELDS, covering candidate apply, committed overlay and owned rollback; unrelated theme preserved. Checkpoint excludes M05-A diagnostic source.
