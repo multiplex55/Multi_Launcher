@@ -36,6 +36,7 @@ pub mod image_crop_editor;
 mod image_panel;
 mod indexing;
 mod json_utility_dialog;
+pub(crate) mod jump_mode;
 mod macro_dialog;
 pub mod mkmacro_dialog;
 mod mouse_gesture_settings_dialog;

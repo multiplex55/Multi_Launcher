@@ -6,17 +6,17 @@
 - Initial working tree: clean, including tracked task-input documents. No user changes copied/discarded.
 - Environment: Windows PowerShell; rustc/cargo 1.99.0; Nextest 0.9.135; egui/eframe 0.36.2 with local vendor patches.
 - Git branch creation needed sandbox escalation because .git is read-only in the normal sandbox; authorized creation succeeded.
-- Current milestone: M03 next; M02 complete; M01-B populated baseline incomplete.
+- Current milestone: M04 next; M02/M03 complete; M01-B populated baseline incomplete.
 - Latest evidence: pending baseline run.
-- Latest checkpoint: 02d0928c — test(jump): [M01-A] add isolated GUI fixtures and owned runner.
-- Push status: M00 and M01-A both pushed successfully to origin; upstream configured.
+- Latest checkpoint: f3215251 — feat(jump): [M02-A] add default-off setting and Settings toggle.
+- Push status: M00, M01-A and M02 all pushed successfully to origin; upstream configured.
 
 | Milestone | State | Checkpoint / verification | Evidence or dependency |
 |---|---|---|---|
 | M00 | complete | Branch from recorded HEAD; verified source map | Clean initial tree; existing fixture isolation seam |
 | M01 | in_progress | M01-A scaffold verified; real capture/cleanup demonstrated | M01-B populated dashboard readiness incomplete |
 | M02 | complete | 3/3 targeted Nextest tests; touched-file fmt/diff pass | Legacy false; explicit serde/editor/runtime apply |
-| M03 | pending | Pure hint engine | M02 |
+| M03 | complete | 10/10 targeted Nextest tests; scoped fmt/diff | Typed IDs, frozen mapping, prefix-free matching |
 | M04 | pending | Registry and safe focus intents | M03 |
 | M05 | pending | Input lifecycle and overlay | M02–M04 |
 | M06 | pending | Grid integration | M05 |
@@ -70,3 +70,14 @@ Checkpoint M01-A, then implement M02 default-off settings gate. Return to M01-B 
 - Added experimental_jump_mode_enabled (serde/Rust false), Settings Launcher Window toggle/help and existing committed save/apply runtime gate/accessor/setter.
 - cargo nextest run --lib -E 'test(jump_mode)': exit 0, 3 passed / 5808 skipped. Touched Rust rustfmt and diff checks pass. Initial private-field visibility compiler feedback corrected using a narrow setter; editor test accounts for existing screenshot config normalization without changing production behavior.
 - M01 content investigation: generated Markdown/notes engine/query/dashboard keys match actual loader. Tag fixture uses unsupported hyphens (parsed as jump); fix to underscores later. Before adding readiness infrastructure, semantic fixture verify must call production note loader/query and typed slot-config parsing. Empty results cause remains unproven.
+## M04/M05 verified integration handoff
+
+- Phase 1 suppresses unsupported surfaces using `any_panel_open()` plus confirmation, Action Sheet, macro pending prompt, and `ParameterPromptUi::owns_input()` (currently QA-gated; expose read-only generally).
+- Use root viewport plus `InputState::focused`; `Popup::is_any_open(ctx)` persists across frames, unlike current-pass-only `Context::any_popup_open()`. Previous-frame `top_modal_layer()` and interaction allowance also help filter registration.
+- Capture first-pass Jump input after second snippet-prompt ownership recheck/action-sheet blocker and before CentralPanel/query TextEdit. Latch higher-priority ownership across dismissal frame; cancel on hidden-root return and focus loss. Revalidate before applying intents if ownership changes later that frame.
+- Root frame diagnostic seam for M14: `root_list_test_app`, `root_list_action`, `run_root_list_frame` in render.rs. Before M05 hooks, record narrow 100-action, 3-column 960x640 CPU baseline with 9 warmups/20 measured frames, no timing assertions. Reuse identical fixture/profile later for disabled/idle/active comparison; no historical broad perf campaign.
+
+## M03 outcome
+- Pure src/gui/jump_mode.rs: typed semantic/surface/generation identities, metadata, immutable hint map, explicit matcher/session outcomes and stale-population reconciliation. Shallowest-rightmost leaf expansion preserves short prefix-free uppercase A–Z codes. No action or UI dependency.
+- cargo nextest run --lib -E 'test(gui::jump_mode)': exit 0, 10 passed / 5811 filtered. Scoped format/diff clean; vendor warnings only in test compile. One duplicate filtered invocation queued after tool handle loss reused Cargo output; no extra suite run.
+- Count / longest / mean hint lengths: 0/0/0; 1/1/1; 2/1/1; 26/1/1; 27/2/1.074074; 52/2/1.538462; 100/2/1.77; 1000/3/2.337.

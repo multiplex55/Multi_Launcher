@@ -37,7 +37,8 @@ The first nested helper did not inherit root patches/lock; it was replaced by a 
 | M00 branch/source ownership | Complete |
 | M01 fixture/runner | Scaffold implemented, corrections under scoped verification |
 | M01 populated dashboard baseline | Incomplete: correct fixture content/readiness still needs proof |
-| M02–M05 setting, engine, registry, input and overlay | Pending |
+| M02 setting | Complete; 3 targeted tests passed, checkpoint f3215251 pushed |
+| M03–M05 engine, registry, input and overlay | In progress / pending |
 | M06–M09 grid/dashboard, keyboard harness and Phase 1 review | Pending |
 | M10–M13 Settings, dialogs, complex widgets and extended evidence | Pending |
 | M14–M15 performance, final checks and handoff | Pending |
@@ -49,3 +50,5 @@ See [execution ledger](JUMP_MODE_EXECUTION.md) for current ownership and next ac
 ## M02 checkpoint
 Implemented default-off experimental_jump_mode_enabled setting, Launcher Window toggle, editor roundtrip and centralized runtime gate via established committed Save/Apply. cargo nextest run --lib -E 'test(jump_mode)' passed 3 tests (5808 skipped); touched-file rustfmt/diff checks passed. No Jump input interception yet.
 
+## M03 checkpoint
+Pure typed hint engine implemented in src/gui/jump_mode.rs. Target generation/surface identity, deterministic prefix-free A–Z leaf expansion, frozen sessions, case-insensitive matching, invalid-input preservation, Backspace/cancel and stale-target reconciliation covered. cargo nextest run --lib -E 'test(gui::jump_mode)' passed 10 tests (5811 filtered). No UI targeting or input interception is claimed yet.
