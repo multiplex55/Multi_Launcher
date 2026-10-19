@@ -16,7 +16,7 @@ radial presentation policy, explicit action settings, and note persistence.
 | M2-B | Window-content capture and bounded latest-frame sessions owned by pinboard | complete | Fake stream/budget/pause/identity/cancellation tests; Windows compile |
 | M2-C | Child texture updates, status, Pause/Resume and latest-frame copy/save | complete | Focused presenter/lifecycle tests; exact native ownership and hidden-root error feedback |
 | M2-D | Native source smoke and remaining direct lifetime/resource gate | complete | One owned-window WGC smoke; reuse B/C coverage without duplicate tests |
-| M3-A | Per-panel Unicode-safe source matching and navigation | pending | Literal case-insensitive range/navigation tests; no content changes |
+| M3-A | Per-panel Unicode-safe source matching and navigation | complete | Literal case-insensitive range/navigation tests; no content changes |
 | M3-B | Find strip, scoped keys, Edit/Preview/Split navigation | pending | Targeted note-panel interactions, honest source-only fallback |
 | M4 | Independent focused review and user documentation | pending | Final targeted integration, fmt, one Clippy attempt; report native smoke limitations |
 
@@ -295,3 +295,20 @@ QUIT and exits; timeout/unwind guards target only its own Child. No HWND reopen,
 pixel heuristic, screen polling, synthetic input, or unrelated user window control.
 Native pin UI controls, radial triggering and note UI were not manually operated;
 focused deterministic UI tests provide separate evidence. No broader smoke suite.
+
+M2-D checkpoint: e067a612 fix(pinboard): [M2-D] verify native frame lifetime and cleanup — normal push succeeded to origin/live-pinboard.
+M3-A assigned to sole implementation writer: per-panel transient original-source
+Find model and invalidation, no Find UI/preview/key routing until M3-B.
+
+M3-A complete: new private gui/note_find.rs owns per-panel transient open/query,
+escaped Unicode-insensitive regex, query/content revisions, original byte+char
+ranges, current result and wrapping navigation. One monotonic char_indices scan
+maps all matches. Empty/no-query results are empty; conventional nonoverlap is
+explicit. Unchanged revisions reuse compiled regex/results. NotePanel mutation,
+alias save, external invalidation/replacement and slug-switch owners invalidate
+or reset it; no note content/save/dirty/mode changes come from Find.
+Scoped `cargo nextest run --cargo-profile fast-dev --lib -E 'test(note_find_)'`
+passed 6/6. Covers literal punctuation/nonoverlap, Unicode/CRLF original ranges,
+empty/no matches, wraps/revisions/cache reuse, and panel isolation/same-length
+replacement/unchanged persistence state. Touched rustfmt passes (mod.rs with
+skip_children=true); git diff --check passes. No UI/preview/root-key changes yet.

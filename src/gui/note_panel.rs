@@ -4,6 +4,7 @@ use crate::file_search::actions::{
     ExplorerAction, execute_explorer_action, resolve_explorer_action,
 };
 use crate::gui::LauncherApp;
+use crate::gui::note_find::{NoteFindMatch, NoteFindState};
 use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use crate::notes_markdown::{
     MarkdownAnalysis, MarkdownCallout, MarkdownHeading, MarkdownSection, MarkdownTaskItem,
@@ -942,6 +943,7 @@ pub struct NotePanel {
     links_expanded: bool,
     backlink_tab: BacklinkTab,
     backlink_page: usize,
+    note_find: NoteFindState,
     pending_selection: Option<(usize, usize)>,
     pending_cursor_position: Option<usize>,
     link_dialog_open: bool,
@@ -1323,6 +1325,7 @@ impl NotePanel {
             links_expanded: false,
             backlink_tab: BacklinkTab::LinkedTodos,
             backlink_page: 0,
+            note_find: NoteFindState::default(),
             pending_selection: None,
             pending_cursor_position: None,
             link_dialog_open: false,
@@ -1484,6 +1487,7 @@ impl NotePanel {
     }
 
     fn save_alias_metadata_change(&mut self, app: &mut LauncherApp) {
+        self.note_find.content_changed();
         self.sync_aliases_from_content();
         let mut note = self.note.clone();
         match save_note(&mut note, true) {
@@ -1730,6 +1734,7 @@ impl NotePanel {
     }
 
     fn mark_content_changed(&mut self, now_secs: f64) {
+        self.note_find.content_changed();
         self.invalidate_markdown_analysis();
         self.markdown_cache.clear_scrollable();
         self.fast_derived_dirty = true;
@@ -1932,6 +1937,46 @@ impl NotePanel {
         &self.note.content
     }
 
+    pub(crate) fn is_find_open(&self) -> bool {
+        self.note_find.is_open()
+    }
+
+    pub(crate) fn open_find(&mut self) {
+        self.note_find.open();
+    }
+
+    pub(crate) fn close_find(&mut self) {
+        self.note_find.close();
+    }
+
+    pub(crate) fn find_query(&self) -> &str {
+        self.note_find.query()
+    }
+
+    pub(crate) fn set_find_query(&mut self, query: impl Into<String>) -> bool {
+        self.note_find.set_query(query)
+    }
+
+    pub(crate) fn find_matches(&mut self) -> &[NoteFindMatch] {
+        self.note_find.results(&self.note.content)
+    }
+
+    pub(crate) fn find_current_index(&mut self) -> Option<usize> {
+        self.note_find.current_index(&self.note.content)
+    }
+
+    pub(crate) fn find_current_match(&mut self) -> Option<NoteFindMatch> {
+        self.note_find.current_match(&self.note.content).cloned()
+    }
+
+    pub(crate) fn find_next(&mut self) -> Option<NoteFindMatch> {
+        self.note_find.next(&self.note.content).cloned()
+    }
+
+    pub(crate) fn find_previous(&mut self) -> Option<NoteFindMatch> {
+        self.note_find.previous(&self.note.content).cloned()
+    }
+
     pub(super) fn note_close_observation(&self) -> super::query_observation::NoteCloseSoleNote {
         use super::query_observation::{NoteCloseSoleNote, Q11_NOTE_MARKER, Q11_NOTE_SLUG};
         NoteCloseSoleNote {
@@ -2094,12 +2139,17 @@ impl NotePanel {
     }
 
     pub(crate) fn replace_note_after_external_mutation(&mut self, mut note: Note) {
+        let slug_changed = self.note.slug != note.slug;
         let content = std::mem::take(&mut note.content);
         self.note = note;
+        if slug_changed {
+            self.note_find.reset_for_new_note();
+        }
         self.replace_content_from_mutation(content, 0.0);
     }
 
     pub(crate) fn invalidate_note_derived_data_after_external_mutation(&mut self) {
+        self.note_find.content_changed();
         self.invalidate_markdown_analysis();
         self.invalidate_link_menu_results();
         self.link_menu_targets_version = None;
@@ -8749,6 +8799,53 @@ mod tests {
             aliases: Vec::new(),
             entity_refs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn note_find_panel_state_is_isolated_and_does_not_mutate_note_state() {
+        let mut first = NotePanel::from_note(empty_note("cat dog"));
+        let mut second = NotePanel::from_note(empty_note("cat dog"));
+        let original_content = first.note_content().to_owned();
+        let original_mode = first.test_view_mode();
+
+        first.open_find();
+        assert!(first.set_find_query("cat"));
+        assert_eq!(first.find_matches()[0].byte_range, 0..3);
+        assert_eq!(first.find_current_index(), Some(0));
+        assert!(!first.has_unsaved_changes());
+
+        assert!(!second.is_find_open());
+        assert_eq!(second.find_query(), "");
+        assert!(second.find_matches().is_empty());
+
+        assert_eq!(first.find_next().unwrap().byte_range, 0..3);
+        assert_eq!(first.find_previous().unwrap().byte_range, 0..3);
+        assert_eq!(first.note_content(), original_content);
+        assert!(!first.has_unsaved_changes());
+        assert_eq!(first.test_view_mode(), original_mode);
+
+        // Same-length editor changes and external replacements both advance
+        // the source revision even though byte/character counts are unchanged.
+        first.note.content.replace_range(0..3, "fox");
+        first.mark_content_changed(0.0);
+        assert!(first.find_matches().is_empty());
+
+        first.replace_content_after_external_mutation("dog cat".into());
+        assert_eq!(first.find_matches()[0].byte_range, 4..7);
+        assert_eq!(first.find_current_index(), Some(0));
+        assert!(first.has_unsaved_changes());
+        let replaced_content = first.note_content().to_owned();
+        assert_eq!(first.find_next().unwrap().byte_range, 4..7);
+        assert_eq!(first.note_content(), replaced_content);
+        assert!(first.has_unsaved_changes());
+        assert_eq!(first.test_view_mode(), original_mode);
+
+        let mut other_note = empty_note("dog cat");
+        other_note.slug = "different-note".into();
+        first.replace_note_after_external_mutation(other_note);
+        assert!(!first.is_find_open());
+        assert_eq!(first.find_query(), "");
+        assert!(first.find_matches().is_empty());
     }
 
     fn backlink_rows_signature(

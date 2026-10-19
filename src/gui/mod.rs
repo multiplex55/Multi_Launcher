@@ -43,6 +43,7 @@ mod mouse_gestures_dialog;
 mod mouse_settings_dialog;
 mod multi_manager_actions;
 mod note_clipboard;
+mod note_find;
 mod note_graph_dialog;
 pub(crate) mod note_mutation;
 mod note_panel;
