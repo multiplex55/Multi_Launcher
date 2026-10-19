@@ -17,6 +17,15 @@ where
             .with_gui_failure_policy()),
             Err(error) => Err(CommandError::new("pinboard", error).with_gui_failure_policy()),
         },
+        PinboardCommand::Live => match host.start_pinboard_live_capture() {
+            Ok(true) => Ok(CommandOutcome::default()),
+            Ok(false) => Err(CommandError::new(
+                "pinboard",
+                "A pinboard capture is already in progress",
+            )
+            .with_gui_failure_policy()),
+            Err(error) => Err(CommandError::new("pinboard", error).with_gui_failure_policy()),
+        },
         PinboardCommand::List => host
             .open_pinboard_list()
             .map(|()| CommandOutcome::default())
@@ -37,12 +46,18 @@ mod tests {
     #[derive(Default)]
     struct Host {
         captures: usize,
+        live_captures: usize,
         lists: usize,
     }
 
     impl PinboardCommandHost for Host {
         fn start_pinboard_capture(&mut self) -> Result<bool, String> {
             self.captures += 1;
+            Ok(true)
+        }
+
+        fn start_pinboard_live_capture(&mut self) -> Result<bool, String> {
+            self.live_captures += 1;
             Ok(true)
         }
 
@@ -56,10 +71,11 @@ mod tests {
     fn pinboard_typed_actions_reach_the_gui_host_without_generic_visibility_or_focus_policy() {
         let mut host = Host::default();
         let capture = handle_pinboard(&mut host, &PinboardCommand::Capture).unwrap();
+        let live = handle_pinboard(&mut host, &PinboardCommand::Live).unwrap();
         let list = handle_pinboard(&mut host, &PinboardCommand::List).unwrap();
 
-        assert_eq!((host.captures, host.lists), (1, 1));
-        for outcome in [capture, list] {
+        assert_eq!((host.captures, host.live_captures, host.lists), (1, 1, 1));
+        for outcome in [capture, live, list] {
             assert_eq!(outcome.query, QueryPolicy::Keep);
             assert_eq!(outcome.pending_query, PendingQueryPolicy::Keep);
             assert_eq!(outcome.visibility, VisibilityPolicy::Keep);

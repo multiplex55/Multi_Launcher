@@ -12,6 +12,9 @@ use crate::gui::mkmacro_dialog::visual_overlay::{
 use crate::gui::pinboard_windows::PinWindowPresenter;
 use crate::launcher_parking::LauncherParkingTransaction;
 use crate::mkmacro::{ExecutionDiagnostic, ScreenCaptureBackend, ScreenRect};
+use crate::pinboard::source::{
+    NativePinSourceResolver, PinCaptureIntent, PinSourceBinding, PinSourceResolver,
+};
 use crate::pinboard::{
     PinCaptureGeneration, PinCaptureIdentity, PinCaptureOperationId, PinVisibilityAck,
     PinWindowVisibilityCoordinator, Pinboard,
@@ -40,23 +43,73 @@ pub(super) trait LauncherCaptureParkingFactory: Send + Sync {
     ) -> Result<Box<dyn LauncherCaptureParking>, String>;
 }
 
-struct NativeLauncherCaptureParking(LauncherParkingTransaction<PinCaptureGeneration>);
+enum NativeLauncherCaptureParking {
+    Transaction(LauncherParkingTransaction<PinCaptureGeneration>),
+    AlreadySafe {
+        generation: PinCaptureGeneration,
+        hwnd: usize,
+        virtual_desktop: ScreenRect,
+    },
+}
 
 impl LauncherCaptureParking for NativeLauncherCaptureParking {
     fn verify_capture_safe(&mut self) -> Result<bool, String> {
-        self.0.verify()
+        let already_safe = match self {
+            Self::Transaction(transaction) => return transaction.verify(),
+            Self::AlreadySafe {
+                generation,
+                hwnd,
+                virtual_desktop,
+            } => (*generation, *hwnd, *virtual_desktop),
+        };
+        if crate::launcher_parking::system_launcher_is_capture_safe(
+            Some(already_safe.1),
+            already_safe.2,
+        )? {
+            return Ok(true);
+        }
+        let transaction =
+            LauncherParkingTransaction::begin(already_safe.0, already_safe.1, already_safe.2)?;
+        let verified = transaction.verify()?;
+        *self = Self::Transaction(transaction);
+        Ok(verified)
     }
 
     fn restore(&mut self) -> Result<(), String> {
-        self.0.restore()
+        match self {
+            Self::Transaction(transaction) => transaction.restore(),
+            Self::AlreadySafe { .. } => Ok(()),
+        }
     }
 
     fn repark(&mut self) -> Result<(), String> {
-        self.0.repark_after_stale_restore(|| Ok(()))
+        match self {
+            Self::Transaction(transaction) => transaction.repark_after_stale_restore(|| Ok(())),
+            Self::AlreadySafe {
+                generation,
+                hwnd,
+                virtual_desktop,
+            } => {
+                if crate::launcher_parking::system_launcher_is_capture_safe(
+                    Some(*hwnd),
+                    *virtual_desktop,
+                )? {
+                    return Ok(());
+                }
+                *self = Self::Transaction(LauncherParkingTransaction::begin(
+                    *generation,
+                    *hwnd,
+                    *virtual_desktop,
+                )?);
+                Ok(())
+            }
+        }
     }
 
     fn commit_hidden(&mut self) {
-        self.0.commit_hidden();
+        if let Self::Transaction(transaction) = self {
+            transaction.commit_hidden();
+        }
     }
 }
 
@@ -70,7 +123,15 @@ impl LauncherCaptureParkingFactory for NativeLauncherCaptureParkingFactory {
         hwnd: usize,
         virtual_desktop: ScreenRect,
     ) -> Result<Box<dyn LauncherCaptureParking>, String> {
-        Ok(Box::new(NativeLauncherCaptureParking(
+        #[cfg(windows)]
+        if crate::launcher_parking::system_launcher_is_capture_safe(Some(hwnd), virtual_desktop)? {
+            return Ok(Box::new(NativeLauncherCaptureParking::AlreadySafe {
+                generation,
+                hwnd,
+                virtual_desktop,
+            }));
+        }
+        Ok(Box::new(NativeLauncherCaptureParking::Transaction(
             LauncherParkingTransaction::begin(generation, hwnd, virtual_desktop)?,
         )))
     }
@@ -88,6 +149,7 @@ enum PinCapturePhase {
 
 struct PinCaptureSession {
     identity: PinCaptureIdentity,
+    intent: PinCaptureIntent,
     overlay_operation_id: OperationId,
     hwnd: usize,
     hwnd_generation: u64,
@@ -95,6 +157,8 @@ struct PinCaptureSession {
     owned_revision: u64,
     focus_intent: RootFocusIntent,
     invocation_id: Option<u64>,
+    initial_visible: bool,
+    initial_root_restore_flag: bool,
     phase: PinCapturePhase,
     parking: Box<dyn LauncherCaptureParking>,
     hide_requested: bool,
@@ -105,6 +169,8 @@ struct PinCaptureSession {
     cancel_sent: bool,
     capture_job: Option<CaptureJob>,
     selected_rect: Option<ScreenRect>,
+    source_binding: Option<PinSourceBinding>,
+    deferred_error: Option<String>,
     staged: bool,
     superseded: bool,
     cancelled: bool,
@@ -161,6 +227,7 @@ pub(super) struct PinboardCaptureLifecycle {
     board: Pinboard,
     overlay: SharedVisualOverlayController,
     capture_backend: Arc<dyn ScreenCaptureBackend>,
+    source_resolver: Arc<dyn PinSourceResolver>,
     parking_factory: Arc<dyn LauncherCaptureParkingFactory>,
     windows: PinWindowPresenter,
     pin_windows: Box<dyn PinWindowVisibilityCoordinator>,
@@ -178,6 +245,7 @@ impl PinboardCaptureLifecycle {
             board: Pinboard::default(),
             overlay,
             capture_backend,
+            source_resolver: Arc::new(NativePinSourceResolver),
             parking_factory: Arc::new(NativeLauncherCaptureParkingFactory),
             windows,
             pin_windows,
@@ -273,6 +341,12 @@ impl PinboardCaptureLifecycle {
     }
 
     #[cfg(test)]
+    fn set_source_resolver_for_test(&mut self, source_resolver: Arc<dyn PinSourceResolver>) {
+        assert!(self.session.is_none());
+        self.source_resolver = source_resolver;
+    }
+
+    #[cfg(test)]
     pub(super) fn set_pin_click_through_for_test(
         &mut self,
         ctx: &eframe::egui::Context,
@@ -311,11 +385,36 @@ impl PinboardCaptureLifecycle {
         launcher_hwnd: Option<usize>,
         root_identity: (usize, u64),
     ) -> Result<bool, String> {
+        self.begin_with_intent(
+            PinCaptureIntent::Static,
+            false,
+            visible,
+            last_visible,
+            revision,
+            focus_intent,
+            invocation_id,
+            launcher_hwnd,
+            root_identity,
+        )
+    }
+
+    pub(super) fn begin_with_intent(
+        &mut self,
+        intent: PinCaptureIntent,
+        initial_root_restore_flag: bool,
+        visible: bool,
+        last_visible: bool,
+        revision: u64,
+        focus_intent: RootFocusIntent,
+        invocation_id: Option<u64>,
+        launcher_hwnd: Option<usize>,
+        root_identity: (usize, u64),
+    ) -> Result<bool, String> {
         if self.is_busy() {
             return Ok(false);
         }
-        if !visible || !last_visible {
-            return Err("Show the launcher before pinning a screen region".into());
+        if visible != last_visible {
+            return Err("Launcher visibility is changing; retry pin selection".into());
         }
         let hwnd = launcher_hwnd.ok_or("Launcher HWND is unavailable for screenshot pinning")?;
         if hwnd == 0 || root_identity.0 != hwnd || root_identity.1 == 0 {
@@ -364,6 +463,7 @@ impl PinboardCaptureLifecycle {
         };
         self.session = Some(PinCaptureSession {
             identity,
+            intent,
             overlay_operation_id,
             hwnd,
             hwnd_generation: root_identity.1,
@@ -371,6 +471,8 @@ impl PinboardCaptureLifecycle {
             owned_revision: revision,
             focus_intent,
             invocation_id,
+            initial_visible: visible,
+            initial_root_restore_flag,
             phase: PinCapturePhase::AwaitRootAcknowledgement,
             parking,
             hide_requested: false,
@@ -381,6 +483,8 @@ impl PinboardCaptureLifecycle {
             cancel_sent: false,
             capture_job: None,
             selected_rect: None,
+            source_binding: None,
+            deferred_error: None,
             staged: false,
             superseded: false,
             cancelled: false,
@@ -611,6 +715,12 @@ impl PinboardCaptureLifecycle {
             );
         }
 
+        if session.cleanup_complete
+            && session.error.is_none()
+            && let Some(error) = session.deferred_error.take()
+        {
+            session.error = Some(error);
+        }
         let report = session.error.as_ref().and_then(|error| {
             if session.error_reported {
                 None
@@ -664,21 +774,42 @@ impl PinboardCaptureLifecycle {
                         set_capture_error(session, error.to_string());
                         session.phase = PinCapturePhase::Restoring;
                     }
-                    Ok(_) => match spawn_capture_job(
-                        Arc::clone(&self.capture_backend),
-                        session.identity,
-                        rect,
-                    ) {
-                        Ok(job) => {
-                            session.selected_rect = Some(rect);
-                            session.capture_job = Some(job);
-                            session.phase = PinCapturePhase::Capturing;
+                    Ok(_) => {
+                        session.selected_rect = Some(rect);
+                        match session.intent {
+                            PinCaptureIntent::Static => {
+                                match spawn_capture_job(
+                                    Arc::clone(&self.capture_backend),
+                                    session.identity,
+                                    rect,
+                                ) {
+                                    Ok(job) => {
+                                        session.capture_job = Some(job);
+                                        session.phase = PinCapturePhase::Capturing;
+                                    }
+                                    Err(error) => {
+                                        set_capture_error(session, error);
+                                        session.phase = PinCapturePhase::Restoring;
+                                    }
+                                }
+                            }
+                            PinCaptureIntent::Live => {
+                                match self.source_resolver.resolve(rect) {
+                                    Ok(binding) => {
+                                        session.source_binding = Some(binding);
+                                        session.deferred_error =
+                                            Some("Live window capture is not available yet".into());
+                                    }
+                                    Err(error) => {
+                                        session.deferred_error = Some(format!(
+                                            "Could not bind a live pin to one external window: {error}"
+                                        ));
+                                    }
+                                }
+                                session.phase = PinCapturePhase::Restoring;
+                            }
                         }
-                        Err(error) => {
-                            set_capture_error(session, error);
-                            session.phase = PinCapturePhase::Restoring;
-                        }
-                    },
+                    }
                 }
             }
             VisualOverlayEvent::Cancelled { .. } | VisualOverlayEvent::Expired { .. } => {
@@ -918,6 +1049,17 @@ impl LauncherApp {
     }
 
     pub(super) fn begin_pinboard_capture(&mut self) -> Result<bool, String> {
+        self.begin_pinboard_capture_with_intent(PinCaptureIntent::Static)
+    }
+
+    pub(super) fn begin_pinboard_live_capture(&mut self) -> Result<bool, String> {
+        self.begin_pinboard_capture_with_intent(PinCaptureIntent::Live)
+    }
+
+    fn begin_pinboard_capture_with_intent(
+        &mut self,
+        intent: PinCaptureIntent,
+    ) -> Result<bool, String> {
         if self.pinboard_capture_busy() {
             return Ok(false);
         }
@@ -946,7 +1088,9 @@ impl LauncherApp {
                 self.visibility_revision.invocation_id(),
             )
         });
-        self.pinboard_capture.begin(
+        self.pinboard_capture.begin_with_intent(
+            intent,
+            self.restore_flag.load(Ordering::SeqCst),
             self.visible_flag.load(Ordering::SeqCst),
             self.last_visible,
             revision,
@@ -1122,6 +1266,12 @@ fn restore_root_visibility_intent(
 ) {
     let current = root_visibility_snapshot(revision, visible_flag);
     if current.revision == session.owned_revision && !session.superseded {
+        if !session.initial_visible {
+            visible_flag.store(false, Ordering::SeqCst);
+            restore_flag.store(session.initial_root_restore_flag, Ordering::SeqCst);
+            *last_visible = false;
+            return;
+        }
         if current.visible {
             *last_visible = true;
             return;
@@ -1264,6 +1414,18 @@ mod tests {
 
         fn shutdown_and_drain(&mut self, _: PinCaptureIdentity) -> Result<(), String> {
             Ok(())
+        }
+    }
+
+    struct RecordingSourceResolver {
+        selections: Arc<Mutex<Vec<ScreenRect>>>,
+        binding: PinSourceBinding,
+    }
+
+    impl PinSourceResolver for RecordingSourceResolver {
+        fn resolve(&self, selection: ScreenRect) -> Result<PinSourceBinding, String> {
+            self.selections.lock().unwrap().push(selection);
+            Ok(self.binding)
         }
     }
 
@@ -1503,6 +1665,152 @@ mod tests {
         assert_eq!(completed.pin_restore_polls, 2);
         assert_eq!(completed.pin_restore_requests, 1);
         assert!(overlay_fixture.controller.poll().is_empty());
+        let next_operation = overlay_fixture
+            .controller
+            .reserve_pinboard_rectangle_pick()
+            .unwrap();
+        assert!(
+            overlay_fixture
+                .controller
+                .abort_reserved_pinboard_rectangle_pick(next_operation)
+        );
+    }
+
+    #[test]
+    fn pinboard_live_selection_resolves_source_then_restores_hidden_root_without_snapshot() {
+        let overlay_fixture = SharedVisualOverlayController::test_fixture();
+        let log = Arc::new(Mutex::new(CaptureFlowLog::default()));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (completed_tx, _completed_rx) = mpsc::channel();
+        release_tx.send(()).unwrap();
+        let desktop = ScreenRect::new(-1_920, -240, 3_840, 1_320);
+        let backend: Arc<dyn ScreenCaptureBackend> = Arc::new(GatedCaptureBackend {
+            log: Arc::clone(&log),
+            started: started_tx,
+            release: Mutex::new(release_rx),
+            completed: completed_tx,
+            desktop,
+        });
+        let mut lifecycle =
+            PinboardCaptureLifecycle::new(overlay_fixture.controller.clone(), backend);
+        lifecycle.set_adapters_for_test(
+            Arc::new(FakeParkingFactory {
+                log: Arc::clone(&log),
+                acknowledge_after: Some(1),
+            }),
+            Box::new(FakePinWindows {
+                log: Arc::clone(&log),
+                hide_ack_after: 1,
+                restore_ack_after: 1,
+                hide_failure: None,
+            }),
+        );
+        let selections = Arc::new(Mutex::new(Vec::new()));
+        let source_bounds = ScreenRect::new(-200, 0, 800, 700);
+        lifecycle.set_source_resolver_for_test(Arc::new(RecordingSourceResolver {
+            selections: Arc::clone(&selections),
+            binding: PinSourceBinding {
+                window: crate::pinboard::source::PinSourceWindowIdentity {
+                    hwnd: 501,
+                    process_id: 502,
+                    thread_id: 503,
+                },
+                captured_bounds: source_bounds,
+                crop: crate::pinboard::source::PinSourceCrop {
+                    x: 100,
+                    y: 100,
+                    width: 300,
+                    height: 200,
+                },
+            },
+        }));
+
+        let visibility = VisibilityRevision::default();
+        let visible = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let restore = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut last_visible = false;
+        let native_identity = (42, 9);
+        assert!(
+            lifecycle
+                .begin_with_intent(
+                    PinCaptureIntent::Live,
+                    true,
+                    false,
+                    false,
+                    visibility.current(),
+                    RootFocusIntent::PreserveForeground,
+                    Some(77),
+                    Some(native_identity.0),
+                    native_identity,
+                )
+                .unwrap()
+        );
+        let operation_id = lifecycle.session.as_ref().unwrap().overlay_operation_id;
+        let context = eframe::egui::Context::default();
+
+        poll_lifecycle(
+            &context,
+            &mut lifecycle,
+            &visibility,
+            &visible,
+            &restore,
+            &mut last_visible,
+            native_identity,
+        );
+        poll_lifecycle(
+            &context,
+            &mut lifecycle,
+            &visibility,
+            &visible,
+            &restore,
+            &mut last_visible,
+            native_identity,
+        );
+        overlay_fixture.observer.wait_for_commands(1);
+        assert!(selections.lock().unwrap().is_empty());
+        assert_eq!(log.lock().unwrap().capture_rects, []);
+
+        let selected = ScreenRect::new(-100, 100, 300, 200);
+        overlay_fixture.controller.inject_pinboard_event_for_test(
+            VisualOverlayEvent::RectangleConfirmed {
+                operation_id,
+                purpose: RectanglePurpose::PinboardCapture,
+                rect: selected,
+            },
+        );
+        assert!(overlay_fixture.controller.poll().is_empty());
+        let error = poll_lifecycle(
+            &context,
+            &mut lifecycle,
+            &visibility,
+            &visible,
+            &restore,
+            &mut last_visible,
+            native_identity,
+        );
+
+        assert_eq!(
+            error.as_deref(),
+            Some("Live window capture is not available yet")
+        );
+        assert_eq!(*selections.lock().unwrap(), [selected]);
+        assert!(started_rx.try_recv().is_err());
+        assert!(log.lock().unwrap().capture_rects.is_empty());
+        assert_eq!(lifecycle.pinboard().len(), 0);
+        assert_eq!(lifecycle.pinboard().pending_bytes(), 0);
+        assert!(!lifecycle.is_busy());
+        assert!(!visible.load(Ordering::SeqCst));
+        assert!(restore.load(Ordering::SeqCst));
+        assert!(!last_visible);
+        let flow = log.lock().unwrap();
+        assert_eq!(flow.parking_restores, 1);
+        assert_eq!(flow.parking_reparks, 1);
+        assert_eq!(flow.parking_commits, 1);
+        assert_eq!(flow.pin_restore_requests, 1);
+        assert_eq!(flow.pin_restore_polls, 1);
+        drop(flow);
+
         let next_operation = overlay_fixture
             .controller
             .reserve_pinboard_rectangle_pick()

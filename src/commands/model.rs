@@ -628,9 +628,10 @@ kinds!(ScreenshotCommand, Self::Capture { .. } => "capture", Self::UnknownMode {
 pub enum PinboardCommand {
     Capture,
     List,
+    Live,
     Unknown { raw: String },
 }
-kinds!(PinboardCommand, Self::Capture => "capture", Self::List => "list", Self::Unknown { .. } => "unknown");
+kinds!(PinboardCommand, Self::Capture => "capture", Self::List => "list", Self::Live => "live", Self::Unknown { .. } => "unknown");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShellCommand {
     Dialog,

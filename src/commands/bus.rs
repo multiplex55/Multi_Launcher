@@ -380,6 +380,11 @@ mod tests {
             Ok(true)
         }
 
+        fn start_pinboard_live_capture(&mut self) -> Result<bool, String> {
+            self.pinboard_calls.push("live");
+            Ok(true)
+        }
+
         fn open_pinboard_list(&mut self) -> Result<(), String> {
             self.pinboard_calls.push("list");
             Ok(())
@@ -544,6 +549,7 @@ mod tests {
         for command in [
             crate::commands::PinboardCommand::Capture,
             crate::commands::PinboardCommand::List,
+            crate::commands::PinboardCommand::Live,
         ] {
             let outcome = CommandBus
                 .dispatch(&invocation(Command::Pinboard(command)), &mut host)
@@ -551,7 +557,7 @@ mod tests {
             assert_eq!(outcome.visibility, crate::commands::VisibilityPolicy::Keep);
             assert!(!outcome.focus && !outcome.restore && !outcome.search);
         }
-        assert_eq!(host.pinboard_calls, ["capture", "list"]);
+        assert_eq!(host.pinboard_calls, ["capture", "list", "live"]);
         assert_eq!(host.headless_calls, 0);
     }
 

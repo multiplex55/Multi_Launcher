@@ -212,6 +212,10 @@ pub trait PinboardCommandHost {
         Err("pinboard commands require the launcher interface".into())
     }
 
+    fn start_pinboard_live_capture(&mut self) -> Result<bool, String> {
+        Err("live pinboard commands require the launcher interface".into())
+    }
+
     fn open_pinboard_list(&mut self) -> Result<(), String> {
         Err("pinboard commands require the launcher interface".into())
     }

@@ -967,6 +967,15 @@ impl PinboardCommandHost for LauncherApp {
         Ok(started)
     }
 
+    fn start_pinboard_live_capture(&mut self) -> Result<bool, String> {
+        let started = self.begin_pinboard_live_capture()?;
+        if started {
+            self.egui_ctx
+                .request_repaint_of(eframe::egui::ViewportId::ROOT);
+        }
+        Ok(started)
+    }
+
     fn open_pinboard_list(&mut self) -> Result<(), String> {
         self.pin_list_open = true;
         self.focus_query = false;

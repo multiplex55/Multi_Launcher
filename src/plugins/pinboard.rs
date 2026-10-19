@@ -10,8 +10,10 @@ impl Plugin for PinboardPlugin {
             || query.eq_ignore_ascii_case("pinboard capture");
         let list =
             query.eq_ignore_ascii_case("pinboard") || query.eq_ignore_ascii_case("pinboard list");
+        let live =
+            query.eq_ignore_ascii_case("pinboard") || query.eq_ignore_ascii_case("pinboard live");
 
-        let mut actions = Vec::with_capacity(2);
+        let mut actions = Vec::with_capacity(3);
         if capture {
             actions.push(Action {
                 label: "Capture Screenshot Pin".into(),
@@ -28,6 +30,14 @@ impl Plugin for PinboardPlugin {
                 args: None,
             });
         }
+        if live {
+            actions.push(Action {
+                label: "Capture Live Window Pin".into(),
+                desc: "Select a crop inside one external window for a live reference pin".into(),
+                action: "pinboard:live".into(),
+                args: None,
+            });
+        }
         actions
     }
 
@@ -36,7 +46,7 @@ impl Plugin for PinboardPlugin {
     }
 
     fn description(&self) -> &str {
-        "Capture region-only, session-only floating screenshot pins. Pins are topmost by default, pass-through pins are recovered from the pin list, and explicit Copy/Save actions are available. The session limit is 8 pins and 256 MiB; display size fits the owning child viewport's DPI."
+        "Capture region-only, session-only screenshot pins with `pinboard capture`, or select a window-attached live reference with `pinboard live`. Pins are topmost by default, pass-through pins are recovered from the pin list, and explicit Copy/Save actions are available. The session limit is 8 pins and 256 MiB; display size fits the owning child viewport's DPI."
     }
 
     fn capabilities(&self) -> &[&str] {
@@ -50,7 +60,7 @@ impl Plugin for PinboardPlugin {
     fn commands(&self) -> Vec<Action> {
         vec![Action {
             label: "pinboard".into(),
-            desc: "Capture or recover session-only screenshot pins".into(),
+            desc: "Capture static or live reference pins, or recover session-only pins".into(),
             action: "query:pinboard".into(),
             args: None,
         }]
@@ -66,9 +76,10 @@ mod tests {
     fn exact_pinboard_queries_expose_capture_and_recovery_actions() {
         for query in ["pinboard", " PINBOARD ", "pInBoArD"] {
             let actions = PinboardPlugin.search(query);
-            assert_eq!(actions.len(), 2, "{query:?}");
+            assert_eq!(actions.len(), 3, "{query:?}");
             assert_eq!(actions[0].action, "pinboard:capture");
             assert_eq!(actions[1].action, "pinboard:list");
+            assert_eq!(actions[2].action, "pinboard:live");
         }
 
         for (query, wire, command) in [
@@ -78,6 +89,7 @@ mod tests {
                 PinboardCommand::Capture,
             ),
             ("pinboard list", "pinboard:list", PinboardCommand::List),
+            ("pinboard live", "pinboard:live", PinboardCommand::Live),
         ] {
             let actions = PinboardPlugin.search(query);
             assert_eq!(actions.len(), 1, "{query:?}");
@@ -92,6 +104,7 @@ mod tests {
         for query in [
             "pinboard capture extra",
             "pinboard list now",
+            "pinboard live extra",
             "pinboard: capture",
             "pinboardish",
         ] {
@@ -100,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn plugin_help_discloses_both_pinboard_paths() {
+    fn plugin_help_discloses_all_pinboard_paths() {
         assert_eq!(PinboardPlugin.commands()[0].action, "query:pinboard");
         let description = PinboardPlugin.description();
         for detail in [
@@ -108,6 +121,7 @@ mod tests {
             "session-only",
             "topmost",
             "pin list",
+            "pinboard live",
             "256 MiB",
         ] {
             assert!(description.contains(detail), "missing {detail:?}");

@@ -106,6 +106,7 @@ pub(crate) fn command_requirement(command: &Command) -> InteractionRequirement {
         | Command::Macro(_)
         | Command::Screenshot(_)
         | Command::Pinboard(crate::commands::PinboardCommand::Capture)
+        | Command::Pinboard(crate::commands::PinboardCommand::Live)
         | Command::MouseGesture(_)
         | Command::CoordinateTool(crate::commands::CoordinateToolCommand::Pick) => {
             InteractionRequirement::ExclusiveCapture

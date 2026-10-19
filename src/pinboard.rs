@@ -3,6 +3,8 @@
 //! Native pin windows are owned by the GUI layer. This module owns only the
 //! immutable image snapshots and independent per-pin display state.
 
+pub(crate) mod source;
+
 use crate::mkmacro::ScreenRect;
 use image::RgbaImage;
 use std::collections::BTreeMap;

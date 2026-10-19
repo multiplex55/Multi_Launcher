@@ -287,29 +287,38 @@ mod pinboard_headless_tests {
 
     #[test]
     fn pinboard_is_explicitly_gui_only_and_never_uses_external_fallback() {
-        let original = Action {
-            label: "Capture Screenshot Pin".into(),
-            desc: String::new(),
-            action: "pinboard:capture".into(),
-            args: None,
-        };
-        let mut external_calls = Vec::new();
-        let error = execute_with_external(
-            Command::Pinboard(PinboardCommand::Capture),
-            &original,
-            &mut |target, args| {
-                external_calls.push((target.to_owned(), args.map(str::to_owned)));
-                Ok(())
-            },
-        )
-        .unwrap_err();
+        for (wire, command, expected_error) in [
+            (
+                "pinboard:capture",
+                PinboardCommand::Capture,
+                "pinboard commands require the launcher interface",
+            ),
+            (
+                "pinboard:live",
+                PinboardCommand::Live,
+                "pinboard commands require the launcher interface",
+            ),
+        ] {
+            let original = Action {
+                label: "Pinboard action".into(),
+                desc: String::new(),
+                action: wire.into(),
+                args: None,
+            };
+            let mut external_calls = Vec::new();
+            let error = execute_with_external(
+                Command::Pinboard(command),
+                &original,
+                &mut |target, args| {
+                    external_calls.push((target.to_owned(), args.map(str::to_owned)));
+                    Ok(())
+                },
+            )
+            .unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .contains("pinboard commands require the launcher interface")
-        );
-        assert!(external_calls.is_empty());
+            assert!(error.to_string().contains(expected_error));
+            assert!(external_calls.is_empty());
+        }
     }
 }
 

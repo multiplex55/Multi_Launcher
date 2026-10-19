@@ -537,7 +537,7 @@ fn launcher_state_is_capture_safe(
     desktop: ScreenRect,
     window: LauncherWindowRect,
 ) -> bool {
-    is_valid && is_visible && !is_iconic && !signed_rectangles_intersect(desktop, window)
+    is_valid && (!is_visible || (!is_iconic && !signed_rectangles_intersect(desktop, window)))
 }
 
 #[cfg(windows)]
@@ -555,7 +555,13 @@ pub(crate) fn system_launcher_is_capture_safe(
     let is_valid = unsafe { IsWindow(hwnd) }.as_bool();
     let is_visible = is_valid && unsafe { IsWindowVisible(hwnd) }.as_bool();
     let is_iconic = is_valid && unsafe { IsIconic(hwnd) }.as_bool();
-    if !is_valid || !is_visible || is_iconic {
+    if !is_valid {
+        return Ok(false);
+    }
+    if !is_visible {
+        return Ok(true);
+    }
+    if is_iconic {
         return Ok(false);
     }
 
@@ -767,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_safety_requires_valid_visible_non_iconic_offscreen_window() {
+    fn capture_safety_accepts_hidden_or_visible_non_iconic_offscreen_window() {
         let desktop = ScreenRect::new(0, 0, 1920, 1080);
         let offscreen = rect(2016, 0, 300, 200);
         assert!(launcher_state_is_capture_safe(
@@ -776,8 +782,11 @@ mod tests {
         assert!(!launcher_state_is_capture_safe(
             false, true, false, desktop, offscreen
         ));
-        assert!(!launcher_state_is_capture_safe(
+        assert!(launcher_state_is_capture_safe(
             true, false, false, desktop, offscreen
+        ));
+        assert!(launcher_state_is_capture_safe(
+            true, false, true, desktop, offscreen
         ));
         assert!(!launcher_state_is_capture_safe(
             true, true, true, desktop, offscreen

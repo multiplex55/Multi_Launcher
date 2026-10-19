@@ -81,6 +81,7 @@ mod pinboard_parser_tests {
         for (raw, expected) in [
             ("pinboard:capture", PinboardCommand::Capture),
             ("pinboard:list", PinboardCommand::List),
+            ("pinboard:live", PinboardCommand::Live),
         ] {
             let parsed = parse_action(&action(raw, None)).unwrap();
             assert_eq!(parsed, Command::Pinboard(expected.clone()));
@@ -101,10 +102,12 @@ mod pinboard_parser_tests {
         }
 
         for args in [Some(""), Some("payload")] {
-            let error = parse_action(&action("pinboard:capture", args)).unwrap_err();
-            assert_eq!(error.domain, "pinboard");
-            assert!(error.message.contains("do not accept"));
-            assert!(error.toast && error.refocus);
+            for raw in ["pinboard:capture", "pinboard:list", "pinboard:live"] {
+                let error = parse_action(&action(raw, args)).unwrap_err();
+                assert_eq!(error.domain, "pinboard");
+                assert!(error.message.contains("do not accept"));
+                assert!(error.toast && error.refocus);
+            }
         }
 
         assert!(matches!(
@@ -304,6 +307,7 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         let command = match raw {
             "capture" => PinboardCommand::Capture,
             "list" => PinboardCommand::List,
+            "live" => PinboardCommand::Live,
             _ => PinboardCommand::Unknown { raw: raw.into() },
         };
         return Ok(Command::Pinboard(command));
