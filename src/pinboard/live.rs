@@ -270,6 +270,11 @@ impl WorkerSignal {
             return false;
         }
         flags.activated = true;
+        // The native frame pool may already contain frames that arrived while
+        // the pin was waiting for its creation transaction to restore the
+        // launcher. Schedule one drain after activation so those buffered
+        // frames do not have to produce another FrameArrived event.
+        flags.frame_arrived = true;
         self.frame_changed.notify_all();
         self.control_changed.notify_all();
         true
@@ -331,8 +336,9 @@ impl WorkerSignal {
             });
         match result {
             Ok((mut flags, _)) => {
+                let snapshot = WorkerFlagsSnapshot::from(&*flags);
                 flags.frame_arrived = false;
-                WorkerFlagsSnapshot::from(&*flags)
+                snapshot
             }
             Err(_) => self.snapshot(),
         }
@@ -545,6 +551,24 @@ impl PinLiveCaptureSession {
                 ))
             }
         }
+    }
+
+    #[cfg(test)]
+    fn wait_first_frame_result(&mut self, timeout: Duration) -> Option<Result<(), String>> {
+        if self.first_frame_reported {
+            return None;
+        }
+        let result = match self.first_frame.recv_timeout(timeout) {
+            Ok(result) => Some(result),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => Some(Err(
+                "window capture worker stopped before its first frame".into(),
+            )),
+        };
+        if result.is_some() {
+            self.first_frame_reported = true;
+        }
+        result
     }
 
     pub(crate) fn activate(&self) -> bool {
@@ -932,33 +956,106 @@ mod native {
 
     struct NativeCaptureResources {
         item: GraphicsCaptureItem,
-        frame_pool: Direct3D11CaptureFramePool,
+        winrt_device: IDirect3DDevice,
+        source_size: SizeInt32,
+        frame_signal: Arc<WorkerSignal>,
+        frame_pool: Option<Direct3D11CaptureFramePool>,
         frame_token: Option<EventRegistrationToken>,
         closed_token: Option<EventRegistrationToken>,
         capture_session: Option<GraphicsCaptureSession>,
     }
 
     impl NativeCaptureResources {
-        fn new(item: GraphicsCaptureItem, frame_pool: Direct3D11CaptureFramePool) -> Self {
-            Self {
+        fn new(
+            item: GraphicsCaptureItem,
+            winrt_device: IDirect3DDevice,
+            source_size: SizeInt32,
+            frame_signal: Arc<WorkerSignal>,
+            generation: PinCaptureGeneration,
+            slot: Arc<PinLiveFrameSlot>,
+        ) -> Result<Self, String> {
+            let closed_signal = Arc::clone(&frame_signal);
+            let closed_slot = Arc::clone(&slot);
+            let closed_token = item
+                .Closed(&TypedEventHandler::<
+                    GraphicsCaptureItem,
+                    windows::core::IInspectable,
+                >::new(move |_, _| {
+                    closed_slot.set_status(generation, PinLiveStatus::SourceClosed);
+                    closed_signal.notify_source_closed();
+                    Ok(())
+                }))
+                .map_err(|error| {
+                    format!("could not subscribe to source-window closure: {error}")
+                })?;
+            Ok(Self {
                 item,
-                frame_pool,
+                winrt_device,
+                source_size,
+                frame_signal,
+                frame_pool: None,
                 frame_token: None,
-                closed_token: None,
+                closed_token: Some(closed_token),
                 capture_session: None,
-            }
+            })
         }
 
-        fn start_capture(&mut self) -> Result<(), String> {
-            if self.capture_session.is_none() {
-                self.capture_session = Some(
-                    self.frame_pool
-                        .CreateCaptureSession(&self.item)
-                        .map_err(|error| {
-                            format!("could not create a source-window capture session: {error}")
-                        })?,
-                );
+        fn start_capture(
+            &mut self,
+            binding: PinSourceBinding,
+            gpu_reservation: &mut GpuBudgetReservation,
+        ) -> Result<(), String> {
+            if self.capture_session.is_some() || self.frame_pool.is_some() {
+                return Err("source-window capture resources were already started".into());
             }
+
+            // Capture sessions are tied to the frame pool that created them.
+            // Pause closes both; resume creates a new pool for the same exact
+            // GraphicsCaptureItem rather than reusing a closed session's pool.
+            self.source_size = self
+                .item
+                .Size()
+                .map_err(|error| format!("could not query source window capture size: {error}"))?;
+            let source_dimensions = valid_dimensions(self.source_size)?;
+            validate_source_frame_geometry(binding, source_dimensions, false)?;
+            gpu_reservation.resize(estimate_gpu_bytes(source_dimensions, binding.crop)?)?;
+
+            let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+                &self.winrt_device,
+                DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                FRAME_POOL_BUFFERS as i32,
+                self.source_size,
+            )
+            .map_err(|error| format!("could not create a window frame pool: {error}"))?;
+            let frame_signal = Arc::clone(&self.frame_signal);
+            let frame_token = match frame_pool.FrameArrived(&TypedEventHandler::<
+                Direct3D11CaptureFramePool,
+                windows::core::IInspectable,
+            >::new(move |_, _| {
+                frame_signal.notify_frame();
+                Ok(())
+            })) {
+                Ok(token) => token,
+                Err(error) => {
+                    let _ = frame_pool.Close();
+                    return Err(format!(
+                        "could not subscribe to source-window frames: {error}"
+                    ));
+                }
+            };
+            let capture_session = match frame_pool.CreateCaptureSession(&self.item) {
+                Ok(session) => session,
+                Err(error) => {
+                    let _ = frame_pool.RemoveFrameArrived(frame_token);
+                    let _ = frame_pool.Close();
+                    return Err(format!(
+                        "could not create a source-window capture session: {error}"
+                    ));
+                }
+            };
+            self.frame_pool = Some(frame_pool);
+            self.frame_token = Some(frame_token);
+            self.capture_session = Some(capture_session);
             self.capture_session
                 .as_ref()
                 .ok_or_else(|| "source-window capture session was not created".to_owned())?
@@ -970,31 +1067,60 @@ mod native {
             if let Some(session) = self.capture_session.take() {
                 let _ = session.Close();
             }
-            self.drain_frames();
+            if let Some(frame_pool) = self.frame_pool.take() {
+                if let Some(token) = self.frame_token.take() {
+                    let _ = frame_pool.RemoveFrameArrived(token);
+                }
+                Self::drain_pool(&frame_pool);
+                let _ = frame_pool.Close();
+            }
         }
 
         fn drain_frames(&self) {
+            if let Some(frame_pool) = self.frame_pool.as_ref() {
+                Self::drain_pool(frame_pool);
+            }
+        }
+
+        fn drain_pool(frame_pool: &Direct3D11CaptureFramePool) {
             for _ in 0..FRAME_POOL_BUFFERS {
-                let Ok(frame) = self.frame_pool.TryGetNextFrame() else {
+                let Ok(frame) = frame_pool.TryGetNextFrame() else {
                     break;
                 };
                 drop(frame);
             }
+        }
+
+        fn try_get_next_frame(&self) -> Option<Direct3D11CaptureFrame> {
+            self.frame_pool.as_ref()?.TryGetNextFrame().ok()
+        }
+
+        fn recreate_frame_pool(&mut self, source_size: SizeInt32) -> Result<(), String> {
+            let frame_pool = self
+                .frame_pool
+                .as_ref()
+                .ok_or_else(|| "source-window frame pool was not created".to_owned())?;
+            frame_pool
+                .Recreate(
+                    &self.winrt_device,
+                    DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                    FRAME_POOL_BUFFERS as i32,
+                    source_size,
+                )
+                .map_err(|error| format!("could not resize source-window frame pool: {error}"))?;
+            self.source_size = source_size;
+            Ok(())
         }
     }
 
     impl Drop for NativeCaptureResources {
         fn drop(&mut self) {
             self.stop_capture();
-            if let Some(token) = self.frame_token.take() {
-                let _ = self.frame_pool.RemoveFrameArrived(token);
-            }
             if let Some(token) = self.closed_token.take() {
                 let _ = self.item.RemoveClosed(token);
             }
-            let _ = self.frame_pool.Close();
             // Keep the exact capture item alive until its subscriptions and
-            // frame pool are closed; never reopen a possibly recycled HWND.
+            // replaceable frame pool are closed; never reopen a recycled HWND.
         }
     }
 
@@ -1024,43 +1150,15 @@ mod native {
         validate_source_frame_geometry(binding, initial_dimensions, true)?;
         let mut gpu_reservation =
             gpu_budget.reserve(estimate_gpu_bytes(initial_dimensions, binding.crop)?)?;
-        let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
-            &winrt_device,
-            DirectXPixelFormat::B8G8R8A8UIntNormalized,
-            FRAME_POOL_BUFFERS as i32,
+        let mut resources = NativeCaptureResources::new(
+            item,
+            winrt_device.clone(),
             initial_size,
-        )
-        .map_err(|error| format!("could not create a window frame pool: {error}"))?;
-        let mut resources = NativeCaptureResources::new(item, frame_pool);
-        let frame_signal = Arc::clone(&signal);
-        resources.frame_token = Some(
-            resources
-                .frame_pool
-                .FrameArrived(&TypedEventHandler::<
-                    Direct3D11CaptureFramePool,
-                    windows::core::IInspectable,
-                >::new(move |_, _| {
-                    frame_signal.notify_frame();
-                    Ok(())
-                }))
-                .map_err(|error| format!("could not subscribe to source-window frames: {error}"))?,
-        );
-        let closed_signal = Arc::clone(&signal);
-        resources.closed_token = Some(
-            resources
-                .item
-                .Closed(&TypedEventHandler::<
-                    GraphicsCaptureItem,
-                    windows::core::IInspectable,
-                >::new(move |_, _| {
-                    closed_signal.notify_source_closed();
-                    Ok(())
-                }))
-                .map_err(|error| {
-                    format!("could not subscribe to source-window closure: {error}")
-                })?,
-        );
-        resources.start_capture()?;
+            Arc::clone(&signal),
+            generation,
+            Arc::clone(&slot),
+        )?;
+        resources.start_capture(binding, &mut gpu_reservation)?;
 
         let cpu_budget = reservation.shared_budget();
         let mut first_reservation = Some(reservation);
@@ -1091,6 +1189,8 @@ mod native {
                     resources.stop_capture();
                     capture_running = false;
                 }
+                staging = None;
+                gpu_reservation.resize(0)?;
                 slot.set_status(generation, PinLiveStatus::Paused);
                 let resumed = signal.wait_while_paused();
                 if resumed.cancelled {
@@ -1112,8 +1212,7 @@ mod native {
                         continue;
                     }
                     NativeWindowState::Available => {
-                        resources.drain_frames();
-                        resources.start_capture()?;
+                        resources.start_capture(binding, &mut gpu_reservation)?;
                         capture_running = true;
                     }
                 }
@@ -1142,12 +1241,13 @@ mod native {
                         if capture_running {
                             resources.stop_capture();
                             capture_running = false;
+                            staging = None;
+                            gpu_reservation.resize(0)?;
                         }
                     }
                     NativeWindowState::Available => {
                         if !capture_running {
-                            resources.drain_frames();
-                            resources.start_capture()?;
+                            resources.start_capture(binding, &mut gpu_reservation)?;
                             capture_running = true;
                         }
                     }
@@ -1191,7 +1291,7 @@ mod native {
             // fixed-size, so this never creates an unbounded image backlog.
             let mut latest_frame = None;
             for _ in 0..FRAME_POOL_BUFFERS {
-                let Ok(next) = resources.frame_pool.TryGetNextFrame() else {
+                let Some(next) = resources.try_get_next_frame() else {
                     break;
                 };
                 latest_frame = Some(next);
@@ -1281,22 +1381,24 @@ mod native {
                     return Err(message);
                 }
                 let estimate = estimate_gpu_bytes(content_size, binding.crop)?;
-                gpu_reservation.resize(estimate)?;
-                if let Err(error) = resources.frame_pool.Recreate(
-                    &winrt_device,
-                    DirectXPixelFormat::B8G8R8A8UIntNormalized,
-                    FRAME_POOL_BUFFERS as i32,
-                    SizeInt32 {
-                        Width: content_size.0 as i32,
-                        Height: content_size.1 as i32,
-                    },
-                ) {
+                let previous_dimensions = valid_dimensions(resources.source_size)?;
+                let previous_estimate = estimate_gpu_bytes(previous_dimensions, binding.crop)?;
+                if estimate > previous_estimate {
+                    gpu_reservation.resize(estimate)?;
+                }
+                if let Err(error) = resources.recreate_frame_pool(SizeInt32 {
+                    Width: content_size.0 as i32,
+                    Height: content_size.1 as i32,
+                }) {
+                    gpu_reservation.resize(previous_estimate)?;
                     slot.set_status(
                         generation,
                         PinLiveStatus::TemporarilyUnavailable(format!(
                             "source resize is not capturable: {error}"
                         )),
                     );
+                } else {
+                    gpu_reservation.resize(estimate)?;
                 }
                 continue;
             }
@@ -1322,6 +1424,9 @@ mod native {
                 bottom: binding.crop.y + binding.crop.height,
                 back: 1,
             };
+            if !source_can_publish_frame(identity, generation, &signal, &slot) {
+                continue;
+            }
             unsafe {
                 context.CopySubresourceRegion(
                     staging_texture,
@@ -1346,6 +1451,7 @@ mod native {
             // Reserve CPU bytes before allocating the converted crop. The first
             // lease was reserved by the selection transaction; later frames
             // compete atomically with all other pin and clipboard leases.
+            let initial_frame_candidate = first_reservation.is_some();
             let frame_reservation = if let Some(reservation) = first_reservation.take() {
                 if reservation.bytes() != image_bytes {
                     return Err("first source frame does not match its reserved crop size".into());
@@ -1364,6 +1470,12 @@ mod native {
                 }
             };
             let image = read_staging_rgba(&context, staging_texture, binding.crop)?;
+            if !source_can_publish_frame(identity, generation, &signal, &slot) {
+                if initial_frame_candidate {
+                    first_reservation = Some(frame_reservation);
+                }
+                continue;
+            }
             cadence.record_completed(clock_origin.elapsed());
             if slot.has_frame() {
                 sequence = sequence
@@ -1505,6 +1617,37 @@ mod native {
             NativeWindowState::Unavailable("source window is cloaked")
         } else {
             NativeWindowState::Available
+        }
+    }
+
+    fn source_can_publish_frame(
+        identity: PinSourceWindowIdentity,
+        generation: PinCaptureGeneration,
+        signal: &WorkerSignal,
+        slot: &PinLiveFrameSlot,
+    ) -> bool {
+        let flags = signal.snapshot();
+        if flags.cancelled || flags.paused {
+            return false;
+        }
+        if flags.source_closed {
+            slot.set_status(generation, PinLiveStatus::SourceClosed);
+            return false;
+        }
+        match validate_native_window(identity) {
+            NativeWindowState::Available => true,
+            NativeWindowState::Unavailable(reason) => {
+                slot.set_status(
+                    generation,
+                    PinLiveStatus::TemporarilyUnavailable(reason.into()),
+                );
+                false
+            }
+            NativeWindowState::Closed => {
+                slot.set_status(generation, PinLiveStatus::SourceClosed);
+                signal.notify_source_closed();
+                false
+            }
         }
     }
 
@@ -1815,6 +1958,43 @@ mod tests {
     }
 
     #[test]
+    fn worker_signal_returns_coalesced_frame_arrival_once() {
+        let signal = WorkerSignal::new();
+        signal.notify_frame();
+        signal.notify_frame();
+
+        assert!(
+            signal
+                .wait_for_frame_or_control(Duration::ZERO)
+                .frame_arrived
+        );
+        assert!(
+            !signal
+                .wait_for_frame_or_control(Duration::ZERO)
+                .frame_arrived
+        );
+    }
+
+    #[test]
+    fn worker_signal_activation_schedules_a_drain_for_buffered_frames() {
+        let signal = WorkerSignal::new();
+        signal.notify_frame();
+        let inactive = signal.wait_for_frame_or_control(Duration::ZERO);
+        assert!(inactive.frame_arrived);
+        assert!(!inactive.activated);
+
+        assert!(signal.activate());
+        let activated = signal.wait_for_frame_or_control(Duration::ZERO);
+        assert!(activated.activated);
+        assert!(activated.frame_arrived);
+        assert!(
+            !signal
+                .wait_for_frame_or_control(Duration::ZERO)
+                .frame_arrived
+        );
+    }
+
+    #[test]
     fn latest_frame_slot_rejects_stale_publications_and_charges_retained_leases() {
         let budget = Arc::new(SharedImageBudget {
             limit: 32,
@@ -1966,5 +2146,572 @@ mod tests {
         assert_eq!(budget.used_bytes(), 16);
         assert!(!session.pause());
         assert!(!session.resume());
+    }
+
+    #[cfg(windows)]
+    mod native_smoke {
+        use super::*;
+        use crate::pinboard::source::{NativePinSourceResolver, PinSourceResolver};
+        use crate::pinboard::{Pin, PinCaptureOperationId, Pinboard, PinboardLimits};
+        use image::Rgba;
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::windows::process::CommandExt;
+        use std::path::PathBuf;
+        use std::process::{Child, ChildStdin, Command, Stdio};
+        use std::sync::mpsc::{self, Receiver, SyncSender};
+        use std::time::SystemTime;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CROP_X: u32 = 43;
+        const CROP_Y: u32 = 57;
+        const CROP_SIZE: u32 = 64;
+
+        struct SourceReady {
+            nonce: String,
+            hwnd: usize,
+            process_id: u32,
+            thread_id: u32,
+            bounds: ScreenRect,
+        }
+
+        impl SourceReady {
+            fn parse(line: &str) -> Result<Self, String> {
+                let fields: Vec<_> = line.split('|').collect();
+                if fields.len() != 9 || fields[0] != "READY" {
+                    return Err(format!("invalid source fixture handshake: {line}"));
+                }
+                let parse = |value: &str, name: &str| {
+                    value
+                        .parse::<u64>()
+                        .map_err(|error| format!("invalid {name} in fixture handshake: {error}"))
+                };
+                let hwnd = usize::try_from(parse(fields[2], "HWND")?)
+                    .map_err(|_| "fixture HWND does not fit usize".to_owned())?;
+                let process_id = u32::try_from(parse(fields[3], "PID")?)
+                    .map_err(|_| "fixture PID does not fit u32".to_owned())?;
+                let thread_id = u32::try_from(parse(fields[4], "thread ID")?)
+                    .map_err(|_| "fixture thread ID does not fit u32".to_owned())?;
+                let x = i32::try_from(
+                    fields[5]
+                        .parse::<i64>()
+                        .map_err(|error| error.to_string())?,
+                )
+                .map_err(|_| "fixture X coordinate does not fit i32".to_owned())?;
+                let y = i32::try_from(
+                    fields[6]
+                        .parse::<i64>()
+                        .map_err(|error| error.to_string())?,
+                )
+                .map_err(|_| "fixture Y coordinate does not fit i32".to_owned())?;
+                let width = u32::try_from(parse(fields[7], "width")?)
+                    .map_err(|_| "fixture width does not fit u32".to_owned())?;
+                let height = u32::try_from(parse(fields[8], "height")?)
+                    .map_err(|_| "fixture height does not fit u32".to_owned())?;
+                Ok(Self {
+                    nonce: fields[1].to_owned(),
+                    hwnd,
+                    process_id,
+                    thread_id,
+                    bounds: ScreenRect::new(x, y, width, height),
+                })
+            }
+        }
+
+        struct OwnedSourceFixture {
+            child: Child,
+            stdin: Option<ChildStdin>,
+            lines: Receiver<String>,
+            reader: Option<thread::JoinHandle<()>>,
+            next_command_id: u64,
+            finished: bool,
+        }
+
+        impl OwnedSourceFixture {
+            fn spawn(nonce: &str) -> Result<Self, String> {
+                let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests")
+                    .join("fixtures")
+                    .join("pinboard_live_source.ps1");
+                let mut child = Command::new("powershell.exe")
+                    .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-File"])
+                    .arg(script)
+                    .arg(nonce)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .map_err(|error| {
+                        format!("could not start the owned PowerShell fixture: {error}")
+                    })?;
+                let stdout = child.stdout.take().ok_or_else(|| {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    "PowerShell fixture has no stdout pipe".to_owned()
+                })?;
+                let (line_tx, lines) = mpsc::sync_channel(32);
+                let reader = match thread::Builder::new()
+                    .name("pinboard-live-fixture-output".into())
+                    .spawn(move || {
+                        for line in BufReader::new(stdout).lines() {
+                            match line {
+                                Ok(line) => {
+                                    if line_tx.try_send(line).is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }) {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(format!("could not read fixture output: {error}"));
+                    }
+                };
+                Ok(Self {
+                    stdin: child.stdin.take(),
+                    child,
+                    lines,
+                    reader: Some(reader),
+                    next_command_id: 1,
+                    finished: false,
+                })
+            }
+
+            fn next_line(&self, timeout: Duration) -> Result<String, String> {
+                self.lines.recv_timeout(timeout).map_err(|error| {
+                    format!("timed out waiting for the owned source fixture: {error}")
+                })
+            }
+
+            fn wait_ready(&self, nonce: &str) -> Result<SourceReady, String> {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(
+                            "owned source fixture did not become ready within 10 seconds".into(),
+                        );
+                    }
+                    let line = self.next_line(remaining)?;
+                    if line.starts_with("ERROR|") {
+                        return Err(format!("owned source fixture reported {line}"));
+                    }
+                    let ready = SourceReady::parse(&line)?;
+                    if ready.nonce != nonce {
+                        return Err("owned source fixture nonce did not match the test".into());
+                    }
+                    return Ok(ready);
+                }
+            }
+
+            fn command(&mut self, command: &str) -> Result<(), String> {
+                let id = self.next_command_id;
+                self.next_command_id = self
+                    .next_command_id
+                    .checked_add(1)
+                    .ok_or_else(|| "fixture command identity exhausted".to_owned())?;
+                let stdin = self
+                    .stdin
+                    .as_mut()
+                    .ok_or_else(|| "owned source fixture stdin is closed".to_owned())?;
+                writeln!(stdin, "{command} {id}")
+                    .and_then(|()| stdin.flush())
+                    .map_err(|error| format!("could not send command to owned fixture: {error}"))?;
+                let deadline = Instant::now() + Duration::from_secs(3);
+                loop {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(format!(
+                            "owned source fixture did not acknowledge {command}"
+                        ));
+                    }
+                    let line = self.next_line(remaining)?;
+                    if line == format!("ACK|{id}") {
+                        return Ok(());
+                    }
+                    if line.starts_with(&format!("ERROR|{id}|")) || line.starts_with("ERROR|") {
+                        return Err(format!("owned source fixture rejected {command}: {line}"));
+                    }
+                    return Err(format!(
+                        "unexpected output from owned source fixture: {line}"
+                    ));
+                }
+            }
+
+            fn finish(&mut self) -> Result<(), String> {
+                if self
+                    .child
+                    .try_wait()
+                    .map_err(|error| error.to_string())?
+                    .is_none()
+                {
+                    self.command("QUIT")?;
+                }
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let status = loop {
+                    if let Some(status) =
+                        self.child.try_wait().map_err(|error| error.to_string())?
+                    {
+                        break status;
+                    }
+                    if Instant::now() >= deadline {
+                        self.child.kill().map_err(|error| {
+                            format!("could not reap the owned fixture: {error}")
+                        })?;
+                        break self.child.wait().map_err(|error| error.to_string())?;
+                    }
+                    thread::yield_now();
+                };
+                self.stdin.take();
+                if let Some(reader) = self.reader.take() {
+                    reader.join().map_err(|_| {
+                        "owned fixture stdout reader terminated unexpectedly".to_owned()
+                    })?;
+                }
+                self.finished = true;
+                if !status.success() {
+                    return Err(format!("owned PowerShell fixture exited with {status}"));
+                }
+                Ok(())
+            }
+        }
+
+        impl Drop for OwnedSourceFixture {
+            fn drop(&mut self) {
+                if !self.finished && self.child.try_wait().ok().flatten().is_none() {
+                    if let Some(stdin) = self.stdin.as_mut() {
+                        let id = self.next_command_id;
+                        let _ = writeln!(stdin, "QUIT {id}").and_then(|()| stdin.flush());
+                    }
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    while self.child.try_wait().ok().flatten().is_none()
+                        && Instant::now() < deadline
+                    {
+                        thread::yield_now();
+                    }
+                    if self.child.try_wait().ok().flatten().is_none() {
+                        let _ = self.child.kill();
+                        let _ = self.child.wait();
+                    }
+                }
+                self.stdin.take();
+                if let Some(reader) = self.reader.take() {
+                    let _ = reader.join();
+                }
+            }
+        }
+
+        struct LocalLiveSession(Option<PinLiveCaptureSession>);
+
+        impl Drop for LocalLiveSession {
+            fn drop(&mut self) {
+                if let Some(session) = self.0.as_mut() {
+                    let _ = session.cancel_and_join();
+                }
+            }
+        }
+
+        fn fixture_nonce() -> String {
+            format!(
+                "{:x}",
+                SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |duration| duration.as_nanos())
+            )
+        }
+
+        fn wait_for_first_frame(session: &mut PinLiveCaptureSession) -> Result<(), String> {
+            session
+                .wait_first_frame_result(Duration::from_secs(10))
+                .unwrap_or_else(|| {
+                    Err("the native live source produced no first frame in 10 seconds".into())
+                })
+        }
+
+        fn first_anchor(frame: &PinLiveFrameLease) -> Rgba<u8> {
+            *frame.image.pixels().get_pixel(8, 8)
+        }
+
+        fn second_anchor(frame: &PinLiveFrameLease) -> Rgba<u8> {
+            *frame.image.pixels().get_pixel(43, 32)
+        }
+
+        fn phase_colors(phase: char) -> (Rgba<u8>, Rgba<u8>) {
+            match phase {
+                'A' => (Rgba([250, 210, 25, 255]), Rgba([20, 180, 245, 255])),
+                'B' => (Rgba([35, 240, 70, 255]), Rgba([250, 90, 15, 255])),
+                'C' => (Rgba([245, 40, 170, 255]), Rgba([25, 210, 230, 255])),
+                _ => unreachable!(),
+            }
+        }
+
+        fn assert_phase(frame: &PinLiveFrameLease, phase: char) {
+            let (first, second) = phase_colors(phase);
+            assert_eq!(
+                first_anchor(frame),
+                first,
+                "wrong first anchor for phase {phase} at sequence {}",
+                frame.sequence
+            );
+            assert_eq!(
+                second_anchor(frame),
+                second,
+                "wrong second anchor for phase {phase} at sequence {}",
+                frame.sequence
+            );
+        }
+
+        fn wait_for_phase(
+            board: &Pinboard,
+            pin_id: crate::pinboard::PinId,
+            after_sequence: u64,
+            phase: char,
+            wakes: &Receiver<()>,
+            timeout: Duration,
+        ) -> Result<PinLiveFrameLease, String> {
+            let deadline = Instant::now() + timeout;
+            loop {
+                if let Some(frame) = board.get(pin_id).and_then(Pin::live_frame)
+                    && frame.sequence > after_sequence
+                    && first_anchor(&frame) == phase_colors(phase).0
+                {
+                    assert_phase(&frame, phase);
+                    return Ok(frame);
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    let status = board.get(pin_id).and_then(Pin::live_status);
+                    return Err(format!(
+                        "no newer phase {phase} frame arrived after sequence {after_sequence}; status: {status:?}"
+                    ));
+                }
+                match wakes.recv_timeout(remaining) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err("native live frame wake channel disconnected".into());
+                    }
+                }
+            }
+        }
+
+        fn drain_wakes(wakes: &Receiver<()>) {
+            while wakes.try_recv().is_ok() {}
+        }
+
+        #[test]
+        #[ignore = "requires an interactive Windows desktop with Windows Graphics Capture support"]
+        fn native_live_pin_owned_window_smoke() {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
+
+            const CROP_BYTES: usize = (CROP_SIZE * CROP_SIZE * 4) as usize;
+            let nonce = fixture_nonce();
+            let mut fixture = OwnedSourceFixture::spawn(&nonce).unwrap_or_else(|error| {
+                panic!("could not start the native source fixture: {error}")
+            });
+            let ready = fixture
+                .wait_ready(&nonce)
+                .unwrap_or_else(|error| panic!("native source fixture was not ready: {error}"));
+            assert_eq!(ready.process_id, fixture.child.id());
+            assert_ne!(ready.process_id, std::process::id());
+            assert_eq!((ready.bounds.width, ready.bounds.height), (360, 240));
+            let hwnd = HWND(ready.hwnd as *mut core::ffi::c_void);
+            assert!(
+                unsafe { IsWindow(hwnd) }.as_bool(),
+                "fixture HWND is not live"
+            );
+            let mut actual_process_id = 0;
+            let actual_thread_id =
+                unsafe { GetWindowThreadProcessId(hwnd, Some(&mut actual_process_id)) };
+            assert_eq!(actual_process_id, ready.process_id);
+            assert_eq!(actual_thread_id, ready.thread_id);
+
+            fixture.command("PAINT A").unwrap();
+            let selection = ScreenRect::new(
+                ready.bounds.x + CROP_X as i32,
+                ready.bounds.y + CROP_Y as i32,
+                CROP_SIZE,
+                CROP_SIZE,
+            );
+            let resolver = NativePinSourceResolver;
+            let binding = resolver.resolve(selection).unwrap_or_else(|error| {
+                panic!("native source resolver rejected owned source: {error}")
+            });
+            assert_eq!(binding.window.hwnd, ready.hwnd);
+            assert_eq!(binding.window.process_id, ready.process_id);
+            assert_eq!(binding.window.thread_id, ready.thread_id);
+            assert_eq!(binding.captured_bounds, ready.bounds);
+            assert_eq!(
+                binding.crop,
+                PinSourceCrop {
+                    x: CROP_X,
+                    y: CROP_Y,
+                    width: CROP_SIZE,
+                    height: CROP_SIZE,
+                }
+            );
+
+            let mut board = Pinboard::with_limits(PinboardLimits::default()).unwrap();
+            let operation_id = PinCaptureOperationId::new(0x5049_4e42_4f41_5244).unwrap();
+            let capture = board.reserve_live_capture(operation_id).unwrap();
+            board.reserve_selected_rect(capture, selection).unwrap();
+            let reservation = board.take_live_reservation(capture).unwrap();
+            assert_eq!(reservation.bytes(), CROP_BYTES);
+            let gpu_budget = board.gpu_budget();
+            let mut local_session = LocalLiveSession(Some(
+                NativePinLiveCaptureBackend
+                    .start(
+                        binding,
+                        capture.generation,
+                        reservation,
+                        Arc::clone(&gpu_budget),
+                    )
+                    .unwrap_or_else(|error| panic!("native live capture could not start: {error}")),
+            ));
+            let wake_source = local_session.0.as_ref().unwrap().frame_source();
+            let (wake_tx, wakes) = mpsc::sync_channel::<()>(1);
+            let wake_sender: SyncSender<()> = wake_tx;
+            wake_source.set_child_wake_notifier(Some(Arc::new(move || {
+                let _ = wake_sender.try_send(());
+            })));
+            wait_for_first_frame(local_session.0.as_mut().unwrap()).unwrap_or_else(|error| {
+                panic!("native source did not publish its first frame: {error}")
+            });
+
+            board
+                .stage_live_capture(capture, binding, local_session.0.take().unwrap())
+                .unwrap();
+            let pin_id = board.commit_capture(capture).unwrap();
+            let initial = board.get(pin_id).unwrap().live_frame().unwrap();
+            assert_eq!(initial.sequence, 1);
+            assert_eq!(initial.source_content_size, (360, 240));
+            assert_phase(&initial, 'A');
+
+            let output_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("pinboard-live-smoke")
+                .join(&nonce);
+            std::fs::create_dir_all(&output_dir).unwrap();
+            let initial_path = output_dir.join("initial.png");
+            initial.image.pixels().save(&initial_path).unwrap();
+            eprintln!(
+                "native live smoke initial frame: {}",
+                initial_path.display()
+            );
+
+            fixture.command("MOVE").unwrap();
+            fixture.command("COVER").unwrap();
+            fixture.command("PAINT B").unwrap();
+            let covered = wait_for_phase(
+                &board,
+                pin_id,
+                initial.sequence,
+                'B',
+                &wakes,
+                Duration::from_secs(5),
+            )
+            .unwrap_or_else(|error| {
+                panic!("moved/covered source did not publish phase B: {error}")
+            });
+            assert_eq!(covered.source_content_size, (360, 240));
+            assert_ne!(first_anchor(&covered), Rgba([255, 0, 255, 255]));
+            let covered_path = output_dir.join("covered-updated.png");
+            covered.image.pixels().save(&covered_path).unwrap();
+            eprintln!(
+                "native live smoke moved, covered frame: {}",
+                covered_path.display()
+            );
+
+            assert!(board.pause_live(pin_id), "live source did not pause");
+            assert_eq!(
+                board.get(pin_id).unwrap().live_status(),
+                Some(PinLiveStatus::Paused)
+            );
+            let frozen = board.get(pin_id).unwrap().live_frame().unwrap();
+            assert!(frozen.sequence >= covered.sequence);
+            assert_phase(&frozen, 'B');
+            drain_wakes(&wakes);
+            fixture.command("PAINT C").unwrap();
+            let frozen_until = Instant::now() + Duration::from_millis(350);
+            while Instant::now() < frozen_until {
+                let current = board.get(pin_id).unwrap().live_frame().unwrap();
+                assert_eq!(
+                    current.sequence, frozen.sequence,
+                    "a paused source published a frame"
+                );
+                assert_eq!(first_anchor(&current), first_anchor(&frozen));
+                assert_eq!(second_anchor(&current), second_anchor(&frozen));
+                let remaining = frozen_until.saturating_duration_since(Instant::now());
+                let _ = wakes.recv_timeout(remaining.min(Duration::from_millis(25)));
+            }
+            assert!(board.resume_live(pin_id), "live source did not resume");
+            let resumed = wait_for_phase(
+                &board,
+                pin_id,
+                frozen.sequence,
+                'C',
+                &wakes,
+                Duration::from_secs(5),
+            )
+            .unwrap_or_else(|error| panic!("resumed source did not publish phase C: {error}"));
+
+            fixture.command("CLOSE_SOURCE").unwrap();
+            let closed_deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if board.get(pin_id).unwrap().live_status() == Some(PinLiveStatus::SourceClosed) {
+                    break;
+                }
+                let remaining = closed_deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    panic!(
+                        "source HWND closed but capture did not become terminal; status: {:?}",
+                        board.get(pin_id).unwrap().live_status()
+                    );
+                }
+                let _ = wakes.recv_timeout(remaining);
+            }
+            assert!(
+                !board.resume_live(pin_id),
+                "closed source unexpectedly resumed"
+            );
+            let closed_frame = board.get(pin_id).unwrap().live_frame().unwrap();
+            assert!(closed_frame.sequence >= resumed.sequence);
+            assert_phase(&closed_frame, 'C');
+            let terminal_sequence = closed_frame.sequence;
+            let terminal_until = Instant::now() + Duration::from_millis(200);
+            while Instant::now() < terminal_until {
+                let current = board.get(pin_id).unwrap().live_frame().unwrap();
+                assert_eq!(current.sequence, terminal_sequence);
+                assert_eq!(first_anchor(&current), first_anchor(&closed_frame));
+                assert_eq!(second_anchor(&current), second_anchor(&closed_frame));
+                let remaining = terminal_until.saturating_duration_since(Instant::now());
+                let _ = wakes.recv_timeout(remaining.min(Duration::from_millis(25)));
+            }
+
+            drop(initial);
+            drop(covered);
+            drop(frozen);
+            drop(resumed);
+            drop(closed_frame);
+            drop(wake_source);
+            assert!(board.close(pin_id));
+            board.shutdown_live_sessions_and_join().unwrap();
+            assert_eq!(
+                board.image_bytes(),
+                0,
+                "CPU image budget was not released after close"
+            );
+            assert_eq!(
+                gpu_budget.used.load(Ordering::Acquire),
+                0,
+                "GPU capture reservation was not released after close"
+            );
+            drop(gpu_budget);
+            fixture.finish().unwrap();
+        }
     }
 }

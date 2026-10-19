@@ -15,7 +15,7 @@ radial presentation policy, explicit action settings, and note persistence.
 | M2-A | Typed live intent through existing selector/parking lifecycle; unambiguous external window binding | complete | Parser/handler and selection/restoration tests; static path unchanged |
 | M2-B | Window-content capture and bounded latest-frame sessions owned by pinboard | complete | Fake stream/budget/pause/identity/cancellation tests; Windows compile |
 | M2-C | Child texture updates, status, Pause/Resume and latest-frame copy/save | complete | Focused presenter/lifecycle tests; exact native ownership and hidden-root error feedback |
-| M2-D | Native source smoke and remaining direct lifetime/resource gate | pending | One owned-window WGC smoke; reuse B/C coverage without duplicate tests |
+| M2-D | Native source smoke and remaining direct lifetime/resource gate | complete | One owned-window WGC smoke; reuse B/C coverage without duplicate tests |
 | M3-A | Per-panel Unicode-safe source matching and navigation | pending | Literal case-insensitive range/navigation tests; no content changes |
 | M3-B | Find strip, scoped keys, Edit/Preview/Split navigation | pending | Targeted note-panel interactions, honest source-only fallback |
 | M4 | Independent focused review and user documentation | pending | Final targeted integration, fmt, one Clippy attempt; report native smoke limitations |
@@ -233,3 +233,65 @@ Initial five passing cases were feedback persistence, exact native controls,
 retained child texture/zoom, command recovery, and delayed live restoration/error.
 All seven distinct selected cases have passed across these runs. No full suite
 was run. Actual native pin UI remains unverified; M2-D provides backend evidence.
+
+M2-C checkpoint: 3776f20b feat(pinboard): [M2-C] display and control live pins — normal push succeeded to origin/live-pinboard.
+M2-D assigned to sole implementation writer: one ignored owned-window native
+WGC smoke with fixed movement/occlusion/pause/source-death/cleanup script.
+
+M2-D native gate evidence so far (not complete): ignored test and owned WinForms
+fixture use actual resolver, WGC backend and domain commit. First compile needed
+three missing test imports. First execution was blocked by PowerShell script
+policy before windows; process-scoped -ExecutionPolicy Bypass fixes fixture launch
+without changing user/machine policy. Restricted execution then failed at WGC
+IsSupported with 0x8007000E. One normal-permissions run passed that boundary and
+failed CreateForWindow 0x80070057. Fixture-only source style correction (ordinary
+app/taskbar window, no forced NOACTIVATE; ShowWithoutActivation retained) passed
+binding. No production window-style workaround was added.
+
+First-frame timeout exposed a real production defect: wait_for_frame_or_control
+cleared frame_arrived before constructing its returned snapshot, so the native
+loop discarded every frame event. Fixed snapshot-before-clear and activation's
+pending-drain signal (needed when the bounded pool fills during restoration).
+Two deterministic regressions passed: `cargo nextest run --cargo-profile fast-dev
+--lib -E 'test(worker_signal_)'`. Touched rustfmt/diff checks pass.
+
+Same fixed native command, run with normal permissions:
+`cargo nextest run --cargo-profile fast-dev --lib --run-ignored ignored-only -E 'test(native_live_pin_owned_window_smoke)' --no-capture`.
+It now verified initial source-relative asymmetric A pixels and moved/covered B
+pixels (never magenta desktop occluder), then paused frame stability. Evidence
+saved and visually inspected at target/pinboard-live-smoke/18dfcce490d22a8c/initial.png
+and covered-updated.png. Resume exposed a second production boundary: creating a
+new capture session from the already-used frame pool after Close returned
+0x8000FFFF. Implementation is correcting pool/session restart while retaining the
+same source item; source closure and full cleanup assertions remain pending.
+
+M2-D restart correction: NativeCaptureResources retains one item/Closed
+subscription but closes and replaces pool/session/event token on pause/recovery.
+GPU reservation/staging release while stopped; reserve before restart allocation.
+Windows `cargo check --profile fast-dev --lib`, touched fmt/diff passed. The next
+same escalated smoke reached valid resumed C pixels, proving restart, then exposed
+a source-closure race: a zero-filled teardown frame replaced C before terminal
+status. The final frozen C assertion correctly failed. Implementation is fencing
+terminal status in the actual item Closed callback and native publication boundary;
+no pixel heuristics or source HWND reopening. New A/B artifacts from that run:
+target/pinboard-live-smoke/18dfcd37c9bbb75c/{initial,covered-updated}.png.
+
+M2-D COMPLETE: item Closed callback terminalizes the exact slot before waking
+worker; native identity/visibility/control checks fence GPU/CPU readback and
+publication. Existing terminal late-publication test passed (1/1):
+`cargo nextest run --cargo-profile fast-dev --lib -E 'test(latest_frame_slot_rejects_stale_publications_and_charges_retained_leases)'`.
+The escalated same fixed smoke then passed all assertions in 1.73s. Final diff
+review also repaired initial-reservation transfer if a first candidate is rejected
+after readback; same reservation remains pending, no activation-before-first-frame
+stall. Windows library check/fmt/diff passed and same native smoke passed again
+(1/1, 1.730s total). Final artifacts:
+`target/pinboard-live-smoke/18dfcd900e990e80/initial.png` and
+`target/pinboard-live-smoke/18dfcd900e990e80/covered-updated.png`.
+
+This establishes real source-relative WGC pixels, moved/covered changing source,
+Pause/Resume, frozen terminal source closure with Resume rejected, and zero CPU
+image/GPU reservations after all leases/workers close. Owned helper acknowledges
+QUIT and exits; timeout/unwind guards target only its own Child. No HWND reopen,
+pixel heuristic, screen polling, synthetic input, or unrelated user window control.
+Native pin UI controls, radial triggering and note UI were not manually operated;
+focused deterministic UI tests provide separate evidence. No broader smoke suite.
