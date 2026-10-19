@@ -4,7 +4,10 @@
 //! `Response` for the current call, applies any returned focus directive, and
 //! then drops it normally.
 
-use super::{SemanticTargetId, SurfaceId, TargetGeneration, TargetId, TargetKind, TargetMetadata};
+use super::{
+    HintMap, HintSession, MatchOutcome, SemanticTargetId, SessionLifecycle, SurfaceId,
+    TargetGeneration, TargetId, TargetKind, TargetMetadata,
+};
 use eframe::egui;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -213,6 +216,14 @@ struct PassCollector {
     closed: bool,
 }
 
+#[derive(Default)]
+struct RootInputFrame {
+    owner_blocked: bool,
+    resolved: bool,
+    capture_text_remainder: bool,
+    captured_events: Vec<egui::Event>,
+}
+
 /// A per-surface adapter. Cloning a scope keeps only a handle to this frame's
 /// collector and its value-only surface namespace.
 #[derive(Clone)]
@@ -384,6 +395,10 @@ impl JumpModeScope {
 pub(crate) struct JumpModeUi {
     enabled: bool,
     navigation_epoch: NavigationEpoch,
+    active_session: Option<HintSession>,
+    last_outcome: Option<MatchOutcome>,
+    root_input_frame: RootInputFrame,
+    held_captured_keys: HashSet<egui::Key>,
     pending_focus_intent: Option<FocusIntent>,
     collector: Option<Arc<Mutex<PassCollector>>>,
     pass_registry: Option<TargetRegistry>,
@@ -420,9 +435,47 @@ impl JumpModeUi {
         self.collector = None;
         self.pass_registry = None;
         self.frame_consumed_focus_intent = None;
+        self.root_input_frame = RootInputFrame::default();
         if !self.enabled {
             self.clear();
         }
+    }
+
+    /// Resolve the root's first visible-frame input owner before any menu or
+    /// widget can observe the events. The first pass performs transitions;
+    /// later passes reapply the same event removals to egui's restored input.
+    pub(crate) fn handle_root_input(
+        &mut self,
+        ctx: &egui::Context,
+        root_owner_allowed: bool,
+        first_ui_pass: bool,
+    ) {
+        if !root_owner_allowed {
+            self.root_input_frame.owner_blocked = true;
+            if !ctx.input(|input| input.focused) && self.active_session.is_some() {
+                self.capture_unfocused_owner_loss_events(ctx);
+            }
+        }
+
+        if first_ui_pass {
+            if !root_owner_allowed {
+                self.cancel_for_owner_loss();
+            } else if self.enabled && !self.root_input_frame.owner_blocked {
+                self.process_root_input_events(ctx);
+            }
+        }
+
+        self.apply_root_input_capture(ctx);
+    }
+
+    pub(crate) fn active_session(&self) -> Option<&HintSession> {
+        self.active_session
+            .as_ref()
+            .filter(|session| matches!(session.lifecycle(), SessionLifecycle::Active))
+    }
+
+    pub(crate) fn last_outcome(&self) -> Option<&MatchOutcome> {
+        self.last_outcome.as_ref()
     }
 
     /// Start a new pass collector. Calling this again replaces all geometry
@@ -492,8 +545,21 @@ impl JumpModeUi {
             return;
         }
 
+        if !root_owner_allowed {
+            self.cancel_for_owner_loss();
+        }
+
         let mut completed = self.pass_registry.take().unwrap_or_default();
         completed.revalidate(ctx, root_owner_allowed);
+        if root_owner_allowed && let Some(session) = self.active_session.as_mut() {
+            let population_changed = session
+                .reconcile_targets(completed.targets().iter().map(|target| target.id().clone()))
+                .map(|change| change.requires_new_session())
+                .unwrap_or(true);
+            if population_changed {
+                self.cancel_active_session();
+            }
+        }
         let pending_intent = self.pending_focus_intent.take();
         if let Some(consumed) = self.frame_consumed_focus_intent.as_ref() {
             let still_matches = pending_intent.as_ref() == Some(&consumed.intent)
@@ -555,16 +621,399 @@ impl JumpModeUi {
 
     pub(crate) fn cancel_all(&mut self) {
         self.navigation_epoch = self.navigation_epoch.next();
-        self.clear();
-    }
-
-    fn clear(&mut self) {
+        self.cancel_active_session();
         self.pending_focus_intent = None;
         self.collector = None;
         self.pass_registry = None;
         self.retained_registry = TargetRegistry::default();
         self.frame_consumed_focus_intent = None;
     }
+
+    fn clear(&mut self) {
+        self.active_session = None;
+        self.last_outcome = None;
+        self.root_input_frame = RootInputFrame::default();
+        self.held_captured_keys.clear();
+        self.pending_focus_intent = None;
+        self.collector = None;
+        self.pass_registry = None;
+        self.retained_registry = TargetRegistry::default();
+        self.frame_consumed_focus_intent = None;
+    }
+
+    pub(crate) fn root_input_owner_allowed(&self, root_owner_allowed: bool) -> bool {
+        root_owner_allowed && !self.root_input_frame.owner_blocked
+    }
+
+    fn process_root_input_events(&mut self, ctx: &egui::Context) {
+        let events = ctx.input(|input| input.events.clone());
+        let input_modifiers = ctx.input(|input| input.modifiers);
+        let paired_text_indices = paired_text_indices(&events);
+        let mut captured_text_indices = HashSet::new();
+        let mut captured_text_only_indices = HashSet::new();
+        let mut shortcut_text_indices = HashSet::new();
+
+        for (event_index, event) in events.iter().enumerate() {
+            if matches!(
+                event,
+                egui::Event::Cut | egui::Event::Paste(_) | egui::Event::Ime(_)
+            ) {
+                if self.active_session.is_some()
+                    || self.root_input_frame.resolved
+                    || self.root_input_frame.capture_text_remainder
+                {
+                    self.capture_event(event);
+                }
+                continue;
+            }
+
+            if let egui::Event::Key {
+                key,
+                pressed,
+                repeat,
+                modifiers,
+                ..
+            } = event
+            {
+                let paired_text_index = paired_text_indices.get(&event_index).copied();
+                if !pressed {
+                    if self.held_captured_keys.remove(key) {
+                        self.capture_event(event);
+                    }
+                    continue;
+                }
+                if self.held_captured_keys.contains(key) {
+                    self.capture_event(event);
+                    if let Some(text_index) = paired_text_index {
+                        captured_text_indices.insert(text_index);
+                        captured_text_only_indices.insert(text_index);
+                    }
+                    continue;
+                }
+
+                let leader = is_leader_key(*key, *modifiers);
+                if leader && !self.root_input_frame.resolved {
+                    self.capture_event(event);
+                    self.held_captured_keys.insert(*key);
+                    if let Some(text_index) = paired_text_index {
+                        captured_text_indices.insert(text_index);
+                        captured_text_only_indices.insert(text_index);
+                    }
+                    if !*repeat
+                        && !self.root_input_frame.capture_text_remainder
+                        && self.toggle_session()
+                    {
+                        self.root_input_frame.capture_text_remainder = true;
+                    }
+                    continue;
+                }
+                if matches!(*key, egui::Key::Enter | egui::Key::Space)
+                    && (self.active_session.is_some()
+                        || self.root_input_frame.resolved
+                        || self.root_input_frame.capture_text_remainder)
+                {
+                    self.capture_event(event);
+                    self.held_captured_keys.insert(*key);
+                    if let Some(text_index) = paired_text_index {
+                        captured_text_indices.insert(text_index);
+                        captured_text_only_indices.insert(text_index);
+                    }
+                    continue;
+                }
+
+                if has_shortcut_modifier(*modifiers) {
+                    if let Some(text_index) = paired_text_index {
+                        shortcut_text_indices.insert(text_index);
+                    }
+                    continue;
+                }
+
+                if self.active_session.is_none()
+                    && !self.root_input_frame.resolved
+                    && !self.root_input_frame.capture_text_remainder
+                {
+                    continue;
+                }
+
+                // While Jump Mode owns the root, all plain key presses are
+                // isolated from egui controls. Only the documented keys below
+                // alter the hint session.
+                self.capture_event(event);
+                self.held_captured_keys.insert(*key);
+                if let Some(text_index) = paired_text_index {
+                    captured_text_indices.insert(text_index);
+                    if *repeat {
+                        captured_text_only_indices.insert(text_index);
+                    }
+                }
+                if self.root_input_frame.resolved || self.root_input_frame.capture_text_remainder {
+                    if matches!(*key, egui::Key::Enter | egui::Key::Space) {
+                        continue;
+                    }
+                }
+                if *repeat {
+                    continue;
+                }
+
+                match key {
+                    egui::Key::Escape if self.active_session.is_some() => {
+                        self.cancel_active_session();
+                        self.root_input_frame.capture_text_remainder = true;
+                    }
+                    egui::Key::Backspace if self.active_session.is_some() => {
+                        self.update_session(HintSession::backspace);
+                    }
+                    egui::Key::Enter | egui::Key::Space => {}
+                    _ => {
+                        if paired_text_index.is_none()
+                            && let Some(letter) = key_letter(*key)
+                            && self.active_session.is_some()
+                        {
+                            self.push_hint_character(letter);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let egui::Event::Text(text) = event else {
+                continue;
+            };
+            if shortcut_text_indices.contains(&event_index) {
+                continue;
+            }
+            if captured_text_indices.contains(&event_index) {
+                self.capture_event(event);
+                if !captured_text_only_indices.contains(&event_index)
+                    && self.active_session.is_some()
+                    && !has_shortcut_modifier(input_modifiers)
+                {
+                    for character in text.chars() {
+                        self.push_hint_character(character);
+                    }
+                }
+                continue;
+            }
+            let active = self.active_session.is_some();
+            if !active
+                && !self.root_input_frame.resolved
+                && !self.root_input_frame.capture_text_remainder
+            {
+                continue;
+            }
+            if has_shortcut_modifier(input_modifiers) {
+                continue;
+            }
+
+            self.capture_event(event);
+            if !active {
+                continue;
+            }
+
+            for character in text.chars() {
+                self.push_hint_character(character);
+                if self.root_input_frame.resolved {
+                    self.root_input_frame.capture_text_remainder = true;
+                }
+            }
+        }
+    }
+
+    /// Returns true when the leader canceled an existing session.
+    fn toggle_session(&mut self) -> bool {
+        if let Some(mut session) = self.active_session.take() {
+            self.last_outcome = Some(session.cancel());
+            return true;
+        }
+
+        let map = HintMap::assign(self.retained_registry.metadata().cloned()).unwrap_or_default();
+        self.last_outcome = Some(if map.is_empty() {
+            MatchOutcome::NoTargets
+        } else {
+            MatchOutcome::Partial {
+                matching_targets: map.len(),
+            }
+        });
+        self.active_session = Some(HintSession::new(map));
+        false
+    }
+
+    fn cancel_active_session(&mut self) {
+        if let Some(mut session) = self.active_session.take() {
+            self.last_outcome = Some(session.cancel());
+        }
+    }
+
+    fn cancel_for_owner_loss(&mut self) {
+        self.cancel_active_session();
+        self.held_captured_keys.clear();
+    }
+
+    fn capture_unfocused_owner_loss_events(&mut self, ctx: &egui::Context) {
+        let events = ctx.input(|input| input.events.clone());
+        for event in events {
+            self.capture_event(&event);
+        }
+    }
+
+    fn update_session(&mut self, update: impl FnOnce(&mut HintSession) -> MatchOutcome) {
+        let Some(session) = self.active_session.as_mut() else {
+            return;
+        };
+        let outcome = update(session);
+        self.last_outcome = Some(outcome);
+    }
+
+    fn push_hint_character(&mut self, character: char) {
+        let Some(session) = self.active_session.as_mut() else {
+            return;
+        };
+        let outcome = session.push_char(character);
+        let completed = match &outcome {
+            MatchOutcome::Completed(target) => Some(target.clone()),
+            _ => None,
+        };
+        self.last_outcome = Some(outcome);
+        if let Some(target) = completed {
+            self.active_session = None;
+            self.root_input_frame.resolved = true;
+            let epoch = self.advance_navigation_epoch();
+            if !self.queue_focus_intent(target, egui::ViewportId::ROOT, epoch) {
+                self.last_outcome = Some(MatchOutcome::NoTarget);
+            }
+        }
+    }
+
+    fn capture_event(&mut self, event: &egui::Event) {
+        if is_capturable_input_event(event) {
+            self.root_input_frame.captured_events.push(event.clone());
+        }
+    }
+
+    fn apply_root_input_capture(&self, ctx: &egui::Context) {
+        if self.root_input_frame.captured_events.is_empty() {
+            return;
+        }
+        ctx.input_mut(|input| {
+            let mut remaining = self.root_input_frame.captured_events.clone();
+            input.events.retain(|event| {
+                if let Some(index) = remaining
+                    .iter()
+                    .position(|captured| same_keyboard_event(captured, event))
+                {
+                    remaining.remove(index);
+                    false
+                } else {
+                    true
+                }
+            });
+        });
+    }
+}
+
+fn has_shortcut_modifier(modifiers: egui::Modifiers) -> bool {
+    modifiers.ctrl || modifiers.alt || modifiers.command || modifiers.mac_cmd
+}
+
+fn is_leader_key(key: egui::Key, modifiers: egui::Modifiers) -> bool {
+    key == egui::Key::Space && modifiers.shift && !has_shortcut_modifier(modifiers)
+}
+
+fn paired_text_indices(events: &[egui::Event]) -> std::collections::HashMap<usize, usize> {
+    let mut pairs = std::collections::HashMap::new();
+    for (key_index, event) in events.iter().enumerate() {
+        if !matches!(event, egui::Event::Key { pressed: true, .. }) {
+            continue;
+        }
+        for (index, following) in events.iter().enumerate().skip(key_index + 1) {
+            match following {
+                egui::Event::Text(_) => {
+                    pairs.insert(key_index, index);
+                    break;
+                }
+                egui::Event::Key { .. } => break,
+                _ => {}
+            }
+        }
+    }
+    pairs
+}
+
+fn key_letter(key: egui::Key) -> Option<char> {
+    Some(match key {
+        egui::Key::A => 'A',
+        egui::Key::B => 'B',
+        egui::Key::C => 'C',
+        egui::Key::D => 'D',
+        egui::Key::E => 'E',
+        egui::Key::F => 'F',
+        egui::Key::G => 'G',
+        egui::Key::H => 'H',
+        egui::Key::I => 'I',
+        egui::Key::J => 'J',
+        egui::Key::K => 'K',
+        egui::Key::L => 'L',
+        egui::Key::M => 'M',
+        egui::Key::N => 'N',
+        egui::Key::O => 'O',
+        egui::Key::P => 'P',
+        egui::Key::Q => 'Q',
+        egui::Key::R => 'R',
+        egui::Key::S => 'S',
+        egui::Key::T => 'T',
+        egui::Key::U => 'U',
+        egui::Key::V => 'V',
+        egui::Key::W => 'W',
+        egui::Key::X => 'X',
+        egui::Key::Y => 'Y',
+        egui::Key::Z => 'Z',
+        _ => return None,
+    })
+}
+
+fn same_keyboard_event(left: &egui::Event, right: &egui::Event) -> bool {
+    match (left, right) {
+        (
+            egui::Event::Key {
+                key: left_key,
+                physical_key: left_physical,
+                pressed: left_pressed,
+                repeat: left_repeat,
+                modifiers: left_modifiers,
+                ..
+            },
+            egui::Event::Key {
+                key: right_key,
+                physical_key: right_physical,
+                pressed: right_pressed,
+                repeat: right_repeat,
+                modifiers: right_modifiers,
+                ..
+            },
+        ) => {
+            left_key == right_key
+                && left_physical == right_physical
+                && left_pressed == right_pressed
+                && left_repeat == right_repeat
+                && left_modifiers == right_modifiers
+        }
+        (egui::Event::Text(left_text), egui::Event::Text(right_text)) => left_text == right_text,
+        (egui::Event::Paste(left_text), egui::Event::Paste(right_text)) => left_text == right_text,
+        (egui::Event::Ime(left_ime), egui::Event::Ime(right_ime)) => left_ime == right_ime,
+        (egui::Event::Cut, egui::Event::Cut) => true,
+        _ => false,
+    }
+}
+
+fn is_capturable_input_event(event: &egui::Event) -> bool {
+    matches!(
+        event,
+        egui::Event::Key { .. }
+            | egui::Event::Text(_)
+            | egui::Event::Cut
+            | egui::Event::Paste(_)
+            | egui::Event::Ime(_)
+    )
 }
 
 fn rect_is_usable(rect: egui::Rect) -> bool {
@@ -616,6 +1065,406 @@ mod tests {
             )
             .expect("enabled bridge creates a render scope");
         (jump, scope)
+    }
+
+    fn root_input_raw(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 650.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn register_root_input_targets(jump: &mut JumpModeUi, ctx: &egui::Context, count: usize) {
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let scope = jump
+            .scope(
+                SurfaceId::LauncherResults,
+                TargetGeneration(1),
+                "input-test",
+                egui::ViewportId::ROOT,
+                true,
+            )
+            .expect("enabled bridge creates a render scope");
+        ctx.run_ui(root_input_raw(Vec::new()), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.columns(3, |columns| {
+                    for index in 0..count {
+                        let label = format!("Target {index}");
+                        let column = &mut columns[index % 3];
+                        let response = column.button(&label);
+                        let registration = scope.register(
+                            column,
+                            &response,
+                            format!("target-{index}"),
+                            label,
+                            TargetKind::Button,
+                            index as u64,
+                        );
+                        assert!(
+                            matches!(registration, RegistrationResult::Registered { .. }),
+                            "target {index} registration rejected: {registration:?}"
+                        );
+                    }
+                });
+            });
+        })
+        .drop_without_applying_deltas();
+        jump.finish_ui_pass();
+        jump.complete_frame(ctx, true, true);
+    }
+
+    fn run_root_input_frame(
+        jump: &mut JumpModeUi,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> Vec<egui::Event> {
+        let mut remaining = Vec::new();
+        ctx.run_ui(root_input_raw(events), |ui| {
+            jump.begin_frame();
+            jump.handle_root_input(ctx, true, true);
+            remaining = ctx.input(|input| input.events.clone());
+            let _ = ui;
+        })
+        .drop_without_applying_deltas();
+        remaining
+    }
+
+    fn key_event(
+        key: egui::Key,
+        pressed: bool,
+        repeat: bool,
+        modifiers: egui::Modifiers,
+    ) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat,
+            modifiers,
+        }
+    }
+
+    fn key_for_letter(character: char) -> egui::Key {
+        match character.to_ascii_uppercase() {
+            'A' => egui::Key::A,
+            'B' => egui::Key::B,
+            'C' => egui::Key::C,
+            'D' => egui::Key::D,
+            'E' => egui::Key::E,
+            'F' => egui::Key::F,
+            'G' => egui::Key::G,
+            'H' => egui::Key::H,
+            'I' => egui::Key::I,
+            'J' => egui::Key::J,
+            'K' => egui::Key::K,
+            'L' => egui::Key::L,
+            'M' => egui::Key::M,
+            'N' => egui::Key::N,
+            'O' => egui::Key::O,
+            'P' => egui::Key::P,
+            'Q' => egui::Key::Q,
+            'R' => egui::Key::R,
+            'S' => egui::Key::S,
+            'T' => egui::Key::T,
+            'U' => egui::Key::U,
+            'V' => egui::Key::V,
+            'W' => egui::Key::W,
+            'X' => egui::Key::X,
+            'Y' => egui::Key::Y,
+            'Z' => egui::Key::Z,
+            _ => panic!("test key must be an ASCII letter"),
+        }
+    }
+
+    #[test]
+    fn jump_mode_root_input_deduplicates_text_repeats_and_cancels_without_leaks() {
+        let ctx = egui::Context::default();
+        let mut jump = JumpModeUi::new(true);
+        register_root_input_targets(&mut jump, &ctx, 27);
+        let leader = egui::Modifiers::SHIFT;
+
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(egui::Key::Space, true, false, leader),
+                    egui::Event::Text(" ".into()),
+                ],
+            )
+            .is_empty()
+        );
+        let active = jump.active_session().expect("leader starts a session");
+        assert_eq!(active.hint_map().len(), 27);
+        let two_letter_hint = active
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.hint.as_str().len() == 2)
+            .expect("27 targets allocate one two-letter hint")
+            .hint
+            .as_str()
+            .to_owned();
+        let first_letter = two_letter_hint.chars().next().unwrap();
+
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![key_event(egui::Key::Space, false, false, leader)],
+            )
+            .is_empty()
+        );
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(
+                        key_for_letter(first_letter),
+                        true,
+                        false,
+                        egui::Modifiers::NONE,
+                    ),
+                    egui::Event::Text(first_letter.to_ascii_lowercase().to_string()),
+                ],
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            jump.active_session().unwrap().prefix(),
+            first_letter.to_string(),
+            "paired Key and Text input contributes one hint character"
+        );
+
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![key_event(
+                    key_for_letter(first_letter),
+                    false,
+                    false,
+                    egui::Modifiers::NONE,
+                )],
+            )
+            .is_empty()
+        );
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(
+                        key_for_letter(first_letter),
+                        true,
+                        true,
+                        egui::Modifiers::NONE,
+                    ),
+                    egui::Event::Text(first_letter.to_ascii_lowercase().to_string()),
+                ],
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            jump.active_session().unwrap().prefix(),
+            first_letter.to_string(),
+            "autorepeat does not advance the prefix"
+        );
+
+        let control_a = egui::Modifiers::CTRL;
+        let remaining = run_root_input_frame(
+            &mut jump,
+            &ctx,
+            vec![
+                key_event(egui::Key::A, true, false, control_a),
+                egui::Event::Text("a".into()),
+                key_event(egui::Key::A, false, false, egui::Modifiers::NONE),
+                key_event(egui::Key::ControlLeft, false, false, egui::Modifiers::NONE),
+            ],
+        );
+        assert_eq!(
+            remaining.len(),
+            4,
+            "shortcut-owned key, text, and unowned releases remain visible"
+        );
+        assert_eq!(
+            jump.active_session().unwrap().prefix(),
+            first_letter.to_string()
+        );
+
+        assert!(
+            run_root_input_frame(&mut jump, &ctx, vec![egui::Event::Text("1".into())],).is_empty()
+        );
+        assert_eq!(
+            jump.active_session().unwrap().prefix(),
+            first_letter.to_string(),
+            "invalid input leaves the prior valid prefix unchanged"
+        );
+        assert_eq!(jump.last_outcome(), Some(&MatchOutcome::Invalid));
+
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![key_event(
+                    key_for_letter(first_letter),
+                    false,
+                    false,
+                    egui::Modifiers::NONE,
+                )],
+            )
+            .is_empty()
+        );
+        // Exercise Backspace after building a prefix again.
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![key_event(
+                    key_for_letter(first_letter),
+                    true,
+                    false,
+                    egui::Modifiers::NONE,
+                )],
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            jump.active_session().unwrap().prefix(),
+            first_letter.to_string()
+        );
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![key_event(
+                    egui::Key::Backspace,
+                    true,
+                    false,
+                    egui::Modifiers::NONE,
+                )],
+            )
+            .is_empty()
+        );
+        assert_eq!(jump.active_session().unwrap().prefix(), "");
+
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![key_event(
+                    key_for_letter(first_letter),
+                    false,
+                    false,
+                    egui::Modifiers::NONE,
+                )],
+            )
+            .is_empty()
+        );
+
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(
+                        key_for_letter(first_letter),
+                        true,
+                        false,
+                        egui::Modifiers::NONE,
+                    ),
+                    egui::Event::Text("\u{00e5}".into()),
+                ],
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            jump.active_session().unwrap().prefix(),
+            "",
+            "a composed non-ASCII Text event cannot resolve from its physical key"
+        );
+
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(egui::Key::Escape, true, false, egui::Modifiers::NONE,),
+                    egui::Event::Text("z".into()),
+                ],
+            )
+            .is_empty()
+        );
+        assert!(jump.active_session().is_none());
+        assert_eq!(jump.last_outcome(), Some(&MatchOutcome::Cancelled));
+
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![key_event(
+                    egui::Key::Escape,
+                    false,
+                    false,
+                    egui::Modifiers::NONE,
+                )],
+            )
+            .is_empty()
+        );
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(egui::Key::Space, true, false, leader),
+                    egui::Event::Text(" ".into()),
+                ],
+            )
+            .is_empty()
+        );
+        assert!(jump.active_session().is_some());
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(egui::Key::Space, true, true, leader),
+                    egui::Event::Text(" ".into()),
+                ],
+            )
+            .is_empty()
+        );
+        assert!(
+            jump.active_session().is_some(),
+            "leader repeat does not toggle"
+        );
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![key_event(egui::Key::Space, false, false, leader)],
+            )
+            .is_empty()
+        );
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(egui::Key::Space, true, false, leader),
+                    egui::Event::Text(" ".into()),
+                ],
+            )
+            .is_empty()
+        );
+        assert!(jump.active_session().is_none(), "second leader cancels");
     }
 
     fn named_scope_target(

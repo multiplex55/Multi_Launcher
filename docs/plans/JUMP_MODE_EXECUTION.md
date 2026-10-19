@@ -6,10 +6,10 @@
 - Initial working tree: clean, including tracked task-input documents. No user changes copied/discarded.
 - Environment: Windows PowerShell; rustc/cargo 1.99.0; Nextest 0.9.135; egui/eframe 0.36.2 with local vendor patches.
 - Git branch creation needed sandbox escalation because .git is read-only in the normal sandbox; authorized creation succeeded.
-- Current milestone: M05-A next; M02–M04 complete; M01-B populated baseline incomplete.
-- Latest evidence: pending baseline run.
-- Latest checkpoint: b151ff00 — feat(jump): [M04-A] register scoped targets and hand off focus safely.
-- Push status: M00, M01-A, M02, M03 and M04 all pushed successfully to origin; upstream configured.
+- Current milestone: M05-A verified; M05-B painter/native next; M01-B populated baseline incomplete.
+- Latest GUI evidence: rejected populated-baseline run jump_m01_20261019T210335Z_cd3ec49b; CPU baseline recorded separately.
+- Latest checkpoint: 470c654a — fix(jump): [M02-B] persist the experimental toggle through save ownership.
+- Push status: all checkpoints through M02-B (470c654a) pushed successfully to origin; upstream configured.
 
 | Milestone | State | Checkpoint / verification | Evidence or dependency |
 |---|---|---|---|
@@ -18,7 +18,7 @@
 | M02 | complete | M02-A 3 tests + M02-B ownership regression passed | Real general apply/publication/rollback covered |
 | M03 | complete | 10/10 targeted Nextest tests; scoped fmt/diff | Typed IDs, frozen mapping, prefix-free matching |
 | M04 | complete | 24/24 all-Jump Nextest; scoped fmt/diff clean | Copied responses, multipass retention, one-shot intents |
-| M05 | in_progress | M05-A input lifecycle; M05-B painter/native pending | M02–M04 verified |
+| M05 | in_progress | M05-A 29/29 all-Jump tests; M05-B painter/native pending | Actual root query and multipass verified |
 | M06 | pending | Grid integration | M05 |
 | M07 | pending | Dashboard integration | M05 |
 | M08 | pending | Native keyboard acceptance | M01, M06–M07 |
@@ -52,7 +52,7 @@ Parent owns branch, ledger, commits and one best-effort push per checkpoint. Pla
 
 ## Next action
 
-Verify/checkpoint M02-B save-ownership repair, then resume M05-A early input lifecycle. M05-B painter/native evidence follows. Return to M01-B semantic fixture/readiness through the native observer; do not claim its populated dashboard baseline complete.
+Checkpoint verified M05-A, then implement M05-B visual overlay and native query-only evidence. M01-B fixture root-cause handoff is ready; populated dashboard baseline remains incomplete until semantic and rendered-content proof.
 
 
 
@@ -106,3 +106,17 @@ Safe actual-root test seam: `forced_discard_dispatches_the_root_action_and_histo
 - M05-A pre-hook CPU baseline completed on b151ff00660976aefd4d12b780f9fcefd7aa6dbb, test profile, 100 actions / grid3 / 960x640 / 9 warmups / 20 samples. Raw output: dev/jump_mode/evidence/cpu-baseline/m05-a-root-list-baseline.log. Diagnostic source remains uncommitted for M05-A; M02-B commit will contain only its repair/tests/docs.
 
 - M02-B repair verified: cargo nextest run --lib -E 'test(jump_mode_general_save_acknowledges_and_rolls_back_owned_setting)' exit 0, 1 passed / 5833 skipped. Added experimental flag to GENERAL_SETTINGS_FIELDS, covering candidate apply, committed overlay and owned rollback; unrelated theme preserved. Checkpoint excludes M05-A diagnostic source.
+
+## M01-B bounded investigation
+- Read-only planner identified a concrete empty-cache mechanism: fixture inherits reduce_dashboard_work_when_unfocused=true. An unfocused initial frame resets last_refresh without populating pinned results; default interval is 45 seconds. Existing receipt proves later focus only, so exact execution in rejected run remains unproven.
+- Pending fixture-only repair: set reduce_dashboard_work_when_unfocused=false; replace hyphenated tags with underscore tags; verify production load_notes/NotePlugin exact queries and typed PinnedQueryResultsConfig.
+- Pending readiness proof: narrowly gated QA observation of actual per-slot cached and visible note identities, then existing retained ROOT capture after expected cards render. Loaded files alone are insufficient. No refresh scheduler change, shortened interval, or guessed sleep.
+## M05-A scoped review (in progress)
+- Read-only review identified modified Enter bypassing generic shortcut handling and reaching root's modifier-agnostic Enter activation. Repair must capture activation keys before shortcut bypass while Jump is active/resolved.
+- Review also identified held captured keys surviving owner loss when release occurred in a blocked frame. Repair clears/reconciles guards at the ownership boundary while retaining current-frame capture across discarded passes.
+- Both findings assigned to the sole input implementer together with exact regression cases. Neither is considered resolved until scoped checks pass.
+## M05-A outcome
+- Early visible-root input interception precedes menus/widgets. Once-per-frame transitions plus per-pass capture preserve query/caret across discarded passes; valid second leader/Escape cancel, Backspace edits prefix, letters normalize without Key/Text duplication, and paste/IME stay isolated while active.
+- Hint completion queues one focus intent only. Active, completed and cancellation frames suppress same-frame modified/unmodified Enter/Space; held key guards require release, and owner loss clears them. Focus-loss transition captures formerly active input without taking input from focused modal owners.
+- Actual query response is the minimal real registered target. Full grid/dashboard controls and painter remain later checkpoints.
+- Final cargo nextest run --lib -E 'test(jump_mode)': exit 0, 29 passed / 5809 filtered. Scoped rustfmt and git diff --check pass. Initial test failures were sizing/registry setup plus a genuine focus-loss text leak; repaired at respective owners without relaxing eligibility. Review findings (modified activation, held-key poison, cancellation variant) resolved and covered in final passing filter.

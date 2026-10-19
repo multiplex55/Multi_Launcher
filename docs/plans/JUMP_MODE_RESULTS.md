@@ -1,6 +1,6 @@
 # Jump Mode Results
 
-Work in progress on `feat/jump-mode-2026-10-19-c7e42`, based on `8f94b003a12853735d1cb4689c6ec4e53c4ace8e`. M00 checkpoint `03e42b69` was pushed to origin. No Jump Mode runtime behavior is implemented yet.
+Work in progress on `feat/jump-mode-2026-10-19-c7e42`, based on `8f94b003a12853735d1cb4689c6ec4e53c4ace8e`. Checkpoints through `470c654a` are pushed to origin. The default-off setting, pure hint engine and scoped target/focus registry are implemented; keyboard routing is verified on the actual root query path. Overlay and end-to-end surface integration remain pending.
 
 ## Architecture and current inventory
 
@@ -40,7 +40,7 @@ The first nested helper did not inherit root patches/lock; it was replaced by a 
 | M02 setting | Complete: M02-A 3 tests + M02-B real save-owner regression passed |
 | M03 pure hint engine | Complete; 10 targeted tests passed, c3549759 pushed |
 | M04 registry | Complete; 24 all-Jump tests passed, scoped fmt/diff clean |
-| M05 input and overlay | Pending |
+| M05 input and overlay | M05-A input verified (29 all-Jump tests); painter/native evidence pending |
 | M06–M09 grid/dashboard, keyboard harness and Phase 1 review | Pending |
 | M10–M13 Settings, dialogs, complex widgets and extended evidence | Pending |
 | M14–M15 performance, final checks and handoff | Pending |
@@ -59,9 +59,14 @@ Pure typed hint engine implemented in src/gui/jump_mode.rs. Target generation/su
 App-owned frame registry/focus bridge implemented, with public opaque optional dashboard scope and instance/generation namespacing. Final-pass retention, one-shot epoch/generation intents, interactivity/clip/viewport/modal filtering, same-priority non-root ambiguity rejection, real button focus without clicks, logical selection without execution and disabled clearing are tested. Runtime flag has one owner. cargo nextest run --lib -E 'test(jump_mode)' passed 24 tests (5808 skipped); scoped formatting/diff passed. No keyboard interception or overlay yet.
 
 ## M02-B discovered persistence gap
-The general Settings save coordinator uses define_general_settings_fields! in src/settings_save.rs. The new toggle was omitted, so the editor Save path would drop it despite M02-A serde/editor/direct runtime tests passing. This is being repaired at the actual ownership boundary, with focused apply/publication/rollback coverage. M02 is not complete until that passes.
+The general Settings save coordinator uses define_general_settings_fields! in src/settings_save.rs. The new toggle was omitted, so the editor Save path would drop it despite M02-A serde/editor/direct runtime tests passing. This was repaired at the actual ownership boundary in `470c654a`, with focused apply/publication/rollback coverage. M02 is complete.
 
 ## Pre-input CPU baseline
 On b151ff00660976aefd4d12b780f9fcefd7aa6dbb (M04), test profile, 100 inert actions, 3-column 960x640 root fixture, 9 warmups and 20 measured frames: mean 159.54 microseconds, median 163.1, nearest-rank p95 213.9, range 97.7–228.5. Timed run_root_list_frame only; output disposal outside measurement. Raw local log: dev/jump_mode/evidence/cpu-baseline/m05-a-root-list-baseline.log. CPU-only observation, no GPU/native claim; later identical disabled/idle/active measurements remain required.
 
 M02-B correction verified: experimental_jump_mode_enabled is now a GENERAL_SETTINGS_FIELDS member. The exact test jump_mode_general_save_acknowledges_and_rolls_back_owned_setting passed (1 passed / 5833 skipped), exercising apply, publication overlay and rollback while preserving an unrelated theme write. The earlier gap is resolved; no input hooks were included in this repair.
+
+## M05-A input checkpoint
+The first real target is the root query editor. Early leader/hint capture precedes widgets, repeats and paired text are handled once, and capture survives discarded passes. Actual-root tests preserve query/caret, prevent a focused button from activating on the leader, and suppress same-frame modified Enter through active, completion and cancellation transitions. Focus/owner loss cancels and releases held guards. Paste/IME cannot mutate the query while hints own input.
+
+Final cargo nextest run --lib -E 'test(jump_mode)': 29 passed / 5809 filtered, exit 0. Touched-file rustfmt and diff checks pass. No visual overlay or native Jump keyboard scenario is claimed yet. Bounded input review found activation and held-key defects; all were repaired with focused regressions.

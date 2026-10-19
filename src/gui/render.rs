@@ -2965,6 +2965,11 @@ impl LauncherApp {
     }
 
     fn jump_mode_root_targets_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        let screen_draw_owns_input = !matches!(
+            self.screen_draw_controller.state(),
+            crate::screen_draw::ScreenDrawState::NoSession
+                | crate::screen_draw::ScreenDrawState::Failed { .. }
+        );
         self.jump_mode_enabled()
             && root_visible
             && self.visible_flag.load(Ordering::Relaxed)
@@ -2975,13 +2980,22 @@ impl LauncherApp {
             && !self.action_sheet.is_open()
             && self.macro_prompt.pending.is_none()
             && !self.macro_parameter_prompt.owns_input()
+            && !self.snippet_prompt_dialog.is_open()
+            && !self
+                .root_frame_logic
+                .as_ref()
+                .is_some_and(|logic| logic.snippet_prompt_owns_input)
+            && !screen_draw_owns_input
+            && !self.screen_draw_controller.toolbar_open()
             && !egui::Popup::is_any_open(ctx)
             && ctx.memory(|memory| memory.top_modal_layer().is_none())
     }
 
     fn complete_jump_mode_frame(&mut self, ctx: &egui::Context) {
         let root_visible = self.visible_flag.load(Ordering::Relaxed);
-        let root_owner_allowed = self.jump_mode_root_targets_allowed(ctx, root_visible);
+        let root_owner_allowed = self
+            .jump_mode_ui
+            .root_input_owner_allowed(self.jump_mode_root_targets_allowed(ctx, root_visible));
         self.jump_mode_ui
             .complete_frame(ctx, root_owner_allowed, root_visible);
     }
@@ -2990,21 +3004,26 @@ impl LauncherApp {
         use egui::*;
 
         let ctx = ui.ctx().clone();
-        self.show_screenshot_pins(&ctx);
-        self.pin_list_open = self.show_screenshot_pin_list(&ctx, self.pin_list_open);
         let mut frame_logic = self.root_frame_logic.clone().unwrap_or_default();
         let first_ui_pass = frame_logic.ui_passes == 0;
         frame_logic.ui_passes = frame_logic.ui_passes.saturating_add(1);
         if let Some(logic) = self.root_frame_logic.as_mut() {
             logic.ui_passes = frame_logic.ui_passes;
         }
+        let root_owner_allowed =
+            self.jump_mode_root_targets_allowed(&ctx, frame_logic.should_be_visible);
+        self.jump_mode_ui
+            .handle_root_input(&ctx, root_owner_allowed, first_ui_pass);
+        self.show_screenshot_pins(&ctx);
+        self.pin_list_open = self.show_screenshot_pin_list(&ctx, self.pin_list_open);
         if frame_logic.should_be_visible {
             self.jump_mode_ui.begin_ui_pass();
         } else {
             self.jump_mode_ui.cancel_all();
         }
-        let jump_mode_root_allowed =
-            self.jump_mode_root_targets_allowed(&ctx, frame_logic.should_be_visible);
+        let jump_mode_root_allowed = self
+            .jump_mode_ui
+            .root_input_owner_allowed(root_owner_allowed);
         let jump_mode_root_scope = jump_mode_root_allowed
             .then(|| {
                 self.jump_mode_ui.scope(
@@ -3421,6 +3440,21 @@ impl LauncherApp {
                     self.move_cursor_end = false;
                 }
                 let query_response = query_output.response;
+                if let Some(scope) = jump_mode_root_scope.as_ref()
+                    && let crate::gui::jump_mode::ui::RegistrationResult::Registered {
+                        directive: Some(directive),
+                        ..
+                    } = scope.register(
+                        ui,
+                        &query_response,
+                        "query_input",
+                        "Search query",
+                        crate::gui::jump_mode::TargetKind::TextEntry,
+                        0,
+                    )
+                {
+                    directive.apply_to_response(&query_response);
+                }
                 query_bottom = query_response.rect.bottom();
                 #[cfg(test)]
                 ctx.data_mut(|data| {
@@ -7767,6 +7801,66 @@ mod tests {
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
         run_root_list_frame_with_pass_count(ctx, app, frame_index, width, height, events).0
+    }
+
+    #[test]
+    #[ignore = "M05-A CPU baseline; 100 synthetic root-list actions, 9 warmups and 20 samples"]
+    fn jump_mode_cpu_baseline_root_list_frame() {
+        const WARMUPS: usize = 9;
+        const SAMPLES: usize = 20;
+        const VIEW_WIDTH: f32 = 960.0;
+        const VIEW_HEIGHT: f32 = 640.0;
+        const ACTION_COUNT: usize = 100;
+
+        let source_sha = std::env::var("ML_JUMP_MODE_CPU_SOURCE_SHA")
+            .unwrap_or_else(|_| "UNSPECIFIED_SOURCE_SHA".into());
+        let profile = std::env::var("ML_JUMP_MODE_CPU_PROFILE")
+            .unwrap_or_else(|_| "unspecified-profile".into());
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) =
+            root_list_test_app(&ctx, (0..ACTION_COUNT).map(root_list_action).collect());
+        app.query_results_layout.enabled = true;
+        app.query_results_layout.cols = 3;
+        app.query_results_layout.respect_plugin_capability = false;
+        app.recompute_query_results_layout();
+        assert!(app.resolved_grid_layout);
+
+        eprintln!(
+            "M05A_CPU_BASELINE schema=1 source_sha={source_sha} profile={profile} fixture=root_list_action_fixture count={ACTION_COUNT} viewport={}x{} grid_cols=3 warmups={WARMUPS} samples={SAMPLES} timing=run_root_list_frame output_disposal=outside_timing",
+            VIEW_WIDTH as u32, VIEW_HEIGHT as u32,
+        );
+
+        let mut frame_index = 0;
+        for _ in 0..WARMUPS {
+            let output = run_root_list_frame(
+                &ctx,
+                &mut app,
+                frame_index,
+                VIEW_WIDTH,
+                VIEW_HEIGHT,
+                Vec::new(),
+            );
+            frame_index += 1;
+            output.drop_without_applying_deltas();
+        }
+
+        for sample_index in 0..SAMPLES {
+            let started = std::time::Instant::now();
+            let output = run_root_list_frame(
+                &ctx,
+                &mut app,
+                frame_index,
+                VIEW_WIDTH,
+                VIEW_HEIGHT,
+                Vec::new(),
+            );
+            let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+            frame_index += 1;
+            eprintln!(
+                "M05A_CPU_BASELINE_SAMPLE sample_index={sample_index} elapsed_ns={elapsed_ns}"
+            );
+            output.drop_without_applying_deltas();
+        }
     }
 
     fn run_root_list_frame_with_pass_count(
@@ -21819,6 +21913,16 @@ mod tests {
         }
     }
 
+    fn key_release(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers,
+        }
+    }
+
     #[test]
     fn launcher_query_frame_has_no_scope_strip_or_ctrl_number_scope_changes() {
         let ctx = egui::Context::default();
@@ -22321,6 +22425,373 @@ mod tests {
         app.run_root_frame_for_test(ctx, actual_query_input(true), false)
             .0
             .drop_without_applying_deltas();
+    }
+
+    fn query_cursor_indices(ctx: &egui::Context) -> (usize, usize) {
+        let range = egui::TextEdit::load_state(ctx, egui::Id::new("query_input"))
+            .unwrap()
+            .cursor
+            .char_range()
+            .unwrap();
+        (range.primary.index.0, range.secondary.index.0)
+    }
+
+    #[test]
+    fn jump_mode_actual_query_capture_preserves_text_and_survives_discarded_pass() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+
+        let query_id = egui::Id::new("query_input");
+        assert_eq!(app.jump_mode_ui.retained_registry().len(), 1);
+        let query_before = app.query.clone();
+        set_query_cursor(&ctx, 2, 7);
+        let cursor_before = query_cursor_indices(&ctx);
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.query, query_before,
+            "Shift+Space never enters the query"
+        );
+        assert_eq!(query_cursor_indices(&ctx), cursor_before);
+        assert!(app.jump_mode_ui.active_session().is_some());
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![
+                    egui::Event::Paste("replacement text".into()),
+                    egui::Event::Ime(egui::ImeEvent::Preedit {
+                        text: "composed text".into(),
+                        active_range_chars: None,
+                    }),
+                    egui::Event::Ime(egui::ImeEvent::Commit("committed text".into())),
+                ],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.query, query_before,
+            "paste and IME cannot mutate the query"
+        );
+        assert!(app.jump_mode_ui.active_session().is_some());
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_some());
+        assert!(app.test_activation_trace.is_empty());
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+
+        let (completion, passes) = app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![
+                    key_press(egui::Key::A, egui::Modifiers::NONE),
+                    egui::Event::Text("a".into()),
+                    key_press(egui::Key::Enter, egui::Modifiers::CTRL),
+                ],
+                ..actual_query_input(true)
+            },
+            true,
+        );
+        completion.drop_without_applying_deltas();
+        assert!(passes >= 2, "the test adapter forced a discarded UI pass");
+        assert_eq!(
+            app.query, query_before,
+            "Key+Text does not duplicate into query"
+        );
+        assert_eq!(query_cursor_indices(&ctx), cursor_before);
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(matches!(
+            app.jump_mode_ui.last_outcome(),
+            Some(crate::gui::jump_mode::MatchOutcome::Completed(_))
+        ));
+        assert!(app.test_activation_trace.is_empty());
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![
+                    key_press(egui::Key::A, egui::Modifiers::NONE),
+                    egui::Event::Text("a".into()),
+                ],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.query, query_before,
+            "held captured-key repeat text is suppressed"
+        );
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![
+                    key_release(egui::Key::A, egui::Modifiers::NONE),
+                    key_release(egui::Key::Enter, egui::Modifiers::NONE),
+                ],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text("x".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_ne!(
+            app.query, query_before,
+            "fresh text is available after selection"
+        );
+
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_some());
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        let query_before_cancel = app.query.clone();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![
+                    key_press(egui::Key::Escape, egui::Modifiers::NONE),
+                    key_press(egui::Key::Enter, egui::Modifiers::CTRL),
+                ],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert_eq!(app.query, query_before_cancel);
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_leader_is_captured_before_a_focused_root_button() {
+        let ctx = egui::Context::default();
+        let safe_action = Action {
+            label: "Edit Radial Menus".into(),
+            desc: "Open the radial editor".into(),
+            action: "radial edit".into(),
+            args: None,
+        };
+        let (workspace, mut app) = root_list_test_app(&ctx, vec![safe_action]);
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        let row_id = app
+            .test_root_rendered_row_ids
+            .first()
+            .map(|(_, id)| *id)
+            .expect("the safe root action button was painted");
+        ctx.memory_mut(|memory| memory.request_focus(row_id));
+        assert!(ctx.memory(|memory| memory.has_focus(row_id)));
+
+        let (output, passes) = app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+                ..actual_query_input(true)
+            },
+            true,
+        );
+        output.drop_without_applying_deltas();
+
+        assert!(passes >= 2);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        assert!(!app.panel_states.radial_editor);
+        assert!(app.selected.is_none());
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_disabled_and_owner_loss_preserve_normal_input_ownership() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        prepare_actual_query_frame(&ctx, &mut app);
+        let query_before = app.query.clone();
+        set_query_cursor(
+            &ctx,
+            query_before.chars().count(),
+            query_before.chars().count(),
+        );
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(" ".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.query, format!("{query_before} "));
+
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_some());
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+
+        let query_before_focus_loss = app.query.clone();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![
+                    key_release(egui::Key::Space, egui::Modifiers::SHIFT),
+                    key_press(egui::Key::A, egui::Modifiers::NONE),
+                    egui::Event::Text("a".into()),
+                ],
+                ..actual_query_input(false)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert_eq!(app.query, query_before_focus_loss);
+
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_some());
+
+        app.show_settings = true;
+        let query_before_owner_change = app.query.clone();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert_eq!(app.query, query_before_owner_change);
+        app.show_settings = false;
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Space, egui::Modifiers::SHIFT)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(
+            app.jump_mode_ui.active_session().is_some(),
+            "a leader released while Settings owns input does not poison a fresh leader"
+        );
+        drop(workspace);
     }
 
     #[test]
