@@ -958,6 +958,7 @@ enum PlainLinkConfirmOutcome {
 
 pub struct NotePanel {
     pub open: bool,
+    activation_handoff_pending: bool,
     note: Note,
     saved_content_baseline: String,
     discard_unsaved_prompt: bool,
@@ -1378,6 +1379,7 @@ impl NotePanel {
         let saved_content_baseline = note.content.clone();
         let mut panel = Self {
             open: true,
+            activation_handoff_pending: false,
             note,
             saved_content_baseline,
             discard_unsaved_prompt: false,
@@ -2042,6 +2044,10 @@ impl NotePanel {
         &self.note.slug
     }
 
+    pub(crate) fn request_activation_handoff(&mut self) {
+        self.activation_handoff_pending = true;
+    }
+
     pub fn note_content(&self) -> &str {
         &self.note.content
     }
@@ -2056,11 +2062,9 @@ impl NotePanel {
         self.focus_textedit_next_frame = false;
         self.find_focus_next_frame = true;
         self.find_select_query_next_frame = true;
-        if !was_open {
-            if !self.find_query().is_empty() {
-                let found = self.find_current_match();
-                self.queue_find_navigation(found);
-            }
+        if !was_open && !self.find_query().is_empty() {
+            let found = self.find_current_match();
+            self.queue_find_navigation(found);
         }
     }
 
@@ -2490,7 +2494,7 @@ impl NotePanel {
         let scroll_id_source = ("note_scroll", slug.clone());
         let text_id_source = ("note_text", slug);
 
-        egui::Window::new(self.note.title.clone())
+        let window_response = egui::Window::new(self.note.title.clone())
             .id(window_id)
             .open(&mut open)
             .resizable(true)
@@ -2552,6 +2556,28 @@ impl NotePanel {
                     text_id_source.clone(),
                 );
             });
+
+        if self.activation_handoff_pending
+            && open
+            && window_response.is_some()
+            && app.visible_flag.load(std::sync::atomic::Ordering::SeqCst)
+            && app.last_visible
+        {
+            self.activation_handoff_pending = false;
+            app.focus_query = false;
+            let launcher_query_id = egui::Id::new("query_input");
+            let focused_widget = ctx.memory(|memory| memory.focused());
+            let superseded_note_focus = app
+                .note_panels
+                .iter()
+                .any(|panel| panel.note_slug() != self.note.slug && panel.owns_keyboard_layer(ctx));
+            if (ctx.memory(|memory| memory.has_focus(launcher_query_id)) || superseded_note_focus)
+                && let Some(focused_widget) = focused_widget
+            {
+                ctx.memory_mut(|memory| memory.surrender_focus(focused_widget));
+            }
+            ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, window_id));
+        }
 
         // If the panel is closing, ensure we don't leave egui focus on a widget
         // that will no longer exist this frame. This avoids AccessKit panics

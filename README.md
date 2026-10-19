@@ -108,7 +108,7 @@ Multi Launcher is centered around a **single query box**:
 | `color` | HEX/RGB/HSL conversion and screen eyedropper | `color #ff0000` / `color pick` |
 | `mouse` | Mouse settings, coordinates, picking, and independent crosshair | `mouse settings` / `mouse coords copy` / `mouse crosshair toggle` |
 | `ocr` | Local English text recognition from a screen region | `ocr` |
-| `pinboard` | Session-only screenshot reference pins | `pinboard capture` / `pinboard list` |
+| `pinboard` | Session-only static and live reference pins | `pinboard capture` / `pinboard live` / `pinboard list` |
 | `ss` / `shot` | Screenshot actions | `ss` / `shot region markup` |
 | `sd` / `sa` | Full-desktop Screen Draw annotations | `sd` / `sd ghost` / `sa done` |
 | `conv` / `convert` | Conversion panel + converters | `conv` / `conv 10 km to mi` |
@@ -222,6 +222,15 @@ Notes support an in-app markdown workspace with **Edit**, **Preview**, and
 checkboxes, headings can appear in the outline sidebar, and sections can be
 collapsed while reading or editing longer notes. Callouts use blockquote-style
 markers such as `> [!NOTE]` or `> [!WARNING]`.
+
+Within an open note, use **Ctrl+F** or the toolbar's **Find** button for literal,
+case-insensitive search of its current Markdown, including unsaved edits.
+**Enter** advances and **Shift+Enter** goes back, wrapping through the matches;
+**Esc** closes Find while leaving the note open. Each note keeps its own
+temporary query and match count. Edit selects the exact source occurrence;
+Preview and Split identify the containing rendered segment. Hidden Markdown
+targets and collapsed content are identified explicitly, with **Reveal in Edit**
+for exact source selection. Searching does not edit the note or switch modes.
 
 Use wiki links (`[[Roadmap]]`) and canonical links (`link://note/roadmap`) for
 backlinks. Add aliases near the top of a note with either `Alias: Display Name`
@@ -1193,7 +1202,23 @@ Screenshot behavior is controlled by settings:
 
 Use `pinboard capture` to select a screen region and open it as an in-memory floating reference image. Multiple pins are session-only, default to Always on Top, and are limited to 8 pins and 256 MiB total image data. Each pin can be moved and resized, switched between Fit and 1:1 display, zoomed, made not-topmost or click-through, and explicitly copied or saved. Fit and 1:1 sizing use each child viewport's DPI. The image remains available without a backing temporary file; Copy Image and Save As run only when selected.
 
-Use `pinboard list` to recover a click-through pin with its Recover control or the keyboard-accessible Recover All button, or to close pins. The list reports desired control values separately from native child-window status. Region-selection cancellation creates no pin; capture errors are shown in the launcher. Pin layout and images are not restored after restart. Existing `ss`, `shot`, and `screenshot` commands keep opening the screenshot capture/editor flows.
+Use `pinboard live` to select a crop inside one external window and refresh it
+through Windows Graphics Capture, capped at approximately 10 frames per second.
+The crop follows that source window when it moves and can update while another
+window covers it where Windows permits capture. Ambiguous, multi-window, and
+self-capture selections are rejected. Live capture has no desktop-polling
+fallback. Static capture remains the default.
+
+Live pins have **Pause/Resume** controls and a status indicator in the pin and
+pin list. A minimized or temporarily unavailable source keeps its last completed
+frame and can recover; a closed source stays frozen until the pin is closed.
+Copy Image and Save As take one completed frame as a still image, including while
+paused. Static and live pins share the 8-pin and image-memory limits, including
+outstanding image actions; live capture also bounds native capture resources.
+Closing a live pin stops its own capture. Sources, images, and pin layout remain
+session-only.
+
+Use `pinboard list` to recover a click-through pin with its Recover control or the keyboard-accessible Recover All button, or to close pins. The list reports desired control values separately from native child-window status. Region-selection cancellation creates no pin; capture errors remain reachable even when capture began with the launcher hidden. Pin layout and images are not restored after restart. Existing `ss`, `shot`, and `screenshot` commands keep opening the screenshot capture/editor flows.
 
 ---
 

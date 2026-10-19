@@ -236,7 +236,7 @@ pub(super) struct PinboardCaptureLifecycle {
     windows: PinWindowPresenter,
     pin_windows: Box<dyn PinWindowVisibilityCoordinator>,
     session: Option<PinCaptureSession>,
-    pending_live_capture_error: Option<String>,
+    pending_capture_error: Option<String>,
 }
 
 impl PinboardCaptureLifecycle {
@@ -256,7 +256,7 @@ impl PinboardCaptureLifecycle {
             windows,
             pin_windows,
             session: None,
-            pending_live_capture_error: None,
+            pending_capture_error: None,
         }
     }
 
@@ -293,7 +293,7 @@ impl PinboardCaptureLifecycle {
         root_identity: (usize, u64),
     ) {
         self.windows.set_root_native_identity(root_identity);
-        if let Some(error) = self.pending_live_capture_error.take() {
+        if let Some(error) = self.pending_capture_error.take() {
             self.windows.queue_capture_feedback(error);
         }
         self.windows.show_capture_feedback(ctx);
@@ -309,13 +309,11 @@ impl PinboardCaptureLifecycle {
     }
 
     pub(super) fn pin_windows_need_bootstrap(&self) -> bool {
-        self.pending_live_capture_error.is_some()
-            || self.windows.needs_viewport_bootstrap(&self.board)
+        self.pending_capture_error.is_some() || self.windows.needs_viewport_bootstrap(&self.board)
     }
 
     pub(super) fn pin_windows_need_hidden_root_ui(&self) -> bool {
-        self.pending_live_capture_error.is_some()
-            || self.windows.needs_root_ui_when_hidden(&self.board)
+        self.pending_capture_error.is_some() || self.windows.needs_root_ui_when_hidden(&self.board)
     }
 
     pub(super) fn close_pin(&mut self, id: crate::pinboard::PinId) -> bool {
@@ -791,11 +789,9 @@ impl PinboardCaptureLifecycle {
             );
         }
 
-        let defer_hidden_live_error = session.intent == PinCaptureIntent::Live
-            && !session.initial_visible
-            && !session.cleanup_complete;
+        let defer_hidden_capture_error = !session.initial_visible && !session.cleanup_complete;
         let report = session.error.as_ref().and_then(|error| {
-            if session.error_reported || defer_hidden_live_error {
+            if session.error_reported || defer_hidden_capture_error {
                 None
             } else {
                 session.error_reported = true;
@@ -803,11 +799,10 @@ impl PinboardCaptureLifecycle {
             }
         });
         let completed = session.cleanup_complete;
-        if session.intent == PinCaptureIntent::Live
-            && !session.initial_visible
+        if !session.initial_visible
             && let Some(error) = report.as_ref()
         {
-            self.pending_live_capture_error = Some(error.clone());
+            self.pending_capture_error = Some(error.clone());
         }
         if !completed {
             self.session = Some(session);
@@ -1581,6 +1576,27 @@ mod tests {
         }
     }
 
+    struct FailingCaptureBackend {
+        desktop: ScreenRect,
+    }
+
+    impl ScreenCaptureBackend for FailingCaptureBackend {
+        fn virtual_desktop(&self) -> ExecResult<ScreenRect> {
+            Ok(self.desktop)
+        }
+
+        fn region_bounds(&self, _: &SearchRegion) -> ExecResult<ScreenRect> {
+            Ok(self.desktop)
+        }
+
+        fn capture_rect(&self, _: ScreenRect, _: &dyn Fn() -> bool) -> ExecResult<RgbaImage> {
+            Err(ExecutionDiagnostic::new(
+                crate::mkmacro::DiagnosticKind::Backend,
+                "controlled static capture failure",
+            ))
+        }
+    }
+
     fn poll_lifecycle(
         context: &eframe::egui::Context,
         lifecycle: &mut PinboardCaptureLifecycle,
@@ -2214,7 +2230,7 @@ mod tests {
                 .is_some_and(|error| error.contains("invalid first crop size"))
         );
         assert!(
-            lifecycle.pending_live_capture_error.is_some(),
+            lifecycle.pending_capture_error.is_some(),
             "the hidden-root error should be retained for its independent viewport"
         );
         assert!(!visible.load(Ordering::SeqCst));
@@ -2225,7 +2241,7 @@ mod tests {
         let output = feedback_context.run_ui(eframe::egui::RawInput::default(), |root| {
             lifecycle.show_pin_windows(root.ctx(), native_identity);
         });
-        assert!(lifecycle.pending_live_capture_error.is_none());
+        assert!(lifecycle.pending_capture_error.is_none());
         let root_commands = &output.viewport_output[&eframe::egui::ViewportId::ROOT].commands;
         assert!(!root_commands.iter().any(|command| {
             matches!(
@@ -2238,6 +2254,134 @@ mod tests {
         assert!(lifecycle.board.shutdown_live_sessions_and_join().is_ok());
         drop(cancel_release_tx);
         drop(static_release_tx);
+    }
+
+    #[test]
+    fn hidden_root_static_capture_failure_is_deferred_until_restore() {
+        let overlay_fixture = SharedVisualOverlayController::test_fixture();
+        let log = Arc::new(Mutex::new(CaptureFlowLog::default()));
+        let desktop = ScreenRect::new(-1_920, -240, 3_840, 1_320);
+        let backend: Arc<dyn ScreenCaptureBackend> = Arc::new(FailingCaptureBackend { desktop });
+        let mut lifecycle =
+            PinboardCaptureLifecycle::new(overlay_fixture.controller.clone(), backend);
+        lifecycle.set_adapters_for_test(
+            Arc::new(FakeParkingFactory {
+                log: Arc::clone(&log),
+                acknowledge_after: Some(1),
+            }),
+            Box::new(FakePinWindows {
+                log: Arc::clone(&log),
+                hide_ack_after: 1,
+                restore_ack_after: 2,
+                hide_failure: None,
+            }),
+        );
+
+        let visibility = VisibilityRevision::default();
+        let visible = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let restore = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut last_visible = false;
+        let native_identity = (42, 10);
+        assert!(
+            lifecycle
+                .begin_with_intent(
+                    PinCaptureIntent::Static,
+                    true,
+                    false,
+                    false,
+                    visibility.current(),
+                    RootFocusIntent::PreserveForeground,
+                    Some(80),
+                    Some(native_identity.0),
+                    native_identity,
+                )
+                .unwrap()
+        );
+        let operation_id = lifecycle.session.as_ref().unwrap().overlay_operation_id;
+        let context = eframe::egui::Context::default();
+        for _ in 0..2 {
+            poll_lifecycle(
+                &context,
+                &mut lifecycle,
+                &visibility,
+                &visible,
+                &restore,
+                &mut last_visible,
+                native_identity,
+            );
+        }
+        overlay_fixture.observer.wait_for_commands(1);
+        let selection = ScreenRect::new(-1_000, 80, 320, 240);
+        overlay_fixture.controller.inject_pinboard_event_for_test(
+            VisualOverlayEvent::RectangleConfirmed {
+                operation_id,
+                purpose: RectanglePurpose::PinboardCapture,
+                rect: selection,
+            },
+        );
+        assert!(overlay_fixture.controller.poll().is_empty());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut reported_error = None;
+        while lifecycle.is_busy() && Instant::now() < deadline {
+            let error = poll_lifecycle(
+                &context,
+                &mut lifecycle,
+                &visibility,
+                &visible,
+                &restore,
+                &mut last_visible,
+                native_identity,
+            );
+            if lifecycle.is_busy() {
+                assert!(
+                    error.is_none(),
+                    "hidden-root static feedback must wait for restoration acknowledgements"
+                );
+            }
+            reported_error = error.or(reported_error);
+            thread::yield_now();
+        }
+        assert!(!lifecycle.is_busy(), "static failure did not restore ROOT");
+        assert!(
+            reported_error
+                .as_deref()
+                .is_some_and(|error| error.contains("controlled static capture failure"))
+        );
+        let flow = log.lock().unwrap();
+        assert_eq!(flow.parking_restores, 1);
+        assert_eq!(flow.pin_restore_polls, 2);
+        drop(flow);
+        assert!(
+            lifecycle.pending_capture_error.is_some(),
+            "the hidden-root static error must be retained for its independent viewport"
+        );
+        assert!(!visible.load(Ordering::SeqCst));
+        assert!(!last_visible);
+        assert_eq!(lifecycle.pinboard().len(), 0);
+
+        let feedback_context = eframe::egui::Context::default();
+        feedback_context.set_embed_viewports(false);
+        let output = feedback_context.run_ui(eframe::egui::RawInput::default(), |root| {
+            lifecycle.show_pin_windows(root.ctx(), native_identity);
+        });
+        assert!(lifecycle.pending_capture_error.is_none());
+        assert!(
+            output
+                .viewport_output
+                .keys()
+                .any(|viewport_id| *viewport_id != eframe::egui::ViewportId::ROOT)
+        );
+        let root_commands = &output.viewport_output[&eframe::egui::ViewportId::ROOT].commands;
+        assert!(!root_commands.iter().any(|command| {
+            matches!(
+                command,
+                eframe::egui::ViewportCommand::Focus | eframe::egui::ViewportCommand::Visible(true)
+            )
+        }));
+        output.drop_without_applying_deltas();
+        assert!(lifecycle.shutdown_pin_windows().is_ok());
+        assert!(lifecycle.board.shutdown_live_sessions_and_join().is_ok());
     }
 
     #[test]

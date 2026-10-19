@@ -22735,6 +22735,232 @@ mod tests {
     }
 
     #[test]
+    fn open_note_activation_hands_off_query_focus_once() {
+        let _lock = crate::gui::TEST_MUTEX.lock().unwrap();
+        struct NotesDirectoryGuard(Option<std::ffi::OsString>);
+        impl Drop for NotesDirectoryGuard {
+            fn drop(&mut self) {
+                if let Some(previous) = self.0.take() {
+                    unsafe { std::env::set_var("ML_NOTES_DIR", previous) };
+                } else {
+                    unsafe { std::env::remove_var("ML_NOTES_DIR") };
+                }
+            }
+        }
+
+        let notes_directory = tempfile::tempdir().unwrap();
+        let previous_notes_directory = std::env::var_os("ML_NOTES_DIR");
+        unsafe { std::env::set_var("ML_NOTES_DIR", notes_directory.path()) };
+        let _notes_directory_guard = NotesDirectoryGuard(previous_notes_directory);
+        std::fs::write(
+            notes_directory.path().join("find-activation.md"),
+            "# Find Activation\n\nneedle",
+        )
+        .unwrap();
+        std::fs::write(
+            notes_directory.path().join("find-activation-a.md"),
+            "# Find Activation A\n\neditor text",
+        )
+        .unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        prepare_actual_query_frame(&ctx, &mut app);
+        let launcher_query_id = egui::Id::new("query_input");
+        assert!(ctx.memory(|memory| memory.has_focus(launcher_query_id)));
+
+        // The new-note route supersedes even a queued request to focus the
+        // launcher query. The one-shot handoff runs after the note's Window is
+        // rendered, without changing its configured Preview mode.
+        app.focus_query = true;
+        app.open_note_panel("find-activation", None);
+        assert!(!app.focus_query);
+        assert_eq!(app.note_panels.len(), 1);
+        assert_eq!(
+            app.note_panels[0].test_view_mode(),
+            crate::settings::NoteViewMode::Preview
+        );
+        // A focus request queued before the note reaches its render boundary
+        // is still superseded by this activation.
+        app.focus_query = true;
+        for _ in 0..2 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        assert!(!app.focus_query);
+        let note_layer = egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(("note_panel_window", "find-activation")),
+        );
+        assert!(!ctx.memory(|memory| memory.has_focus(launcher_query_id)));
+        assert_eq!(ctx.top_layer_id(), Some(note_layer));
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::F, egui::Modifiers::CTRL)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.note_panels[0].is_find_open());
+        for _ in 0..2 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        let find_query_id = app.note_panels[0].test_find_query_widget_id().unwrap();
+        assert!(ctx.memory(|memory| memory.has_focus(find_query_id)));
+
+        // A later deliberate launcher-query focus remains authoritative after
+        // the activation request has been consumed.
+        app.note_panels[0].close_find();
+        ctx.memory_mut(|memory| memory.surrender_focus(find_query_id));
+        focus_launcher_query(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::F, egui::Modifiers::CTRL)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.note_panels[0].is_find_open());
+        assert!(ctx.memory(|memory| memory.has_focus(launcher_query_id)));
+
+        // Reactivating the same existing note performs the same one-time
+        // handoff, without reconstructing the panel or changing its mode.
+        app.open_note_panel("find-activation", None);
+        assert_eq!(app.note_panels.len(), 1);
+        assert_eq!(
+            app.note_panels[0].test_view_mode(),
+            crate::settings::NoteViewMode::Preview
+        );
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!ctx.memory(|memory| memory.has_focus(launcher_query_id)));
+        assert_eq!(ctx.top_layer_id(), Some(note_layer));
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::F, egui::Modifiers::CTRL)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.note_panels[0].is_find_open());
+
+        // Reactivating B must take focus from A's real editor as well as from
+        // the launcher query, so the active note receives the next shortcut.
+        app.open_note_panel("find-activation-a", None);
+        assert_eq!(app.note_panels.len(), 2);
+        let a_index = app
+            .note_panels
+            .iter()
+            .position(|panel| panel.note_slug() == "find-activation-a")
+            .unwrap();
+        app.note_panels[a_index].test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        for _ in 0..2 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        let a_editor_id = app.note_panels[a_index]
+            .test_editor_widget_id()
+            .expect("Note A Edit mode provides its editor widget");
+        ctx.memory_mut(|memory| {
+            memory.surrender_focus(launcher_query_id);
+            memory.request_focus(a_editor_id);
+        });
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(ctx.memory(|memory| memory.has_focus(a_editor_id)));
+
+        app.open_note_panel("find-activation", None);
+        for _ in 0..2 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        let b_index = app
+            .note_panels
+            .iter()
+            .position(|panel| panel.note_slug() == "find-activation")
+            .unwrap();
+        let note_b_layer = egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(("note_panel_window", "find-activation")),
+        );
+        let a_index = app
+            .note_panels
+            .iter()
+            .position(|panel| panel.note_slug() == "find-activation-a")
+            .unwrap();
+        assert!(!ctx.memory(|memory| memory.has_focus(a_editor_id)));
+        assert_eq!(ctx.top_layer_id(), Some(note_b_layer));
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::F, egui::Modifiers::CTRL)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.note_panels[a_index].is_find_open());
+        assert!(app.note_panels[b_index].is_find_open());
+
+        // A focused field in an unrelated dialog is preserved across a note
+        // activation. The dialog is a real egui window in a distinct layer.
+        app.note_panels[b_index].close_find();
+        let dialog_input_id = egui::Id::new("activation_unrelated_dialog_input");
+        let mut dialog_text = String::new();
+        let mut focus_dialog_on_first_render = true;
+        let mut run_with_dialog = |app: &mut LauncherApp, input: egui::RawInput| {
+            app.run_root_frame_for_test_with(&ctx, input, false, |app, ui| {
+                app.render_root_ui(ui);
+                egui::Window::new("Unrelated dialog")
+                    .id(egui::Id::new("activation_unrelated_dialog"))
+                    .collapsible(false)
+                    .show(ui.ctx(), |ui| {
+                        let response = ui
+                            .add(egui::TextEdit::singleline(&mut dialog_text).id(dialog_input_id));
+                        if focus_dialog_on_first_render {
+                            response.request_focus();
+                            focus_dialog_on_first_render = false;
+                        }
+                    });
+            })
+            .0
+            .drop_without_applying_deltas();
+        };
+        run_with_dialog(&mut app, actual_query_input(true));
+        assert!(ctx.memory(|memory| memory.has_focus(dialog_input_id)));
+        app.open_note_panel("find-activation-a", None);
+        run_with_dialog(&mut app, actual_query_input(true));
+        assert!(ctx.memory(|memory| memory.has_focus(dialog_input_id)));
+        run_with_dialog(
+            &mut app,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::F, egui::Modifiers::CTRL)],
+                ..actual_query_input(true)
+            },
+        );
+        assert!(ctx.memory(|memory| memory.has_focus(dialog_input_id)));
+        assert!(app.note_panels.iter().all(|panel| !panel.is_find_open()));
+    }
+
+    #[test]
     fn note_find_shortcut_uses_focused_or_top_note_and_preserves_ctrl_w_close() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);

@@ -500,6 +500,22 @@ mod tests {
     }
 
     #[test]
+    fn pinboard_capture_intents_require_exclusive_handoff() {
+        use crate::commands::PinboardCommand;
+
+        for command in [PinboardCommand::Capture, PinboardCommand::Live] {
+            assert_eq!(
+                command_requirement(&Command::Pinboard(command)),
+                InteractionRequirement::ExclusiveCapture
+            );
+        }
+        assert_eq!(
+            command_requirement(&Command::Pinboard(PinboardCommand::List)),
+            InteractionRequirement::LauncherUi
+        );
+    }
+
+    #[test]
     fn mouse_pick_and_settings_use_their_required_handoffs() {
         assert_eq!(
             command_requirement(&Command::CoordinateTool(

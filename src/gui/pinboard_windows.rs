@@ -756,7 +756,7 @@ impl PinWindowPresenter {
         let viewport_id = self.capture_feedback_viewport_id;
         let closed = Arc::clone(&self.capture_feedback_closed);
         let builder = egui::ViewportBuilder::default()
-            .with_title("Live pin capture")
+            .with_title("Pinboard capture")
             .with_inner_size([390.0, 130.0])
             .with_resizable(false)
             .with_active(false)
@@ -769,7 +769,7 @@ impl PinWindowPresenter {
             let native_close = child_ctx.input(|input| input.viewport().close_requested());
             let mut dismiss = false;
             egui::CentralPanel::default().show(ui, |ui| {
-                ui.label("Live screenshot capture could not be completed.");
+                ui.label("Pinboard capture could not be completed.");
                 ui.label(&message);
                 dismiss = ui.button("Dismiss").clicked();
             });
@@ -1044,7 +1044,7 @@ impl PinWindowPresenter {
                                 .image_source
                                 .live_preparation()
                                 .and_then(|preparation| preparation.error())
-                                .map_or_else(|| live_status_label(&status), |error| error)
+                                .unwrap_or_else(|| live_status_label(&status))
                         }),
                     })
                 })
@@ -4764,7 +4764,7 @@ mod tests {
     }
 
     #[test]
-    fn pinboard_live_presenter_capture_feedback_re_registers_until_dismissed() {
+    fn pinboard_presenter_capture_feedback_re_registers_until_dismissed() {
         let ctx = egui::Context::default();
         ctx.set_embed_viewports(false);
         let mut presenter = PinWindowPresenter::new();

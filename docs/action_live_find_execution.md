@@ -18,7 +18,7 @@ radial presentation policy, explicit action settings, and note persistence.
 | M2-D | Native source smoke and remaining direct lifetime/resource gate | complete | One owned-window WGC smoke; reuse B/C coverage without duplicate tests |
 | M3-A | Per-panel Unicode-safe source matching and navigation | complete | Literal case-insensitive range/navigation tests; no content changes |
 | M3-B | Find strip, scoped keys, Edit/Preview/Split navigation | complete | Targeted note-panel interactions, honest source-only fallback |
-| M4 | Independent focused review and user documentation | in_progress | Final targeted integration, fmt, one Clippy attempt; report native smoke limitations |
+| M4 | Independent focused review and user documentation | complete | Final targeted integration, fmt, one Clippy attempt; report native smoke limitations |
 
 Implementation checkpoints execute sequentially. Each coherent verified checkpoint
 is committed using `<type>(<scope>): [M#-X] ...`; one normal push is attempted
@@ -433,3 +433,135 @@ M3-B touched Rust formatter checks and git diff --check passed. The generated
 default clipboard_modifiers.json (absent baseline, created during this run's
 new_app startup) was inspected and removed by the writer. Only intended source
 and parent README/ledger changes remain. Writer stopped before checkpoint Git.
+
+M3-B checkpoint: e24dabcf feat(notes): [M3-B] add in-panel find controls and mode navigation — normal push succeeded to origin/live-pinboard.
+M4 sole writer assigned the two reviewed reachability fixes (actual shared
+new/reactivated note activation and hidden-root Static error feedback), with
+focused tests and formatting only. Parent owns the final integration test batch
+and one Clippy attempt, avoiding redundant writer/parent test phases.
+
+M4 final coherent source: shared new/reactivated note activation queues a
+one-time handoff after the target renders and root visibility restoration.
+It cancels pending query focus and clears only actual root-query or superseded
+other-note keyboard ownership, using existing NotePanel ownership and preserving
+modal/prompt/unrelated-dialog inputs. The actual-route test covers query ownership,
+A Edit -> Preview B reactivation, Ctrl+F targeting B, and an unrelated dialog.
+Hidden Static errors now share the restored deferred feedback owner and generic
+pinboard wording; cancellation/root visibility are preserved. Radial Static/Live
+classification has one focused test plus existing close/release dispatch coverage.
+Writer stopped after formatting/diff checks without cargo builds/tests.
+
+Parent final touched-file check passed for all 21 changed Rust files using
+`rustfmt --edition 2024 --config skip_children=true --check` (explicit changed
+file list); cumulative `git diff 96d4926e --check` passed. The writer rechecked
+the final one-shot correction afterward. Global fmt baseline drift is unchanged.
+
+Final targeted integration command (currently running; result pending):
+`cargo nextest run --cargo-profile fast-dev --lib --no-fail-fast -E 'test(note_find_) | test(live_source_) | test(pinboard_live_) | test(pinboard::live::tests::) | test(live_capture_worker_is_cancelled_and_joined_when_pinboard_drops) | test(pins_keep_independent_session_state_and_release_bounded_image_memory) | test(capture_reservations_bound_pending_and_aggregate_bytes_with_overflow_checks) | test(fake_capture_waits_for_both_native_acknowledgements_and_restores_before_commit) | test(pin_controls_use_exact_child_commands_and_reject_invalid_owners) | test(retained_child_callbacks_keep_textures_and_zoom_independent_of_root_scale) | test(pin_list_is_keyboard_focusable_and_stale_rows_cannot_reopen_closed_pins) | test(launcher_pinboard_commands_capture_two_pins_and_recover_all_by_keyboard) | test(action_parity_) | test(primary_universal_action_delegates_to_exact_activation_path) | test(ordinary_radial_execution_preserves_root_launcher_state) | test(saved_paste_to_advance_run_repeats_three_times_through_app_and_physical_admission) | test(saved_run_prompt_continuation_opens_closed_grid_route_and_keeps_root_visible) | test(normal_safety_radial_generic_destructive_primary_is_confirmed_and_consumed_once) | test(unavailable_radial_action_is_rejected_before_confirmation_or_execution) | test(radial_clipboard_modify_completions_preserve_root_and_use_captured_history_query) | test(focused_split_editor_routes_keyboard_image_paste) | test(clipboard_lookup_is_excluded_by_each_non_editor_focus_or_view_mode) | test(split_mode_does_not_request_initial_editor_focus) | test(pinboard_capture_intents_require_exclusive_handoff) | test(exact_close_then_release_dispatches_once) | test(open_note_activation_hands_off_query_focus_once) | test(hidden_root_static_capture_failure_is_deferred_until_restore) | test(pinboard_presenter_capture_feedback_re_registers_until_dismissed) | test(pinboard_namespace_is_exact_typed_and_payload_free) | test(pinboard_typed_actions_reach_the_gui_host_without_generic_visibility_or_focus_policy)'`.
+Output is retained at `target/action-live-find-final-nextest.log`. The already
+passed ignored owned-window native smoke is intentionally not repeated here.
+
+Final targeted integration first command compiled until one new test-fake E0308:
+FailingCaptureBackend::capture_rect returned anyhow::Error instead of the
+existing ExecResult ExecutionDiagnostic. Exit101, zero tests executed. Writer
+will correct that test boundary then parent reruns the same selected cases.
+Original output retained at target/action-live-find-final-nextest-compile1.log.
+Independent reviewer has closed all accepted findings by source inspection,
+including final A-to-B activation; scope/coherence confirmed, execution pending.
+
+The fake now constructs ExecutionDiagnostic(DiagnosticKind::Backend), matching
+existing capture fakes. Its formatter/diff checks pass. Parent reran the exact
+final integration filter; tests are compiling. No source changed during build.
+
+Actual modified files (baseline to final working tree):
+- Cargo.lock
+- Cargo.toml
+- README.md
+- docs/action_live_find_execution.md
+- src/commands/bus.rs
+- src/commands/handlers/pinboard.rs
+- src/commands/headless.rs
+- src/commands/host.rs
+- src/commands/model.rs
+- src/commands/parser.rs
+- src/gui/command_host.rs
+- src/gui/mod.rs
+- src/gui/note_find.rs
+- src/gui/note_find_preview.rs
+- src/gui/note_panel.rs
+- src/gui/pinboard.rs
+- src/gui/pinboard_windows.rs
+- src/gui/render.rs
+- src/gui/universal_action_executor.rs
+- src/launcher_parking.rs
+- src/pinboard.rs
+- src/pinboard/live.rs
+- src/pinboard/source.rs
+- src/plugins/pinboard.rs
+- src/radial/handoff.rs
+- tests/fixtures/pinboard_live_source.ps1
+
+Final integration compiled and executed 59 selected tests:58 passed,1 failed,
+5749 outside selection (4.515s test phase). All action/clipboard/paste/radial,
+Find/actual-open activation, hidden Static feedback, source resolver, presenter,
+and direct resource cases passed except the M2-B fake session test's stale
+post-cancel assertion at live.rs2145. M2-C3776f20b intentionally fences NEW
+current_frame leases after explicit cancellation; SourceClosed retention is a
+distinct passing contract. Writer will migrate that test to retain a completed
+lease before cancel, assert no new leases/control after cancel, verify retained
+pixels and charged lifetime, then zero budget after session+lease release.
+No production fix or 58-case repeat is required; only that test will be rerun.
+
+Final failing-case recheck passed1/1 (5807 outside selection):
+"cargo nextest run --cargo-profile fast-dev --lib --no-fail-fast -E 'test(fake_live_session_keeps_first_frame_and_pause_resume_sequence_fenced)'".
+Output target/action-live-find-final-recheck.log. All59 final selected cases now
+have passing evidence (58 in final batch +1 targeted recheck); no 58-case repeat.
+Reviewer independently accepted the test migration as stronger lifetime coverage
+with exact pixels, new-lease/control fencing, retained charge and final zero.
+
+Single final lint attempt is running:
+"cargo clippy --profile fast-dev --message-format=json --lib --bin multi_launcher -- -D warnings".
+Structured output retained at target/action-live-find-clippy.jsonl. No vendor
+or unrelated lint cleanup will be performed; exact provenance will be recorded.
+
+Full Clippy attempt failed exit101 with seven task-code diagnostics, not
+preexisting/vendor blockers: bind_instead_of_map live.rs1306; two
+chunks_exact_to_as_chunks live.rs1731; intentional single_range_in_vec_init
+note_find_preview.rs583; collapsible_if note_panel.rs2065/2576;
+unnecessary_option_map_or_else pinboard_windows.rs1043. Writer is applying
+only equivalent corrections (single span remains Vec<Range<usize>>, never a
+collection of integer offsets). Normal vendor warnings were not gate failures.
+Goal I permits bounded diagnosis/remediation/recheck of an actual feature
+failure: parent will recheck only these five lint categories on lib/bin, not
+repeat a broad -D warnings pass or unrelated cleanup. Binary lint completion
+was blocked by the initial library errors; do not report that original attempt
+as a clean whole-project lint pass.
+
+M4 final result: all accepted independent review findings closed; all59 selected
+integration cases have passing evidence; real owned-source WGC smoke passed
+earlier and was not repeated. Seven task-code Clippy diagnostics were corrected
+with equivalent operations. Bounded failed-category lint recheck passed exit0
+for library AND multi_launcher binary in53.15s:
+"cargo clippy --profile fast-dev --lib --bin multi_launcher -- -A warnings -D clippy::bind_instead_of_map -D clippy::chunks_exact_to_as_chunks -D clippy::single_range_in_vec_init -D clippy::collapsible_if -D clippy::unnecessary_option_map_or_else".
+Log target/action-live-find-clippy-recheck.log. This is a scoped failure recheck,
+not a claim that the original full -D warnings attempt passed. No further full
+lint/test/native campaign was run. The equivalent fixed-array iteration and
+single-span construction preserve byte conversion and original-source mapping.
+
+Final formatting passed for8 M4 Rust files (skip_children=true), after the
+earlier21-file cumulative check. Final diff whitespace check passed. Obsolete
+live-only capture-error field/message search found no references. The generated
+default clipboard_modifiers.json (created2026-10-19T00:03:40 local during final
+new_app tests, absent baseline) was inspected and removed. No unrelated changes.
+README documents live opt-in, bounds/status/stills and transient note shortcuts.
+
+Remaining feature blockers: none. Known verification limits: native pin controls,
+radial UI invocation and actual note UI were not manually operated because
+native UI control is disabled here; deterministic UI/dispatch tests cover those
+owners separately from real WGC backend proof. Full Nextest/release/benchmarks
+were intentionally not run. Whole-repository fmt remains blocked by documented
+untouched baseline drift; touched files pass. Preview navigation identifies real
+containing segments, with coarser footnote-linked groups and explicit Edit reveal
+for exact/source-only or collapsed matches. Windows capture restrictions remain
+respected with no desktop-polling fallback. Final checkpoint Git follows below
+in the delivery report; no more implementation or validation is planned.

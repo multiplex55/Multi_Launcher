@@ -1303,10 +1303,7 @@ mod native {
             // lease, so a stale in-flight conversion cannot replace the frozen
             // frame after the control transition.
             let publication_epoch = slot.publication_epoch();
-            let content_size = match frame
-                .ContentSize()
-                .and_then(|size| Ok(valid_dimensions(size)))
-            {
+            let content_size = match frame.ContentSize().map(valid_dimensions) {
                 Ok(Ok(size)) => size,
                 Ok(Err(message)) => {
                     slot.set_status(generation, PinLiveStatus::TemporarilyUnavailable(message));
@@ -1728,7 +1725,12 @@ mod native {
             let bgra_row =
                 unsafe { std::slice::from_raw_parts(source.add(row * row_pitch), row_bytes) };
             let rgba_row = &mut rgba[row * row_bytes..(row + 1) * row_bytes];
-            for (source, target) in bgra_row.chunks_exact(4).zip(rgba_row.chunks_exact_mut(4)) {
+            for (source, target) in bgra_row
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(rgba_row.as_chunks_mut::<4>().0.iter_mut())
+            {
                 target[0] = source[2];
                 target[1] = source[1];
                 target[2] = source[0];
@@ -2140,12 +2142,31 @@ mod tests {
         resumed_processed_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("resumed frame should be published");
-        assert_eq!(session.current_frame().unwrap().sequence, 3);
+        let retained_completed_frame = session
+            .current_frame()
+            .expect("the completed sequence-three frame should be current");
+        assert_eq!(retained_completed_frame.sequence, 3);
+        assert_eq!(budget.used_bytes(), 16);
+
         session.cancel_and_join().unwrap();
-        assert!(session.current_frame().is_some());
+        assert!(session.current_frame().is_none());
         assert_eq!(budget.used_bytes(), 16);
         assert!(!session.pause());
         assert!(!session.resume());
+        assert_eq!(retained_completed_frame.sequence, 3);
+        assert_eq!(
+            *retained_completed_frame.image.pixels().get_pixel(0, 0),
+            image::Rgba([10, 11, 12, 255])
+        );
+
+        drop(session);
+        assert_eq!(budget.used_bytes(), 16);
+        assert_eq!(
+            *retained_completed_frame.image.pixels().get_pixel(0, 0),
+            image::Rgba([10, 11, 12, 255])
+        );
+        drop(retained_completed_frame);
+        assert_eq!(budget.used_bytes(), 0);
     }
 
     #[cfg(windows)]

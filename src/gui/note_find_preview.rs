@@ -580,7 +580,9 @@ fn event_visible_ranges(
         return vec![range.clone()];
     }
     raw.find(text)
-        .map(|start| vec![(range.start + start)..(range.start + start + text.len())])
+        .map(|start| {
+            std::iter::once((range.start + start)..(range.start + start + text.len())).collect()
+        })
         .unwrap_or_default()
 }
 

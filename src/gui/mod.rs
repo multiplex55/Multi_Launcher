@@ -4759,12 +4759,17 @@ impl LauncherApp {
                     entity_refs: Vec::new(),
                 }
             });
+        // A note activation takes precedence over a queued launcher query-focus
+        // request. The note consumes a one-shot layer handoff after its own
+        // window has rendered, so later deliberate focus changes remain intact.
+        self.focus_query = false;
         if let Some(existing_idx) = self
             .note_panels
             .iter()
             .position(|panel| panel.note_slug() == note.slug)
         {
-            let panel = self.note_panels.remove(existing_idx);
+            let mut panel = self.note_panels.remove(existing_idx);
+            panel.request_activation_handoff();
             self.note_panels.push(panel);
             self.update_panel_stack();
             return;
@@ -4793,6 +4798,7 @@ impl LauncherApp {
             self.note_show_details,
             &self.note_settings,
         );
+        panel.request_activation_handoff();
         panel.load_collapsed_sections_state(self);
         self.note_panels.push(panel);
         // Allow keyboard shortcuts like Esc/Cmd+W to immediately close the panel
