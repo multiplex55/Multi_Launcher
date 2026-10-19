@@ -66,7 +66,7 @@ pub use notes_recent::NotesRecentWidget;
 pub use notes_tags::NotesTagsWidget;
 pub use now_playing::NowPlayingWidget;
 pub use pinned_commands::PinnedCommandsWidget;
-pub use pinned_query_results::PinnedQueryResultsWidget;
+pub use pinned_query_results::{ClickBehavior, PinnedQueryResultsConfig, PinnedQueryResultsWidget};
 pub use plugin_home::PluginHomeWidget;
 pub use process_list::ProcessesWidget;
 pub use query_list::QueryListWidget;

@@ -1,7 +1,11 @@
 use multi_launcher::actions::{Action, load_actions_typed};
 use multi_launcher::common::persistence::LoadState;
 use multi_launcher::dashboard::config::{DashboardConfig, GridConfig, OverflowMode, SlotConfig};
-use multi_launcher::plugins::note::{NoteExternalOpen, NotePluginSettings};
+use multi_launcher::dashboard::widgets::{ClickBehavior, PinnedQueryResultsConfig};
+use multi_launcher::hotkey::validation::validate_hotkey_routes;
+use multi_launcher::plugin::Plugin;
+use multi_launcher::plugins::note::{NoteExternalOpen, NotePlugin, NotePluginSettings, load_notes};
+use multi_launcher::radial::model::RadialDocument;
 use multi_launcher::settings::{LogFile, Settings};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -10,15 +14,16 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const FIXTURE_ID: &str = "jump-mode-m01-v1";
+const FIXTURE_ID: &str = "jump-mode-m01-v2";
 const NOTE_COUNT: usize = 32;
 const SAFE_PLUGIN: &str = "notes";
-const LAUNCHER_HOTKEY: &str = "Ctrl+Alt+F12";
+const LAUNCHER_HOTKEY: &str = "Ctrl+Alt+F10";
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct FixtureManifest {
     schema_version: u32,
     fixture_id: String,
+    launcher_hotkey: String,
     enabled_plugins: Vec<String>,
     dashboard_slot_ids: Vec<String>,
     note_ids: Vec<String>,
@@ -36,6 +41,28 @@ struct SafetyManifest {
     network_plugin_enabled: bool,
     custom_actions_present: bool,
     dashboard_click_behavior: String,
+    reduce_dashboard_work_when_unfocused: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct NoteQueryObservation {
+    slot_id: String,
+    query: String,
+    action_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TagObservation {
+    tag: String,
+    count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ProductionSemanticsObservation {
+    canonical_notes_dir: String,
+    loaded_note_count: usize,
+    note_queries: Vec<NoteQueryObservation>,
+    observed_tags: Vec<TagObservation>,
 }
 
 fn main() {
@@ -75,6 +102,9 @@ fn generate(profile: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(profile)?;
     let notes_dir = profile.join("notes");
     fs::create_dir(&notes_dir)?;
+    let templates_dir = profile.join("templates");
+    fs::create_dir(&templates_dir)?;
+    set_isolated_fixture_dirs(profile)?;
     let screenshot_dir = profile.join("screenshot-output");
     fs::create_dir(&screenshot_dir)?;
 
@@ -82,6 +112,8 @@ fn generate(profile: &Path) -> anyhow::Result<()> {
     settings.hotkey = Some(LAUNCHER_HOTKEY.into());
     settings.help_hotkey = None;
     settings.quit_hotkey = None;
+    settings.paste_sequence.next_hotkey = None;
+    settings.paste_sequence.cancel_hotkey = None;
     settings.window_size = Some((900, 560));
     settings.offscreen_pos = None;
     settings.follow_mouse = false;
@@ -98,6 +130,7 @@ fn generate(profile: &Path) -> anyhow::Result<()> {
     settings.screenshot_save_file = false;
     settings.screenshot_auto_save = false;
     settings.screenshot_use_editor = false;
+    settings.reduce_dashboard_work_when_unfocused = false;
     settings.note.backlinks_enabled = false;
     settings.note.aliases_enabled = false;
     settings.note.templates_enabled = false;
@@ -128,7 +161,7 @@ fn generate(profile: &Path) -> anyhow::Result<()> {
     for (index, note_id) in note_ids.iter().enumerate() {
         let ordinal = index + 1;
         let note_text = format!(
-            "# Jump QA Note {ordinal:03}\n\nFixture record {ordinal:03} for the isolated Jump Mode runner.\n\nStable fixture ID: `{note_id}`\nTag: #jump-qa-bucket-{:02}\n",
+            "# Jump QA Note {ordinal:03}\n\nFixture record {ordinal:03} for the isolated Jump Mode runner.\n\nStable fixture ID: `{note_id}`\nTag: #jump_qa_bucket_{:02}\n",
             ((index % 4) + 1)
         );
         fs::write(notes_dir.join(format!("{note_id}.md")), note_text)?;
@@ -142,6 +175,7 @@ fn generate(profile: &Path) -> anyhow::Result<()> {
 fn verify(profile: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(profile.is_dir(), "fixture profile is not a directory");
     let profile = fs::canonicalize(profile)?;
+    let (notes_dir, _templates_dir) = set_isolated_fixture_dirs(&profile)?;
     let settings_path = profile.join("settings.json");
     let settings = match Settings::load_typed(&settings_path)? {
         LoadState::Loaded(settings) => settings,
@@ -166,6 +200,10 @@ fn verify(profile: &Path) -> anyhow::Result<()> {
         "filesystem indexing must be disabled"
     );
     anyhow::ensure!(
+        !settings.reduce_dashboard_work_when_unfocused,
+        "fixture must allow dashboard query refreshes while the launcher is initially unfocused"
+    );
+    anyhow::ensure!(
         settings.plugin_settings.contains_key("clipboard_modify"),
         "clipboard migration guard is missing"
     );
@@ -183,6 +221,21 @@ fn verify(profile: &Path) -> anyhow::Result<()> {
         settings.hotkey.as_deref() == Some(LAUNCHER_HOTKEY),
         "fixture must use its isolated launcher chord"
     );
+    anyhow::ensure!(
+        settings.paste_sequence.next_hotkey.is_none()
+            && settings.paste_sequence.cancel_hotkey.is_none(),
+        "fixture Next and Cancel Paste Sequence shortcuts must remain disabled"
+    );
+    validate_hotkey_routes(&settings, &RadialDocument::starter(), None).map_err(|issues| {
+        anyhow::anyhow!(
+            "fixture hotkey routes are invalid: {}",
+            issues
+                .iter()
+                .map(|issue| issue.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
     let configured_screenshot_dir = PathBuf::from(
         settings
             .screenshot_dir
@@ -241,7 +294,127 @@ fn verify(profile: &Path) -> anyhow::Result<()> {
         "dashboard contains an unexpected widget or click behavior"
     );
 
-    let notes_dir = profile.join("notes");
+    let expected_queries = [
+        ("jump-qa-note-list", "note list"),
+        ("jump-qa-note-tags", "note tags"),
+        ("jump-qa-note-search", "note search"),
+    ];
+    let mut typed_configs = std::collections::HashMap::new();
+    for slot in &dashboard.slots {
+        let slot_id = slot
+            .id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("dashboard fixture slot is missing its stable ID"))?;
+        let config: PinnedQueryResultsConfig = serde_json::from_value(slot.settings.clone())?;
+        let expected_query = expected_queries
+            .iter()
+            .find(|(expected_id, _)| *expected_id == slot_id)
+            .map(|(_, query)| *query)
+            .ok_or_else(|| anyhow::anyhow!("unexpected dashboard slot {slot_id:?}"))?;
+        anyhow::ensure!(
+            config.engine == SAFE_PLUGIN
+                && config.query == expected_query
+                && config.limit == NOTE_COUNT
+                && config.click_behavior == ClickBehavior::FillQuery,
+            "dashboard slot {slot_id:?} does not match its typed production config"
+        );
+        anyhow::ensure!(
+            typed_configs.insert(slot_id.to_owned(), config).is_none(),
+            "dashboard fixture contains duplicate slot ID {slot_id:?}"
+        );
+    }
+
+    let loaded_notes = load_notes()?;
+    let mut loaded_note_ids: Vec<String> =
+        loaded_notes.iter().map(|note| note.slug.clone()).collect();
+    loaded_note_ids.sort();
+    let mut expected_note_ids = note_ids();
+    expected_note_ids.sort();
+    anyhow::ensure!(
+        loaded_note_ids == expected_note_ids,
+        "production note loader did not return the stable fixture records"
+    );
+    let mut tag_counts = std::collections::BTreeMap::new();
+    for note in &loaded_notes {
+        for tag in &note.tags {
+            *tag_counts.entry(tag.clone()).or_insert(0usize) += 1;
+        }
+    }
+    let expected_tag_counts: std::collections::BTreeMap<String, usize> = (1..=4)
+        .map(|bucket| (format!("jump_qa_bucket_{bucket:02}"), NOTE_COUNT / 4))
+        .collect();
+    anyhow::ensure!(
+        tag_counts == expected_tag_counts,
+        "production note loader did not extract the expected four underscore tags"
+    );
+
+    // ML_NOTES_DIR was set before settings/plugin construction and before this
+    // production plugin starts its watcher/coordinator threads.
+    let note_plugin = NotePlugin::new();
+    let expected_open_actions: Vec<String> = expected_note_ids
+        .iter()
+        .map(|slug| format!("note:open:{slug}"))
+        .collect();
+    let mut query_observations = Vec::new();
+    for slot_id in ["jump-qa-note-list", "jump-qa-note-search"] {
+        let config = typed_configs
+            .get(slot_id)
+            .ok_or_else(|| anyhow::anyhow!("missing typed config for {slot_id:?}"))?;
+        let mut action_ids: Vec<String> = note_plugin
+            .search(&config.query)
+            .into_iter()
+            .map(|action| action.action)
+            .collect();
+        action_ids.sort();
+        anyhow::ensure!(
+            action_ids == expected_open_actions,
+            "production NotePlugin query {:?} did not return all stable fixture note IDs",
+            config.query
+        );
+        query_observations.push(NoteQueryObservation {
+            slot_id: slot_id.to_owned(),
+            query: config.query.clone(),
+            action_ids,
+        });
+    }
+    let tag_config = typed_configs
+        .get("jump-qa-note-tags")
+        .ok_or_else(|| anyhow::anyhow!("missing typed config for note tags"))?;
+    let tag_actions = note_plugin.search(&tag_config.query);
+    let mut observed_tag_counts = std::collections::BTreeMap::new();
+    for action in &tag_actions {
+        let tag = action
+            .label
+            .strip_prefix('#')
+            .and_then(|label| label.split_once(" ("))
+            .and_then(|(tag, count)| count.strip_suffix(')').map(|count| (tag, count)))
+            .ok_or_else(|| {
+                anyhow::anyhow!("unexpected production tag action label {:?}", action.label)
+            })?;
+        let count: usize = tag.1.parse()?;
+        observed_tag_counts.insert(tag.0.to_owned(), count);
+    }
+    anyhow::ensure!(
+        observed_tag_counts == expected_tag_counts,
+        "production NotePlugin tag query did not return the four expected underscore tags"
+    );
+    let production_semantics = ProductionSemanticsObservation {
+        canonical_notes_dir: notes_dir.to_string_lossy().into_owned(),
+        loaded_note_count: loaded_notes.len(),
+        note_queries: query_observations,
+        observed_tags: observed_tag_counts
+            .iter()
+            .map(|(tag, count)| TagObservation {
+                tag: tag.clone(),
+                count: *count,
+            })
+            .collect(),
+    };
+    println!(
+        "production_semantics={}",
+        serde_json::to_string(&production_semantics)?
+    );
+
     anyhow::ensure!(notes_dir.is_dir(), "isolated notes directory is missing");
     let mut actual_notes = fs::read_dir(&notes_dir)?
         .map(|entry| {
@@ -277,6 +450,7 @@ fn verify(profile: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(manifest.safety.macros_enabled == false);
     anyhow::ensure!(manifest.safety.network_plugin_enabled == false);
     anyhow::ensure!(manifest.safety.custom_actions_present == false);
+    anyhow::ensure!(manifest.safety.reduce_dashboard_work_when_unfocused == false);
 
     let resolved_notes_dir = fs::canonicalize(notes_dir)?;
     anyhow::ensure!(
@@ -334,6 +508,7 @@ fn fixture_manifest(note_ids: Vec<String>) -> FixtureManifest {
     FixtureManifest {
         schema_version: 1,
         fixture_id: FIXTURE_ID.to_owned(),
+        launcher_hotkey: LAUNCHER_HOTKEY.to_owned(),
         enabled_plugins: vec![SAFE_PLUGIN.to_owned()],
         dashboard_slot_ids: dashboard_slot_ids(),
         note_ids,
@@ -347,8 +522,31 @@ fn fixture_manifest(note_ids: Vec<String>) -> FixtureManifest {
             network_plugin_enabled: false,
             custom_actions_present: false,
             dashboard_click_behavior: "fill_query".to_owned(),
+            reduce_dashboard_work_when_unfocused: false,
         },
     }
+}
+
+fn set_isolated_fixture_dirs(profile: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let profile = fs::canonicalize(profile)?;
+    let notes_dir = fs::canonicalize(profile.join("notes"))?;
+    anyhow::ensure!(
+        notes_dir != profile && notes_dir.starts_with(&profile),
+        "fixture notes path must resolve below the isolated profile"
+    );
+    let templates_dir = fs::canonicalize(profile.join("templates"))?;
+    anyhow::ensure!(
+        templates_dir != profile && templates_dir.starts_with(&profile),
+        "fixture templates path must resolve below the isolated profile"
+    );
+    // SAFETY: this binary is a single-threaded fixture CLI. The generator and
+    // verifier set both isolated data paths before constructing NotePlugin or
+    // starting any production worker/watcher threads; neither path spawns
+    // threads earlier. Canonical containment is checked before environment
+    // mutation and before any production loader/plugin reads those paths.
+    unsafe { env::set_var("ML_NOTES_DIR", &notes_dir) };
+    unsafe { env::set_var("ML_NOTE_TEMPLATES_DIR", &templates_dir) };
+    Ok((notes_dir, templates_dir))
 }
 
 fn write_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
@@ -372,7 +570,7 @@ mod tests {
         let fixture = fixture_manifest(ids);
         assert_eq!(fixture.enabled_plugins, ["notes"]);
         assert_eq!(fixture.action_count, 0);
-        assert_eq!(LAUNCHER_HOTKEY, "Ctrl+Alt+F12");
+        assert_eq!(LAUNCHER_HOTKEY, "Ctrl+Alt+F10");
         assert!(!fixture.safety.clipboard_modify_plugin_enabled);
         assert!(!fixture.safety.macros_enabled);
         assert!(!fixture.safety.network_plugin_enabled);
@@ -393,5 +591,23 @@ mod tests {
                     .starts_with("note ")
             );
         }
+    }
+
+    #[test]
+    fn fixture_hotkey_passes_production_route_validation_and_f12_conflicts() {
+        let mut settings = Settings::default();
+        settings.hotkey = Some(LAUNCHER_HOTKEY.to_owned());
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        assert!(validate_hotkey_routes(&settings, &RadialDocument::starter(), None).is_ok());
+
+        settings.hotkey = Some("Ctrl+Alt+F12".to_owned());
+        let issues =
+            validate_hotkey_routes(&settings, &RadialDocument::starter(), None).unwrap_err();
+        assert!(issues.iter().any(|issue| {
+            issue
+                .message
+                .contains("launcher hotkey can co-fire with Screen Draw emergency hotkey")
+        }));
     }
 }

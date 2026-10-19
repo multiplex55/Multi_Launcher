@@ -6,15 +6,15 @@
 - Initial working tree: clean, including tracked task-input documents. No user changes copied/discarded.
 - Environment: Windows PowerShell; rustc/cargo 1.99.0; Nextest 0.9.135; egui/eframe 0.36.2 with local vendor patches.
 - Git branch creation needed sandbox escalation because .git is read-only in the normal sandbox; authorized creation succeeded.
-- Current milestone: M05-B painter verified; native query proof and M01-B populated baseline next.
-- Latest GUI evidence: rejected populated-baseline run jump_m01_20261019T210335Z_cd3ec49b; CPU baseline recorded separately.
-- Latest checkpoint: 9da782edf4c35e7c618319091d4d7a839b2a7c00 — feat(jump): [M05-A] route scoped leader and hint keys.
-- Push status: all checkpoints through M05-A (9da782ed) pushed successfully to origin; upstream configured.
+- Current milestone: M01 baseline accepted; M05 native query proof next.
+- Latest GUI evidence: accepted baseline jump_m01_20261019T232227Z_fc7bc04b; curated 00_baseline_dashboard.png.
+- Latest checkpoint: 7a537081946e2cd49fe634c7a7b5d846bec84c89 — feat(jump): [M05-B] paint clipped hints and focus feedback.
+- Push status: all checkpoints through M05-B (7a537081) pushed successfully to origin; upstream configured.
 
 | Milestone | State | Checkpoint / verification | Evidence or dependency |
 |---|---|---|---|
 | M00 | complete | Branch from recorded HEAD; verified source map | Clean initial tree; existing fixture isolation seam |
-| M01 | in_progress | M01-A scaffold verified; real capture/cleanup demonstrated | M01-B populated dashboard readiness incomplete |
+| M01 | complete | M01-B production semantic fixture checks + accepted real baseline | 232227Z_fc7bc04b; visual review + owned cleanup PASS |
 | M02 | complete | M02-A 3 tests + M02-B ownership regression passed | Real general apply/publication/rollback covered |
 | M03 | complete | 10/10 targeted Nextest tests; scoped fmt/diff | Typed IDs, frozen mapping, prefix-free matching |
 | M04 | complete | 24/24 all-Jump Nextest; scoped fmt/diff clean | Copied responses, multipass retention, one-shot intents |
@@ -52,7 +52,7 @@ Parent owns branch, ledger, commits and one best-effort push per checkpoint. Pla
 
 ## Next action
 
-M05-B painter verified and ready to checkpoint. Next: M01-B concrete fixture repair/production semantic validation and owned baseline, then native query-only Jump proof. M01-B fixture root-cause handoff is ready; populated dashboard baseline remains incomplete until semantic and rendered-content proof.
+M05-B painter committed/pushed. Sole fixture implementer owns M01-B concrete scheduling/tag repair, production semantic checks and one owned baseline; parent reviews actual PNG/content before acceptance. Native query-only Jump proof follows. M01-B fixture root-cause handoff is ready; populated dashboard baseline remains incomplete until semantic and rendered-content proof.
 
 
 
@@ -125,3 +125,17 @@ Safe actual-root test seam: `forced_discard_dispatches_the_root_action_and_histo
 - Real focus plus the exact completed response is required for a destination outline. Painting never requests focus or executes handlers.
 - Both visible root exits finish collection, validate/reconcile and paint before QA capture. Shared reconciliation retains the completion callback as final registry owner. Focus ID is read once per paint rather than locking memory per target.
 - cargo nextest run --lib -E 'test(jump_mode)': exit 0, 33 passed / 5809 filtered. All four new model tests pass; touched-file rustfmt --check and diff check pass. Native screenshots are not yet claimed.
+## M01-B execution scope clarification
+Production plugin.rs search_plugin_with_ticket invokes NotePlugin.search synchronously; no missing async publication readiness has been established. First repair the verified fixture scheduling/tag defects and prove production semantic queries, then one actual baseline capture and parent visual-content review. Add further readiness instrumentation only if that run exposes a concrete unmet state. Existing capture alone remains insufficient for content PASS.
+## P2 read-only integration handoff
+- M06: register actual grid/list Responses before context-menu attachment with TargetKind::Action (Select). TargetId::root_result(result_generation, index) distinguishes duplicate payloads/args without ActionIdLookup. Set existing selected index, retain query keyboard owner/caret, one repaint for selected styling, no activation/deferred action on resolution. Fresh Enter uses existing root handler/activate_action. Capture result scope generation AFTER query processing because results can change during the frame. Existing search/command-host/universal-action invalidation owners advance generation; geometry-only rebuild must not.
+- M06 narrow proof: list/grid actual-root hint selection plus later exact-once safe query action, full Action/args identity, stale generation, clipped/virtualized rows, and forced discard. Existing query-only registry-count assumption will need intentional migration.
+- M07: reuse slot-scoped DashboardContext jump scope. Small opt-in Response helper requests native focus; original clicked/WidgetAction or direct mutation branches stay owners. Stable native egui IDs are also required for reordered dynamic rows (TodoEntry.id, timer ID, temp path; action/args plus occurrence for query/history rows).
+- M07 headers/body keys must differ. Root dashboard idle lacks results-loop unconditional focus_input; avoid broad suppression of explicit query focus. Guard direct Refresh/Copy/Append mutations against repeated discarded passes, while collecting every pass. Native fixtures must never execute destructive/media/clipboard controls.
+- M07 exact files: recent_commands, pinned_query_results, query_list (bookmarks equivalent), todo, calendar, tempfiles, active_timers, scratchpad, now_playing, recycle_bin, system_actions/system_status headers. Todo inline complex widgets, Scratchpad multiline, Calendar date/event navigation remain later control coverage unless explicitly integrated.
+## M01-B accepted baseline / future test constraint
+- Fixed fixture-only focus throttling/tags and validated actual production note loading, exact list/search IDs (32 each), four bucket tags (8 each), typed pinned-query config and complete hotkey route. CtrlAltF10 passes; old F12 co-fire conflict is rejected headlessly.
+- Canonical notes AND template paths are strict profile subpaths before any environment update/plugin construction. ML_NOTE_TEMPLATES_DIR is necessary because NotePlugin construction refreshes templates even when disabled; verifier and launched app now use the isolated templates directory.
+- Warning run jump_m01_20261019T232004Z_28069510 marked FAIL, original pixels/receipt/lifecycle retained. Fresh jump_m01_20261019T232227Z_fc7bc04b: production semantics PASS, 3 fixture tests PASS, actual 900x560 populated dashboard visually accepted by parent, no warning. PID23360 gracefully exited0, owned_tree_gone, no forced cleanup. Automated runner originally BLOCKED content; explicit baseline_visual_review.json records parent acceptance and scenarios/manifest now PASS.
+- Curated fixture-only PNG is docs/plans/jump_mode_review/00_baseline_dashboard.png (171568 bytes); raw logs/evidence remain ignored.
+- NEW USER CONSTRAINT: disable Enable Next Shortcut and Enable Cancel Shortcut for all future test profiles. Generator now writes paste_sequence.next_hotkey=None and cancel_hotkey=None; verifier rejects either enabled, README records it. Existing baseline predates this steering and remains immutable. Production defaults unchanged. Fixture-only follow-up jump_m01_20261019T232417Z_6468abe4 PASS: 3 tests, generate/production verify exit0, persisted Next/Cancel null confirmed.

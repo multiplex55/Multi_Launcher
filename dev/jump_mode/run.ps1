@@ -412,10 +412,10 @@ try {
     $fixtureManifestFile = Join-Path $profileRoot 'fixture_manifest.json'
     $fixtureHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $fixtureManifestFile).Hash.ToLowerInvariant()
     $fixtureScenarioStatus = 'PASS'
-    $fixtureScenarioReason = 'Typed settings, dashboard, actions, plugin allowlist, isolated screenshot settings, and 32 stable note records passed fixture validation.'
+    $fixtureScenarioReason = 'Typed settings/dashboard and production pinned-query config passed; isolated production note loading/search returned all 32 stable note IDs and four underscore bucket tags; the production hotkey-route validator accepted the isolated fixture chord; side-effect safety checks passed.'
     $phase = 'fixture_checked'
     Update-Scenarios
-    Write-Summary 'BLOCKED' 'Fixture typed-load checks passed. The profile has an explicit `notes` plugin allowlist, empty custom actions, disabled user screenshot output, and 32 stable local note records.'
+    Write-Summary 'BLOCKED' 'Fixture validation passed typed production widget config and production note loader/search checks: 32 list results, 32 search results, and four underscore bucket tags. The production hotkey-route validator accepted the isolated chord. The profile has an explicit `notes` allowlist, empty custom actions, disabled screenshot side effects, and isolated notes/template paths.'
 
     if ($FixturesOnly) {
         $scenarioStatus = 'BLOCKED'
@@ -468,6 +468,7 @@ try {
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $psi.Environment['ML_NOTES_DIR'] = Join-Path $profileRoot 'notes'
+        $psi.Environment['ML_NOTE_TEMPLATES_DIR'] = Join-Path $profileRoot 'templates'
         $psi.Environment['ML_QA_FRAMEBUFFER_REQUEST_MANIFEST'] = $qaRequestPath
         $psi.Environment.Remove('ML_TRACK_C_BENCH_MODE') | Out-Null
         $process = [Diagnostics.Process]::new()
@@ -486,6 +487,7 @@ try {
             executable_sha256 = $executableHash
             working_directory = $profileRoot
             ml_notes_dir = $psi.Environment['ML_NOTES_DIR']
+            ml_note_templates_dir = $psi.Environment['ML_NOTE_TEMPLATES_DIR']
         }
         $treeObserved = $false
         for ($attempt = 0; $attempt -lt 25; $attempt++) {

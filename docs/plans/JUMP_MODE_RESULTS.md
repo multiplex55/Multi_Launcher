@@ -1,6 +1,6 @@
 # Jump Mode Results
 
-Work in progress on `feat/jump-mode-2026-10-19-c7e42`, based on `8f94b003a12853735d1cb4689c6ec4e53c4ace8e`. Checkpoints through `9da782ed` are pushed to origin. The default-off setting, pure hint engine and scoped target/focus registry are implemented; keyboard routing is verified on the actual root query path. The overlay painter is verified headlessly; native overlay proof and end-to-end surface integration remain pending.
+Work in progress on `feat/jump-mode-2026-10-19-c7e42`, based on `8f94b003a12853735d1cb4689c6ec4e53c4ace8e`. Checkpoints through `7a537081` are pushed to origin. The default-off setting, pure hint engine and scoped target/focus registry are implemented; keyboard routing is verified on the actual root query path. The overlay painter is verified headlessly; native overlay proof and end-to-end surface integration remain pending.
 
 ## Architecture and current inventory
 
@@ -24,7 +24,7 @@ The first nested helper did not inherit root patches/lock; it was replaced by a 
 
 ## Evidence
 
-- Latest real GUI run: `G:\Repos\rust\Multi_Launcher\dev\jump_mode\evidence\jump_m01_20261019T210335Z_cd3ec49b\summary.md`.
+- Initial rejected GUI run: `dev/jump_mode/evidence/jump_m01_20261019T210335Z_cd3ec49b/summary.md`. Latest accepted run is listed below.
 - PNG: `G:\Repos\rust\Multi_Launcher\dev\jump_mode\evidence\jump_m01_20261019T210335Z_cd3ec49b\screenshots\00_baseline_dashboard.png` (900×560).
 - Cleanup: same run's `process_lifecycle.json`; original capture receipt retained.
 - **Baseline fixture-content FAIL:** screenshot shows an invalid-hotkey conflict banner and empty intended pinned results. A post-run correction explicitly overrides the automated receipt-only acceptance. Real capture and cleanup mechanics succeeded, but this is not an accepted populated-dashboard baseline.
@@ -35,8 +35,8 @@ The first nested helper did not inherit root patches/lock; it was replaced by a 
 | Surface / requirement | Current status |
 |---|---|
 | M00 branch/source ownership | Complete |
-| M01 fixture/runner | Scaffold implemented, corrections under scoped verification |
-| M01 populated dashboard baseline | Incomplete: correct fixture content/readiness still needs proof |
+| M01 fixture/runner | Complete: production semantics, accepted actual baseline and owned cleanup |
+| M01 populated dashboard baseline | PASS: 232227Z_fc7bc04b, explicit parent visual review |
 | M02 setting | Complete: M02-A 3 tests + M02-B real save-owner regression passed |
 | M03 pure hint engine | Complete; 10 targeted tests passed, c3549759 pushed |
 | M04 registry | Complete; 24 all-Jump tests passed, scoped fmt/diff clean |
@@ -45,7 +45,7 @@ The first nested helper did not inherit root patches/lock; it was replaced by a 
 | M10–M13 Settings, dialogs, complex widgets and extended evidence | Pending |
 | M14–M15 performance, final checks and handoff | Pending |
 
-No feature scenario, native keyboard scenario or performance claim is marked passed before execution. No curated PNG has been published as accepted feature evidence.
+No feature scenario, native keyboard scenario or performance claim is marked passed before execution. A normal-dashboard fixture baseline is curated; no native Jump interaction has been claimed yet.
 
 See [execution ledger](JUMP_MODE_EXECUTION.md) for current ownership and next action.
 
@@ -74,3 +74,13 @@ Final cargo nextest run --lib -E 'test(jump_mode)': 29 passed / 5809 filtered, e
 Current-pass clipped badges, accepted-prefix styling, active/invalid/no-target feedback and real-focus destination outline are implemented in jump_mode/paint.rs. Frozen IDs cannot borrow stale-generation geometry. Root pass finalization validates/reconciles before paint and QA capture; full-frame registry retention is unchanged. No widget focus or action behavior is owned by the painter.
 
 cargo nextest run --lib -E 'test(jump_mode)': 33 passed / 5809 filtered, exit 0. Touched-file rustfmt --check and diff check pass. Actual native overlay screenshot remains required before M05 completion.
+## M01-B accepted production baseline
+Latest accepted summary: [232227Z_fc7bc04b](../../dev/jump_mode/evidence/jump_m01_20261019T232227Z_fc7bc04b/summary.md). Actual PNG: [normal dashboard](jump_mode_review/00_baseline_dashboard.png), 900x560, 171568 bytes. Parent inspected populated list/search cards and all four expected tag buckets without warnings. Explicit baseline_visual_review.json records the visual assessment; scenarios and manifest were advanced from automated content-BLOCKED to PASS based on that assessment, without modifying original capture receipt, pixels or lifecycle.
+
+Fixture verification now invokes production load_notes, NotePlugin queries, typed pinned-query config and the pure complete hotkey-route validator. Three fixture tests pass; list/search each return32 stable IDs and four underscore tags each count8. Canonical notes/template paths are confined before environment update or plugin creation; child uses both ML_NOTES_DIR and ML_NOTE_TEMPLATES_DIR. Fixture-only unfocused throttling is disabled and CtrlAltF10 validates cleanly. Warning run232004Z_28069510 remains FAIL.
+
+Owned run command: `pwsh -NoProfile -ExecutionPolicy Bypass -File dev/jump_mode/run.ps1 -CaptureTimeoutSeconds 45 -GracefulCloseSeconds 6`. Process23360 closed gracefully, exit0, owned_tree_gone, no forced cleanup. Scoped formatting, PowerShell/evidence parsing and diff checks pass. No Jump interaction is proved by this baseline.
+
+All future test profiles now disable Paste Sequence Enable Next Shortcut and Enable Cancel Shortcut, per user steering: both optional hotkeys are None and the verifier rejects enabling either. The accepted baseline predates that instruction; its original artifacts are preserved. Normal application defaults remain unchanged.
+
+Future-shortcut constraint verified by fixture-only run jump_m01_20261019T232417Z_6468abe4: 3 tests passed, generation/production semantic verification exit 0; both persisted shortcut fields are null. No native run was requested in this fixture-only check.
