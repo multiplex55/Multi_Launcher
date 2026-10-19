@@ -91,7 +91,6 @@ impl ParameterPromptUi {
         self.bootstrap_pending
     }
 
-    #[cfg(feature = "qa-framebuffer-capture")]
     pub(crate) fn owns_input(&self) -> bool {
         self.pending.is_some() || self.notice.is_some()
     }

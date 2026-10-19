@@ -300,6 +300,7 @@ mod tests {
             reduce_dashboard_work_when_unfocused: false,
             diagnostics: None,
             show_diagnostics_widget: false,
+            jump_mode_scope: None,
         }
     }
 

@@ -459,6 +459,7 @@ impl CommandHistoryWidget {
             reduce_dashboard_work_when_unfocused: false,
             diagnostics: None,
             show_diagnostics_widget: false,
+            jump_mode_scope: None,
         };
         let mut widget = Self::new(CommandHistoryConfig {
             count: pins.len(),
@@ -616,6 +617,7 @@ mod tests {
             reduce_dashboard_work_when_unfocused: false,
             diagnostics: None,
             show_diagnostics_widget: false,
+            jump_mode_scope: None,
         }
     }
 

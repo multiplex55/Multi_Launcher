@@ -34,6 +34,7 @@ pub enum WidgetActivation {
 }
 
 /// Context shared with widgets at render time.
+#[derive(Clone)]
 pub struct DashboardContext<'a> {
     pub actions: &'a [Action],
     pub actions_by_id: &'a ActionIdLookup,
@@ -54,6 +55,7 @@ pub struct DashboardContext<'a> {
     pub reduce_dashboard_work_when_unfocused: bool,
     pub diagnostics: Option<DashboardDiagnosticsSnapshot>,
     pub show_diagnostics_widget: bool,
+    pub jump_mode_scope: Option<crate::gui::JumpModeScope>,
 }
 
 struct SlotRuntime {
@@ -114,6 +116,7 @@ pub struct Dashboard {
     registry: WidgetRegistry,
     watcher: Option<JsonWatcher>,
     pub warnings: Vec<String>,
+    target_generation: u64,
     event_cb: Option<std::sync::Arc<dyn Fn(DashboardEvent) + Send + Sync>>,
     diagnostics: DashboardDiagnostics,
 }
@@ -142,6 +145,7 @@ impl Dashboard {
             registry,
             watcher: None,
             warnings,
+            target_generation: 0,
             event_cb,
             diagnostics: DashboardDiagnostics::new(),
         };
@@ -190,6 +194,13 @@ impl Dashboard {
 
         self.slots = slots;
         self.runtime_slots = runtime_slots;
+        self.target_generation = self.target_generation.wrapping_add(1);
+    }
+
+    /// Generation for dashboard targets. A config reload invalidates target
+    /// identities even when a slot keeps the same local widget key.
+    pub(crate) fn target_generation(&self) -> u64 {
+        self.target_generation
     }
 
     pub fn reload(&mut self) {
@@ -299,6 +310,21 @@ impl Dashboard {
         activation: WidgetActivation,
         diagnostics: &mut DashboardDiagnostics,
     ) -> Option<WidgetAction> {
+        let scoped_context = ctx.jump_mode_scope.as_ref().map(|scope| {
+            let slot_identity = slot.slot.id.as_deref().map_or_else(
+                || {
+                    format!(
+                        "slot-position:{}:{}:{}",
+                        slot.slot.widget, slot.slot.row, slot.slot.col
+                    )
+                },
+                |id| format!("slot-id:{id}"),
+            );
+            let mut scoped_context = ctx.clone();
+            scoped_context.jump_mode_scope = Some(scope.child_namespace(slot_identity));
+            scoped_context
+        });
+        let ctx = scoped_context.as_ref().unwrap_or(ctx);
         let (heading, diag_key) = slot_diagnostics_label(&slot.slot);
 
         ui.set_clip_rect(slot_clip);
@@ -797,6 +823,7 @@ mod tests {
             reduce_dashboard_work_when_unfocused: false,
             diagnostics: None,
             show_diagnostics_widget: true,
+            jump_mode_scope: None,
         }
     }
 

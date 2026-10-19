@@ -6,10 +6,10 @@
 - Initial working tree: clean, including tracked task-input documents. No user changes copied/discarded.
 - Environment: Windows PowerShell; rustc/cargo 1.99.0; Nextest 0.9.135; egui/eframe 0.36.2 with local vendor patches.
 - Git branch creation needed sandbox escalation because .git is read-only in the normal sandbox; authorized creation succeeded.
-- Current milestone: M04 next; M02/M03 complete; M01-B populated baseline incomplete.
+- Current milestone: M05-A next; M02–M04 complete; M01-B populated baseline incomplete.
 - Latest evidence: pending baseline run.
-- Latest checkpoint: f3215251 — feat(jump): [M02-A] add default-off setting and Settings toggle.
-- Push status: M00, M01-A and M02 all pushed successfully to origin; upstream configured.
+- Latest checkpoint: c3549759 — feat(jump): [M03-A] add typed prefix-free hint engine.
+- Push status: M00, M01-A, M02 and M03 all pushed successfully to origin; upstream configured.
 
 | Milestone | State | Checkpoint / verification | Evidence or dependency |
 |---|---|---|---|
@@ -17,7 +17,7 @@
 | M01 | in_progress | M01-A scaffold verified; real capture/cleanup demonstrated | M01-B populated dashboard readiness incomplete |
 | M02 | complete | 3/3 targeted Nextest tests; touched-file fmt/diff pass | Legacy false; explicit serde/editor/runtime apply |
 | M03 | complete | 10/10 targeted Nextest tests; scoped fmt/diff | Typed IDs, frozen mapping, prefix-free matching |
-| M04 | pending | Registry and safe focus intents | M03 |
+| M04 | complete | 24/24 all-Jump Nextest; scoped fmt/diff clean | Copied responses, multipass retention, one-shot intents |
 | M05 | pending | Input lifecycle and overlay | M02–M04 |
 | M06 | pending | Grid integration | M05 |
 | M07 | pending | Dashboard integration | M05 |
@@ -81,3 +81,22 @@ Checkpoint M01-A, then implement M02 default-off settings gate. Return to M01-B 
 - Pure src/gui/jump_mode.rs: typed semantic/surface/generation identities, metadata, immutable hint map, explicit matcher/session outcomes and stale-population reconciliation. Shallowest-rightmost leaf expansion preserves short prefix-free uppercase A–Z codes. No action or UI dependency.
 - cargo nextest run --lib -E 'test(gui::jump_mode)': exit 0, 10 passed / 5811 filtered. Scoped format/diff clean; vendor warnings only in test compile. One duplicate filtered invocation queued after tool handle loss reused Cargo output; no extra suite run.
 - Count / longest / mean hint lengths: 0/0/0; 1/1/1; 2/1/1; 26/1/1; 27/2/1.074074; 52/2/1.538462; 100/2/1.77; 1000/3/2.337.
+## M05 input handoff constraints
+
+- M04 queue protocol: after begin_frame, capture input/advance navigation epoch/queue intent BEFORE begin_ui_pass and scope creation. Queueing during/after a pass returns false; no second propagation path. This prevents old scope epochs and dropped same-frame intents.
+- Consume keys/text on every UI pass while state transitions happen once. Force-discard tests must prove leader/cancel/resolve events cannot reappear in TextEdit on a second pass. Latch first-pass ownership/capture through modal dismissal and hint resolution.
+- Require a fresh post-resolution activation: consume same-frame Enter/Space, and held/repeated leader/completion/activation keys must not leak after exit before release. No arbitrary delays.
+- Overlay never owns keyboard focus; cancellation normally preserves original field/caret without an unsafe focus resurrection. Focus loss/hidden root/owner change cancels.
+- M05 minimal real GUI screenshot can use main query registration; full dashboard/grid native evidence belongs at M08. Ensure existing QA F11 capture remains usable for active-overlay screenshots (feature-gated QA interception may precede Jump input); no production screenshot shortcut bypass.
+- M01 baseline must be completed through semantic fixture validation (production loader and exact queries) then actual readiness/target-state observation, not guessed sleep. Use underscore tags; hyphens collapse to tag `jump` in current parser.
+### M05 insertion correction from current-source inspection
+
+Root menus/buttons render before the originally proposed post-snippet/pre-query seam. Vendored egui treats focused Space as a click even with Shift. Therefore eligible leader/session key sanitation must occur in the early visible UI hook before root menu widgets, with existing modal/prompt/OCR/Screen Draw ownership latched and preserved. Later pre-query handling alone is insufficient. Ordinary root Escape hide is after query, so consumed active Escape can prevent it without moving that handler.
+
+Safe actual-root test seam: `forced_discard_dispatches_the_root_action_and_history_once` already uses internal `radial edit`, `test_skip_history_persistence`, `test_activation_trace`, usage counts and forced multipass. Use `query:jump-safe-marker` for a minimal safe eventual-action case; do not deliberately activate `root_list_action()` synthetic app payloads.
+
+## M04 outcome
+- Added app-owned egui bridge in jump_mode/ui.rs, copied eligible target metadata/geometry, per-pass collectors, completed-pass retention and exact target/viewport/navigation-epoch focus directives. No callbacks/actions are stored or invoked.
+- DashboardContext has a public opaque optional scope, slot-scoped across header/body; all six repository constructors migrated. Configuration generation guards slot reloads. Root hidden/disabled/ownership guards clear navigation. Parameter-prompt ownership accessor is generally available.
+- Bridge is the single runtime enabled-state owner; App gate delegates to it. Ambiguous distinct non-root surfaces fail closed; root dashboard/results may coexist. Disabled, hover-only, clipped, blocked and wrong-viewport targets excluded. Queueing after pass start returns false; intent remains single-path/one-shot.
+- cargo nextest run --lib -E 'test(jump_mode)': exit 0, 24 passed / 5808 skipped. Scoped rustfmt and diff checks pass, no project/private-interface warnings. Test-fixture mutability/capture, modal rejection classification and selectable-label setup were corrected through focused feedback; no assertions weakened.

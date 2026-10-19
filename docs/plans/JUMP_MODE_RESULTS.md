@@ -38,7 +38,9 @@ The first nested helper did not inherit root patches/lock; it was replaced by a 
 | M01 fixture/runner | Scaffold implemented, corrections under scoped verification |
 | M01 populated dashboard baseline | Incomplete: correct fixture content/readiness still needs proof |
 | M02 setting | Complete; 3 targeted tests passed, checkpoint f3215251 pushed |
-| M03–M05 engine, registry, input and overlay | In progress / pending |
+| M03 pure hint engine | Complete; 10 targeted tests passed, c3549759 pushed |
+| M04 registry | Complete; 24 all-Jump tests passed, scoped fmt/diff clean |
+| M05 input and overlay | Pending |
 | M06–M09 grid/dashboard, keyboard harness and Phase 1 review | Pending |
 | M10–M13 Settings, dialogs, complex widgets and extended evidence | Pending |
 | M14–M15 performance, final checks and handoff | Pending |
@@ -52,3 +54,6 @@ Implemented default-off experimental_jump_mode_enabled setting, Launcher Window 
 
 ## M03 checkpoint
 Pure typed hint engine implemented in src/gui/jump_mode.rs. Target generation/surface identity, deterministic prefix-free A–Z leaf expansion, frozen sessions, case-insensitive matching, invalid-input preservation, Backspace/cancel and stale-target reconciliation covered. cargo nextest run --lib -E 'test(gui::jump_mode)' passed 10 tests (5811 filtered). No UI targeting or input interception is claimed yet.
+
+## M04 checkpoint
+App-owned frame registry/focus bridge implemented, with public opaque optional dashboard scope and instance/generation namespacing. Final-pass retention, one-shot epoch/generation intents, interactivity/clip/viewport/modal filtering, same-priority non-root ambiguity rejection, real button focus without clicks, logical selection without execution and disabled clearing are tested. Runtime flag has one owner. cargo nextest run --lib -E 'test(jump_mode)' passed 24 tests (5808 skipped); scoped formatting/diff passed. No keyboard interception or overlay yet.

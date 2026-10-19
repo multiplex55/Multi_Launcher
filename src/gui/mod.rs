@@ -37,6 +37,7 @@ mod image_panel;
 mod indexing;
 mod json_utility_dialog;
 pub(crate) mod jump_mode;
+pub use jump_mode::ui::JumpModeScope;
 mod macro_dialog;
 pub mod mkmacro_dialog;
 mod mouse_gesture_settings_dialog;
@@ -1114,7 +1115,7 @@ pub struct LauncherApp {
     pub list_scale: f32,
     pub(crate) show_launcher_icon: bool,
     pub(crate) show_launcher_title: bool,
-    experimental_jump_mode_enabled: bool,
+    jump_mode_ui: jump_mode::ui::JumpModeUi,
     /// Number of user defined commands at the start of `actions`.
     pub custom_len: usize,
     pub history_limit: usize,
@@ -1673,11 +1674,11 @@ impl LauncherApp {
     /// Central runtime gate for Jump Mode. The value changes only after the
     /// Settings save/apply path commits the editor's persisted settings.
     pub(crate) fn jump_mode_enabled(&self) -> bool {
-        self.experimental_jump_mode_enabled
+        self.jump_mode_ui.is_enabled()
     }
 
     pub(crate) fn set_jump_mode_enabled(&mut self, enabled: bool) {
-        self.experimental_jump_mode_enabled = enabled;
+        self.jump_mode_ui.set_enabled(enabled);
     }
 
     /// Opens the standalone Mouse Gesture Settings dialog.
@@ -3190,7 +3191,7 @@ impl LauncherApp {
             list_scale,
             show_launcher_icon: settings.show_launcher_icon,
             show_launcher_title: settings.show_launcher_title,
-            experimental_jump_mode_enabled: settings.experimental_jump_mode_enabled,
+            jump_mode_ui: jump_mode::ui::JumpModeUi::new(settings.experimental_jump_mode_enabled),
             custom_len,
             history_limit: settings.history_limit,
             clipboard_limit: settings.clipboard_limit,

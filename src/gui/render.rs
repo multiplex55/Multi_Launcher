@@ -2831,6 +2831,7 @@ impl LauncherApp {
             return;
         }
         self.pending_ui_frame_receipt = None;
+        self.jump_mode_ui.begin_frame();
         #[cfg(feature = "qa-framebuffer-capture")]
         self.qa_framebuffer_begin_root_logic(ctx);
         let visible_input_allowed = self.visible_flag.load(Ordering::Relaxed);
@@ -2866,6 +2867,7 @@ impl LauncherApp {
         self.qa_framebuffer_revalidate_root_logic(ctx, should_be_visible);
         if !should_be_visible {
             self.cancel_root_hidden_query_observer();
+            self.jump_mode_ui.cancel_all();
         }
         let trace_root_hwnd = acceptance_trace::enabled()
             .then(|| crate::window_manager::get_hwnd(frame))
@@ -2888,6 +2890,7 @@ impl LauncherApp {
     fn run_hidden_logic_tick(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.root_frame_logic = None;
         self.pending_ui_frame_receipt = None;
+        self.jump_mode_ui.cancel_all();
         let bootstrap_before_tick = self.viewport_bootstrap_state();
         self.run_runtime_tick(ctx, frame);
         let (_, _, should_be_visible, _) = self.reconcile_root_visibility(ctx);
@@ -2961,6 +2964,28 @@ impl LauncherApp {
         }
     }
 
+    fn jump_mode_root_targets_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        self.jump_mode_enabled()
+            && root_visible
+            && self.visible_flag.load(Ordering::Relaxed)
+            && ctx.viewport_id() == egui::ViewportId::ROOT
+            && ctx.input(|input| input.focused)
+            && !self.any_panel_open()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && self.macro_prompt.pending.is_none()
+            && !self.macro_parameter_prompt.owns_input()
+            && !egui::Popup::is_any_open(ctx)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+    }
+
+    fn complete_jump_mode_frame(&mut self, ctx: &egui::Context) {
+        let root_visible = self.visible_flag.load(Ordering::Relaxed);
+        let root_owner_allowed = self.jump_mode_root_targets_allowed(ctx, root_visible);
+        self.jump_mode_ui
+            .complete_frame(ctx, root_owner_allowed, root_visible);
+    }
+
     fn render_root_ui(&mut self, ui: &mut egui::Ui) {
         use egui::*;
 
@@ -2973,6 +2998,26 @@ impl LauncherApp {
         if let Some(logic) = self.root_frame_logic.as_mut() {
             logic.ui_passes = frame_logic.ui_passes;
         }
+        if frame_logic.should_be_visible {
+            self.jump_mode_ui.begin_ui_pass();
+        } else {
+            self.jump_mode_ui.cancel_all();
+        }
+        let jump_mode_root_allowed =
+            self.jump_mode_root_targets_allowed(&ctx, frame_logic.should_be_visible);
+        let jump_mode_root_scope = jump_mode_root_allowed
+            .then(|| {
+                self.jump_mode_ui.scope(
+                    crate::gui::jump_mode::SurfaceId::LauncherResults,
+                    crate::gui::jump_mode::TargetGeneration(
+                        self.root_list_geometry.result_generation(),
+                    ),
+                    "launcher-results",
+                    ctx.viewport_id(),
+                    true,
+                )
+            })
+            .flatten();
         #[cfg(feature = "qa-framebuffer-capture")]
         self.qa_framebuffer_start_ui_pass(frame_logic.ui_passes);
         if !frame_logic.should_be_visible {
@@ -3645,6 +3690,14 @@ impl LauncherApp {
                     reduce_dashboard_work_when_unfocused: self.reduce_dashboard_work_when_unfocused,
                     diagnostics,
                     show_diagnostics_widget,
+                    jump_mode_scope: jump_mode_root_scope.as_ref().map(|scope| {
+                        scope.with_surface(
+                            crate::gui::jump_mode::SurfaceId::Dashboard,
+                            crate::gui::jump_mode::TargetGeneration(
+                                self.dashboard.target_generation(),
+                            ),
+                        )
+                    }),
                 };
                 if let Some(interval) =
                     crate::dashboard::repaint_interval(crate::dashboard::RepaintPolicyInput {
@@ -4181,6 +4234,7 @@ impl LauncherApp {
             );
             #[cfg(feature = "qa-framebuffer-capture")]
             self.qa_framebuffer_finish_ui_pass(&ctx, frame_logic.should_be_visible);
+            self.jump_mode_ui.finish_ui_pass();
             return;
         }
         let show_editor = self.show_editor;
@@ -4643,6 +4697,7 @@ impl LauncherApp {
         }
         #[cfg(feature = "qa-framebuffer-capture")]
         self.qa_framebuffer_finish_ui_pass(&ctx, frame_logic.should_be_visible);
+        self.jump_mode_ui.finish_ui_pass();
     }
 
     fn stage_ui_frame_receipt(
@@ -4907,6 +4962,7 @@ impl eframe::App for LauncherApp {
 
     fn on_ui_frame_complete(&mut self, _ctx: &egui::Context) {
         self.finish_ui_frame_receipt();
+        self.complete_jump_mode_frame(_ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -5051,6 +5107,7 @@ impl LauncherApp {
         } else {
             self.finish_ui_frame_receipt();
         }
+        self.complete_jump_mode_frame(ctx);
         (output, passes)
     }
 
