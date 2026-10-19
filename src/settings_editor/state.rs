@@ -87,6 +87,7 @@ pub struct SettingsEditor {
     pub always_on_top: bool,
     pub(crate) show_launcher_icon: bool,
     pub(crate) show_launcher_title: bool,
+    pub(crate) experimental_jump_mode_enabled: bool,
     pub(crate) timer_refresh: f32,
     pub(crate) disable_timer_updates: bool,
     pub(crate) preserve_command: bool,

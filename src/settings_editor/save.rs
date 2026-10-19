@@ -104,6 +104,9 @@ impl SettingsEditor {
         app.list_scale = new_settings.list_scale.unwrap_or(1.0).min(5.0);
         app.show_launcher_icon = new_settings.show_launcher_icon;
         app.show_launcher_title = new_settings.show_launcher_title;
+        if app.jump_mode_enabled() != new_settings.experimental_jump_mode_enabled {
+            app.set_jump_mode_enabled(new_settings.experimental_jump_mode_enabled);
+        }
         app.history_limit = new_settings.history_limit;
         app.clipboard_limit = new_settings.clipboard_limit;
         app.page_jump = new_settings.page_jump;
@@ -205,5 +208,58 @@ impl SettingsEditor {
                 style: Default::default(),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SettingsEditor;
+    use crate::gui::LauncherApp;
+    use crate::plugin::PluginManager;
+    use crate::settings::Settings;
+    use eframe::egui;
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    #[test]
+    fn jump_mode_runtime_gate_tracks_startup_and_committed_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.experimental_jump_mode_enabled = true;
+        settings.index_paths = Some(Vec::new());
+        settings.plugin_dirs = Some(Vec::new());
+        settings.enabled_plugins = Some(std::collections::HashSet::new());
+        settings.dashboard.enabled = false;
+
+        let mut app = LauncherApp::new(
+            &ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test(),
+            directory
+                .path()
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings.clone(),
+            None,
+            None,
+            Some(std::collections::HashSet::new()),
+            Some(std::collections::HashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(app.jump_mode_enabled());
+
+        settings.experimental_jump_mode_enabled = false;
+        SettingsEditor::apply_saved_settings(&ctx, &mut app, settings, false);
+
+        assert!(!app.jump_mode_enabled());
     }
 }

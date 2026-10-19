@@ -45,3 +45,7 @@ The first nested helper did not inherit root patches/lock; it was replaced by a 
 No feature scenario, native keyboard scenario or performance claim is marked passed before execution. No curated PNG has been published as accepted feature evidence.
 
 See [execution ledger](JUMP_MODE_EXECUTION.md) for current ownership and next action.
+
+## M02 checkpoint
+Implemented default-off experimental_jump_mode_enabled setting, Launcher Window toggle, editor roundtrip and centralized runtime gate via established committed Save/Apply. cargo nextest run --lib -E 'test(jump_mode)' passed 3 tests (5808 skipped); touched-file rustfmt/diff checks passed. No Jump input interception yet.
+

@@ -140,6 +140,7 @@ impl SettingsEditor {
             always_on_top: settings.always_on_top,
             show_launcher_icon: settings.show_launcher_icon,
             show_launcher_title: settings.show_launcher_title,
+            experimental_jump_mode_enabled: settings.experimental_jump_mode_enabled,
             timer_refresh: settings.timer_refresh,
             disable_timer_updates: settings.disable_timer_updates,
             preserve_command: settings.preserve_command,
@@ -302,6 +303,7 @@ impl SettingsEditor {
             always_on_top: self.always_on_top,
             show_launcher_icon: self.show_launcher_icon,
             show_launcher_title: self.show_launcher_title,
+            experimental_jump_mode_enabled: self.experimental_jump_mode_enabled,
             timer_refresh: self.timer_refresh,
             disable_timer_updates: self.disable_timer_updates,
             preserve_command: self.preserve_command,
@@ -501,6 +503,39 @@ mod tests {
         assert!(restored.show_launcher_icon);
         assert!(!restored.show_launcher_title);
         assert_eq!(restored.mkmacro_properties, settings.mkmacro_properties);
+    }
+
+    #[test]
+    fn experimental_jump_mode_toggle_round_trips_without_changing_other_settings() {
+        let mut initial = Settings::default();
+        initial.show_examples = true;
+        initial.theme.mode = crate::settings::ThemeMode::Custom;
+        initial
+            .plugin_settings
+            .insert("fixture-setting".into(), serde_json::json!({"kept": true}));
+
+        let mut editor = SettingsEditor::from_settings(&initial);
+        assert!(!editor.experimental_jump_mode_enabled);
+
+        editor.experimental_jump_mode_enabled = true;
+        let enabled = editor.to_settings(&initial);
+        assert!(enabled.experimental_jump_mode_enabled);
+        assert!(enabled.show_examples);
+        assert_eq!(enabled.theme, initial.theme);
+        assert_eq!(
+            enabled.plugin_settings.get("fixture-setting"),
+            initial.plugin_settings.get("fixture-setting")
+        );
+
+        editor.experimental_jump_mode_enabled = false;
+        let disabled = editor.to_settings(&enabled);
+        assert!(!disabled.experimental_jump_mode_enabled);
+        assert!(disabled.show_examples);
+        assert_eq!(disabled.theme, initial.theme);
+        assert_eq!(
+            disabled.plugin_settings.get("fixture-setting"),
+            initial.plugin_settings.get("fixture-setting")
+        );
     }
 
     #[test]

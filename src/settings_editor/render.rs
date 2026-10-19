@@ -690,6 +690,13 @@ impl SettingsEditor {
             ui.checkbox(&mut self.show_launcher_icon, "Show Launcher Icon");
             ui.checkbox(&mut self.show_launcher_title, "Show Launcher Title");
         });
+        ui.checkbox(
+            &mut self.experimental_jump_mode_enabled,
+            "Experimental Jump Mode",
+        )
+        .on_hover_text(
+            "Shift+Space displays hints; typing a hint selects, Enter activates. Available in supported screens only.",
+        );
         crate::gui::theme::widgets::labeled_form_row(ui, "Off-screen position", |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label("X");

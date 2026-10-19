@@ -761,6 +761,8 @@ pub struct Settings {
     pub show_launcher_icon: bool,
     #[serde(default = "default_true")]
     pub show_launcher_title: bool,
+    #[serde(default)]
+    pub experimental_jump_mode_enabled: bool,
     #[serde(default = "default_timer_refresh")]
     pub timer_refresh: f32,
     #[serde(default)]
@@ -1129,6 +1131,7 @@ impl Default for Settings {
             always_on_top: default_always_on_top(),
             show_launcher_icon: true,
             show_launcher_title: true,
+            experimental_jump_mode_enabled: false,
             timer_refresh: default_timer_refresh(),
             net_refresh: default_net_refresh(),
             net_unit: NetUnit::Auto,
@@ -1831,6 +1834,24 @@ mod tests {
         .expect("missing unrelated settings retain defaults");
         assert!(!old_defaults.show_launcher_icon);
         assert!(!old_defaults.show_launcher_title);
+    }
+
+    #[test]
+    fn experimental_jump_mode_defaults_off_and_round_trips_explicit_values() {
+        let legacy: Settings = serde_json::from_str("{}").expect("deserialize legacy settings");
+        assert!(!Settings::default().experimental_jump_mode_enabled);
+        assert!(!legacy.experimental_jump_mode_enabled);
+
+        for expected in [false, true] {
+            let mut settings = Settings::default();
+            settings.experimental_jump_mode_enabled = expected;
+
+            let serialized = serde_json::to_string(&settings).expect("serialize settings");
+            let restored: Settings =
+                serde_json::from_str(&serialized).expect("deserialize settings");
+
+            assert_eq!(restored.experimental_jump_mode_enabled, expected);
+        }
     }
 
     #[test]

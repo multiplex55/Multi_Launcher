@@ -6,16 +6,16 @@
 - Initial working tree: clean, including tracked task-input documents. No user changes copied/discarded.
 - Environment: Windows PowerShell; rustc/cargo 1.99.0; Nextest 0.9.135; egui/eframe 0.36.2 with local vendor patches.
 - Git branch creation needed sandbox escalation because .git is read-only in the normal sandbox; authorized creation succeeded.
-- Current milestone: M02 next; M01-A safe harness scaffold verified, M01-B populated baseline incomplete.
+- Current milestone: M03 next; M02 complete; M01-B populated baseline incomplete.
 - Latest evidence: pending baseline run.
-- Latest checkpoint: 03e42b69 — docs(jump): [M00-A] establish branch and execution baseline.
-- Push status: M00 pushed successfully to origin; upstream configured.
+- Latest checkpoint: 02d0928c — test(jump): [M01-A] add isolated GUI fixtures and owned runner.
+- Push status: M00 and M01-A both pushed successfully to origin; upstream configured.
 
 | Milestone | State | Checkpoint / verification | Evidence or dependency |
 |---|---|---|---|
 | M00 | complete | Branch from recorded HEAD; verified source map | Clean initial tree; existing fixture isolation seam |
 | M01 | in_progress | M01-A scaffold verified; real capture/cleanup demonstrated | M01-B populated dashboard readiness incomplete |
-| M02 | pending | Persisted default-off gate | M00 |
+| M02 | complete | 3/3 targeted Nextest tests; touched-file fmt/diff pass | Legacy false; explicit serde/editor/runtime apply |
 | M03 | pending | Pure hint engine | M02 |
 | M04 | pending | Registry and safe focus intents | M03 |
 | M05 | pending | Input lifecycle and overlay | M02–M04 |
@@ -66,3 +66,7 @@ Checkpoint M01-A, then implement M02 default-off settings gate. Return to M01-B 
 
 - M01-A latest fixture-only verification: jump_m01_20261019T211636Z_8316f826, 2/2 generator tests plus typed validation PASS; dashboard correctly BLOCKED (not requested). Fixture rustfmt, PowerShell parser and git diff --check pass. Root cargo fmt --all -- --check reports pre-existing formatting outside this change; fixture file corrected. Reviewer cleanup finding resolved.
 
+## M02 outcome
+- Added experimental_jump_mode_enabled (serde/Rust false), Settings Launcher Window toggle/help and existing committed save/apply runtime gate/accessor/setter.
+- cargo nextest run --lib -E 'test(jump_mode)': exit 0, 3 passed / 5808 skipped. Touched Rust rustfmt and diff checks pass. Initial private-field visibility compiler feedback corrected using a narrow setter; editor test accounts for existing screenshot config normalization without changing production behavior.
+- M01 content investigation: generated Markdown/notes engine/query/dashboard keys match actual loader. Tag fixture uses unsupported hyphens (parsed as jump); fix to underscores later. Before adding readiness infrastructure, semantic fixture verify must call production note loader/query and typed slot-config parsing. Empty results cause remains unproven.
