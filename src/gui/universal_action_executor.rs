@@ -1319,6 +1319,106 @@ mod tests {
     }
 
     #[test]
+    fn action_parity_external_primary_routes_preserve_exact_action_args_and_source_once() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        // These cases exercise the shared primary dispatch contract, not native input triggering.
+        let cases = [
+            (
+                ActionSurface::LauncherList,
+                ActivationSource::Enter,
+                "launcher list",
+            ),
+            (
+                ActionSurface::LauncherGrid,
+                ActivationSource::Dashboard,
+                "launcher grid",
+            ),
+            (
+                ActionSurface::ActionSheet,
+                ActivationSource::Click,
+                "action sheet",
+            ),
+            (
+                ActionSurface::RadialMenu,
+                ActivationSource::RadialRelease,
+                "radial menu",
+            ),
+            (ActionSurface::Gesture, ActivationSource::Gesture, "gesture"),
+            (
+                ActionSurface::LauncherList,
+                ActivationSource::Macro,
+                "macro",
+            ),
+        ];
+
+        for (surface, source, route) in cases {
+            let ctx = eframe::egui::Context::default();
+            let mut app = crate::gui::actions::tests::new_app(&ctx);
+            app.test_skip_history_persistence = true;
+            app.query = "launcher action parity query".into();
+            let expected_action = action();
+            let history_query = if surface == ActionSurface::RadialMenu {
+                "captured radial action query".to_owned()
+            } else {
+                app.query.clone()
+            };
+            let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let observed_by_hook = std::sync::Arc::clone(&observed);
+            crate::gui::set_execute_action_hook(Some(Box::new(move |received| {
+                observed_by_hook.lock().unwrap().push(received.clone());
+                Ok(())
+            })));
+
+            let execution = app.execute_universal_action_with_context(
+                universal(
+                    action_ids::RESULT_EXECUTE,
+                    ActionTarget::Generic {
+                        action: expected_action.clone(),
+                    },
+                    ActionSafety::Normal,
+                    UniversalActionOperation::InvokePrimary(expected_action.clone()),
+                ),
+                UniversalActionInvocationContext {
+                    surface,
+                    source,
+                    stable_request: None,
+                    history_query: history_query.clone(),
+                    root_policy: if surface == ActionSurface::RadialMenu {
+                        RootLauncherPolicy::PreserveOrdinaryState
+                    } else {
+                        RootLauncherPolicy::Legacy
+                    },
+                    primary_invocation: surface == ActionSurface::RadialMenu,
+                },
+                None,
+            );
+            crate::gui::set_execute_action_hook(None);
+
+            assert_eq!(
+                execution,
+                UniversalActionExecution::Executed,
+                "{route} should execute the resolved primary"
+            );
+            assert_eq!(
+                *observed.lock().unwrap(),
+                [expected_action.clone()],
+                "{route} should invoke the external action with its exact arguments once"
+            );
+            assert_eq!(
+                app.test_activation_trace,
+                [(expected_action.clone(), source)],
+                "{route} should retain the originating source exactly once"
+            );
+            assert_eq!(app.usage.get(&expected_action.action), Some(&1), "{route}");
+            assert_eq!(
+                app.test_recorded_history_queries,
+                [history_query.as_str()],
+                "{route}"
+            );
+        }
+    }
+
+    #[test]
     fn ordinary_radial_execution_preserves_root_launcher_state() {
         let ctx = eframe::egui::Context::default();
         let mut app = crate::gui::actions::tests::new_app(&ctx);
@@ -1353,7 +1453,7 @@ mod tests {
                     action: primary.clone(),
                 },
                 ActionSafety::Normal,
-                UniversalActionOperation::InvokePrimary(primary),
+                UniversalActionOperation::InvokePrimary(primary.clone()),
             ),
             UniversalActionInvocationContext {
                 surface: ActionSurface::RadialMenu,
@@ -1371,6 +1471,15 @@ mod tests {
         assert_eq!(app.selected, Some(0));
         assert!(app.resolved_grid_layout);
         assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(
+            app.help_window.open,
+            "the launcher-owned dialog remains reachable"
+        );
+        assert_eq!(
+            app.test_activation_trace,
+            [(primary, ActivationSource::Click)],
+            "the radial primary reaches the normal dialog action path once"
+        );
         assert!(app.restore_flag.load(Ordering::SeqCst));
         assert!(app.focus_query);
         assert!(app.move_cursor_end);
