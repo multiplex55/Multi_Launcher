@@ -5,6 +5,9 @@ use crate::file_search::actions::{
 };
 use crate::gui::LauncherApp;
 use crate::gui::note_find::{NoteFindMatch, NoteFindState};
+use crate::gui::note_find_preview::{
+    NoteFindPreviewBlock, NoteFindPreviewIndex, inline_note_visible_ranges,
+};
 use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use crate::notes_markdown::{
     MarkdownAnalysis, MarkdownCallout, MarkdownHeading, MarkdownSection, MarkdownTaskItem,
@@ -480,6 +483,16 @@ fn task_display_text(task_item: &MarkdownTaskItem) -> &str {
     task_item.text.as_str()
 }
 
+fn task_text_source_range(
+    content: &str,
+    task_item: &MarkdownTaskItem,
+) -> Option<std::ops::Range<usize>> {
+    let line = content.get(task_item.line_byte_range.clone())?;
+    let start = line.find(task_display_text(task_item))?;
+    let absolute_start = task_item.line_byte_range.start + start;
+    Some(absolute_start..absolute_start + task_display_text(task_item).len())
+}
+
 fn clamp_char_index(s: &str, char_index: usize) -> usize {
     char_index.min(s.chars().count())
 }
@@ -507,6 +520,43 @@ fn char_range_to_byte_range(s: &str, start: usize, end: usize) -> (usize, usize)
         (end, start)
     };
     (char_to_byte_index(s, start), char_to_byte_index(s, end))
+}
+
+fn galley_char_range_rects(
+    galley: &egui::Galley,
+    range: &std::ops::Range<usize>,
+) -> Vec<egui::Rect> {
+    use egui::text::CharIndex;
+
+    let mut rects = Vec::new();
+    let mut row_start = 0usize;
+    for row in &galley.rows {
+        let row_end = row_start + row.char_count_excluding_newline().0;
+        let start = range.start.max(row_start);
+        let end = range.end.min(row_end);
+        if start < end {
+            let left = row.x_offset(CharIndex(start - row_start));
+            let right = row.x_offset(CharIndex(end - row_start)).max(left + 1.5);
+            rects.push(egui::Rect::from_min_max(
+                egui::pos2(left, row.min_y()),
+                egui::pos2(right, row.max_y()),
+            ));
+        }
+        // Newline has no glyph. Keep a narrow target on its preceding row so
+        // navigation to a literal newline remains scrollable as well.
+        if range.start <= row_end
+            && row_end < range.end
+            && row_end == row_start + row.char_count_excluding_newline().0
+        {
+            let x = row.x_offset(CharIndex(row.char_count_excluding_newline().0));
+            rects.push(egui::Rect::from_min_max(
+                egui::pos2(x, row.min_y()),
+                egui::pos2(x + 1.5, row.max_y()),
+            ));
+        }
+        row_start += row.char_count_including_newline().0;
+    }
+    rects
 }
 
 fn selected_char_range(state: &egui::widgets::text_edit::TextEditState) -> Option<(usize, usize)> {
@@ -944,6 +994,11 @@ pub struct NotePanel {
     backlink_tab: BacklinkTab,
     backlink_page: usize,
     note_find: NoteFindState,
+    note_find_preview: Option<NoteFindPreviewIndex>,
+    pending_find_navigation: Option<PendingFindNavigation>,
+    find_focus_next_frame: bool,
+    find_select_query_next_frame: bool,
+    find_query_widget_id: Option<egui::Id>,
     pending_selection: Option<(usize, usize)>,
     pending_cursor_position: Option<usize>,
     link_dialog_open: bool,
@@ -1014,6 +1069,39 @@ pub struct NotePanel {
     last_paste_outcome: Option<ClipboardImagePasteOutcome>,
     #[cfg(test)]
     last_paste_request: Option<NotePasteRequest>,
+    #[cfg(test)]
+    last_find_preview_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    last_find_preview_clip_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    last_find_callout_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    last_find_reveal_button_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    last_find_editor_rects: Vec<egui::Rect>,
+    #[cfg(test)]
+    last_find_navigation_source: Option<std::ops::Range<usize>>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingFindNavigation {
+    byte_range: std::ops::Range<usize>,
+    char_range: std::ops::Range<usize>,
+    editor_pending: bool,
+    preview_pending: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FindPreviewVisibility {
+    Visible,
+    SourceOnly,
+    Collapsed,
+}
+
+#[derive(Clone, Copy)]
+enum FindNavigation {
+    Next,
+    Previous,
 }
 
 #[cfg(test)]
@@ -1326,6 +1414,11 @@ impl NotePanel {
             backlink_tab: BacklinkTab::LinkedTodos,
             backlink_page: 0,
             note_find: NoteFindState::default(),
+            note_find_preview: None,
+            pending_find_navigation: None,
+            find_focus_next_frame: false,
+            find_select_query_next_frame: false,
+            find_query_widget_id: None,
             pending_selection: None,
             pending_cursor_position: None,
             link_dialog_open: false,
@@ -1391,6 +1484,18 @@ impl NotePanel {
             last_paste_outcome: None,
             #[cfg(test)]
             last_paste_request: None,
+            #[cfg(test)]
+            last_find_preview_rect: None,
+            #[cfg(test)]
+            last_find_preview_clip_rect: None,
+            #[cfg(test)]
+            last_find_callout_rect: None,
+            #[cfg(test)]
+            last_find_reveal_button_rect: None,
+            #[cfg(test)]
+            last_find_editor_rects: Vec::new(),
+            #[cfg(test)]
+            last_find_navigation_source: None,
         };
         panel.refresh_fast_derived();
         panel.refresh_heavy_derived(true, backlinks_enabled);
@@ -1488,6 +1593,8 @@ impl NotePanel {
 
     fn save_alias_metadata_change(&mut self, app: &mut LauncherApp) {
         self.note_find.content_changed();
+        self.note_find_preview = None;
+        self.pending_find_navigation = None;
         self.sync_aliases_from_content();
         let mut note = self.note.clone();
         match save_note(&mut note, true) {
@@ -1735,6 +1842,8 @@ impl NotePanel {
 
     fn mark_content_changed(&mut self, now_secs: f64) {
         self.note_find.content_changed();
+        self.note_find_preview = None;
+        self.pending_find_navigation = None;
         self.invalidate_markdown_analysis();
         self.markdown_cache.clear_scrollable();
         self.fast_derived_dirty = true;
@@ -1942,11 +2051,31 @@ impl NotePanel {
     }
 
     pub(crate) fn open_find(&mut self) {
+        let was_open = self.note_find.is_open();
         self.note_find.open();
+        self.focus_textedit_next_frame = false;
+        self.find_focus_next_frame = true;
+        self.find_select_query_next_frame = true;
+        if !was_open {
+            if !self.find_query().is_empty() {
+                let found = self.find_current_match();
+                self.queue_find_navigation(found);
+            }
+        }
     }
 
     pub(crate) fn close_find(&mut self) {
         self.note_find.close();
+        self.note_find_preview = None;
+        self.pending_find_navigation = None;
+        self.find_focus_next_frame = false;
+        self.find_select_query_next_frame = false;
+    }
+
+    pub(crate) fn surrender_find_focus(&self, ctx: &egui::Context) {
+        if let Some(id) = self.find_query_widget_id {
+            ctx.memory_mut(|memory| memory.surrender_focus(id));
+        }
     }
 
     pub(crate) fn find_query(&self) -> &str {
@@ -1954,7 +2083,18 @@ impl NotePanel {
     }
 
     pub(crate) fn set_find_query(&mut self, query: impl Into<String>) -> bool {
-        self.note_find.set_query(query)
+        let query = query.into();
+        let was_empty = self.note_find.query().is_empty();
+        let became_nonempty = !query.is_empty();
+        let changed = self.note_find.set_query(query);
+        if changed {
+            self.pending_find_navigation = None;
+            if was_empty && became_nonempty {
+                let found = self.find_current_match();
+                self.queue_find_navigation(found);
+            }
+        }
+        changed
     }
 
     pub(crate) fn find_matches(&mut self) -> &[NoteFindMatch] {
@@ -1975,6 +2115,154 @@ impl NotePanel {
 
     pub(crate) fn find_previous(&mut self) -> Option<NoteFindMatch> {
         self.note_find.previous(&self.note.content).cloned()
+    }
+
+    pub(crate) fn owns_keyboard_layer(&self, ctx: &egui::Context) -> bool {
+        if !self.open
+            || self.discard_unsaved_prompt
+            || self.overwrite_prompt
+            || self.link_dialog_open
+            || self.link_new_dialog_open
+            || self.pending_plain_link_conversion.is_some()
+        {
+            return false;
+        }
+
+        let window_layer = egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(("note_panel_window", self.note.slug.clone())),
+        );
+        if ctx
+            .memory(|memory| memory.top_modal_layer())
+            .is_some_and(|modal_layer| modal_layer != window_layer)
+        {
+            return false;
+        }
+        if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+            return ctx
+                .read_response(focused)
+                .is_some_and(|response| response.layer_id == window_layer);
+        }
+        ctx.top_layer_id() == Some(window_layer)
+    }
+
+    fn ensure_find_preview_index(&mut self) {
+        if self.note_find.is_open() && self.note_find_preview.is_none() {
+            self.note_find_preview = Some(NoteFindPreviewIndex::new(&self.note.content));
+        }
+    }
+
+    fn queue_find_navigation(&mut self, found: Option<NoteFindMatch>) {
+        let Some(found) = found else {
+            self.pending_find_navigation = None;
+            return;
+        };
+        #[cfg(test)]
+        {
+            self.last_find_navigation_source = Some(found.byte_range.clone());
+        }
+        self.pending_find_navigation = Some(PendingFindNavigation {
+            byte_range: found.byte_range,
+            char_range: found.char_range,
+            editor_pending: matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split),
+            preview_pending: matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split),
+        });
+    }
+
+    fn navigate_find_next(&mut self) {
+        let found = self.find_next();
+        self.queue_find_navigation(found);
+    }
+
+    fn navigate_find_previous(&mut self) {
+        let found = self.find_previous();
+        self.queue_find_navigation(found);
+    }
+
+    fn reveal_find_match_in_edit(&mut self) {
+        let found = self.find_current_match();
+        self.set_view_mode(NoteViewMode::Edit);
+        self.queue_find_navigation(found);
+    }
+
+    fn find_preview_visibility(&mut self, app: &LauncherApp) -> Option<FindPreviewVisibility> {
+        if !matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split) {
+            return None;
+        }
+        let found = self.find_current_match()?;
+        let hidden = if app.note_settings.collapsible_sections_enabled {
+            let sections = self.collapsible_sections(true);
+            Self::collapsed_body_ranges(&self.note.slug, &sections, &self.collapsed_sections, true)
+        } else {
+            Vec::new()
+        };
+        if hidden
+            .iter()
+            .any(|range| range.start <= found.byte_range.start && found.byte_range.end <= range.end)
+        {
+            return Some(FindPreviewVisibility::Collapsed);
+        }
+        let task = if app.note_settings.task_lists_enabled {
+            self.markdown_analysis()
+                .task_items
+                .iter()
+                .find(|task| {
+                    task.line_byte_range.start <= found.byte_range.start
+                        && found.byte_range.end <= task.line_byte_range.end
+                })
+                .map(|task| (task.line_byte_range.clone(), task.text.clone()))
+        } else {
+            None
+        };
+        if let Some((line_range, task_text)) = task
+            && let Some(line) = self.note.content.get(line_range.clone())
+            && let Some(start) = line.find(&task_text)
+        {
+            let text_range = line_range.start + start..line_range.start + start + task_text.len();
+            let visible = inline_note_visible_ranges(&self.note.content, text_range);
+            return Some(
+                if visible.iter().any(|range| {
+                    range.start <= found.byte_range.start && found.byte_range.end <= range.end
+                }) {
+                    FindPreviewVisibility::Visible
+                } else {
+                    FindPreviewVisibility::SourceOnly
+                },
+            );
+        }
+        self.ensure_find_preview_index();
+        self.note_find_preview.as_ref().map(|index| {
+            if index.match_is_visible_in(
+                &self.note.content,
+                &found.byte_range,
+                &self.note.slug,
+                &self.derived.todo_label_map,
+                app.note_images_as_links,
+            ) {
+                FindPreviewVisibility::Visible
+            } else {
+                FindPreviewVisibility::SourceOnly
+            }
+        })
+    }
+
+    fn preview_visible_ranges(
+        &self,
+        block: &NoteFindPreviewBlock,
+        app: &LauncherApp,
+    ) -> Vec<std::ops::Range<usize>> {
+        self.note_find_preview
+            .as_ref()
+            .map(|index| {
+                index.visible_ranges_for_block(
+                    &self.note.content,
+                    block,
+                    &self.note.slug,
+                    &self.derived.todo_label_map,
+                    app.note_images_as_links,
+                )
+            })
+            .unwrap_or_default()
     }
 
     pub(super) fn note_close_observation(&self) -> super::query_observation::NoteCloseSoleNote {
@@ -2008,12 +2296,27 @@ impl NotePanel {
         self.set_view_mode(view_mode);
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_find_query_widget_id(&self) -> Option<egui::Id> {
+        self.find_query_widget_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_editor_widget_id(&self) -> Option<egui::Id> {
+        self.last_textedit_id
+    }
+
     fn set_view_mode(&mut self, view_mode: NoteViewMode) {
         if self.view_mode != view_mode {
             self.view_mode = view_mode;
             // Edit and Split live in different Ui namespaces. Until the new
             // editor renders there is no valid ID for that variant.
             self.last_textedit_id = None;
+            if self.note_find.is_open() {
+                let found = self.note_find.current_match(&self.note.content).cloned();
+                self.queue_find_navigation(found);
+                self.find_focus_next_frame = true;
+            }
         }
     }
 
@@ -2150,6 +2453,8 @@ impl NotePanel {
 
     pub(crate) fn invalidate_note_derived_data_after_external_mutation(&mut self) {
         self.note_find.content_changed();
+        self.note_find_preview = None;
+        self.pending_find_navigation = None;
         self.invalidate_markdown_analysis();
         self.invalidate_link_menu_results();
         self.link_menu_targets_version = None;
@@ -2222,6 +2527,9 @@ impl NotePanel {
                 }
                 if self.render_toolbar(ui, app) {
                     save_now = true;
+                }
+                if self.note_find.is_open() {
+                    self.render_find_strip(ui, ctx, app);
                 }
                 if !app.note_settings.outline_sidebar_enabled {
                     self.outline_open = false;
@@ -2414,6 +2722,9 @@ impl NotePanel {
         {
             ctx.memory_mut(|m| m.surrender_focus(id));
         }
+        if !self.open {
+            self.surrender_find_focus(ctx);
+        }
         if self.overwrite_prompt {
             egui::Window::new("Note exists")
                 .collapsible(false)
@@ -2483,6 +2794,9 @@ impl NotePanel {
             let save = ui.button("Save");
             if widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary).clicked() {
                 save_now = true;
+            }
+            if ui.button("Find").clicked() {
+                self.open_find();
             }
             let open_resp = ui.button("Open Externally");
             let popup_id = open_resp.id.with("open_with_menu");
@@ -2612,6 +2926,125 @@ impl NotePanel {
             }
         });
         save_now
+    }
+
+    fn render_find_strip(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, app: &LauncherApp) {
+        let query_id = ui.make_persistent_id(("note_find_query", self.note.slug.clone()));
+        self.find_query_widget_id = Some(query_id);
+        #[cfg(test)]
+        {
+            self.last_find_reveal_button_rect = None;
+        }
+        let focus_find_query = self.find_focus_next_frame;
+        if focus_find_query {
+            if self.find_select_query_next_frame {
+                let mut state = egui::widgets::text_edit::TextEditState::load(ctx, query_id)
+                    .unwrap_or_default();
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(self.find_query().chars().count()),
+                    )));
+                state.store(ctx, query_id);
+            }
+            ctx.memory_mut(|memory| memory.request_focus(query_id));
+        }
+
+        let mut query = self.find_query().to_owned();
+        let mut action = None;
+        let mut find_query_accepted_focus = false;
+        let enter_modifiers = ctx.input(|input| {
+            input.events.iter().rev().find_map(|event| match event {
+                egui::Event::Key {
+                    key: egui::Key::Enter,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => Some(*modifiers),
+                _ => None,
+            })
+        });
+        if ctx.memory(|memory| memory.has_focus(query_id))
+            && let Some(modifiers) = enter_modifiers
+        {
+            ctx.input_mut(|input| input.consume_key(modifiers, egui::Key::Enter));
+            action = Some(if modifiers.shift {
+                FindNavigation::Previous
+            } else {
+                FindNavigation::Next
+            });
+        }
+        let mut close = false;
+        let mut reveal = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Find");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut query)
+                    .id(query_id)
+                    .desired_width(220.0)
+                    .hint_text("Find in this note"),
+            );
+            find_query_accepted_focus = response.enabled() && response.has_focus();
+            if response.changed() {
+                self.set_find_query(query.clone());
+            }
+            let count = self.find_matches().len();
+            let current = self.find_current_index().map_or(0, |index| index + 1);
+            ui.label(format!("{current}/{count}"));
+            if ui.button("Prev").clicked() {
+                action = Some(FindNavigation::Previous);
+            }
+            if ui.button("Next").clicked() {
+                action = Some(FindNavigation::Next);
+            }
+            if ui.button("Close").clicked() {
+                close = true;
+            }
+
+            let visibility = self.find_preview_visibility(app);
+            match visibility {
+                Some(FindPreviewVisibility::SourceOnly) => {
+                    ui.weak("Source match is not displayed in Preview.");
+                    let response = ui.button("Reveal in Edit");
+                    #[cfg(test)]
+                    {
+                        self.last_find_reveal_button_rect = Some(response.rect);
+                    }
+                    reveal = response.clicked();
+                }
+                Some(FindPreviewVisibility::Collapsed) => {
+                    ui.weak("Match is in a collapsed section.");
+                    let response = ui.button("Reveal in Edit");
+                    #[cfg(test)]
+                    {
+                        self.last_find_reveal_button_rect = Some(response.rect);
+                    }
+                    reveal = response.clicked();
+                }
+                Some(FindPreviewVisibility::Visible) | None => {}
+            }
+        });
+        if focus_find_query && find_query_accepted_focus {
+            self.find_focus_next_frame = false;
+            self.find_select_query_next_frame = false;
+        }
+
+        if let Some(action) = action {
+            match action {
+                FindNavigation::Next => self.navigate_find_next(),
+                FindNavigation::Previous => self.navigate_find_previous(),
+            }
+            ctx.memory_mut(|memory| memory.request_focus(query_id));
+        }
+        if reveal {
+            self.reveal_find_match_in_edit();
+            ctx.memory_mut(|memory| memory.request_focus(query_id));
+        }
+        if close {
+            self.close_find();
+            ctx.memory_mut(|memory| memory.surrender_focus(query_id));
+        }
     }
 
     fn render_metadata_details_section(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
@@ -3327,7 +3760,7 @@ impl NotePanel {
                 ui.set_min_width(available_size.x);
                 ui.set_max_width(available_size.x);
                 let editor_id = ui.make_persistent_id(text_id_source);
-                if self.focus_textedit_next_frame && ui.is_enabled() {
+                if self.focus_textedit_next_frame && !self.note_find.is_open() && ui.is_enabled() {
                     // Focus before processing this frame's keyboard/clipboard events.
                     ctx.memory_mut(|memory| memory.request_focus(editor_id));
                 }
@@ -3358,12 +3791,79 @@ impl NotePanel {
             .desired_width(desired_width)
             .font(FontId::monospace(font_size))
             .lock_focus(true);
-        let response = if let Some(size) = desired_size {
-            ui.add_sized(size, text_edit)
+        let navigation_range = self
+            .pending_find_navigation
+            .as_ref()
+            .filter(|navigation| navigation.editor_pending)
+            .map(|navigation| navigation.char_range.clone());
+        if let Some(range) = &navigation_range {
+            let mut state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
+                .unwrap_or_default();
+            restore_char_range(&mut state, (range.start, range.end));
+            state.store(ui.ctx(), editor_id);
+        }
+        let output = if let Some(size) = desired_size {
+            ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_width(size.x);
+                text_edit.min_size(size).show(ui)
+            })
+            .inner
         } else {
-            ui.add(text_edit.desired_rows(10))
+            text_edit.desired_rows(10).show(ui)
         };
+        let response = output.response.response;
         debug_assert_eq!(response.id, editor_id);
+        let active_match = if self.note_find.is_open() {
+            self.find_current_match().map(|found| found.char_range)
+        } else {
+            None
+        };
+        // TextEdit collapses an unfocused cursor range while it renders. Keep
+        // Find's active source selection stored while the query owns focus,
+        // without overriding a caret or selection in an editor the user chose.
+        let selection_range = navigation_range.as_ref().or_else(|| {
+            (!response.has_focus())
+                .then_some(active_match.as_ref())
+                .flatten()
+        });
+        if let Some(range) = selection_range {
+            let mut state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
+                .unwrap_or_default();
+            restore_char_range(&mut state, (range.start, range.end));
+            state.store(ui.ctx(), editor_id);
+        }
+
+        let highlight_range = navigation_range.as_ref().or(active_match.as_ref());
+        if let Some(range) = highlight_range {
+            let rects = galley_char_range_rects(&output.galley, range)
+                .into_iter()
+                .map(|rect| rect.translate(output.galley_pos.to_vec2()))
+                .collect::<Vec<_>>();
+            if navigation_range.is_some()
+                && let Some(rect) = rects.first()
+            {
+                ui.scroll_to_rect(*rect, Some(egui::Align::Center));
+            }
+            let painter = ui
+                .painter()
+                .with_clip_rect(output.text_clip_rect.intersect(ui.clip_rect()));
+            let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.32);
+            let stroke = egui::Stroke::new(1.5, ui.visuals().selection.stroke.color);
+            for rect in rects {
+                #[cfg(test)]
+                self.last_find_editor_rects.push(rect);
+                painter.rect_filled(rect, 2.0, fill);
+                painter.rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
+            }
+        }
+        if navigation_range.is_some()
+            && let Some(navigation) = self.pending_find_navigation.as_mut()
+        {
+            navigation.editor_pending = false;
+            if !navigation.preview_pending {
+                self.pending_find_navigation = None;
+            }
+        }
         #[cfg(test)]
         {
             self.last_editor_rect = Some(response.rect);
@@ -3374,6 +3874,10 @@ impl NotePanel {
 
     fn render_preview(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, ctx: &egui::Context) {
         let preview_width = ui.available_width().max(0.0);
+        #[cfg(test)]
+        {
+            self.last_find_preview_clip_rect = Some(ui.clip_rect());
+        }
         ui.set_min_width(preview_width);
         ui.set_max_width(preview_width);
         self.render_preview_document(ui, app, ctx);
@@ -3385,10 +3889,14 @@ impl NotePanel {
         app: &mut LauncherApp,
         ctx: &egui::Context,
     ) {
+        if self.note_find.is_open() && !self.find_query().is_empty() {
+            self.ensure_find_preview_index();
+        }
         if app.note_settings.collapsible_sections_enabled {
             let sections = self.collapsible_sections(true);
             if !sections.is_empty() {
                 self.render_collapsible_preview(ui, app, ctx, &sections);
+                self.finish_source_only_find_navigation(app);
                 return;
             }
         } else {
@@ -3419,9 +3927,11 @@ impl NotePanel {
                     heading.byte_range.end..self.note.content.len(),
                 );
             }
+            self.finish_source_only_find_navigation(app);
             return;
         }
         self.render_preview_range(ui, app, ctx, 0..self.note.content.len());
+        self.finish_source_only_find_navigation(app);
     }
 
     fn render_preview_range(
@@ -3502,9 +4012,17 @@ impl NotePanel {
             let width = parsed.width;
             if app.note_images_as_links {
                 let label = if alt.is_empty() { rel } else { alt };
-                if ui.link(label).clicked() {
+                let response = ui.link(label);
+                if response.clicked() {
                     app.open_image_panel(&full);
                 }
+                self.ensure_find_preview_index();
+                let visible_ranges = self
+                    .note_find_preview
+                    .as_ref()
+                    .map(|index| index.visible_ranges_for_image(&range, true))
+                    .unwrap_or_default();
+                self.finish_find_preview_segment(ui, &range, &visible_ranges, response.rect);
             } else {
                 let tex = if let Some(t) = self.image_cache.get(&full) {
                     t.clone()
@@ -3522,6 +4040,7 @@ impl NotePanel {
                     self.image_cache.insert(full.clone(), tex.clone());
                     tex
                 } else {
+                    self.finish_find_preview_segment(ui, &range, &[], egui::Rect::NOTHING);
                     last = local_range.end;
                     continue;
                 };
@@ -3574,6 +4093,7 @@ impl NotePanel {
                         ui.close();
                     }
                 });
+                self.finish_find_preview_segment(ui, &range, &[], response.rect);
             }
             last = local_range.end;
         }
@@ -3600,7 +4120,7 @@ impl NotePanel {
         let visuals = ui.visuals().clone();
         let fill = visuals.faint_bg_color;
         let stroke = egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color);
-        egui::Frame::NONE
+        let output = egui::Frame::NONE
             .fill(fill)
             .stroke(stroke)
             .corner_radius(egui::CornerRadius::same(6))
@@ -3627,6 +4147,27 @@ impl NotePanel {
                     }
                 });
             });
+        #[cfg(test)]
+        {
+            self.last_find_callout_rect = Some(output.response.rect);
+        }
+        if let Some(found) = self.find_current_match()
+            && callout.byte_range.start <= found.byte_range.start
+            && found.byte_range.end <= callout.byte_range.end
+            && let Some(block) = self
+                .note_find_preview
+                .as_ref()
+                .and_then(|index| index.block_for_match(&found.byte_range))
+                .cloned()
+        {
+            let visible_ranges = self.preview_visible_ranges(&block, app);
+            self.finish_find_preview_segment(
+                ui,
+                &callout.byte_range,
+                &visible_ranges,
+                output.response.rect,
+            );
+        }
     }
 
     fn render_collapsible_preview(
@@ -3659,11 +4200,42 @@ impl NotePanel {
             }
             let collapsed = self.collapsed_sections.contains(&self.section_key(section));
             let resp = self.render_collapsible_heading_row(ui, app, section, collapsed);
+            if let Some(found) = self.find_current_match()
+                && heading_range.start <= found.byte_range.start
+                && found.byte_range.end <= heading_range.end
+                && let Some(block) = self
+                    .note_find_preview
+                    .as_ref()
+                    .and_then(|index| index.block_for_match(&found.byte_range))
+                    .cloned()
+            {
+                let visible_ranges = self.preview_visible_ranges(&block, app);
+                self.finish_find_preview_segment(ui, &heading_range, &visible_ranges, resp.rect);
+            }
             if self.pending_scroll_target.as_deref()
                 == Some(section.heading.normalized_anchor.as_str())
             {
                 ui.scroll_to_rect(resp.rect, Some(egui::Align::Center));
                 self.pending_scroll_target = None;
+            }
+            let find_target = self
+                .pending_find_navigation
+                .as_ref()
+                .filter(|navigation| navigation.preview_pending)
+                .map(|navigation| navigation.byte_range.clone());
+            if collapsed
+                && find_target.as_ref().is_some_and(|target| {
+                    section.body_byte_range.start <= target.start
+                        && target.end <= section.body_byte_range.end
+                })
+            {
+                ui.scroll_to_rect(resp.rect, Some(egui::Align::Center));
+                if let Some(navigation) = self.pending_find_navigation.as_mut() {
+                    navigation.preview_pending = false;
+                    if !navigation.editor_pending {
+                        self.pending_find_navigation = None;
+                    }
+                }
             }
             cursor = heading_range.end;
         }
@@ -3676,6 +4248,7 @@ impl NotePanel {
                 &hidden,
             );
         }
+        self.finish_source_only_find_navigation(app);
     }
 
     fn render_collapsible_heading_row(
@@ -3850,20 +4423,27 @@ impl NotePanel {
             pending_state.store(ctx, resp.id);
             self.pending_cursor_position = None;
         }
-        if request_initial_focus && first_edit_frame {
+        if request_initial_focus && first_edit_frame && !self.note_find.is_open() {
             self.focus_textedit_next_frame = true;
         }
         // egui lays out a new Window invisibly with disabled widgets first.
         // Keep the focus request until the editor can actually receive input.
-        if self.focus_textedit_next_frame && resp.enabled() {
+        if self.focus_textedit_next_frame && !self.note_find.is_open() && resp.enabled() {
             resp.request_focus();
             self.focus_textedit_next_frame = false;
         }
         let mut state =
             egui::widgets::text_edit::TextEditState::load(ctx, resp.id).unwrap_or_default();
         if !resp.secondary_clicked() {
-            self.pending_selection = selected_char_range(&state)
+            let selection = selected_char_range(&state)
                 .and_then(|range| normalize_char_range(range, self.note.content.chars().count()));
+            let find_selection = self
+                .note_find
+                .current_match(&self.note.content)
+                .is_some_and(|found| {
+                    Some((found.char_range.start, found.char_range.end)) == selection
+                });
+            self.pending_selection = if find_selection { None } else { selection };
         } else {
             match self
                 .pending_selection
@@ -4043,15 +4623,106 @@ impl NotePanel {
         }
     }
 
+    fn render_find_preview_source_range(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        source_range: std::ops::Range<usize>,
+    ) -> bool {
+        if !self.note_find.is_open() || self.find_query().is_empty() {
+            return false;
+        }
+        self.ensure_find_preview_index();
+        let Some(index) = self.note_find_preview.as_ref() else {
+            return false;
+        };
+        let blocks: Vec<NoteFindPreviewBlock> = index
+            .blocks
+            .iter()
+            .filter(|block| {
+                block.source_range.start >= source_range.start
+                    && block.source_range.end <= source_range.end
+            })
+            .cloned()
+            .collect();
+        let mut fragments = Vec::new();
+        let mut cursor = source_range.start;
+        for block in blocks {
+            if cursor < block.source_range.start {
+                for gap in index.renderable_uncovered_ranges(
+                    &self.note.content,
+                    cursor..block.source_range.start,
+                ) {
+                    let partial = index.block_for_partial_source_range(&self.note.content, gap);
+                    fragments.push((
+                        partial.clone(),
+                        index.rendered_block(&self.note.content, &partial),
+                    ));
+                }
+            }
+            cursor = block.source_range.end;
+            fragments.push((
+                block.clone(),
+                index.rendered_block(&self.note.content, &block),
+            ));
+        }
+        if cursor < source_range.end {
+            for gap in
+                index.renderable_uncovered_ranges(&self.note.content, cursor..source_range.end)
+            {
+                let partial = index.block_for_partial_source_range(&self.note.content, gap);
+                fragments.push((
+                    partial.clone(),
+                    index.rendered_block(&self.note.content, &partial),
+                ));
+            }
+        }
+        if fragments.is_empty() {
+            return false;
+        }
+        for (block, fragment) in fragments {
+            self.show_markdown_fragment_for_find_block(ui, app, &fragment, &block);
+        }
+        true
+    }
+
+    fn show_markdown_fragment_for_find_block(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        fragment: &str,
+        block: &NoteFindPreviewBlock,
+    ) -> egui::Rect {
+        let visible_ranges = self.preview_visible_ranges(block, app);
+        self.show_markdown_fragment_inner(
+            ui,
+            app,
+            fragment,
+            block.source_range.start,
+            Some((block.source_range.clone(), visible_ranges)),
+        )
+    }
+
     fn show_markdown_fragment(
         &mut self,
         ui: &mut egui::Ui,
         app: &mut LauncherApp,
         fragment: &str,
         cache_id: impl std::fmt::Display,
-    ) {
+    ) -> egui::Rect {
+        self.show_markdown_fragment_inner(ui, app, fragment, cache_id, None)
+    }
+
+    fn show_markdown_fragment_inner(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        fragment: &str,
+        cache_id: impl std::fmt::Display,
+        source_mapping: Option<(std::ops::Range<usize>, Vec<std::ops::Range<usize>>)>,
+    ) -> egui::Rect {
         if fragment.is_empty() {
-            return;
+            return egui::Rect::NOTHING;
         }
         let fragment_id = cache_id.to_string();
         let fragment_ui_id = ui.make_persistent_id(("note_seg", fragment_id.as_str()));
@@ -4059,7 +4730,7 @@ impl NotePanel {
         let note_font_size = effective_note_font_size(ui.ctx(), app.note_font_size);
         #[cfg(test)]
         let capture_fragment_ids = self.test_capture_markdown_fragment_ids;
-        ui.scope_builder(egui::UiBuilder::new().id(fragment_ui_id), |ui| {
+        let scope = ui.scope_builder(egui::UiBuilder::new().id(fragment_ui_id), |ui| {
             ui.set_min_width(fragment_width);
             ui.set_max_width(fragment_width);
             ui.style_mut().override_font_id = Some(FontId::proportional(note_font_size));
@@ -4097,6 +4768,87 @@ impl NotePanel {
                 Err(_) => self.render_preview_fallback(ui, app, fragment),
             }
         });
+        let rect = scope.response.rect;
+        if let Some((source_range, visible_ranges)) = source_mapping {
+            self.finish_find_preview_segment(ui, &source_range, &visible_ranges, rect);
+        }
+        rect
+    }
+
+    fn finish_find_preview_segment(
+        &mut self,
+        ui: &mut egui::Ui,
+        source_range: &std::ops::Range<usize>,
+        visible_ranges: &[std::ops::Range<usize>],
+        rect: egui::Rect,
+    ) {
+        if !self.note_find.is_open() {
+            return;
+        }
+        let Some(found) = self.find_current_match() else {
+            return;
+        };
+        if source_range.start > found.byte_range.start || found.byte_range.end > source_range.end {
+            return;
+        }
+        let visible = visible_ranges.iter().any(|range| {
+            range.start <= found.byte_range.start && found.byte_range.end <= range.end
+        });
+        if visible {
+            #[cfg(test)]
+            {
+                self.last_find_preview_rect = Some(rect);
+            }
+            let painter = ui.painter();
+            painter.rect_filled(
+                rect,
+                3.0,
+                ui.visuals().selection.bg_fill.gamma_multiply(0.15),
+            );
+            painter.rect_stroke(
+                rect,
+                3.0,
+                egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                egui::StrokeKind::Inside,
+            );
+            if self
+                .pending_find_navigation
+                .as_ref()
+                .is_some_and(|pending| {
+                    pending.preview_pending && pending.byte_range == found.byte_range
+                })
+            {
+                ui.scroll_to_rect(rect, Some(egui::Align::Center));
+            }
+        }
+        if let Some(pending) = self.pending_find_navigation.as_mut()
+            && pending.preview_pending
+            && pending.byte_range == found.byte_range
+        {
+            pending.preview_pending = false;
+            if !pending.editor_pending {
+                self.pending_find_navigation = None;
+            }
+        }
+    }
+
+    fn finish_source_only_find_navigation(&mut self, app: &LauncherApp) {
+        let Some(navigation) = self.pending_find_navigation.as_ref() else {
+            return;
+        };
+        if !navigation.preview_pending {
+            return;
+        }
+        let pending_range = navigation.byte_range.clone();
+        let active_range = self.find_current_match().map(|found| found.byte_range);
+        let source_only = active_range.as_ref() == Some(&pending_range)
+            && self.find_preview_visibility(app) == Some(FindPreviewVisibility::SourceOnly);
+        if source_only && let Some(navigation) = self.pending_find_navigation.as_mut() {
+            navigation.preview_pending = false;
+            if !navigation.editor_pending {
+                self.pending_find_navigation = None;
+            }
+        }
     }
 
     fn render_preview_fallback(
@@ -4257,7 +5009,7 @@ impl NotePanel {
         ctx: &egui::Context,
     ) -> bool {
         let mut modified = false;
-        ui.horizontal_top(|ui| {
+        let output = ui.horizontal_top(|ui| {
             ui.add_space(task_item.indent as f32 * 8.0);
             let mut state = task_item.checked;
             let resp = ui.add_enabled(interactive, egui::Checkbox::without_text(&mut state));
@@ -4267,6 +5019,15 @@ impl NotePanel {
             ui.add_space(4.0);
             self.render_inline_note_text(ui, app, task_display_text(task_item));
         });
+        let visible_ranges = task_text_source_range(&self.note.content, task_item)
+            .map(|range| inline_note_visible_ranges(&self.note.content, range))
+            .unwrap_or_default();
+        self.finish_find_preview_segment(
+            ui,
+            &task_item.line_byte_range,
+            &visible_ranges,
+            output.response.rect,
+        );
         modified
     }
 
@@ -4279,6 +5040,9 @@ impl NotePanel {
         ctx: &egui::Context,
     ) -> bool {
         if !app.note_settings.task_lists_enabled {
+            if self.render_find_preview_source_range(ui, app, start..start + segment.len()) {
+                return false;
+            }
             self.show_markdown_fragment(ui, app, segment, start);
             return false;
         }
@@ -4295,6 +5059,9 @@ impl NotePanel {
             .collect();
 
         if task_items.is_empty() {
+            if self.render_find_preview_source_range(ui, app, start..segment_end) {
+                return false;
+            }
             self.show_markdown_fragment(ui, app, segment, start);
             return false;
         }
@@ -4305,8 +5072,16 @@ impl NotePanel {
         ui.spacing_mut().item_spacing.y = 0.0;
         for task_item in task_items {
             if task_item.line_byte_range.start > cursor {
-                let before = self.note.content[cursor..task_item.line_byte_range.start].to_string();
-                self.show_markdown_fragment(ui, app, &before, cursor);
+                let rendered = self.render_find_preview_source_range(
+                    ui,
+                    app,
+                    cursor..task_item.line_byte_range.start,
+                );
+                if !rendered {
+                    let before =
+                        self.note.content[cursor..task_item.line_byte_range.start].to_string();
+                    self.show_markdown_fragment(ui, app, &before, cursor);
+                }
             }
             if self.render_task_item(
                 ui,
@@ -4324,8 +5099,11 @@ impl NotePanel {
             }
         }
         if !modified && cursor < segment_end {
-            let rest = self.note.content[cursor..segment_end].to_string();
-            self.show_markdown_fragment(ui, app, &rest, cursor);
+            let rendered = self.render_find_preview_source_range(ui, app, cursor..segment_end);
+            if !rendered {
+                let rest = self.note.content[cursor..segment_end].to_string();
+                self.show_markdown_fragment(ui, app, &rest, cursor);
+            }
         }
         ui.spacing_mut().item_spacing = old_spacing;
         modified
@@ -8846,6 +9624,426 @@ mod tests {
         assert!(!first.is_find_open());
         assert_eq!(first.find_query(), "");
         assert!(first.find_matches().is_empty());
+    }
+
+    #[test]
+    fn note_find_preview_visibility_tracks_custom_task_and_image_link_output() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_settings.task_lists_enabled = true;
+        app.note_settings.callouts_enabled = false;
+
+        let mut note = empty_note(
+            "- [ ] Task @todo:task-id [[hidden-target|shown alias]]\n\n![Image alt](image.png)",
+        );
+        note.slug = "find-preview-visibility".into();
+        let mut panel = NotePanel::from_note(note);
+        panel.view_mode = NoteViewMode::Preview;
+        panel.show_metadata = false;
+        panel.open_find();
+        panel.set_find_query("shown alias");
+        assert_eq!(
+            panel.find_preview_visibility(&app),
+            Some(FindPreviewVisibility::Visible)
+        );
+
+        render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(640.0, 480.0));
+        assert!(
+            panel
+                .last_find_preview_rect
+                .is_some_and(|rect| rect.is_positive())
+        );
+
+        panel.set_find_query("hidden-target");
+        assert_eq!(
+            panel.find_preview_visibility(&app),
+            Some(FindPreviewVisibility::SourceOnly),
+            "the custom task-row renderer displays the alias but hides its resolved target"
+        );
+
+        app.note_settings.task_lists_enabled = false;
+        app.note_images_as_links = true;
+        panel.set_find_query("Image alt");
+        assert_eq!(
+            panel.find_preview_visibility(&app),
+            Some(FindPreviewVisibility::Visible),
+            "image alt text is visible when the preview renders images as links"
+        );
+        panel.navigate_find_next();
+        panel.last_find_preview_rect = None;
+        render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(640.0, 480.0));
+        assert!(
+            panel
+                .last_find_preview_rect
+                .is_some_and(|rect| rect.is_positive())
+        );
+
+        panel.set_find_query("image.png");
+        assert_eq!(
+            panel.find_preview_visibility(&app),
+            Some(FindPreviewVisibility::SourceOnly),
+            "image source paths are hidden when only the alt label is rendered"
+        );
+    }
+
+    #[test]
+    fn note_find_navigation_renders_original_ranges_in_all_view_modes() {
+        for (index, mode) in [
+            NoteViewMode::Edit,
+            NoteViewMode::Preview,
+            NoteViewMode::Split,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ctx = egui::Context::default();
+            ctx.style_mut_of(ctx.theme(), |style| {
+                style.scroll_animation = egui::style::ScrollAnimation::none();
+            });
+            let mut app = new_app(&ctx);
+            app.note_settings.rich_markdown_enabled = true;
+            app.note_settings.split_view_enabled = true;
+            let mut note = empty_note("λ 😀 target\n\nsecond target");
+            note.slug = format!("find-mode-{index}");
+            let original_content = note.content.clone();
+            let mut panel = NotePanel::from_note(note);
+            panel.view_mode = mode;
+            panel.show_metadata = false;
+            panel.open_find();
+            panel.set_find_query("target");
+
+            render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(720.0, 520.0));
+
+            assert_eq!(panel.note_content(), original_content);
+            assert!(!panel.has_unsaved_changes());
+            assert_eq!(panel.test_view_mode(), mode);
+            if matches!(mode, NoteViewMode::Edit | NoteViewMode::Split) {
+                let editor_id = panel
+                    .last_textedit_id
+                    .expect("the real editor reports its persistent Find selection owner");
+                let state = egui::TextEdit::load_state(&ctx, editor_id)
+                    .expect("the editor keeps the queued Find char selection");
+                let range = state.cursor.char_range().unwrap();
+                let [start, end] = range.sorted_cursors();
+                assert_eq!(
+                    (start.index.0, end.index.0),
+                    (4, 10),
+                    "selection uses egui character offsets after multibyte source text"
+                );
+                assert!(!panel.last_find_editor_rects.is_empty());
+            }
+            if matches!(mode, NoteViewMode::Preview | NoteViewMode::Split) {
+                assert!(
+                    panel
+                        .last_find_preview_rect
+                        .is_some_and(|rect| rect.is_positive())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn note_find_preview_scrolls_a_long_heading_free_body_match_into_view() {
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let mut app = new_app(&ctx);
+        let mut content = (0..36)
+            .map(|index| format!("Ordinary body paragraph {index} has useful text."))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        content.push_str("\n\nThe Unicode match near the end is target λ.");
+        let mut note = empty_note(&content);
+        note.slug = "find-long-body".into();
+        let mut panel = NotePanel::from_note(note);
+        panel.view_mode = NoteViewMode::Preview;
+        panel.show_metadata = false;
+        panel.open_find();
+        panel.set_find_query("target λ");
+
+        for _ in 0..4 {
+            render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(620.0, 250.0));
+        }
+
+        let rect = panel
+            .last_find_preview_rect
+            .expect("the active semantic block has a rendered response rectangle");
+        let clip = panel
+            .last_find_preview_clip_rect
+            .expect("the preview records its actual scroll viewport clip");
+        assert!(
+            rect.intersects(clip),
+            "active match block {rect:?} is outside preview viewport {clip:?}"
+        );
+        assert!(rect.is_positive());
+        let found = panel.find_current_match().unwrap();
+        assert_eq!(&content[found.byte_range], "target λ");
+        assert_eq!(panel.note_content(), content);
+        assert!(!panel.has_unsaved_changes());
+        assert_eq!(panel.test_view_mode(), NoteViewMode::Preview);
+    }
+
+    #[test]
+    fn note_find_callout_does_not_consume_later_body_navigation() {
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let mut app = new_app(&ctx);
+        app.note_settings.callouts_enabled = true;
+        let mut content = "> [!NOTE]\n> A separate callout.\n\n".to_owned();
+        content.push_str(
+            &(0..32)
+                .map(|index| format!("Ordinary paragraph {index} remains in the body."))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        );
+        content.push_str("\n\nThe later target is here.");
+        let mut note = empty_note(&content);
+        note.slug = "find-after-callout".into();
+        let mut panel = NotePanel::from_note(note);
+        panel.view_mode = NoteViewMode::Preview;
+        panel.show_metadata = false;
+        panel.open_find();
+        panel.set_find_query("later target");
+
+        for _ in 0..4 {
+            render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(620.0, 250.0));
+        }
+
+        let locator = panel
+            .last_find_preview_rect
+            .expect("the matching body paragraph has a real response rectangle");
+        let clip = panel.last_find_preview_clip_rect.unwrap();
+        let callout = panel
+            .last_find_callout_rect
+            .expect("the preceding unrelated callout was rendered");
+        assert!(
+            locator.intersects(clip),
+            "body match {locator:?} is outside preview viewport {clip:?}"
+        );
+        assert_ne!(
+            locator, callout,
+            "the unrelated callout must not claim the later body match"
+        );
+    }
+
+    #[test]
+    fn note_find_keeps_custom_segment_text_around_an_inline_image() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.note_settings.callouts_enabled = false;
+        let content = "First paragraph.\n\nPrefix ![alt](image.png) suffix";
+        let mut note = empty_note(content);
+        note.slug = "find-around-inline-image".into();
+        let mut panel = NotePanel::from_note(note);
+        panel.view_mode = NoteViewMode::Preview;
+        panel.show_metadata = false;
+        panel.open_find();
+        panel.set_find_query("Prefix");
+
+        for _ in 0..3 {
+            render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(620.0, 320.0));
+        }
+
+        let locator = panel
+            .last_find_preview_rect
+            .expect("the partial paragraph beside the image retains a Find locator");
+        let clip = panel.last_find_preview_clip_rect.unwrap();
+        assert!(locator.is_positive() && locator.intersects(clip));
+        assert_eq!(panel.note_content(), content);
+        assert!(!panel.has_unsaved_changes());
+    }
+
+    #[test]
+    fn note_find_collapsed_match_reveals_exact_original_unicode_selection() {
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let mut app = new_app(&ctx);
+        app.note_settings.rich_markdown_enabled = true;
+        app.note_settings.collapsible_sections_enabled = true;
+        app.note_settings.collapsed_sections_persist = false;
+        let mut content = (0..24)
+            .map(|index| format!("Introductory paragraph {index} remains visible."))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        content.push_str("\n\n## Unicode section\n\nThe hidden match is λ target.");
+        let original_content = content.clone();
+        let mut note = empty_note(&content);
+        note.slug = "find-collapsed-unicode".into();
+        let mut panel = NotePanel::from_note(note);
+        panel.view_mode = NoteViewMode::Preview;
+        panel.show_metadata = false;
+        let section = panel
+            .collapsible_sections(true)
+            .into_iter()
+            .find(|section| section.heading.title == "Unicode section")
+            .expect("the fixture has a source section to collapse");
+        let section_key = panel.section_key(&section);
+        panel.collapsed_sections.insert(section_key.clone());
+        panel.open_find();
+        panel.set_find_query("λ target");
+
+        let render = |panel: &mut NotePanel, app: &mut LauncherApp, events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(700.0, 300.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| panel.ui(ctx, app),
+            )
+            .drop_without_applying_deltas();
+        };
+        for _ in 0..4 {
+            render(&mut panel, &mut app, Vec::new());
+        }
+        assert_eq!(
+            panel.find_preview_visibility(&app),
+            Some(FindPreviewVisibility::Collapsed)
+        );
+        assert!(panel.collapsed_sections.contains(&section_key));
+        assert!(
+            panel.last_find_preview_rect.is_none(),
+            "collapsed body has no rendered match block"
+        );
+        let heading_rect = *panel
+            .last_preview_heading_rects
+            .last()
+            .expect("the collapsed section heading remains visible");
+        let clip = panel.last_find_preview_clip_rect.unwrap();
+        assert!(
+            heading_rect.intersects(clip),
+            "the collapsed match scrolls its visible heading into view"
+        );
+        let reveal = panel
+            .last_find_reveal_button_rect
+            .expect("collapsed matches offer an explicit Reveal in Edit action");
+
+        render(
+            &mut panel,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(reveal.center()),
+                egui::Event::PointerButton {
+                    pos: reveal.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        render(
+            &mut panel,
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: reveal.center(),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+
+        assert_eq!(panel.test_view_mode(), NoteViewMode::Edit);
+        assert!(panel.collapsed_sections.contains(&section_key));
+        assert_eq!(panel.note_content(), original_content);
+        assert!(!panel.has_unsaved_changes());
+        let found = panel.find_current_match().unwrap();
+        let editor_id = panel
+            .last_textedit_id
+            .expect("the Edit pane reports the exact text-edit selection owner");
+        let state = egui::TextEdit::load_state(&ctx, editor_id)
+            .expect("Reveal in Edit installs the original source selection");
+        let [start, end] = state.cursor.char_range().unwrap().sorted_cursors();
+        assert_eq!(
+            (start.index.0, end.index.0),
+            (found.char_range.start, found.char_range.end)
+        );
+    }
+
+    #[test]
+    fn note_find_query_enter_wraps_without_surrendering_query_focus() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut note = empty_note("target one\n\ntarget two");
+        note.slug = "find-query-enter".into();
+        let mut panel = NotePanel::from_note(note);
+        panel.view_mode = NoteViewMode::Preview;
+        panel.show_metadata = false;
+        panel.open_find();
+
+        let frame = |panel: &mut NotePanel, app: &mut LauncherApp, events: Vec<egui::Event>| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 650.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| panel.ui(ctx, app),
+            )
+            .drop_without_applying_deltas();
+        };
+        for _ in 0..3 {
+            frame(&mut panel, &mut app, Vec::new());
+        }
+        let query_id = panel.find_query_widget_id.unwrap();
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+
+        frame(
+            &mut panel,
+            &mut app,
+            vec![egui::Event::Text("target".into())],
+        );
+        assert_eq!(panel.find_query(), "target");
+        assert_eq!(panel.find_current_index(), Some(0));
+        assert!(
+            panel
+                .last_find_preview_rect
+                .is_some_and(|rect| rect.is_positive())
+        );
+
+        frame(
+            &mut panel,
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(panel.find_current_index(), Some(1));
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+
+        frame(
+            &mut panel,
+            &mut app,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: Some(egui::Key::Enter),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::SHIFT,
+                },
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            ],
+        );
+        assert_eq!(panel.find_current_index(), Some(0));
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
     }
 
     fn backlink_rows_signature(

@@ -17,8 +17,8 @@ radial presentation policy, explicit action settings, and note persistence.
 | M2-C | Child texture updates, status, Pause/Resume and latest-frame copy/save | complete | Focused presenter/lifecycle tests; exact native ownership and hidden-root error feedback |
 | M2-D | Native source smoke and remaining direct lifetime/resource gate | complete | One owned-window WGC smoke; reuse B/C coverage without duplicate tests |
 | M3-A | Per-panel Unicode-safe source matching and navigation | complete | Literal case-insensitive range/navigation tests; no content changes |
-| M3-B | Find strip, scoped keys, Edit/Preview/Split navigation | pending | Targeted note-panel interactions, honest source-only fallback |
-| M4 | Independent focused review and user documentation | pending | Final targeted integration, fmt, one Clippy attempt; report native smoke limitations |
+| M3-B | Find strip, scoped keys, Edit/Preview/Split navigation | complete | Targeted note-panel interactions, honest source-only fallback |
+| M4 | Independent focused review and user documentation | in_progress | Final targeted integration, fmt, one Clippy attempt; report native smoke limitations |
 
 Implementation checkpoints execute sequentially. Each coherent verified checkpoint
 is committed using `<type>(<scope>): [M#-X] ...`; one normal push is attempted
@@ -312,3 +312,124 @@ passed 6/6. Covers literal punctuation/nonoverlap, Unicode/CRLF original ranges,
 empty/no matches, wraps/revisions/cache reuse, and panel isolation/same-length
 replacement/unchanged persistence state. Touched rustfmt passes (mod.rs with
 skip_children=true); git diff --check passes. No UI/preview/root-key changes yet.
+
+M3-A checkpoint: d4b702a8 feat(notes): [M3-A] add transient per-note find navigation — normal push succeeded to origin/live-pinboard.
+M3-B assigned to sole writer: active-note Find controls/keys/selection and honest
+original-source to rendered preview navigation; early root Esc only for Find.
+
+M3-B preview decision (implementation pending): current show_markdown_fragment
+can span entire heading-free documents, so Find-open preview uses actual semantic
+block response boundaries, caching source metadata. Direct already-locked
+pulldown-cmark is justified for original-source block/visibility spans; normal
+closed-Find rendering remains unchanged. Ordinary reference definition spans are
+carried into rendering units. A bounded read-only planner check confirmed existing
+footnote support and no public CommonMarkViewer/backend event or shared-footnote
+rendering API. Do not fork/edit vendor or invent approximate line-to-pixel offsets.
+Footnote-dependent blocks may coalesce into a containing semantic rendering unit;
+unrelated body blocks remain separate. A large linked group has a coarser unit
+locator, honestly identified with explicit Reveal in Edit for exact source
+selection. This uses the approved containing-segment locator policy, never a false
+claim that visible body text is source-only. Tests must establish ordinary long
+body navigation, hidden source targets, and preserved reference/footnote context.
+
+M3-B first test batch stopped at compilation (no tests ran): public modal-layer
+lookup belongs to Memory, and root routing needed borrowed Context arguments.
+Those API corrections are in progress alongside the required long-preview,
+keyboard-owner and collapsed-source interaction cases. Ctrl+F/Ctrl+W matching
+uses each key event's modifiers rather than the frame's last modifier state.
+README documentation is prepared independently; no source-write overlap.
+
+M4 independent reviewer is inspecting baseline 96d4926e through the coherent
+M3-B source boundary (including the untracked preview helper), read-only and
+without builds/tests. M3-B focused test binary is compiling; no tests have
+reported yet. No broad regression or native UI campaign is being started.
+
+M3-B next compile exposed an E0502 borrowing cached task analysis alongside
+note content in find_preview_visibility; no tests ran (exit 101). The writer
+is correcting that specific ownership boundary before the intended test batch.
+Independent review accepted concrete fixes: preserve partial text beside custom
+image segments; Ctrl+F must refocus an already-open query; unrelated callouts
+must not consume preview navigation. These stay in M3-B. A separate M4 fix will
+make initially-hidden Static capture errors independently visible, matching the
+already-admitted hidden-root capture path without changing root visibility.
+
+Independent cumulative review completed read-only with five P2 findings:
+partial custom-preview text preservation, callout locator ownership, hidden
+Static error reachability, reopening Find focus, and event-local key modifiers.
+All are accepted for correction. No additional actionable capture lifetime or
+resource ownership defect was found. Reviewer ran no tests/builds. Final approval
+is pending bounded inspection of these fixes and scoped verification, not a
+second general audit. The Static fix remains sequential after M3-B commit.
+
+M3-B acceptance batch compiled and ran 15/27: 12 passed, 3 failed, remaining
+12 cancelled/not executed (5778 outside selection). Concrete failures are helper
+resolved-id source visibility, later-body navigation after an unrelated callout,
+and collapsed-heading locator visibility. Writer is diagnosing these owners;
+failed and unexecuted cases must pass. The recheck uses --no-fail-fast to avoid
+counting cancelled cases as evidence. Four note review findings are resolved by
+independent source inspection, with execution evidence still pending.
+
+Resolved-id visibility diagnosis: new preview helper's TODO_TOKEN_RE had no
+capture group while token construction required captures.get(1), silently
+discarding every todo token. Parent identified the direct mismatch and sent
+it to the sole writer; expected hidden resolved-ID behavior is preserved.
+Scroll tests now disable animation only in their test Contexts to inspect the
+completed target deterministically; production animation remains unchanged.
+
+Animation diagnosis correction: egui Ui::scroll_to_rect reads
+style.scroll_animation, independently of style.animation_time. The first
+test-only animation_time adjustment did not disable scrolling. The verified
+public test control is egui::style::ScrollAnimation::none(); writer was sent
+this exact API. Production scrolling and visibility assertions stay intact.
+
+Full no-fail-fast batch: 20/27 passed, 7 failed. Todo/wiki visibility now passes.
+Remaining actual failures: three offscreen locator cases (long body, callout,
+collapsed heading), all-mode editor-state initialization, query initial focus,
+and two root shortcuts. Parent/reviewer confirmed plain CTRL has command=false
+in egui; matches_logically(COMMAND) requires command=true. Route/consume actual
+Ctrl-or-command event modifiers, retaining legitimate unrelated-input exclusion.
+Reviewer also found Find focus request cleared in disabled Window sizing pass;
+retain until the enabled TextEdit accepts focus. No broad note-open rewrite.
+
+M4 actual-route inspection confirmed one directly requested integration gap:
+macro/gesture/radial note Open/New can retain launcher query focus, so a new
+Preview note rejects immediate Ctrl+F. Enter/click routes happen to surrender it.
+The shared open_note_panel owner only pushes/reorders panels, and outcome/root
+restoration does not clear stale egui query ownership. M4 will add a one-time
+activation handoff at the exact note render boundary (new/reactivated panels),
+clearing only superseded root-query ownership/pending focus and raising that
+note layer. Later deliberate query/dialog focus must continue excluding Find;
+Split initial-editor policy/default modes stay unchanged. This is the explicit
+note-open/Find integration criterion, not a general focus subsystem change.
+
+M3-B behavioral gate passed across bounded runs: 20 distinct cases from the
+complete 27-case batch, four previously failing cases in the seven-case recheck,
+then the final three cases passed 3/3 (5802 outside selection). All 27 selected
+cases have now executed successfully. No cancelled test is counted as passing.
+Final three-case command:
+`cargo nextest run --cargo-profile fast-dev --lib --no-fail-fast -E 'test(note_find_navigation_renders_original_ranges_in_all_view_modes) | test(note_find_collapsed_match_reveals_exact_original_unicode_selection) | test(note_find_shortcut_uses_focused_or_top_note_and_preserves_ctrl_w_close)'`.
+
+Initial complete selection was `test(note_find_)` plus the four semantic-preview
+helper tests and eight existing regressions: focused_split_editor_routes_keyboard_image_paste,
+clipboard_lookup_is_excluded_by_each_non_editor_focus_or_view_mode,
+markdown_fragments_keep_distinct_stable_ids_and_prepare_shared_cache,
+split_mode_does_not_request_initial_editor_focus,
+preview_preprocess_preserves_markdown_blocks_and_raw_html,
+programmatic_content_replacement_invalidates_cached_markdown_analysis,
+persistence_baseline_tracks_exact_content, discard_prompt_actions_have_explicit_transitions.
+The direct pulldown-cmark dependency uses already-locked 0.13.4 without default
+features, for original-source semantic ranges; no vendor/new parser renderer.
+
+Actual fixes preserve source text around custom images, restrict callout locator
+ownership, refocus repeated Ctrl+F, use event-local modifiers, defer disabled
+sizing-pass focus, and preserve exact active Find selection after unfocused
+TextEdit normalization without overriding a user-focused caret. Scroll tests
+use ScrollAnimation::none only in their Context; production animations stay.
+One test-only accessor exposes the actual rendered editor ID to the root fixture.
+M4 activation-time root-query handoff and hidden Static error feedback remain
+pending as explicitly scoped integration work.
+
+M3-B touched Rust formatter checks and git diff --check passed. The generated
+default clipboard_modifiers.json (absent baseline, created during this run's
+new_app startup) was inspected and removed by the writer. Only intended source
+and parent README/ledger changes remain. Writer stopped before checkpoint Git.

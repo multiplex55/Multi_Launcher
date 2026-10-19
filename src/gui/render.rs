@@ -3436,6 +3436,55 @@ impl LauncherApp {
                     });
                 }
 
+                let find_shortcut_modifiers = ctx.input(|input| {
+                    input.events.iter().rev().find_map(|event| match event {
+                        egui::Event::Key {
+                            key: egui::Key::F,
+                            pressed: true,
+                            modifiers,
+                            ..
+                        } if modifiers.ctrl || modifiers.command => Some(*modifiers),
+                        _ => None,
+                    })
+                });
+                let escape_modifiers = ctx.input(|input| {
+                    input.events.iter().rev().find_map(|event| match event {
+                        egui::Event::Key {
+                            key: egui::Key::Escape,
+                            pressed: true,
+                            modifiers,
+                            ..
+                        } => Some(*modifiers),
+                        _ => None,
+                    })
+                });
+                if first_ui_pass
+                    && !action_sheet_blocks_launcher_input
+                    && (escape_modifiers.is_some() || find_shortcut_modifiers.is_some())
+                {
+                    let escape = escape_modifiers.is_some();
+                    let find = find_shortcut_modifiers.is_some();
+                    if let Some(panel) = self
+                        .note_panels
+                        .iter_mut()
+                        .rev()
+                        .find(|panel| panel.owns_keyboard_layer(&ctx))
+                    {
+                        if find {
+                            panel.open_find();
+                            let modifiers = find_shortcut_modifiers.unwrap_or_default();
+                            ctx.input_mut(|input| input.consume_key(modifiers, egui::Key::F));
+                        } else if escape && panel.is_find_open() {
+                            let modifiers = escape_modifiers.unwrap_or_default();
+                            panel.close_find();
+                            panel.surrender_find_focus(&ctx);
+                            ctx.input_mut(|i| {
+                                i.consume_key(modifiers, egui::Key::Escape)
+                            });
+                        }
+                    }
+                }
+
                 if first_ui_pass
                     && !action_sheet_blocks_launcher_input
                     && Self::launcher_escape_handling_enabled(self.file_search_dialog.open)
@@ -3452,12 +3501,24 @@ impl LauncherApp {
                     }
                 }
 
+                let close_panel_shortcut_modifiers = ctx.input(|input| {
+                    input.events.iter().rev().find_map(|event| match event {
+                        egui::Event::Key {
+                            key: egui::Key::W,
+                            pressed: true,
+                            modifiers,
+                            ..
+                        } if modifiers.ctrl || modifiers.command => Some(*modifiers),
+                        _ => None,
+                    })
+                });
                 if first_ui_pass
-                    && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::W))
+                    && close_panel_shortcut_modifiers.is_some()
                     && self.any_panel_open()
                     && self.close_front_dialog()
                 {
-                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::W));
+                    let modifiers = close_panel_shortcut_modifiers.unwrap_or_default();
+                    ctx.input_mut(|input| input.consume_key(modifiers, egui::Key::W));
                 }
 
                 if first_ui_pass
@@ -22586,6 +22647,221 @@ mod tests {
             assert!(app.note_confirm_discard_unsaved_changes);
             assert!(app.test_last_activation.is_none());
         }
+    }
+
+    #[test]
+    fn note_find_shortcut_and_escape_leave_dirty_note_open_until_the_next_escape() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.note_save_on_close = false;
+        app.note_confirm_discard_unsaved_changes = true;
+
+        let mut panel = crate::gui::note_panel::NotePanel::from_note(crate::plugins::note::Note {
+            title: "Find Escape fixture".into(),
+            path: std::path::PathBuf::new(),
+            content: "unsaved target".into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "find-escape-fixture".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        });
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Preview);
+        panel.replace_content_from_mutation("unsaved target draft".into(), 1.0);
+        app.note_panels.push(panel);
+        app.update_panel_stack();
+
+        for _ in 0..3 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+            ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        }
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::F, egui::Modifiers::CTRL)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.note_panels.len(), 1);
+        assert!(app.note_panels[0].is_find_open());
+        assert!(app.note_panels[0].has_unsaved_changes());
+        let query_id = app.note_panels[0].test_find_query_widget_id().unwrap();
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![
+                    key_press(egui::Key::Escape, egui::Modifiers::SHIFT),
+                    egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+                ],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.note_panels.len(), 1);
+        assert!(!app.note_panels[0].is_find_open());
+        assert!(!app.note_panels[0].note_close_observation().pending_discard);
+        assert!(app.note_panels[0].has_unsaved_changes());
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.note_panels.len(), 1);
+        assert!(app.note_panels[0].note_close_observation().pending_discard);
+        assert!(app.note_panels[0].has_unsaved_changes());
+    }
+
+    #[test]
+    fn note_find_shortcut_uses_focused_or_top_note_and_preserves_ctrl_w_close() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        prepare_actual_query_frame(&ctx, &mut app);
+
+        let make_panel = |slug: &str| {
+            let mut panel =
+                crate::gui::note_panel::NotePanel::from_note(crate::plugins::note::Note {
+                    title: format!("Find owner {slug}"),
+                    path: std::path::PathBuf::new(),
+                    content: "preview target".into(),
+                    tags: Vec::new(),
+                    links: Vec::new(),
+                    slug: slug.into(),
+                    alias: None,
+                    aliases: Vec::new(),
+                    entity_refs: Vec::new(),
+                });
+            panel.test_set_view_mode(crate::settings::NoteViewMode::Preview);
+            panel
+        };
+        app.note_panels.extend([
+            make_panel("find-owner-first"),
+            make_panel("find-owner-second"),
+        ]);
+        app.note_panels[1].set_find_query("target");
+        app.update_panel_stack();
+        for _ in 0..3 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+
+        let launcher_query_id = egui::Id::new("query_input");
+        assert!(ctx.memory(|memory| memory.has_focus(launcher_query_id)));
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::F, egui::Modifiers::CTRL)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.note_panels.iter().all(|panel| !panel.is_find_open()));
+        assert!(ctx.memory(|memory| memory.has_focus(launcher_query_id)));
+
+        ctx.memory_mut(|memory| memory.surrender_focus(launcher_query_id));
+        let second_window_id = egui::Id::new(("note_panel_window", "find-owner-second"));
+        let second_window_rect = ctx
+            .memory(|memory| memory.area_rect(second_window_id))
+            .expect("the top note window was rendered");
+        assert_eq!(
+            ctx.top_layer_id(),
+            Some(egui::LayerId::new(egui::Order::Middle, second_window_id))
+        );
+        let outside_note = egui::pos2(-20.0, -20.0);
+        assert!(!second_window_rect.contains(outside_note));
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![
+                    egui::Event::PointerMoved(outside_note),
+                    key_press(egui::Key::F, egui::Modifiers::CTRL),
+                ],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.note_panels[0].is_find_open());
+        assert!(app.note_panels[1].is_find_open());
+        let find_query_id = app.note_panels[1].test_find_query_widget_id().unwrap();
+        assert!(ctx.memory(|memory| memory.has_focus(find_query_id)));
+
+        let query_state = egui::TextEdit::load_state(&ctx, find_query_id)
+            .expect("opening Find selects the retained query");
+        let [query_start, query_end] = query_state.cursor.char_range().unwrap().sorted_cursors();
+        assert_eq!((query_start.index.0, query_end.index.0), (0, 6));
+
+        // Reopening Find from the editor restores and selects the query even
+        // when the strip was already open and the editor took focus.
+        app.note_panels[1].test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        let editor_id = app.note_panels[1]
+            .test_editor_widget_id()
+            .expect("the active Edit note supplies its real TextEdit owner ID");
+        ctx.memory_mut(|memory| {
+            memory.surrender_focus(find_query_id);
+            memory.request_focus(editor_id);
+        });
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(ctx.memory(|memory| memory.has_focus(editor_id)));
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::F, egui::Modifiers::CTRL)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(ctx.memory(|memory| memory.has_focus(find_query_id)));
+        let query_state = egui::TextEdit::load_state(&ctx, find_query_id).unwrap();
+        let [query_start, query_end] = query_state.cursor.char_range().unwrap().sorted_cursors();
+        assert_eq!((query_start.index.0, query_end.index.0), (0, 6));
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::W, egui::Modifiers::CTRL)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.note_panels.len(), 1);
+        assert_eq!(app.note_panels[0].note_slug(), "find-owner-first");
+        assert!(!app.note_panels[0].is_find_open());
     }
 
     fn set_query_cursor(ctx: &egui::Context, first: usize, last: usize) {

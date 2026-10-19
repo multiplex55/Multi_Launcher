@@ -3100,6 +3100,7 @@ dependencies = [
  "notify",
  "once_cell",
  "open",
+ "pulldown-cmark",
  "qrcode",
  "rand 0.10.1",
  "raw-window-handle",
