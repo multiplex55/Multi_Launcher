@@ -3,14 +3,17 @@
 //! Native pin windows are owned by the GUI layer. This module owns only the
 //! immutable image snapshots and independent per-pin display state.
 
+pub(crate) mod live;
 pub(crate) mod source;
 
 use crate::mkmacro::ScreenRect;
+use crate::pinboard::source::PinSourceBinding;
 use image::RgbaImage;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::{Arc, atomic::AtomicUsize};
+use std::thread::JoinHandle;
 
 const MIB: usize = 1024 * 1024;
 
@@ -104,6 +107,9 @@ pub enum PinboardError {
     PinLimitReached {
         limit: usize,
     },
+    LiveSessionLimitReached {
+        limit: usize,
+    },
     ImageBudgetReached {
         available: usize,
     },
@@ -133,6 +139,12 @@ impl fmt::Display for PinboardError {
             Self::CaptureInProgress => f.write_str("a pinboard capture is already in progress"),
             Self::PinLimitReached { limit } => {
                 write!(f, "pinboard limit reached ({limit} pins)")
+            }
+            Self::LiveSessionLimitReached { limit } => {
+                write!(
+                    f,
+                    "live pin capture worker limit reached ({limit} sessions)"
+                )
             }
             Self::ImageBudgetReached { available } => write!(
                 f,
@@ -233,36 +245,22 @@ impl PinImageHandle {
 struct TrackedRgbaImage {
     image: RgbaImage,
     bytes: usize,
-    budget: Arc<SharedImageBudget>,
+    _reservation: ImageBudgetReservation,
 }
 
-impl Drop for TrackedRgbaImage {
-    fn drop(&mut self) {
-        let released = self.budget.allocated_bytes.try_update(
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-            |allocated| allocated.checked_sub(self.bytes),
-        );
-        debug_assert!(
-            released.is_ok(),
-            "tracked image budget released more than once"
-        );
-    }
-}
-
-struct SharedImageBudget {
+pub(crate) struct SharedImageBudget {
     limit: usize,
-    allocated_bytes: AtomicUsize,
+    reserved_and_allocated_bytes: AtomicUsize,
 }
 
 impl SharedImageBudget {
-    fn allocated_bytes(&self) -> usize {
-        self.allocated_bytes
+    fn used_bytes(&self) -> usize {
+        self.reserved_and_allocated_bytes
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    fn charge(&self, bytes: usize) -> Result<(), PinboardError> {
-        self.allocated_bytes
+    fn reserve(self: &Arc<Self>, bytes: usize) -> Result<ImageBudgetReservation, PinboardError> {
+        self.reserved_and_allocated_bytes
             .try_update(
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Acquire,
@@ -272,17 +270,90 @@ impl SharedImageBudget {
                         .filter(|total| *total <= self.limit)
                 },
             )
-            .map(|_| ())
+            .map(|_| ImageBudgetReservation {
+                budget: Arc::clone(self),
+                bytes,
+            })
             .map_err(|allocated| PinboardError::ImageBudgetReached {
                 available: self.limit.saturating_sub(allocated),
             })
     }
 }
 
+/// One atomic reservation for either an in-flight RGBA conversion or a
+/// published image. Moving it into the tracked image prevents a budget gap or
+/// a double charge between conversion and publication.
+pub(crate) struct ImageBudgetReservation {
+    budget: Arc<SharedImageBudget>,
+    bytes: usize,
+}
+
+impl ImageBudgetReservation {
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub(crate) fn shared_budget(&self) -> Arc<SharedImageBudget> {
+        Arc::clone(&self.budget)
+    }
+
+    pub(crate) fn resize(&mut self, bytes: usize) -> Result<(), PinboardError> {
+        if bytes > self.bytes {
+            let additional = bytes - self.bytes;
+            self.budget
+                .reserved_and_allocated_bytes
+                .try_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |used| {
+                        used.checked_add(additional)
+                            .filter(|total| *total <= self.budget.limit)
+                    },
+                )
+                .map_err(|used| PinboardError::ImageBudgetReached {
+                    available: self.budget.limit.saturating_sub(used),
+                })?;
+        } else if bytes < self.bytes {
+            self.release(self.bytes - bytes);
+        }
+        self.bytes = bytes;
+        Ok(())
+    }
+
+    pub(crate) fn into_image(self, image: RgbaImage) -> Result<PinImageHandle, PinboardError> {
+        if image.as_raw().len() != self.bytes {
+            return Err(PinboardError::CapturePixelBufferMismatch {
+                expected: self.bytes,
+                actual: image.as_raw().len(),
+            });
+        }
+        Ok(PinImageHandle(Arc::new(TrackedRgbaImage {
+            bytes: self.bytes,
+            image,
+            _reservation: self,
+        })))
+    }
+
+    fn release(&self, bytes: usize) {
+        let released = self.budget.reserved_and_allocated_bytes.try_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |used| used.checked_sub(bytes),
+        );
+        debug_assert!(released.is_ok(), "image budget reservation released once");
+    }
+}
+
+impl Drop for ImageBudgetReservation {
+    fn drop(&mut self) {
+        self.release(self.bytes);
+    }
+}
+
 #[derive(Debug)]
 pub struct Pin {
     id: PinId,
-    snapshot: PinSnapshot,
+    content: PinContent,
     display_bounds: ScreenRect,
     zoom: f32,
     always_on_top: bool,
@@ -294,8 +365,50 @@ impl Pin {
         self.id
     }
 
-    pub const fn snapshot(&self) -> &PinSnapshot {
-        &self.snapshot
+    /// Static pins retain their immutable snapshot API. Live pins publish via
+    /// their independent latest-frame slot instead of retaining a seed image.
+    pub const fn snapshot(&self) -> Option<&PinSnapshot> {
+        match &self.content {
+            PinContent::Static(snapshot) => Some(snapshot),
+            PinContent::Live(_) => None,
+        }
+    }
+
+    pub fn current_image_handle(&self) -> Option<PinImageHandle> {
+        match &self.content {
+            PinContent::Static(snapshot) => Some(snapshot.image_handle()),
+            PinContent::Live(session) => session.current_frame().map(|frame| frame.image),
+        }
+    }
+
+    pub fn live_frame(&self) -> Option<live::PinLiveFrameLease> {
+        match &self.content {
+            PinContent::Static(_) => None,
+            PinContent::Live(session) => session.current_frame(),
+        }
+    }
+
+    pub fn live_status(&self) -> Option<live::PinLiveStatus> {
+        match &self.content {
+            PinContent::Static(_) => None,
+            PinContent::Live(session) => Some(session.status()),
+        }
+    }
+
+    /// Registers a repaint notifier for this live pin's child viewport.
+    /// Static pins have no live publication source and return false.
+    #[allow(dead_code)] // The child presenter installs this in M2-C.
+    pub(crate) fn set_live_child_wake_notifier(
+        &self,
+        notifier: Option<live::PinLiveChildWake>,
+    ) -> bool {
+        match &self.content {
+            PinContent::Static(_) => false,
+            PinContent::Live(session) => {
+                session.set_child_wake_notifier(notifier);
+                true
+            }
+        }
     }
 
     pub const fn display_bounds(&self) -> ScreenRect {
@@ -337,11 +450,19 @@ impl Pin {
     }
 }
 
+#[derive(Debug)]
+enum PinContent {
+    Static(PinSnapshot),
+    Live(live::PinLiveCaptureSession),
+}
+
 struct PendingCapture {
     identity: PinCaptureIdentity,
-    reserved_bytes: usize,
+    reservation: Option<ImageBudgetReservation>,
     selected_rect: Option<ScreenRect>,
     image: Option<PinImageHandle>,
+    live: Option<(PinSourceBinding, live::PinLiveCaptureSession)>,
+    live_actor_reserved: bool,
 }
 
 /// Owns session pin image references and reserves memory before native work.
@@ -350,7 +471,9 @@ pub struct Pinboard {
     limits: PinboardLimits,
     pins: BTreeMap<PinId, Pin>,
     image_budget: Arc<SharedImageBudget>,
+    gpu_budget: Arc<live::SharedGpuBudget>,
     pending: Option<PendingCapture>,
+    retired_live_workers: Vec<JoinHandle<()>>,
     next_pin_id: u64,
     next_capture_generation: u64,
 }
@@ -368,9 +491,11 @@ impl Pinboard {
             pins: BTreeMap::new(),
             image_budget: Arc::new(SharedImageBudget {
                 limit: limits.max_image_bytes,
-                allocated_bytes: AtomicUsize::new(0),
+                reserved_and_allocated_bytes: AtomicUsize::new(0),
             }),
+            gpu_budget: Arc::new(live::SharedGpuBudget::default()),
             pending: None,
+            retired_live_workers: Vec::new(),
             next_pin_id: 1,
             next_capture_generation: 1,
         })
@@ -389,13 +514,14 @@ impl Pinboard {
     }
 
     pub fn image_bytes(&self) -> usize {
-        self.image_budget.allocated_bytes()
+        self.image_budget.used_bytes()
     }
 
     pub fn pending_bytes(&self) -> usize {
         self.pending
             .as_ref()
-            .map_or(0, |pending| pending.reserved_bytes)
+            .and_then(|pending| pending.reservation.as_ref())
+            .map_or(0, ImageBudgetReservation::bytes)
     }
 
     pub fn active_capture(&self) -> Option<PinCaptureIdentity> {
@@ -420,6 +546,7 @@ impl Pinboard {
         &mut self,
         operation_id: PinCaptureOperationId,
     ) -> Result<PinCaptureIdentity, PinboardError> {
+        self.reap_finished_live_workers();
         if self.pending.is_some() {
             return Err(PinboardError::CaptureInProgress);
         }
@@ -431,12 +558,12 @@ impl Pinboard {
         let available = self
             .limits
             .max_image_bytes
-            .checked_sub(self.image_budget.allocated_bytes())
-            .ok_or(PinboardError::ImageBudgetReached { available: 0 })?;
+            .saturating_sub(self.image_budget.used_bytes());
         let reserved_bytes = available.min(self.limits.max_capture_bytes);
         if reserved_bytes == 0 {
             return Err(PinboardError::ImageBudgetReached { available });
         }
+        let reservation = self.image_budget.reserve(reserved_bytes)?;
         let generation = PinCaptureGeneration(
             NonZeroU64::new(self.next_capture_generation)
                 .ok_or(PinboardError::IdentityExhausted)?,
@@ -451,10 +578,42 @@ impl Pinboard {
         };
         self.pending = Some(PendingCapture {
             identity,
-            reserved_bytes,
+            reservation: Some(reservation),
             selected_rect: None,
             image: None,
+            live: None,
+            live_actor_reserved: false,
         });
+        Ok(identity)
+    }
+
+    /// Reserves one bounded live-capture actor before parking or starting
+    /// native window work. Cancelled actors continue to count until reaped.
+    pub(crate) fn reserve_live_capture(
+        &mut self,
+        operation_id: PinCaptureOperationId,
+    ) -> Result<PinCaptureIdentity, PinboardError> {
+        self.reap_finished_live_workers();
+        let live_actors = self.retired_live_workers.len()
+            + self
+                .pins
+                .values()
+                .filter(|pin| matches!(&pin.content, PinContent::Live(_)))
+                .count()
+            + usize::from(
+                self.pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.live_actor_reserved),
+            );
+        if live_actors >= self.limits.max_pins {
+            return Err(PinboardError::LiveSessionLimitReached {
+                limit: self.limits.max_pins,
+            });
+        }
+        let identity = self.reserve_capture(operation_id)?;
+        if let Some(pending) = self.pending.as_mut() {
+            pending.live_actor_reserved = true;
+        }
         Ok(identity)
     }
 
@@ -471,13 +630,17 @@ impl Pinboard {
             .as_mut()
             .filter(|pending| pending.identity == identity)
             .ok_or(PinboardError::StaleCapture)?;
-        if byte_count > pending.reserved_bytes {
+        let reservation = pending
+            .reservation
+            .as_mut()
+            .ok_or(PinboardError::CaptureNotReady)?;
+        if byte_count > reservation.bytes() {
             return Err(PinboardError::CaptureTooLarge {
                 requested: byte_count,
-                limit: pending.reserved_bytes,
+                limit: reservation.bytes(),
             });
         }
-        pending.reserved_bytes = byte_count;
+        reservation.resize(byte_count)?;
         pending.selected_rect = Some(rect);
         Ok(byte_count)
     }
@@ -501,7 +664,7 @@ impl Pinboard {
         if rect != expected_rect {
             return Err(PinboardError::StaleCapture);
         }
-        if pending.image.is_some() {
+        if pending.image.is_some() || pending.live.is_some() {
             return Err(PinboardError::CaptureAlreadyStaged);
         }
         let expected_bytes = capture_byte_count(rect)?;
@@ -520,20 +683,82 @@ impl Pinboard {
                 actual: actual_bytes,
             });
         }
-        if actual_bytes > pending.reserved_bytes {
+        let reservation = pending
+            .reservation
+            .as_ref()
+            .ok_or(PinboardError::CaptureNotReady)?;
+        if actual_bytes > reservation.bytes() {
             return Err(PinboardError::CaptureTooLarge {
                 requested: actual_bytes,
-                limit: pending.reserved_bytes,
+                limit: reservation.bytes(),
             });
         }
-        self.image_budget.charge(actual_bytes)?;
-        pending.image = Some(PinImageHandle(Arc::new(TrackedRgbaImage {
-            image,
-            bytes: actual_bytes,
-            budget: Arc::clone(&self.image_budget),
-        })));
-        pending.reserved_bytes = 0;
+        let reservation = pending
+            .reservation
+            .take()
+            .ok_or(PinboardError::CaptureNotReady)?;
+        pending.image = Some(reservation.into_image(image)?);
         Ok(())
+    }
+
+    pub(crate) fn take_live_reservation(
+        &mut self,
+        identity: PinCaptureIdentity,
+    ) -> Result<ImageBudgetReservation, PinboardError> {
+        self.pending
+            .as_mut()
+            .filter(|pending| pending.identity == identity)
+            .ok_or(PinboardError::StaleCapture)?
+            .reservation
+            .take()
+            .ok_or(PinboardError::CaptureNotReady)
+    }
+
+    pub(crate) fn gpu_budget(&self) -> Arc<live::SharedGpuBudget> {
+        Arc::clone(&self.gpu_budget)
+    }
+
+    pub(crate) fn stage_live_capture(
+        &mut self,
+        identity: PinCaptureIdentity,
+        binding: PinSourceBinding,
+        session: live::PinLiveCaptureSession,
+    ) -> Result<(), PinboardError> {
+        let validation = match self
+            .pending
+            .as_ref()
+            .filter(|pending| pending.identity == identity)
+        {
+            None => Err(PinboardError::StaleCapture),
+            Some(pending) => match pending.selected_rect {
+                None => Err(PinboardError::CaptureNotReady),
+                Some(_) if pending.image.is_some() || pending.live.is_some() => {
+                    Err(PinboardError::CaptureAlreadyStaged)
+                }
+                Some(rect)
+                    if (binding.crop.width, binding.crop.height) != (rect.width, rect.height)
+                        || !session.has_first_frame() =>
+                {
+                    Err(PinboardError::CaptureNotReady)
+                }
+                Some(_) => Ok(()),
+            },
+        };
+        if let Err(error) = validation {
+            self.retire_live_session(session);
+            return Err(error);
+        }
+        if let Some(pending) = self.pending.as_mut() {
+            pending.live = Some((binding, session));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn retire_live_session(&mut self, mut session: live::PinLiveCaptureSession) {
+        if let Some(worker) = session.cancel_and_take_worker() {
+            self.retired_live_workers.push(worker);
+        }
+        self.reap_finished_live_workers();
     }
 
     /// Publishes the new pin only after the caller has finished native cleanup.
@@ -551,7 +776,7 @@ impl Pinboard {
         let rect = pending
             .selected_rect
             .ok_or(PinboardError::CaptureNotReady)?;
-        if pending.image.is_none() {
+        if pending.image.is_none() && pending.live.is_none() {
             return Err(PinboardError::CaptureNotReady);
         }
         let id = PinId(NonZeroU64::new(self.next_pin_id).ok_or(PinboardError::IdentityExhausted)?);
@@ -560,24 +785,47 @@ impl Pinboard {
             .checked_add(1)
             .ok_or(PinboardError::IdentityExhausted)?;
         let pending = self.pending.take().ok_or(PinboardError::StaleCapture)?;
-        let image = pending.image.ok_or(PinboardError::CaptureNotReady)?;
-        let dimensions = image.pixels().dimensions();
+        let content = if let Some(image) = pending.image {
+            let dimensions = image.pixels().dimensions();
+            PinContent::Static(PinSnapshot {
+                image,
+                physical_dimensions: dimensions,
+                capture_screen_rect: rect,
+            })
+        } else if let Some((binding, session)) = pending.live {
+            if (binding.crop.width, binding.crop.height)
+                != session
+                    .current_frame()
+                    .ok_or(PinboardError::CaptureNotReady)?
+                    .image
+                    .pixels()
+                    .dimensions()
+            {
+                return Err(PinboardError::CaptureNotReady);
+            }
+            PinContent::Live(session)
+        } else {
+            return Err(PinboardError::CaptureNotReady);
+        };
         self.next_pin_id = next_pin_id;
         self.pins.insert(
             id,
             Pin {
                 id,
-                snapshot: PinSnapshot {
-                    image,
-                    physical_dimensions: dimensions,
-                    capture_screen_rect: rect,
-                },
+                content,
                 display_bounds: rect,
                 zoom: 1.0,
                 always_on_top: true,
                 click_through: false,
             },
         );
+        if let Some(Pin {
+            content: PinContent::Live(session),
+            ..
+        }) = self.pins.get(&id)
+        {
+            session.activate();
+        }
         Ok(id)
     }
 
@@ -588,7 +836,13 @@ impl Pinboard {
             .as_ref()
             .is_some_and(|pending| pending.identity == identity)
         {
-            self.pending = None;
+            if let Some(mut pending) = self.pending.take()
+                && let Some((_, mut session)) = pending.live.take()
+                && let Some(worker) = session.cancel_and_take_worker()
+            {
+                self.retired_live_workers.push(worker);
+            }
+            self.reap_finished_live_workers();
             true
         } else {
             false
@@ -598,7 +852,77 @@ impl Pinboard {
     /// Closing removes the model. Retained image handles keep the allocation
     /// and its shared budget lease until the final owner releases them.
     pub fn close(&mut self, id: PinId) -> bool {
-        self.pins.remove(&id).is_some()
+        let Some(mut pin) = self.pins.remove(&id) else {
+            return false;
+        };
+        if let PinContent::Live(session) = &mut pin.content
+            && let Some(worker) = session.cancel_and_take_worker()
+        {
+            self.retired_live_workers.push(worker);
+        }
+        self.reap_finished_live_workers();
+        true
+    }
+
+    pub fn pause_live(&self, id: PinId) -> bool {
+        self.pins
+            .get(&id)
+            .is_some_and(|pin| matches!(&pin.content, PinContent::Live(session) if session.pause()))
+    }
+
+    pub fn resume_live(&self, id: PinId) -> bool {
+        self.pins.get(&id).is_some_and(
+            |pin| matches!(&pin.content, PinContent::Live(session) if session.resume()),
+        )
+    }
+
+    pub(crate) fn shutdown_live_sessions_and_join(&mut self) -> Result<(), String> {
+        let mut errors = Vec::new();
+        for worker in self.retired_live_workers.drain(..) {
+            if worker.join().is_err() {
+                errors.push("window capture worker terminated unexpectedly".to_owned());
+            }
+        }
+        if let Some(pending) = self.pending.as_mut()
+            && let Some((_, session)) = pending.live.as_mut()
+            && let Err(error) = session.cancel_and_join()
+        {
+            errors.push(error);
+        }
+        for pin in self.pins.values_mut() {
+            if let PinContent::Live(session) = &mut pin.content
+                && let Err(error) = session.cancel_and_join()
+            {
+                errors.push(error);
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    fn reap_finished_live_workers(&mut self) {
+        let mut remaining = Vec::with_capacity(self.retired_live_workers.len());
+        for worker in self.retired_live_workers.drain(..) {
+            if worker.is_finished() {
+                if worker.join().is_err() {
+                    tracing::error!("cancelled pin capture worker terminated unexpectedly");
+                }
+            } else {
+                remaining.push(worker);
+            }
+        }
+        self.retired_live_workers = remaining;
+    }
+}
+
+impl Drop for Pinboard {
+    fn drop(&mut self) {
+        if let Err(error) = self.shutdown_live_sessions_and_join() {
+            tracing::error!("could not drain live pin capture workers on drop: {error}");
+        }
     }
 }
 
@@ -649,6 +973,10 @@ pub trait PinWindowVisibilityCoordinator: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pinboard::live::{PinLiveCaptureBackend, test_support::FakePinLiveCaptureBackend};
+    use crate::pinboard::source::{PinSourceCrop, PinSourceWindowIdentity};
+    use std::sync::{Mutex, mpsc};
+    use std::time::{Duration, Instant};
 
     fn operation_id(value: u64) -> PinCaptureOperationId {
         PinCaptureOperationId::new(value).unwrap()
@@ -673,13 +1001,19 @@ mod tests {
             )
             .unwrap();
         let first_id = board.commit_capture(first_capture).unwrap();
-        let retained_image = board.get(first_id).unwrap().snapshot().image_handle();
+        let retained_image = board
+            .get(first_id)
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .image_handle();
         assert_eq!(retained_image.pixels().as_raw().len(), 16);
         assert_eq!(
             board
                 .get(first_id)
                 .unwrap()
                 .snapshot()
+                .unwrap()
                 .physical_dimensions(),
             (2, 2)
         );
@@ -688,6 +1022,7 @@ mod tests {
                 .get(first_id)
                 .unwrap()
                 .snapshot()
+                .unwrap()
                 .capture_screen_rect(),
             first_rect
         );
@@ -817,5 +1152,145 @@ mod tests {
         assert_eq!(stale_commit_board.image_bytes(), 4);
         assert!(stale_commit_board.commit_capture(current).is_ok());
         assert_eq!(stale_commit_board.image_bytes(), 4);
+    }
+
+    #[test]
+    fn live_capture_worker_is_cancelled_and_joined_when_pinboard_drops() {
+        let mut board = Pinboard::with_limits(PinboardLimits::new(3, 48, 16)).unwrap();
+        let initial_operation_id = operation_id(20);
+        let identity = board.reserve_live_capture(initial_operation_id).unwrap();
+        let rect = ScreenRect::new(-17, 8, 2, 2);
+        board.reserve_selected_rect(identity, rect).unwrap();
+        let reservation = board.take_live_reservation(identity).unwrap();
+        let binding = PinSourceBinding {
+            window: PinSourceWindowIdentity {
+                hwnd: 51,
+                process_id: 52,
+                thread_id: 53,
+            },
+            captured_bounds: ScreenRect::new(-30, -2, 12, 10),
+            crop: PinSourceCrop {
+                x: 3,
+                y: 2,
+                width: 2,
+                height: 2,
+            },
+        };
+        let (_frame_tx, frame_rx) = mpsc::channel();
+        let backend = FakePinLiveCaptureBackend {
+            first_image: RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255])),
+            first_content_size: (12, 10),
+            stream: Mutex::new(Some(frame_rx)),
+            first_frame_gate: None,
+        };
+        let mut session = backend
+            .start(
+                binding,
+                identity.generation,
+                reservation,
+                board.gpu_budget(),
+            )
+            .unwrap();
+        let first_frame_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(result) = session.try_first_frame_result() {
+                result.unwrap();
+                break;
+            }
+            assert!(
+                Instant::now() < first_frame_deadline,
+                "fake live worker did not start"
+            );
+            std::thread::yield_now();
+        }
+        board
+            .stage_live_capture(identity, binding, session)
+            .unwrap();
+        let pin_id = board.commit_capture(identity).unwrap();
+        assert_eq!(board.image_bytes(), 16);
+        let static_pending = board.reserve_capture(operation_id(21)).unwrap();
+        assert_eq!(board.pending_bytes(), 16);
+        let final_budget_lease = board.image_budget.reserve(16).unwrap();
+        assert!(board.image_budget.reserve(1).is_err());
+        drop(final_budget_lease);
+        assert!(board.cancel_capture(static_pending));
+
+        let second_identity = board.reserve_live_capture(operation_id(22)).unwrap();
+        board.reserve_selected_rect(second_identity, rect).unwrap();
+        let second_reservation = board.take_live_reservation(second_identity).unwrap();
+        let (_second_frame_tx, second_frame_rx) = mpsc::channel();
+        let second_backend = FakePinLiveCaptureBackend {
+            first_image: RgbaImage::from_pixel(2, 2, image::Rgba([2, 3, 4, 255])),
+            first_content_size: (12, 10),
+            stream: Mutex::new(Some(second_frame_rx)),
+            first_frame_gate: None,
+        };
+        let mut second_session = second_backend
+            .start(
+                binding,
+                second_identity.generation,
+                second_reservation,
+                board.gpu_budget(),
+            )
+            .unwrap();
+        let second_first_frame_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(result) = second_session.try_first_frame_result() {
+                result.unwrap();
+                break;
+            }
+            assert!(
+                Instant::now() < second_first_frame_deadline,
+                "second fake live worker did not start"
+            );
+            std::thread::yield_now();
+        }
+        board
+            .stage_live_capture(second_identity, binding, second_session)
+            .unwrap();
+        board.commit_capture(second_identity).unwrap();
+        assert_eq!(board.image_bytes(), 32);
+
+        // Close one worker while another remains active, then stage a third
+        // pending worker. Domain destruction drains every remaining owner.
+        assert!(board.close(pin_id));
+
+        let pending_identity = board.reserve_live_capture(operation_id(23)).unwrap();
+        board.reserve_selected_rect(pending_identity, rect).unwrap();
+        let pending_reservation = board.take_live_reservation(pending_identity).unwrap();
+        let (_pending_frame_tx, pending_frame_rx) = mpsc::channel();
+        let pending_backend = FakePinLiveCaptureBackend {
+            first_image: RgbaImage::from_pixel(2, 2, image::Rgba([5, 6, 7, 255])),
+            first_content_size: (12, 10),
+            stream: Mutex::new(Some(pending_frame_rx)),
+            first_frame_gate: None,
+        };
+        let mut pending_session = pending_backend
+            .start(
+                binding,
+                pending_identity.generation,
+                pending_reservation,
+                board.gpu_budget(),
+            )
+            .unwrap();
+        let pending_first_frame_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(result) = pending_session.try_first_frame_result() {
+                result.unwrap();
+                break;
+            }
+            assert!(
+                Instant::now() < pending_first_frame_deadline,
+                "pending fake live worker did not start"
+            );
+            std::thread::yield_now();
+        }
+        board
+            .stage_live_capture(pending_identity, binding, pending_session)
+            .unwrap();
+
+        let budget = Arc::clone(&board.image_budget);
+        drop(board);
+        assert_eq!(budget.used_bytes(), 0);
     }
 }

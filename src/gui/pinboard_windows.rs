@@ -299,6 +299,10 @@ impl PinWindowPresenter {
             let restore_identity = registry.restore_identity;
             let shutting_down = registry.shutting_down;
             for pin in board.pins() {
+                let Some(image) = pin.current_image_handle() else {
+                    continue;
+                };
+                let dimensions = image.pixels().dimensions();
                 let runtime = registry.pins.entry(pin.id()).or_insert_with(|| {
                     let lifetime = pin.id().get();
                     let viewport_id = pin_viewport_id(pin.id(), lifetime);
@@ -309,8 +313,8 @@ impl PinWindowPresenter {
                         process_id,
                         viewport_id,
                         title,
-                        image: pin.snapshot().image_handle(),
-                        dimensions: pin.snapshot().physical_dimensions(),
+                        image,
+                        dimensions,
                         state: Mutex::new(PinWindowState {
                             texture: None,
                             scale_mode: PinScaleMode::Fit,
@@ -4114,6 +4118,7 @@ mod tests {
             .get(second)
             .unwrap()
             .snapshot()
+            .unwrap()
             .image_handle();
         action_client
             .submit(PinActionJob {
@@ -4521,7 +4526,7 @@ mod tests {
             pin_id: first,
             lifetime: first.get(),
             request_id: 1,
-            image: board.get(first).unwrap().snapshot().image_handle(),
+            image: board.get(first).unwrap().snapshot().unwrap().image_handle(),
             kind: PinActionKind::SaveAs,
         };
         client.submit(first_job()).unwrap();
@@ -4688,7 +4693,12 @@ mod tests {
             pin_id: second,
             lifetime: second.get(),
             request_id: 20,
-            image: board.get(second).unwrap().snapshot().image_handle(),
+            image: board
+                .get(second)
+                .unwrap()
+                .snapshot()
+                .unwrap()
+                .image_handle(),
             kind: PinActionKind::SaveAs,
         };
         save_client.submit(second_job).unwrap();
@@ -4718,7 +4728,12 @@ mod tests {
             pin_id: second,
             lifetime: second.get(),
             request_id: 22,
-            image: board.get(second).unwrap().snapshot().image_handle(),
+            image: board
+                .get(second)
+                .unwrap()
+                .snapshot()
+                .unwrap()
+                .image_handle(),
             kind: PinActionKind::SaveAs,
         };
         save_client.submit(cancelled_job).unwrap();
@@ -4740,7 +4755,7 @@ mod tests {
         let cancellation = cancellation.expect("cancelled picker returns a receipt");
         assert_eq!(cancellation.result, Ok(None));
         assert_eq!(cancellation.request_id, 22);
-        let second_pixels = board.get(second).unwrap().snapshot().pixels();
+        let second_pixels = board.get(second).unwrap().snapshot().unwrap().pixels();
         let clipboard = clipboard_image_data(second_pixels);
         assert_eq!(clipboard.width, second_pixels.width() as usize);
         assert_eq!(clipboard.height, second_pixels.height() as usize);
@@ -4757,7 +4772,12 @@ mod tests {
                     pin_id: second,
                     lifetime: second.get(),
                     request_id,
-                    image: board.get(second).unwrap().snapshot().image_handle(),
+                    image: board
+                        .get(second)
+                        .unwrap()
+                        .snapshot()
+                        .unwrap()
+                        .image_handle(),
                     kind: PinActionKind::SaveAs,
                 })
                 .unwrap();
@@ -4791,7 +4811,12 @@ mod tests {
                     pin_id: second,
                     lifetime: second.get(),
                     request_id: 30 + MAX_PIN_ACTIONS as u64,
-                    image: board.get(second).unwrap().snapshot().image_handle(),
+                    image: board
+                        .get(second)
+                        .unwrap()
+                        .snapshot()
+                        .unwrap()
+                        .image_handle(),
                     kind: PinActionKind::SaveAs,
                 })
                 .is_err()

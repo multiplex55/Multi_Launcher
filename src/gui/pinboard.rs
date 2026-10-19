@@ -12,6 +12,9 @@ use crate::gui::mkmacro_dialog::visual_overlay::{
 use crate::gui::pinboard_windows::PinWindowPresenter;
 use crate::launcher_parking::LauncherParkingTransaction;
 use crate::mkmacro::{ExecutionDiagnostic, ScreenCaptureBackend, ScreenRect};
+use crate::pinboard::live::{
+    NativePinLiveCaptureBackend, PinLiveCaptureBackend, PinLiveCaptureSession,
+};
 use crate::pinboard::source::{
     NativePinSourceResolver, PinCaptureIntent, PinSourceBinding, PinSourceResolver,
 };
@@ -168,9 +171,9 @@ struct PinCaptureSession {
     overlay_reservation_released: bool,
     cancel_sent: bool,
     capture_job: Option<CaptureJob>,
+    live_capture: Option<PinLiveCaptureSession>,
     selected_rect: Option<ScreenRect>,
     source_binding: Option<PinSourceBinding>,
-    deferred_error: Option<String>,
     staged: bool,
     superseded: bool,
     cancelled: bool,
@@ -228,6 +231,7 @@ pub(super) struct PinboardCaptureLifecycle {
     overlay: SharedVisualOverlayController,
     capture_backend: Arc<dyn ScreenCaptureBackend>,
     source_resolver: Arc<dyn PinSourceResolver>,
+    live_backend: Arc<dyn PinLiveCaptureBackend>,
     parking_factory: Arc<dyn LauncherCaptureParkingFactory>,
     windows: PinWindowPresenter,
     pin_windows: Box<dyn PinWindowVisibilityCoordinator>,
@@ -246,6 +250,7 @@ impl PinboardCaptureLifecycle {
             overlay,
             capture_backend,
             source_resolver: Arc::new(NativePinSourceResolver),
+            live_backend: Arc::new(NativePinLiveCaptureBackend),
             parking_factory: Arc::new(NativeLauncherCaptureParkingFactory),
             windows,
             pin_windows,
@@ -347,6 +352,12 @@ impl PinboardCaptureLifecycle {
     }
 
     #[cfg(test)]
+    fn set_live_backend_for_test(&mut self, live_backend: Arc<dyn PinLiveCaptureBackend>) {
+        assert!(self.session.is_none());
+        self.live_backend = live_backend;
+    }
+
+    #[cfg(test)]
     pub(super) fn set_pin_click_through_for_test(
         &mut self,
         ctx: &eframe::egui::Context,
@@ -439,7 +450,11 @@ impl PinboardCaptureLifecycle {
                 .abort_reserved_pinboard_rectangle_pick(overlay_operation_id);
             "visual overlay operation identity was invalid".to_owned()
         })?;
-        let identity = match self.board.reserve_capture(operation_id) {
+        let identity = match if intent == PinCaptureIntent::Live {
+            self.board.reserve_live_capture(operation_id)
+        } else {
+            self.board.reserve_capture(operation_id)
+        } {
             Ok(identity) => identity,
             Err(error) => {
                 self.overlay
@@ -482,9 +497,9 @@ impl PinboardCaptureLifecycle {
             overlay_reservation_released: false,
             cancel_sent: false,
             capture_job: None,
+            live_capture: None,
             selected_rect: None,
             source_binding: None,
-            deferred_error: None,
             staged: false,
             superseded: false,
             cancelled: false,
@@ -630,37 +645,90 @@ impl PinboardCaptureLifecycle {
                 }
             }
             PinCapturePhase::Capturing => {
-                if let Some(job) = session.capture_job.as_ref()
-                    && session.cancelled
-                {
-                    job.cancel();
-                }
-                if let Some(job) = session.capture_job.take() {
-                    if job.is_finished() {
-                        let (identity, rect, result) = job.join_result();
-                        if identity == session.identity && !session.cancelled {
+                if session.intent == PinCaptureIntent::Live {
+                    if session.cancelled {
+                        if let Some(live) = session.live_capture.take() {
+                            self.board.retire_live_session(live);
+                        }
+                        session.phase = PinCapturePhase::Restoring;
+                    } else if let Some(mut live) = session.live_capture.take() {
+                        if let Some(result) = live.try_first_frame_result() {
                             match result {
-                                Ok(image) => {
-                                    match self.board.stage_capture(identity, rect, image) {
-                                        Ok(()) => session.staged = true,
+                                Ok(()) => {
+                                    let binding = session.source_binding.ok_or_else(|| {
+                                        "live source binding was lost before the first frame"
+                                            .to_owned()
+                                    });
+                                    let result = match binding {
+                                        Ok(binding) => self
+                                            .board
+                                            .stage_live_capture(session.identity, binding, live)
+                                            .map_err(|error| error.to_string()),
                                         Err(error) => {
-                                            set_capture_error(&mut session, error.to_string())
+                                            self.board.retire_live_session(live);
+                                            Err(error)
+                                        }
+                                    };
+                                    match result {
+                                        Ok(()) => {
+                                            session.staged = true;
+                                            session.phase = PinCapturePhase::Restoring;
+                                        }
+                                        Err(error) => {
+                                            set_capture_error(&mut session, error);
+                                            session.phase = PinCapturePhase::Restoring;
                                         }
                                     }
                                 }
-                                Err(error) => set_capture_error(&mut session, error),
+                                Err(error) => {
+                                    set_capture_error(&mut session, error);
+                                    self.board.retire_live_session(live);
+                                    session.phase = PinCapturePhase::Restoring;
+                                }
                             }
-                        } else if let Err(error) = result
-                            && !session.cancelled
-                        {
-                            set_capture_error(&mut session, error);
+                        } else {
+                            session.live_capture = Some(live);
                         }
-                        session.phase = PinCapturePhase::Restoring;
                     } else {
-                        session.capture_job = Some(job);
+                        set_capture_error(
+                            &mut session,
+                            "live window capture worker was not started",
+                        );
+                        session.phase = PinCapturePhase::Restoring;
                     }
                 } else {
-                    session.phase = PinCapturePhase::Restoring;
+                    if let Some(job) = session.capture_job.as_ref()
+                        && session.cancelled
+                    {
+                        job.cancel();
+                    }
+                    if let Some(job) = session.capture_job.take() {
+                        if job.is_finished() {
+                            let (identity, rect, result) = job.join_result();
+                            if identity == session.identity && !session.cancelled {
+                                match result {
+                                    Ok(image) => {
+                                        match self.board.stage_capture(identity, rect, image) {
+                                            Ok(()) => session.staged = true,
+                                            Err(error) => {
+                                                set_capture_error(&mut session, error.to_string())
+                                            }
+                                        }
+                                    }
+                                    Err(error) => set_capture_error(&mut session, error),
+                                }
+                            } else if let Err(error) = result
+                                && !session.cancelled
+                            {
+                                set_capture_error(&mut session, error);
+                            }
+                            session.phase = PinCapturePhase::Restoring;
+                        } else {
+                            session.capture_job = Some(job);
+                        }
+                    } else {
+                        session.phase = PinCapturePhase::Restoring;
+                    }
                 }
             }
             PinCapturePhase::Restoring => {}
@@ -715,12 +783,6 @@ impl PinboardCaptureLifecycle {
             );
         }
 
-        if session.cleanup_complete
-            && session.error.is_none()
-            && let Some(error) = session.deferred_error.take()
-        {
-            session.error = Some(error);
-        }
         let report = session.error.as_ref().and_then(|error| {
             if session.error_reported {
                 None
@@ -793,21 +855,48 @@ impl PinboardCaptureLifecycle {
                                     }
                                 }
                             }
-                            PinCaptureIntent::Live => {
-                                match self.source_resolver.resolve(rect) {
-                                    Ok(binding) => {
-                                        session.source_binding = Some(binding);
-                                        session.deferred_error =
-                                            Some("Live window capture is not available yet".into());
-                                    }
-                                    Err(error) => {
-                                        session.deferred_error = Some(format!(
-                                            "Could not bind a live pin to one external window: {error}"
-                                        ));
+                            PinCaptureIntent::Live => match self.source_resolver.resolve(rect) {
+                                Ok(binding) => {
+                                    match self.board.take_live_reservation(session.identity) {
+                                        Ok(reservation) => {
+                                            match self.live_backend.start(
+                                                binding,
+                                                session.identity.generation,
+                                                reservation,
+                                                self.board.gpu_budget(),
+                                            ) {
+                                                Ok(worker) => {
+                                                    session.source_binding = Some(binding);
+                                                    session.live_capture = Some(worker);
+                                                    session.phase = PinCapturePhase::Capturing;
+                                                }
+                                                Err(error) => {
+                                                    set_capture_error(
+                                                        session,
+                                                        format!(
+                                                            "could not start live window capture: {error}"
+                                                        ),
+                                                    );
+                                                    session.phase = PinCapturePhase::Restoring;
+                                                }
+                                            }
+                                        }
+                                        Err(error) => {
+                                            set_capture_error(session, error.to_string());
+                                            session.phase = PinCapturePhase::Restoring;
+                                        }
                                     }
                                 }
-                                session.phase = PinCapturePhase::Restoring;
-                            }
+                                Err(error) => {
+                                    set_capture_error(
+                                        session,
+                                        format!(
+                                            "Could not bind a live pin to one external window: {error}"
+                                        ),
+                                    );
+                                    session.phase = PinCapturePhase::Restoring;
+                                }
+                            },
                         }
                     }
                 }
@@ -841,6 +930,9 @@ impl PinboardCaptureLifecycle {
         root_identity: (usize, u64),
         egui_ctx: &eframe::egui::Context,
     ) {
+        if let Some(live) = session.live_capture.take() {
+            self.board.retire_live_session(live);
+        }
         if let Some(job) = session.capture_job.as_ref() {
             job.cancel();
         }
@@ -962,7 +1054,7 @@ impl PinboardCaptureLifecycle {
         root_identity: (usize, u64),
     ) -> Result<(), String> {
         let Some(mut session) = self.session.take() else {
-            return Ok(());
+            return self.board.shutdown_live_sessions_and_join();
         };
         session.cancelled = true;
         if let Some(job) = session.capture_job.as_ref() {
@@ -970,6 +1062,9 @@ impl PinboardCaptureLifecycle {
         }
         if let Some(job) = session.capture_job.take() {
             let _ = job.take_result(true);
+        }
+        if let Some(mut live) = session.live_capture.take() {
+            live.cancel_and_join()?;
         }
         if session.overlay_dispatched && !session.overlay_terminal_consumed {
             let _ = self
@@ -1018,6 +1113,9 @@ impl PinboardCaptureLifecycle {
             errors.push("ROOT native identity changed before pin shutdown restoration".into());
         }
         self.board.cancel_capture(session.identity);
+        if let Err(error) = self.board.shutdown_live_sessions_and_join() {
+            errors.push(format!("could not drain live pin capture workers: {error}"));
+        }
         if !session.overlay_reservation_released {
             if session.overlay_dispatched && session.overlay_terminal_consumed {
                 session.overlay_reservation_released = self
@@ -1655,10 +1753,10 @@ mod tests {
         assert_eq!(lifecycle.pinboard().len(), 1);
         let pin = lifecycle.pinboard().pins().next().unwrap();
         assert_eq!(
-            pin.snapshot().physical_dimensions(),
+            pin.snapshot().unwrap().physical_dimensions(),
             (rect.width, rect.height)
         );
-        assert_eq!(pin.snapshot().capture_screen_rect(), rect);
+        assert_eq!(pin.snapshot().unwrap().capture_screen_rect(), rect);
         let completed = log.lock().unwrap();
         assert_eq!(completed.capture_rects, [rect]);
         assert_eq!(completed.parking_restores, 1);
@@ -1681,14 +1779,16 @@ mod tests {
         let overlay_fixture = SharedVisualOverlayController::test_fixture();
         let log = Arc::new(Mutex::new(CaptureFlowLog::default()));
         let (started_tx, started_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
+        let (first_frame_started_tx, first_frame_started_rx) = mpsc::sync_channel(1);
+        let (first_frame_release_tx, first_frame_release_rx) = mpsc::channel();
         let (completed_tx, _completed_rx) = mpsc::channel();
-        release_tx.send(()).unwrap();
         let desktop = ScreenRect::new(-1_920, -240, 3_840, 1_320);
+        let (static_release_tx, static_release_rx) = mpsc::channel();
+        static_release_tx.send(()).unwrap();
         let backend: Arc<dyn ScreenCaptureBackend> = Arc::new(GatedCaptureBackend {
             log: Arc::clone(&log),
             started: started_tx,
-            release: Mutex::new(release_rx),
+            release: Mutex::new(static_release_rx),
             completed: completed_tx,
             desktop,
         });
@@ -1702,7 +1802,7 @@ mod tests {
             Box::new(FakePinWindows {
                 log: Arc::clone(&log),
                 hide_ack_after: 1,
-                restore_ack_after: 1,
+                restore_ack_after: 2,
                 hide_failure: None,
             }),
         );
@@ -1725,6 +1825,19 @@ mod tests {
                 },
             },
         }));
+        lifecycle.set_live_backend_for_test(Arc::new(
+            crate::pinboard::live::test_support::FakePinLiveCaptureBackend {
+                first_image: RgbaImage::from_pixel(300, 200, image::Rgba([17, 31, 47, 255])),
+                first_content_size: (800, 700),
+                stream: Mutex::new(None),
+                first_frame_gate: Some(Arc::new(
+                    crate::pinboard::live::test_support::FakeFirstFrameGate {
+                        started: first_frame_started_tx,
+                        release: Mutex::new(first_frame_release_rx),
+                    },
+                )),
+            },
+        ));
 
         let visibility = VisibilityRevision::default();
         let visible = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1780,7 +1893,7 @@ mod tests {
             },
         );
         assert!(overlay_fixture.controller.poll().is_empty());
-        let error = poll_lifecycle(
+        poll_lifecycle(
             &context,
             &mut lifecycle,
             &visibility,
@@ -1789,26 +1902,89 @@ mod tests {
             &mut last_visible,
             native_identity,
         );
-
-        assert_eq!(
-            error.as_deref(),
-            Some("Live window capture is not available yet")
+        first_frame_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fake live worker should block before publishing its first frame");
+        let restore_requests_before_frame = log.lock().unwrap().pin_restore_requests;
+        for _ in 0..3 {
+            assert!(lifecycle.is_busy());
+            assert_eq!(lifecycle.pinboard().len(), 0);
+            assert!(lifecycle.pinboard().image_bytes() > 0);
+            assert_eq!(
+                log.lock().unwrap().pin_restore_requests,
+                restore_requests_before_frame,
+                "native restoration must wait for the first live frame"
+            );
+            poll_lifecycle(
+                &context,
+                &mut lifecycle,
+                &visibility,
+                &visible,
+                &restore,
+                &mut last_visible,
+                native_identity,
+            );
+        }
+        first_frame_release_tx.send(()).unwrap();
+        let restore_ack_deadline = Instant::now() + Duration::from_secs(2);
+        while log.lock().unwrap().pin_restore_polls == 0 && Instant::now() < restore_ack_deadline {
+            poll_lifecycle(
+                &context,
+                &mut lifecycle,
+                &visibility,
+                &visible,
+                &restore,
+                &mut last_visible,
+                native_identity,
+            );
+            thread::yield_now();
+        }
+        assert_eq!(log.lock().unwrap().pin_restore_polls, 1);
+        assert!(lifecycle.is_busy());
+        assert_eq!(lifecycle.pinboard().len(), 0);
+        let mut error = None;
+        let completion_deadline = Instant::now() + Duration::from_secs(2);
+        while lifecycle.is_busy() && Instant::now() < completion_deadline {
+            error = poll_lifecycle(
+                &context,
+                &mut lifecycle,
+                &visibility,
+                &visible,
+                &restore,
+                &mut last_visible,
+                native_identity,
+            )
+            .or(error);
+            thread::yield_now();
+        }
+        assert!(
+            !lifecycle.is_busy(),
+            "live capture did not complete restoration"
         );
+        assert_eq!(error, None);
         assert_eq!(*selections.lock().unwrap(), [selected]);
         assert!(started_rx.try_recv().is_err());
         assert!(log.lock().unwrap().capture_rects.is_empty());
-        assert_eq!(lifecycle.pinboard().len(), 0);
+        assert_eq!(lifecycle.pinboard().len(), 1);
         assert_eq!(lifecycle.pinboard().pending_bytes(), 0);
-        assert!(!lifecycle.is_busy());
         assert!(!visible.load(Ordering::SeqCst));
         assert!(restore.load(Ordering::SeqCst));
         assert!(!last_visible);
+        let pin = lifecycle.pinboard().pins().next().unwrap();
+        assert!(pin.snapshot().is_none());
+        let first_frame = pin.live_frame().expect("a live pin needs a first frame");
+        assert_eq!(first_frame.sequence, 1);
+        assert_eq!(first_frame.image.pixels().dimensions(), (300, 200));
+        assert_eq!(
+            pin.live_status(),
+            Some(crate::pinboard::live::PinLiveStatus::Live)
+        );
         let flow = log.lock().unwrap();
         assert_eq!(flow.parking_restores, 1);
         assert_eq!(flow.parking_reparks, 1);
         assert_eq!(flow.parking_commits, 1);
         assert_eq!(flow.pin_restore_requests, 1);
-        assert_eq!(flow.pin_restore_polls, 1);
+        assert_eq!(flow.pin_restore_polls, 2);
         drop(flow);
 
         let next_operation = overlay_fixture
@@ -1820,6 +1996,103 @@ mod tests {
                 .controller
                 .abort_reserved_pinboard_rectangle_pick(next_operation)
         );
+
+        let (cancel_started_tx, cancel_started_rx) = mpsc::sync_channel(1);
+        let (cancel_release_tx, cancel_release_rx) = mpsc::channel();
+        lifecycle.set_live_backend_for_test(Arc::new(
+            crate::pinboard::live::test_support::FakePinLiveCaptureBackend {
+                first_image: RgbaImage::from_pixel(300, 200, image::Rgba([19, 23, 29, 255])),
+                first_content_size: (800, 700),
+                stream: Mutex::new(None),
+                first_frame_gate: Some(Arc::new(
+                    crate::pinboard::live::test_support::FakeFirstFrameGate {
+                        started: cancel_started_tx,
+                        release: Mutex::new(cancel_release_rx),
+                    },
+                )),
+            },
+        ));
+        assert!(
+            lifecycle
+                .begin_with_intent(
+                    PinCaptureIntent::Live,
+                    true,
+                    false,
+                    false,
+                    visibility.current(),
+                    RootFocusIntent::PreserveForeground,
+                    Some(78),
+                    Some(native_identity.0),
+                    native_identity,
+                )
+                .unwrap()
+        );
+        let cancel_operation = lifecycle.session.as_ref().unwrap().overlay_operation_id;
+        poll_lifecycle(
+            &context,
+            &mut lifecycle,
+            &visibility,
+            &visible,
+            &restore,
+            &mut last_visible,
+            native_identity,
+        );
+        poll_lifecycle(
+            &context,
+            &mut lifecycle,
+            &visibility,
+            &visible,
+            &restore,
+            &mut last_visible,
+            native_identity,
+        );
+        overlay_fixture.observer.wait_for_commands(2);
+        let cancelled_selection = ScreenRect::new(-120, 130, 300, 200);
+        overlay_fixture.controller.inject_pinboard_event_for_test(
+            VisualOverlayEvent::RectangleConfirmed {
+                operation_id: cancel_operation,
+                purpose: RectanglePurpose::PinboardCapture,
+                rect: cancelled_selection,
+            },
+        );
+        assert!(overlay_fixture.controller.poll().is_empty());
+        poll_lifecycle(
+            &context,
+            &mut lifecycle,
+            &visibility,
+            &visible,
+            &restore,
+            &mut last_visible,
+            native_identity,
+        );
+        cancel_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second fake worker should be waiting behind the first-frame gate");
+        assert!(lifecycle.is_busy());
+        assert_eq!(lifecycle.pinboard().len(), 1);
+        lifecycle.cancel();
+        let cancel_deadline = Instant::now() + Duration::from_secs(2);
+        while lifecycle.is_busy() && Instant::now() < cancel_deadline {
+            poll_lifecycle(
+                &context,
+                &mut lifecycle,
+                &visibility,
+                &visible,
+                &restore,
+                &mut last_visible,
+                native_identity,
+            );
+            thread::yield_now();
+        }
+        assert!(
+            !lifecycle.is_busy(),
+            "cancelled live selection did not drain"
+        );
+        assert_eq!(lifecycle.pinboard().len(), 1);
+        assert_eq!(lifecycle.pinboard().pending_bytes(), 0);
+        assert!(lifecycle.board.shutdown_live_sessions_and_join().is_ok());
+        drop(cancel_release_tx);
+        drop(static_release_tx);
     }
 
     #[test]
