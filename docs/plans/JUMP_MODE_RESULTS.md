@@ -1,6 +1,6 @@
 # Jump Mode Results
 
-Work in progress on `feat/jump-mode-2026-10-19-c7e42`, based on `8f94b003a12853735d1cb4689c6ec4e53c4ace8e`. Checkpoints through `470c654a` are pushed to origin. The default-off setting, pure hint engine and scoped target/focus registry are implemented; keyboard routing is verified on the actual root query path. Overlay and end-to-end surface integration remain pending.
+Work in progress on `feat/jump-mode-2026-10-19-c7e42`, based on `8f94b003a12853735d1cb4689c6ec4e53c4ace8e`. Checkpoints through `9da782ed` are pushed to origin. The default-off setting, pure hint engine and scoped target/focus registry are implemented; keyboard routing is verified on the actual root query path. The overlay painter is verified headlessly; native overlay proof and end-to-end surface integration remain pending.
 
 ## Architecture and current inventory
 
@@ -40,7 +40,7 @@ The first nested helper did not inherit root patches/lock; it was replaced by a 
 | M02 setting | Complete: M02-A 3 tests + M02-B real save-owner regression passed |
 | M03 pure hint engine | Complete; 10 targeted tests passed, c3549759 pushed |
 | M04 registry | Complete; 24 all-Jump tests passed, scoped fmt/diff clean |
-| M05 input and overlay | M05-A input verified (29 all-Jump tests); painter/native evidence pending |
+| M05 input and overlay | Input/painter verified (33 all-Jump tests); native evidence pending |
 | M06–M09 grid/dashboard, keyboard harness and Phase 1 review | Pending |
 | M10–M13 Settings, dialogs, complex widgets and extended evidence | Pending |
 | M14–M15 performance, final checks and handoff | Pending |
@@ -70,3 +70,7 @@ M02-B correction verified: experimental_jump_mode_enabled is now a GENERAL_SETTI
 The first real target is the root query editor. Early leader/hint capture precedes widgets, repeats and paired text are handled once, and capture survives discarded passes. Actual-root tests preserve query/caret, prevent a focused button from activating on the leader, and suppress same-frame modified Enter through active, completion and cancellation transitions. Focus/owner loss cancels and releases held guards. Paste/IME cannot mutate the query while hints own input.
 
 Final cargo nextest run --lib -E 'test(jump_mode)': 29 passed / 5809 filtered, exit 0. Touched-file rustfmt and diff checks pass. No visual overlay or native Jump keyboard scenario is claimed yet. Bounded input review found activation and held-key defects; all were repaired with focused regressions.
+## M05-B painter checkpoint
+Current-pass clipped badges, accepted-prefix styling, active/invalid/no-target feedback and real-focus destination outline are implemented in jump_mode/paint.rs. Frozen IDs cannot borrow stale-generation geometry. Root pass finalization validates/reconciles before paint and QA capture; full-frame registry retention is unchanged. No widget focus or action behavior is owned by the painter.
+
+cargo nextest run --lib -E 'test(jump_mode)': 33 passed / 5809 filtered, exit 0. Touched-file rustfmt --check and diff check pass. Actual native overlay screenshot remains required before M05 completion.

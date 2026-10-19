@@ -6,10 +6,10 @@
 - Initial working tree: clean, including tracked task-input documents. No user changes copied/discarded.
 - Environment: Windows PowerShell; rustc/cargo 1.99.0; Nextest 0.9.135; egui/eframe 0.36.2 with local vendor patches.
 - Git branch creation needed sandbox escalation because .git is read-only in the normal sandbox; authorized creation succeeded.
-- Current milestone: M05-A verified; M05-B painter/native next; M01-B populated baseline incomplete.
+- Current milestone: M05-B painter verified; native query proof and M01-B populated baseline next.
 - Latest GUI evidence: rejected populated-baseline run jump_m01_20261019T210335Z_cd3ec49b; CPU baseline recorded separately.
-- Latest checkpoint: 470c654a — fix(jump): [M02-B] persist the experimental toggle through save ownership.
-- Push status: all checkpoints through M02-B (470c654a) pushed successfully to origin; upstream configured.
+- Latest checkpoint: 9da782edf4c35e7c618319091d4d7a839b2a7c00 — feat(jump): [M05-A] route scoped leader and hint keys.
+- Push status: all checkpoints through M05-A (9da782ed) pushed successfully to origin; upstream configured.
 
 | Milestone | State | Checkpoint / verification | Evidence or dependency |
 |---|---|---|---|
@@ -18,7 +18,7 @@
 | M02 | complete | M02-A 3 tests + M02-B ownership regression passed | Real general apply/publication/rollback covered |
 | M03 | complete | 10/10 targeted Nextest tests; scoped fmt/diff | Typed IDs, frozen mapping, prefix-free matching |
 | M04 | complete | 24/24 all-Jump Nextest; scoped fmt/diff clean | Copied responses, multipass retention, one-shot intents |
-| M05 | in_progress | M05-A 29/29 all-Jump tests; M05-B painter/native pending | Actual root query and multipass verified |
+| M05 | in_progress | M05-A input + M05-B painter; 33/33 all-Jump tests | Native query-only proof remains pending |
 | M06 | pending | Grid integration | M05 |
 | M07 | pending | Dashboard integration | M05 |
 | M08 | pending | Native keyboard acceptance | M01, M06–M07 |
@@ -52,7 +52,7 @@ Parent owns branch, ledger, commits and one best-effort push per checkpoint. Pla
 
 ## Next action
 
-Checkpoint verified M05-A, then implement M05-B visual overlay and native query-only evidence. M01-B fixture root-cause handoff is ready; populated dashboard baseline remains incomplete until semantic and rendered-content proof.
+M05-B painter verified and ready to checkpoint. Next: M01-B concrete fixture repair/production semantic validation and owned baseline, then native query-only Jump proof. M01-B fixture root-cause handoff is ready; populated dashboard baseline remains incomplete until semantic and rendered-content proof.
 
 
 
@@ -120,3 +120,8 @@ Safe actual-root test seam: `forced_discard_dispatches_the_root_action_and_histo
 - Hint completion queues one focus intent only. Active, completed and cancellation frames suppress same-frame modified/unmodified Enter/Space; held key guards require release, and owner loss clears them. Focus-loss transition captures formerly active input without taking input from focused modal owners.
 - Actual query response is the minimal real registered target. Full grid/dashboard controls and painter remain later checkpoints.
 - Final cargo nextest run --lib -E 'test(jump_mode)': exit 0, 29 passed / 5809 filtered. Scoped rustfmt and git diff --check pass. Initial test failures were sizing/registry setup plus a genuine focus-loss text leak; repaired at respective owners without relaxing eligibility. Review findings (modified activation, held-key poison, cancellation variant) resolved and covered in final passing filter.
+## M05-B painter outcome
+- Exact frozen hint IDs resolve against the revalidated current-pass registry. Badges use control layers/clipped geometry and accepted-prefix styling; static active/invalid/no-target feedback does not alter layout or request continuous repaint.
+- Real focus plus the exact completed response is required for a destination outline. Painting never requests focus or executes handlers.
+- Both visible root exits finish collection, validate/reconcile and paint before QA capture. Shared reconciliation retains the completion callback as final registry owner. Focus ID is read once per paint rather than locking memory per target.
+- cargo nextest run --lib -E 'test(jump_mode)': exit 0, 33 passed / 5809 filtered. All four new model tests pass; touched-file rustfmt --check and diff check pass. Native screenshots are not yet claimed.

@@ -5,6 +5,7 @@
 //! metadata; geometry belongs to a frame-scoped UI registry and is not part of
 //! this identity.
 
+pub(crate) mod paint;
 pub(crate) mod ui;
 
 use std::cmp::Reverse;

@@ -530,6 +530,50 @@ impl JumpModeUi {
         self.pass_registry = Some(collector.registry.clone());
     }
 
+    /// Revalidate and reconcile the just-finished pass before its geometry is
+    /// used for visual feedback. Retained-frame ownership remains in
+    /// `complete_frame`, after egui has finished the whole frame.
+    pub(crate) fn prepare_pass_for_paint(
+        &mut self,
+        ctx: &egui::Context,
+        root_owner_allowed: bool,
+        root_visible: bool,
+    ) -> bool {
+        if !self.enabled || !root_visible || ctx.viewport_id() != egui::ViewportId::ROOT {
+            return false;
+        }
+        if !root_owner_allowed {
+            self.cancel_for_owner_loss();
+            return false;
+        }
+
+        let Some(mut completed) = self.pass_registry.take() else {
+            return true;
+        };
+        self.reconcile_current_registry(ctx, &mut completed, true);
+        self.pass_registry = Some(completed);
+        true
+    }
+
+    fn reconcile_current_registry(
+        &mut self,
+        ctx: &egui::Context,
+        registry: &mut TargetRegistry,
+        root_owner_allowed: bool,
+    ) {
+        registry.revalidate(ctx, root_owner_allowed);
+        let population_changed = root_owner_allowed
+            && self.active_session.as_mut().is_some_and(|session| {
+                session
+                    .reconcile_targets(registry.targets().iter().map(|target| target.id().clone()))
+                    .map(|change| change.requires_new_session())
+                    .unwrap_or(true)
+            });
+        if population_changed {
+            self.cancel_active_session();
+        }
+    }
+
     /// Retain only the final UI pass after egui has completed the whole frame.
     pub(crate) fn complete_frame(
         &mut self,
@@ -550,16 +594,7 @@ impl JumpModeUi {
         }
 
         let mut completed = self.pass_registry.take().unwrap_or_default();
-        completed.revalidate(ctx, root_owner_allowed);
-        if root_owner_allowed && let Some(session) = self.active_session.as_mut() {
-            let population_changed = session
-                .reconcile_targets(completed.targets().iter().map(|target| target.id().clone()))
-                .map(|change| change.requires_new_session())
-                .unwrap_or(true);
-            if population_changed {
-                self.cancel_active_session();
-            }
-        }
+        self.reconcile_current_registry(ctx, &mut completed, root_owner_allowed);
         let pending_intent = self.pending_focus_intent.take();
         if let Some(consumed) = self.frame_consumed_focus_intent.as_ref() {
             let still_matches = pending_intent.as_ref() == Some(&consumed.intent)

@@ -3000,6 +3000,20 @@ impl LauncherApp {
             .complete_frame(ctx, root_owner_allowed, root_visible);
     }
 
+    fn finish_and_paint_jump_mode_ui_pass(&mut self, ctx: &egui::Context, root_visible: bool) {
+        self.jump_mode_ui.finish_ui_pass();
+        let root_visible = root_visible && self.visible_flag.load(Ordering::Relaxed);
+        let root_owner_allowed = self
+            .jump_mode_ui
+            .root_input_owner_allowed(self.jump_mode_root_targets_allowed(ctx, root_visible));
+        if self
+            .jump_mode_ui
+            .prepare_pass_for_paint(ctx, root_owner_allowed, root_visible)
+        {
+            crate::gui::jump_mode::paint::paint(ctx, &self.jump_mode_ui);
+        }
+    }
+
     fn render_root_ui(&mut self, ui: &mut egui::Ui) {
         use egui::*;
 
@@ -4266,9 +4280,9 @@ impl LauncherApp {
                 painted_query_results,
                 false,
             );
+            self.finish_and_paint_jump_mode_ui_pass(&ctx, frame_logic.should_be_visible);
             #[cfg(feature = "qa-framebuffer-capture")]
             self.qa_framebuffer_finish_ui_pass(&ctx, frame_logic.should_be_visible);
-            self.jump_mode_ui.finish_ui_pass();
             return;
         }
         let show_editor = self.show_editor;
@@ -4729,9 +4743,9 @@ impl LauncherApp {
                 },
             ]);
         }
+        self.finish_and_paint_jump_mode_ui_pass(&ctx, frame_logic.should_be_visible);
         #[cfg(feature = "qa-framebuffer-capture")]
         self.qa_framebuffer_finish_ui_pass(&ctx, frame_logic.should_be_visible);
-        self.jump_mode_ui.finish_ui_pass();
     }
 
     fn stage_ui_frame_receipt(
