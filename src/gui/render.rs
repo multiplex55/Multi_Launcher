@@ -2991,6 +2991,45 @@ impl LauncherApp {
             && ctx.memory(|memory| memory.top_modal_layer().is_none())
     }
 
+    fn jump_mode_root_scope_for_current_results(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> Option<crate::gui::jump_mode::ui::JumpModeScope> {
+        let root_owner_allowed = self
+            .jump_mode_ui
+            .root_input_owner_allowed(self.jump_mode_root_targets_allowed(ctx, root_visible));
+        root_owner_allowed
+            .then(|| {
+                self.jump_mode_ui.scope(
+                    crate::gui::jump_mode::SurfaceId::LauncherResults,
+                    crate::gui::jump_mode::TargetGeneration(
+                        self.root_list_geometry.result_generation(),
+                    ),
+                    "launcher-results",
+                    ctx.viewport_id(),
+                    true,
+                )
+            })
+            .flatten()
+    }
+
+    fn apply_jump_mode_result_selection(
+        &mut self,
+        ctx: &egui::Context,
+        query_response: Option<&egui::Response>,
+        index: usize,
+    ) {
+        let selection_changed = self.selected != Some(index);
+        self.selected = Some(index);
+        if let Some(query_response) = query_response {
+            query_response.request_focus();
+        }
+        if selection_changed {
+            ctx.request_repaint();
+        }
+    }
+
     #[cfg(feature = "qa-framebuffer-capture")]
     pub(super) fn qa_framebuffer_jump_root_owner_allowed(
         &self,
@@ -3045,22 +3084,8 @@ impl LauncherApp {
         } else {
             self.jump_mode_ui.cancel_all();
         }
-        let jump_mode_root_allowed = self
-            .jump_mode_ui
-            .root_input_owner_allowed(root_owner_allowed);
-        let jump_mode_root_scope = jump_mode_root_allowed
-            .then(|| {
-                self.jump_mode_ui.scope(
-                    crate::gui::jump_mode::SurfaceId::LauncherResults,
-                    crate::gui::jump_mode::TargetGeneration(
-                        self.root_list_geometry.result_generation(),
-                    ),
-                    "launcher-results",
-                    ctx.viewport_id(),
-                    true,
-                )
-            })
-            .flatten();
+        let mut jump_mode_root_scope = None;
+        let mut jump_mode_query_response = None;
         #[cfg(feature = "qa-framebuffer-capture")]
         self.qa_framebuffer_start_ui_pass(frame_logic.ui_passes);
         if !frame_logic.should_be_visible {
@@ -3464,21 +3489,6 @@ impl LauncherApp {
                     self.move_cursor_end = false;
                 }
                 let query_response = query_output.response;
-                if let Some(scope) = jump_mode_root_scope.as_ref()
-                    && let crate::gui::jump_mode::ui::RegistrationResult::Registered {
-                        directive: Some(directive),
-                        ..
-                    } = scope.register(
-                        ui,
-                        &query_response,
-                        "query_input",
-                        "Search query",
-                        crate::gui::jump_mode::TargetKind::TextEntry,
-                        0,
-                    )
-                {
-                    directive.apply_to_response(&query_response);
-                }
                 query_bottom = query_response.rect.bottom();
                 #[cfg(test)]
                 ctx.data_mut(|data| {
@@ -3692,6 +3702,31 @@ impl LauncherApp {
                     deferred_activation =
                         deferred_activation_from_results(&self.results, i, ActivationSource::Enter);
                 }
+
+                // Query processing above can replace results and advance their
+                // generation. Register the actual query response only after
+                // those edits and suggestion/keyboard updates have settled.
+                let query_scope = self.jump_mode_root_scope_for_current_results(
+                    &ctx,
+                    frame_logic.should_be_visible,
+                );
+                if let Some(scope) = query_scope.as_ref()
+                    && let crate::gui::jump_mode::ui::RegistrationResult::Registered {
+                        directive: Some(directive),
+                        ..
+                    } = scope.register(
+                        ui,
+                        &query_response,
+                        "query_input",
+                        "Search query",
+                        crate::gui::jump_mode::TargetKind::TextEntry,
+                        0,
+                    )
+                {
+                    directive.apply_to_response(&query_response);
+                }
+                jump_mode_query_response = Some(query_response.response.clone());
+                jump_mode_root_scope = query_scope;
             });
 
             let header_bottom = brand_bottom
@@ -3835,6 +3870,10 @@ impl LauncherApp {
                                 let cols = self.query_results_layout.cols.max(1);
                                 let geometry_rebuilt =
                                     self.root_list_geometry.ensure_grid(ui, &self.results, cols);
+                                let result_scope = self.jump_mode_root_scope_for_current_results(
+                                    &ctx,
+                                    frame_logic.should_be_visible,
+                                );
                                 if track_c_enabled || self.track_c_query_observer.is_enabled() {
                                     painted_root_generation =
                                         Some(self.root_list_geometry.result_generation);
@@ -3927,6 +3966,38 @@ impl LauncherApp {
                                             self.selected == Some(idx),
                                             &text_presentation,
                                         );
+                                        if let Some(scope) = result_scope.as_ref() {
+                                            let metadata = crate::gui::jump_mode::TargetMetadata::new(
+                                                crate::gui::jump_mode::TargetId::root_result(
+                                                    crate::gui::jump_mode::TargetGeneration(
+                                                        self.root_list_geometry.result_generation(),
+                                                    ),
+                                                    idx,
+                                                ),
+                                                action.label.clone(),
+                                                crate::gui::jump_mode::TargetKind::Action,
+                                                idx as u64,
+                                            )
+                                            .with_description(action.desc.clone());
+                                            if let crate::gui::jump_mode::ui::RegistrationResult::Registered {
+                                                directive: Some(directive),
+                                                ..
+                                            } = scope.register_metadata(ui, &resp, metadata)
+                                            {
+                                                match directive {
+                                                    crate::gui::jump_mode::ui::FocusDirective::Select => {
+                                                        self.apply_jump_mode_result_selection(
+                                                            &ctx,
+                                                            jump_mode_query_response.as_ref(),
+                                                            idx,
+                                                        );
+                                                    }
+                                                    crate::gui::jump_mode::ui::FocusDirective::Focus => {
+                                                        directive.apply_to_response(&resp);
+                                                    }
+                                                }
+                                            }
+                                        }
                                         #[cfg(test)]
                                         self.test_root_rendered_rows
                                             .push((idx, action.action.clone()));
@@ -3978,6 +4049,10 @@ impl LauncherApp {
                                     &self.folder_aliases,
                                     show_full,
                                     false,
+                                );
+                                let result_scope = self.jump_mode_root_scope_for_current_results(
+                                    &ctx,
+                                    frame_logic.should_be_visible,
                                 );
                                 if track_c_enabled || self.track_c_query_observer.is_enabled() {
                                     painted_root_generation =
@@ -4108,6 +4183,38 @@ impl LauncherApp {
                                             },
                                         )
                                         .inner;
+                                    if let Some(scope) = result_scope.as_ref() {
+                                        let metadata = crate::gui::jump_mode::TargetMetadata::new(
+                                            crate::gui::jump_mode::TargetId::root_result(
+                                                crate::gui::jump_mode::TargetGeneration(
+                                                    self.root_list_geometry.result_generation(),
+                                                ),
+                                                idx,
+                                            ),
+                                            a.label.clone(),
+                                            crate::gui::jump_mode::TargetKind::Action,
+                                            idx as u64,
+                                        )
+                                        .with_description(a.desc.clone());
+                                        if let crate::gui::jump_mode::ui::RegistrationResult::Registered {
+                                            directive: Some(directive),
+                                            ..
+                                        } = scope.register_metadata(ui, &resp, metadata)
+                                        {
+                                            match directive {
+                                                crate::gui::jump_mode::ui::FocusDirective::Select => {
+                                                    self.apply_jump_mode_result_selection(
+                                                        &ctx,
+                                                        jump_mode_query_response.as_ref(),
+                                                        idx,
+                                                    );
+                                                }
+                                                crate::gui::jump_mode::ui::FocusDirective::Focus => {
+                                                    directive.apply_to_response(&resp);
+                                                }
+                                            }
+                                        }
+                                    }
                                     #[cfg(test)]
                                     {
                                         // Keep the row's parent scope tied to the result
@@ -22460,6 +22567,60 @@ mod tests {
         (range.primary.index.0, range.secondary.index.0)
     }
 
+    fn duplicate_query_payload_results() -> Vec<Action> {
+        ["first payload argument", "second payload argument"]
+            .into_iter()
+            .map(|args| Action {
+                label: "Payloads".into(),
+                desc: "Safe query payload fixture".into(),
+                action: "query:payloads".into(),
+                args: Some(args.into()),
+            })
+            .collect()
+    }
+
+    fn start_actual_root_jump_mode(ctx: &egui::Context, app: &mut LauncherApp) {
+        app.run_root_frame_for_test(
+            ctx,
+            egui::RawInput {
+                events: vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_some());
+        app.run_root_frame_for_test(
+            ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+    }
+
+    fn root_result_hint(app: &LauncherApp, index: usize) -> String {
+        let target = crate::gui::jump_mode::TargetId::root_result(
+            crate::gui::jump_mode::TargetGeneration(app.root_list_geometry.result_generation()),
+            index,
+        );
+        app.jump_mode_ui
+            .active_session()
+            .expect("Jump Mode session is active")
+            .hint_map()
+            .hint_for(&target)
+            .expect("the requested visible action has a hint")
+            .as_str()
+            .to_owned()
+    }
+
     #[test]
     fn jump_mode_actual_query_capture_preserves_text_and_survives_discarded_pass() {
         let ctx = egui::Context::default();
@@ -22469,7 +22630,14 @@ mod tests {
         prepare_actual_query_frame(&ctx, &mut app);
 
         let query_id = egui::Id::new("query_input");
-        assert_eq!(app.jump_mode_ui.retained_registry().len(), 1);
+        assert_eq!(app.jump_mode_ui.retained_registry().len(), 3);
+        for index in 0..2 {
+            let target = crate::gui::jump_mode::TargetId::root_result(
+                crate::gui::jump_mode::TargetGeneration(app.root_list_geometry.result_generation()),
+                index,
+            );
+            assert!(app.jump_mode_ui.retained_registry().get(&target).is_some());
+        }
         let query_before = app.query.clone();
         set_query_cursor(&ctx, 2, 7);
         let cursor_before = query_cursor_indices(&ctx);
@@ -22657,6 +22825,213 @@ mod tests {
         .drop_without_applying_deltas();
         assert!(app.jump_mode_ui.active_session().is_none());
         assert_eq!(app.query, query_before_cancel);
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_root_result_hints_select_without_activation_in_list_and_grid_then_fresh_enter_activates_full_action()
+     {
+        for grid in [false, true] {
+            let ctx = egui::Context::default();
+            let results = duplicate_query_payload_results();
+            let expected_second_action = results[1].clone();
+            let (workspace, mut app) = root_list_test_app(&ctx, results);
+            app.set_jump_mode_enabled(true);
+            app.test_skip_history_persistence = true;
+            app.query_results_layout.enabled = grid;
+            app.query_results_layout.cols = 3;
+            app.query_results_layout.respect_plugin_capability = false;
+            app.recompute_query_results_layout();
+            assert_eq!(app.resolved_grid_layout, grid);
+            prepare_actual_query_frame(&ctx, &mut app);
+
+            let generation =
+                crate::gui::jump_mode::TargetGeneration(app.root_list_geometry.result_generation());
+            for index in 0..2 {
+                let target = crate::gui::jump_mode::TargetId::root_result(generation, index);
+                assert!(app.jump_mode_ui.retained_registry().get(&target).is_some());
+            }
+            let query_before = app.query.clone();
+            set_query_cursor(&ctx, 2, 7);
+            let cursor_before = query_cursor_indices(&ctx);
+
+            start_actual_root_jump_mode(&ctx, &mut app);
+            let hint = root_result_hint(&app, 1);
+            assert_eq!(hint, "C", "query plus two cards receive A, B, C");
+
+            let (completion, passes) = app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![
+                        key_press(egui::Key::C, egui::Modifiers::NONE),
+                        egui::Event::Text("c".into()),
+                        key_press(egui::Key::Enter, egui::Modifiers::NONE),
+                    ],
+                    ..actual_query_input(true)
+                },
+                true,
+            );
+            completion.drop_without_applying_deltas();
+
+            assert!(passes >= 2, "the test adapter forced a discarded UI pass");
+            assert!(app.jump_mode_ui.active_session().is_none());
+            assert_eq!(
+                app.selected,
+                Some(1),
+                "the second duplicate action is selected"
+            );
+            assert_eq!(app.query, query_before, "hint input preserves query text");
+            assert_eq!(query_cursor_indices(&ctx), cursor_before);
+            assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+            assert!(
+                app.test_activation_trace.is_empty(),
+                "hint completion and same-frame Enter only select"
+            );
+
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![
+                        key_release(egui::Key::C, egui::Modifiers::NONE),
+                        key_release(egui::Key::Enter, egui::Modifiers::NONE),
+                    ],
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+            assert_eq!(app.test_activation_trace.len(), 1);
+            assert_eq!(
+                app.test_activation_trace[0],
+                (expected_second_action, ActivationSource::Enter),
+                "fresh Enter uses the selected full action, including its argument"
+            );
+            drop(workspace);
+        }
+    }
+
+    #[test]
+    fn jump_mode_root_result_targets_follow_visible_clipped_rows_and_cancel_on_generation_change() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) =
+            root_list_test_app(&ctx, (0..100).map(root_list_action).collect::<Vec<_>>());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+
+        let viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("the root list records its clipped viewport");
+        let registered_indices = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter_map(|target| match target.id().semantic() {
+                crate::gui::jump_mode::SemanticTargetId::RootResult(index) => Some(*index),
+                crate::gui::jump_mode::SemanticTargetId::Named(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(registered_indices.len() < app.results.len());
+        assert!(
+            !registered_indices.contains(&99),
+            "offscreen rows are not targets"
+        );
+        for index in &registered_indices {
+            let registered = app
+                .jump_mode_ui
+                .retained_registry()
+                .get(&crate::gui::jump_mode::TargetId::root_result(
+                    crate::gui::jump_mode::TargetGeneration(
+                        app.root_list_geometry.result_generation(),
+                    ),
+                    *index,
+                ))
+                .expect("every retained action has its generation/index identity");
+            assert!(registered.rect().intersects(viewport));
+            assert!(registered.clipped_rect().intersects(viewport));
+            assert!(
+                app.test_root_rendered_rows
+                    .iter()
+                    .any(|(rendered_index, _)| rendered_index == index)
+            );
+        }
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let stale_generation = app.root_list_geometry.result_generation();
+        app.invalidate_root_list_results();
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert_eq!(
+            app.root_list_geometry.result_generation(),
+            stale_generation.wrapping_add(1)
+        );
+        assert!(
+            app.jump_mode_ui.active_session().is_none(),
+            "a frozen session is canceled when its result generation changes"
+        );
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_root_result_registry_is_empty_while_context_menu_owns_input() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        assert_eq!(app.jump_mode_ui.retained_registry().len(), 3);
+
+        let row = app
+            .test_root_rendered_row_rects
+            .iter()
+            .find_map(|(index, rect)| (*index == 0).then_some(*rect))
+            .expect("the first action was painted");
+        let pointer = row.center();
+        for pressed in [true, false] {
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::PointerMoved(pointer),
+                        egui::Event::PointerButton {
+                            pos: pointer,
+                            button: egui::PointerButton::Secondary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+        }
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert_eq!(app.root_list_geometry.popup_owner(), Some(0));
+
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(
+            app.jump_mode_ui.retained_registry().is_empty(),
+            "root result targets are excluded while a popup owns input"
+        );
         assert!(app.test_activation_trace.is_empty());
         drop(workspace);
     }

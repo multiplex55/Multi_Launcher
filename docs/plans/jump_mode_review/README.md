@@ -20,7 +20,6 @@ tree gone). No Jump keyboard scenario is claimed by this baseline image.
 This baseline predates the instruction to disable Paste Sequence Next/Cancel
 shortcuts in test profiles. All subsequent generated profiles enforce that
 instruction; existing evidence is preserved unchanged.
-| [Query hint](00_query_hints.png) | M05 native leader, map-derived focus handoff, normal typing and zero action activations PASS; parent viewed identical SHA-256 pixels | `jump_m05_query_probe_20261020T000051Z_b5d58182` |
 
 The M05 query screenshot is 900×560, 178133 bytes, SHA-256
 `50b14f02a5d4165af7f5fc110dcde35d65a976ad0408eb2dec31bb6579c9c816`.

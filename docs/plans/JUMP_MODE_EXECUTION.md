@@ -6,10 +6,10 @@
 - Initial working tree: clean, including tracked task-input documents. No user changes copied/discarded.
 - Environment: Windows PowerShell; rustc/cargo 1.99.0; Nextest 0.9.135; egui/eframe 0.36.2 with local vendor patches.
 - Git branch creation needed sandbox escalation because .git is read-only in the normal sandbox; authorized creation succeeded.
-- Current milestone: M05 native query proof accepted; M06 grid integration next.
+- Current milestone: M06 implementation verified; checkpointing before M07 dashboard integration.
 - Latest GUI evidence: M05 PASS jump_m05_query_probe_20261020T000051Z_b5d58182; curated 00_query_hints.png.
-- Latest checkpoint: M05-C native query proof (this checkpoint); previous b67effb4332268c3e85590f4f1c3b2353c5b2ef7.
-- Push status: all prior checkpoints pushed; M05-C receives one normal push after commit; upstream configured.
+- Latest checkpoint: 898b733f7f8b010e10e25e64d4f96410a481fab7 — test(jump): [M05-C] prove native query hint focus handoff.
+- Push status: all checkpoints through M05-C (898b733f) pushed successfully; upstream configured.
 
 | Milestone | State | Checkpoint / verification | Evidence or dependency |
 |---|---|---|---|
@@ -19,7 +19,7 @@
 | M03 | complete | 10/10 targeted Nextest tests; scoped fmt/diff | Typed IDs, frozen mapping, prefix-free matching |
 | M04 | complete | 24/24 all-Jump Nextest; scoped fmt/diff clean | Copied responses, multipass retention, one-shot intents |
 | M05 | complete | Input/painter tests + native query-only PASS | 000051Z_b5d58182: hint focus, normal typing, count0, owned cleanup |
-| M06 | pending | Grid integration | M05 |
+| M06 | complete | Actual grid/list targeting;38/38 Jump tests | Native note/grid catalog follows M08 as planned |
 | M07 | pending | Dashboard integration | M05 |
 | M08 | pending | Native keyboard acceptance | M01, M06–M07 |
 | M09 | pending | Phase 1 review | M02–M08 |
@@ -52,7 +52,7 @@ Parent owns branch, ledger, commits and one best-effort push per checkpoint. Pla
 
 ## Next action
 
-M05 native proof accepted and checkpointing. Next sole implementer owns M06 grid integration using bounded handoff below. All future profiles must disable Paste Sequence Next/Cancel shortcuts. M01 populated baseline is complete.
+M06 verified and checkpointing. M07 dashboard integration next using bounded handoff below. All future profiles must disable Paste Sequence Next/Cancel shortcuts. M01 populated baseline is complete.
 
 
 
@@ -156,4 +156,13 @@ Phase1 sequence captures01-14 on enabled fixture then18 in separate disabled own
 ## M05-C native query proof accepted
 Run jump_m05_query_probe_20261020T000051Z_b5d58182 PASS: 4 fixture tests and production semantic verification, actual retained ROOT active query hintA, native map-derived A -> exact query focus with query empty/activation_count0, nativeX -> queryx/count0. Parent reviewed events, receipt and graceful exit0/owned_tree_gone for PID40556. Curated PNG178133bytes SHA25650b14f02a5d4165af7f5fc110dcde35d65a976ad0408eb2dec31bb6579c9c816 matches parent-viewed actual pixels. No warning/toast. Failed iterations remain FAIL with original evidence. M05 complete; M06/M07/M08 coverage remains required.
 M05-C scoped verification: combined fast-dev QA/Jump filter had58passed and1setup failure after focus-contract change; real-widget regression now explicitly surrenders query focus, then exact final filter test(jump_mode_observer_recognizes_the_real_registered_query_text_entry_and_hint) passed1/5868skipped. No production correction followed. Native runner passed4fixturetests, semantic verifier, persisted Test-ObservedQueryTargetLookup regression and real query probe. Scoped rustfmt, PowerShell parser and diff check pass. No broader suite rerun required.
-
+## M11 bounded planning handoff
+All four dialogs host ui(ctx,&mut LauncherApp) via mem::take in render_root_ui: compute/pass optional scope at host, do not re-read absent app.dialog.open. Reuse M10 shared owner/instance contract, no second router/pluginAPI migration.
+- notes_dialog.rs NotesDialog open/open_edit/ui QuickNotes: entries_generation/projection_generation/entries_revision and menu_owner; stable note slug/header Response within existing quick-notes-row identity, preserve virtualization. AddNote/UnusedAssets/Templates/Close/search and editSave/Cancel. Never openedit/save/remove on hint; multiline advanced later. Helpers render_notes_frame(_at/_with_events), rendered_note_rect/header_id.
+- todo_dialog.rs TodoDialog open/ensure_open/ui Todos: NewTodo/Tags/Filter TextEdits, PersistTags/done checkboxes, Add/ClearCompleted/Remove. Native row IDs TodoEntry.id while existing mutation index remains owner. Existing focused-field Enter adds; shared capture prevents hint-frame leak. Inline pending_clear_confirm exposes only nested Confirm/Cancel; tests select Cancel. Preserve candidate_entries/save_now; priorityDragValueM12. Helpers render_todo_frame and clearconfirmationtests.
+- timer_dialog.rs TimerDialog open_timer/open_alarm/ui: duration/time/name real TextEdits, duration_ui returnsResponse, preserve one-shot focus_duration_next_frame without later steal. Play/Start/Cancel real buttons, SoundComboM12. Native safe text/Cancel, nevercreate/play. Helpers render_duration_frame and existing focus tests; add actual-root globalrouting case.
+- paste_sequence_dialog.rs open_with_context/ui/close_from_window/end_session: New/RemoveSaved/savedrows/name/editor/footer enabledbuttons. SequenceId native row scopes; hint only focuses, laterEnter existing select_saved_sequence replacesdraft. editor_footer remains execution/keepopenowner; no focus sideeffects/suspend/hide. remove_confirmation SequenceId nested owner Keep safe. use_test_data_sources isolatedstore; helpers layout_app/frame/editor_event_frame/editor_click.
+Safe existing commands note:dialog, todo:dialog, timer:dialog:timer/alarm, paste/paste:open. Existing Close/Cancel or close_front_dialog preservesunsaved/pinnedpolicy. Narrow actual-root proof per dialog safefocus->Enter +cancel, draftpreservation, stale row, nestedbackgroundblock and Paste/launcher visibility. No storage/timer/scheduler refactor.
+## M06 outcome
+Actual list/grid Responses register generation/index RootResult identities after query processing, so duplicate labels/commands/args remain distinct. Select updates existing selected and requests actual query response focus without cursor reconstruction; only changedselection requests repaint. Existing freshEnter activation remains authoritative. Query-only registry assertions intentionally include visiblecards.
+Verification: cargo nextest run --cargo-profile fast-dev --features qa-framebuffer-capture --lib -E 'test(jump_mode)' exit0;38passed/5834skipped. New tests cover list+grid secondduplicate fullActionargs, unchangedquery/caret, forceddiscard/sameframeEnter0, laterfreshEnter1, virtualized/clipped population, generationcancel and popupownership. Scopedrustfmt/diff clean. Compiler AtomLayoutResponse wrapper mismatch corrected beforetests. Accidental cargo fmt formatting-only churn explicitly restored in native.rs/lib.rs/paste_sequence/playback.rs; no unrelated source diff remains. Native note/prefix/dense screenshots reserved M08.

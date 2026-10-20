@@ -1,6 +1,6 @@
 # Jump Mode Results
 
-Work in progress on `feat/jump-mode-2026-10-19-c7e42`, based on `8f94b003a12853735d1cb4689c6ec4e53c4ace8e`. Checkpoints through `b67effb4` are pushed to origin. The default-off setting, pure hint engine and scoped target/focus registry are implemented; keyboard routing is verified on the actual root query path. The overlay painter is verified headlessly; native overlay proof and end-to-end surface integration remain pending.
+Work in progress on `feat/jump-mode-2026-10-19-c7e42`, based on `8f94b003a12853735d1cb4689c6ec4e53c4ace8e`. Checkpoints through `898b733f` are pushed to origin. The default-off setting, pure hint engine, scoped registry, input routing and clipped overlay are implemented. Real native query hint/focus/typing proof passed with zero action execution and verified cleanup. Grid/list integration is verified; dashboard and Phase 2 surface integration remain pending.
 
 ## Architecture and current inventory
 
@@ -89,3 +89,6 @@ Future-shortcut constraint verified by fixture-only run jump_m01_20261019T232417
 
 Earlier native runs remain FAIL: too-short2s owned-window readiness (no input), pre-handoff query-focus requirement (leader only), PowerShell automatic Matches overwrite (leader and real PNG, no hint). Corrected bounded condition poll, focus-stage contract and candidate variable at their owners; regression checks accompany the fixes. No action-card/dashboard/native activation coverage is claimed yet; M06 onward remains required.
 Final Rust verification: `cargo nextest run --cargo-profile fast-dev --features dev-smoke-binaries,qa-framebuffer-capture --lib -E 'test(jump_mode_observer_recognizes_the_real_registered_query_text_entry_and_hint)'` passed1/5868skipped. Combined filter previously passed58 with this one setup failure; exact corrected test now passes. Four fixture tests, persisted PowerShell helper regression, production semantic validation, parser, scoped rustfmt and diff checks passed.
+## M06 grid/list checkpoint
+Visible actual list/grid responses now register result-generation/index identities, including equal-looking actions with distinct arguments. Hint completion changes the existing logical selection and keeps query focus/caret; no action is queued. FreshEnter retains existing action semantics.
+`cargo nextest run --cargo-profile fast-dev --features qa-framebuffer-capture --lib -E 'test(jump_mode)'`:38passed/5834skipped. New actual-root tests prove list/grid selection, fullActionargs, zero execution at completion/sameframeEnter, exactly once afterfreshEnter, query/caret preservation, forceddiscard, clipped/offscreen exclusion, generation cancellation and popupbackground exclusion. Scopedrustfmt/diff pass. M08 provides real note-list/native catalog evidence.
