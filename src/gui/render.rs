@@ -3014,7 +3014,11 @@ impl LauncherApp {
             .filter(|panel| {
                 !matches!(
                     panel,
-                    super::Panel::Settings | super::Panel::NotesDialog | super::Panel::TodoDialog
+                    super::Panel::Settings
+                        | super::Panel::NotesDialog
+                        | super::Panel::TodoDialog
+                        | super::Panel::TimerDialog
+                        | super::Panel::PasteSequenceDialog
                 )
             })
             .any(|panel| self.is_panel_open(panel))
@@ -3036,8 +3040,16 @@ impl LauncherApp {
         let todo_visibility_changed = self
             .jump_mode_ui
             .observe_todo_visibility(self.todo_dialog.open);
-        let supported_dialog_visibility_changed =
-            settings_visibility_changed || notes_visibility_changed || todo_visibility_changed;
+        let timer_window_title = self.timer_dialog.jump_mode_window_title();
+        let timer_visibility_changed = self.jump_mode_ui.observe_timer_window(timer_window_title);
+        let paste_sequence_visibility_changed = self
+            .jump_mode_ui
+            .observe_paste_sequence_visibility(self.paste_sequence_dialog.open);
+        let supported_dialog_visibility_changed = settings_visibility_changed
+            || notes_visibility_changed
+            || todo_visibility_changed
+            || timer_visibility_changed
+            || paste_sequence_visibility_changed;
         let candidate = if self.jump_mode_host_input_allowed(ctx, root_visible) {
             let windows = crate::gui::jump_mode::ui::NavigationWindows {
                 settings: self
@@ -3051,6 +3063,11 @@ impl LauncherApp {
                     .todo_dialog
                     .open
                     .then_some(self.jump_mode_ui.todo_instance()),
+                timer: timer_window_title.map(|_| self.jump_mode_ui.timer_instance()),
+                paste_sequence: self
+                    .paste_sequence_dialog
+                    .open
+                    .then_some(self.jump_mode_ui.paste_sequence_instance()),
             };
             let owner = resolve_layer_navigation_owner(ctx, windows);
             match owner {
@@ -3829,6 +3846,8 @@ impl LauncherApp {
                     && !self.shell_cmd_dialog.open
                     && !self.notes_dialog.open
                     && !self.todo_dialog.open
+                    && !self.timer_dialog.open
+                    && !self.paste_sequence_dialog.open
                     && !self.todo_view_dialog.open
                     && self.note_panels.is_empty()
                     && self.image_panels.is_empty()
@@ -4569,6 +4588,8 @@ impl LauncherApp {
                 crate::gui::jump_mode::ui::NavigationOwner::Root
                 | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
             };
             let mut ed = std::mem::take(&mut self.settings_editor);
@@ -4673,8 +4694,28 @@ impl LauncherApp {
         let mut help = std::mem::take(&mut self.help_window);
         help.ui(&ctx, self);
         self.help_window = help;
+        let timer_owner =
+            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+        let timer_scope = match timer_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Timer { instance } => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("timer", instance),
+                    crate::gui::jump_mode::TargetGeneration(instance),
+                    "timer-dialog",
+                    ctx.viewport_id(),
+                    timer_owner,
+                    false,
+                )
+            }
+            crate::gui::jump_mode::ui::NavigationOwner::Root
+            | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
+        };
         let mut timer_dlg = std::mem::take(&mut self.timer_dialog);
-        timer_dlg.ui(&ctx, self);
+        timer_dlg.ui_with_jump_mode(&ctx, self, timer_scope);
         self.timer_dialog = timer_dlg;
         let mut comp = std::mem::take(&mut self.completion_dialog);
         comp.ui(&ctx);
@@ -4703,8 +4744,28 @@ impl LauncherApp {
                 }
             }
         }
+        let paste_sequence_owner =
+            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+        let paste_sequence_scope = match paste_sequence_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { instance } => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("paste-sequence", instance),
+                    crate::gui::jump_mode::TargetGeneration(instance),
+                    "paste-sequence-dialog",
+                    ctx.viewport_id(),
+                    paste_sequence_owner,
+                    false,
+                )
+            }
+            crate::gui::jump_mode::ui::NavigationOwner::Root
+            | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
+        };
         let mut paste_sequence_dlg = std::mem::take(&mut self.paste_sequence_dialog);
-        paste_sequence_dlg.ui(&ctx, self);
+        paste_sequence_dlg.ui_with_jump_mode(&ctx, self, paste_sequence_scope);
         self.paste_sequence_dialog = paste_sequence_dlg;
         let mut macro_dlg = std::mem::take(&mut self.macro_dialog);
         macro_dlg.ui(&ctx, self);
@@ -4812,6 +4873,8 @@ impl LauncherApp {
             crate::gui::jump_mode::ui::NavigationOwner::Root
             | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
@@ -4884,6 +4947,8 @@ impl LauncherApp {
             crate::gui::jump_mode::ui::NavigationOwner::Root
             | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut todo_dlg = std::mem::take(&mut self.todo_dialog);
@@ -22844,6 +22909,38 @@ mod tests {
             .to_owned()
     }
 
+    fn safe_sequence_invocation_context() -> crate::paste_sequence::SequenceInvocationContext {
+        crate::paste_sequence::SequenceInvocationContext::new(
+            chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05+00:00")
+                .expect("the fixed fixture timestamp is valid"),
+            None,
+            None,
+        )
+    }
+
+    fn seed_safe_saved_sequence(
+        root: &std::path::Path,
+        name: &str,
+    ) -> (std::path::PathBuf, crate::paste_sequence::SequenceId) {
+        let store_path = root.join(crate::paste_sequence::PASTE_SEQUENCES_FILE);
+        let store = crate::paste_sequence::SequenceStore::new(&store_path);
+        let mut snapshot = store
+            .load()
+            .expect("a fresh isolated sequence store loads empty");
+        let id = snapshot
+            .upsert(crate::paste_sequence::SequenceDraft::new(
+                name,
+                vec![crate::paste_sequence::Step::LiteralText {
+                    text: "inert Jump Mode fixture text".into(),
+                }],
+            ))
+            .expect("the inert fixture sequence is valid");
+        store
+            .commit(&mut snapshot)
+            .expect("write the sequence only into the isolated workspace");
+        (store_path, id)
+    }
+
     fn press_dialog_hint_with_enter(ctx: &egui::Context, app: &mut LauncherApp, hint: &str) {
         let output = app
             .run_root_frame_for_test(
@@ -22878,6 +22975,15 @@ mod tests {
         app.run_root_frame_for_test(ctx, actual_query_input(true), false)
             .0
             .drop_without_applying_deltas();
+    }
+
+    fn settings_root_action() -> Action {
+        Action {
+            label: "Open Settings".into(),
+            desc: "Safe root-activation sentinel".into(),
+            action: "settings:dialog".into(),
+            args: None,
+        }
     }
 
     fn resize_todo_window_in_test(ctx: &egui::Context, app: &mut LauncherApp, height_delta: f32) {
@@ -22923,6 +23029,505 @@ mod tests {
             resized.height() > window_rect.height(),
             "the fixture must resize the real dialog: before={window_rect:?}, after={resized:?}"
         );
+    }
+
+    #[test]
+    fn jump_mode_timer_dialog_cancel_focuses_then_uses_the_existing_button() {
+        use crate::gui::jump_mode::ui::NavigationOwner;
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.timer_dialog.open_timer();
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text("17s".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.timer_dialog.test_duration(), "17s");
+
+        let instance = app.jump_mode_ui.timer_instance();
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Timer { instance }
+        );
+        let targets = app.jump_mode_ui.retained_registry().targets();
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.metadata().label() == "Duration")
+        );
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.metadata().label() == "Start")
+        );
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.metadata().label() == "Cancel")
+        );
+        assert!(targets.iter().all(|target| matches!(
+            target.id().surface(),
+            crate::gui::jump_mode::SurfaceId::Dialog { kind, instance: target_instance }
+                if kind == "timer" && *target_instance == instance
+        )));
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let cancel_hint = dialog_hint_for_label(&app, "Cancel");
+        press_dialog_hint_with_enter(&ctx, &mut app, &cancel_hint);
+        assert!(
+            app.timer_dialog.open,
+            "same-frame Enter only focuses Cancel"
+        );
+        assert_eq!(app.timer_dialog.test_duration(), "17s");
+        assert!(app.test_activation_trace.is_empty());
+        release_dialog_hint_enter(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(
+            !app.timer_dialog.open,
+            "fresh Enter invokes the existing Cancel button"
+        );
+        assert_eq!(app.timer_dialog.test_duration(), "17s");
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_timer_window_change_cancels_the_previous_target_generation() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.timer_dialog.open_timer();
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let timer_instance = app.jump_mode_ui.timer_instance();
+        start_actual_root_jump_mode(&ctx, &mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+
+        app.timer_dialog.open_alarm();
+        run_dialog_frame(&ctx, &mut app);
+        assert_eq!(
+            app.jump_mode_ui.timer_instance(),
+            timer_instance.wrapping_add(1)
+        );
+        assert!(
+            app.jump_mode_ui.active_session().is_none(),
+            "switching from Create Timer to Set Alarm invalidates copied targets"
+        );
+        let transition_labels = app
+            .jump_mode_ui
+            .retained_registry()
+            .metadata()
+            .map(|metadata| metadata.label())
+            .collect::<Vec<_>>();
+        assert!(
+            !transition_labels.iter().any(|label| *label == "Duration"),
+            "the transition frame cannot retain old timer targets: {transition_labels:?}"
+        );
+        for _ in 0..2 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let labels = app
+            .jump_mode_ui
+            .retained_registry()
+            .metadata()
+            .map(|metadata| metadata.label())
+            .collect::<Vec<_>>();
+        assert!(labels.iter().any(|label| *label == "Time"), "{labels:?}");
+        assert!(
+            !labels.iter().any(|label| *label == "Duration"),
+            "{labels:?}"
+        );
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn ordinary_enter_cannot_activate_root_results_behind_timer_or_paste_dialogs() {
+        for open_kind in ["timer", "paste"] {
+            let ctx = egui::Context::default();
+            let (workspace, mut app) = root_list_test_app(&ctx, vec![settings_root_action()]);
+            prepare_actual_query_frame(&ctx, &mut app);
+            app.selected = Some(0);
+            match open_kind {
+                "timer" => app.timer_dialog.open_timer(),
+                "paste" => {
+                    let (store_path, _) = seed_safe_saved_sequence(workspace.root(), "No run");
+                    app.paste_sequence_dialog.use_test_data_sources(store_path);
+                    app.paste_sequence_dialog
+                        .open_with_context(Ok(safe_sequence_invocation_context()));
+                }
+                _ => unreachable!(),
+            }
+            for _ in 0..3 {
+                run_dialog_frame(&ctx, &mut app);
+            }
+            focus_launcher_query(&ctx, &mut app);
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+            assert!(
+                app.test_activation_trace.is_empty(),
+                "Enter must not activate a background result while {open_kind} is open"
+            );
+            assert!(!app.show_settings);
+            drop(workspace);
+        }
+    }
+
+    #[test]
+    fn jump_mode_paste_sequence_selects_saved_row_and_keeps_nested_confirmation_safe() {
+        use crate::gui::jump_mode::{SurfaceId, ui::NavigationOwner};
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        let (store_path, sequence_id) = seed_safe_saved_sequence(workspace.root(), "Safe M11 row");
+        app.paste_sequence_dialog
+            .use_test_data_sources(store_path.clone());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.paste_sequence_dialog
+            .open_with_context(Ok(safe_sequence_invocation_context()));
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        let instance = app.jump_mode_ui.paste_sequence_instance();
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::PasteSequence { instance }
+        );
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| { target.metadata().label().starts_with("Safe M11 row") })
+        );
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .all(|target| {
+                    matches!(
+                        target.id().surface(),
+                        SurfaceId::Dialog { kind, instance: target_instance }
+                            if kind == "paste-sequence" && *target_instance == instance
+                    )
+                })
+        );
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let name_hint = dialog_hint_for_label(&app, "Name");
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(name_hint.to_ascii_lowercase())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(" M11 draft".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(
+            app.paste_sequence_dialog
+                .test_draft_name()
+                .contains("M11 draft")
+        );
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let row_hint = dialog_hint_for_label(&app, "Safe M11 row  ·  1 steps");
+        press_dialog_hint_with_enter(&ctx, &mut app, &row_hint);
+        assert!(app.paste_sequence_dialog.open);
+        assert!(app.test_activation_trace.is_empty());
+        assert!(app.sequence_playback.started_run().is_none());
+        release_dialog_hint_enter(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.paste_sequence_dialog.test_selected_id(),
+            Some(sequence_id)
+        );
+        assert_eq!(app.paste_sequence_dialog.test_draft_id(), Some(sequence_id));
+        assert_eq!(app.paste_sequence_dialog.test_draft_name(), "Safe M11 row");
+        assert!(app.sequence_playback.started_run().is_none());
+        assert!(app.test_activation_trace.is_empty());
+
+        run_dialog_frame(&ctx, &mut app);
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let remove_hint = dialog_hint_for_label(&app, "Remove Saved");
+        press_dialog_hint_with_enter(&ctx, &mut app, &remove_hint);
+        assert!(app.paste_sequence_dialog.open);
+        assert!(app.test_activation_trace.is_empty());
+        release_dialog_hint_enter(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.paste_sequence_dialog.open);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(
+            !app.jump_mode_ui.test_has_focus_intent_or_handoff(),
+            "the parent Remove Saved focus handoff is invalidated with the surface change"
+        );
+        assert!(app.sequence_playback.started_run().is_none());
+        assert!(app.test_activation_trace.is_empty());
+        let opening_registry = app.jump_mode_ui.retained_registry();
+        assert!(
+            !opening_registry.is_empty(),
+            "the new child is collected immediately"
+        );
+        assert!(opening_registry.targets().iter().all(|target| {
+            matches!(target.id().surface(), SurfaceId::Popup { kind, .. } if kind == "remove-saved-confirm")
+        }));
+        assert!(
+            opening_registry
+                .targets()
+                .iter()
+                .any(|target| { target.metadata().label() == "Keep" })
+        );
+        assert!(
+            !opening_registry
+                .targets()
+                .iter()
+                .any(|target| target.metadata().label() == "Name")
+        );
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let keep_hint = dialog_hint_for_label(&app, "Keep");
+        press_dialog_hint_with_enter(&ctx, &mut app, &keep_hint);
+        assert!(app.paste_sequence_dialog.open);
+        assert!(app.test_activation_trace.is_empty());
+        release_dialog_hint_enter(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(
+            !app.jump_mode_ui.test_has_focus_intent_or_handoff(),
+            "the closed child cannot retain a stale native focus handoff"
+        );
+        assert!(
+            app.jump_mode_ui.retained_registry().is_empty(),
+            "closing Keep clears child targets for this transition frame"
+        );
+        run_dialog_frame(&ctx, &mut app);
+        let saved = crate::paste_sequence::SequenceStore::new(&store_path)
+            .load()
+            .expect("the isolated sequence store remains readable");
+        assert!(
+            saved.sequence(sequence_id).is_some(),
+            "Keep preserves the saved row"
+        );
+        assert!(app.paste_sequence_dialog.open);
+        assert!(app.sequence_playback.started_run().is_none());
+        assert!(app.test_activation_trace.is_empty());
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let name_hint = dialog_hint_for_label(&app, "Name");
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(name_hint.to_ascii_lowercase())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(" unsaved".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(
+            app.paste_sequence_dialog
+                .test_draft_name()
+                .contains("unsaved")
+        );
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let cancel_editor_hint = dialog_hint_for_label(&app, "Cancel Editor");
+        press_dialog_hint_with_enter(&ctx, &mut app, &cancel_editor_hint);
+        assert!(app.paste_sequence_dialog.open);
+        assert!(app.test_activation_trace.is_empty());
+        release_dialog_hint_enter(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.paste_sequence_dialog.open);
+        let saved = crate::paste_sequence::SequenceStore::new(&store_path)
+            .load()
+            .expect("Cancel Editor leaves the fixture store readable");
+        assert_eq!(saved.sequence(sequence_id).unwrap().name, "Safe M11 row");
+        assert!(app.sequence_playback.started_run().is_none());
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn paste_saved_row_native_identity_survives_removal_of_an_earlier_row() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        let (store_path, first_id) = seed_safe_saved_sequence(workspace.root(), "First row");
+        let store = crate::paste_sequence::SequenceStore::new(&store_path);
+        let mut snapshot = store.load().expect("the isolated fixture store loads");
+        let second_id = snapshot
+            .upsert(crate::paste_sequence::SequenceDraft::new(
+                "Stable second row",
+                vec![crate::paste_sequence::Step::LiteralText {
+                    text: "second inert fixture".into(),
+                }],
+            ))
+            .expect("the second inert fixture row is valid");
+        store
+            .commit(&mut snapshot)
+            .expect("seed only the isolated sequence store");
+        app.paste_sequence_dialog
+            .use_test_data_sources(store_path.clone());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.paste_sequence_dialog
+            .open_with_context(Ok(safe_sequence_invocation_context()));
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        let before = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Stable second row  ·  1 steps")
+            .expect("the actual second saved row is registered");
+        let stable_target = before.id().clone();
+        let stable_response = before.response_id();
+        start_actual_root_jump_mode(&ctx, &mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        assert!(
+            app.paste_sequence_dialog
+                .test_remove_saved_snapshot_row(first_id)
+        );
+        run_dialog_frame(&ctx, &mut app);
+        assert!(
+            app.jump_mode_ui.active_session().is_none(),
+            "a saved-row population change cancels the frozen hint map"
+        );
+
+        let after = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Stable second row  ·  1 steps")
+            .expect("the surviving row remains a visible target");
+        assert_eq!(after.id(), &stable_target);
+        assert_eq!(
+            after.response_id(),
+            stable_response,
+            "the surviving row's native egui identity is independent of its prior position"
+        );
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let row_hint = dialog_hint_for_label(&app, "Stable second row  ·  1 steps");
+        press_dialog_hint_with_enter(&ctx, &mut app, &row_hint);
+        assert!(app.paste_sequence_dialog.test_selected_id().is_none());
+        assert!(app.sequence_playback.started_run().is_none());
+        release_dialog_hint_enter(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.paste_sequence_dialog.test_selected_id(),
+            Some(second_id)
+        );
+        assert_eq!(app.paste_sequence_dialog.test_draft_id(), Some(second_id));
+        assert!(app.sequence_playback.started_run().is_none());
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
     }
 
     #[test]
@@ -24000,6 +24605,8 @@ mod tests {
                         .then_some(app.jump_mode_ui.settings_instance()),
                     notes: None,
                     todo: None,
+                    timer: None,
+                    paste_sequence: None,
                 },
             ),
             NavigationOwner::Settings { instance: 1 },
@@ -24101,6 +24708,8 @@ mod tests {
                         .then_some(app.jump_mode_ui.settings_instance()),
                     notes: None,
                     todo: None,
+                    timer: None,
+                    paste_sequence: None,
                 }
             ),
         );
@@ -24820,6 +25429,8 @@ mod tests {
                         .then_some(app.jump_mode_ui.settings_instance()),
                     notes: None,
                     todo: None,
+                    timer: None,
+                    paste_sequence: None,
                 }
             ),
             app.confirm_modal.is_open(),

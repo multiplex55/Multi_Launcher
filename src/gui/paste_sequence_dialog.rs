@@ -378,10 +378,24 @@ impl PasteSequenceDialog {
     }
 
     pub(crate) fn ui(&mut self, ctx: &egui::Context, app: &mut super::LauncherApp) {
+        self.ui_with_jump_mode(ctx, app, None);
+    }
+
+    pub(crate) fn ui_with_jump_mode(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut super::LauncherApp,
+        jump_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+    ) {
         if !self.open {
             return;
         }
         self.poll_hotkey_update(ctx);
+        let mut jump_visual_order = 0;
+        let initial_confirmation_id = self.remove_confirmation;
+        let initial_dialog_scope = self.current_dialog_jump_scope(jump_scope.as_ref());
+        let initial_confirmation_scope = self.current_confirmation_jump_scope(jump_scope.as_ref());
+        let mut body_dialog_scope_for_footer = None;
         let mut window_open = self.open;
         let window = egui::Window::new("Paste Sequences")
             .default_size((760.0, 640.0))
@@ -409,14 +423,32 @@ impl PasteSequenceDialog {
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Saved sequences");
-                            if ui
+                            let playback_settings = ui
                                 .button("Playback Settings")
-                                .on_hover_text(app.paste_sequence_shortcut_summary())
-                                .clicked()
-                            {
+                                .on_hover_text(app.paste_sequence_shortcut_summary());
+                            register_paste_sequence_jump_target(
+                                initial_dialog_scope.as_ref(),
+                                ui,
+                                &playback_settings,
+                                "playback-settings",
+                                "Playback Settings",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut jump_visual_order,
+                            );
+                            if playback_settings.clicked() {
                                 app.open_paste_sequence_settings_dialog();
                             }
-                            if ui.button("New").clicked() {
+                            let new_sequence = ui.button("New");
+                            register_paste_sequence_jump_target(
+                                initial_dialog_scope.as_ref(),
+                                ui,
+                                &new_sequence,
+                                "new-sequence",
+                                "New",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut jump_visual_order,
+                            );
+                            if new_sequence.clicked() {
                                 self.selected_id = None;
                                 self.selected_step = None;
                                 self.reveal_step = None;
@@ -425,20 +457,47 @@ impl PasteSequenceDialog {
                                 self.hotkey_text.clear();
                                 self.inline_error = None;
                             }
-                            if ui
-                                .add_enabled(
-                                    self.selected_id.is_some() && self.hotkey_update.is_none(),
-                                    egui::Button::new("Remove Saved"),
-                                )
-                                .clicked()
-                            {
+                            let remove_saved = ui.add_enabled(
+                                self.selected_id.is_some() && self.hotkey_update.is_none(),
+                                egui::Button::new("Remove Saved"),
+                            );
+                            register_paste_sequence_jump_target(
+                                initial_dialog_scope.as_ref(),
+                                ui,
+                                &remove_saved,
+                                "remove-saved",
+                                "Remove Saved",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut jump_visual_order,
+                            );
+                            if remove_saved.clicked() {
                                 self.remove_confirmation = self.selected_id;
                             }
                         });
-                        self.saved_sequence_list(ui);
-                        self.saved_sequence_remove_confirmation(ui, ctx, app);
+                        // The header may have opened or closed the inline
+                        // confirmation. Select scopes from the live state so
+                        // the remainder of this same UI pass belongs only to
+                        // its actual foreground surface.
+                        let dialog_scope = self.current_dialog_jump_scope(jump_scope.as_ref());
+                        body_dialog_scope_for_footer = dialog_scope.clone();
+                        let confirmation_scope =
+                            self.current_confirmation_jump_scope(jump_scope.as_ref());
+                        self.saved_sequence_list(ui, dialog_scope.as_ref(), &mut jump_visual_order);
+                        self.saved_sequence_remove_confirmation(
+                            ui,
+                            ctx,
+                            app,
+                            confirmation_scope.as_ref(),
+                            &mut jump_visual_order,
+                        );
                         ui.separator();
-                        self.editor(ui, app, step_height);
+                        self.editor(
+                            ui,
+                            app,
+                            step_height,
+                            dialog_scope.as_ref(),
+                            &mut jump_visual_order,
+                        );
                     });
                 #[cfg(test)]
                 {
@@ -450,7 +509,15 @@ impl PasteSequenceDialog {
                 #[cfg(not(test))]
                 let _ = body;
                 ui.separator();
-                let footer = ui.scope(|ui| self.editor_footer(ui, ctx, app));
+                let footer = ui.scope(|ui| {
+                    self.editor_footer(
+                        ui,
+                        ctx,
+                        app,
+                        body_dialog_scope_for_footer.as_ref(),
+                        &mut jump_visual_order,
+                    )
+                });
                 #[cfg(test)]
                 {
                     self.layout.footer = footer.response.rect;
@@ -467,9 +534,41 @@ impl PasteSequenceDialog {
         if self.open && !window_open {
             self.close_from_window(app);
         }
+        if initial_confirmation_id.is_some() && self.remove_confirmation.is_none() {
+            if let Some(scope) = initial_confirmation_scope.as_ref() {
+                scope.discard_registered_targets();
+            }
+        }
     }
 
-    fn saved_sequence_list(&mut self, ui: &mut egui::Ui) {
+    fn current_dialog_jump_scope(
+        &self,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ) -> Option<crate::gui::jump_mode::ui::JumpModeScope> {
+        if self.remove_confirmation.is_some() {
+            return None;
+        }
+        scope.cloned()
+    }
+
+    fn current_confirmation_jump_scope(
+        &self,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ) -> Option<crate::gui::jump_mode::ui::JumpModeScope> {
+        let id = self.remove_confirmation?;
+        Some(
+            scope?
+                .child_popup_scope("remove-saved-confirm")
+                .child_namespace(format!("sequence-{}", id.get())),
+        )
+    }
+
+    fn saved_sequence_list(
+        &mut self,
+        ui: &mut egui::Ui,
+        jump_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        jump_visual_order: &mut u64,
+    ) {
         let sequences = self
             .snapshot
             .as_ref()
@@ -484,13 +583,24 @@ impl PasteSequenceDialog {
                 }
                 for sequence in sequences {
                     let selected = self.selected_id == Some(sequence.id);
-                    if ui
-                        .selectable_label(
+                    let row_id = ui.id().with(("saved-sequence-row", sequence.id.get()));
+                    let response = ui.scope_builder(egui::UiBuilder::new().id(row_id), |ui| {
+                        ui.selectable_label(
                             selected,
                             format!("{}  ·  {} steps", sequence.name, sequence.steps.len()),
                         )
-                        .clicked()
-                    {
+                    });
+                    let response = response.inner;
+                    register_paste_sequence_jump_target(
+                        jump_scope,
+                        ui,
+                        &response,
+                        format!("saved-sequence-{}", sequence.id.get()),
+                        format!("{}  ·  {} steps", sequence.name, sequence.steps.len()),
+                        crate::gui::jump_mode::TargetKind::Button,
+                        jump_visual_order,
+                    );
+                    if response.clicked() {
                         self.select_saved_sequence(&sequence);
                         self.inline_error = None;
                     }
@@ -516,6 +626,8 @@ impl PasteSequenceDialog {
         ui: &mut egui::Ui,
         ctx: &egui::Context,
         app: &mut super::LauncherApp,
+        jump_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        jump_visual_order: &mut u64,
     ) {
         let Some(id) = self.remove_confirmation else {
             return;
@@ -531,10 +643,30 @@ impl PasteSequenceDialog {
         };
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(format!("Remove saved sequence ‘{name}’?")).strong());
-            if ui.button("Confirm Remove").clicked() {
+            let confirm_remove = ui.button("Confirm Remove");
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &confirm_remove,
+                "confirm-remove",
+                "Confirm Remove",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
+            );
+            if confirm_remove.clicked() {
                 self.remove_saved_sequence(ctx, app, id);
             }
-            if ui.button("Keep").clicked() {
+            let keep = ui.button("Keep");
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &keep,
+                "keep",
+                "Keep",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
+            );
+            if keep.clicked() {
                 self.remove_confirmation = None;
             }
         });
@@ -571,7 +703,14 @@ impl PasteSequenceDialog {
         );
     }
 
-    fn editor(&mut self, ui: &mut egui::Ui, app: &mut super::LauncherApp, step_height: f32) {
+    fn editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut super::LauncherApp,
+        step_height: f32,
+        jump_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        jump_visual_order: &mut u64,
+    ) {
         if let Some(origin) = self
             .context
             .as_ref()
@@ -588,28 +727,76 @@ impl PasteSequenceDialog {
         let mut name_changed = false;
         ui.horizontal(|ui| {
             ui.label("Name");
-            name_changed = ui.text_edit_singleline(&mut self.draft.name).changed();
+            let name = ui.text_edit_singleline(&mut self.draft.name);
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &name,
+                "name",
+                "Name",
+                crate::gui::jump_mode::TargetKind::TextEntry,
+                jump_visual_order,
+            );
+            name_changed = name.changed();
         });
         if name_changed {
             self.inline_error = None;
         }
         ui.horizontal(|ui| {
             ui.label("Optional start hotkey");
-            ui.add(egui::TextEdit::singleline(&mut self.hotkey_text).desired_width(180.0));
+            let hotkey =
+                ui.add(egui::TextEdit::singleline(&mut self.hotkey_text).desired_width(180.0));
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &hotkey,
+                "start-hotkey",
+                "Optional start hotkey",
+                crate::gui::jump_mode::TargetKind::TextEntry,
+                jump_visual_order,
+            );
         });
         ui.weak("Uses the application's existing chord syntax");
         ui.horizontal_wrapped(|ui| {
             ui.label("Playback");
-            ui.selectable_value(&mut self.draft.mode, PlaybackMode::Automatic, "Automatic");
-            ui.selectable_value(
+            let automatic =
+                ui.selectable_value(&mut self.draft.mode, PlaybackMode::Automatic, "Automatic");
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &automatic,
+                "mode-automatic",
+                "Automatic playback",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
+            );
+            let manual = ui.selectable_value(
                 &mut self.draft.mode,
                 PlaybackMode::ManualAdvance,
                 "Manual advance",
             );
-            ui.selectable_value(
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &manual,
+                "mode-manual",
+                "Manual advance playback",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
+            );
+            let paste_to_advance = ui.selectable_value(
                 &mut self.draft.mode,
                 PlaybackMode::PasteToAdvance,
                 "Paste-to-Advance (Ctrl+V)",
+            );
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &paste_to_advance,
+                "mode-paste-to-advance",
+                "Paste-to-Advance playback",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
             );
         });
         ui.add_enabled_ui(self.draft.mode != PlaybackMode::PasteToAdvance, |ui| {
@@ -680,14 +867,34 @@ impl PasteSequenceDialog {
                     }
                 }
             });
-            if ui.button("Add Temporary Text").clicked() {
+            let add_temporary_text = ui.button("Add Temporary Text");
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &add_temporary_text,
+                "add-temporary-text",
+                "Add Temporary Text",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
+            );
+            if add_temporary_text.clicked() {
                 self.draft.steps.push(Step::LiteralText {
                     text: String::new(),
                 });
                 self.selected_step = self.draft.steps.len().checked_sub(1);
                 self.reveal_step = self.selected_step;
             }
-            if ui.button("Move Up").clicked()
+            let move_up = ui.button("Move Up");
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &move_up,
+                "move-up",
+                "Move Up",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
+            );
+            if move_up.clicked()
                 && let Some(index) = self.selected_step
                 && index > 0
             {
@@ -695,7 +902,17 @@ impl PasteSequenceDialog {
                 self.selected_step = Some(index - 1);
                 self.reveal_step = self.selected_step;
             }
-            if ui.button("Move Down").clicked()
+            let move_down = ui.button("Move Down");
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &move_down,
+                "move-down",
+                "Move Down",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
+            );
+            if move_down.clicked()
                 && let Some(index) = self.selected_step
                 && index + 1 < self.draft.steps.len()
             {
@@ -703,9 +920,18 @@ impl PasteSequenceDialog {
                 self.selected_step = Some(index + 1);
                 self.reveal_step = self.selected_step;
             }
-            if ui
-                .add_enabled(self.selected_step.is_some(), egui::Button::new("Remove"))
-                .clicked()
+            let remove_step =
+                ui.add_enabled(self.selected_step.is_some(), egui::Button::new("Remove"));
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &remove_step,
+                "remove-step",
+                "Remove selected step",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
+            );
+            if remove_step.clicked()
                 && let Some(index) = self.selected_step.take()
                 && index < self.draft.steps.len()
             {
@@ -731,45 +957,84 @@ impl PasteSequenceDialog {
         ui: &mut egui::Ui,
         ctx: &egui::Context,
         app: &mut super::LauncherApp,
+        jump_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        jump_visual_order: &mut u64,
     ) {
         let state = app.sequence_playback.status();
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!self.draft.steps.is_empty(), egui::Button::new("Preview"))
-                .clicked()
-            {
+            let preview =
+                ui.add_enabled(!self.draft.steps.is_empty(), egui::Button::new("Preview"));
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &preview,
+                "preview",
+                "Preview",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
+            );
+            if preview.clicked() {
                 self.prepare_current(app, false, false);
             }
-            if ui
-                .add_enabled(!self.draft.steps.is_empty(), egui::Button::new("Run Once"))
-                .clicked()
-            {
+            let run_once =
+                ui.add_enabled(!self.draft.steps.is_empty(), egui::Button::new("Run Once"));
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &run_once,
+                "run-once",
+                "Run Once",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
+            );
+            if run_once.clicked() {
                 self.prepare_current(app, true, true);
             }
-            if ui
-                .add_enabled(!self.draft.steps.is_empty(), egui::Button::new("Run"))
-                .clicked()
-            {
+            let run = ui.add_enabled(!self.draft.steps.is_empty(), egui::Button::new("Run"));
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &run,
+                "run",
+                "Run",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
+            );
+            if run.clicked() {
                 self.prepare_current(app, true, false);
             }
-            if ui
-                .add_enabled(
-                    self.snapshot.is_some() && self.hotkey_update.is_none(),
-                    egui::Button::new("Save"),
-                )
-                .clicked()
-            {
+            let save = ui.add_enabled(
+                self.snapshot.is_some() && self.hotkey_update.is_none(),
+                egui::Button::new("Save"),
+            );
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &save,
+                "save",
+                "Save",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
+            );
+            if save.clicked() {
                 self.save_draft(ctx, app);
             }
         });
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    state == crate::paste_sequence::SequencePlaybackStatus::Ready,
-                    egui::Button::new("Start"),
-                )
-                .clicked()
-            {
+            let start = ui.add_enabled(
+                state == crate::paste_sequence::SequencePlaybackStatus::Ready,
+                egui::Button::new("Start"),
+            );
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &start,
+                "start",
+                "Start",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
+            );
+            if start.clicked() {
                 match app.start_sequence_playback() {
                     Ok(()) => {
                         self.status = Some("Sequence started.".into());
@@ -781,39 +1046,63 @@ impl PasteSequenceDialog {
                     Err(error) => self.inline_error = Some(error.message().into()),
                 }
             }
-            if ui
-                .add_enabled(
-                    state == crate::paste_sequence::SequencePlaybackStatus::AwaitAdvance,
-                    egui::Button::new("Next"),
-                )
-                .clicked()
-            {
+            let next = ui.add_enabled(
+                state == crate::paste_sequence::SequencePlaybackStatus::AwaitAdvance,
+                egui::Button::new("Next"),
+            );
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &next,
+                "next",
+                "Next",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
+            );
+            if next.clicked() {
                 match app.next_sequence_playback() {
                     Ok(()) => self.status = Some("Advanced to the next step.".into()),
                     Err(error) => self.inline_error = Some(error.message().into()),
                 }
             }
-            if ui
-                .add_enabled(
-                    matches!(
-                        state,
-                        crate::paste_sequence::SequencePlaybackStatus::Preparing
-                            | crate::paste_sequence::SequencePlaybackStatus::Ready
-                            | crate::paste_sequence::SequencePlaybackStatus::Running
-                            | crate::paste_sequence::SequencePlaybackStatus::AwaitAdvance
-                            | crate::paste_sequence::SequencePlaybackStatus::AwaitTarget
-                            | crate::paste_sequence::SequencePlaybackStatus::AwaitPaste
-                    ),
-                    egui::Button::new("Cancel Run"),
-                )
-                .clicked()
-            {
+            let cancel_run = ui.add_enabled(
+                matches!(
+                    state,
+                    crate::paste_sequence::SequencePlaybackStatus::Preparing
+                        | crate::paste_sequence::SequencePlaybackStatus::Ready
+                        | crate::paste_sequence::SequencePlaybackStatus::Running
+                        | crate::paste_sequence::SequencePlaybackStatus::AwaitAdvance
+                        | crate::paste_sequence::SequencePlaybackStatus::AwaitTarget
+                        | crate::paste_sequence::SequencePlaybackStatus::AwaitPaste
+                ),
+                egui::Button::new("Cancel Run"),
+            );
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &cancel_run,
+                "cancel-run",
+                "Cancel Run",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
+            );
+            if cancel_run.clicked() {
                 app.cancel_active_paste_sequence();
                 self.autostart_when_ready = false;
                 self.status =
                     Some("Sequence cancelled; the latest clipboard value is retained.".into());
             }
-            if ui.button("Cancel Editor").clicked() {
+            let cancel_editor = ui.button("Cancel Editor");
+            register_paste_sequence_jump_target(
+                jump_scope,
+                ui,
+                &cancel_editor,
+                "cancel-editor",
+                "Cancel Editor",
+                crate::gui::jump_mode::TargetKind::Button,
+                jump_visual_order,
+            );
+            if cancel_editor.clicked() {
                 app.cancel_active_paste_sequence();
                 self.end_session();
                 app.close_paste_sequence_dialog();
@@ -1053,6 +1342,28 @@ impl PasteSequenceDialog {
         self.sources_are_test_owned = true;
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_draft_name(&self) -> &str {
+        &self.draft.name
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_selected_id(&self) -> Option<SequenceId> {
+        self.selected_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_draft_id(&self) -> Option<SequenceId> {
+        self.draft.id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_remove_saved_snapshot_row(&mut self, id: SequenceId) -> bool {
+        self.snapshot
+            .as_mut()
+            .is_some_and(|snapshot| snapshot.remove(id))
+    }
+
     fn save_draft(&mut self, ctx: &egui::Context, app: &mut super::LauncherApp) {
         self.inline_error = None;
         let mut draft = self.current_draft();
@@ -1274,6 +1585,29 @@ impl PasteSequenceDialog {
                 ctx.request_repaint_after(std::time::Duration::from_millis(100))
             }
         }
+    }
+}
+
+fn register_paste_sequence_jump_target(
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    local_identity: impl AsRef<str>,
+    label: impl Into<String>,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: &mut u64,
+) {
+    let order = *visual_order;
+    *visual_order = visual_order.saturating_add(1);
+    let Some(scope) = scope else {
+        return;
+    };
+    if let crate::gui::jump_mode::ui::RegistrationResult::Registered {
+        directive: Some(directive),
+        ..
+    } = scope.register(ui, response, local_identity, label, kind, order)
+    {
+        directive.apply_to_response(response);
     }
 }
 

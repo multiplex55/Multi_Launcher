@@ -1,11 +1,11 @@
 # Jump Mode Results
 
-Implementation is in progress. M00–M10 and M11-A Notes/Todo are complete; M11-B Timer/Paste is next. M12–M15 remain pending. Phase 1 native evidence is accepted; native Settings/dialog/complex-control evidence remains pending.
+Implementation is in progress. M00–M11 are complete; M12 complex controls/MkMacro is next. M12–M15 remain pending. Phase 1 native evidence is accepted; native Settings/dialog/complex-control evidence remains pending.
 
 - Branch: feat/jump-mode-2026-10-19-c7e42.
 - Starting SHA: 8f94b003a12853735d1cb4689c6ec4e53c4ace8e.
-- Latest completed checkpoint: 8929daeca6c9e7ab4a85cf97c3e5ba7d1d0efffb (M10-B).
-- All checkpoint commits through M10-B were pushed normally to origin; no local-only task commits.
+- Latest completed checkpoint: 1ce05985c4bbd668f0d63b80bc319ef28e2e5f39 (M11-A).
+- All checkpoint commits through M11-A were pushed normally to origin; no local-only task commits.
 - Current ownership, exact historical commands, failures and next action: [execution ledger](JUMP_MODE_EXECUTION.md).
 - This report consolidates accepted results. Earlier failed evidence remains unchanged in the ignored raw evidence directory.
 
@@ -19,7 +19,7 @@ One app-owned bridge holds copied semantic/native IDs, geometry, clips, epochs a
 
 Root result IDs use current result generation and full result index, preserving equal-looking actions with different arguments. Selecting a list/grid card updates the existing logical selection and leaves native focus with the query; later Enter uses the existing full Action/args handler. Dashboard controls use slot/row semantic and native IDs so configuration reorder cannot redirect completed focus.
 
-Root/Settings(instance)/Notes(instance)/Todo(instance)/Blocked ownership follows actual retained ordinary-window order and focused response layer. Opening/closing/raising a window invalidates navigation and blocks the transition frame across discarded passes. Supported windows use the same input, registry and painter while root editing/autofocus/navigation/Enter yield. Dialog targets require the exact kind and instance; scoped child confirmations retain their parent identity. Existing container Escape/Note Find behavior remains with its owner. Unsupported windows/popups fail closed.
+Root/Settings(instance)/Notes(instance)/Todo(instance)/Timer(instance)/PasteSequence(instance)/Blocked ownership follows actual retained ordinary-window order and focused response layer. Opening/closing/raising a window invalidates navigation and blocks the transition frame across discarded passes. Supported windows use the same input, registry and painter while root editing/autofocus/navigation/Enter yield. Dialog targets require the exact kind and instance; scoped child confirmations retain their parent identity. Existing container Escape/Note Find behavior remains with its owner. Unsupported windows/popups fail closed.
 
 | Component | Main source ownership |
 |---|---|
@@ -41,7 +41,7 @@ Root/Settings(instance)/Notes(instance)/Todo(instance)/Blocked ownership follows
 | Dashboard discrete controls | Supported + verified representative native FillQuery; full registered inventory below |
 | Settings basic controls | Supported + verified real egui widgets/headless; native screenshots pending M13 |
 | Notes/Todo dialogs | Supported basic controls; real egui/headless behavior verified; native evidence pending M13 |
-| Timer/Paste Sequence dialogs | Pending M11-B |
+| Timer/Paste Sequence dialogs | Basic controls supported+verified headless; native evidence follows M13 |
 | Combo/slider/DragValue/radio/multiline adapters | Pending M12; currently unregistered |
 | MkMacro representative controls | Pending M12; native proof pending M13 |
 | Unsupported windows/popups | Background/root suppression verified; supported nested controls still require M11/M12 |
@@ -67,7 +67,7 @@ Settings registration covers all eight top-level section toggles, Expand/Collaps
 | M08 | complete | All15 Phase1 catalog cases through focused Dashboard/Grid/Disabled runs |
 | M09 | complete | Bounded core/evidence review;8 painter tests and post-fix native Dashboard01–05 |
 | M10 | complete | M10-A63 tests; M10-B67 tests and scoped review; native evidence reserved M13 |
-| M11 | in_progress | Notes/Todo accepted:73 combined +2 focused tests; Timer/Paste follows |
+| M11 | complete | Notes/Todo and Timer/Paste; repaired final83tests + scoped review clean |
 | M12 | pending | Complex controls/MkMacro |
 | M13 | pending | Extended native screenshots and control semantics |
 | M14 | pending | Focused reliability, after measurements, Clippy and review |
@@ -75,18 +75,20 @@ Settings registration covers all eight top-level section toggles, Expand/Collaps
 
 ## Verification
 
-Latest combined command on accepted M11-A source, exit0, **73 passed / 5832 skipped**:
+Latest combined command on repaired M11-B source, exit0, **83 passed / 5827 skipped**:
 
 ~~~powershell
-cargo nextest run --lib --no-fail-fast --cargo-profile fast-dev --features "dev-smoke-binaries qa-framebuffer-capture" -E 'test(jump_mode) | test(actual_root_navigation_owner_follows_settings_and_foreign_window_layers) | test(opening_settings_on_a_discarded_root_pass_cancels_background_navigation) | test(settings_owner_blocks_root_autofocus_and_enter_activation) | test(settings_escape_closes_when_jump_mode_owns_root_navigation) | test(note_find_shortcut_and_escape_leave_dirty_note_open_until_the_next_escape) | test(note_find_shortcut_uses_focused_or_top_note_and_preserves_ctrl_w_close) | test(settings_shell_tests)'
+cargo nextest run --lib --no-fail-fast --cargo-profile fast-dev --features "dev-smoke-binaries qa-framebuffer-capture" -E 'test(jump_mode) | test(actual_root_navigation_owner_follows_settings_and_foreign_window_layers) | test(opening_settings_on_a_discarded_root_pass_cancels_background_navigation) | test(settings_owner_blocks_root_autofocus_and_enter_activation) | test(settings_escape_closes_when_jump_mode_owns_root_navigation) | test(note_find_shortcut_and_escape_leave_dirty_note_open_until_the_next_escape) | test(note_find_shortcut_uses_focused_or_top_note_and_preserves_ctrl_w_close) | test(settings_shell_tests) | test(todo_row_widget_ids_stay_bound_to_entry_when_filter_moves_another_row_to_zero) | test(enter_adds_todo_with_filter_focus) | test(enter_adds_todo_with_tags) | test(ordinary_enter_cannot_activate_root_results_behind_timer_or_paste_dialogs) | test(open_timer_resets_timer_fields_and_arms_duration_focus) | test(open_alarm_clears_pending_timer_focus_and_keeps_alarm_title) | test(paste_saved_row_native_identity_survives_removal_of_an_earlier_row)'
 ~~~
 
 The real Settings test verifies focus before action, distinct Enter/Space/text, disabled footer exclusion, draft/runtime isolation and Cancel restoration. One actual run_ui/request_discard verifies final keyboard/pointer checkbox state, section state, text and caret. Existing general-save/runtime tests cover committed apply/publication/rollback. Scoped rustfmt and diff checks pass. Warnings were existing vendored epaint/egui/image warnings. Scoped independent review has no remaining concrete finding. A source-local replay allegation was retracted after tracing egui's real event-clearing lifecycle; unnecessary rollback code was removed.
 
 Earlier scoped accepted checks include M09 paint/parent-clip8 passed/5877 skipped; M08 processed Tab/Enter2 passed/5879 skipped and observer3 passed/5877 skipped; fixture tests5/5 plus production note/search/tag/zero-result semantics and PowerShell parser/reader/predicate checks. Exact historical commands/results and repaired failures are in the execution ledger. No full repository suite, final Clippy or final performance qualification is claimed.
 
-Notes/Todo basic controls now use the same owner/registry. Notes uses visible slug-bound rows, management/search controls and edit Save/Cancel; multiline remains M12. Todo covers draft/filter/tag fields, Add, row completion/tag editing/Remove and clear-confirmation controls; priority DragValue remains M12. Completion only focuses; fresh native Enter performs the existing action. Exact-instance, popup, draft preservation, immediate-next-frame non-Add safety and feature-off behavior are covered. A separate exact Todo row-identity/legacy run passed2/2 (5903 skipped); it is separate from the73-test combined run. Native dialog proof remains pending M13.
+Notes/Todo basic controls now use the same owner/registry. Notes uses visible slug-bound rows, management/search controls and edit Save/Cancel; multiline remains M12. Todo covers draft/filter/tag fields, Add, row completion/tag editing/Remove and clear-confirmation controls; priority DragValue remains M12. Completion only focuses; fresh native Enter performs the existing action. Exact-instance, popup, draft preservation, immediate-next-frame non-Add safety and feature-off behavior are covered. The earlier exact Todo row-identity/legacy run passed2/2; both cases are included in the current83-test union. Native dialog proof remains pending M13.
 
+
+Timer basic targets cover Duration/Time, Name, Play, Start and Cancel; Sound combo follows M12. Native Timer/Alarm title changes invalidate the old instance. Paste covers saved rows, New/Remove Saved/Playback Settings, name/hotkey/playback choices, simple step-management buttons and footer controls with their existing enablement. Source/advanced editors remain unregistered pending M12. Saved rows have durable semantic and explicit native IDs. Remove Saved confirmation owns only Confirm/Keep; opening and closing discard stale targets immediately. Production action handlers are unchanged; tests use only inert row loading, Keep and cancellation, never timer start/sound or paste execution. Focused5/5 initially passed; scoped review then found a same-pass confirmation handoff defect. After repair, its strengthened exact test passed1/1 and the final union passed83/83 (run e1cc9e15-a854-49d1-af06-7861b7b3ba35). Bounded reviewer closed the transition defect with no new finding. Native evidence remains M13.
 ## Actual native evidence
 
 All raw paths are under G:/Repos/rust/Multi_Launcher/dev/jump_mode/evidence/. Each accepted run retains summary.md, scenarios.json, events.jsonl, manifest, PNG/receipt/hash bindings and process_lifecycle.json. Parent/reviewer rechecked identities, frame/pass and owned cleanup.

@@ -44,6 +44,12 @@ pub(crate) enum NavigationOwner {
     Todo {
         instance: u64,
     },
+    Timer {
+        instance: u64,
+    },
+    PasteSequence {
+        instance: u64,
+    },
     Blocked,
 }
 
@@ -63,6 +69,12 @@ impl NavigationOwner {
                 Self::Todo {
                     instance: owner_instance,
                 } => kind == "todo" && *instance == owner_instance,
+                Self::Timer {
+                    instance: owner_instance,
+                } => kind == "timer" && *instance == owner_instance,
+                Self::PasteSequence {
+                    instance: owner_instance,
+                } => kind == "paste-sequence" && *instance == owner_instance,
                 _ => false,
             },
             SurfaceId::Popup { owner, .. } => self.owns_surface(owner),
@@ -84,16 +96,34 @@ pub(crate) fn todo_dialog_layer_id() -> egui::LayerId {
     egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Todos")))
 }
 
+pub(crate) fn timer_dialog_layer_id() -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Create Timer")))
+}
+
+pub(crate) fn alarm_dialog_layer_id() -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Set Alarm")))
+}
+
+pub(crate) fn paste_sequence_dialog_layer_id() -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Paste Sequences")))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct NavigationWindows {
     pub(crate) settings: Option<u64>,
     pub(crate) notes: Option<u64>,
     pub(crate) todo: Option<u64>,
+    pub(crate) timer: Option<u64>,
+    pub(crate) paste_sequence: Option<u64>,
 }
 
 impl NavigationWindows {
     fn any_open(self) -> bool {
-        self.settings.is_some() || self.notes.is_some() || self.todo.is_some()
+        self.settings.is_some()
+            || self.notes.is_some()
+            || self.todo.is_some()
+            || self.timer.is_some()
+            || self.paste_sequence.is_some()
     }
 }
 
@@ -149,6 +179,14 @@ pub(crate) fn resolve_layer_navigation_owner(
             windows
                 .todo
                 .map(|instance| NavigationOwner::Todo { instance })
+        } else if layer == timer_dialog_layer_id() || layer == alarm_dialog_layer_id() {
+            windows
+                .timer
+                .map(|instance| NavigationOwner::Timer { instance })
+        } else if layer == paste_sequence_dialog_layer_id() {
+            windows
+                .paste_sequence
+                .map(|instance| NavigationOwner::PasteSequence { instance })
         } else {
             None
         };
@@ -567,6 +605,26 @@ impl JumpModeScope {
 
         RegistrationResult::Registered { id, directive }
     }
+
+    /// Remove this child surface's targets when it closes during the current
+    /// UI pass. A consumed focus intent is kept so frame completion can
+    /// surrender focus after it observes that the target is no longer present.
+    pub(crate) fn discard_registered_targets(&self) {
+        let Ok(mut collector) = self.collector.lock() else {
+            return;
+        };
+        collector
+            .registry
+            .targets
+            .retain(|target| target.id().surface() != &self.surface);
+        if collector
+            .pending_focus_intent
+            .as_ref()
+            .is_some_and(|intent| intent.target.surface() == &self.surface)
+        {
+            collector.pending_focus_intent = None;
+        }
+    }
 }
 
 /// App-instance-owned coordinator. It separates the in-progress pass, the
@@ -584,6 +642,10 @@ pub(crate) struct JumpModeUi {
     notes_instance: u64,
     todo_open: bool,
     todo_instance: u64,
+    timer_window_title: Option<&'static str>,
+    timer_instance: u64,
+    paste_sequence_open: bool,
+    paste_sequence_instance: u64,
     active_session: Option<HintSession>,
     last_outcome: Option<MatchOutcome>,
     root_input_frame: RootInputFrame,
@@ -678,6 +740,36 @@ impl JumpModeUi {
         self.todo_instance
     }
 
+    pub(crate) fn observe_timer_window(&mut self, title: Option<&'static str>) -> bool {
+        if self.timer_window_title == title {
+            return false;
+        }
+        self.timer_window_title = title;
+        if title.is_some() {
+            self.timer_instance = self.timer_instance.wrapping_add(1).max(1);
+        }
+        true
+    }
+
+    pub(crate) fn timer_instance(&self) -> u64 {
+        self.timer_instance
+    }
+
+    pub(crate) fn observe_paste_sequence_visibility(&mut self, open: bool) -> bool {
+        if self.paste_sequence_open == open {
+            return false;
+        }
+        self.paste_sequence_open = open;
+        if open {
+            self.paste_sequence_instance = self.paste_sequence_instance.wrapping_add(1).max(1);
+        }
+        true
+    }
+
+    pub(crate) fn paste_sequence_instance(&self) -> u64 {
+        self.paste_sequence_instance
+    }
+
     /// Apply the host's current layer-owner decision. Any owner or supported
     /// dialog visibility transition cancels stale navigation and blocks this complete
     /// egui frame, including all discarded passes.
@@ -694,8 +786,14 @@ impl JumpModeUi {
                     NavigationOwner::Settings { .. }
                         | NavigationOwner::Notes { .. }
                         | NavigationOwner::Todo { .. }
+                        | NavigationOwner::Timer { .. }
+                        | NavigationOwner::PasteSequence { .. }
                 ) || (supported_dialog_visibility_changed
-                    && (self.settings_open || self.notes_open || self.todo_open))
+                    && (self.settings_open
+                        || self.notes_open
+                        || self.todo_open
+                        || self.timer_window_title.is_some()
+                        || self.paste_sequence_open))
                 {
                     // A supported native dialog deliberately takes ownership
                     // from the launcher query. `surrender_focus` is conditional
@@ -759,6 +857,13 @@ impl JumpModeUi {
         self.active_session
             .as_ref()
             .filter(|session| matches!(session.lifecycle(), SessionLifecycle::Active))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_has_focus_intent_or_handoff(&self) -> bool {
+        self.pending_focus_intent.is_some()
+            || self.frame_consumed_focus_intent.is_some()
+            || self.last_completed_focus_handoff.is_some()
     }
 
     pub(crate) fn last_outcome(&self) -> Option<&MatchOutcome> {
@@ -919,11 +1024,22 @@ impl JumpModeUi {
         root_targets_allowed: bool,
     ) {
         registry.revalidate(ctx, navigation_owner, root_targets_allowed);
+        if self
+            .last_completed_focus_handoff
+            .as_ref()
+            .is_some_and(|handoff| registry.get(&handoff.intent.target).is_none())
+        {
+            if let Some(handoff) = self.last_completed_focus_handoff.take() {
+                ctx.memory_mut(|memory| memory.surrender_focus(handoff.response_id));
+            }
+        }
         let navigation_allowed = match navigation_owner {
             NavigationOwner::Root => root_targets_allowed,
             NavigationOwner::Settings { .. }
             | NavigationOwner::Notes { .. }
-            | NavigationOwner::Todo { .. } => true,
+            | NavigationOwner::Todo { .. }
+            | NavigationOwner::Timer { .. }
+            | NavigationOwner::PasteSequence { .. } => true,
             NavigationOwner::Blocked => false,
         };
         let population_changed = navigation_allowed
@@ -1634,6 +1750,8 @@ mod tests {
             settings: Some(11),
             notes: Some(22),
             todo: Some(33),
+            timer: None,
+            paste_sequence: None,
         };
         render_supported_dialog_windows(&ctx, true, true, true, None);
         assert_eq!(visible_top_middle_layer(&ctx), Some(todo_dialog_layer_id()));

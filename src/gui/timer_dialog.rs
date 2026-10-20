@@ -47,6 +47,15 @@ impl TimerDialog {
         }
     }
 
+    pub(crate) fn jump_mode_window_title(&self) -> Option<&'static str> {
+        self.open.then(|| self.title())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_duration(&self) -> &str {
+        &self.duration
+    }
+
     fn duration_ui(&mut self, ui: &mut egui::Ui) -> egui::Response {
         let response = ui.add(
             egui::TextEdit::singleline(&mut self.duration)
@@ -60,11 +69,21 @@ impl TimerDialog {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        self.ui_with_jump_mode(ctx, app, None);
+    }
+
+    pub(crate) fn ui_with_jump_mode(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        jump_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+    ) {
         if !self.open {
             return;
         }
         let mut open_val = self.open;
         let mut close = false;
+        let mut jump_visual_order = 0;
         egui::Window::new(self.title())
             .open(&mut open_val)
             .resizable(false)
@@ -74,29 +93,58 @@ impl TimerDialog {
                     Mode::Timer => {
                         ui.horizontal_wrapped(|ui| {
                             let label = ui.label("Duration");
-                            self.duration_ui(ui).labelled_by(label.id);
+                            let response = self.duration_ui(ui).labelled_by(label.id);
+                            register_timer_jump_target(
+                                jump_scope.as_ref(),
+                                ui,
+                                &response,
+                                "duration",
+                                "Duration",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut jump_visual_order,
+                            );
                         });
                         secondary_help(ui, "Use Ns, Nm, Nh, mm:ss, or hh:mm:ss.");
                     }
                     Mode::Alarm => {
                         ui.horizontal_wrapped(|ui| {
                             let label = ui.label("Time");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.time)
-                                    .desired_width(ui.available_width().min(220.0).max(72.0)),
-                            )
-                            .labelled_by(label.id);
+                            let response = ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut self.time)
+                                        .desired_width(ui.available_width().min(220.0).max(72.0)),
+                                )
+                                .labelled_by(label.id);
+                            register_timer_jump_target(
+                                jump_scope.as_ref(),
+                                ui,
+                                &response,
+                                "time",
+                                "Time",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut jump_visual_order,
+                            );
                         });
                         secondary_help(ui, "Use HH:MM, Nd HH:MM, or YYYY-MM-DD HH:MM.");
                     }
                 }
                 ui.horizontal_wrapped(|ui| {
                     let label = ui.label("Name");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.label)
-                            .desired_width(ui.available_width().min(220.0).max(72.0)),
-                    )
-                    .labelled_by(label.id);
+                    let response = ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.label)
+                                .desired_width(ui.available_width().min(220.0).max(72.0)),
+                        )
+                        .labelled_by(label.id);
+                    register_timer_jump_target(
+                        jump_scope.as_ref(),
+                        ui,
+                        &response,
+                        "name",
+                        "Name",
+                        crate::gui::jump_mode::TargetKind::TextEntry,
+                        &mut jump_visual_order,
+                    );
                 });
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Sound");
@@ -108,7 +156,17 @@ impl TimerDialog {
                                 ui.selectable_value(&mut self.sound_idx, idx, *name);
                             }
                         });
-                    if ui.button("Play").clicked() {
+                    let play_button = ui.button("Play");
+                    register_timer_jump_target(
+                        jump_scope.as_ref(),
+                        ui,
+                        &play_button,
+                        "play",
+                        "Play",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut jump_visual_order,
+                    );
+                    if play_button.clicked() {
                         let name = crate::sound::SOUND_NAMES[self.sound_idx];
                         if name == "None" {
                             if app.enable_toasts {
@@ -130,6 +188,15 @@ impl TimerDialog {
                     let start_button = ui.button("Start");
                     let start_button =
                         with_button_emphasis(ui, start_button, ButtonEmphasis::Primary);
+                    register_timer_jump_target(
+                        jump_scope.as_ref(),
+                        ui,
+                        &start_button,
+                        "start",
+                        "Start",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut jump_visual_order,
+                    );
                     if start_button.clicked() {
                         match self.mode {
                             Mode::Timer => {
@@ -169,7 +236,17 @@ impl TimerDialog {
                             }
                         }
                     }
-                    if ui.button("Cancel").clicked() {
+                    let cancel_button = ui.button("Cancel");
+                    register_timer_jump_target(
+                        jump_scope.as_ref(),
+                        ui,
+                        &cancel_button,
+                        "cancel",
+                        "Cancel",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut jump_visual_order,
+                    );
+                    if cancel_button.clicked() {
                         close = true;
                     }
                 });
@@ -178,6 +255,29 @@ impl TimerDialog {
             open_val = false;
         }
         self.open = open_val;
+    }
+}
+
+fn register_timer_jump_target(
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    local_identity: &'static str,
+    label: &'static str,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: &mut u64,
+) {
+    let order = *visual_order;
+    *visual_order = visual_order.saturating_add(1);
+    let Some(scope) = scope else {
+        return;
+    };
+    if let crate::gui::jump_mode::ui::RegistrationResult::Registered {
+        directive: Some(directive),
+        ..
+    } = scope.register(ui, response, local_identity, label, kind, order)
+    {
+        directive.apply_to_response(response);
     }
 }
 
