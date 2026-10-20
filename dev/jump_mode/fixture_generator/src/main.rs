@@ -3,8 +3,24 @@ use multi_launcher::common::persistence::LoadState;
 use multi_launcher::dashboard::config::{DashboardConfig, GridConfig, OverflowMode, SlotConfig};
 use multi_launcher::dashboard::widgets::{ClickBehavior, PinnedQueryResultsConfig};
 use multi_launcher::hotkey::validation::validate_hotkey_routes;
+use multi_launcher::mkmacro::hotkeys::{HotkeyDiagnosticSeverity, validate_hotkeys};
+use multi_launcher::mkmacro::store::ASSET_DIRECTORY;
+use multi_launcher::mkmacro::store::LoadDisposition;
+use multi_launcher::mkmacro::templates::{MKMACRO_TEMPLATES_FILE, MkMacroTemplateCatalog};
+use multi_launcher::mkmacro::{
+    DiagnosticSeverity, MkAction, MkDelayMode, MkDelayPayload, MkErrorPolicy, MkHotkey, MkKey,
+    MkMacro, MkMacroDocument, MkMacroSettings, MkMacroStore, MkStep, MkStepMetadata,
+    validate_document,
+};
+use multi_launcher::paste_sequence::{
+    PASTE_SEQUENCES_FILE, PlaybackMode, SequenceDraft, SequenceStore, Step as SequenceStep,
+};
 use multi_launcher::plugin::Plugin;
+use multi_launcher::plugins::clipboard::CLIPBOARD_FILE;
 use multi_launcher::plugins::note::{NoteExternalOpen, NotePlugin, NotePluginSettings, load_notes};
+use multi_launcher::plugins::snippets::SNIPPETS_FILE;
+use multi_launcher::plugins::timer::ALARMS_FILE;
+use multi_launcher::plugins::todo::{TODO_FILE, TodoEntry, load_todos_typed};
 use multi_launcher::radial::model::RadialDocument;
 use multi_launcher::settings::{LogFile, Settings};
 use serde::{Deserialize, Serialize};
@@ -21,10 +37,13 @@ const LAUNCHER_HOTKEY: &str = "Ctrl+Alt+F10";
 const NO_RESULTS_QUERY: &str = "zzzznomatchprobe";
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct FixtureManifest {
     schema_version: u32,
     fixture_id: String,
     scenario: String,
+    phase2_surface: Option<String>,
+    qa_empty_paste_invocation_context: bool,
     experimental_jump_mode_enabled: bool,
     launcher_hotkey: String,
     enabled_plugins: Vec<String>,
@@ -37,6 +56,7 @@ struct FixtureManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct SafetyManifest {
     profile_isolated_by_working_directory: bool,
     notes_path_supplied_by_ml_notes_dir: bool,
@@ -47,6 +67,10 @@ struct SafetyManifest {
     dashboard_click_behavior: String,
     reduce_dashboard_work_when_unfocused: bool,
     experimental_jump_mode_enabled: bool,
+    mkmacro_plugin_enabled: bool,
+    qa_empty_paste_invocation_context: bool,
+    paste_next_hotkey_enabled: bool,
+    paste_cancel_hotkey_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +79,53 @@ enum FixtureScenario {
     QueryProbe,
     Phase1Enabled,
     Phase1Disabled,
+    Phase2(Phase2Surface),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase2Surface {
+    Settings,
+    Notes,
+    Todo,
+    Timer,
+    Paste,
+    MkMacro,
+}
+
+impl Phase2Surface {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "settings" => Self::Settings,
+            "notes" => Self::Notes,
+            "todo" => Self::Todo,
+            "timer" => Self::Timer,
+            "paste" => Self::Paste,
+            "mkmacro" => Self::MkMacro,
+            _ => return None,
+        })
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Settings => "settings",
+            Self::Notes => "notes",
+            Self::Todo => "todo",
+            Self::Timer => "timer",
+            Self::Paste => "paste",
+            Self::MkMacro => "mkmacro",
+        }
+    }
+
+    fn enabled_plugins(self) -> &'static [&'static str] {
+        match self {
+            Self::Settings => &["notes", "settings"],
+            Self::Notes => &["notes"],
+            Self::Todo => &["notes", "todo"],
+            Self::Timer => &["notes", "timer"],
+            Self::Paste => &["notes", "paste_sequence"],
+            Self::MkMacro => &["notes", "mkmacro"],
+        }
+    }
 }
 
 impl FixtureScenario {
@@ -64,18 +135,47 @@ impl FixtureScenario {
             "query-probe" => Ok(Self::QueryProbe),
             "phase1-enabled" => Ok(Self::Phase1Enabled),
             "phase1-disabled" => Ok(Self::Phase1Disabled),
+            value if value.starts_with("phase2-") => {
+                let surface = &value["phase2-".len()..];
+                Phase2Surface::parse(surface)
+                    .map(Self::Phase2)
+                    .ok_or_else(|| anyhow::anyhow!("unknown Phase 2 surface {surface:?}"))
+            }
             value => anyhow::bail!(
-                "unknown fixture scenario {value:?}; expected baseline, query-probe, phase1-enabled, or phase1-disabled"
+                "unknown fixture scenario {value:?}; expected baseline, query-probe, phase1-enabled, phase1-disabled, or phase2-settings/notes/todo/timer/paste/mkmacro"
             ),
         }
     }
 
     fn jump_mode_enabled(self) -> bool {
-        matches!(self, Self::QueryProbe | Self::Phase1Enabled)
+        matches!(
+            self,
+            Self::QueryProbe | Self::Phase1Enabled | Self::Phase2(_)
+        )
     }
 
     fn phase1(self) -> bool {
         matches!(self, Self::Phase1Enabled | Self::Phase1Disabled)
+    }
+
+    fn phase2_surface(self) -> Option<Phase2Surface> {
+        match self {
+            Self::Phase2(surface) => Some(surface),
+            _ => None,
+        }
+    }
+
+    fn enabled_plugins(self) -> Vec<String> {
+        self.phase2_surface().map_or_else(
+            || vec![SAFE_PLUGIN.to_owned()],
+            |surface| {
+                surface
+                    .enabled_plugins()
+                    .iter()
+                    .map(|plugin| (*plugin).to_owned())
+                    .collect()
+            },
+        )
     }
 
     fn label(self) -> &'static str {
@@ -84,6 +184,14 @@ impl FixtureScenario {
             Self::QueryProbe => "query-probe",
             Self::Phase1Enabled => "phase1-enabled",
             Self::Phase1Disabled => "phase1-disabled",
+            Self::Phase2(surface) => match surface {
+                Phase2Surface::Settings => "phase2-settings",
+                Phase2Surface::Notes => "phase2-notes",
+                Phase2Surface::Todo => "phase2-todo",
+                Phase2Surface::Timer => "phase2-timer",
+                Phase2Surface::Paste => "phase2-paste",
+                Phase2Surface::MkMacro => "phase2-mkmacro",
+            },
         }
     }
 }
@@ -173,7 +281,7 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     settings.quit_hotkey = None;
     settings.paste_sequence.next_hotkey = None;
     settings.paste_sequence.cancel_hotkey = None;
-    settings.window_size = if scenario.phase1() {
+    settings.window_size = if scenario.phase1() || scenario.phase2_surface().is_some() {
         Some((1800, 1000))
     } else {
         Some((900, 560))
@@ -184,7 +292,7 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     settings.index_paths = Some(Vec::new());
     settings.max_indexed_items = Some(0);
     settings.plugin_dirs = Some(Vec::new());
-    settings.enabled_plugins = Some(HashSet::from([SAFE_PLUGIN.to_owned()]));
+    settings.enabled_plugins = Some(scenario.enabled_plugins().into_iter().collect());
     settings.debug_logging = true;
     settings.log_file = Some(LogFile::Path(
         profile.join("launcher.log").to_string_lossy().into_owned(),
@@ -243,6 +351,10 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         fs::write(notes_dir.join(format!("{note_id}.md")), note_text)?;
     }
 
+    // Constructors and background pollers can run before plugin allowlists
+    // are applied. Every profile therefore owns safe CWD stores up front.
+    write_phase2_stores(profile, scenario.phase2_surface())?;
+
     let manifest = fixture_manifest(note_ids, scenario);
     write_json(&profile.join("fixture_manifest.json"), &manifest)?;
     verify(profile, scenario)
@@ -264,8 +376,9 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("fixture must use an explicit plugin allowlist"))?;
     anyhow::ensure!(
-        enabled_plugins.len() == 1 && enabled_plugins.contains(SAFE_PLUGIN),
-        "fixture plugin allowlist must contain only {SAFE_PLUGIN:?}"
+        enabled_plugins.iter().cloned().collect::<HashSet<_>>()
+            == scenario.enabled_plugins().into_iter().collect(),
+        "fixture plugin allowlist does not match the safe scenario-specific allowlist"
     );
     anyhow::ensure!(
         settings.plugin_dirs.as_deref() == Some(&[]),
@@ -282,6 +395,11 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     anyhow::ensure!(
         settings.enable_toasts && settings.show_error_toasts,
         "fixture must preserve normal and error notifications"
+    );
+    anyhow::ensure!(
+        settings.paste_sequence.next_hotkey.is_none()
+            && settings.paste_sequence.cancel_hotkey.is_none(),
+        "all fixture profiles must keep Paste Sequence Next and Cancel shortcuts disabled"
     );
     if scenario.phase1() {
         anyhow::ensure!(
@@ -313,7 +431,8 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         !enabled_plugins.contains("clipboard_modify")
             && !enabled_plugins.contains("clipboard")
             && !enabled_plugins.contains("macros")
-            && !enabled_plugins.contains("mkmacro")
+            && (scenario.phase2_surface() == Some(Phase2Surface::MkMacro)
+                || !enabled_plugins.contains("mkmacro"))
             && !enabled_plugins.contains("network")
             && !enabled_plugins.contains("shell")
             && !enabled_plugins.contains("system"),
@@ -610,6 +729,28 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
             && manifest.safety.experimental_jump_mode_enabled == scenario.jump_mode_enabled(),
         "fixture manifest Jump Mode gate does not match the requested scenario"
     );
+    anyhow::ensure!(
+        manifest.phase2_surface.as_deref() == scenario.phase2_surface().map(Phase2Surface::as_str),
+        "fixture manifest Phase 2 surface does not match the requested scenario"
+    );
+    let empty_paste_context = scenario.phase2_surface() == Some(Phase2Surface::Paste);
+    anyhow::ensure!(
+        manifest.qa_empty_paste_invocation_context == empty_paste_context
+            && manifest.safety.qa_empty_paste_invocation_context == empty_paste_context,
+        "fixture empty-context capability must be enabled only for the Phase 2 Paste profile"
+    );
+    anyhow::ensure!(
+        manifest.safety.paste_next_hotkey_enabled == false
+            && manifest.safety.paste_cancel_hotkey_enabled == false,
+        "fixture manifest must record disabled Paste Sequence shortcuts"
+    );
+    anyhow::ensure!(
+        manifest.safety.mkmacro_plugin_enabled
+            == (scenario.phase2_surface() == Some(Phase2Surface::MkMacro)),
+        "fixture manifest MkMacro allowlist claim does not match the selected surface"
+    );
+
+    verify_phase2_stores(&profile, scenario.phase2_surface())?;
 
     let resolved_notes_dir = fs::canonicalize(notes_dir)?;
     anyhow::ensure!(
@@ -694,6 +835,284 @@ fn dashboard_queries(scenario: FixtureScenario) -> Vec<(&'static str, &'static s
     }
 }
 
+fn phase2_recorder_hotkey() -> MkHotkey {
+    MkHotkey {
+        key: MkKey::Function(24),
+        modifiers: vec![MkKey::Control, MkKey::Alt, MkKey::Shift],
+    }
+}
+
+fn phase2_macro_document(surface: Option<Phase2Surface>) -> MkMacroDocument {
+    let mut document = MkMacroDocument::default();
+    document.settings = MkMacroSettings {
+        record_toggle_hotkey: phase2_recorder_hotkey(),
+        recorder: Default::default(),
+    };
+    if surface == Some(Phase2Surface::MkMacro) {
+        document.macros.push(MkMacro {
+            id: 1,
+            name: "Jump QA Inert Macro".into(),
+            description: "Disabled fixture macro with one inert delay".into(),
+            enabled: false,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: Default::default(),
+            signature: Default::default(),
+            steps: vec![MkStep {
+                id: 1,
+                enabled: false,
+                breakpoint: false,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: MkErrorPolicy::Stop,
+                metadata: MkStepMetadata {
+                    label: "Inert zero delay".into(),
+                    comment: String::new(),
+                    ..Default::default()
+                },
+                action: MkAction::Delay(MkDelayPayload {
+                    mode: MkDelayMode::Fixed,
+                    fixed_ms: 0,
+                    minimum_ms: 0,
+                    maximum_ms: 0,
+                }),
+            }],
+        });
+    }
+    document
+}
+
+fn write_phase2_stores(profile: &Path, surface: Option<Phase2Surface>) -> anyhow::Result<()> {
+    let todo = if surface == Some(Phase2Surface::Todo) {
+        vec![TodoEntry {
+            id: "jump-qa-todo-001".into(),
+            text: "Jump QA isolated todo".into(),
+            done: false,
+            priority: 0,
+            tags: Vec::new(),
+            entity_refs: Vec::new(),
+        }]
+    } else {
+        Vec::new()
+    };
+    write_json(&profile.join(TODO_FILE), &todo)?;
+    write_json(&profile.join(ALARMS_FILE), &Vec::<Value>::new())?;
+    write_json(&profile.join(CLIPBOARD_FILE), &Vec::<Value>::new())?;
+    write_json(&profile.join(SNIPPETS_FILE), &Vec::<Value>::new())?;
+    write_json(&profile.join("macros.json"), &Vec::<Value>::new())?;
+    write_json(
+        &profile.join(MKMACRO_TEMPLATES_FILE),
+        &MkMacroTemplateCatalog::default(),
+    )?;
+    fs::create_dir_all(profile.join(ASSET_DIRECTORY))?;
+
+    let todo_state = load_todos_typed(profile.join(TODO_FILE))?;
+    match (surface, todo_state) {
+        (Some(Phase2Surface::Todo), LoadState::Loaded(entries)) => anyhow::ensure!(
+            entries == todo,
+            "typed Todo loader did not preserve the isolated plain fixture entry"
+        ),
+        (_, LoadState::Loaded(entries)) => anyhow::ensure!(
+            entries.is_empty(),
+            "typed Todo loader found unexpected entries outside the Todo surface"
+        ),
+        _ => anyhow::bail!("Todo fixture must use a typed loaded array"),
+    }
+    let clipboard_state =
+        multi_launcher::plugins::clipboard::load_history_typed(profile.join(CLIPBOARD_FILE))?;
+    anyhow::ensure!(
+        matches!(clipboard_state, LoadState::Loaded(entries) if entries.is_empty()),
+        "typed clipboard history store must be an empty array"
+    );
+    let snippets_state =
+        multi_launcher::plugins::snippets::load_snippets_typed(profile.join(SNIPPETS_FILE))?;
+    anyhow::ensure!(
+        matches!(snippets_state, LoadState::Loaded(entries) if entries.is_empty()),
+        "typed snippets store must be an empty array"
+    );
+
+    let store = SequenceStore::new(profile.join(PASTE_SEQUENCES_FILE));
+    let mut snapshot = store.load()?;
+    let mut sequence = SequenceDraft::new(
+        "Jump QA Literal Sequence",
+        vec![SequenceStep::LiteralText {
+            text: "isolated fixture text".into(),
+        }],
+    );
+    sequence.mode = PlaybackMode::ManualAdvance;
+    sequence.delay_ms = 0;
+    sequence.hotkey = None;
+    snapshot.upsert(sequence)?;
+    store.commit(&mut snapshot)?;
+
+    let document = phase2_macro_document(surface);
+    anyhow::ensure!(
+        validate_hotkeys(&document, &[]).is_empty(),
+        "Phase 2 recorder chord or macro hotkeys failed production validation"
+    );
+    let diagnostics = validate_document(&document, None);
+    anyhow::ensure!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity != DiagnosticSeverity::Fatal),
+        "isolated macro document must pass production semantic validation"
+    );
+    {
+        let (store, _) = MkMacroStore::open(profile)?;
+        store.save(document)?;
+    }
+    Ok(())
+}
+
+fn verify_phase2_stores(profile: &Path, surface: Option<Phase2Surface>) -> anyhow::Result<()> {
+    let todo = match load_todos_typed(profile.join(TODO_FILE))? {
+        LoadState::Loaded(entries) => entries,
+        LoadState::Missing | LoadState::Empty => {
+            anyhow::bail!("Todo fixture must use a typed loaded array")
+        }
+    };
+    if surface == Some(Phase2Surface::Todo) {
+        anyhow::ensure!(
+            todo.len() == 1
+                && todo[0].id == "jump-qa-todo-001"
+                && !todo[0].done
+                && todo[0].priority == 0
+                && todo[0].tags.is_empty()
+                && todo[0].entity_refs.is_empty(),
+            "Todo fixture must be one unfinished plain item without entity references"
+        );
+    } else {
+        anyhow::ensure!(
+            todo.is_empty(),
+            "unexpected Todo data in this Phase 2 profile"
+        );
+    }
+    for path in [ALARMS_FILE, "macros.json"] {
+        let value: Value = serde_json::from_slice(&fs::read(profile.join(path))?)?;
+        anyhow::ensure!(
+            value.as_array().is_some_and(Vec::is_empty),
+            "isolated store {path} must be an empty typed array"
+        );
+    }
+    anyhow::ensure!(
+        matches!(
+            multi_launcher::plugins::clipboard::load_history_typed(
+                profile.join(CLIPBOARD_FILE)
+            )?,
+            LoadState::Loaded(entries) if entries.is_empty()
+        ) && matches!(
+            multi_launcher::plugins::snippets::load_snippets_typed(
+                profile.join(SNIPPETS_FILE)
+            )?,
+            LoadState::Loaded(entries) if entries.is_empty()
+        ),
+        "typed clipboard and snippets stores must be empty"
+    );
+
+    let sequence_store = SequenceStore::new(profile.join(PASTE_SEQUENCES_FILE));
+    let sequences = sequence_store.load()?;
+    anyhow::ensure!(
+        sequences.sequences().len() == 1,
+        "expected one isolated sequence"
+    );
+    let sequence = &sequences.sequences()[0];
+    anyhow::ensure!(
+        sequence.name == "Jump QA Literal Sequence"
+            && sequence.hotkey.is_none()
+            && sequence.mode == PlaybackMode::ManualAdvance
+            && sequence.delay_ms == 0
+            && sequence.steps
+                == [SequenceStep::LiteralText {
+                    text: "isolated fixture text".into(),
+                }],
+        "Paste fixture must be a manual, unbound, literal-only sequence"
+    );
+
+    let (macro_store, disposition) = MkMacroStore::open(profile)?;
+    anyhow::ensure!(
+        matches!(disposition, LoadDisposition::Loaded),
+        "typed MkMacro store must reload the saved isolated document"
+    );
+    let macro_document = macro_store.snapshot();
+    anyhow::ensure!(
+        validate_document(&macro_document, None)
+            .iter()
+            .all(|diagnostic| diagnostic.severity != DiagnosticSeverity::Fatal),
+        "reloaded MkMacro document must pass production semantic validation"
+    );
+    anyhow::ensure!(
+        macro_document.settings.record_toggle_hotkey.key == MkKey::Function(24)
+            && macro_document.settings.record_toggle_hotkey.modifiers
+                == [MkKey::Control, MkKey::Alt, MkKey::Shift]
+            && macro_document
+                .settings
+                .recorder
+                .pause_resume_hotkey
+                .is_none()
+            && macro_document.settings.recorder.marker_hotkey.is_none()
+            && validate_hotkeys(&macro_document, &[]).is_empty(),
+        "Phase 2 recorder chord must be an UNSENT production-valid Ctrl+Alt+Shift+F24 chord"
+    );
+    if surface == Some(Phase2Surface::MkMacro) {
+        anyhow::ensure!(
+            macro_document.macros.len() == 1,
+            "MkMacro fixture needs one macro"
+        );
+        let m = &macro_document.macros[0];
+        anyhow::ensure!(
+            m.id == 1
+                && m.name == "Jump QA Inert Macro"
+                && !m.enabled
+                && m.hotkey.is_none()
+                && m.steps.len() == 1
+                && m.steps[0].id == 1
+                && !m.steps[0].enabled
+                && !m.steps[0].breakpoint
+                && m.steps[0].repeat == 1
+                && m.steps[0].delay_after_ms == 0
+                && m.steps[0].on_error == MkErrorPolicy::Stop
+                && m.steps[0].metadata.label == "Inert zero delay"
+                && m.steps[0].metadata.comment.is_empty()
+                && matches!(
+                    m.steps[0].action,
+                    MkAction::Delay(MkDelayPayload {
+                        mode: MkDelayMode::Fixed,
+                        fixed_ms: 0,
+                        minimum_ms: 0,
+                        maximum_ms: 0,
+                    })
+                ),
+            "MkMacro fixture must remain disabled, unbound, and inert"
+        );
+        let mut recorder_conflict_probe = (*macro_document).clone();
+        let macro_entry = &mut recorder_conflict_probe.macros[0];
+        macro_entry.enabled = true;
+        macro_entry.hotkey = Some(phase2_recorder_hotkey());
+        let conflict_diagnostics = validate_hotkeys(&recorder_conflict_probe, &[]);
+        anyhow::ensure!(
+            conflict_diagnostics.len() == 1
+                && conflict_diagnostics[0].severity == HotkeyDiagnosticSeverity::Error
+                && conflict_diagnostics[0].message.contains("recording toggle"),
+            "production hotkey compiler must detect the in-memory recorder chord conflict"
+        );
+    } else {
+        anyhow::ensure!(
+            macro_document.macros.is_empty(),
+            "unexpected macro data in this Phase 2 profile"
+        );
+    }
+    let macro_templates: MkMacroTemplateCatalog =
+        serde_json::from_slice(&fs::read(profile.join(MKMACRO_TEMPLATES_FILE))?)?;
+    anyhow::ensure!(
+        macro_templates == MkMacroTemplateCatalog::default(),
+        "isolated MkMacro templates must remain empty"
+    );
+    let assets = fs::read_dir(profile.join(ASSET_DIRECTORY))?;
+    anyhow::ensure!(assets.count() == 0, "Phase 2 macro assets must be empty");
+    Ok(())
+}
+
 fn note_ids() -> Vec<String> {
     (1..=NOTE_COUNT)
         .map(|index| format!("jump-qa-note-{index:03}"))
@@ -710,18 +1129,26 @@ fn fixture_note_title(scenario: FixtureScenario, ordinal: usize) -> String {
 
 fn fixture_manifest(note_ids: Vec<String>, scenario: FixtureScenario) -> FixtureManifest {
     let jump_mode_enabled = scenario.jump_mode_enabled();
+    let phase2_surface = scenario.phase2_surface();
+    let enabled_plugins = scenario.enabled_plugins();
+    let empty_paste_context = phase2_surface == Some(Phase2Surface::Paste);
     FixtureManifest {
-        schema_version: 2,
+        schema_version: 4,
         fixture_id: match scenario {
             FixtureScenario::QueryProbe => "jump-mode-m05-query-probe-v1".to_owned(),
             FixtureScenario::Phase1Enabled => "jump-mode-m08-phase1-enabled-v1".to_owned(),
             FixtureScenario::Phase1Disabled => "jump-mode-m08-phase1-disabled-v1".to_owned(),
             FixtureScenario::Baseline => FIXTURE_ID.to_owned(),
+            FixtureScenario::Phase2(surface) => {
+                format!("jump-mode-m13-{}-v1", surface.as_str())
+            }
         },
         scenario: scenario.label().to_owned(),
+        phase2_surface: phase2_surface.map(|surface| surface.as_str().to_owned()),
+        qa_empty_paste_invocation_context: empty_paste_context,
         experimental_jump_mode_enabled: jump_mode_enabled,
         launcher_hotkey: LAUNCHER_HOTKEY.to_owned(),
-        enabled_plugins: vec![SAFE_PLUGIN.to_owned()],
+        enabled_plugins,
         dashboard_slot_ids: dashboard_slot_ids(scenario),
         note_ids,
         action_count: 0,
@@ -737,6 +1164,10 @@ fn fixture_manifest(note_ids: Vec<String>, scenario: FixtureScenario) -> Fixture
             dashboard_click_behavior: "fill_query".to_owned(),
             reduce_dashboard_work_when_unfocused: false,
             experimental_jump_mode_enabled: jump_mode_enabled,
+            mkmacro_plugin_enabled: phase2_surface == Some(Phase2Surface::MkMacro),
+            qa_empty_paste_invocation_context: empty_paste_context,
+            paste_next_hotkey_enabled: false,
+            paste_cancel_hotkey_enabled: false,
         },
     }
 }
@@ -834,6 +1265,41 @@ mod tests {
             fixture_note_title(FixtureScenario::Phase1Enabled, 3),
             fixture_note_title(FixtureScenario::Phase1Enabled, 1)
         );
+    }
+
+    #[test]
+    fn all_scenario_profiles_seed_isolated_inert_stores_before_app_construction() {
+        for surface in [
+            None,
+            Some(Phase2Surface::Settings),
+            Some(Phase2Surface::Notes),
+            Some(Phase2Surface::Todo),
+            Some(Phase2Surface::Timer),
+            Some(Phase2Surface::Paste),
+            Some(Phase2Surface::MkMacro),
+        ] {
+            let profile = tempfile::tempdir().unwrap();
+            write_phase2_stores(profile.path(), surface).unwrap();
+            verify_phase2_stores(profile.path(), surface).unwrap();
+        }
+    }
+
+    #[test]
+    fn fixture_and_safety_manifests_reject_unknown_fields() {
+        let mut fixture = serde_json::to_value(fixture_manifest(
+            note_ids(),
+            FixtureScenario::Phase2(Phase2Surface::Paste),
+        ))
+        .unwrap();
+        fixture["unexpected"] = json!(true);
+        assert!(serde_json::from_value::<FixtureManifest>(fixture).is_err());
+
+        let mut safety = serde_json::to_value(
+            fixture_manifest(note_ids(), FixtureScenario::Phase2(Phase2Surface::Paste)).safety,
+        )
+        .unwrap();
+        safety["unexpected"] = json!(true);
+        assert!(serde_json::from_value::<SafetyManifest>(safety).is_err());
     }
 
     #[test]

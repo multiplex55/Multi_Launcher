@@ -882,6 +882,15 @@ pub struct NotesDialog {
     test_edit_cancel_rect: Option<egui::Rect>,
 }
 
+#[cfg(feature = "qa-framebuffer-capture")]
+pub(crate) struct NotesDialogQaObservation {
+    pub(crate) open: bool,
+    pub(crate) entry_count: usize,
+    pub(crate) editing: bool,
+    pub(crate) draft_text_chars: usize,
+    pub(crate) draft_newline_count: usize,
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 struct RenderedNoteRowRects {
@@ -1088,6 +1097,17 @@ impl TemplateManagerState {
 }
 
 impl NotesDialog {
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn qa_observation(&self) -> NotesDialogQaObservation {
+        NotesDialogQaObservation {
+            open: self.open,
+            entry_count: self.entries.len(),
+            editing: self.edit_idx.is_some(),
+            draft_text_chars: self.text.chars().count(),
+            draft_newline_count: self.text.chars().filter(|ch| *ch == '\n').count(),
+        }
+    }
+
     pub(crate) fn jump_mode_target_generation(&self) -> crate::gui::jump_mode::TargetGeneration {
         use std::hash::{Hash, Hasher};
 

@@ -99,6 +99,40 @@ struct RequestManifest {
 struct JumpModeObservationRequest {
     #[serde(default)]
     wait_for_active_hints: bool,
+    #[serde(default)]
+    phase2: Option<Phase2DialogRequest>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum Phase2Surface {
+    Settings,
+    Notes,
+    Todo,
+    Timer,
+    Paste,
+    MkMacro,
+}
+
+impl Phase2Surface {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Settings => "settings",
+            Self::Notes => "notes",
+            Self::Todo => "todo",
+            Self::Timer => "timer",
+            Self::Paste => "paste",
+            Self::MkMacro => "mkmacro",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct Phase2DialogRequest {
+    surface: Phase2Surface,
+    #[serde(default)]
+    use_empty_paste_invocation_context: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -122,6 +156,7 @@ struct JumpModeObservation {
     opened_note_slugs: Vec<String>,
     root_focused: bool,
     root_owner_allowed: bool,
+    navigation_owner: QaNavigationOwner,
     jump_mode_enabled: bool,
     active_session: bool,
     prefix: Option<String>,
@@ -130,6 +165,8 @@ struct JumpModeObservation {
     query_focused: bool,
     focused_destination: Option<String>,
     focused_widget_id: Option<String>,
+    focused_navigation_destination: Option<String>,
+    dialog_state: Option<QaDialogState>,
     activation_count: u64,
     last_action: Option<QaActivationObservation>,
     tab_processed_count: u64,
@@ -138,6 +175,53 @@ struct JumpModeObservation {
     last_enter_processed_logic_frame_id: Option<u64>,
     prefix_target_ids: Vec<String>,
     targets: Vec<JumpModeTargetObservation>,
+    navigation_targets: Vec<JumpModeTargetObservation>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct QaNavigationOwner {
+    kind: &'static str,
+    instance: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Default)]
+struct QaDialogState {
+    surface: Option<&'static str>,
+    instance: Option<u64>,
+    target_generation: Option<u64>,
+    settings_draft_jump_mode: Option<bool>,
+    settings_committed_jump_mode: Option<bool>,
+    notes_open: Option<bool>,
+    notes_entry_count: Option<usize>,
+    notes_editing: Option<bool>,
+    notes_draft_chars: Option<usize>,
+    notes_draft_newlines: Option<usize>,
+    todo_open: Option<bool>,
+    todo_entry_ids: Option<Vec<String>>,
+    todo_pending_clear_confirmation: Option<bool>,
+    todo_draft_text_chars: Option<usize>,
+    todo_draft_newlines: Option<usize>,
+    timer_open: Option<bool>,
+    timer_mode: Option<&'static str>,
+    timer_duration_chars: Option<usize>,
+    timer_label_chars: Option<usize>,
+    active_timer_count: Option<usize>,
+    paste_open: Option<bool>,
+    paste_context_present: Option<bool>,
+    paste_context_has_clipboard_text: Option<bool>,
+    paste_saved_sequence_ids: Option<Vec<u64>>,
+    paste_selected_sequence_id: Option<u64>,
+    paste_draft_step_count: Option<usize>,
+    paste_remove_confirmation_open: Option<bool>,
+    mkmacro_open: Option<bool>,
+    mkmacro_draft_revision: Option<u64>,
+    mkmacro_selected_id: Option<u64>,
+    mkmacro_selected_step_ids: Option<Vec<u64>>,
+    mkmacro_table_focus_id: Option<String>,
+    mkmacro_table_focused: Option<bool>,
+    mkmacro_document_macro_count: Option<usize>,
+    mkmacro_active_runtime: Option<bool>,
+    mkmacro_recorder_active: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -155,6 +239,9 @@ enum JumpModeOutcomeObservation {
 #[derive(Clone, Debug, Serialize)]
 struct JumpModeTargetObservation {
     target_id: String,
+    semantic_id: QaSemanticTarget,
+    target_generation: u64,
+    surface_identity: QaSurfaceIdentity,
     surface: &'static str,
     label: String,
     kind: &'static str,
@@ -166,6 +253,32 @@ struct JumpModeTargetObservation {
     hint: Option<String>,
     root_result_index: Option<usize>,
     root_action: Option<QaActionObservation>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+enum QaSemanticTarget {
+    Named(String),
+    RootResult(usize),
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum QaSurfaceIdentity {
+    Dashboard,
+    LauncherResults,
+    Settings {
+        instance: u64,
+    },
+    Dialog {
+        dialog_kind: String,
+        instance: u64,
+    },
+    Popup {
+        popup_kind: String,
+        instance: u64,
+        owner: Box<QaSurfaceIdentity>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -225,8 +338,8 @@ impl QaFramebufferRequest {
         let manifest: RequestManifest = serde_json::from_slice(&manifest_bytes)
             .map_err(|error| format!("invalid QA framebuffer manifest: {error}"))?;
         validate_manifest(&manifest)?;
-        if manifest.jump_mode_observation.is_some() {
-            verify_fixture_manifest_binding(&manifest.fixture_manifest_sha256)?;
+        if let Some(observation) = manifest.jump_mode_observation.as_ref() {
+            verify_fixture_manifest_binding(&manifest.fixture_manifest_sha256, observation.phase2)?;
         }
 
         let executable_path = std::env::current_exe()
@@ -313,6 +426,21 @@ fn validate_manifest(manifest: &RequestManifest) -> Result<(), String> {
     if manifest.jump_mode_observation.is_some() && manifest.target != CaptureTarget::Root {
         return Err("Jump Mode observation requires the ROOT capture target".into());
     }
+    if let Some(observation) = manifest.jump_mode_observation.as_ref()
+        && let Some(phase2) = observation.phase2
+    {
+        if manifest.trigger != CaptureTrigger::F11 {
+            return Err("Phase 2 observation requires the ROOT/F11 trigger".into());
+        }
+        if observation.wait_for_active_hints {
+            return Err("Phase 2 dialog observation cannot wait for root query hints".into());
+        }
+        if phase2.use_empty_paste_invocation_context && phase2.surface != Phase2Surface::Paste {
+            return Err(
+                "empty Paste invocation context is valid only for the Phase 2 Paste surface".into(),
+            );
+        }
+    }
     if !is_sha256(&manifest.fixture_manifest_sha256) {
         return Err("manifest fixture_manifest_sha256 must be 64 hexadecimal characters".into());
     }
@@ -351,7 +479,10 @@ fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn verify_fixture_manifest_binding(expected_sha256: &str) -> Result<(), String> {
+fn verify_fixture_manifest_binding(
+    expected_sha256: &str,
+    phase2: Option<Phase2DialogRequest>,
+) -> Result<(), String> {
     let working_dir = std::env::current_dir()
         .map_err(|error| format!("failed to identify fixture working directory: {error}"))?;
     let working_dir = fs::canonicalize(&working_dir).map_err(|error| {
@@ -371,6 +502,111 @@ fn verify_fixture_manifest_binding(expected_sha256: &str) -> Result<(), String> 
         .map_err(|error| format!("failed to hash isolated fixture_manifest.json: {error}"))?;
     if actual_sha256 != expected_sha256 {
         return Err("fixture_manifest.json hash does not match the QA request".into());
+    }
+    if let Some(phase2) = phase2 {
+        let fixture: serde_json::Value = serde_json::from_slice(
+            &fs::read(&manifest_path)
+                .map_err(|error| format!("failed to read isolated fixture manifest: {error}"))?,
+        )
+        .map_err(|error| format!("invalid isolated fixture manifest: {error}"))?;
+        validate_phase2_fixture_capability(&fixture, phase2)?;
+    }
+    Ok(())
+}
+
+fn validate_phase2_fixture_capability(
+    fixture: &serde_json::Value,
+    request: Phase2DialogRequest,
+) -> Result<(), String> {
+    let surface = request.surface.as_str();
+    let expected_scenario = format!("phase2-{surface}");
+    let expected_fixture_id = format!("jump-mode-m13-{surface}-v1");
+    let expected_plugins: &[&str] = match request.surface {
+        Phase2Surface::Settings => &["notes", "settings"],
+        Phase2Surface::Notes => &["notes"],
+        Phase2Surface::Todo => &["notes", "todo"],
+        Phase2Surface::Timer => &["notes", "timer"],
+        Phase2Surface::Paste => &["notes", "paste_sequence"],
+        Phase2Surface::MkMacro => &["notes", "mkmacro"],
+    };
+    if fixture.get("scenario").and_then(serde_json::Value::as_str)
+        != Some(expected_scenario.as_str())
+        || fixture
+            .get("fixture_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(expected_fixture_id.as_str())
+        || fixture
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(4)
+        || fixture
+            .get("phase2_surface")
+            .and_then(serde_json::Value::as_str)
+            != Some(surface)
+        || fixture
+            .get("enabled_plugins")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|plugins| {
+                plugins.len() != expected_plugins.len()
+                    || plugins
+                        .iter()
+                        .zip(expected_plugins)
+                        .any(|(actual, expected)| actual.as_str() != Some(*expected))
+            })
+        || fixture
+            .get("experimental_jump_mode_enabled")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || fixture
+            .get("action_count")
+            .and_then(serde_json::Value::as_u64)
+            != Some(0)
+        || fixture
+            .get("qa_empty_paste_invocation_context")
+            .and_then(serde_json::Value::as_bool)
+            != Some(request.use_empty_paste_invocation_context)
+    {
+        return Err("Phase 2 QA request does not match the bound fixture identity".into());
+    }
+    let safety = fixture
+        .get("safety")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "Phase 2 fixture safety manifest is missing".to_owned())?;
+    for (key, expected) in [
+        ("profile_isolated_by_working_directory", true),
+        ("notes_path_supplied_by_ml_notes_dir", true),
+        (
+            "mkmacro_plugin_enabled",
+            request.surface == Phase2Surface::MkMacro,
+        ),
+    ] {
+        if safety.get(key).and_then(serde_json::Value::as_bool) != Some(expected) {
+            return Err(format!(
+                "Phase 2 fixture safety flag {key} must be {expected}"
+            ));
+        }
+    }
+    for key in [
+        "clipboard_modify_plugin_enabled",
+        "macros_enabled",
+        "network_plugin_enabled",
+        "custom_actions_present",
+        "paste_next_hotkey_enabled",
+        "paste_cancel_hotkey_enabled",
+    ] {
+        if safety.get(key).and_then(serde_json::Value::as_bool) != Some(false) {
+            return Err(format!("Phase 2 fixture safety flag {key} must be false"));
+        }
+    }
+    if safety
+        .get("qa_empty_paste_invocation_context")
+        .and_then(serde_json::Value::as_bool)
+        != Some(request.use_empty_paste_invocation_context)
+    {
+        return Err("Phase 2 empty-context safety flag does not match the QA request".into());
+    }
+    if request.use_empty_paste_invocation_context && request.surface != Phase2Surface::Paste {
+        return Err("empty Paste invocation context requires the Phase 2 Paste surface".into());
     }
     Ok(())
 }
@@ -643,6 +879,7 @@ pub(super) struct FramebufferProbe {
     diagnostics_enabled: bool,
     jump_mode_observation_enabled: bool,
     wait_for_active_hints: bool,
+    phase2_request: Option<Phase2DialogRequest>,
     activation_count: u64,
     last_action: Option<QaActivationObservation>,
     tab_processed_count: u64,
@@ -672,6 +909,11 @@ pub(super) struct FramebufferProbe {
 }
 
 impl FramebufferProbe {
+    fn use_empty_paste_invocation_context(&self) -> bool {
+        self.phase2_request
+            .is_some_and(|request| request.use_empty_paste_invocation_context)
+    }
+
     fn new(request: QaFramebufferRequest, ctx: egui::Context) -> Result<Self, String> {
         let reply_timeout = selected_reply_timeout(request.manifest.target);
         Self::new_with_reply_timeout(request, ctx, reply_timeout)
@@ -698,6 +940,7 @@ impl FramebufferProbe {
             jump_mode_observation_enabled: observation_request.is_some(),
             wait_for_active_hints: observation_request
                 .is_some_and(|request| request.wait_for_active_hints),
+            phase2_request: observation_request.and_then(|request| request.phase2),
             activation_count: 0,
             last_action: None,
             tab_processed_count: 0,
@@ -1370,6 +1613,12 @@ impl FramebufferProbe {
 }
 
 impl LauncherApp {
+    pub(super) fn qa_framebuffer_use_empty_paste_invocation_context(&self) -> bool {
+        self.qa_framebuffer
+            .as_ref()
+            .is_some_and(FramebufferProbe::use_empty_paste_invocation_context)
+    }
+
     pub fn install_qa_framebuffer_request(
         &mut self,
         request: QaFramebufferRequest,
@@ -1989,59 +2238,51 @@ fn build_jump_mode_observation(
         .iter()
         .map(|panel| panel.note_slug().to_owned())
         .collect();
-
+    let navigation_owner = app.jump_mode_ui.frame_navigation_owner();
+    let collected_targets: Vec<_> = registry
+        .into_iter()
+        .flat_map(|registry| registry.targets())
+        .map(|target| {
+            observe_registered_target(
+                app,
+                target,
+                result_generation,
+                result_count,
+                active_hint_map,
+                focused_egui_id,
+            )
+        })
+        .collect();
     let targets: Vec<_> = if root_owner_allowed {
-        registry
-            .into_iter()
-            .flat_map(|registry| registry.targets())
-            .map(|target| {
-                let rect = target.rect();
-                let clipped_rect = target.clipped_rect();
-                let is_query_input = target.response_id() == egui::Id::new("query_input")
-                    && target.metadata().kind() == super::jump_mode::TargetKind::TextEntry;
-                let root_result_index = match target.metadata().id().semantic() {
-                    super::jump_mode::SemanticTargetId::RootResult(index)
-                        if target.metadata().id().generation().0 == result_generation
-                            && *index < result_count =>
-                    {
-                        Some(*index)
-                    }
-                    _ => None,
-                };
-                let root_action = root_result_index
-                    .and_then(|index| app.results.get(index))
-                    .map(qa_action_observation);
-                JumpModeTargetObservation {
-                    target_id: format!("{:?}", target.id()),
-                    surface: target_surface_name(target.metadata().id().surface()),
-                    label: target.metadata().label().to_owned(),
-                    kind: target_kind_name(target.metadata().kind()),
-                    rect: [rect.min.x, rect.min.y, rect.max.x, rect.max.y],
-                    clipped_rect: [
-                        clipped_rect.min.x,
-                        clipped_rect.min.y,
-                        clipped_rect.max.x,
-                        clipped_rect.max.y,
-                    ],
-                    eligible: target.eligible() && target.enabled(),
-                    is_query_input,
-                    focused: Some(target.response_id()) == focused_egui_id,
-                    hint: active_hint_map
-                        .and_then(|hint_map| hint_map.hint_for(target.id()))
-                        .map(|hint| hint.as_str().to_owned()),
-                    root_result_index,
-                    root_action,
-                }
-            })
-            .collect()
+        collected_targets.clone()
     } else {
         Vec::new()
     };
+    let navigation_targets: Vec<_> = registry
+        .into_iter()
+        .flat_map(|registry| registry.targets())
+        .filter(|target| navigation_owner.owns_surface(target.metadata().id().surface()))
+        .map(|target| {
+            observe_registered_target(
+                app,
+                target,
+                result_generation,
+                result_count,
+                active_hint_map,
+                focused_egui_id,
+            )
+        })
+        .collect();
     let query_target = targets.iter().find(|target| target.is_query_input);
     let focused_destination = targets
         .iter()
         .find(|target| target.focused)
         .map(|target| target.target_id.clone());
+    let focused_navigation_destination = navigation_targets
+        .iter()
+        .find(|target| target.focused)
+        .map(|target| target.target_id.clone());
+    let dialog_state = qa_dialog_state(app, ctx, navigation_owner, &navigation_targets);
     let selected_target_id = selected_index.and_then(|selected_index| {
         targets
             .iter()
@@ -2107,6 +2348,7 @@ fn build_jump_mode_observation(
         opened_note_slugs,
         root_focused,
         root_owner_allowed,
+        navigation_owner: qa_navigation_owner(navigation_owner),
         jump_mode_enabled: app.jump_mode_ui.is_enabled(),
         active_session: active_session.is_some(),
         prefix: active_session.map(|session| session.prefix().to_owned()),
@@ -2115,6 +2357,8 @@ fn build_jump_mode_observation(
         query_focused: ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))),
         focused_destination,
         focused_widget_id,
+        focused_navigation_destination,
+        dialog_state,
         activation_count,
         last_action,
         tab_processed_count,
@@ -2123,7 +2367,187 @@ fn build_jump_mode_observation(
         last_enter_processed_logic_frame_id,
         prefix_target_ids,
         targets,
+        navigation_targets,
     }
+}
+
+fn observe_registered_target(
+    app: &LauncherApp,
+    target: &super::jump_mode::ui::RegisteredTarget,
+    result_generation: u64,
+    result_count: usize,
+    active_hint_map: Option<&super::jump_mode::HintMap>,
+    focused_egui_id: Option<egui::Id>,
+) -> JumpModeTargetObservation {
+    let rect = target.rect();
+    let clipped_rect = target.clipped_rect();
+    let metadata = target.metadata();
+    let target_id = metadata.id();
+    let is_query_input = target.response_id() == egui::Id::new("query_input")
+        && metadata.kind() == super::jump_mode::TargetKind::TextEntry;
+    let root_result_index = match target_id.semantic() {
+        super::jump_mode::SemanticTargetId::RootResult(index)
+            if target_id.generation().0 == result_generation && *index < result_count =>
+        {
+            Some(*index)
+        }
+        _ => None,
+    };
+    let root_action = root_result_index
+        .and_then(|index| app.results.get(index))
+        .map(qa_action_observation);
+    JumpModeTargetObservation {
+        target_id: format!("{:?}", target.id()),
+        semantic_id: qa_semantic_target(target_id.semantic()),
+        target_generation: target_id.generation().0,
+        surface_identity: qa_surface_identity(target_id.surface()),
+        surface: target_surface_name(target_id.surface()),
+        label: metadata.label().to_owned(),
+        kind: target_kind_name(metadata.kind()),
+        rect: [rect.min.x, rect.min.y, rect.max.x, rect.max.y],
+        clipped_rect: [
+            clipped_rect.min.x,
+            clipped_rect.min.y,
+            clipped_rect.max.x,
+            clipped_rect.max.y,
+        ],
+        eligible: target.eligible() && target.enabled(),
+        is_query_input,
+        focused: Some(target.response_id()) == focused_egui_id,
+        hint: active_hint_map
+            .and_then(|hint_map| hint_map.hint_for(target.id()))
+            .map(|hint| hint.as_str().to_owned()),
+        root_result_index,
+        root_action,
+    }
+}
+
+fn qa_navigation_owner(owner: super::jump_mode::ui::NavigationOwner) -> QaNavigationOwner {
+    use super::jump_mode::ui::NavigationOwner as Owner;
+    let (kind, instance) = match owner {
+        Owner::Root => ("root", None),
+        Owner::Settings { instance } => ("settings", Some(instance)),
+        Owner::Notes { instance } => ("notes", Some(instance)),
+        Owner::Todo { instance } => ("todo", Some(instance)),
+        Owner::Timer { instance } => ("timer", Some(instance)),
+        Owner::PasteSequence { instance } => ("paste_sequence", Some(instance)),
+        Owner::MkMacro { instance } => ("mkmacro", Some(instance)),
+        Owner::Blocked => ("blocked", None),
+    };
+    QaNavigationOwner { kind, instance }
+}
+
+fn qa_semantic_target(semantic: &super::jump_mode::SemanticTargetId) -> QaSemanticTarget {
+    match semantic {
+        super::jump_mode::SemanticTargetId::Named(value) => QaSemanticTarget::Named(value.clone()),
+        super::jump_mode::SemanticTargetId::RootResult(index) => {
+            QaSemanticTarget::RootResult(*index)
+        }
+    }
+}
+
+fn qa_surface_identity(surface: &super::jump_mode::SurfaceId) -> QaSurfaceIdentity {
+    match surface {
+        super::jump_mode::SurfaceId::Dashboard => QaSurfaceIdentity::Dashboard,
+        super::jump_mode::SurfaceId::LauncherResults => QaSurfaceIdentity::LauncherResults,
+        super::jump_mode::SurfaceId::Settings { instance } => QaSurfaceIdentity::Settings {
+            instance: *instance,
+        },
+        super::jump_mode::SurfaceId::Dialog { kind, instance } => QaSurfaceIdentity::Dialog {
+            dialog_kind: kind.clone(),
+            instance: *instance,
+        },
+        super::jump_mode::SurfaceId::Popup {
+            kind,
+            instance,
+            owner,
+        } => QaSurfaceIdentity::Popup {
+            popup_kind: kind.clone(),
+            instance: *instance,
+            owner: Box::new(qa_surface_identity(owner)),
+        },
+    }
+}
+
+fn qa_dialog_state(
+    app: &LauncherApp,
+    ctx: &egui::Context,
+    owner: super::jump_mode::ui::NavigationOwner,
+    targets: &[JumpModeTargetObservation],
+) -> Option<QaDialogState> {
+    use super::jump_mode::ui::NavigationOwner as Owner;
+    let (surface, instance) = match owner {
+        Owner::Root | Owner::Blocked => return None,
+        Owner::Settings { instance } => ("settings", instance),
+        Owner::Notes { instance } => ("notes", instance),
+        Owner::Todo { instance } => ("todo", instance),
+        Owner::Timer { instance } => ("timer", instance),
+        Owner::PasteSequence { instance } => ("paste_sequence", instance),
+        Owner::MkMacro { instance } => ("mkmacro", instance),
+    };
+    let mut state = QaDialogState {
+        surface: Some(surface),
+        instance: Some(instance),
+        target_generation: targets.first().map(|target| target.target_generation),
+        ..Default::default()
+    };
+    match owner {
+        Owner::Settings { .. } => {
+            state.settings_draft_jump_mode =
+                Some(app.settings_editor.experimental_jump_mode_enabled);
+            state.settings_committed_jump_mode = Some(app.jump_mode_ui.is_enabled());
+        }
+        Owner::Notes { .. } => {
+            let observation = app.notes_dialog.qa_observation();
+            state.notes_open = Some(observation.open);
+            state.notes_entry_count = Some(observation.entry_count);
+            state.notes_editing = Some(observation.editing);
+            state.notes_draft_chars = Some(observation.draft_text_chars);
+            state.notes_draft_newlines = Some(observation.draft_newline_count);
+        }
+        Owner::Todo { .. } => {
+            let observation = app.todo_dialog.qa_observation();
+            state.todo_open = Some(observation.open);
+            state.todo_entry_ids = Some(observation.entry_ids);
+            state.todo_pending_clear_confirmation = Some(observation.pending_clear_confirmation);
+            state.todo_draft_text_chars = Some(observation.draft_text_chars);
+            state.todo_draft_newlines = Some(observation.draft_newline_count);
+            state.target_generation = Some(app.todo_dialog.jump_mode_target_generation().0);
+        }
+        Owner::Timer { .. } => {
+            let observation = app.timer_dialog.qa_observation();
+            state.timer_open = Some(observation.open);
+            state.timer_mode = Some(observation.mode);
+            state.timer_duration_chars = Some(observation.duration_text_chars);
+            state.timer_label_chars = Some(observation.label_text_chars);
+            state.active_timer_count = Some(crate::plugins::timer::active_timers().len());
+        }
+        Owner::PasteSequence { .. } => {
+            let observation = app.paste_sequence_dialog.qa_observation();
+            state.paste_open = Some(observation.open);
+            state.paste_context_present = Some(observation.invocation_context_present);
+            state.paste_context_has_clipboard_text =
+                Some(observation.invocation_context_has_clipboard_text);
+            state.paste_saved_sequence_ids = Some(observation.saved_sequence_ids);
+            state.paste_selected_sequence_id = observation.selected_sequence_id;
+            state.paste_draft_step_count = Some(observation.draft_step_count);
+            state.paste_remove_confirmation_open = Some(observation.remove_confirmation_open);
+        }
+        Owner::MkMacro { .. } => {
+            let observation = app.mkmacro_dialog.qa_observation(ctx);
+            state.mkmacro_open = Some(observation.open);
+            state.mkmacro_draft_revision = Some(observation.draft_revision);
+            state.mkmacro_selected_id = observation.selected_macro_id;
+            state.mkmacro_selected_step_ids = Some(observation.selected_step_ids);
+            state.mkmacro_table_focus_id = observation.table_focus_id.map(|id| format!("{id:?}"));
+            state.mkmacro_table_focused = Some(observation.table_focused);
+            state.mkmacro_document_macro_count = Some(observation.document_macro_count);
+            state.mkmacro_active_runtime = Some(observation.runtime_active);
+            state.mkmacro_recorder_active = Some(observation.recorder_active);
+        }
+        Owner::Root | Owner::Blocked => unreachable!("handled above"),
+    }
+    Some(state)
 }
 
 fn qa_action_observation(action: &crate::actions::Action) -> QaActionObservation {
@@ -2476,6 +2900,10 @@ mod tests {
 
     fn test_launcher_app(ctx: &egui::Context, data_dir: &Path) -> LauncherApp {
         let mut settings = crate::settings::Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        settings.enable_toasts = true;
+        settings.show_error_toasts = true;
         settings.dashboard.config_path = Some(
             data_dir
                 .join("dashboard.json")
@@ -2486,7 +2914,7 @@ mod tests {
             ctx,
             Arc::new(Vec::new()),
             0,
-            crate::plugin::PluginManager::new_inert_for_test(),
+            crate::plugin::PluginManager::new_inert_for_test_at(data_dir),
             data_dir.join("actions.json").to_string_lossy().into_owned(),
             data_dir
                 .join("settings.json")
@@ -2532,6 +2960,171 @@ mod tests {
                 probe_initialized_at_unix_ms: 1,
             },
         }
+    }
+
+    fn phase2_fixture_json(
+        surface: &str,
+        plugins: &[&str],
+        empty_context: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 4,
+            "fixture_id": format!("jump-mode-m13-{surface}-v1"),
+            "scenario": format!("phase2-{surface}"),
+            "phase2_surface": surface,
+            "qa_empty_paste_invocation_context": empty_context,
+            "experimental_jump_mode_enabled": true,
+            "enabled_plugins": plugins,
+            "action_count": 0,
+            "safety": {
+                "profile_isolated_by_working_directory": true,
+                "notes_path_supplied_by_ml_notes_dir": true,
+                "mkmacro_plugin_enabled": surface == "mkmacro",
+                "clipboard_modify_plugin_enabled": false,
+                "macros_enabled": false,
+                "network_plugin_enabled": false,
+                "custom_actions_present": false,
+                "paste_next_hotkey_enabled": false,
+                "paste_cancel_hotkey_enabled": false,
+                "qa_empty_paste_invocation_context": empty_context
+            }
+        })
+    }
+
+    #[test]
+    fn phase2_fixture_capability_requires_exact_surface_identity_and_safe_allowlist() {
+        let request = Phase2DialogRequest {
+            surface: Phase2Surface::Paste,
+            use_empty_paste_invocation_context: true,
+        };
+        let safe = phase2_fixture_json("paste", &["notes", "paste_sequence"], true);
+        assert!(validate_phase2_fixture_capability(&safe, request).is_ok());
+
+        let unsafe_allowlist =
+            phase2_fixture_json("paste", &["notes", "paste_sequence", "clipboard"], true);
+        assert!(validate_phase2_fixture_capability(&unsafe_allowlist, request).is_err());
+
+        let mut stale_identity = safe.clone();
+        stale_identity["fixture_id"] = serde_json::json!("other-profile");
+        assert!(validate_phase2_fixture_capability(&stale_identity, request).is_err());
+
+        let mut missing_isolation = safe;
+        missing_isolation["safety"]["profile_isolated_by_working_directory"] =
+            serde_json::json!(false);
+        assert!(validate_phase2_fixture_capability(&missing_isolation, request).is_err());
+    }
+
+    #[test]
+    fn phase2_request_is_root_f11_and_empty_context_is_paste_only() {
+        let manifest = RequestManifest {
+            run_id: "phase2".into(),
+            request_id: "paste".into(),
+            target: CaptureTarget::Root,
+            trigger: CaptureTrigger::F11,
+            capture_count: 16,
+            diagnostics: false,
+            jump_mode_observation: Some(JumpModeObservationRequest {
+                wait_for_active_hints: false,
+                phase2: Some(Phase2DialogRequest {
+                    surface: Phase2Surface::Paste,
+                    use_empty_paste_invocation_context: true,
+                }),
+            }),
+            output_dir: PathBuf::from("capture"),
+            fixture_manifest_sha256: "a".repeat(64),
+            build_receipt_identity: "test-build".into(),
+        };
+        assert!(validate_manifest(&manifest).is_ok());
+
+        let mut invalid = manifest;
+        invalid.jump_mode_observation.as_mut().unwrap().phase2 = Some(Phase2DialogRequest {
+            surface: Phase2Surface::Settings,
+            use_empty_paste_invocation_context: true,
+        });
+        assert!(validate_manifest(&invalid).is_err());
+    }
+
+    #[test]
+    fn todo_dialog_observation_reports_registry_target_generation() {
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let app = test_launcher_app(&ctx, directory.path());
+        let expected_generation = app.todo_dialog.jump_mode_target_generation().0;
+        let state = qa_dialog_state(
+            &app,
+            &ctx,
+            super::super::jump_mode::ui::NavigationOwner::Todo { instance: 9 },
+            &[],
+        )
+        .unwrap();
+
+        assert_ne!(expected_generation, 0);
+        assert_eq!(state.target_generation, Some(expected_generation));
+    }
+
+    #[test]
+    fn mkmacro_observation_separates_selected_step_from_actual_table_focus() {
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = test_launcher_app(&ctx, directory.path());
+        app.mkmacro_dialog.create_macro();
+        let macro_id = app.mkmacro_dialog.selected_macro_id.unwrap();
+        let step_id = 42;
+        app.mkmacro_dialog
+            .selected_macro_mut()
+            .unwrap()
+            .steps
+            .push(crate::mkmacro::MkStep {
+                id: step_id,
+                enabled: false,
+                breakpoint: false,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: crate::mkmacro::MkErrorPolicy::Stop,
+                metadata: Default::default(),
+                action: crate::mkmacro::MkAction::Delay(crate::mkmacro::MkDelayPayload {
+                    mode: crate::mkmacro::MkDelayMode::Fixed,
+                    fixed_ms: 0,
+                    minimum_ms: 0,
+                    maximum_ms: 0,
+                }),
+            });
+        app.mkmacro_dialog.selection.replace([step_id]);
+        let table_id = app
+            .mkmacro_dialog
+            .qa_observation(&ctx)
+            .table_focus_id
+            .unwrap();
+        ctx.memory_mut(|memory| memory.request_focus(table_id));
+
+        let table_focused = qa_dialog_state(
+            &app,
+            &ctx,
+            super::super::jump_mode::ui::NavigationOwner::MkMacro { instance: 11 },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(table_focused.mkmacro_selected_id, Some(macro_id));
+        assert_eq!(table_focused.mkmacro_selected_step_ids, Some(vec![step_id]));
+        assert_eq!(
+            table_focused.mkmacro_table_focus_id,
+            Some(format!("{table_id:?}"))
+        );
+        assert_eq!(table_focused.mkmacro_table_focused, Some(true));
+
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("other-native-widget")));
+        let other_widget_focused = qa_dialog_state(
+            &app,
+            &ctx,
+            super::super::jump_mode::ui::NavigationOwner::MkMacro { instance: 11 },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            other_widget_focused.mkmacro_selected_step_ids,
+            Some(vec![step_id])
+        );
+        assert_eq!(other_widget_focused.mkmacro_table_focused, Some(false));
     }
 
     fn eligible_surface() -> SurfaceEligibility {
@@ -2616,6 +3209,7 @@ mod tests {
             diagnostics_enabled: false,
             jump_mode_observation_enabled: false,
             wait_for_active_hints: false,
+            phase2_request: None,
             activation_count: 0,
             last_action: None,
             tab_processed_count: 0,
@@ -3001,6 +3595,7 @@ mod tests {
             diagnostics: false,
             jump_mode_observation: Some(JumpModeObservationRequest {
                 wait_for_active_hints: true,
+                phase2: None,
             }),
             output_dir: PathBuf::from("capture"),
             fixture_manifest_sha256: "a".repeat(64),

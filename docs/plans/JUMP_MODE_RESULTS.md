@@ -1,11 +1,11 @@
 # Jump Mode Results
 
-Implementation is in progress. M00–M12 are complete, including complex controls and representative MkMacro integration. M13–M15 remain pending. Phase 1 native evidence is accepted; native Settings/dialog/complex-control evidence remains pending.
+Implementation is in progress. M00–M12 are complete, including complex controls and representative MkMacro integration. M13-A safe fixture/observation foundation is accepted; native workflow/evidence work remains active. M14–M15 remain pending. Phase 1 native evidence is accepted; native Settings/dialog/complex-control evidence remains pending.
 
 - Branch: feat/jump-mode-2026-10-19-c7e42.
 - Starting SHA: 8f94b003a12853735d1cb4689c6ec4e53c4ace8e.
-- Latest completed checkpoint: dae06ea7008b7e6c148800cb211707e681da0c2f (M12-A).
-- All checkpoint commits through M12-A were pushed normally to origin; no local-only task commits.
+- Latest completed checkpoint: b7a1e4cb9622a51429f2d761155e5840dc3559d3 (M12-B).
+- All checkpoint commits through M12-B were pushed normally to origin; no local-only task commits.
 - Current ownership, exact historical commands, failures and next action: [execution ledger](JUMP_MODE_EXECUTION.md).
 - This report consolidates accepted results. Earlier failed evidence remains unchanged in the ignored raw evidence directory.
 
@@ -69,7 +69,7 @@ Settings registration covers all eight top-level section toggles, Expand/Collaps
 | M10 | complete | M10-A63 tests; M10-B67 tests and scoped review; native evidence reserved M13 |
 | M11 | complete | Notes/Todo and Timer/Paste; repaired final83tests + scoped review clean |
 | M12 | complete | M12-A89tests; M12-B96tests + scoped review closed3P2s |
-| M13 | pending | Extended native screenshots and control semantics |
+| M13 | in_progress | M13-A foundation accepted (2fixture+5QA+6compatibility); native workflow/evidence next |
 | M14 | pending | Focused reliability, after measurements, Clippy and review |
 | M15 | pending | Final representative native smoke, consolidated final status/handoff |
 
@@ -95,6 +95,16 @@ M12-A adds distinct thumb/numeric targets to the five existing Settings float ro
 Recognized native combos require exactly one current owned anchor, actual foreground popup layer and focus in the parent or that popup. The invisible sizing pass and owner-transition passes expose no eligible targets; only narrow anchor provenance survives until the actual popup is interactive. Unknown/foreign/stale popups remain blocked. Existing inline Todo/Paste confirmations retain their separate child scopes. Real foreign Foreground TextEdit regression proves its leader/text remain untouched with the combo still open.
 
 Actual native-widget tests cover focus without mutation, later numeric/radio/text actions, multiline typing/newline, combo option focus/activation/Escape, first and repeated slider arrows and continuous Todo priority arrows at0/255. A final focused3/3 run passed, then the literal combined filter passed89/89. Early integer/no-op, range, first-arrow focus and fixture-kinetic-scroll failures are documented in the execution ledger. Narrow vendored fixes clamp keyboard increments, give zero-decimal keyboard input a meaningful signed step without changing pointer sensitivity, and allow native key filters on newly focused widgets. One-shot focus seeds native editor/slider filters; exact owned TextEntry identity preserves focus across legitimate save generations. Scoped review closed both popup and numeric/focus findings; no high/medium finding remains. Native control evidence is still pending M13.
+## M13-A native fixture and observation foundation
+
+Every newly generated profile now seeds isolated typed Todo, alarm, clipboard/history, snippet, legacy macro, Paste Sequence and MkMacro stores before constructors, regardless of plugin allowlist. Production loaders, MkMacroStore save/reopen, semantic validation and an in-memory recorder conflict probe verify the fixture. Macros and steps are disabled, no macro hotkey is bound, and the recorder chord is an unsent Ctrl+Alt+Shift+F24. Strict fixture/safety manifests reject unknown fields. Next/Cancel remain None and normal/error toasts remain enabled.
+
+An explicit ROOT/F11 Phase2-Paste QA request must match the fixture hash, identity, schema, surface and isolation/safety flags before the existing paste:open route can choose an empty invocation context. The choice happens before OS clipboard capture; absent/default requests keep the existing production capture path. Only clipboard-presence booleans are exposed. No clipboard mutation, playback, recording or native input occurred during this checkpoint.
+
+The retained observer adds structured active owner, surface/instance/parent, semantic target and generation facts, plus named read-only dialog snapshots. Existing ROOT/query behavior remains intact. Todo reports the production target generation; MkMacro reports logical selection and actual expected-table focus independently, preserving row focus truth. Both review findings were repaired and their regressions passed.
+
+Verification: fixture target2/2 (5skipped), new QA/context tests5/5 (5923skipped), existing ROOT/query/activation compatibility6/6 (5922skipped), all exit0. Exact commands/run IDs and normal compiler repairs are in the execution ledger. Scoped rustfmt/diff checks pass; unrelated playback formatting churn was removed. These checks establish the foundation; native workflows, control value transitions, screenshots and cleanup proof remain M13-B work.
+
 ## Actual native evidence
 
 All raw paths are under G:/Repos/rust/Multi_Launcher/dev/jump_mode/evidence/. Each accepted run retains summary.md, scenarios.json, events.jsonl, manifest, PNG/receipt/hash bindings and process_lifecycle.json. Parent/reviewer rechecked identities, frame/pass and owned cleanup.

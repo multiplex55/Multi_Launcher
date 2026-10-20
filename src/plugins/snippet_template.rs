@@ -145,6 +145,11 @@ impl SnippetInvocationContext {
             foreground_title,
         }
     }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn has_clipboard_text(&self) -> bool {
+        self.clipboard_text.is_some()
+    }
 }
 
 impl fmt::Debug for SnippetInvocationContext {

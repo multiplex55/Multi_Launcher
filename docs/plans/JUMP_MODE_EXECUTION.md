@@ -6,10 +6,10 @@
 - Initial working tree: clean, including tracked task-input documents. No user changes copied/discarded.
 - Environment: Windows PowerShell; rustc/cargo 1.99.0; Nextest 0.9.135; egui/eframe 0.36.2 with local vendor patches.
 - Git branch creation needed sandbox escalation because .git is read-only in the normal sandbox; authorized creation succeeded.
-- Current milestone: M13 native dialog evidence preparation. M12-A/B accepted; no active source writer until checkpoint commit.
+- Current milestone: M13-A foundation accepted; source frozen for checkpoint. M13-B native workflows/evidence next with /root/implementation.
 - Latest GUI evidence: M09 Dashboard021959Z_abcd5152 PASS; M08 Grid020713Z_48084286 and Disabled020802Z_db3b2dd1 PASS. All15 catalog bindings/cleanup verified; curated Dashboard image includes label fix.
-- Latest checkpoint: dae06ea7008b7e6c148800cb211707e681da0c2f — feat(jump): [M12-A] add native complex-control focus adapters.
-- Push status: all checkpoints through M12-A (dae06ea7) pushed successfully; upstream configured.
+- Latest checkpoint: b7a1e4cb9622a51429f2d761155e5840dc3559d3 — feat(jump): [M12-B] integrate MkMacro visible actions and safe controls.
+- Push status: all checkpoints through M12-B (b7a1e4cb) pushed successfully; upstream configured.
 
 | Milestone | State | Checkpoint / verification | Evidence or dependency |
 |---|---|---|---|
@@ -26,7 +26,7 @@
 | M10 | complete | Shared owner63tests; Settings integration67tests + scoped review | Native Settings evidence follows M13 |
 | M11 | complete | Notes/Todo and Timer/Paste; repaired final83tests + scoped review clean | Native dialog evidence follows M13 |
 | M12 | complete | M12-A89tests; M12-B96tests and all3P2 findings closed | Native extended evidence follows M13 |
-| M13 | pending | Extended native evidence | M08, M10–M12 |
+| M13 | in_progress | Extended native harness source, then evidence | M08, M10–M12 |
 | M14 | pending | Focused reliability and review | M09, M13 |
 | M15 | pending | Final smoke and handoff | All prior outcomes |
 
@@ -370,3 +370,47 @@ The three reviewer regressions passed3/3 (f11a2a5f-c891-4d38-a7a5-ce32a56d8ccb):
 
 Final literal RESULTS union (same command, including all test(jump_mode) cases) passed96/96,5827skipped, exit0; writer session24575 completed. Scoped rustfmt --edition2024 --config skip_children=true --check and git diff --check passed. Source frozen and released by /root/input. Read-only reviewer checking only the three repairs; no native run, recorder or playback activation. Next/Cancel shortcut settings remain None in all new fixtures. Native Phase2 proof remains M13.
 Read-only final closure: all3P2 repairs closed, no newP1/P2. Parent confirmed final96/96 union after reviewer source inspection; source writer released. M12 complete; native Settings/dialog evidence remains M13, then M14/M15 proceed autonomously.
+
+M12-B checkpoint b7a1e4cb9622a51429f2d761155e5840dc3559d3 committed and normal push succeeded. Sole M13-A source ownership assigned to /root/implementation; native runs wait for safety source review. Parent retains docs/Git/curated images. Working tree otherwise only preserved untracked clipboard_modifiers.json.
+
+M13-A bounded plan accepted: strict Phase2 + surface fixture, typed isolated stores before constructors, validated Phase2-Paste-only QA empty context at existing opener, exact retained active-owner structured target observation and redacted state snapshots, focused per-surface native workflow using existing capture/input/cleanup. Small feature-gated read-only owner accessors may expose counts/booleans/fixture IDs/numeric values and editor lengths/newline counts, never raw private text or new mutation routes. Source review precedes native launch. No source writer overlap or parallel Cargo.
+
+M14 read-only preflight: existing ignored jump_mode_cpu_baseline_root_list_frame at src/gui/render.rs retains the baseline100inertaction/3column960x640/9warmup20sample fixture; measured output disposal remains outside clock. Testprofile must match historical baseline; log actual visible target counts for disabled/idle/active comparison. No established Clippy invocation found in .github/README/dev scripts; use standard affected binary+feature invocation unless later source tooling supplies a convention. Feature-off host gate prevents target-generation/registry/painter work; final measurements and lint checks remain pending, not claimed passed.
+M14 read-only coverage preflight (/root/registry): existing tests cover0/1/26/27/100 targets, duplicate labels, prefix/backspace/cancel, repeatedleader, nativefocusloss, ownertransitions, generation/reorder, disabled/clipped entries and query/caret. Only3direct gaps identified: rapidmultiBackspace, held/repeat=true Enter acrossframes, actualresize/reflowduringactiveSession. Future soleM14writer should add these narrow regressions plus samefixtureperfprobe; no broader regressioncampaign. Exactexistingtestnames follow agentpacket. No sourceedits/builds/nativeinput by preflight.
+
+### M14 implementer-ready focused coverage packet
+
+Existing exact tests (read-only registry mapping): empty_map_reports_no_targets_and_can_be_cancelled; hint_lengths_remain_compact_for_representative_populations (0/1/26/27/52/100/1000); assignments_are_unique_prefix_free_and_use_only_uppercase_ascii; duplicate_labels_and_unicode_metadata_keep_distinct_typed_targets; registry_keeps_equal_labels_distinct_and_rejects_duplicate_ids; matching_is_case_insensitive_and_invalid_input_keeps_the_prefix; backspace_and_cancel_clear_prefix_without_resolving_a_target; jump_mode_root_input_deduplicates_text_repeats_and_cancels_without_leaks; jump_mode_disabled_and_owner_loss_preserve_normal_input_ownership; owner_transition_blocks_all_discarded_passes_then_stabilizes; actual_root_navigation_owner_follows_settings_and_foreign_window_layers; opening_settings_on_a_discarded_root_pass_cancels_background_navigation; reconciliation_invalidates_stale_targets_without_reassigning_hints; jump_mode_root_result_targets_follow_visible_clipped_rows_and_cancel_on_generation_change; jump_mode_mkmacro_macro_and_step_targets_keep_native_identity_after_reorder; todo_row_widget_ids_stay_bound_to_entry_when_filter_moves_another_row_to_zero; registry_excludes_disabled_clipped_zero_area_blocked_and_wrong_viewport_targets; jump_mode_focuses_real_settings_controls_and_later_egui_keys_activate_them; jump_mode_actual_query_capture_preserves_text_and_survives_discarded_pass; jump_mode_root_result_hints_select_without_activation_in_list_and_grid_then_fresh_enter_activates_full_action.
+
+Only new behavioral tests recommended: extend existing inputtest with rapid multipleBackspace; extend exactonce rootactivationtest with held/repeat:true Enter acrossframes before release/freshEnter; add activeSession viewport/layoutresize test verifying latest geometry+clipping/stalehandling. Reuse current inert root fixtures, Next/CancelNone, no ordinarymanager/pollers, no OSinput. Keep accepted96 union plus these tests; no fullsuite.
+
+Perfprobe: reuse existing ignored baseline fixture/testprofile, sourceSHA/profile recorded,100actions/3cols/960x640/9warmups20samples per disabled/idle/active state, outputdisposal outsideclock, actualvisibleeligiblecount logged. Existing historic baseline log untouched. No timingassertions or exacthistoricalparity claim. Standard affectedbinary check/build and Clippy with existing feature set; scopedfmt plus rootfmtcheck classification of baseline unrelatedchurn. Newwarnings only; no unrelatedcleanup.
+M13-A parent WIP safety inspection found raw JSON-only Todo/MkMacro validation and all-disabled hotkey validation insufficient to prove recorder compilation. Writer now migrating to production load_todos_typed, MkMacroStore save/reopen, validate_document and an in-memory enabled conflict probe, strict FixtureManifest/SafetyManifest unknown-field rejection plus exact QA fixture schema/identity/isolation checks. QA owner snapshots use named feature-gated read-only structs rather than multi-boolean tuples. No native launch or acceptance claimed before compile/tests/frozen-source review. This was source preflight, not a failed native run.
+M13-A first scoped compile/test boundary reached; source safety reviewer active, no native runner additions or launches. Reviewer found concrete Todo observer mismatch: dialog_state.target_generation used raw generation but registered targets use jump_mode_target_generation hash including filter. Relayed to solewriter for actual productiongeneration snapshot/target consistency regression; no nativePASS claimed. Normal productgeneration and targeteligibilitymustnotbechanged tofitobserver.
+
+M13-A initial bounded reviewer complete: exactly2P2 observation defects. Todo generation mismatch above; MkMacro logicalselectedIDs and opaque focused_widget_id did not expose exact expectedtableID/has_focus, so semantic nativefocus proof was missing. Correct by separate actualtablefocus fact atowner; never falsify rowfocused. Add correct-vs-otherfocus regression. Reviewer found no additional concrete fixtureisolation/defaultbehavior defects: freshprofile typed reloads/semantics, in-memory unsentF24probe, Next/CancelNone/toasts enabled and requestgated Paste bypass before captureclosure were sound. Solewriter handling2P2 with compilerfeedback; freeze foundation and narrowclosure before nativeworkflow extension. Source review doesnotreplacegenerator/tests/receipts/lifecycle/nativeevidence.
+M13-A first targeted command (session51068):
+~~~powershell
+cargo nextest run --cargo-profile fast-dev --features "dev-smoke-binaries qa-framebuffer-capture" --bin jump_mode_fixture -E 'test(all_scenario_profiles_seed_isolated_inert_stores_before_app_construction) | test(fixture_and_safety_manifests_reject_unknown_fields)' --no-fail-fast
+~~~
+First source compiler feedback: SequenceInvocationContext::has_clipboard_text reached private SnippetInvocationContext.clipboard_text. Narrow fix: feature-gated presence accessor at actual snippet owner, delegate from sequence context. Include alongside2observerP2 repairs before scoped rerun; normal compilerfeedback, no user/environmentblocker. No native run or finalpassingcheck claimed yet.
+M13-A initialcompile exit1 onlyprivateSnippetclipboardfield. Narrowowneraccessor fix added. Reviewer boundedclosure confirms bothP2s closedinsource contingent scopedtests: Todo production TargetGeneration method; MkMacro expectedtableID from production navigation::table_id(selectedmacro) plus independent Memory.has_focus, rawrowfocusedtruthunchanged. Regression holds logicalIDsconstant whilechangingactualnativefocus, Todo compares productiongeneration withoutregistry. No newconcretefinding; no build/edit/nativeinputbyreviewer. Sourcewriter rerunningexactfixturecommand then scopedQA/contexttests; nativeworkflows stillunimplemented/notrun.
+
+M13-A correctedfixturetarget compiledfeature-enabledlibrary, then testcrate caught accidentalunwrap on fixture_manifest() directreturn. Writer removedunwrap/unusedimport and reruns exact2fixturetests afterscopedformat. This is localtestcompilefeedback, not fixture/nativebehaviorfailure. Initial longcompile singleactive rustc, no parallelCargo or nativeprocess.
+
+M13-A correctedfixturetests PASS: fb6325d4-b2c2-4aba-a115-024869ffda4e,2passed/5skipped,exit0, sameexact2case commandabove. Establishes allscenarioinertstoreseeding and strictunknownfieldrejection. FocusedlibQArequest/context/Todogeneration/MkMacronativefocus testsnext. No nativeevidenceyet.
+
+## M13-A foundation verification
+
+New focusedlib cases PASS0c51d03a-8257-4c81-b65e-135b3f19d899,5passed/5923skipped,exit0:
+~~~powershell
+cargo nextest run --lib --no-fail-fast --cargo-profile fast-dev --features "dev-smoke-binaries qa-framebuffer-capture" -E 'test(phase2_fixture_capability_requires_exact_surface_identity_and_safe_allowlist) | test(phase2_request_is_root_f11_and_empty_context_is_paste_only) | test(phase2_paste_context_suppression_is_explicit_and_scoped_to_qa_request) | test(todo_dialog_observation_reports_registry_target_generation) | test(mkmacro_observation_separates_selected_step_from_actual_table_focus)'
+~~~
+
+Direct existingROOTobserver compatibility PASSa3da4898-1488-4a23-9ee5-8d199d1f4a33,6passed/5922skipped,exit0:
+~~~powershell
+cargo nextest run --lib --no-fail-fast --cargo-profile fast-dev --features "dev-smoke-binaries qa-framebuffer-capture" -E 'test(jump_mode_observation) | test(jump_mode_observer_recognizes_the_real_registered_query_text_entry_and_hint) | test(activation_observation_counts_only_when_jump_probe_is_opted_in)'
+~~~
+
+Priorfixturetarget2/2 remainsaccepted (fb6325d4-b2c2-4aba-a115-024869ffda4e), no additionalbroadsuite. Formatting-only accidental childtouch in src/paste_sequence/playback.rs removed; no behaviorchange there. Clipboardpresence accessor nowfeaturegatedatSnippetInvocationContextowner, delegatedbySequenceInvocationContext. BothreviewerP2s closedinsource and theirtests passed. Featuregatednamed snapshots expose currentlogicalstate/actualnativefocus; explicitfixture-boundPastecontext keepsnormalroute unchanged. No nativeworkflow added/launched inthisfoundationcheckpoint; M13-B mustaddactualcontrolvalues asneededfornativearrow/comboassertions andrunner/evidence beforeM13complete.
+M13-A foundationacceptedandwriterreleased: scopedrustfmt(skip_children)/diffcheckpassed, parentinspectedactualdiffandreviewclosure. No additionalreviewcycle needed. Commitcoherentfoundationthenbest-effortpush; activatenextwriterforM13-B actualrunner/controlstates/evidence. M13 remainsinprogress; no nativePhase2PASSclaimed.

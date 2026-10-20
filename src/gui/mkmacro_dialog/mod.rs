@@ -351,6 +351,19 @@ pub struct MkMacroDialog {
     package_ui: package_ui::PackageUiState,
 }
 
+#[cfg(feature = "qa-framebuffer-capture")]
+pub(crate) struct MkMacroDialogQaObservation {
+    pub(crate) open: bool,
+    pub(crate) draft_revision: u64,
+    pub(crate) selected_macro_id: Option<u64>,
+    pub(crate) selected_step_ids: Vec<u64>,
+    pub(crate) table_focus_id: Option<eframe::egui::Id>,
+    pub(crate) table_focused: bool,
+    pub(crate) document_macro_count: usize,
+    pub(crate) runtime_active: bool,
+    pub(crate) recorder_active: bool,
+}
+
 #[cfg(test)]
 struct RecordingPreviewTestFacade {
     runtime: Arc<crate::mkmacro::MacroRuntime>,
@@ -5895,6 +5908,34 @@ impl MkMacroDialog {
 
     pub fn draft_revision(&self) -> u64 {
         self.draft_revision
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn qa_observation(&self, ctx: &eframe::egui::Context) -> MkMacroDialogQaObservation {
+        let runtime_active = crate::mkmacro::runtime::snapshot().is_some_and(|snapshot| {
+            matches!(
+                snapshot.state,
+                crate::mkmacro::runtime::RuntimeState::Running
+                    | crate::mkmacro::runtime::RuntimeState::Paused
+                    | crate::mkmacro::runtime::RuntimeState::Stopping
+            )
+        });
+        let recorder_active = crate::mkmacro::runtime::recorder_snapshot()
+            .is_some_and(|snapshot| snapshot.state != crate::mkmacro::RecorderRuntimeState::Idle);
+        let table_focus_id = self.selected_macro_id.map(navigation::table_id);
+        let table_focused =
+            table_focus_id.is_some_and(|id| ctx.memory(|memory| memory.has_focus(id)));
+        MkMacroDialogQaObservation {
+            open: self.open,
+            draft_revision: self.draft_revision,
+            selected_macro_id: self.selected_macro_id,
+            selected_step_ids: self.selection.ids.iter().copied().collect(),
+            table_focus_id,
+            table_focused,
+            document_macro_count: self.draft.macros.len(),
+            runtime_active,
+            recorder_active,
+        }
     }
 
     pub(crate) fn jump_mode_target_generation(&self) -> crate::gui::jump_mode::TargetGeneration {

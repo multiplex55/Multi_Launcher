@@ -25,7 +25,27 @@ pub struct TodoDialog {
     test_row_tag_ids: Vec<(String, egui::Id)>,
 }
 
+#[cfg(feature = "qa-framebuffer-capture")]
+pub(crate) struct TodoQaObservation {
+    pub(crate) open: bool,
+    pub(crate) entry_ids: Vec<String>,
+    pub(crate) pending_clear_confirmation: bool,
+    pub(crate) draft_text_chars: usize,
+    pub(crate) draft_newline_count: usize,
+}
+
 impl TodoDialog {
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn qa_observation(&self) -> TodoQaObservation {
+        TodoQaObservation {
+            open: self.open,
+            entry_ids: self.entries.iter().map(|entry| entry.id.clone()).collect(),
+            pending_clear_confirmation: self.pending_clear_confirm,
+            draft_text_chars: self.text.chars().count(),
+            draft_newline_count: self.text.chars().filter(|ch| *ch == '\n').count(),
+        }
+    }
+
     pub(crate) fn jump_mode_target_generation(&self) -> crate::gui::jump_mode::TargetGeneration {
         use std::hash::{Hash, Hasher};
 

@@ -61,7 +61,7 @@ impl NavigationOwner {
         self == Self::Settings { instance }
     }
 
-    fn owns_surface(self, surface: &SurfaceId) -> bool {
+    pub(crate) fn owns_surface(self, surface: &SurfaceId) -> bool {
         match surface {
             SurfaceId::Dashboard | SurfaceId::LauncherResults => self == Self::Root,
             SurfaceId::Settings { instance } => self.owns_settings(*instance),

@@ -181,6 +181,17 @@ pub(crate) struct PasteSequenceDialog {
     saved_run: Option<SavedRunPresentation>,
 }
 
+#[cfg(feature = "qa-framebuffer-capture")]
+pub(crate) struct PasteSequenceDialogQaObservation {
+    pub(crate) open: bool,
+    pub(crate) invocation_context_present: bool,
+    pub(crate) invocation_context_has_clipboard_text: bool,
+    pub(crate) saved_sequence_ids: Vec<u64>,
+    pub(crate) selected_sequence_id: Option<u64>,
+    pub(crate) draft_step_count: usize,
+    pub(crate) remove_confirmation_open: bool,
+}
+
 impl Default for PasteSequenceDialog {
     fn default() -> Self {
         Self {
@@ -213,6 +224,28 @@ impl Default for PasteSequenceDialog {
 }
 
 impl PasteSequenceDialog {
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn qa_observation(&self) -> PasteSequenceDialogQaObservation {
+        PasteSequenceDialogQaObservation {
+            open: self.open,
+            invocation_context_present: self.context.is_some(),
+            invocation_context_has_clipboard_text: self
+                .context
+                .as_ref()
+                .is_some_and(SequenceInvocationContext::has_clipboard_text),
+            saved_sequence_ids: self.snapshot.as_ref().map_or_else(Vec::new, |snapshot| {
+                snapshot
+                    .sequences()
+                    .iter()
+                    .map(|sequence| sequence.id.get())
+                    .collect()
+            }),
+            selected_sequence_id: self.selected_id.map(SequenceId::get),
+            draft_step_count: self.draft.steps.len(),
+            remove_confirmation_open: self.remove_confirmation.is_some(),
+        }
+    }
+
     pub(crate) fn sequence_store_path(&self) -> &std::path::Path {
         self.store_path.as_path()
     }

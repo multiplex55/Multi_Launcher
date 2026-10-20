@@ -14,6 +14,14 @@ pub struct TimerDialog {
     focus_duration_next_frame: bool,
 }
 
+#[cfg(feature = "qa-framebuffer-capture")]
+pub(crate) struct TimerDialogQaObservation {
+    pub(crate) open: bool,
+    pub(crate) mode: &'static str,
+    pub(crate) duration_text_chars: usize,
+    pub(crate) label_text_chars: usize,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 enum Mode {
     #[default]
@@ -22,6 +30,20 @@ enum Mode {
 }
 
 impl TimerDialog {
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn qa_observation(&self) -> TimerDialogQaObservation {
+        let (mode, value) = match self.mode {
+            Mode::Timer => ("timer", self.duration.as_str()),
+            Mode::Alarm => ("alarm", self.time.as_str()),
+        };
+        TimerDialogQaObservation {
+            open: self.open,
+            mode,
+            duration_text_chars: value.chars().count(),
+            label_text_chars: self.label.chars().count(),
+        }
+    }
+
     pub fn open_timer(&mut self) {
         self.mode = Mode::Timer;
         self.open = true;

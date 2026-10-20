@@ -15,6 +15,27 @@ use crate::commands::{
 use super::{LauncherApp, Toast, ToastKind, ToastOptions};
 use crate::performance::track_c::EventOrigin;
 
+fn choose_paste_open_context(
+    use_empty_qa_context: bool,
+    capture_context: impl FnOnce() -> Result<
+        crate::paste_sequence::SequenceInvocationContext,
+        crate::paste_sequence::SequencePreflightError,
+    >,
+) -> Result<
+    crate::paste_sequence::SequenceInvocationContext,
+    crate::paste_sequence::SequencePreflightError,
+> {
+    if use_empty_qa_context {
+        Ok(crate::paste_sequence::SequenceInvocationContext::new(
+            chrono::Local::now().fixed_offset(),
+            None,
+            None,
+        ))
+    } else {
+        capture_context()
+    }
+}
+
 fn sequence_source_requirements(sequence: &crate::paste_sequence::Sequence) -> (bool, bool) {
     let mut snippets = false;
     let mut history = false;
@@ -210,7 +231,13 @@ impl DialogCommandHost for LauncherApp {
     }
 
     fn open_paste_sequence_dialog(&mut self) {
-        let context = self.capture_sequence_context(crate::commands::ActivationSource::Click);
+        #[cfg(feature = "qa-framebuffer-capture")]
+        let use_empty_qa_context = self.qa_framebuffer_use_empty_paste_invocation_context();
+        #[cfg(not(feature = "qa-framebuffer-capture"))]
+        let use_empty_qa_context = false;
+        let context = choose_paste_open_context(use_empty_qa_context, || {
+            self.capture_sequence_context(crate::commands::ActivationSource::Click)
+        });
         self.paste_sequence_dialog.open_with_context(context);
         self.focus_panel(super::Panel::PasteSequenceDialog);
     }
@@ -2136,6 +2163,38 @@ fn allow_radial_queryexec_activation(
 #[cfg(test)]
 pub(in crate::gui) mod tests {
     use super::*;
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    #[test]
+    fn phase2_paste_context_suppression_is_explicit_and_scoped_to_qa_request() {
+        let mut capture_called = false;
+        let empty = choose_paste_open_context(true, || {
+            capture_called = true;
+            Err(crate::paste_sequence::SequencePreflightError::InvalidSequence)
+        })
+        .unwrap();
+        assert!(
+            !capture_called,
+            "QA Paste open must bypass the OS clipboard read"
+        );
+        assert!(!empty.has_clipboard_text());
+
+        let normal_context = crate::paste_sequence::SequenceInvocationContext::new(
+            chrono::Local::now().fixed_offset(),
+            Some("test-only sentinel".into()),
+            None,
+        );
+        let normal = choose_paste_open_context(false, || {
+            capture_called = true;
+            Ok(normal_context)
+        })
+        .unwrap();
+        assert!(
+            capture_called,
+            "unrequested Paste open keeps the production path"
+        );
+        assert!(normal.has_clipboard_text());
+    }
 
     pub(crate) struct AppPastePlatform {
         now: std::time::Instant,

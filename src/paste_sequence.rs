@@ -881,6 +881,11 @@ impl SequenceInvocationContext {
     pub(crate) fn origin(&self) -> Option<&SequenceTarget> {
         self.origin.as_ref()
     }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn has_clipboard_text(&self) -> bool {
+        self.snippet_context.has_clipboard_text()
+    }
 }
 
 impl fmt::Debug for SequenceInvocationContext {
