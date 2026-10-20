@@ -14,6 +14,20 @@ use super::{
     resolve_valid_roots,
 };
 
+macro_rules! register_filter_target {
+    ($scope:expr, $ui:expr, $response:expr, $identity:expr, $label:expr, $kind:expr, $order:expr) => {
+        super::register_jump_mode_target(
+            $scope.as_ref(),
+            $ui,
+            $response,
+            $identity,
+            $label,
+            $kind,
+            $order,
+        )
+    };
+}
+
 impl FileSearchRequestError {
     pub fn user_message(&self) -> &'static str {
         match self {
@@ -105,40 +119,107 @@ impl FileSearchDialogState {
     }
 
     pub fn filters_ui(&mut self, ui: &mut egui::Ui) {
+        let mut scope = None;
+        let mut visual_order = 0;
+        self.filters_ui_with_jump_mode(ui, &mut scope, &mut visual_order, true, true);
+    }
+
+    pub(super) fn filters_ui_with_jump_mode(
+        &mut self,
+        ui: &mut egui::Ui,
+        scope: &mut Option<crate::gui::jump_mode::ui::JumpModeScope>,
+        visual_order: &mut u64,
+        first_ui_pass: bool,
+        navigation_owner: bool,
+    ) {
+        let commit_actions = first_ui_pass && navigation_owner;
         let prefs_before = self.ui_preferences.clone();
-        egui::CollapsingHeader::new("Filters")
+        if !self.excluded_directory_names_overridden {
+            self.ui_preferences.excluded_directory_names =
+                self.settings.excluded_directory_names.clone();
+            self.excluded_directory_names_overridden = true;
+        }
+        let mut exclusion_structure_changed = false;
+        let filters_header = egui::CollapsingHeader::new("Filters")
+            .id_salt("file-search-filters")
             .default_open(false)
             .show(ui, |ui| {
                 match self.selected_mode {
                     FileSearchMode::Filename => {
                         ui.label("Filename matching");
                         ui.horizontal(|ui| {
-                            ui.radio_value(
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.filename_match_mode,
                                 FilenameMatchMode::RankedSubstring,
                                 "Ranked substring",
                             );
-                            ui.radio_value(
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/filename/match/ranked-substring",
+                                "Ranked substring",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
+                            );
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.filename_match_mode,
                                 FilenameMatchMode::Fuzzy,
                                 "Fuzzy",
+                            );
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/filename/match/fuzzy",
+                                "Fuzzy",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
                             );
                         });
                     }
                     FileSearchMode::Content => {
                         ui.label("Content matching");
                         ui.horizontal(|ui| {
-                            ui.radio_value(
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.content_match_mode,
                                 ContentMatchMode::ExactPhrase,
                                 "Exact phrase",
                             );
-                            ui.radio_value(
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/content/match/exact-phrase",
+                                "Exact phrase",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
+                            );
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.content_match_mode,
                                 ContentMatchMode::AnyTerm,
                                 "Match any term",
                             );
-                            ui.checkbox(&mut self.ui_preferences.whole_word, "Whole word");
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/content/match/any-term",
+                                "Match any term",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
+                            );
+                            let response =
+                                ui.checkbox(&mut self.ui_preferences.whole_word, "Whole word");
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/content/whole-word",
+                                "Whole word",
+                                crate::gui::jump_mode::TargetKind::Checkbox,
+                                visual_order
+                            );
                         });
                     }
                 }
@@ -148,80 +229,206 @@ impl FileSearchDialogState {
                     FileSearchMode::Filename => {
                         ui.label("Sort");
                         ui.horizontal_wrapped(|ui| {
-                            ui.radio_value(
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.filename_sort,
                                 FileSearchFilenameSort::Relevance,
                                 "Relevance",
                             );
-                            ui.radio_value(
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/filename/sort/relevance",
+                                "Relevance",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
+                            );
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.filename_sort,
                                 FileSearchFilenameSort::FilenameAscending,
                                 "Filename ↑",
                             );
-                            ui.radio_value(
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/filename/sort/filename-ascending",
+                                "Filename ascending",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
+                            );
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.filename_sort,
                                 FileSearchFilenameSort::FilenameDescending,
                                 "Filename ↓",
                             );
-                            ui.radio_value(
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/filename/sort/filename-descending",
+                                "Filename descending",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
+                            );
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.filename_sort,
                                 FileSearchFilenameSort::FullPathAscending,
                                 "Path ↑",
                             );
-                            ui.radio_value(
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/filename/sort/path-ascending",
+                                "Path ascending",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
+                            );
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.filename_sort,
                                 FileSearchFilenameSort::ModifiedNewest,
                                 "Modified newest",
                             );
-                            ui.radio_value(
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/filename/sort/modified-newest",
+                                "Modified newest",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
+                            );
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.filename_sort,
                                 FileSearchFilenameSort::ModifiedOldest,
                                 "Modified oldest",
                             );
-                            ui.radio_value(
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/filename/sort/modified-oldest",
+                                "Modified oldest",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
+                            );
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.filename_sort,
                                 FileSearchFilenameSort::SizeLargest,
                                 "Size largest",
                             );
-                            ui.radio_value(
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/filename/sort/size-largest",
+                                "Size largest",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
+                            );
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.filename_sort,
                                 FileSearchFilenameSort::SizeSmallest,
                                 "Size smallest",
+                            );
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/filename/sort/size-smallest",
+                                "Size smallest",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
                             );
                         });
                     }
                     FileSearchMode::Content => {
                         ui.label("Sort");
                         ui.horizontal_wrapped(|ui| {
-                            ui.radio_value(
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.content_sort,
                                 FileSearchContentSort::DiscoveryOrder,
                                 "Discovery",
                             );
-                            ui.radio_value(
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/content/sort/discovery",
+                                "Discovery order",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
+                            );
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.content_sort,
                                 FileSearchContentSort::PathThenLine,
                                 "Path then line",
                             );
-                            ui.radio_value(
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/content/sort/path-line",
+                                "Path then line",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
+                            );
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.content_sort,
                                 FileSearchContentSort::MatchCountDescending,
                                 "Match count",
                             );
-                            ui.radio_value(
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/content/sort/match-count",
+                                "Match count",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
+                            );
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.content_sort,
                                 FileSearchContentSort::ModifiedNewest,
                                 "Modified newest",
                             );
-                            ui.radio_value(
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/content/sort/modified-newest",
+                                "Modified newest",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
+                            );
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.content_sort,
                                 FileSearchContentSort::FilenameRelevance,
                                 "Filename relevance",
                             );
-                            ui.radio_value(
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/content/sort/filename-relevance",
+                                "Filename relevance",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
+                            );
+                            let response = ui.radio_value(
                                 &mut self.ui_preferences.content_sort,
                                 FileSearchContentSort::LineNumber,
                                 "Line number",
+                            );
+                            register_filter_target!(
+                                scope,
+                                ui,
+                                &response,
+                                "filters/content/sort/line-number",
+                                "Line number",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order
                             );
                         });
                     }
@@ -231,20 +438,47 @@ impl FileSearchDialogState {
                     ui.label("Type");
                     let enabled = self.selected_mode == FileSearchMode::Filename;
                     ui.add_enabled_ui(enabled, |ui| {
-                        ui.radio_value(
+                        let response = ui.radio_value(
                             &mut self.ui_preferences.file_type_filter,
                             FileTypeFilter::FilesOnly,
                             "Files",
                         );
-                        ui.radio_value(
+                        register_filter_target!(
+                            scope,
+                            ui,
+                            &response,
+                            "filters/type/files",
+                            "Files",
+                            crate::gui::jump_mode::TargetKind::Selectable,
+                            visual_order
+                        );
+                        let response = ui.radio_value(
                             &mut self.ui_preferences.file_type_filter,
                             FileTypeFilter::DirectoriesOnly,
                             "Directories",
                         );
-                        ui.radio_value(
+                        register_filter_target!(
+                            scope,
+                            ui,
+                            &response,
+                            "filters/type/directories",
+                            "Directories",
+                            crate::gui::jump_mode::TargetKind::Selectable,
+                            visual_order
+                        );
+                        let response = ui.radio_value(
                             &mut self.ui_preferences.file_type_filter,
                             FileTypeFilter::FilesAndDirectories,
                             "Files and directories",
+                        );
+                        register_filter_target!(
+                            scope,
+                            ui,
+                            &response,
+                            "filters/type/files-and-directories",
+                            "Files and directories",
+                            crate::gui::jump_mode::TargetKind::Selectable,
+                            visual_order
                         );
                     })
                     .response
@@ -256,25 +490,46 @@ impl FileSearchDialogState {
                 ui.horizontal(|ui| {
                     ui.label("Include extensions");
                     let mut text = extension_list_text(&self.ui_preferences.included_extensions);
-                    if ui.text_edit_singleline(&mut text).changed() {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut text)
+                            .id_salt("file-search-included-extensions"),
+                    );
+                    register_filter_target!(
+                        scope,
+                        ui,
+                        &response,
+                        "filters/extensions/include",
+                        "Include extensions",
+                        crate::gui::jump_mode::TargetKind::TextEntry,
+                        visual_order
+                    );
+                    if response.changed() && commit_actions {
                         self.ui_preferences.included_extensions = normalize_extension_input(&text);
                     }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Exclude extensions");
                     let mut text = extension_list_text(&self.ui_preferences.excluded_extensions);
-                    if ui.text_edit_singleline(&mut text).changed() {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut text)
+                            .id_salt("file-search-excluded-extensions"),
+                    );
+                    register_filter_target!(
+                        scope,
+                        ui,
+                        &response,
+                        "filters/extensions/exclude",
+                        "Exclude extensions",
+                        crate::gui::jump_mode::TargetKind::TextEntry,
+                        visual_order
+                    );
+                    if response.changed() && commit_actions {
                         self.ui_preferences.excluded_extensions = normalize_extension_input(&text);
                     }
                 });
 
                 ui.separator();
                 ui.label("Excluded directories");
-                if !self.excluded_directory_names_overridden {
-                    self.ui_preferences.excluded_directory_names =
-                        self.settings.excluded_directory_names.clone();
-                    self.excluded_directory_names_overridden = true;
-                }
                 let mut remove = None;
                 for (idx, value) in self
                     .ui_preferences
@@ -283,34 +538,108 @@ impl FileSearchDialogState {
                     .enumerate()
                 {
                     ui.horizontal(|ui| {
-                        ui.text_edit_singleline(value);
-                        if ui.button("Remove").clicked() {
+                        let response = ui.add(
+                            egui::TextEdit::singleline(value)
+                                .id_salt(("file-search-exclusion", idx)),
+                        );
+                        register_filter_target!(
+                            scope,
+                            ui,
+                            &response,
+                            format!("filters/exclusions/{idx}/name"),
+                            "Excluded directory",
+                            crate::gui::jump_mode::TargetKind::TextEntry,
+                            visual_order
+                        );
+                        exclusion_structure_changed |= response.changed() && commit_actions;
+                        let remove_response = ui.button("Remove");
+                        register_filter_target!(
+                            scope,
+                            ui,
+                            &remove_response,
+                            format!("filters/exclusions/{idx}/remove"),
+                            "Remove exclusion",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            visual_order
+                        );
+                        if remove_response.clicked() && commit_actions {
                             remove = Some(idx);
                         }
                     });
                 }
                 if let Some(idx) = remove {
                     self.ui_preferences.excluded_directory_names.remove(idx);
+                    exclusion_structure_changed = true;
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Add exclusion").clicked() {
+                    let add = ui.button("Add exclusion");
+                    register_filter_target!(
+                        scope,
+                        ui,
+                        &add,
+                        "filters/exclusions/add",
+                        "Add exclusion",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        visual_order
+                    );
+                    if add.clicked() && commit_actions {
                         self.ui_preferences
                             .excluded_directory_names
                             .push(String::new());
+                        exclusion_structure_changed = true;
                     }
-                    if ui.button("Restore defaults").clicked() {
+                    let restore = ui.button("Restore defaults");
+                    register_filter_target!(
+                        scope,
+                        ui,
+                        &restore,
+                        "filters/exclusions/restore",
+                        "Restore defaults",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        visual_order
+                    );
+                    if restore.clicked() && commit_actions {
                         self.ui_preferences.excluded_directory_names =
                             self.settings.excluded_directory_names.clone();
                         self.excluded_directory_names_overridden = true;
+                        exclusion_structure_changed = true;
                     }
-                    if ui.button("Clear").clicked() {
+                    let clear = ui.button("Clear");
+                    register_filter_target!(
+                        scope,
+                        ui,
+                        &clear,
+                        "filters/exclusions/clear",
+                        "Clear exclusions",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        visual_order
+                    );
+                    if clear.clicked() && commit_actions {
                         self.ui_preferences.excluded_directory_names.clear();
                         self.excluded_directory_names_overridden = true;
+                        exclusion_structure_changed = true;
                     }
                 });
             });
-        if self.ui_preferences != prefs_before {
+        register_filter_target!(
+            scope,
+            ui,
+            &filters_header.header_response,
+            "filters/toggle",
+            "Filters",
+            crate::gui::jump_mode::TargetKind::Button,
+            visual_order
+        );
+        if commit_actions
+            && (filters_header.header_response.clicked() || exclusion_structure_changed)
+        {
+            self.invalidate_jump_mode_form(scope);
+        }
+        if commit_actions && self.ui_preferences != prefs_before {
             self.handle_sort_changed();
+        }
+        if !commit_actions {
+            self.ui_preferences = prefs_before;
         }
         if self.filters_changed_since_last_search() {
             ui.colored_label(

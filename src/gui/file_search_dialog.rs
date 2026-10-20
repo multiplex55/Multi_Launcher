@@ -34,6 +34,26 @@ pub const FILE_SEARCH_RESULT_LIST_ID_SOURCE: &str = "file_search_result_list";
 pub const FILE_SEARCH_REFINEMENT_FIELD_ID_SOURCE: &str = "file_search_refine_text";
 pub const FILE_SEARCH_CONTEXT_MENU_ID_SOURCE: &str = "file_search_context_menu";
 
+pub(super) fn register_jump_mode_target(
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    local_identity: impl AsRef<str>,
+    label: impl Into<String>,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: &mut u64,
+) {
+    crate::gui::jump_mode::ui::register_and_apply_target(
+        scope,
+        ui,
+        response,
+        local_identity,
+        label,
+        kind,
+        visual_order,
+    );
+}
+
 impl From<FileSearchFilenameSort> for crate::file_search::sorting::FilenameSort {
     fn from(value: FileSearchFilenameSort) -> Self {
         match value {
@@ -358,6 +378,7 @@ pub struct FileSearchDialogState {
     pub excluded_directory_names_overridden: bool,
     pub last_submitted_request: Option<SearchRequest>,
     pub pending_sort_change: bool,
+    pub(crate) jump_mode_form_generation: u64,
 }
 
 impl Default for FileSearchDialogState {
@@ -394,6 +415,7 @@ impl Default for FileSearchDialogState {
             excluded_directory_names_overridden: false,
             last_submitted_request: None,
             pending_sort_change: false,
+            jump_mode_form_generation: 0,
         }
     }
 }
@@ -408,6 +430,20 @@ fn validate_ripgrep_selection(path: &std::path::Path) -> Result<PathBuf, String>
 }
 
 impl FileSearchDialogState {
+    pub(crate) fn jump_mode_target_generation(&self) -> crate::gui::jump_mode::TargetGeneration {
+        crate::gui::jump_mode::TargetGeneration(self.jump_mode_form_generation)
+    }
+
+    fn invalidate_jump_mode_form(
+        &mut self,
+        scope: &mut Option<crate::gui::jump_mode::ui::JumpModeScope>,
+    ) {
+        self.jump_mode_form_generation = self.jump_mode_form_generation.wrapping_add(1);
+        // A form mutation must not leave targets collected under the prior
+        // structural identity available for the remainder of this pass.
+        *scope = None;
+    }
+
     pub fn search_field_id() -> egui::Id {
         egui::Id::new(FILE_SEARCH_SEARCH_FIELD_ID_SOURCE)
     }
@@ -438,6 +474,9 @@ impl FileSearchDialogState {
     }
 
     pub fn open_with_mode(&mut self, mode: FileSearchMode) {
+        if self.selected_mode != mode {
+            self.jump_mode_form_generation = self.jump_mode_form_generation.wrapping_add(1);
+        }
         self.selected_mode = mode;
         self.open();
     }
@@ -449,10 +488,14 @@ impl FileSearchDialogState {
         text: String,
         coordinator: &mut SearchCoordinator,
     ) -> Option<SearchId> {
+        if self.selected_mode != mode {
+            self.jump_mode_form_generation = self.jump_mode_form_generation.wrapping_add(1);
+        }
         self.selected_mode = mode;
         if let Some(root) = root {
             self.selected_scope = FileSearchScopeMode::Directory;
             self.custom_roots = vec![root.display().to_string()];
+            self.jump_mode_form_generation = self.jump_mode_form_generation.wrapping_add(1);
         }
         self.search_text = text;
         self.open();
@@ -489,6 +532,7 @@ impl FileSearchDialogState {
         self.request_root_focus = true;
         if self.selected_scope == FileSearchScopeMode::Directory && self.custom_roots.is_empty() {
             self.custom_roots.push(String::new());
+            self.jump_mode_form_generation = self.jump_mode_form_generation.wrapping_add(1);
         }
     }
 
@@ -1042,6 +1086,17 @@ impl FileSearchDialogState {
         ctx: &egui::Context,
         coordinator: &mut SearchCoordinator,
     ) -> Vec<FileSearchUiCommand> {
+        self.ui_with_jump_mode_scope(ctx, coordinator, None, true, true)
+    }
+
+    pub(crate) fn ui_with_jump_mode_scope(
+        &mut self,
+        ctx: &egui::Context,
+        coordinator: &mut SearchCoordinator,
+        mut jump_mode_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+        first_ui_pass: bool,
+        navigation_owner: bool,
+    ) -> Vec<FileSearchUiCommand> {
         self.drain_events(coordinator);
         if self.consume_immediate_repaint_request() {
             ctx.request_repaint();
@@ -1052,7 +1107,23 @@ impl FileSearchDialogState {
         if !self.open {
             return Vec::new();
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        let open_before = self.open;
+        let committed_owner_pass = first_ui_pass && navigation_owner;
+        if !navigation_owner {
+            let file_search_layer =
+                crate::gui::jump_mode::ui::NavigationDialogKind::FileSearch.layer_id();
+            let focused_file_search_response =
+                crate::gui::jump_mode::ui::focused_response_layer(ctx)
+                    .is_some_and(|layer| Some(layer) == file_search_layer);
+            if focused_file_search_response {
+                ctx.memory_mut(|memory| {
+                    if let Some(id) = memory.focused() {
+                        memory.surrender_focus(id);
+                    }
+                });
+            }
+        }
+        if committed_owner_pass && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.handle_escape(coordinator) == FileSearchEscapeAction::Cancel {
                 ctx.request_repaint();
             }
@@ -1065,12 +1136,22 @@ impl FileSearchDialogState {
             .default_size(DEFAULT_WINDOW_SIZE)
             .min_size(egui::vec2(520.0, 360.0))
             .resizable(true)
-            .show(ctx, |ui| self.contents(ui, coordinator))
+            .show(ctx, |ui| {
+                self.contents(
+                    ui,
+                    coordinator,
+                    &mut jump_mode_scope,
+                    first_ui_pass,
+                    navigation_owner,
+                )
+            })
         {
-            self.persisted_window_size = resp.response.rect.size();
+            if navigation_owner {
+                self.persisted_window_size = resp.response.rect.size();
+            }
             commands = resp.inner.unwrap_or_default();
         }
-        self.open = open;
+        self.open = if navigation_owner { open } else { open_before };
         commands
     }
 
@@ -1109,47 +1190,116 @@ impl FileSearchDialogState {
         &mut self,
         ui: &mut egui::Ui,
         coordinator: &mut SearchCoordinator,
+        jump_mode_scope: &mut Option<crate::gui::jump_mode::ui::JumpModeScope>,
+        first_ui_pass: bool,
+        navigation_owner: bool,
     ) -> Vec<FileSearchUiCommand> {
         let mut commands = Vec::new();
-        self.handle_result_keyboard_shortcuts(ui, coordinator);
+        let committed_owner_pass = first_ui_pass && navigation_owner;
+        let unowned_form_state = (!committed_owner_pass).then(|| {
+            (
+                self.search_text.clone(),
+                self.selected_mode,
+                self.selected_scope,
+                self.custom_roots.clone(),
+                self.case_sensitive,
+                self.include_hidden,
+                self.refinement_text.clone(),
+                self.ui_preferences.clone(),
+                self.ui_preferences_dirty,
+                self.excluded_directory_names_overridden,
+            )
+        });
+        if committed_owner_pass {
+            self.handle_result_keyboard_shortcuts(ui, coordinator);
+        }
         widgets::compact_section_heading(
             ui,
             "Search",
             Some("Choose what to search and where to look."),
         );
         let previously_selected_mode = self.selected_mode;
+        let previously_selected_scope = self.selected_scope;
+        let mut visual_order = 0;
         ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(
+            let filename = ui.selectable_value(
                 &mut self.selected_mode,
                 FileSearchMode::Filename,
                 "Filename",
             );
-            ui.selectable_value(&mut self.selected_mode, FileSearchMode::Content, "Content");
-            self.clear_selection_if_mode_changed(previously_selected_mode);
+            register_jump_mode_target(
+                jump_mode_scope.as_ref(),
+                ui,
+                &filename,
+                "form/mode/filename",
+                "Filename",
+                crate::gui::jump_mode::TargetKind::Selectable,
+                &mut visual_order,
+            );
+            let content =
+                ui.selectable_value(&mut self.selected_mode, FileSearchMode::Content, "Content");
+            register_jump_mode_target(
+                jump_mode_scope.as_ref(),
+                ui,
+                &content,
+                "form/mode/content",
+                "Content",
+                crate::gui::jump_mode::TargetKind::Selectable,
+                &mut visual_order,
+            );
             ui.separator();
-            ui.selectable_value(
+            let global = ui.selectable_value(
                 &mut self.selected_scope,
                 FileSearchScopeMode::Global,
                 "Global",
             );
-            ui.selectable_value(
+            register_jump_mode_target(
+                jump_mode_scope.as_ref(),
+                ui,
+                &global,
+                "form/scope/global",
+                "Global",
+                crate::gui::jump_mode::TargetKind::Selectable,
+                &mut visual_order,
+            );
+            let directory = ui.selectable_value(
                 &mut self.selected_scope,
                 FileSearchScopeMode::Directory,
                 "Directory",
             );
+            register_jump_mode_target(
+                jump_mode_scope.as_ref(),
+                ui,
+                &directory,
+                "form/scope/directory",
+                "Directory",
+                crate::gui::jump_mode::TargetKind::Selectable,
+                &mut visual_order,
+            );
         });
-        let search_response = widgets::labeled_form_row(ui, "Search", |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.search_text).id_salt(Self::search_field_id()),
-            )
-        });
-        if self.consume_search_focus_request() {
-            search_response.request_focus();
+        if committed_owner_pass {
+            self.clear_selection_if_mode_changed(previously_selected_mode);
         }
-        if search_response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            self.start_search(coordinator);
-            ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
-            ui.ctx().request_repaint();
+        if committed_owner_pass
+            && (self.selected_mode != previously_selected_mode
+                || self.selected_scope != previously_selected_scope)
+        {
+            self.invalidate_jump_mode_form(jump_mode_scope);
+        }
+        let search_response = widgets::labeled_form_row(ui, "Search", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.search_text).id(Self::search_field_id()))
+        });
+        register_jump_mode_target(
+            jump_mode_scope.as_ref(),
+            ui,
+            &search_response,
+            "form/query",
+            "Search query",
+            crate::gui::jump_mode::TargetKind::TextEntry,
+            &mut visual_order,
+        );
+        if navigation_owner && self.consume_search_focus_request() {
+            search_response.request_focus();
         }
         match self.selected_scope {
             FileSearchScopeMode::Global => {
@@ -1169,44 +1319,74 @@ impl FileSearchDialogState {
                         ),
                     );
                 }
-                egui::CollapsingHeader::new("Global root list")
+                let roots_header = egui::CollapsingHeader::new("Global root list")
+                    .id_salt("file-search-global-roots")
                     .default_open(false)
                     .show(ui, |ui| {
                         for root in &valid_global_roots {
                             ui.label(root.display().to_string());
                         }
                     });
+                register_jump_mode_target(
+                    jump_mode_scope.as_ref(),
+                    ui,
+                    &roots_header.header_response,
+                    "form/global-roots",
+                    "Global root list",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    &mut visual_order,
+                );
+                if roots_header.header_response.clicked() && committed_owner_pass {
+                    self.invalidate_jump_mode_form(jump_mode_scope);
+                }
             }
             FileSearchScopeMode::Directory => {
+                let mut roots_changed = false;
+                let mut added_root = false;
+                let mut removed_root = false;
                 ui.vertical(|ui| {
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button("Add folder…").clicked()
+                        let add_folder = ui.button("Add folder…");
+                        register_jump_mode_target(
+                            jump_mode_scope.as_ref(),
+                            ui,
+                            &add_folder,
+                            "form/roots/add-folder",
+                            "Add folder",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut visual_order,
+                        );
+                        if add_folder.clicked()
+                            && first_ui_pass
+                            && navigation_owner
                             && let Some(path) = rfd::FileDialog::new().pick_folder()
                         {
                             self.custom_roots.push(path.display().to_string());
+                            added_root = true;
                         }
                     });
                     let mut remove = None;
-                    let mut submit_search = false;
-                    let focus_root_idx = self.consume_root_focus_request().then_some(0usize);
+                    let focus_root_idx =
+                        (navigation_owner && first_ui_pass && self.consume_root_focus_request())
+                            .then_some(0usize);
                     for (idx, root) in self.custom_roots.iter_mut().enumerate() {
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Root");
                             let root_response = ui.add(
-                                egui::TextEdit::singleline(root)
-                                    .id_salt((Self::root_field_id(), idx)),
+                                egui::TextEdit::singleline(root).id(Self::root_text_field_id(idx)),
                             );
+                            register_jump_mode_target(
+                                jump_mode_scope.as_ref(),
+                                ui,
+                                &root_response,
+                                format!("form/roots/{idx}/path"),
+                                "Root path",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut visual_order,
+                            );
+                            roots_changed |= root_response.changed() && committed_owner_pass;
                             if focus_root_idx == Some(idx) {
                                 root_response.request_focus();
-                            }
-                            if root_response.has_focus()
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                            {
-                                submit_search = true;
-                                ui.input_mut(|i| {
-                                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
-                                });
-                                ui.ctx().request_repaint();
                             }
                             let valid = PathBuf::from(root.trim())
                                 .canonicalize()
@@ -1221,23 +1401,52 @@ impl FileSearchDialogState {
                                 if valid { "valid" } else { "invalid" },
                                 None,
                             );
-                            if ui.button("Remove").clicked() {
+                            let remove_response = ui.button("Remove");
+                            register_jump_mode_target(
+                                jump_mode_scope.as_ref(),
+                                ui,
+                                &remove_response,
+                                format!("form/roots/{idx}/remove"),
+                                "Remove root",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            );
+                            if remove_response.clicked() && first_ui_pass && navigation_owner {
                                 remove = Some(idx);
                             }
                         });
                     }
-                    if submit_search {
-                        self.start_search(coordinator);
-                    }
                     if let Some(idx) = remove {
                         self.custom_roots.remove(idx);
+                        removed_root = true;
                     }
                 });
+                if roots_changed || added_root || removed_root {
+                    self.invalidate_jump_mode_form(jump_mode_scope);
+                }
             }
         }
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.case_sensitive, "Case-sensitive");
-            ui.checkbox(&mut self.include_hidden, "Include hidden");
+            let case_sensitive = ui.checkbox(&mut self.case_sensitive, "Case-sensitive");
+            register_jump_mode_target(
+                jump_mode_scope.as_ref(),
+                ui,
+                &case_sensitive,
+                "form/case-sensitive",
+                "Case-sensitive",
+                crate::gui::jump_mode::TargetKind::Checkbox,
+                &mut visual_order,
+            );
+            let include_hidden = ui.checkbox(&mut self.include_hidden, "Include hidden");
+            register_jump_mode_target(
+                jump_mode_scope.as_ref(),
+                ui,
+                &include_hidden,
+                "form/include-hidden",
+                "Include hidden",
+                crate::gui::jump_mode::TargetKind::Checkbox,
+                &mut visual_order,
+            );
             let search_enabled = !self.search_text.trim().is_empty()
                 && match self.selected_scope {
                     FileSearchScopeMode::Global => {
@@ -1249,27 +1458,73 @@ impl FileSearchDialogState {
                 };
             let search = ui.add_enabled(search_enabled, egui::Button::new("Search"));
             let search = widgets::with_button_emphasis(ui, search, ButtonEmphasis::Primary);
-            if search.clicked() && self.start_search(coordinator).is_some() {
+            register_jump_mode_target(
+                jump_mode_scope.as_ref(),
+                ui,
+                &search,
+                "form/actions/search",
+                "Search",
+                crate::gui::jump_mode::TargetKind::Button,
+                &mut visual_order,
+            );
+            if search.clicked()
+                && first_ui_pass
+                && navigation_owner
+                && self.start_search(coordinator).is_some()
+            {
                 ui.ctx().request_repaint();
             }
-            if ui.button("Cancel").clicked() {
+            let cancel = ui.button("Cancel");
+            register_jump_mode_target(
+                jump_mode_scope.as_ref(),
+                ui,
+                &cancel,
+                "form/actions/cancel",
+                "Cancel",
+                crate::gui::jump_mode::TargetKind::Button,
+                &mut visual_order,
+            );
+            if cancel.clicked() && first_ui_pass && navigation_owner {
                 self.cancel_search(coordinator);
                 ui.ctx().request_repaint();
             }
             let open = ui.add_enabled(self.can_open_selected_result(), egui::Button::new("Open"));
-            if widgets::with_button_emphasis(ui, open, ButtonEmphasis::Primary).clicked() {
+            let open = widgets::with_button_emphasis(ui, open, ButtonEmphasis::Primary);
+            register_jump_mode_target(
+                jump_mode_scope.as_ref(),
+                ui,
+                &open,
+                "form/actions/open",
+                "Open",
+                crate::gui::jump_mode::TargetKind::Button,
+                &mut visual_order,
+            );
+            if open.clicked() && first_ui_pass && navigation_owner {
                 self.open_selected_result();
                 ui.ctx().request_repaint();
             }
-            ui.menu_button("Export", |ui| {
-                if ui.button("Copy visible results").clicked() {
+            let export_button = ui.button("Export");
+            let export_popup_id = egui::Popup::default_response_id(&export_button);
+            let export_popup_layer = egui::LayerId::new(egui::Order::Foreground, export_popup_id);
+            let export_popup_current = egui::Popup::is_id_open(ui.ctx(), export_popup_id)
+                && ui
+                    .ctx()
+                    .memory(|memory| memory.area_rect(export_popup_id))
+                    .is_some_and(|rect| {
+                        rect.is_positive()
+                            && ui.ctx().layer_id_at(rect.center()) == Some(export_popup_layer)
+                    });
+            let export_actions_allowed =
+                first_ui_pass && (navigation_owner || export_popup_current);
+            let _export_contents = egui::Popup::menu(&export_button).show(|ui| {
+                if ui.button("Copy visible results").clicked() && export_actions_allowed {
                     match self.copy_all_visible_results_payload() {
                         Ok(payload) => self.copy_text_payload("copy visible results", payload),
                         Err(err) => self.warning_error_message = Some(err),
                     }
                     ui.close();
                 }
-                if ui.button("Save visible results as TSV…").clicked() {
+                if ui.button("Save visible results as TSV…").clicked() && export_actions_allowed {
                     self.export_visible_results_to_file();
                     ui.close();
                 }
@@ -1279,12 +1534,13 @@ impl FileSearchDialogState {
                         egui::Button::new("Copy selected result"),
                     )
                     .clicked()
+                    && export_actions_allowed
                     && let Some(payload) = self.copy_selected_payload()
                 {
                     self.copy_text_payload("copy selected", payload);
                     ui.close();
                 }
-                if ui.button("Copy visible full paths").clicked() {
+                if ui.button("Copy visible full paths").clicked() && export_actions_allowed {
                     match self.copy_visible_full_paths_payload() {
                         Ok(payload) => self.copy_text_payload("copy visible full paths", payload),
                         Err(err) => self.warning_error_message = Some(err),
@@ -1292,28 +1548,60 @@ impl FileSearchDialogState {
                     ui.close();
                 }
             });
+            register_jump_mode_target(
+                jump_mode_scope.as_ref(),
+                ui,
+                &export_button,
+                "form/actions/export",
+                "Export",
+                crate::gui::jump_mode::TargetKind::Button,
+                &mut visual_order,
+            );
         });
         widgets::labeled_form_row(ui, "Filter", |ui| {
             let mut refinement = self.refinement_text.clone();
             let response = ui.add(
                 egui::TextEdit::singleline(&mut refinement)
-                    .id_salt(Self::refinement_field_id())
+                    .id(Self::refinement_field_id())
                     .hint_text("Filter current results"),
             );
-            if response.changed() {
+            if response.changed() && committed_owner_pass {
                 self.set_refinement_text(refinement);
                 ui.ctx().request_repaint();
             }
-            let clear = ui
-                .add_enabled(!self.refinement_text.is_empty(), egui::Button::new("Clear"))
-                .clicked();
-            if clear {
+            register_jump_mode_target(
+                jump_mode_scope.as_ref(),
+                ui,
+                &response,
+                "form/refinement",
+                "Filter current results",
+                crate::gui::jump_mode::TargetKind::TextEntry,
+                &mut visual_order,
+            );
+            let clear =
+                ui.add_enabled(!self.refinement_text.is_empty(), egui::Button::new("Clear"));
+            register_jump_mode_target(
+                jump_mode_scope.as_ref(),
+                ui,
+                &clear,
+                "form/refinement/clear",
+                "Clear filter",
+                crate::gui::jump_mode::TargetKind::Button,
+                &mut visual_order,
+            );
+            if clear.clicked() && first_ui_pass && navigation_owner {
                 self.clear_refinement();
                 ui.ctx().request_repaint();
             }
             response
         });
-        self.filters_ui(ui);
+        self.filters_ui_with_jump_mode(
+            ui,
+            jump_mode_scope,
+            &mut visual_order,
+            first_ui_pass,
+            navigation_owner,
+        );
         let counts = self.result_counts();
         let displayed = match self.selected_mode {
             FileSearchMode::Filename => counts.filename_rows,
@@ -1328,24 +1616,57 @@ impl FileSearchDialogState {
             &status,
             None,
         );
-        egui::CollapsingHeader::new("Diagnostics")
+        let diagnostics_header = egui::CollapsingHeader::new("Diagnostics")
+            .id_salt("file-search-diagnostics")
             .default_open(false)
             .show(ui, |ui| {
-                if ui.button("Copy diagnostics").clicked() {
+                let copy_diagnostics = ui.button("Copy diagnostics");
+                register_jump_mode_target(
+                    jump_mode_scope.as_ref(),
+                    ui,
+                    &copy_diagnostics,
+                    "form/diagnostics/copy",
+                    "Copy diagnostics",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    &mut visual_order,
+                );
+                if copy_diagnostics.clicked() && first_ui_pass && navigation_owner {
                     self.copy_text_payload(
                         "copy diagnostics",
                         self.diagnostics.copy_diagnostics_text(),
                     );
                 }
-                if let Some(command) = self.diagnostics.full_command_text()
-                    && ui.button("Copy full command (may include query)").clicked()
-                {
-                    self.copy_text_payload("copy full command", command);
+                if let Some(command) = self.diagnostics.full_command_text() {
+                    let copy_command = ui.button("Copy full command (may include query)");
+                    register_jump_mode_target(
+                        jump_mode_scope.as_ref(),
+                        ui,
+                        &copy_command,
+                        "form/diagnostics/copy-command",
+                        "Copy full command",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut visual_order,
+                    );
+                    if copy_command.clicked() && first_ui_pass && navigation_owner {
+                        self.copy_text_payload("copy full command", command);
+                    }
                 }
                 for line in self.diagnostics.summary_lines() {
                     ui.label(line);
                 }
             });
+        register_jump_mode_target(
+            jump_mode_scope.as_ref(),
+            ui,
+            &diagnostics_header.header_response,
+            "form/diagnostics",
+            "Diagnostics",
+            crate::gui::jump_mode::TargetKind::Button,
+            &mut visual_order,
+        );
+        if diagnostics_header.header_response.clicked() && committed_owner_pass {
+            self.invalidate_jump_mode_form(jump_mode_scope);
+        }
         if let Some(msg) = &self.warning_error_message {
             widgets::semantic_status(
                 ui,
@@ -1358,7 +1679,13 @@ impl FileSearchDialogState {
                 None,
             );
         }
-        commands.extend(self.ripgrep_missing_prompt_ui(ui));
+        commands.extend(self.ripgrep_missing_prompt_ui(
+            ui,
+            jump_mode_scope,
+            &mut visual_order,
+            first_ui_pass,
+            navigation_owner,
+        ));
         let results_region_size = ui.available_size();
         ui.allocate_ui_with_layout(results_region_size, *ui.layout(), |ui| {
             ui.push_id(Self::result_list_id(), |ui| {
@@ -1380,10 +1707,41 @@ impl FileSearchDialogState {
                 self.ui_preferences.clone(),
             ));
         }
+        if let Some((
+            search_text,
+            selected_mode,
+            selected_scope,
+            custom_roots,
+            case_sensitive,
+            include_hidden,
+            refinement_text,
+            ui_preferences,
+            ui_preferences_dirty,
+            excluded_directory_names_overridden,
+        )) = unowned_form_state
+        {
+            self.search_text = search_text;
+            self.selected_mode = selected_mode;
+            self.selected_scope = selected_scope;
+            self.custom_roots = custom_roots;
+            self.case_sensitive = case_sensitive;
+            self.include_hidden = include_hidden;
+            self.refinement_text = refinement_text;
+            self.ui_preferences = ui_preferences;
+            self.ui_preferences_dirty = ui_preferences_dirty;
+            self.excluded_directory_names_overridden = excluded_directory_names_overridden;
+        }
         commands
     }
 
-    fn ripgrep_missing_prompt_ui(&mut self, ui: &mut egui::Ui) -> Vec<FileSearchUiCommand> {
+    fn ripgrep_missing_prompt_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        jump_mode_scope: &mut Option<crate::gui::jump_mode::ui::JumpModeScope>,
+        visual_order: &mut u64,
+        first_ui_pass: bool,
+        navigation_owner: bool,
+    ) -> Vec<FileSearchUiCommand> {
         let mut commands = Vec::new();
         if !self.show_ripgrep_missing_prompt || self.ripgrep_missing_prompt_dismissed {
             return commands;
@@ -1394,8 +1752,22 @@ impl FileSearchDialogState {
             "ripgrep (rg) was not found",
             Some("Native content search will continue; configure rg for faster future searches."),
         );
+        let mut dismissed = false;
+        let mut configured = false;
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Locate rg.exe").clicked()
+            let locate_rg = ui.button("Locate rg.exe");
+            register_jump_mode_target(
+                jump_mode_scope.as_ref(),
+                ui,
+                &locate_rg,
+                "form/rg-missing/locate",
+                "Locate ripgrep",
+                crate::gui::jump_mode::TargetKind::Button,
+                visual_order,
+            );
+            if locate_rg.clicked()
+                && first_ui_pass
+                && navigation_owner
                 && let Some(path) = rfd::FileDialog::new()
                     .add_filter("Executable", &["exe", ""])
                     .pick_file()
@@ -1404,14 +1776,29 @@ impl FileSearchDialogState {
                     Ok(abs) => {
                         commands.push(FileSearchUiCommand::ConfigureRipgrep(abs));
                         self.show_ripgrep_missing_prompt = false;
+                        configured = true;
                     }
                     Err(err) => self.warning_error_message = Some(err),
                 }
             }
-            if ui.button("Dismiss").clicked() {
+            let dismiss = ui.button("Dismiss");
+            register_jump_mode_target(
+                jump_mode_scope.as_ref(),
+                ui,
+                &dismiss,
+                "form/rg-missing/dismiss",
+                "Dismiss",
+                crate::gui::jump_mode::TargetKind::Button,
+                visual_order,
+            );
+            if dismiss.clicked() && first_ui_pass && navigation_owner {
                 self.dismiss_ripgrep_missing_prompt();
+                dismissed = true;
             }
         });
+        if dismissed || configured {
+            self.invalidate_jump_mode_form(jump_mode_scope);
+        }
         commands
     }
 

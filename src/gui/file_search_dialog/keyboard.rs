@@ -65,6 +65,7 @@ impl FileSearchDialogState {
         if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && !menu_or_combo_active {
             if search_submit_field_focused {
                 self.start_search(coordinator);
+                ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                 ctx.request_repaint();
             } else if !text_field_focused {
                 if modifiers.ctrl {

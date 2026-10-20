@@ -2968,13 +2968,16 @@ impl LauncherApp {
     }
 
     fn jump_mode_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        self.jump_mode_enabled() && self.native_ui_host_input_allowed(ctx, root_visible)
+    }
+
+    fn native_ui_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         let screen_draw_owns_input = !matches!(
             self.screen_draw_controller.state(),
             crate::screen_draw::ScreenDrawState::NoSession
                 | crate::screen_draw::ScreenDrawState::Failed { .. }
         );
-        self.jump_mode_enabled()
-            && root_visible
+        root_visible
             && self.visible_flag.load(Ordering::Relaxed)
             && ctx.viewport_id() == egui::ViewportId::ROOT
             && ctx.input(|input| input.focused)
@@ -2992,6 +2995,39 @@ impl LauncherApp {
             && !screen_draw_owns_input
             && !self.screen_draw_controller.toolbar_open()
             && ctx.memory(|memory| memory.top_modal_layer().is_none())
+    }
+
+    fn file_search_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+
+        if !self.file_search_dialog.open
+            || !self.native_ui_host_input_allowed(ctx, root_visible)
+            || egui::Popup::is_any_open(ctx)
+        {
+            return false;
+        }
+        let Some(file_search_layer) = NavigationDialogKind::FileSearch.layer_id() else {
+            return false;
+        };
+        if visible_top_middle_layer(ctx) != Some(file_search_layer) {
+            return false;
+        }
+
+        let root_query_id = egui::Id::new("query_input");
+        let focus = ctx.memory(|memory| memory.focused());
+        match focus {
+            None => true,
+            Some(id) if id == root_query_id => ctx.read_response(id).is_some_and(|response| {
+                response.layer_id != file_search_layer
+                    && matches!(
+                        response.layer_id.order,
+                        egui::Order::Background | egui::Order::Middle
+                    )
+            }),
+            Some(id) => ctx
+                .read_response(id)
+                .is_some_and(|response| response.layer_id == file_search_layer),
+        }
     }
 
     fn jump_mode_navigation_input_allowed(
@@ -4972,10 +5008,32 @@ impl LauncherApp {
         fav_dlg.ui(&ctx, self);
         self.fav_dialog = fav_dlg;
         let file_search_was_open = self.file_search_dialog.open;
-        let file_search_commands = self
-            .file_search_dialog
-            .ui(&ctx, &mut self.file_search_coordinator);
-        if first_ui_pass {
+        let file_search_owner =
+            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+        let file_search_scope = match file_search_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::FileSearch,
+                instance,
+            } if self.jump_mode_enabled() => self.jump_mode_ui.scope_for_navigation_owner(
+                crate::gui::jump_mode::SurfaceId::dialog("file-search", instance),
+                self.file_search_dialog.jump_mode_target_generation(),
+                "file-search-dialog",
+                ctx.viewport_id(),
+                file_search_owner,
+                false,
+            ),
+            _ => None,
+        };
+        let file_search_is_current_owner =
+            self.file_search_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
+        let file_search_commands = self.file_search_dialog.ui_with_jump_mode_scope(
+            &ctx,
+            &mut self.file_search_coordinator,
+            file_search_scope,
+            first_ui_pass,
+            file_search_is_current_owner,
+        );
+        if first_ui_pass && file_search_is_current_owner {
             for command in file_search_commands {
                 self.handle_file_search_ui_command(command);
             }
@@ -23237,6 +23295,358 @@ mod tests {
             .hint()
             .as_str()
             .to_owned()
+    }
+
+    fn expand_file_search_header(ctx: &egui::Context, app: &LauncherApp, label: &str) {
+        let response_id = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .unwrap_or_else(|| panic!("no visible File Search header labeled {label:?}"))
+            .response_id();
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ctx,
+            response_id,
+            false,
+        );
+        state.set_open(true);
+        state.store(ctx);
+    }
+
+    fn prepare_actual_file_search_dialog(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        root: &std::path::Path,
+    ) {
+        app.file_search_dialog.selected_scope =
+            crate::gui::file_search_dialog::FileSearchScopeMode::Directory;
+        app.file_search_dialog.custom_roots = vec![root.display().to_string()];
+        app.file_search_dialog.open();
+        for _ in 0..4 {
+            app.run_root_frame_for_test(ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        if app.jump_mode_enabled() {
+            assert_eq!(
+                app.jump_mode_ui.frame_navigation_owner(),
+                crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                    kind: crate::gui::jump_mode::ui::NavigationDialogKind::FileSearch,
+                    instance: 1,
+                },
+                "focused_id={:?}, focused_layer={:?}, top_middle_layer={:?}, popup_open={}, jump_mode_enabled={}, host_allowed={}, file_search_instance={:?}",
+                ctx.memory(|memory| memory.focused()),
+                crate::gui::jump_mode::ui::focused_response_layer(ctx),
+                crate::gui::jump_mode::ui::visible_top_middle_layer(ctx),
+                egui::Popup::is_any_open(ctx),
+                app.jump_mode_enabled(),
+                app.jump_mode_host_input_allowed(ctx, true),
+                app.jump_mode_ui
+                    .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::FileSearch),
+            );
+        }
+    }
+
+    #[test]
+    fn jump_mode_file_search_form_registers_visible_controls_by_mode() {
+        use crate::gui::jump_mode::ui::NavigationOwner;
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        prepare_actual_file_search_dialog(&ctx, &mut app, workspace.root());
+
+        let initial_labels: Vec<_> = app
+            .jump_mode_ui
+            .retained_registry()
+            .metadata()
+            .map(|target| target.label().to_owned())
+            .collect();
+        assert!(
+            initial_labels.iter().any(|target| target == "Diagnostics"),
+            "the diagnostics heading is registered while it is visible: {initial_labels:?}"
+        );
+
+        expand_file_search_header(&ctx, &app, "Filters");
+        for _ in 0..3 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+
+        let filename_labels: Vec<_> = app
+            .jump_mode_ui
+            .retained_registry()
+            .metadata()
+            .map(|target| target.label().to_owned())
+            .collect();
+        for label in [
+            "Search query",
+            "Filename",
+            "Content",
+            "Global",
+            "Directory",
+            "Case-sensitive",
+            "Include hidden",
+            "Add folder",
+            "Cancel",
+            "Export",
+            "Filters",
+            "Ranked substring",
+            "Fuzzy",
+        ] {
+            assert!(
+                filename_labels.iter().any(|target| target == label),
+                "missing {label:?}: {filename_labels:?}"
+            );
+        }
+        for disabled in ["Search", "Open", "Clear filter"] {
+            assert!(
+                !filename_labels.iter().any(|target| target == disabled),
+                "disabled target {disabled:?} was registered"
+            );
+        }
+
+        app.file_search_dialog.selected_mode =
+            crate::gui::file_search_dialog::FileSearchMode::Content;
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        let content_labels: Vec<_> = app
+            .jump_mode_ui
+            .retained_registry()
+            .metadata()
+            .map(|target| target.label().to_owned())
+            .collect();
+        for label in ["Exact phrase", "Match any term", "Whole word"] {
+            assert!(
+                content_labels.iter().any(|target| target == label),
+                "missing {label:?}: {content_labels:?}"
+            );
+        }
+        for inactive in ["Ranked substring", "Fuzzy"] {
+            assert!(
+                !content_labels.iter().any(|target| target == inactive),
+                "inactive target {inactive:?} was registered"
+            );
+        }
+        assert_ne!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Blocked
+        );
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_file_search_form_focus_types_then_enter_starts_one_search() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        prepare_actual_file_search_dialog(&ctx, &mut app, workspace.root());
+        start_actual_root_jump_mode(&ctx, &mut app);
+
+        let query_hint = dialog_hint_for_label(&app, "Search query");
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(query_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        let query_id = crate::gui::file_search_dialog::FileSearchDialogState::search_field_id();
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        assert!(app.file_search_dialog.active_search_id.is_none());
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text("needle".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.file_search_dialog.search_text, "needle");
+        assert_eq!(app.query, "root list fixture");
+        assert!(app.file_search_dialog.active_search_id.is_none());
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.file_search_dialog.active_search_id,
+            Some(crate::file_search::model::SearchId(1)),
+            "the focused query field submits exactly once on its own Enter frame"
+        );
+        assert_eq!(
+            app.file_search_coordinator.active_search_id(),
+            Some(crate::file_search::model::SearchId(1))
+        );
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_file_search_form_default_off_enter_still_starts_search() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(false);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.file_search_dialog.search_text = "needle".to_owned();
+        prepare_actual_file_search_dialog(&ctx, &mut app, workspace.root());
+
+        let query_id = crate::gui::file_search_dialog::FileSearchDialogState::search_field_id();
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        assert!(app.file_search_dialog.active_search_id.is_none());
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+
+        assert_eq!(
+            app.file_search_dialog.active_search_id,
+            Some(crate::file_search::model::SearchId(1)),
+            "default-off File Search keeps its ordinary focused-field Enter behavior"
+        );
+        assert_eq!(
+            app.file_search_coordinator.active_search_id(),
+            Some(crate::file_search::model::SearchId(1))
+        );
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_file_search_form_background_owner_refuses_focused_field_and_button() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        prepare_actual_file_search_dialog(&ctx, &mut app, workspace.root());
+        expand_file_search_header(&ctx, &app, "Filters");
+        for _ in 0..3 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        app.file_search_dialog.current_status = crate::file_search::model::SearchStatus::Running;
+        app.file_search_dialog.active_search_id = Some(crate::file_search::model::SearchId(42));
+        let included_extensions_id = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Include extensions")
+            .expect("the expanded File Search filters show the include field")
+            .response_id();
+        let cancel_id = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Cancel")
+            .expect("Cancel is a visible File Search target")
+            .response_id();
+
+        let unsupported_layer = egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("unsupported-file-search-cover"),
+        );
+        let render_cover = |app: &mut LauncherApp, input: egui::RawInput| {
+            let (output, _) = app.run_root_frame_for_test_with(&ctx, input, false, |app, ui| {
+                app.render_root_ui(ui);
+                egui::Window::new("Unsupported File Search cover")
+                    .id(unsupported_layer.id)
+                    .show(ui.ctx(), |_| {});
+                ui.ctx().move_to_top(unsupported_layer);
+            });
+            output.drop_without_applying_deltas();
+        };
+        render_cover(&mut app, actual_query_input(true));
+        render_cover(&mut app, actual_query_input(true));
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked
+        );
+
+        let query_id = crate::gui::file_search_dialog::FileSearchDialogState::search_field_id();
+        ctx.memory_mut(|memory| memory.request_focus(query_id));
+        render_cover(
+            &mut app,
+            egui::RawInput {
+                events: vec![
+                    egui::Event::Text("background".into()),
+                    key_press(egui::Key::Enter, egui::Modifiers::NONE),
+                ],
+                ..actual_query_input(true)
+            },
+        );
+        assert!(app.file_search_dialog.search_text.is_empty());
+        assert_eq!(app.file_search_coordinator.active_search_id(), None);
+
+        let included_extensions_before = app
+            .file_search_dialog
+            .ui_preferences
+            .included_extensions
+            .clone();
+        ctx.memory_mut(|memory| memory.request_focus(included_extensions_id));
+        render_cover(
+            &mut app,
+            egui::RawInput {
+                events: vec![egui::Event::Text("blocked".into())],
+                ..actual_query_input(true)
+            },
+        );
+        assert!(!ctx.memory(|memory| memory.has_focus(included_extensions_id)));
+        assert_eq!(
+            app.file_search_dialog.ui_preferences.included_extensions, included_extensions_before,
+            "a focused advanced field cannot mutate behind an unknown window"
+        );
+
+        ctx.memory_mut(|memory| memory.request_focus(cancel_id));
+        render_cover(
+            &mut app,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+        );
+        assert_eq!(
+            app.file_search_dialog.current_status,
+            crate::file_search::model::SearchStatus::Running,
+            "a focused background Cancel button cannot run its keyboard action"
+        );
+        assert_eq!(
+            app.file_search_dialog.active_search_id,
+            Some(crate::file_search::model::SearchId(42))
+        );
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
     }
 
     fn safe_sequence_invocation_context() -> crate::paste_sequence::SequenceInvocationContext {

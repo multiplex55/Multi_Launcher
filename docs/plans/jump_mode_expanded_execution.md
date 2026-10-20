@@ -8,8 +8,8 @@ Started 2026-10-20 from clean branch `jump`, HEAD `0cb3dabf148dc720ed560626c32ef
 | Milestone | Status | Evidence / commits |
 |---|---|---|
 | M0-A | complete | Read active plan, repository instructions and configured roles; inspected Git, owner bridge, renderer, dashboard gaps and isolated runner. |
-| M1 | complete | M1-A `3c3b8e91` / M1-B `8648b2d0` pushed; 32 owner and 5 adapter tests passed, independent owner review clean; M1-C fixture-only PASS. |
-| M2 File Search | in_progress | Bounded planner packet prepared; M2-A form first. |
+| M1 | complete | M1-A `3c3b8e91` / M1-B `8648b2d0` / M1-C `a1181df6` pushed; 32 owner and 5 adapter tests passed, independent owner review clean; fixture-only PASS. |
+| M2 File Search | in_progress | M2-A form complete: six focused tests passed. M2-B visible result identity/selection next; M2-C integration/native evidence pending. |
 | M3 Snippets | pending | |
 | M4 Clipboard History | pending | |
 | M5 Dashboard gaps | pending | |
@@ -38,6 +38,8 @@ Native sessions: 0 / 12; images: 0 / 24. No native evidence yet. Use generated i
 ## Coverage inventory
 
 All eight inventories pending implementation; individual unsupported pointer-only, passive or foreign-popup controls will be recorded with their actual boundary. No universal coverage claim.
+
+File Search form (M2-A): query, directory roots/Add folder/Remove, refinement/Clear, Filename/Content, Global/Directory, case/hidden toggles, Search/Cancel/enabled Open, Export anchor, matching/sort/type/extension/exclusion filters, Global roots/Filters/Diagnostics headings, enabled Copy diagnostics, inline Locate ripgrep/Dismiss. Only currently drawn enabled responses register. Generic Export menu options use native menu access and remain outside hints; native picker internals are excluded. Results are not yet registered.
 
 ## Git and final gates
 
@@ -75,3 +77,11 @@ Exact M1-B filter selected these `gui::jump_mode::ui::tests` names: `expanded_di
 `pwsh -NoProfile -File dev/jump_mode/run.ps1 -FixturesOnly`: **PASS**, exit 0; generator tests **7 passed**, generation and typed verification exit 0. Receipt: `dev/jump_mode/evidence/jump_m01_baseline_20261020T211353Z_ec0d5cef/summary.md`. Executable is null; cleanup says not launched. Native budget remains 0/12 sessions, 0/24 images.
 
 No fixture source changes were needed. `root_list_app_at` already constructs an inert plugin manager and disposable typed stores, with Paste Next/Cancel disabled before app construction. Existing disabled-bridge, unknown foreground, discarded-pass and combo-owner regressions cover readiness; M1-A's 32-test slice includes the core cases. Do not add redundant infrastructure.
+
+### M2-A evidence
+
+`cargo nextest run --lib -E 'test(gui::render::tests::jump_mode_file_search_form_) | test(gui::file_search_dialog::tests::escape_ui_consumes_key_after_file_search_handles_it) | test(gui::file_search_dialog::tests::switching_filename_content_mode_clears_selection)'`: final **6 passed, 0 failed**. Scoped rustfmt and `git diff --check` passed. Parent reviewed the form/filter/input/renderer diff.
+
+Real renderer regressions prove hint focus followed by typing and one fresh Enter, default-off ordinary Enter, mode-dependent/disabled inventory and background field/button rejection. Exact query/root/refinement widget IDs now match keyboard helpers; the early handler consumes Enter once. Normal native eligibility is independent of the Jump enabled gate; the shared Jump resolver remains unchanged.
+
+Intermediate failures were corrected at their owners: field-ID mismatch, a fixture forcing all popups visible, and ordinary-input gating when Jump is disabled. Diagnostics is tested while actually visible rather than bypassing clip checks. No result targets, backend changes, native sessions or screenshots in M2-A.
