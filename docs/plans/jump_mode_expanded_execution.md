@@ -8,7 +8,7 @@ Started 2026-10-20 from clean branch `jump`, HEAD `0cb3dabf148dc720ed560626c32ef
 | Milestone | Status | Evidence / commits |
 |---|---|---|
 | M0-A | complete | Read active plan, repository instructions and configured roles; inspected Git, owner bridge, renderer, dashboard gaps and isolated runner. |
-| M1 | in_progress | M1-A complete: typed 12-family inventory, exact ordinary/embedded layers, reopen generations; 32 focused tests passed; independent reviewer found no substantive issues. M1-B/C next. |
+| M1 | in_progress | M1-A `3c3b8e91` complete/pushed: typed owner inventory, 32 tests, independent review clean. M1-B complete: shared adapter, 5 focused tests passed. M1-C next. |
 | M2 File Search | pending | |
 | M3 Snippets | pending | |
 | M4 Clipboard History | pending | |
@@ -57,3 +57,9 @@ Native Regex/XML immediate viewports and deferred Radial CentralPanel remain blo
 - M2: existing `FileSearchResultRowId` supplies stable search/result/match/path identity. Add a view revision for filtering/sorting. Missing-ripgrep notice is inline; Export contains Copy actions in a generic menu, which stays blocked while native keyboard menu access remains. Real Enter dispatch needs exact-once egui proof.
 - M3/M4: neither persisted model has row IDs; use opaque snapshot tokens without changing serialization. Snippets preview is currently hover-only; inline removal confirmation already exists. Clipboard lacks selection/Copy/removal confirmation, so those small explicit additions are required; validate captured snapshot before later action and never reload by saved index.
 - M5: reuse slot scopes and generation. Actual gaps are Pinned/History response registration, Scratchpad multiline editor, Todo summary selectors/priority/done, Calendar month/date/event controls. Already-covered Copy/timestamp/Refresh/Add/Open controls must not be duplicated.
+
+### M1-B evidence
+
+Shared `register_and_apply_target` now owns optional-scope registration, order advancement and Focus application. Notes/Todo/MkMacro wrappers delegate; Select remains renderer-owned. Exact File Search Window bridge regression and migrated Action/Select test prove focus-only handoff.
+
+Final focused slice: **5 passed, 5,895 skipped**; scoped rustfmt and diff check passed. Initial new-test rejection was the expected disabled first Window sizing pass; warming the actual Window fixed the fixture, and both the exact rerun and final slice passed. Parent inspected the entire adapter diff; no dispatch or target-kind changes.

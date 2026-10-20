@@ -1050,6 +1050,42 @@ impl JumpModeScope {
     }
 }
 
+/// Register a current-pass response through an optional Jump Mode scope and
+/// apply only focus directives. A `Select` directive is returned to the owning
+/// renderer so it can update the surface's real selection and focus owner.
+///
+/// `local_identity` should be a static control path or stable entity identity;
+/// the scope binds it to the current surface instance and content generation.
+/// Nested confirmations must use a scope bound to that confirmation instance.
+/// Never put entered text, clipboard contents, secrets, or other payloads in an
+/// identity. Visual order advances on every rendered call, including when the
+/// optional scope is absent, matching the existing dialog adapter contract.
+pub(crate) fn register_and_apply_target(
+    scope: Option<&JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    local_identity: impl AsRef<str>,
+    label: impl Into<String>,
+    kind: TargetKind,
+    visual_order: &mut u64,
+) -> Option<FocusDirective> {
+    let order = *visual_order;
+    *visual_order = visual_order.saturating_add(1);
+    let scope = scope?;
+    let RegistrationResult::Registered { directive, .. } =
+        scope.register(ui, response, local_identity, label, kind, order)
+    else {
+        return None;
+    };
+
+    if let Some(directive @ FocusDirective::Focus(_)) = directive {
+        directive.apply_to_response(response);
+        Some(directive)
+    } else {
+        directive
+    }
+}
+
 /// App-instance-owned coordinator. It separates the in-progress pass, the
 /// completed pass, and the last fully completed frame snapshot.
 #[derive(Default)]
@@ -4293,6 +4329,94 @@ mod tests {
     }
 
     #[test]
+    fn expanded_dialog_scope_bridge_focuses_only_the_real_current_response() {
+        let ctx = egui::Context::default();
+        let kind = NavigationDialogKind::FileSearch;
+        let instance = 17;
+        let owner = NavigationOwner::Dialog { kind, instance };
+        let surface = SurfaceId::dialog(kind.surface_kind(), instance);
+        let generation = TargetGeneration(4);
+        let namespace = "file-search/window";
+        let local_identity = "query";
+        let target_id = named_scope_target(surface.clone(), generation, namespace, local_identity);
+        let mut query = "unchanged".to_owned();
+        ctx.run_ui(root_input_raw(Vec::new()), |ui| {
+            egui::Window::new("File Search").show(ui.ctx(), |window_ui| {
+                window_ui.add(egui::TextEdit::singleline(&mut query));
+            });
+        })
+        .drop_without_applying_deltas();
+
+        let mut jump = JumpModeUi::new(true);
+        jump.begin_frame();
+        assert_eq!(
+            jump.update_navigation_owner(&ctx, owner, false),
+            NavigationOwner::Blocked,
+            "the transition frame cannot route a stale root intent into a new dialog"
+        );
+        jump.begin_frame();
+        assert_eq!(jump.update_navigation_owner(&ctx, owner, false), owner);
+        assert!(jump.queue_focus_intent(
+            target_id.clone(),
+            egui::ViewportId::ROOT,
+            jump.navigation_epoch(),
+        ));
+        jump.begin_ui_pass();
+        let scope = jump
+            .scope_for_navigation_owner(
+                surface,
+                generation,
+                namespace,
+                egui::ViewportId::ROOT,
+                owner,
+                false,
+            )
+            .expect("an enabled, current Dialog owner receives a scope");
+
+        let mut response_id = None;
+        let mut changed = false;
+        let mut visual_order = 0;
+        let output = ctx.run_ui(root_input_raw(Vec::new()), |ui| {
+            egui::Window::new("File Search").show(ui.ctx(), |window_ui| {
+                let response = window_ui.add(egui::TextEdit::singleline(&mut query));
+                assert_eq!(response.layer_id, kind.layer_id().unwrap());
+                response_id = Some(response.id);
+                changed = response.changed();
+                assert_eq!(
+                    register_and_apply_target(
+                        Some(&scope),
+                        window_ui,
+                        &response,
+                        local_identity,
+                        "Search query",
+                        TargetKind::TextEntry,
+                        &mut visual_order,
+                    ),
+                    Some(FocusDirective::Focus(TargetKind::TextEntry))
+                );
+            });
+        });
+
+        jump.finish_ui_pass();
+        assert!(jump.prepare_pass_for_navigation_owner(&ctx, owner, false, true));
+        jump.complete_frame_for_navigation_owner(&ctx, owner, false, true);
+        assert_eq!(visual_order, 1);
+        assert_eq!(
+            query, "unchanged",
+            "hint completion does not edit the field"
+        );
+        assert!(!changed);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            response_id,
+            "the exact current dialog response receives native focus"
+        );
+        assert_eq!(jump.retained_registry().targets().len(), 1);
+        assert_eq!(jump.retained_registry().targets()[0].id(), &target_id);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
     fn jump_mode_native_complex_widgets_keep_their_normal_keyboard_semantics() {
         let key = |key| egui::Event::Key {
             key,
@@ -4675,27 +4799,33 @@ mod tests {
             )
             .unwrap();
         let mut actions_run = 0;
+        let mut visual_order = 0;
         input_context(|ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let result = register_button(ui, &scope, "card", "Action card", TargetKind::Action);
-                assert_eq!(
-                    result,
-                    RegistrationResult::Registered {
-                        id: scope.target_id("card"),
-                        directive: Some(FocusDirective::Select),
-                    }
+                let response = ui.button("Action card");
+                let directive = register_and_apply_target(
+                    Some(&scope),
+                    ui,
+                    &response,
+                    "card",
+                    "Action card",
+                    TargetKind::Action,
+                    &mut visual_order,
                 );
-                if let RegistrationResult::Registered {
-                    directive: Some(FocusDirective::Select),
-                    ..
-                } = result
-                {
+                assert_eq!(
+                    directive,
+                    Some(FocusDirective::Select),
+                    "the renderer receives Select rather than the adapter activating the response"
+                );
+                assert!(!response.clicked());
+                if directive == Some(FocusDirective::Select) {
                     // The owning surface will update selection in a later milestone.
                     actions_run += 0;
                 }
             });
         });
         jump.finish_ui_pass();
+        assert_eq!(visual_order, 1);
         assert_eq!(actions_run, 0);
     }
 

@@ -698,19 +698,15 @@ fn register_todo_jump_target(
     kind: crate::gui::jump_mode::TargetKind,
     visual_order: &mut u64,
 ) {
-    let order = *visual_order;
-    *visual_order = visual_order.saturating_add(1);
-    let Some(scope) = scope else {
-        return;
-    };
-    let result = scope.register(ui, response, local_identity, label, kind, order);
-    if let crate::gui::jump_mode::ui::RegistrationResult::Registered {
-        directive: Some(directive),
-        ..
-    } = result
-    {
-        directive.apply_to_response(response);
-    }
+    let _ = crate::gui::jump_mode::ui::register_and_apply_target(
+        scope,
+        ui,
+        response,
+        local_identity,
+        label,
+        kind,
+        visual_order,
+    );
 }
 
 #[cfg(test)]
