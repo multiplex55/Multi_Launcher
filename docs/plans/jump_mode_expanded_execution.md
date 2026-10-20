@@ -8,8 +8,8 @@ Started 2026-10-20 from clean branch `jump`, HEAD `0cb3dabf148dc720ed560626c32ef
 | Milestone | Status | Evidence / commits |
 |---|---|---|
 | M0-A | complete | Read active plan, repository instructions and configured roles; inspected Git, owner bridge, renderer, dashboard gaps and isolated runner. |
-| M1 | in_progress | M1-A `3c3b8e91` complete/pushed: typed owner inventory, 32 tests, independent review clean. M1-B complete: shared adapter, 5 focused tests passed. M1-C next. |
-| M2 File Search | pending | |
+| M1 | complete | M1-A `3c3b8e91` / M1-B `8648b2d0` pushed; 32 owner and 5 adapter tests passed, independent owner review clean; M1-C fixture-only PASS. |
+| M2 File Search | in_progress | Bounded planner packet prepared; M2-A form first. |
 | M3 Snippets | pending | |
 | M4 Clipboard History | pending | |
 | M5 Dashboard gaps | pending | |
@@ -57,9 +57,21 @@ Native Regex/XML immediate viewports and deferred Radial CentralPanel remain blo
 - M2: existing `FileSearchResultRowId` supplies stable search/result/match/path identity. Add a view revision for filtering/sorting. Missing-ripgrep notice is inline; Export contains Copy actions in a generic menu, which stays blocked while native keyboard menu access remains. Real Enter dispatch needs exact-once egui proof.
 - M3/M4: neither persisted model has row IDs; use opaque snapshot tokens without changing serialization. Snippets preview is currently hover-only; inline removal confirmation already exists. Clipboard lacks selection/Copy/removal confirmation, so those small explicit additions are required; validate captured snapshot before later action and never reload by saved index.
 - M5: reuse slot scopes and generation. Actual gaps are Pinned/History response registration, Scratchpad multiline editor, Todo summary selectors/priority/done, Calendar month/date/event controls. Already-covered Copy/timestamp/Refresh/Add/Open controls must not be duplicated.
+- M6: JSON has document generation and typed tree nodes. M6-B must bind existing-engine instances to exact viewports and consistently migrate scope registration, registry revalidation/combo provenance, prepare/complete and focus-intent checks; ROOT defaults remain unchanged. Native Regex owns its callback lifecycle, XML reuses it, and deferred Radial later reuses the same mechanism. No app-wide viewport map or duplicate hint algorithm.
+- M7: session switches apply immediately, appearance remains draft, Mouse Gesture Settings is a separate actual window. Bind Action needs stable explicit identity. Use opaque session tokens for gesture/binding rows; exclude active capture/drag, unknown color popups and OS window picker. Preserve live-apply versus Save semantics.
+- M8: use RuleDraft IDs, SnapshotEntryRef, scan/session revisions, SearchGeneration/ReplacementRevision/MatchId. Rename rows have real Include/Select checkboxes, not selectable labels. Replace inspection and approval are separate. Child IDs: default Confirm batch rename/Confirm Undo; explicit replace_apply_confirmation/replace_recovery_confirmation. Separate pass eligibility from effect commitment; backend commands and write authority remain untouched.
+- M9: Dashboard editor has structural Select/header controls and hover-only drag preview; persistent IDs need duplicate/missing fallback. Radial uses deferred callback under existing editor lock; authored MenuId/RingId/CellId and dirty guards remain authoritative. Action editor is inline, not another window. Actual nested IDs and property renderers must be scoped explicitly; no coverage claim through an opaque widget registry call. Canvases remain pointer-only.
 
 ### M1-B evidence
 
 Shared `register_and_apply_target` now owns optional-scope registration, order advancement and Focus application. Notes/Todo/MkMacro wrappers delegate; Select remains renderer-owned. Exact File Search Window bridge regression and migrated Action/Select test prove focus-only handoff.
 
 Final focused slice: **5 passed, 5,895 skipped**; scoped rustfmt and diff check passed. Initial new-test rejection was the expected disabled first Window sizing pass; warming the actual Window fixed the fixture, and both the exact rerun and final slice passed. Parent inspected the entire adapter diff; no dispatch or target-kind changes.
+
+Exact M1-B filter selected these `gui::jump_mode::ui::tests` names: `expanded_dialog_scope_bridge_focuses_only_the_real_current_response`, `a_real_response_receives_focus_once_without_clicking_or_activating`, `action_targets_request_logical_selection_without_running_actions`, `registry_excludes_disabled_clipped_zero_area_blocked_and_wrong_viewport_targets`, `owner_transition_blocks_all_discarded_passes_then_stabilizes` via `cargo nextest run --lib -E` test union.
+
+### M1-C evidence
+
+`pwsh -NoProfile -File dev/jump_mode/run.ps1 -FixturesOnly`: **PASS**, exit 0; generator tests **7 passed**, generation and typed verification exit 0. Receipt: `dev/jump_mode/evidence/jump_m01_baseline_20261020T211353Z_ec0d5cef/summary.md`. Executable is null; cleanup says not launched. Native budget remains 0/12 sessions, 0/24 images.
+
+No fixture source changes were needed. `root_list_app_at` already constructs an inert plugin manager and disposable typed stores, with Paste Next/Cancel disabled before app construction. Existing disabled-bridge, unknown foreground, discarded-pass and combo-owner regressions cover readiness; M1-A's 32-test slice includes the core cases. Do not add redundant infrastructure.
