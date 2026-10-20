@@ -5,13 +5,14 @@
 //! pass, so an old generation can never borrow current geometry by index.
 
 use super::ui::{JumpModeUi, RegisteredTarget, TargetRegistry};
-use super::{HintSession, MatchOutcome};
+use super::{HintSession, MatchOutcome, TargetId};
 use eframe::egui;
 
 const BADGE_FONT_SIZE: f32 = 10.0;
 const STATUS_FONT_SIZE: f32 = 10.5;
 const BADGE_PADDING: egui::Vec2 = egui::vec2(4.0, 2.0);
 const BADGE_MARGIN: f32 = 2.0;
+const BADGE_LABEL_GAP: f32 = 2.0;
 const STATUS_PADDING: egui::Vec2 = egui::vec2(7.0, 4.0);
 const STATUS_MARGIN: f32 = 8.0;
 
@@ -19,7 +20,11 @@ const STATUS_MARGIN: f32 = 8.0;
 struct BadgeModel {
     hint: String,
     accepted_prefix_chars: usize,
+    target_id: TargetId,
+    target_label: String,
+    target_rect: egui::Rect,
     clipped_rect: egui::Rect,
+    ui_clip_rect: egui::Rect,
     layer_id: egui::LayerId,
 }
 
@@ -66,8 +71,10 @@ pub(crate) fn paint(ctx: &egui::Context, jump_mode: &JumpModeUi) {
     if let Some(outline) = &model.focus_outline {
         paint_focus_outline(ctx, visuals, outline);
     }
-    for badge in &model.badges {
-        paint_badge(ctx, visuals, badge);
+    if let Some(registry) = registry {
+        for badge in &model.badges {
+            paint_badge(ctx, &style, visuals, badge, registry);
+        }
     }
     if let Some(indicator) = &model.indicator {
         paint_indicator(ctx, visuals, registry, indicator);
@@ -95,7 +102,11 @@ fn build_overlay_model(
             model.badges.push(BadgeModel {
                 hint: assignment.hint().as_str().to_owned(),
                 accepted_prefix_chars: session.prefix().len(),
+                target_id: target.id().clone(),
+                target_label: target.metadata().label().to_owned(),
+                target_rect: target.rect(),
                 clipped_rect: target.clipped_rect(),
+                ui_clip_rect: target.ui_clip_rect(),
                 layer_id: target.layer_id(),
             });
         }
@@ -185,11 +196,22 @@ fn indicator_for(
     }
 }
 
-fn paint_badge(ctx: &egui::Context, visuals: &egui::Visuals, badge: &BadgeModel) {
+fn paint_badge(
+    ctx: &egui::Context,
+    style: &egui::Style,
+    visuals: &egui::Visuals,
+    badge: &BadgeModel,
+    registry: &TargetRegistry,
+) {
     let painter = ctx
         .layer_painter(badge.layer_id)
-        .with_clip_rect(badge.clipped_rect);
+        .with_clip_rect(badge.ui_clip_rect);
     let font_id = egui::FontId::monospace(BADGE_FONT_SIZE);
+    let target_label = painter.layout_no_wrap(
+        badge.target_label.clone(),
+        egui::TextStyle::Button.resolve(style),
+        visuals.widgets.noninteractive.fg_stroke.color,
+    );
     let accepted = badge.accepted_prefix_chars.min(badge.hint.len());
     let mut layout = egui::text::LayoutJob::default();
     if accepted > 0 {
@@ -207,7 +229,19 @@ fn paint_badge(ctx: &egui::Context, visuals: &egui::Visuals, badge: &BadgeModel)
         );
     }
     let galley = painter.layout_job(layout);
-    let Some(rect) = badge_rect(badge.clipped_rect, galley.size()) else {
+    let target_id = &badge.target_id;
+    let layer_id = badge.layer_id;
+    let is_occluded = |candidate: egui::Rect| {
+        is_occluded_by_registered_target(registry, target_id, layer_id, candidate)
+    };
+    let Some(rect) = badge_rect(
+        badge.target_rect,
+        badge.clipped_rect,
+        badge.ui_clip_rect,
+        galley.size(),
+        target_label.size(),
+        is_occluded,
+    ) else {
         return;
     };
     let active_prefix = accepted > 0;
@@ -235,18 +269,90 @@ fn paint_badge(ctx: &egui::Context, visuals: &egui::Visuals, badge: &BadgeModel)
     );
 }
 
-fn badge_rect(clip: egui::Rect, text_size: egui::Vec2) -> Option<egui::Rect> {
+fn badge_rect(
+    target_rect: egui::Rect,
+    target_clipped_rect: egui::Rect,
+    ui_clip_rect: egui::Rect,
+    text_size: egui::Vec2,
+    target_label_size: egui::Vec2,
+    is_occluded: impl Fn(egui::Rect) -> bool,
+) -> Option<egui::Rect> {
     let size = text_size + BADGE_PADDING * 2.0;
-    if clip.width() < size.x + BADGE_MARGIN * 2.0 || clip.height() < size.y + BADGE_MARGIN * 2.0 {
+    if ui_clip_rect.width() < size.x + BADGE_MARGIN * 2.0
+        || ui_clip_rect.height() < size.y + BADGE_MARGIN * 2.0
+    {
         return None;
     }
-    Some(egui::Rect::from_min_size(
+    let visible_target = target_rect
+        .intersect(target_clipped_rect)
+        .intersect(ui_clip_rect);
+    if visible_target.width() <= 0.0 || visible_target.height() <= 0.0 {
+        return None;
+    }
+
+    let label_rect = egui::Rect::from_center_size(target_rect.center(), target_label_size);
+    let inside = egui::Rect::from_min_size(
         egui::pos2(
-            clip.right() - BADGE_MARGIN - size.x,
-            clip.top() + BADGE_MARGIN,
+            visible_target.right() - BADGE_MARGIN - size.x,
+            visible_target.top() + BADGE_MARGIN,
         ),
         size,
-    ))
+    );
+    let inside_fits = visible_target.contains_rect(inside);
+    if inside_fits && !inside.expand(BADGE_LABEL_GAP).intersects(label_rect) && !is_occluded(inside)
+    {
+        return Some(inside);
+    }
+
+    let candidates = [
+        egui::Rect::from_min_size(
+            egui::pos2(
+                visible_target.right() + BADGE_MARGIN,
+                visible_target.top() + BADGE_MARGIN,
+            ),
+            size,
+        ),
+        egui::Rect::from_min_size(
+            egui::pos2(
+                visible_target.left() - BADGE_MARGIN - size.x,
+                visible_target.top() + BADGE_MARGIN,
+            ),
+            size,
+        ),
+        egui::Rect::from_min_size(
+            egui::pos2(
+                visible_target.right() - size.x,
+                visible_target.top() - BADGE_MARGIN - size.y,
+            ),
+            size,
+        ),
+        egui::Rect::from_min_size(
+            egui::pos2(
+                visible_target.right() - size.x,
+                visible_target.bottom() + BADGE_MARGIN,
+            ),
+            size,
+        ),
+    ];
+    let outside = candidates.into_iter().find(|candidate| {
+        ui_clip_rect.contains_rect(*candidate)
+            && !candidate.intersects(visible_target)
+            && !is_occluded(*candidate)
+    });
+    outside.or_else(|| inside_fits.then_some(inside))
+}
+
+fn is_occluded_by_registered_target(
+    registry: &TargetRegistry,
+    target_id: &TargetId,
+    layer_id: egui::LayerId,
+    candidate: egui::Rect,
+) -> bool {
+    registry.targets().iter().any(|other| {
+        other.id() != target_id
+            && other.layer_id() == layer_id
+            && candidate.intersects(other.clipped_rect())
+    })
 }
 
 fn paint_focus_outline(ctx: &egui::Context, visuals: &egui::Visuals, outline: &FocusOutlineModel) {
@@ -378,6 +484,60 @@ mod tests {
         (jump, ctx)
     }
 
+    fn adjacent_controls_fixture() -> (JumpModeUi, egui::Context, TargetId, TargetId) {
+        let mut jump = JumpModeUi::new(true);
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let scope = jump
+            .scope(
+                SurfaceId::Dashboard,
+                TargetGeneration(9),
+                "adjacent-control-test",
+                egui::ViewportId::ROOT,
+                true,
+            )
+            .expect("enabled fixture has a dashboard scope");
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(300.0, 100.0),
+            )),
+            focused: true,
+            ..Default::default()
+        };
+        ctx.run_ui(raw, |root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                ui.horizontal(|ui| {
+                    for (local_id, label, order) in
+                        [("refresh", "Refresh", 0), ("clear", "Clear", 1)]
+                    {
+                        let response = ui.small_button(label);
+                        assert!(matches!(
+                            scope.register(
+                                ui,
+                                &response,
+                                local_id,
+                                label,
+                                TargetKind::Button,
+                                order,
+                            ),
+                            RegistrationResult::Registered { .. }
+                        ));
+                    }
+                });
+            });
+        })
+        .drop_without_applying_deltas();
+        jump.finish_ui_pass();
+        (
+            jump,
+            ctx,
+            scope.target_id("refresh"),
+            scope.target_id("clear"),
+        )
+    }
+
     #[test]
     fn badge_models_use_current_clipped_geometry_and_style_the_accepted_prefix() {
         let (jump, _ctx) = fixture(27);
@@ -406,12 +566,117 @@ mod tests {
         assert!(model.badges.iter().all(|badge| {
             badge.accepted_prefix_chars == 1
                 && badge.hint.starts_with('Z')
-                && registry
-                    .targets()
-                    .iter()
-                    .any(|target| badge.clipped_rect == target.clipped_rect())
+                && registry.targets().iter().any(|target| {
+                    badge.target_rect == target.rect()
+                        && badge.clipped_rect == target.clipped_rect()
+                        && badge.ui_clip_rect == target.ui_clip_rect()
+                })
         }));
         assert!(model.indicator.unwrap().label.contains("PREFIX Z"));
+    }
+
+    #[test]
+    fn narrow_badges_move_outside_labels_and_remain_inside_parent_clip() {
+        let target = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(64.0, 24.0));
+        let parent_clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(160.0, 80.0));
+        let label = egui::Rect::from_center_size(target.center(), egui::vec2(42.0, 16.0));
+        let text_size = egui::vec2(10.0, 12.0);
+
+        let badge = badge_rect(target, target, parent_clip, text_size, label.size(), |_| {
+            false
+        })
+        .expect("there is room to place the badge next to the button");
+        assert!(parent_clip.contains_rect(badge));
+        assert!(badge.min.x >= target.right());
+        assert!(!badge.intersects(target));
+        assert!(!badge.intersects(label));
+
+        let scroll_clip = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(90.0, 80.0));
+        let clipped_badge =
+            badge_rect(target, target, scroll_clip, text_size, label.size(), |_| {
+                false
+            })
+            .expect("the badge fits below the target within the parent clip");
+        assert!(scroll_clip.contains_rect(clipped_badge));
+        assert!(clipped_badge.min.y >= target.bottom());
+        assert!(!clipped_badge.intersects(target));
+        assert!(!clipped_badge.intersects(label));
+
+        let crowded_parent_clip = target;
+        let fallback = badge_rect(
+            target,
+            target,
+            crowded_parent_clip,
+            text_size,
+            label.size(),
+            |_| true,
+        )
+        .expect("a compact target retains its badge when all outside placements are occupied");
+        assert!(crowded_parent_clip.contains_rect(fallback));
+        assert!(fallback.intersects(label));
+    }
+
+    #[test]
+    fn wide_card_badges_stay_in_the_target_and_clear_its_label() {
+        let target = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(360.0, 24.0));
+        let parent_clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 60.0));
+        let label = egui::Rect::from_center_size(target.center(), egui::vec2(120.0, 16.0));
+        let badge = badge_rect(
+            target,
+            target,
+            parent_clip,
+            egui::vec2(10.0, 12.0),
+            label.size(),
+            |_| false,
+        )
+        .expect("wide controls retain an inside badge");
+
+        assert!(target.contains_rect(badge));
+        assert!(!badge.intersects(label));
+    }
+
+    #[test]
+    fn narrow_badge_avoids_adjacent_registered_controls() {
+        let (jump, ctx, target_id, neighbor_id) = adjacent_controls_fixture();
+        let registry = jump.pass_registry().expect("fixture completed a pass");
+        let target = registry.get(&target_id).expect("Refresh is registered");
+        let neighbor = registry.get(&neighbor_id).expect("Clear is registered");
+        assert_eq!(target.layer_id(), neighbor.layer_id());
+        let style = ctx.style_of(ctx.theme());
+        let painter = ctx
+            .layer_painter(target.layer_id())
+            .with_clip_rect(target.ui_clip_rect());
+        let label = painter.layout_no_wrap(
+            target.metadata().label().to_owned(),
+            egui::TextStyle::Button.resolve(style.as_ref()),
+            egui::Color32::WHITE,
+        );
+        let hint = painter.layout_no_wrap(
+            "A".to_owned(),
+            egui::FontId::monospace(BADGE_FONT_SIZE),
+            egui::Color32::WHITE,
+        );
+        let badge = badge_rect(
+            target.rect(),
+            target.clipped_rect(),
+            target.ui_clip_rect(),
+            hint.size(),
+            label.size(),
+            |candidate| {
+                is_occluded_by_registered_target(
+                    registry,
+                    target.id(),
+                    target.layer_id(),
+                    candidate,
+                )
+            },
+        )
+        .expect("the badge can move below both adjacent controls");
+
+        assert!(target.ui_clip_rect().contains_rect(badge));
+        assert!(!badge.intersects(target.clipped_rect()));
+        assert!(!badge.intersects(neighbor.clipped_rect()));
+        assert!(badge.min.y >= target.rect().bottom());
     }
 
     #[test]

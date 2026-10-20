@@ -6,10 +6,10 @@
 - Initial working tree: clean, including tracked task-input documents. No user changes copied/discarded.
 - Environment: Windows PowerShell; rustc/cargo 1.99.0; Nextest 0.9.135; egui/eframe 0.36.2 with local vendor patches.
 - Git branch creation needed sandbox escalation because .git is read-only in the normal sandbox; authorized creation succeeded.
-- Current milestone: M08 complete; M09 bounded Refresh-badge placement stabilization next.
+- Current milestone: M09 complete; checkpoint then M10 modal ownership/Settings.
 - Latest GUI evidence: M08 Dashboard014934Z_c5af8d06, Grid020713Z_48084286, Disabled020802Z_db3b2dd1 PASS; all15 receipt bindings and owned cleanup independently verified.
-- Latest checkpoint: e031a5d315cd66a4a5e41ac8a365711c2f05449d — fix(jump): [M07-B] preserve dashboard focus across slot reloads.
-- Push status: all checkpoints through M07-B (e031a5d3) pushed successfully; upstream configured.
+- Latest checkpoint: 812cef8f52aad90448d2e3887fd9209b36ad7928 — test(jump): [M08-A] qualify native dashboard and grid flows.
+- Push status: all checkpoints through M08-A (812cef8f) pushed successfully; upstream configured.
 
 | Milestone | State | Checkpoint / verification | Evidence or dependency |
 |---|---|---|---|
@@ -22,7 +22,7 @@
 | M06 | complete | Actual grid/list targeting;38/38 Jump tests | Native note/grid catalog follows M08 as planned |
 | M07 | complete |43Jump tests + real Dashboard reload regression1/1 | M09 P2 repaired and read-only closure accepted |
 | M08 | complete | All15 native catalog captures; final read-only acceptance review clean | Dashboard/Grid/Disabled focused runs; all owned trees gone |
-| M09 | in_progress | Core and harness/evidence reviews complete; Refresh badge placement pending | M02–M08 complete |
+| M09 | complete | Core/evidence review clean; badge repair8tests+nativeDashboard5captures PASS | Phase1 gate accepted |
 | M10 | pending | Modal ownership and Settings | M09 |
 | M11 | pending | Notes/Todo/Timer/Paste Sequence | M10 |
 | M12 | pending | Complex controls and MkMacro | M10–M11 |
@@ -52,7 +52,7 @@ Parent owns branch, ledger, commits and one best-effort push per checkpoint. Pla
 
 ## Next action
 
-Commit/push completed M08 checkpoint, then repair the observed small Refresh badge/label overlap in M09 with one source writer. All future profiles disable Paste Sequence Next/Cancel; normal/error notifications stay enabled. Continue M10–M15 after Phase1 gate; no user signoff required.
+M09 repair verified in source and actual native Dashboard pixels; commit/push checkpoint then begin M10 using the bounded ownership/Settings handoffs below. All future profiles disable Paste Sequence Next/Cancel; normal/error notifications stay enabled. Continue M10–M15 after Phase1 gate; no user signoff required.
 
 
 
@@ -203,3 +203,6 @@ Grid020215Z_96b4f9cc reached valid06-08 and exactduplicate001 selection; empty-r
 ProcessedTab/Enter scoped Nextest: `cargo nextest run --cargo-profile fast-dev --features 'dev-smoke-binaries qa-framebuffer-capture' --lib -E 'test(jump_mode_observation_tracks_processed_tab_frame_when_opted_in) | test(jump_mode_observation_tracks_processed_enter_frame_when_opted_in)' --no-fail-fast` exit0,2passed/5879skipped. Native disabled readiness still needs qualification afternewmarker; priorcatalog18 remainsPASS.
 ## M08 completed acceptance
 Dashboard014934Z_c5af8d06 passed01-05; Grid020713Z_48084286 passed06-14; Disabled020802Z_db3b2dd1 passed18. Parent and reviewer independently verified all15 PNG/receipt hashes, PID/executable/fixture/frame/pass identity and gracefulexit0/ownedtreegone. Reviewer found no new defect in final reader/focus/Tab/Enter/stale-query boundaries. All three persisted profiles have Next/Cancel null and normal/error toasts enabled. No wholeaggregatePASS claimed. Curated02Dashboard+07Grid total set1318462bytes, both actual images viewed. M08 source writer released ownership; pending coherent checkpoint before M09 bounded visualrepair. Full verification and evidence mapping are in RESULTS M08 section.
+M08-A checkpoint812cef8f52aad90448d2e3887fd9209b36ad7928 committed/pushed successfully; clean tree verified after push. M09 writer /root/registry is limited to badge placement/necessary originating clip geometry and focused tests. No action/input/assignment/layout changes. One focused nativeDashboard after source verification will resolve the observedRefresh overlap, then continue M10 without user signoff.
+M09-A source verification complete; /root/registry released source ownership. Only paint.rs/ui.rs changed: retain originatingUi clip; prefer clear-label inside placement then finite outside candidates avoiding same-layer registered controls; keep inside fallback for crowded controls. Registration/target geometry, hint assignment, layout/hitboxes, input and action routing unchanged. Exact Nextest filter `test(gui::jump_mode::paint::tests) | test(registry_retains_the_parent_ui_clip_separately_from_target_geometry)` under fast-dev/dev-smoke-binaries+qa-framebuffer-capture passed8/5877skipped. Scopedrustfmt/diffpass. /root/implementation is native-execution-only for one focusedDashboard run, no source edits; parent will verify actualRefresh pixels and curate beforecheckpoint.
+M09 native Dashboard021959Z_abcd5152 passed01-05, PID23372 gracefulexit0/ownedgone, source execution hashcaad8e85a8ec4c162f02b39c45fcc40d6b287699708d2802ab19ec71288b6f58. Parent checked5bindings and viewed02: Refresh labels fully readable, outsidebadges correctly beside controls, widecards unchanged. Curated02 replaced with exactactualPNG SHA256f6f455043e592a57de8c24626ba363d0286d559f51e1a79caed5fb6e4b6504af; total set1319518bytes. No new source changes from native runner. M09/Phase1 complete, sourcewriter released; coherent checkpoint pending then M10A shared navigationowner, M10B basicSettings per savedhandoffs.

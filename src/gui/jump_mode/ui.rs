@@ -45,6 +45,7 @@ pub(crate) struct RegisteredTarget {
     layer_id: egui::LayerId,
     rect: egui::Rect,
     clipped_rect: egui::Rect,
+    ui_clip_rect: egui::Rect,
     enabled: bool,
     eligible: bool,
     epoch: NavigationEpoch,
@@ -77,6 +78,10 @@ impl RegisteredTarget {
 
     pub(crate) fn clipped_rect(&self) -> egui::Rect {
         self.clipped_rect
+    }
+
+    pub(crate) fn ui_clip_rect(&self) -> egui::Rect {
+        self.ui_clip_rect
     }
 
     pub(crate) fn enabled(&self) -> bool {
@@ -326,7 +331,8 @@ impl JumpModeScope {
         }
 
         let rect = response.rect;
-        let clipped_rect = rect.intersect(ui.clip_rect());
+        let ui_clip_rect = ui.clip_rect();
+        let clipped_rect = rect.intersect(ui_clip_rect);
         if !rect_is_usable(rect) || !rect_is_usable(clipped_rect) {
             return RegistrationResult::Rejected(RegistrationRejection::EmptyOrClipped);
         }
@@ -337,6 +343,7 @@ impl JumpModeScope {
             layer_id: response.layer_id,
             rect,
             clipped_rect,
+            ui_clip_rect,
             enabled: true,
             eligible: true,
             epoch: self.epoch,
@@ -1527,6 +1534,35 @@ mod tests {
     ) -> RegistrationResult {
         let response = ui.button(label);
         scope.register(ui, &response, local_id, label, kind, 0)
+    }
+
+    #[test]
+    fn registry_retains_the_parent_ui_clip_separately_from_target_geometry() {
+        let (mut jump, scope) = setup(true);
+        let ctx = egui::Context::default();
+        let mut response_rect = None;
+        let mut parent_clip = None;
+        ctx.run_ui(root_input_raw(Vec::new()), |root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                let response = ui.small_button("Refresh");
+                response_rect = Some(response.rect);
+                parent_clip = Some(ui.clip_rect());
+                assert!(matches!(
+                    scope.register(ui, &response, "refresh", "Refresh", TargetKind::Button, 0,),
+                    RegistrationResult::Registered { .. }
+                ));
+            });
+        })
+        .drop_without_applying_deltas();
+
+        jump.finish_ui_pass();
+        let target = &jump.pass_registry().unwrap().targets()[0];
+        let response_rect = response_rect.expect("the test renders its button");
+        let parent_clip = parent_clip.expect("the test records the parent clip");
+        assert_eq!(target.rect(), response_rect);
+        assert_eq!(target.clipped_rect(), response_rect.intersect(parent_clip));
+        assert_eq!(target.ui_clip_rect(), parent_clip);
+        assert!(parent_clip.width() > response_rect.width());
     }
 
     #[test]
