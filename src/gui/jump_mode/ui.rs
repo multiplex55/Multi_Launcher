@@ -29,6 +29,104 @@ pub(crate) enum FocusDirective {
     Select,
 }
 
+/// A dialog family that can own a Jump Mode surface once its actual root
+/// viewport window has been observed. Some dialogs use immediate viewports or
+/// have no root window; those remain blocked until their viewport owner is
+/// explicitly integrated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum NavigationDialogKind {
+    FileSearch,
+    Snippets,
+    ClipboardHistory,
+    JsonUtility,
+    RegexTester,
+    XmlToolkit,
+    MouseSettings,
+    MouseGestures,
+    BatchRename,
+    SearchReplace,
+    DashboardEditor,
+    RadialDesigner,
+}
+
+impl NavigationDialogKind {
+    pub(crate) const ALL: [Self; 12] = [
+        Self::FileSearch,
+        Self::Snippets,
+        Self::ClipboardHistory,
+        Self::JsonUtility,
+        Self::RegexTester,
+        Self::XmlToolkit,
+        Self::MouseSettings,
+        Self::MouseGestures,
+        Self::BatchRename,
+        Self::SearchReplace,
+        Self::DashboardEditor,
+        Self::RadialDesigner,
+    ];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::FileSearch => 0,
+            Self::Snippets => 1,
+            Self::ClipboardHistory => 2,
+            Self::JsonUtility => 3,
+            Self::RegexTester => 4,
+            Self::XmlToolkit => 5,
+            Self::MouseSettings => 6,
+            Self::MouseGestures => 7,
+            Self::BatchRename => 8,
+            Self::SearchReplace => 9,
+            Self::DashboardEditor => 10,
+            Self::RadialDesigner => 11,
+        }
+    }
+
+    pub(crate) const fn surface_kind(self) -> &'static str {
+        match self {
+            Self::FileSearch => "file-search",
+            Self::Snippets => "snippets",
+            Self::ClipboardHistory => "clipboard-history",
+            Self::JsonUtility => "json-utility",
+            Self::RegexTester => "regex-tester",
+            Self::XmlToolkit => "xml-toolkit",
+            Self::MouseSettings => "mouse-settings",
+            Self::MouseGestures => "mouse-gestures",
+            Self::BatchRename => "batch-rename",
+            Self::SearchReplace => "search-replace",
+            Self::DashboardEditor => "dashboard-editor",
+            Self::RadialDesigner => "radial-designer",
+        }
+    }
+
+    /// The current root viewport layer ID for a dialog's real `Window`.
+    /// Radial Designer is a separate viewport and deliberately has no root
+    /// layer identity here.
+    pub(crate) fn layer_id(self) -> Option<egui::LayerId> {
+        let id = match self {
+            Self::FileSearch => egui::Id::new(Some("File Search")),
+            Self::Snippets => egui::Id::new(Some("Snippets")),
+            Self::ClipboardHistory => egui::Id::new(Some("Clipboard History")),
+            Self::JsonUtility => egui::Id::new("json_utility_dialog"),
+            Self::RegexTester => egui::Id::new("regex_tester_embedded_window"),
+            Self::XmlToolkit => egui::Id::new("xml_toolkit_embedded_window"),
+            Self::MouseSettings => egui::Id::new(Some("Mouse Settings")),
+            Self::MouseGestures => egui::Id::new(Some("Mouse Gestures")),
+            Self::BatchRename => egui::Id::new("batch_rename_preview_dialog"),
+            Self::SearchReplace => egui::Id::new("search_replace_preview_dialog"),
+            Self::DashboardEditor => egui::Id::new(Some("Dashboard Editor")),
+            Self::RadialDesigner => return None,
+        };
+        Some(egui::LayerId::new(egui::Order::Middle, id))
+    }
+
+    fn for_layer(layer: egui::LayerId) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.layer_id() == Some(layer))
+    }
+}
+
 /// The sole surface allowed to receive Jump Mode navigation in this frame.
 /// Unsupported windows and transient owners deliberately map to `Blocked`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -53,10 +151,18 @@ pub(crate) enum NavigationOwner {
     MkMacro {
         instance: u64,
     },
+    Dialog {
+        kind: NavigationDialogKind,
+        instance: u64,
+    },
     Blocked,
 }
 
 impl NavigationOwner {
+    fn is_supported(self) -> bool {
+        !matches!(self, Self::Root | Self::Blocked)
+    }
+
     pub(crate) fn owns_settings(self, instance: u64) -> bool {
         self == Self::Settings { instance }
     }
@@ -81,6 +187,10 @@ impl NavigationOwner {
                 Self::MkMacro {
                     instance: owner_instance,
                 } => kind == "mkmacro" && *instance == owner_instance,
+                Self::Dialog {
+                    kind: owner_kind,
+                    instance: owner_instance,
+                } => kind == owner_kind.surface_kind() && *instance == owner_instance,
                 _ => false,
             },
             SurfaceId::Popup { owner, .. } => self.owns_surface(owner),
@@ -126,6 +236,7 @@ pub(crate) struct NavigationWindows {
     pub(crate) timer: Option<u64>,
     pub(crate) paste_sequence: Option<u64>,
     pub(crate) mkmacro: Option<u64>,
+    pub(crate) dialogs: [Option<u64>; NavigationDialogKind::ALL.len()],
 }
 
 impl NavigationWindows {
@@ -136,6 +247,11 @@ impl NavigationWindows {
             || self.timer.is_some()
             || self.paste_sequence.is_some()
             || self.mkmacro.is_some()
+            || self.dialogs.iter().any(Option::is_some)
+    }
+
+    pub(crate) fn dialog_instance(self, kind: NavigationDialogKind) -> Option<u64> {
+        self.dialogs[kind.index()]
     }
 }
 
@@ -212,6 +328,10 @@ pub(crate) fn resolve_layer_navigation_owner_parent(
             windows
                 .mkmacro
                 .map(|instance| NavigationOwner::MkMacro { instance })
+        } else if let Some(kind) = NavigationDialogKind::for_layer(layer) {
+            windows
+                .dialog_instance(kind)
+                .map(|instance| NavigationOwner::Dialog { kind, instance })
         } else {
             None
         };
@@ -952,6 +1072,7 @@ pub(crate) struct JumpModeUi {
     timer_instance: u64,
     paste_sequence_open: bool,
     paste_sequence_instance: u64,
+    observed_dialogs: [ObservedNavigationDialog; NavigationDialogKind::ALL.len()],
     active_session: Option<HintSession>,
     last_outcome: Option<MatchOutcome>,
     root_input_frame: RootInputFrame,
@@ -962,6 +1083,12 @@ pub(crate) struct JumpModeUi {
     retained_registry: TargetRegistry,
     frame_consumed_focus_intent: Option<ConsumedFocusIntent>,
     last_completed_focus_handoff: Option<ConsumedFocusIntent>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ObservedNavigationDialog {
+    open: bool,
+    instance: u64,
 }
 
 impl JumpModeUi {
@@ -1091,6 +1218,32 @@ impl JumpModeUi {
         self.paste_sequence_instance
     }
 
+    /// Observe the actual open state of each newly supported dialog from its
+    /// owning application state. Reordering windows does not affect these
+    /// per-open instances; closing and reopening a dialog always advances it.
+    pub(crate) fn observe_dialog_visibility(
+        &mut self,
+        dialogs: impl IntoIterator<Item = (NavigationDialogKind, bool)>,
+    ) -> bool {
+        let mut changed = false;
+        for (kind, open) in dialogs {
+            let observed = &mut self.observed_dialogs[kind.index()];
+            if observed.open != open {
+                observed.open = open;
+                if open {
+                    observed.instance = observed.instance.wrapping_add(1).max(1);
+                }
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    pub(crate) fn dialog_instance(&self, kind: NavigationDialogKind) -> Option<u64> {
+        let observed = self.observed_dialogs[kind.index()];
+        observed.open.then_some(observed.instance)
+    }
+
     /// Apply the host's current owner and supported-popup decision. Owner,
     /// dialog-visibility, or popup transitions cancel stale navigation and
     /// block this complete egui frame, including all discarded passes.
@@ -1121,21 +1274,15 @@ impl JumpModeUi {
         if owner_changed || popup_changed {
             if self.enabled {
                 if owner_changed
-                    && (matches!(
-                        candidate,
-                        NavigationOwner::Settings { .. }
-                            | NavigationOwner::Notes { .. }
-                            | NavigationOwner::Todo { .. }
-                            | NavigationOwner::Timer { .. }
-                            | NavigationOwner::PasteSequence { .. }
-                            | NavigationOwner::MkMacro { .. }
-                    ) || (supported_dialog_visibility_changed
-                        && (self.settings_open
-                            || self.notes_open
-                            || self.todo_open
-                            || self.timer_window_title.is_some()
-                            || self.paste_sequence_open
-                            || self.mkmacro_open)))
+                    && (candidate.is_supported()
+                        || (supported_dialog_visibility_changed
+                            && (self.settings_open
+                                || self.notes_open
+                                || self.todo_open
+                                || self.timer_window_title.is_some()
+                                || self.paste_sequence_open
+                                || self.mkmacro_open
+                                || self.observed_dialogs.iter().any(|dialog| dialog.open))))
                 {
                     // A supported native dialog deliberately takes ownership
                     // from the launcher query. `surrender_focus` is conditional
@@ -1437,7 +1584,8 @@ impl JumpModeUi {
             | NavigationOwner::Todo { .. }
             | NavigationOwner::Timer { .. }
             | NavigationOwner::PasteSequence { .. }
-            | NavigationOwner::MkMacro { .. } => true,
+            | NavigationOwner::MkMacro { .. }
+            | NavigationOwner::Dialog { .. } => true,
             NavigationOwner::Blocked => false,
         };
         let population_changed = navigation_allowed
@@ -2244,6 +2392,86 @@ mod tests {
         .drop_without_applying_deltas();
     }
 
+    fn render_owned_dialog_windows(
+        ctx: &egui::Context,
+        dialogs: &[NavigationDialogKind],
+        move_to_top: Option<egui::LayerId>,
+    ) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 650.0),
+            )),
+            focused: true,
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| {
+            let ctx = ui.ctx();
+            for kind in dialogs {
+                match kind {
+                    NavigationDialogKind::FileSearch => {
+                        egui::Window::new("File Search").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::Snippets => {
+                        egui::Window::new("Snippets").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::ClipboardHistory => {
+                        egui::Window::new("Clipboard History").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::JsonUtility => {
+                        egui::Window::new("JSON Utility")
+                            .id(egui::Id::new("json_utility_dialog"))
+                            .show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::RegexTester => {
+                        egui::Window::new("Regex Tester")
+                            .id(egui::Id::new("regex_tester_embedded_window"))
+                            .show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::XmlToolkit => {
+                        egui::Window::new("XML Toolkit")
+                            .id(egui::Id::new("xml_toolkit_embedded_window"))
+                            .show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::MouseSettings => {
+                        egui::Window::new("Mouse Settings").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::MouseGestures => {
+                        egui::Window::new("Mouse Gestures").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::BatchRename => {
+                        egui::Window::new("Batch Renamer")
+                            .id(egui::Id::new("batch_rename_preview_dialog"))
+                            .show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::SearchReplace => {
+                        egui::Window::new("Search and Replace")
+                            .id(egui::Id::new("search_replace_preview_dialog"))
+                            .show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::DashboardEditor => {
+                        egui::Window::new("Dashboard Editor").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::RadialDesigner => {}
+                }
+            }
+            if let Some(layer) = move_to_top {
+                ctx.move_to_top(layer);
+            }
+        })
+        .drop_without_applying_deltas();
+    }
+
+    fn windows_with_dialogs(
+        dialogs: impl IntoIterator<Item = (NavigationDialogKind, u64)>,
+    ) -> NavigationWindows {
+        let mut windows = NavigationWindows::default();
+        for (kind, instance) in dialogs {
+            windows.dialogs[kind.index()] = Some(instance);
+        }
+        windows
+    }
+
     fn setup(enabled: bool) -> (JumpModeUi, JumpModeScope) {
         let mut jump = JumpModeUi::new(enabled);
         jump.begin_frame();
@@ -2320,6 +2548,7 @@ mod tests {
             timer: None,
             paste_sequence: None,
             mkmacro: None,
+            dialogs: [None; NavigationDialogKind::ALL.len()],
         };
         render_supported_dialog_windows(&ctx, true, true, true, None);
         assert_eq!(visible_top_middle_layer(&ctx), Some(todo_dialog_layer_id()));
@@ -2356,6 +2585,91 @@ mod tests {
             ),
             NavigationOwner::Blocked,
             "a visible dialog without its exact live instance is unsupported"
+        );
+    }
+
+    #[test]
+    fn expanded_dialog_layer_inventory_matches_actual_window_ids() {
+        for kind in NavigationDialogKind::ALL {
+            let Some(expected_layer) = kind.layer_id() else {
+                assert_eq!(kind, NavigationDialogKind::RadialDesigner);
+                continue;
+            };
+            let ctx = egui::Context::default();
+            render_owned_dialog_windows(&ctx, &[kind], None);
+            assert_eq!(
+                visible_top_middle_layer(&ctx),
+                Some(expected_layer),
+                "{kind:?} maps to the layer created by its current Window ID"
+            );
+            assert_eq!(
+                resolve_layer_navigation_owner(&ctx, windows_with_dialogs([(kind, 41)])),
+                NavigationOwner::Dialog { kind, instance: 41 },
+                "{kind:?} requires the matching live instance"
+            );
+            assert_eq!(
+                resolve_layer_navigation_owner(&ctx, NavigationWindows::default()),
+                NavigationOwner::Blocked,
+                "a supported-looking window without an open instance remains blocked"
+            );
+        }
+
+        let ctx = egui::Context::default();
+        assert_eq!(NavigationDialogKind::RadialDesigner.layer_id(), None);
+        assert_eq!(
+            resolve_layer_navigation_owner(
+                &ctx,
+                windows_with_dialogs([(NavigationDialogKind::RadialDesigner, 1)])
+            ),
+            NavigationOwner::Blocked,
+            "a viewport-only designer blocks root fallback until its viewport is integrated"
+        );
+    }
+
+    #[test]
+    fn expanded_dialog_instances_change_on_reopen_but_not_reorder() {
+        let file_search = NavigationDialogKind::FileSearch;
+        let snippets = NavigationDialogKind::Snippets;
+        let mut jump = JumpModeUi::new(true);
+        assert!(jump.observe_dialog_visibility([(file_search, true), (snippets, true)]));
+        let first_file_instance = jump.dialog_instance(file_search).unwrap();
+        let first_snippets_instance = jump.dialog_instance(snippets).unwrap();
+        assert_eq!((first_file_instance, first_snippets_instance), (1, 1));
+
+        assert!(!jump.observe_dialog_visibility([(snippets, true), (file_search, true)]));
+        let windows = windows_with_dialogs([
+            (file_search, first_file_instance),
+            (snippets, first_snippets_instance),
+        ]);
+        let ctx = egui::Context::default();
+        render_owned_dialog_windows(&ctx, &[file_search, snippets], None);
+        assert_eq!(
+            resolve_layer_navigation_owner(&ctx, windows),
+            NavigationOwner::Dialog {
+                kind: snippets,
+                instance: first_snippets_instance
+            }
+        );
+        render_owned_dialog_windows(&ctx, &[file_search, snippets], file_search.layer_id());
+        assert_eq!(
+            resolve_layer_navigation_owner(&ctx, windows),
+            NavigationOwner::Dialog {
+                kind: file_search,
+                instance: first_file_instance
+            },
+            "raising another open dialog changes only the foreground owner"
+        );
+
+        assert!(jump.observe_dialog_visibility([(file_search, false), (snippets, true)]));
+        assert_eq!(jump.dialog_instance(file_search), None);
+        assert!(jump.observe_dialog_visibility([(file_search, true), (snippets, true)]));
+        assert_eq!(
+            jump.dialog_instance(file_search),
+            Some(first_file_instance + 1)
+        );
+        assert_eq!(
+            jump.dialog_instance(snippets),
+            Some(first_snippets_instance)
         );
     }
 

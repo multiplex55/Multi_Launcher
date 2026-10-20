@@ -8,7 +8,7 @@ Started 2026-10-20 from clean branch `jump`, HEAD `0cb3dabf148dc720ed560626c32ef
 | Milestone | Status | Evidence / commits |
 |---|---|---|
 | M0-A | complete | Read active plan, repository instructions and configured roles; inspected Git, owner bridge, renderer, dashboard gaps and isolated runner. |
-| M1 | in_progress | Configured planner preparing bounded owner-routing packets. |
+| M1 | in_progress | M1-A complete: typed 12-family inventory, exact ordinary/embedded layers, reopen generations; 32 focused tests passed; independent reviewer found no substantive issues. M1-B/C next. |
 | M2 File Search | pending | |
 | M3 Snippets | pending | |
 | M4 Clipboard History | pending | |
@@ -41,4 +41,19 @@ All eight inventories pending implementation; individual unsupported pointer-onl
 
 ## Git and final gates
 
-Parent owns commits and one best-effort normal push per checkpoint. No pushes attempted yet. Full Nextest and final Clippy not run.
+Parent owns commits and one best-effort normal push per checkpoint. M0-A `520bd40c` pushed successfully. Initial sandbox Git writes/network were unavailable; approved escalated Git commands succeeded. Full Nextest and final Clippy not run.
+
+### M1-A evidence
+
+`cargo nextest run --lib -E 'test(gui::jump_mode::ui::tests::) | test(actual_root_navigation_owner_follows) | test(opening_settings_on_a_discarded_root_pass)'`: **32 passed, 5,867 skipped**, exit 0. Scoped rustfmt and `git diff --check` succeeded. Configured reviewer inspected exact production IDs, lifecycle and frame guards: no substantive findings.
+
+`NavigationDialogKind` / `NavigationOwner::Dialog` centralize identities; `JumpModeUi` observes per-open counters and `NavigationWindows` carries live instances. QA serialization includes the new typed owners without private state. No controls are claimed as covered yet.
+
+Native Regex/XML immediate viewports and deferred Radial CentralPanel remain blocked in M1. M6/M9 must integrate their actual viewport context, registry revalidation and popup guards; this is a mandatory implementation dependency, not a permanent family exclusion. Ordinary root layers and embedded utility fallback windows are recognized exactly. Unknown foreground windows remain blocked.
+
+### Bounded planner findings for upcoming checkpoints
+
+- M1-B: extract existing optional registration wrappers from Notes/Todo/MkMacro into the shared bridge; preserve Select ownership and real native focus. M1-C: existing safe fixtures suffice; run `-FixturesOnly`, avoid claiming new native workflows through metadata alone.
+- M2: existing `FileSearchResultRowId` supplies stable search/result/match/path identity. Add a view revision for filtering/sorting. Missing-ripgrep notice is inline; Export contains Copy actions in a generic menu, which stays blocked while native keyboard menu access remains. Real Enter dispatch needs exact-once egui proof.
+- M3/M4: neither persisted model has row IDs; use opaque snapshot tokens without changing serialization. Snippets preview is currently hover-only; inline removal confirmation already exists. Clipboard lacks selection/Copy/removal confirmation, so those small explicit additions are required; validate captured snapshot before later action and never reload by saved index.
+- M5: reuse slot scopes and generation. Actual gaps are Pinned/History response registration, Scratchpad multiline editor, Todo summary selectors/priority/done, Calendar month/date/event controls. Already-covered Copy/timestamp/Refresh/Add/Open controls must not be duplicated.

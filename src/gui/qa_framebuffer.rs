@@ -2444,6 +2444,7 @@ fn qa_navigation_owner(owner: super::jump_mode::ui::NavigationOwner) -> QaNaviga
         Owner::Timer { instance } => ("timer", Some(instance)),
         Owner::PasteSequence { instance } => ("paste_sequence", Some(instance)),
         Owner::MkMacro { instance } => ("mkmacro", Some(instance)),
+        Owner::Dialog { kind, instance } => (kind.surface_kind(), Some(instance)),
         Owner::Blocked => ("blocked", None),
     };
     QaNavigationOwner { kind, instance }
@@ -2496,6 +2497,7 @@ fn qa_dialog_state(
         Owner::Timer { instance } => ("timer", instance),
         Owner::PasteSequence { instance } => ("paste_sequence", instance),
         Owner::MkMacro { instance } => ("mkmacro", instance),
+        Owner::Dialog { kind, instance } => (kind.surface_kind(), instance),
     };
     let mut state = QaDialogState {
         surface: Some(surface),
@@ -2571,6 +2573,7 @@ fn qa_dialog_state(
             state.mkmacro_action_editor_open =
                 Some(app.mkmacro_dialog.action_editor.draft.is_some());
         }
+        Owner::Dialog { .. } => {}
         Owner::Root | Owner::Blocked => unreachable!("handled above"),
     }
     Some(state)

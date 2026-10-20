@@ -3022,6 +3022,17 @@ impl LauncherApp {
                         | super::Panel::TodoDialog
                         | super::Panel::TimerDialog
                         | super::Panel::PasteSequenceDialog
+                        | super::Panel::FileSearchDialog
+                        | super::Panel::SnippetDialog
+                        | super::Panel::ClipboardDialog
+                        | super::Panel::JsonUtilityDialog
+                        | super::Panel::RegexTesterDialog
+                        | super::Panel::XmlToolkitDialog
+                        | super::Panel::MouseSettingsDialog
+                        | super::Panel::MouseGesturesDialog
+                        | super::Panel::BatchRenameDialog
+                        | super::Panel::SearchReplaceDialog
+                        | super::Panel::RadialEditor
                 )
             })
             .any(|panel| self.is_panel_open(panel))
@@ -3058,13 +3069,70 @@ impl LauncherApp {
         let mkmacro_visibility_changed = self
             .jump_mode_ui
             .observe_mkmacro_visibility(self.mkmacro_dialog.open);
+        let radial_designer_open = self
+            .radial_editor
+            .lock()
+            .map(|editor| editor.open)
+            .unwrap_or(true);
+        let owned_dialog_visibility_changed = self.jump_mode_ui.observe_dialog_visibility([
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::FileSearch,
+                self.file_search_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::Snippets,
+                self.snippet_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory,
+                self.clipboard_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::JsonUtility,
+                self.json_utility_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::RegexTester,
+                self.regex_tester_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::XmlToolkit,
+                self.xml_toolkit_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::MouseSettings,
+                self.mouse_settings_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestures,
+                self.mouse_gestures_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename,
+                self.batch_rename_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace,
+                self.search_replace_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor,
+                self.show_dashboard_editor && self.dashboard_editor.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::RadialDesigner,
+                radial_designer_open,
+            ),
+        ]);
         let supported_dialog_visibility_changed = settings_visibility_changed
             || notes_visibility_changed
             || todo_visibility_changed
             || timer_visibility_changed
             || paste_sequence_visibility_changed
-            || mkmacro_visibility_changed;
+            || mkmacro_visibility_changed
+            || owned_dialog_visibility_changed;
         let (candidate, combo_popup) = if self.jump_mode_host_input_allowed(ctx, root_visible) {
+            use crate::gui::jump_mode::ui::NavigationDialogKind;
             let windows = crate::gui::jump_mode::ui::NavigationWindows {
                 settings: self
                     .show_settings
@@ -3086,6 +3154,8 @@ impl LauncherApp {
                     .mkmacro_dialog
                     .open
                     .then_some(self.jump_mode_ui.mkmacro_instance()),
+                dialogs: NavigationDialogKind::ALL
+                    .map(|kind| self.jump_mode_ui.dialog_instance(kind)),
             };
             let parent_owner = resolve_layer_navigation_owner_parent(ctx, windows);
             let combo_popup = (parent_owner != NavigationOwner::Blocked
@@ -4639,6 +4709,7 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
             };
             let mut ed = std::mem::take(&mut self.settings_editor);
@@ -4762,6 +4833,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut timer_dlg = std::mem::take(&mut self.timer_dialog);
@@ -4813,6 +4885,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut paste_sequence_dlg = std::mem::take(&mut self.paste_sequence_dialog);
@@ -4843,6 +4916,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         self.mkmacro_dialog
@@ -4950,6 +5024,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
@@ -5025,6 +5100,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut todo_dlg = std::mem::take(&mut self.todo_dialog);
@@ -26168,6 +26244,7 @@ mod tests {
                     timer: None,
                     paste_sequence: None,
                     mkmacro: None,
+                    dialogs: [None; 12],
                 },
             ),
             NavigationOwner::Settings { instance: 1 },
@@ -26197,6 +26274,120 @@ mod tests {
             render_with_unsupported_window(&ctx, &mut app, true, true),
             NavigationOwner::Blocked,
             "focus inside a foreign window blocks even when Settings is foremost"
+        );
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn actual_root_navigation_owner_follows_expanded_dialogs() {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner, settings_layer_id};
+
+        fn render_dialog_layers(
+            ctx: &egui::Context,
+            file_search: bool,
+            snippets: bool,
+            settings: bool,
+            unknown: bool,
+            foreground: Option<egui::LayerId>,
+        ) {
+            ctx.run_ui(actual_query_input(true), |ui| {
+                if file_search {
+                    egui::Window::new("File Search").show(ui.ctx(), |_| {});
+                }
+                if snippets {
+                    egui::Window::new("Snippets").show(ui.ctx(), |_| {});
+                }
+                if settings {
+                    egui::Window::new("Settings").show(ui.ctx(), |_| {});
+                }
+                if unknown {
+                    egui::Window::new("Unsupported modal").show(ui.ctx(), |_| {});
+                }
+                if let Some(layer) = foreground {
+                    ui.ctx().move_to_top(layer);
+                }
+            })
+            .drop_without_applying_deltas();
+        }
+
+        fn route_owner(ctx: &egui::Context, app: &mut LauncherApp) -> NavigationOwner {
+            app.jump_mode_ui.begin_frame();
+            let (candidate, visibility_changed, combo_popup) =
+                app.jump_mode_navigation_owner_candidate(ctx, true);
+            app.jump_mode_ui.update_navigation_owner_with_combo_popup(
+                ctx,
+                candidate,
+                visibility_changed,
+                combo_popup,
+            )
+        }
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        assert_eq!(route_owner(&ctx, &mut app), NavigationOwner::Root);
+
+        app.file_search_dialog.open = true;
+        assert_eq!(
+            route_owner(&ctx, &mut app),
+            NavigationOwner::Blocked,
+            "an open dialog without a completed visible layer cannot fall back to Root"
+        );
+        render_dialog_layers(&ctx, true, false, false, false, None);
+        assert_eq!(
+            route_owner(&ctx, &mut app),
+            NavigationOwner::Blocked,
+            "the first observed File Search owner transition consumes the frame"
+        );
+        assert_eq!(
+            route_owner(&ctx, &mut app),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::FileSearch,
+                instance: 1
+            }
+        );
+
+        app.snippet_dialog.open = true;
+        assert_eq!(
+            route_owner(&ctx, &mut app),
+            NavigationOwner::Blocked,
+            "opening another supported dialog invalidates the prior scope"
+        );
+        let snippets_layer =
+            egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Snippets")));
+        render_dialog_layers(&ctx, true, true, false, false, Some(snippets_layer));
+        assert_eq!(route_owner(&ctx, &mut app), NavigationOwner::Blocked);
+        assert_eq!(
+            route_owner(&ctx, &mut app),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::Snippets,
+                instance: 1
+            },
+            "the actual foreground Snippets layer takes ownership after a fresh frame"
+        );
+
+        app.show_settings = true;
+        assert_eq!(route_owner(&ctx, &mut app), NavigationOwner::Blocked);
+        render_dialog_layers(&ctx, true, true, true, false, Some(settings_layer_id()));
+        assert_eq!(route_owner(&ctx, &mut app), NavigationOwner::Blocked);
+        assert_eq!(
+            route_owner(&ctx, &mut app),
+            NavigationOwner::Settings { instance: 1 },
+            "Settings retains its existing owner semantics above expanded dialogs"
+        );
+
+        let unknown_layer = egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(Some("Unsupported modal")),
+        );
+        render_dialog_layers(&ctx, true, true, true, true, Some(unknown_layer));
+        assert_eq!(
+            route_owner(&ctx, &mut app),
+            NavigationOwner::Blocked,
+            "an unknown top window blocks all supported owners behind it"
         );
         assert!(app.test_activation_trace.is_empty());
         drop(workspace);
@@ -26272,6 +26463,7 @@ mod tests {
                     timer: None,
                     paste_sequence: None,
                     mkmacro: None,
+                    dialogs: [None; 12],
                 }
             ),
         );
@@ -26994,6 +27186,7 @@ mod tests {
                     timer: None,
                     paste_sequence: None,
                     mkmacro: None,
+                    dialogs: [None; 12],
                 }
             ),
             app.confirm_modal.is_open(),
