@@ -3011,7 +3011,12 @@ impl LauncherApp {
         Self::TRACKED_PANELS
             .iter()
             .copied()
-            .filter(|panel| *panel != super::Panel::Settings)
+            .filter(|panel| {
+                !matches!(
+                    panel,
+                    super::Panel::Settings | super::Panel::NotesDialog | super::Panel::TodoDialog
+                )
+            })
             .any(|panel| self.is_panel_open(panel))
     }
 
@@ -3025,21 +3030,45 @@ impl LauncherApp {
         let settings_visibility_changed = self
             .jump_mode_ui
             .observe_settings_visibility(self.show_settings);
+        let notes_visibility_changed = self
+            .jump_mode_ui
+            .observe_notes_visibility(self.notes_dialog.open);
+        let todo_visibility_changed = self
+            .jump_mode_ui
+            .observe_todo_visibility(self.todo_dialog.open);
+        let supported_dialog_visibility_changed =
+            settings_visibility_changed || notes_visibility_changed || todo_visibility_changed;
         let candidate = if self.jump_mode_host_input_allowed(ctx, root_visible) {
-            let owner = resolve_layer_navigation_owner(
-                ctx,
-                self.show_settings,
-                self.jump_mode_ui.settings_instance(),
-            );
-            if owner == NavigationOwner::Root && self.jump_mode_unsupported_panel_open() {
-                NavigationOwner::Blocked
-            } else {
-                owner
+            let windows = crate::gui::jump_mode::ui::NavigationWindows {
+                settings: self
+                    .show_settings
+                    .then_some(self.jump_mode_ui.settings_instance()),
+                notes: self
+                    .notes_dialog
+                    .open
+                    .then_some(self.jump_mode_ui.notes_instance()),
+                todo: self
+                    .todo_dialog
+                    .open
+                    .then_some(self.jump_mode_ui.todo_instance()),
+            };
+            let owner = resolve_layer_navigation_owner(ctx, windows);
+            match owner {
+                NavigationOwner::Root if self.jump_mode_unsupported_panel_open() => {
+                    NavigationOwner::Blocked
+                }
+                NavigationOwner::Notes { .. }
+                    if self.notes_dialog.jump_mode_unsupported_nested_owner_open()
+                        || self.unused_assets_dialog.open =>
+                {
+                    NavigationOwner::Blocked
+                }
+                _ => owner,
             }
         } else {
             NavigationOwner::Blocked
         };
-        (candidate, settings_visibility_changed)
+        (candidate, supported_dialog_visibility_changed)
     }
 
     fn resolve_jump_mode_navigation_owner(
@@ -3144,9 +3173,9 @@ impl LauncherApp {
         if let Some(logic) = self.root_frame_logic.as_mut() {
             logic.ui_passes = frame_logic.ui_passes;
         }
-        let (navigation_owner_candidate, settings_visibility_changed) =
+        let (navigation_owner_candidate, supported_dialog_visibility_changed) =
             self.jump_mode_navigation_owner_candidate(&ctx, frame_logic.should_be_visible);
-        let owner_transition_pending = settings_visibility_changed
+        let owner_transition_pending = supported_dialog_visibility_changed
             || navigation_owner_candidate != self.jump_mode_ui.frame_navigation_owner();
         let navigation_input_allowed = !owner_transition_pending
             && self.jump_mode_navigation_input_allowed(
@@ -3159,7 +3188,7 @@ impl LauncherApp {
         self.jump_mode_ui.update_navigation_owner(
             &ctx,
             navigation_owner_candidate,
-            settings_visibility_changed,
+            supported_dialog_visibility_changed,
         );
         self.show_screenshot_pins(&ctx);
         self.pin_list_open = self.show_screenshot_pin_list(&ctx, self.pin_list_open);
@@ -4538,6 +4567,8 @@ impl LauncherApp {
                     )
                 }
                 crate::gui::jump_mode::ui::NavigationOwner::Root
+                | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
             };
             let mut ed = std::mem::take(&mut self.settings_editor);
@@ -4765,8 +4796,26 @@ impl LauncherApp {
             self.submit_ready_search_replace_confirmation();
         }
         self.diff_dialog.ui(&ctx);
+        let notes_owner =
+            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+        let notes_scope = match notes_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Notes { instance } => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("notes", instance),
+                    self.notes_dialog.jump_mode_target_generation(),
+                    "quick-notes",
+                    ctx.viewport_id(),
+                    notes_owner,
+                    false,
+                )
+            }
+            crate::gui::jump_mode::ui::NavigationOwner::Root
+            | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
+        };
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
-        notes_dlg.ui(&ctx, self);
+        notes_dlg.ui_with_jump_mode(&ctx, self, notes_scope);
         self.notes_dialog = notes_dlg;
         let mut graph_dlg = std::mem::take(&mut self.note_graph_dialog);
         let dashboard_snapshot = self.dashboard_data_cache.snapshot();
@@ -4819,8 +4868,26 @@ impl LauncherApp {
                 i += 1;
             }
         }
+        let todo_owner =
+            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+        let todo_scope = match todo_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Todo { instance } => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("todo", instance),
+                    self.todo_dialog.jump_mode_target_generation(),
+                    "todo-dialog",
+                    ctx.viewport_id(),
+                    todo_owner,
+                    false,
+                )
+            }
+            crate::gui::jump_mode::ui::NavigationOwner::Root
+            | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
+        };
         let mut todo_dlg = std::mem::take(&mut self.todo_dialog);
-        todo_dlg.ui(&ctx, self);
+        todo_dlg.ui_with_jump_mode(&ctx, self, todo_scope);
         self.todo_dialog = todo_dlg;
         let mut todo_view = std::mem::take(&mut self.todo_view_dialog);
         todo_view.ui(&ctx, self);
@@ -22753,6 +22820,660 @@ mod tests {
             .to_owned()
     }
 
+    fn dialog_hint_for_label(app: &LauncherApp, label: &str) -> String {
+        app.jump_mode_ui
+            .active_session()
+            .expect("Jump Mode session is active")
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.target().label() == label)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no active dialog target labeled {label:?}; targets={:?}",
+                    app.jump_mode_ui
+                        .retained_registry()
+                        .targets()
+                        .iter()
+                        .map(|target| target.metadata().label())
+                        .collect::<Vec<_>>()
+                )
+            })
+            .hint()
+            .as_str()
+            .to_owned()
+    }
+
+    fn press_dialog_hint_with_enter(ctx: &egui::Context, app: &mut LauncherApp, hint: &str) {
+        let output = app
+            .run_root_frame_for_test(
+                ctx,
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::Text(hint.to_ascii_lowercase()),
+                        key_press(egui::Key::Enter, egui::Modifiers::NONE),
+                    ],
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0;
+        output.drop_without_applying_deltas();
+    }
+
+    fn release_dialog_hint_enter(ctx: &egui::Context, app: &mut LauncherApp) {
+        app.run_root_frame_for_test(
+            ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+    }
+
+    fn run_dialog_frame(ctx: &egui::Context, app: &mut LauncherApp) {
+        app.run_root_frame_for_test(ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+    }
+
+    fn resize_todo_window_in_test(ctx: &egui::Context, app: &mut LauncherApp, height_delta: f32) {
+        let window_rect = ctx
+            .memory(|memory| memory.area_rect(egui::Id::new(Some("Todos"))))
+            .expect("the Todo dialog has a retained window rect");
+        let press_pos = window_rect.right_bottom() - egui::vec2(3.0, 3.0);
+        let drag_pos = press_pos + egui::vec2(0.0, height_delta);
+        for events in [
+            vec![
+                egui::Event::PointerMoved(press_pos),
+                egui::Event::PointerButton {
+                    pos: press_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            vec![egui::Event::PointerMoved(drag_pos)],
+            vec![egui::Event::PointerButton {
+                pos: drag_pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ] {
+            app.run_root_frame_for_test(
+                ctx,
+                egui::RawInput {
+                    events,
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+        }
+        run_dialog_frame(ctx, app);
+        let resized = ctx
+            .memory(|memory| memory.area_rect(egui::Id::new(Some("Todos"))))
+            .expect("the resized Todo dialog remains retained");
+        assert!(
+            resized.height() > window_rect.height(),
+            "the fixture must resize the real dialog: before={window_rect:?}, after={resized:?}"
+        );
+    }
+
+    #[test]
+    fn jump_mode_notes_dialog_escape_preserves_draft_and_fresh_enter_cancels_edit() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.notes_dialog.test_set_edit_draft("unsaved note draft");
+
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Notes {
+                instance: app.jump_mode_ui.notes_instance()
+            }
+        );
+        assert!(
+            !ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))),
+            "the foreground Notes dialog owns focus"
+        );
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .all(|target| {
+                    matches!(
+                        target.id().surface(),
+                        crate::gui::jump_mode::SurfaceId::Dialog { kind, .. } if kind == "notes"
+                    )
+                })
+        );
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let escape = app
+            .run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0;
+        escape.drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(app.notes_dialog.test_is_editing());
+        assert_eq!(app.notes_dialog.test_edit_draft(), "unsaved note draft");
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let cancel_hint = dialog_hint_for_label(&app, "Cancel");
+        press_dialog_hint_with_enter(&ctx, &mut app, &cancel_hint);
+        assert!(
+            app.notes_dialog.test_is_editing(),
+            "hint completion plus same-frame Enter only focuses Cancel"
+        );
+        assert_eq!(app.notes_dialog.test_edit_draft(), "unsaved note draft");
+        assert!(app.test_activation_trace.is_empty());
+        release_dialog_hint_enter(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(
+            !app.notes_dialog.test_is_editing(),
+            "a distinct later Enter invokes the existing Cancel button"
+        );
+        assert_eq!(app.notes_dialog.test_edit_draft(), "unsaved note draft");
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_notes_rows_use_visible_slug_identity_and_fresh_enter_opens_exact_note() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        let make_note = |title: String, slug: String| crate::plugins::note::Note {
+            title,
+            path: std::path::PathBuf::new(),
+            content: format!("safe fixture for {slug}"),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug,
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let mut notes = vec![
+            make_note("Shared title".into(), "duplicate-first".into()),
+            make_note("Shared title".into(), "duplicate-second".into()),
+        ];
+        notes.extend((0..40).map(|index| {
+            make_note(
+                format!("Overflow {index:02}"),
+                format!("overflow-{index:02}"),
+            )
+        }));
+        crate::plugins::note::save_notes(&notes).expect("write notes in the isolated workspace");
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.notes_dialog.open();
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        let visible_note_labels = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter_map(|target| {
+                let label = target.metadata().label();
+                (label.starts_with("Shared title (") || label.starts_with("Overflow "))
+                    .then_some(label)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            visible_note_labels
+                .iter()
+                .any(|label| *label == "Shared title (duplicate-first)"),
+            "the real first note row is visible and registered: {visible_note_labels:?}"
+        );
+        assert!(
+            visible_note_labels.len() < notes.len(),
+            "virtualized and clipped rows are not registered: {} of {}",
+            visible_note_labels.len(),
+            notes.len()
+        );
+
+        let initially_visible_first = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Shared title (duplicate-first)")
+            .expect("the first duplicate-slug header is visible");
+        let initially_visible_first_id = initially_visible_first.id().clone();
+        let initially_visible_first_response = initially_visible_first.response_id();
+        let initially_visible_second_response = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Shared title (duplicate-second)")
+            .expect("both duplicate-title rows are visible in the initial viewport")
+            .response_id();
+        app.set_jump_mode_enabled(false);
+        ctx.memory_mut(|memory| memory.request_focus(initially_visible_first_response));
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(
+            app.note_panels.is_empty(),
+            "feature-off Notes input retains its prior non-activating row behavior"
+        );
+        app.set_jump_mode_enabled(true);
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let mut reordered = notes.clone();
+        reordered.swap(0, 1);
+        crate::plugins::note::save_notes(&reordered)
+            .expect("reorder the isolated notes without changing their slugs");
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        assert!(
+            app.jump_mode_ui.active_session().is_none(),
+            "a frozen Notes hint session cancels when its ordered population changes"
+        );
+        assert!(app.note_panels.is_empty());
+        let visible_first_after_reorder = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Shared title (duplicate-first)")
+            .expect("the reordered first slug remains visible and registered");
+        assert_eq!(
+            visible_first_after_reorder.id().semantic(),
+            initially_visible_first_id.semantic(),
+            "semantic row identity stays attached to the slug across reorder"
+        );
+        assert_eq!(
+            visible_first_after_reorder.response_id(),
+            initially_visible_first_response,
+            "native widget ID stays attached to the slug across reorder"
+        );
+        assert_eq!(
+            visible_first_after_reorder.id().generation(),
+            app.notes_dialog.jump_mode_target_generation(),
+            "the visible target carries the current reordered population generation"
+        );
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let reordered_note_hint = dialog_hint_for_label(&app, "Shared title (duplicate-first)");
+        let target_before_hint = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Shared title (duplicate-first)")
+            .expect("the selected reordered row is visible immediately before hint entry");
+        let target_before_hint_id = target_before_hint.id().clone();
+        let reordered_header_id_after_reorder = target_before_hint.response_id();
+        assert_eq!(
+            target_before_hint_id.semantic(),
+            initially_visible_first_id.semantic()
+        );
+        assert_eq!(
+            target_before_hint_id.generation(),
+            app.notes_dialog.jump_mode_target_generation()
+        );
+        assert_eq!(
+            reordered_header_id_after_reorder,
+            initially_visible_first_response
+        );
+        assert!(!reordered_note_hint.is_empty());
+        press_dialog_hint_with_enter(&ctx, &mut app, &reordered_note_hint);
+        assert!(
+            app.note_panels.is_empty(),
+            "completion focuses the exact row and consumes the same-frame Enter"
+        );
+        assert!(app.test_activation_trace.is_empty());
+        let target_at_focus_commit = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Shared title (duplicate-first)")
+            .expect("the selected slug remains visible while its focus intent commits");
+        assert_eq!(target_at_focus_commit.id(), &target_before_hint_id);
+        assert_eq!(
+            target_at_focus_commit.response_id(),
+            reordered_header_id_after_reorder
+        );
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.metadata().label() == "Shared title (duplicate-second)"),
+            "the other duplicate row is excluded once outside the actual viewport"
+        );
+        release_dialog_hint_enter(&ctx, &mut app);
+        assert!(
+            ctx.memory(|memory| memory.has_focus(reordered_header_id_after_reorder)),
+            "the Notes hint focus intent is committed to the native row response"
+        );
+        assert!(!ctx.memory(|memory| memory.has_focus(initially_visible_second_response)));
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.note_panels.len(), 1);
+        assert_eq!(app.note_panels[0].note_slug(), "duplicate-first");
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_todo_dialog_add_hint_then_fresh_enter_adds_once_and_escape_preserves_draft() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.todo_dialog.open();
+        app.todo_dialog.test_set_text("jump-mode todo draft");
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        assert!(matches!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
+        ));
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .all(|target| {
+                    matches!(
+                        target.id().surface(),
+                        crate::gui::jump_mode::SurfaceId::Dialog { kind, .. } if kind == "todo"
+                    )
+                })
+        );
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let add_hint = dialog_hint_for_label(&app, "Add");
+        press_dialog_hint_with_enter(&ctx, &mut app, &add_hint);
+        assert!(
+            app.todo_dialog.test_entries().is_empty(),
+            "same-frame Enter is suppressed when the Add hint completes"
+        );
+        assert_eq!(app.todo_dialog.test_text(), "jump-mode todo draft");
+        assert!(app.test_activation_trace.is_empty());
+        release_dialog_hint_enter(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.todo_dialog.test_entries().len(), 1);
+        assert_eq!(
+            app.todo_dialog.test_entries()[0].text,
+            "jump-mode todo draft"
+        );
+        assert!(app.todo_dialog.test_text().is_empty());
+        assert!(app.test_activation_trace.is_empty());
+
+        app.todo_dialog.test_set_text("cancelled todo draft");
+        run_dialog_frame(&ctx, &mut app);
+        start_actual_root_jump_mode(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.todo_dialog.test_text(), "cancelled todo draft");
+        assert_eq!(app.todo_dialog.test_entries().len(), 1);
+        assert!(app.test_activation_trace.is_empty());
+        let persisted = crate::plugins::todo::load_todos(crate::plugins::todo::TODO_FILE)
+            .expect("the accepted Todo Add writes inside the isolated workspace");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].text, "jump-mode todo draft");
+
+        app.todo_dialog
+            .test_set_text("draft before Clear Completed");
+        run_dialog_frame(&ctx, &mut app);
+        let new_todo_id = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "New Todo")
+            .expect("the real New Todo field is registered")
+            .response_id();
+        let clear_completed_id = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Clear Completed")
+            .expect("Clear Completed is an actual registered button")
+            .response_id();
+        ctx.memory_mut(|memory| memory.request_focus(new_todo_id));
+        run_dialog_frame(&ctx, &mut app);
+        assert!(ctx.memory(|memory| memory.has_focus(new_todo_id)));
+        assert_eq!(app.todo_dialog.test_text(), "draft before Clear Completed");
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let clear_hint = dialog_hint_for_label(&app, "Clear Completed");
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(clear_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.todo_dialog.test_pending_clear_confirm());
+        assert_eq!(app.todo_dialog.test_entries().len(), 1);
+        assert_eq!(app.todo_dialog.test_text(), "draft before Clear Completed");
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(
+            app.todo_dialog.test_pending_clear_confirm(),
+            "the immediate fresh Enter activates the focused non-Add button"
+        );
+        assert_eq!(app.todo_dialog.test_entries().len(), 1);
+        assert_eq!(app.todo_dialog.test_text(), "draft before Clear Completed");
+        assert_eq!(
+            crate::plugins::todo::load_todos(crate::plugins::todo::TODO_FILE)
+                .expect("read the isolated Todo file after non-Add Enter"),
+            persisted,
+            "Jump Mode Enter on a non-Add control leaves the draft and stored entries alone"
+        );
+
+        app.set_jump_mode_enabled(false);
+        app.todo_dialog.test_set_text("off-mode button focus draft");
+        ctx.memory_mut(|memory| memory.request_focus(clear_completed_id));
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.todo_dialog.test_entries().len(), 2);
+        assert_eq!(
+            app.todo_dialog.test_entries()[1].text,
+            "off-mode button focus draft",
+            "the feature-off global Enter fallback still adds from non-form focus"
+        );
+        let persisted = crate::plugins::todo::load_todos(crate::plugins::todo::TODO_FILE)
+            .expect("read both isolated Todos after the feature-off fallback");
+        assert_eq!(persisted.len(), 2);
+        assert_eq!(persisted[1].text, "off-mode button focus draft");
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_todo_clear_confirm_cancel_is_the_only_scoped_popup_target() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        let completed = crate::plugins::todo::TodoEntry {
+            id: "stable-done-entry".into(),
+            text: "completed task".into(),
+            done: true,
+            priority: 1,
+            tags: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        crate::plugins::todo::replace_todos(
+            crate::plugins::todo::TODO_FILE,
+            vec![completed.clone()],
+        )
+        .expect("seed the isolated Todo file before opening the dialog");
+        app.todo_dialog.open();
+        app.todo_dialog.test_set_text("draft survives cancel");
+        app.todo_dialog.test_request_clear_confirm();
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        resize_todo_window_in_test(&ctx, &mut app, 120.0);
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let targets = app.jump_mode_ui.retained_registry().targets();
+        assert_eq!(
+            targets.len(),
+            2,
+            "owner={:?}, top={:?}, focused={:?}, popup={}, pending={}",
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
+            crate::gui::jump_mode::ui::focused_response_layer(&ctx),
+            egui::Popup::is_any_open(&ctx),
+            app.todo_dialog.test_pending_clear_confirm(),
+        );
+        assert!(targets.iter().all(|target| matches!(
+            target.id().surface(),
+            crate::gui::jump_mode::SurfaceId::Popup { kind, instance, owner }
+                if kind == "todo-clear-confirm"
+                    && *instance == app.jump_mode_ui.todo_instance()
+                    && matches!(owner.as_ref(), crate::gui::jump_mode::SurfaceId::Dialog { kind, instance: owner_instance } if kind == "todo" && *owner_instance == *instance)
+        )));
+        assert!(targets.iter().all(|target| {
+            target.metadata().label() == "Confirm clear completed"
+                || target.metadata().label() == "Cancel clear completed"
+        }));
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let cancel_hint = dialog_hint_for_label(&app, "Cancel clear completed");
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(cancel_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.todo_dialog.test_pending_clear_confirm());
+        assert_eq!(app.todo_dialog.test_entries().len(), 1);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.todo_dialog.test_pending_clear_confirm());
+        assert_eq!(app.todo_dialog.test_text(), "draft survives cancel");
+        assert_eq!(app.todo_dialog.test_entries().len(), 1);
+        assert!(app.todo_dialog.test_entries()[0].done);
+        assert_eq!(
+            crate::plugins::todo::load_todos(crate::plugins::todo::TODO_FILE)
+                .expect("read the isolated Todo file after Cancel"),
+            vec![completed],
+            "a fresh Enter on Cancel must not persist the pending draft or clear the entry"
+        );
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
     #[test]
     fn jump_mode_actual_query_capture_preserves_text_and_survives_discarded_pass() {
         let ctx = egui::Context::default();
@@ -23273,8 +23994,13 @@ mod tests {
         assert_eq!(
             crate::gui::jump_mode::ui::resolve_layer_navigation_owner(
                 &ctx,
-                app.show_settings,
-                app.jump_mode_ui.settings_instance(),
+                crate::gui::jump_mode::ui::NavigationWindows {
+                    settings: app
+                        .show_settings
+                        .then_some(app.jump_mode_ui.settings_instance()),
+                    notes: None,
+                    todo: None,
+                },
             ),
             NavigationOwner::Settings { instance: 1 },
             "the retained Settings layer owns navigation after the transition frame"
@@ -23369,8 +24095,13 @@ mod tests {
             "candidate={candidate:?}, direct={:?}, resolver_facts={resolver_facts:?}, gates={gates:?}, prompts={prompt_gates:?}",
             crate::gui::jump_mode::ui::resolve_layer_navigation_owner(
                 &ctx,
-                app.show_settings,
-                app.jump_mode_ui.settings_instance()
+                crate::gui::jump_mode::ui::NavigationWindows {
+                    settings: app
+                        .show_settings
+                        .then_some(app.jump_mode_ui.settings_instance()),
+                    notes: None,
+                    todo: None,
+                }
             ),
         );
         assert!(!ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
@@ -24083,8 +24814,13 @@ mod tests {
             "candidate={candidate:?}, direct={:?}, resolver_facts={resolver_facts:?}, modal={}, sheet={}, screen_draw={:?}",
             crate::gui::jump_mode::ui::resolve_layer_navigation_owner(
                 &ctx,
-                app.show_settings,
-                app.jump_mode_ui.settings_instance()
+                crate::gui::jump_mode::ui::NavigationWindows {
+                    settings: app
+                        .show_settings
+                        .then_some(app.jump_mode_ui.settings_instance()),
+                    notes: None,
+                    todo: None,
+                }
             ),
             app.confirm_modal.is_open(),
             app.action_sheet.is_open(),

@@ -1088,6 +1088,43 @@ impl TemplateManagerState {
 }
 
 impl NotesDialog {
+    pub(crate) fn jump_mode_target_generation(&self) -> crate::gui::jump_mode::TargetGeneration {
+        use std::hash::{Hash, Hasher};
+
+        let mut generation = std::collections::hash_map::DefaultHasher::new();
+        self.entries_generation.hash(&mut generation);
+        self.entries_revision.hash(&mut generation);
+        self.projection_generation.hash(&mut generation);
+        self.search.hash(&mut generation);
+        crate::gui::jump_mode::TargetGeneration(generation.finish())
+    }
+
+    pub(crate) fn jump_mode_unsupported_nested_owner_open(&self) -> bool {
+        self.open
+            && (self.template_manager.open
+                || self
+                    .menu_owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.response.context_menu_opened()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_edit_draft(&mut self, text: &str) {
+        self.open = true;
+        self.edit_idx = Some(self.entries.len());
+        self.text = text.to_owned();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_edit_draft(&self) -> &str {
+        &self.text
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_is_editing(&self) -> bool {
+        self.edit_idx.is_some()
+    }
+
     fn capture_note_snapshot(&mut self) -> anyhow::Result<(u64, Vec<Note>)> {
         #[cfg(test)]
         let _phase = c2f_observation::Timer::start(c2f_observation::Phase::Snapshot);
@@ -1566,6 +1603,15 @@ impl NotesDialog {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        self.ui_with_jump_mode(ctx, app, None);
+    }
+
+    pub(crate) fn ui_with_jump_mode(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        jump_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+    ) {
         #[cfg(test)]
         self.last_rendered_indices.clear();
         #[cfg(test)]
@@ -1597,6 +1643,7 @@ impl NotesDialog {
         let mut refresh_entries = false;
         let mut wrap_links_slug: Option<String> = None;
         let mut window_open = self.open;
+        let mut jump_visual_order = 0;
         egui::Window::new("Quick Notes")
             .open(&mut window_open)
             .resizable(true)
@@ -1657,9 +1704,18 @@ impl NotesDialog {
                         {
                             self.test_edit_save_rect = Some(save_button.rect);
                         }
-                        if widgets::with_button_emphasis(ui, save_button, ButtonEmphasis::Primary)
-                            .clicked()
-                        {
+                        let save_button =
+                            widgets::with_button_emphasis(ui, save_button, ButtonEmphasis::Primary);
+                        register_jump_mode_target(
+                            jump_scope.as_ref(),
+                            ui,
+                            &save_button,
+                            "edit/save",
+                            "Save",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut jump_visual_order,
+                        );
+                        if save_button.clicked() {
                             if self.text.trim().is_empty() {
                                 app.report_error_message("ui operation", "Text required");
                             } else {
@@ -1691,6 +1747,15 @@ impl NotesDialog {
                         {
                             self.test_edit_cancel_rect = Some(cancel_button.rect);
                         }
+                        register_jump_mode_target(
+                            jump_scope.as_ref(),
+                            ui,
+                            &cancel_button,
+                            "edit/cancel",
+                            "Cancel",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut jump_visual_order,
+                        );
                         if cancel_button.clicked() {
                             self.edit_idx = None;
                         }
@@ -1698,25 +1763,75 @@ impl NotesDialog {
                 } else {
                     ui.horizontal_wrapped(|ui| {
                         let add_note = ui.button("Add Note");
-                        if widgets::with_button_emphasis(ui, add_note, ButtonEmphasis::Primary)
-                            .clicked()
-                        {
+                        let add_note =
+                            widgets::with_button_emphasis(ui, add_note, ButtonEmphasis::Primary);
+                        register_jump_mode_target(
+                            jump_scope.as_ref(),
+                            ui,
+                            &add_note,
+                            "add-note",
+                            "Add Note",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut jump_visual_order,
+                        );
+                        if add_note.clicked() {
                             self.edit_idx = Some(self.entries.len());
                             self.text.clear();
                         }
-                        if ui.button("Unused Assets").clicked() {
+                        let unused_assets = ui.button("Unused Assets");
+                        register_jump_mode_target(
+                            jump_scope.as_ref(),
+                            ui,
+                            &unused_assets,
+                            "unused-assets",
+                            "Unused Assets",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut jump_visual_order,
+                        );
+                        if unused_assets.clicked() {
                             app.unused_assets_dialog.open();
                         }
-                        if app.note_settings.templates_enabled && ui.button("Templates").clicked() {
-                            self.template_manager.open();
+                        if app.note_settings.templates_enabled {
+                            let templates = ui.button("Templates");
+                            register_jump_mode_target(
+                                jump_scope.as_ref(),
+                                ui,
+                                &templates,
+                                "templates",
+                                "Templates",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut jump_visual_order,
+                            );
+                            if templates.clicked() {
+                                self.template_manager.open();
+                            }
                         }
-                        if ui.button("Close").clicked() {
+                        let close_button = ui.button("Close");
+                        register_jump_mode_target(
+                            jump_scope.as_ref(),
+                            ui,
+                            &close_button,
+                            "close",
+                            "Close",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut jump_visual_order,
+                        );
+                        if close_button.clicked() {
                             close = true;
                         }
                     });
                     widgets::compact_section_heading(ui, "Search", None);
-                    ui.add(
+                    let search = ui.add(
                         egui::TextEdit::singleline(&mut self.search).desired_width(f32::INFINITY),
+                    );
+                    register_jump_mode_target(
+                        jump_scope.as_ref(),
+                        ui,
+                        &search,
+                        "search",
+                        "Search notes",
+                        crate::gui::jump_mode::TargetKind::TextEntry,
+                        &mut jump_visual_order,
                     );
                     if update_filtered_projection(
                         &self.search,
@@ -1841,24 +1956,33 @@ impl NotesDialog {
                                     |ui| {
                                         ui.vertical(|ui| {
                                             let preview = row.preview.as_str();
-                                            let header = ui.vertical(|ui| {
-                                                let title = ui.add(
-                                                    egui::Label::new(
-                                                        egui::RichText::new(&row.display_title)
-                                                            .strong(),
-                                                    )
-                                                    .wrap_mode(header_wrap),
-                                                );
-                                                let meta = ui.add(
-                                                    egui::Label::new(
-                                                        egui::RichText::new(&row.meta)
-                                                            .small()
-                                                            .weak(),
-                                                    )
-                                                    .wrap_mode(header_wrap),
-                                                );
-                                                (title, meta)
-                                            });
+                                            let header = ui.scope_builder(
+                                                egui::UiBuilder::new()
+                                                    .layout(egui::Layout::top_down(egui::Align::Min))
+                                                    .sense(if jump_scope.is_some() {
+                                                        egui::Sense::click()
+                                                    } else {
+                                                        egui::Sense::hover()
+                                                    }),
+                                                |ui| {
+                                                    let title = ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(&row.display_title)
+                                                                .strong(),
+                                                        )
+                                                        .wrap_mode(header_wrap),
+                                                    );
+                                                    let meta = ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(&row.meta)
+                                                                .small()
+                                                                .weak(),
+                                                        )
+                                                        .wrap_mode(header_wrap),
+                                                    );
+                                                    (title, meta)
+                                                },
+                                            );
                                             let (title_response, meta_response) = header.inner;
                                             let title_rect = title_response.rect;
                                             let meta_rect = meta_response.rect;
@@ -1867,6 +1991,39 @@ impl NotesDialog {
                                                 .interact(egui::Sense::click())
                                                 .union(title_response)
                                                 .union(meta_response);
+                                            if !entry.slug.is_empty() {
+                                                register_jump_mode_target(
+                                                    jump_scope.as_ref(),
+                                                    ui,
+                                                    &header_response,
+                                                    format!("note/{}/header", entry.slug),
+                                                    format!("{} ({})", row.display_title, entry.slug),
+                                                    crate::gui::jump_mode::TargetKind::Selectable,
+                                                    &mut jump_visual_order,
+                                                );
+                                            }
+                                            let activate_note = jump_scope.is_some()
+                                                && !entry.slug.is_empty()
+                                                && header_response.has_focus()
+                                                && ctx.input(|input| {
+                                                    let modifiers = input.modifiers;
+                                                    let unmodified = !modifiers.ctrl
+                                                        && !modifiers.alt
+                                                        && !modifiers.command
+                                                        && !modifiers.shift;
+                                                    unmodified
+                                                        && (input.key_pressed(egui::Key::Enter)
+                                                            || input.key_pressed(egui::Key::Space))
+                                                });
+                                            if activate_note {
+                                                for key in [egui::Key::Enter, egui::Key::Space] {
+                                                    ctx.input_mut(|input| {
+                                                        let modifiers = input.modifiers;
+                                                        input.consume_key(modifiers, key);
+                                                    });
+                                                }
+                                                app.open_note_panel(&entry.slug, None);
+                                            }
                                             #[cfg(test)]
                                             {
                                                 row_header_response_id = Some(header_response.id);
@@ -2126,6 +2283,29 @@ impl NotesDialog {
         } else {
             self.template_manager.open = false;
         }
+    }
+}
+
+fn register_jump_mode_target(
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    local_identity: impl AsRef<str>,
+    label: impl Into<String>,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: &mut u64,
+) {
+    let order = *visual_order;
+    *visual_order = visual_order.saturating_add(1);
+    let Some(scope) = scope else {
+        return;
+    };
+    if let crate::gui::jump_mode::ui::RegistrationResult::Registered {
+        directive: Some(directive),
+        ..
+    } = scope.register(ui, response, local_identity, label, kind, order)
+    {
+        directive.apply_to_response(response);
     }
 }
 

@@ -1,128 +1,128 @@
 # Jump Mode Results
 
-Work in progress on `feat/jump-mode-2026-10-19-c7e42`, based on `8f94b003a12853735d1cb4689c6ec4e53c4ace8e`. Checkpoints through `e031a5d3` are pushed to origin. The default-off setting, pure hint engine, scoped registry, input routing and clipped overlay are implemented. Real native query hint/focus/typing proof passed with zero action execution and verified cleanup. Grid/list integration is verified; dashboard discrete controls are verified; native catalog and Phase 2 surface integration remain pending.
+Implementation is in progress. M00–M10 and M11-A Notes/Todo are complete; M11-B Timer/Paste is next. M12–M15 remain pending. Phase 1 native evidence is accepted; native Settings/dialog/complex-control evidence remains pending.
 
-## Architecture and current inventory
+- Branch: feat/jump-mode-2026-10-19-c7e42.
+- Starting SHA: 8f94b003a12853735d1cb4689c6ec4e53c4ace8e.
+- Latest completed checkpoint: 8929daeca6c9e7ab4a85cf97c3e5ba7d1d0efffb (M10-B).
+- All checkpoint commits through M10-B were pushed normally to origin; no local-only task commits.
+- Current ownership, exact historical commands, failures and next action: [execution ledger](JUMP_MODE_EXECUTION.md).
+- This report consolidates accepted results. Earlier failed evidence remains unchanged in the ignored raw evidence directory.
 
-- Existing cwd-based AppDataRoot and single-instance identity isolate the fixture without changing production startup.
-- `dev/jump_mode/run.ps1` generates a fresh profile, builds the actual app, requests the existing gated ROOT framebuffer capture and owns process shutdown.
-- `dev/jump_mode/fixture_generator/src/main.rs` is a dev-only root-package binary, preserving the root lockfile/vendor patches. Typed fixture data uses an explicit notes-only plugin allowlist, empty executable actions/index/plugin directories, local note records and explicit ML_NOTES_DIR.
-- ROOT framebuffer evidence reports CPU UI completion before GPU presentation. It is not claimed to prove presented-window pixels.
-- One reviewed cleanup failure path was corrected: process inventory/logging failure no longer skips retained-handle root shutdown. Read-only targeted rereview confirmed repair.
+## Behavior and architecture
 
-## Recorded verification
+The persisted experimental flag defaults off and appears under Settings → Launcher Window & Appearance. The general-settings save coordinator owns committed publication/rollback; editing the checkbox remains a draft until successful Save. Cancel preserves the committed runtime setting.
 
-| Command or check | Outcome |
+Focused Shift+Space starts/cancels navigation. Hints are deterministic, uppercase, prefix-free A–Z and case-insensitive. The map is frozen for a session. Escape cancels and Backspace edits the prefix. Hint completion focuses/selects only; later distinct native interaction activates. Search text/caret survive the leader and captured hint input. Same-frame activation is suppressed, held-key guards require release, and native focus loss cancels safely.
+
+One app-owned bridge holds copied semantic/native IDs, geometry, clips, epochs and generations. It collects real enabled actionable Responses in the current viewport, rejects clipped/disabled/ambiguous/stale entries, reconciles at pass/frame completion and paints a clipped overlay without a continuous repaint loop. It retains no widget callbacks or Responses.
+
+Root result IDs use current result generation and full result index, preserving equal-looking actions with different arguments. Selecting a list/grid card updates the existing logical selection and leaves native focus with the query; later Enter uses the existing full Action/args handler. Dashboard controls use slot/row semantic and native IDs so configuration reorder cannot redirect completed focus.
+
+Root/Settings(instance)/Notes(instance)/Todo(instance)/Blocked ownership follows actual retained ordinary-window order and focused response layer. Opening/closing/raising a window invalidates navigation and blocks the transition frame across discarded passes. Supported windows use the same input, registry and painter while root editing/autofocus/navigation/Enter yield. Dialog targets require the exact kind and instance; scoped child confirmations retain their parent identity. Existing container Escape/Note Find behavior remains with its owner. Unsupported windows/popups fail closed.
+
+| Component | Main source ownership |
 |---|---|
-| Initial Git status, branch, SHA and remotes | Clean master at recorded SHA; unique feature branch created |
-| `pwsh -NoProfile -File dev/jump_mode/run.ps1 -FixturesOnly` | Original nested helper failed registry resolution; corrected root-package helper later passed 2/2 tests and typed generate/verify |
-| `pwsh -NoProfile -ExecutionPolicy Bypass -File dev/jump_mode/run.ps1 -CaptureTimeoutSeconds 45 -GracefulCloseSeconds 6` | Actual app built/launched/captured/closed; fixture-content acceptance FAIL |
-| `Get-CimInstance` within normal sandbox | Access denied; escalated own-process identity lookup succeeded |
-| Actual baseline process cleanup | PID 2128, graceful close, exit 0, verified owned tree gone |
+| Setting/default/save/editor | src/settings/model.rs; src/settings_save.rs; src/settings_editor/state.rs and render.rs |
+| Pure typed hints/session | src/gui/jump_mode.rs |
+| Registry, focus intent, keyboard lifetime | src/gui/jump_mode/ui.rs |
+| Overlay | src/gui/jump_mode/paint.rs |
+| Root host/query/list/grid | src/gui/render.rs; LauncherApp in src/gui/mod.rs |
+| Dashboard controls/native slot identity | src/dashboard/dashboard.rs and widgets modules |
+| Fixture/native runner | dev/jump_mode/fixture_generator/src/main.rs; dev/jump_mode/run.ps1 |
+| Opt-in observation/framebuffer | src/gui/qa_framebuffer.rs; existing ROOT framebuffer path |
 
-The first nested helper did not inherit root patches/lock; it was replaced by a root-package development binary. One incorrect Rust import was corrected after compiler feedback. These were harness implementation failures, not missing GUI environment.
+## Coverage
 
-## Evidence
-
-- Initial rejected GUI run: `dev/jump_mode/evidence/jump_m01_20261019T210335Z_cd3ec49b/summary.md`. Latest accepted run is listed below.
-- PNG: `G:\Repos\rust\Multi_Launcher\dev\jump_mode\evidence\jump_m01_20261019T210335Z_cd3ec49b\screenshots\00_baseline_dashboard.png` (900×560).
-- Cleanup: same run's `process_lifecycle.json`; original capture receipt retained.
-- **Baseline fixture-content FAIL:** screenshot shows an invalid-hotkey conflict banner and empty intended pinned results. A post-run correction explicitly overrides the automated receipt-only acceptance. Real capture and cleanup mechanics succeeded, but this is not an accepted populated-dashboard baseline.
-- Fixture-only successful run: `dev/jump_mode/evidence/jump_m01_20261019T210025Z_5dcc013f/`; 32 stable local note records generated and typed validation succeeded.
-
-## Acceptance inventory
-
-| Surface / requirement | Current status |
+| Surface/control | Current status and evidence |
 |---|---|
-| M00 branch/source ownership | Complete |
-| M01 fixture/runner | Complete: production semantics, accepted actual baseline and owned cleanup |
-| M01 populated dashboard baseline | PASS: 232227Z_fc7bc04b, explicit parent visual review |
-| M02 setting | Complete: M02-A 3 tests + M02-B real save-owner regression passed |
-| M03 pure hint engine | Complete; 10 targeted tests passed, c3549759 pushed |
-| M04 registry | Complete; 24 all-Jump tests passed, scoped fmt/diff clean |
-| M05 input and overlay | Input/painter verified (33 all-Jump tests); native evidence pending |
-| M06–M09 grid/dashboard, keyboard harness and Phase 1 review | Pending |
-| M10–M13 Settings, dialogs, complex widgets and extended evidence | Pending |
-| M14–M15 performance, final checks and handoff | Pending |
+| Root query | Supported + verified headless/native: leader/hint/focus, text/caret, ordinary typing afterward |
+| Root list/grid, note cards | Supported + verified headless/native: selection before action, full payload, duplicate-title exact slug, stale generation |
+| Dashboard discrete controls | Supported + verified representative native FillQuery; full registered inventory below |
+| Settings basic controls | Supported + verified real egui widgets/headless; native screenshots pending M13 |
+| Notes/Todo dialogs | Supported basic controls; real egui/headless behavior verified; native evidence pending M13 |
+| Timer/Paste Sequence dialogs | Pending M11-B |
+| Combo/slider/DragValue/radio/multiline adapters | Pending M12; currently unregistered |
+| MkMacro representative controls | Pending M12; native proof pending M13 |
+| Unsupported windows/popups | Background/root suppression verified; supported nested controls still require M11/M12 |
+| Feature disabled | Supported + verified headless/native catalog18 |
+| Performance/Clippy/final smoke | Baseline recorded; M14/M15 remain pending |
 
-No feature scenario, native keyboard scenario or performance claim is marked passed before execution. A normal-dashboard fixture baseline is curated; no native Jump interaction has been claimed yet.
+Dashboard registration covers RecentCommands rows; PinnedQueryResults/QueryList rows and Refresh; Todo summary/row Open; Calendar Open/Add; Temp Add/ClearAll/Refresh/row Open/Clear; Timer New/Pause/Cancel; Scratchpad Copy/AppendTimestamp/Refresh; NowPlaying controls; Recycle Clean/Refresh; SystemActions rows/Refresh; SystemStatus Refresh. Native automation activates only safe fixture note FillQuery actions. PinnedCommands/CommandHistory and complex Todo/Scratchpad/Calendar controls remain unregistered.
 
-See [execution ledger](JUMP_MODE_EXECUTION.md) for current ownership and next action.
+Settings registration covers all eight top-level section toggles, Expand/Collapse all, Save/Cancel, direct built-in checkboxes/single-line fields and simple buttons in Hotkeys, Paste Sequences, Launcher, Search, Actions/Feedback, Dashboard and Radial. The Plugins section header is supported; delegated plugin/Note editor controls and complex controls remain unregistered. Disabled pending-save footer controls are excluded. The section target is the actual collapse-toggle Response, with existing persistent section identity.
 
-## M02 checkpoint
-Implemented default-off experimental_jump_mode_enabled setting, Launcher Window toggle, editor roundtrip and centralized runtime gate via established committed Save/Apply. cargo nextest run --lib -E 'test(jump_mode)' passed 3 tests (5808 skipped); touched-file rustfmt/diff checks passed. No Jump input interception yet.
+## Milestones
 
-## M03 checkpoint
-Pure typed hint engine implemented in src/gui/jump_mode.rs. Target generation/surface identity, deterministic prefix-free A–Z leaf expansion, frozen sessions, case-insensitive matching, invalid-input preservation, Backspace/cancel and stale-target reconciliation covered. cargo nextest run --lib -E 'test(gui::jump_mode)' passed 10 tests (5811 filtered). No UI targeting or input interception is claimed yet.
-
-## M04 checkpoint
-App-owned frame registry/focus bridge implemented, with public opaque optional dashboard scope and instance/generation namespacing. Final-pass retention, one-shot epoch/generation intents, interactivity/clip/viewport/modal filtering, same-priority non-root ambiguity rejection, real button focus without clicks, logical selection without execution and disabled clearing are tested. Runtime flag has one owner. cargo nextest run --lib -E 'test(jump_mode)' passed 24 tests (5808 skipped); scoped formatting/diff passed. No keyboard interception or overlay yet.
-
-## M02-B discovered persistence gap
-The general Settings save coordinator uses define_general_settings_fields! in src/settings_save.rs. The new toggle was omitted, so the editor Save path would drop it despite M02-A serde/editor/direct runtime tests passing. This was repaired at the actual ownership boundary in `470c654a`, with focused apply/publication/rollback coverage. M02 is complete.
-
-## Pre-input CPU baseline
-On b151ff00660976aefd4d12b780f9fcefd7aa6dbb (M04), test profile, 100 inert actions, 3-column 960x640 root fixture, 9 warmups and 20 measured frames: mean 159.54 microseconds, median 163.1, nearest-rank p95 213.9, range 97.7–228.5. Timed run_root_list_frame only; output disposal outside measurement. Raw local log: dev/jump_mode/evidence/cpu-baseline/m05-a-root-list-baseline.log. CPU-only observation, no GPU/native claim; later identical disabled/idle/active measurements remain required.
-
-M02-B correction verified: experimental_jump_mode_enabled is now a GENERAL_SETTINGS_FIELDS member. The exact test jump_mode_general_save_acknowledges_and_rolls_back_owned_setting passed (1 passed / 5833 skipped), exercising apply, publication overlay and rollback while preserving an unrelated theme write. The earlier gap is resolved; no input hooks were included in this repair.
-
-## M05-A input checkpoint
-The first real target is the root query editor. Early leader/hint capture precedes widgets, repeats and paired text are handled once, and capture survives discarded passes. Actual-root tests preserve query/caret, prevent a focused button from activating on the leader, and suppress same-frame modified Enter through active, completion and cancellation transitions. Focus/owner loss cancels and releases held guards. Paste/IME cannot mutate the query while hints own input.
-
-Final cargo nextest run --lib -E 'test(jump_mode)': 29 passed / 5809 filtered, exit 0. Touched-file rustfmt and diff checks pass. No visual overlay or native Jump keyboard scenario is claimed yet. Bounded input review found activation and held-key defects; all were repaired with focused regressions.
-## M05-B painter checkpoint
-Current-pass clipped badges, accepted-prefix styling, active/invalid/no-target feedback and real-focus destination outline are implemented in jump_mode/paint.rs. Frozen IDs cannot borrow stale-generation geometry. Root pass finalization validates/reconciles before paint and QA capture; full-frame registry retention is unchanged. No widget focus or action behavior is owned by the painter.
-
-cargo nextest run --lib -E 'test(jump_mode)': 33 passed / 5809 filtered, exit 0. Touched-file rustfmt --check and diff check pass. Actual native overlay screenshot remains required before M05 completion.
-## M01-B accepted production baseline
-Latest accepted summary: [232227Z_fc7bc04b](../../dev/jump_mode/evidence/jump_m01_20261019T232227Z_fc7bc04b/summary.md). Actual PNG: [normal dashboard](jump_mode_review/00_baseline_dashboard.png), 900x560, 171568 bytes. Parent inspected populated list/search cards and all four expected tag buckets without warnings. Explicit baseline_visual_review.json records the visual assessment; scenarios and manifest were advanced from automated content-BLOCKED to PASS based on that assessment, without modifying original capture receipt, pixels or lifecycle.
-
-Fixture verification now invokes production load_notes, NotePlugin queries, typed pinned-query config and the pure complete hotkey-route validator. Three fixture tests pass; list/search each return32 stable IDs and four underscore tags each count8. Canonical notes/template paths are confined before environment update or plugin creation; child uses both ML_NOTES_DIR and ML_NOTE_TEMPLATES_DIR. Fixture-only unfocused throttling is disabled and CtrlAltF10 validates cleanly. Warning run232004Z_28069510 remains FAIL.
-
-Owned run command: `pwsh -NoProfile -ExecutionPolicy Bypass -File dev/jump_mode/run.ps1 -CaptureTimeoutSeconds 45 -GracefulCloseSeconds 6`. Process23360 closed gracefully, exit0, owned_tree_gone, no forced cleanup. Scoped formatting, PowerShell/evidence parsing and diff checks pass. No Jump interaction is proved by this baseline.
-
-All future test profiles now disable Paste Sequence Enable Next Shortcut and Enable Cancel Shortcut, per user steering: both optional hotkeys are None and the verifier rejects enabling either. The accepted baseline predates that instruction; its original artifacts are preserved. Normal application defaults remain unchanged.
-
-Future-shortcut constraint verified by fixture-only run jump_m01_20261019T232417Z_6468abe4: 3 tests passed, generation/production semantic verification exit 0; both persisted shortcut fields are null. No native run was requested in this fixture-only check.
-## M05-C native query proof
-[Query hint screenshot](jump_mode_review/00_query_hints.png) and run `jump_m05_query_probe_20261020T000051Z_b5d58182` prove native Shift+Space, actual active map, map-derived A focus handoff, zero action activation, and normal X typing afterward. Retained receipt identifies pass9; completion independently reports actual query editor focus. PID40556 exited0 gracefully; owned tree verified gone. Parent inspected structured trace/cleanup and matching-hash actual pixels. Both test shortcuts persisted null; no warning/toast appears.
-
-Earlier native runs remain FAIL: too-short2s owned-window readiness (no input), pre-handoff query-focus requirement (leader only), PowerShell automatic Matches overwrite (leader and real PNG, no hint). Corrected bounded condition poll, focus-stage contract and candidate variable at their owners; regression checks accompany the fixes. No action-card/dashboard/native activation coverage is claimed yet; M06 onward remains required.
-Final Rust verification: `cargo nextest run --cargo-profile fast-dev --features dev-smoke-binaries,qa-framebuffer-capture --lib -E 'test(jump_mode_observer_recognizes_the_real_registered_query_text_entry_and_hint)'` passed1/5868skipped. Combined filter previously passed58 with this one setup failure; exact corrected test now passes. Four fixture tests, persisted PowerShell helper regression, production semantic validation, parser, scoped rustfmt and diff checks passed.
-## M06 grid/list checkpoint
-Visible actual list/grid responses now register result-generation/index identities, including equal-looking actions with distinct arguments. Hint completion changes the existing logical selection and keeps query focus/caret; no action is queued. FreshEnter retains existing action semantics.
-`cargo nextest run --cargo-profile fast-dev --features qa-framebuffer-capture --lib -E 'test(jump_mode)'`:38passed/5834skipped. New actual-root tests prove list/grid selection, fullActionargs, zero execution at completion/sameframeEnter, exactly once afterfreshEnter, query/caret preservation, forceddiscard, clipped/offscreen exclusion, generation cancellation and popupbackground exclusion. Scopedrustfmt/diff pass. M08 provides real note-list/native catalog evidence.
-## M07 dashboard checkpoint
-Actual native responses now opt in through one lazy focus-only helper, disjoint slot/header/body scope and stable native/Jump row identity. Existing clicks/WidgetActions remain the execution owner. First-pass activation policy gates direct effects while enabled; targets collect every pass.
-Supported inventory and explicit gaps are in execution ledger. `cargo nextest run --lib --features 'dev-smoke-binaries qa-framebuffer-capture' -E 'test(jump_mode)'` passed43/5834filtered, default test profile. Real pinned-query cached-action focus->Enter case preserves original RunAction payload/args/query_override exactly once; adapter tests verify identity, focus, clipped/absent targets and activation policy. Policy test does not claim actual root discarded-pass integration. Scoped rustfmt18files and diff checks pass. No destructive/media/clipboard operation executed. Native dashboard/root evidence follows M08.
-M09 pre-review reopened M07 for one P2: positional native slot IDs can transfer completed Refresh focus after config reorder despite safe semantic generation. The sole writer is adding production native identity and actual Dashboard reload/reorder regression; partial M08 fixture work is preserved. No other M06/M07 core finding was reported. This is pending repair, not a completed Phase1 gate.
-M07-B resolved the M09 P2 at its actual owner: explicit native slot UI IDs include slot/widget identity, with generation-bound legacy fallback and distinct header/body scope. Real Dashboard::ui reload/reorder regression passed1/1 after reproducing the instability; Enter remains with slotA. Scoped rustfmt/diff pass. Read-only reviewer closed original finding and reported no other core issues. M08 remains in progress; its partial fixture changes are excluded from this checkpoint.
-
-## M08 native qualification
-All 15 requested Phase 1 catalog images passed across these focused runs. Parent independently rechecked every PNG hash against its scenario and native receipt, frame/pass, fixture hash, process identity and successful owned cleanup. Prior aggregate attempts remain immutable FAIL; no whole-aggregate PASS is claimed.
-
-| Catalog | Accepted run | Result |
+| Milestone | Status | Accepted verification/checkpoint |
 |---|---|---|
-| 01–05 | `jump_m08_phase1_enabled_20261020T014934Z_c5af8d06_dashboard` | Observed YA focused Note 006 with unchanged query/count0; distinct Enter invoked exact Dashboard FillQuery once |
-| 06–14 | `jump_m08_phase1_enabled_20261020T020713Z_48084286_grid` | 32 visible cards; exact duplicate-title slug001 selected before action; stale-generation Enter blocked; restored/reselected slug opened once; query editing/cancel/dense/ownership passed |
-| 18 | `jump_m08_phase1_disabled_20261020T020802Z_db3b2dd1` | Fresh processed-Tab acknowledgements, ordinary ShiftSpace/text, no targets or actions |
+| M00 | complete | Unique branch/base/initial clean state and ownership ledger |
+| M01 | complete | Production fixture semantics; actual populated baseline and owned cleanup |
+| M02 | complete | Default-off/editor/runtime gate plus general-save ownership regression |
+| M03 | complete | 10 pure engine tests |
+| M04 | complete | 24 registry/focus tests |
+| M05 | complete | 33 input/painter tests; actual native query proof |
+| M06 | complete | 38 Jump tests including real list/grid selection/Enter |
+| M07 | complete | 43 Jump tests; actual Dashboard reload/reorder native-ID regression |
+| M08 | complete | All15 Phase1 catalog cases through focused Dashboard/Grid/Disabled runs |
+| M09 | complete | Bounded core/evidence review;8 painter tests and post-fix native Dashboard01–05 |
+| M10 | complete | M10-A63 tests; M10-B67 tests and scoped review; native evidence reserved M13 |
+| M11 | in_progress | Notes/Todo accepted:73 combined +2 focused tests; Timer/Paste follows |
+| M12 | pending | Complex controls/MkMacro |
+| M13 | pending | Extended native screenshots and control semantics |
+| M14 | pending | Focused reliability, after measurements, Clippy and review |
+| M15 | pending | Final representative native smoke, consolidated final status/handoff |
 
-All three owned app trees closed gracefully with exit0 and were verified gone (PIDs28440/20588/20440). Grid/disabled executable SHA256: `2127414dec570fbc1a674745e76a37ba75a785aac1f0b3da68c3885e57699616`. The stale test uses production-verified `zzzznomatchprobe` with zero results: generation3→4 clears selection, processed Enter advances once with count0/no opened note, then restored note list generation5 allows a fresh exact001 hint/Enter. No file-watcher or production cache behavior changed.
+## Verification
 
-Final scoped verification: Nextest processed-Tab/Enter filter2passed/5879skipped; earlier observer filter3passed/5877skipped; fixture tests5/5 plus production loader/search/tag/zero-result semantics; headless composed predicate and empty/wrong-PID reader checks; PowerShell AST, scoped rustfmt and diff checks passed. A deliberately invalid gate profile fails before launch with both shortcuts null. Aggregate `Phase1 -FixturesOnly` explicitly fails without launching; child fixture-only commands remain usable.
+Latest combined command on accepted M11-A source, exit0, **73 passed / 5832 skipped**:
 
-The runner supports `Phase1`, `Phase1Enabled -Screen Dashboard`, `Phase1Enabled -Screen Grid`, and `Phase1Disabled`, with bounded commands/steps, shared deadline, native owned-window input, environment/window/DPI metadata, retained ROOT/F11 receipts and exact owned cleanup. All future test profiles disable Paste Sequence Next/Cancel while preserving normal/error notifications. Parent viewed representative active/selected/grid/ownership/disabled pixels; curated Dashboard02 and Grid07 bring the set to1318462bytes (<8MiB). Refresh header badges overlap final label letters; bounded M09 placement repair remains pending. Phase2 support is not yet implemented.
+~~~powershell
+cargo nextest run --lib --no-fail-fast --cargo-profile fast-dev --features "dev-smoke-binaries qa-framebuffer-capture" -E 'test(jump_mode) | test(actual_root_navigation_owner_follows_settings_and_foreign_window_layers) | test(opening_settings_on_a_discarded_root_pass_cancels_background_navigation) | test(settings_owner_blocks_root_autofocus_and_enter_activation) | test(settings_escape_closes_when_jump_mode_owns_root_navigation) | test(note_find_shortcut_and_escape_leave_dirty_note_open_until_the_next_escape) | test(note_find_shortcut_uses_focused_or_top_note_and_preserves_ctrl_w_close) | test(settings_shell_tests)'
+~~~
 
-## M09 Phase 1 gate complete
-Core review's dashboard native-ID P2 was repaired in M07-B. M08 harness review findings were resolved; final independent source/evidence review found no remaining correctness defect. All15 catalog cases remain qualified through the focused runs above; failed aggregates remain FAIL.
-The observed Refresh label overlap is repaired in paint.rs/ui.rs by retaining the originating UI clip, choosing a label-clear inside or finite outside placement, avoiding other registered controls on the same layer, and retaining a visible inside fallback in cramped layouts. Target geometry, hitboxes, assignment, input and existing action ownership are unchanged. Native Dashboard `jump_m08_phase1_enabled_20261020T021959Z_abcd5152_dashboard` passed01–05: count0 through focus, exact FillQuery once after Enter, PID23372 gracefulexit0/ownedgone. Parent independently checked all5 bindings and viewed actual pixels; Refresh text is fully readable.
-Focused fast-dev Nextest paint/parent-clip filter passed8/5877skipped; scoped rustfmt and diff checks passed. Curated02 now uses the verified post-fix PNG, SHA256f6f455043e592a57de8c24626ba363d0286d559f51e1a79caed5fb6e4b6504af; total curated set1319518bytes. Phase1 accepted. Continue M10–M15 without signoff; Settings/dialog/complex-control coverage remains pending.
+The real Settings test verifies focus before action, distinct Enter/Space/text, disabled footer exclusion, draft/runtime isolation and Cancel restoration. One actual run_ui/request_discard verifies final keyboard/pointer checkbox state, section state, text and caret. Existing general-save/runtime tests cover committed apply/publication/rollback. Scoped rustfmt and diff checks pass. Warnings were existing vendored epaint/egui/image warnings. Scoped independent review has no remaining concrete finding. A source-local replay allegation was retracted after tracing egui's real event-clearing lifecycle; unnecessary rollback code was removed.
 
-## M10-A shared ownership foundation
-App-owned Root/Settings(instance)/Blocked navigation ownership follows actual retained ordinary-window order and native focused layer. Settings open/close/raise transitions cancel stale maps and block the transition frame across discarded passes. Stable Settings uses the shared input/registry/paint lifecycle, while root query editing, autofocus, navigation and Enter yield. Normal dialog Escape/Note Find commands remain with their owners. Native ROOT focus-loss capture remains isolated from same-ROOT modal ordinary input. Feature-off behavior and Settings native window persistence are preserved.
-Scoped independent review has no remaining finding. Final fast-dev Nextest filter (full exact command in EXECUTION) passed63/63, scoped rustfmt/diff checks passed. Window fixture asserts actual retained order plus cancellation before stable ownership, rather than assuming the first raise is immediately retained. Previous failing runs are documented in EXECUTION; no tests weakened. All future root-list fixtures also disable Paste Sequence Next/Cancel; native fixtures retain notifications/errors enabled. M10-B controls and native Settings evidence remain pending.
+Earlier scoped accepted checks include M09 paint/parent-clip8 passed/5877 skipped; M08 processed Tab/Enter2 passed/5879 skipped and observer3 passed/5877 skipped; fixture tests5/5 plus production note/search/tag/zero-result semantics and PowerShell parser/reader/predicate checks. Exact historical commands/results and repaired failures are in the execution ledger. No full repository suite, final Clippy or final performance qualification is claimed.
 
-## M10 Settings complete
-Actual Settings section toggles, Expand/Collapse, Save/Cancel, built-in checkboxes/single-line fields and straightforward buttons now register real native Responses in the Settings instance scope. Hint completion only focuses; later Enter/Space/text uses existing widget behavior. Pending-save disabled controls are excluded. Draft Jump Mode changes remain separate from runtime until successful existing save; Cancel restores the committed draft/runtime. Root controls stay blocked behind the owning Settings window.
-Final fast-dev/bothfeatures combined filter passed67/5831skipped, including all Jump tests, exact ownership/Find tests and Settings shell tests. Scoped formatting/diff checks and independent review pass. Real-widget test verifies focus before action, native Enter/Space/text, disabled footer, Cancel/runtime isolation and actual forced-discard keyboard/pointer checkbox/header/text/caret behavior. Earlier failed fixtures (initial window readiness, legitimately clipped target, wheel Event phase compile error) are documented in EXECUTION; production geometry/eligibility unchanged. Replay review allegation was retracted after native lifecycle trace; unnecessary rollback removed.
-Complex controls and delegated plugin/Note editor controls remain explicitly unregistered for M12. Native Settings screenshots remain pending M13; no native Settings acceptance claimed at this checkpoint.
+Notes/Todo basic controls now use the same owner/registry. Notes uses visible slug-bound rows, management/search controls and edit Save/Cancel; multiline remains M12. Todo covers draft/filter/tag fields, Add, row completion/tag editing/Remove and clear-confirmation controls; priority DragValue remains M12. Completion only focuses; fresh native Enter performs the existing action. Exact-instance, popup, draft preservation, immediate-next-frame non-Add safety and feature-off behavior are covered. A separate exact Todo row-identity/legacy run passed2/2 (5903 skipped); it is separate from the73-test combined run. Native dialog proof remains pending M13.
+
+## Actual native evidence
+
+All raw paths are under G:/Repos/rust/Multi_Launcher/dev/jump_mode/evidence/. Each accepted run retains summary.md, scenarios.json, events.jsonl, manifest, PNG/receipt/hash bindings and process_lifecycle.json. Parent/reviewer rechecked identities, frame/pass and owned cleanup.
+
+| Accepted run | Evidence/result |
+|---|---|
+| jump_m01_20261019T232227Z_fc7bc04b | [Populated baseline summary](../../dev/jump_mode/evidence/jump_m01_20261019T232227Z_fc7bc04b/summary.md); parent visual acceptance; PID23360 graceful exit0/tree gone |
+| jump_m05_query_probe_20261020T000051Z_b5d58182 | [Query proof](../../dev/jump_mode/evidence/jump_m05_query_probe_20261020T000051Z_b5d58182/summary.md); real ShiftSpace→hintA→query focus→X typing; activation0; PID40556 graceful exit0/tree gone |
+| jump_m08_phase1_enabled_20261020T014934Z_c5af8d06_dashboard | [Dashboard01–05](../../dev/jump_mode/evidence/jump_m08_phase1_enabled_20261020T014934Z_c5af8d06_dashboard/summary.md); YA focuses Note006/count0 then distinct Enter exact FillQuery once; PID28440 graceful exit0/tree gone |
+| jump_m08_phase1_enabled_20261020T020713Z_48084286_grid | [Grid06–14](../../dev/jump_mode/evidence/jump_m08_phase1_enabled_20261020T020713Z_48084286_grid/summary.md);32 cards/dense hints; exact duplicate-title slug001; stale Enter blocked; query/cancel/unsupported-window safety; PID20588 graceful exit0/tree gone |
+| jump_m08_phase1_disabled_20261020T020802Z_db3b2dd1 | [Disabled18](../../dev/jump_mode/evidence/jump_m08_phase1_disabled_20261020T020802Z_db3b2dd1/summary.md); processed native Tab, ordinary ShiftSpace/text,0 targets/actions; PID20440 graceful exit0/tree gone |
+| jump_m08_phase1_enabled_20261020T021959Z_abcd5152_dashboard | [Post-placement Dashboard01–05](../../dev/jump_mode/evidence/jump_m08_phase1_enabled_20261020T021959Z_abcd5152_dashboard/summary.md); Refresh labels readable; count0→focus→Enter exact action1; PID23372 graceful exit0/tree gone |
+
+Phase1 cases passed across focused runs; **no whole-aggregate PASS** is claimed. Earlier rejected aggregates, readiness/driver/fixture attempts and their cleanup remain immutable FAIL. The stale test uses a production-verified zero-result query: generation3→4 clears selection, processed Enter does not open a note, restored list generation5 allows exact001 reselect/open. No file watcher/cache behavior was changed.
+
+The ROOT framebuffer records CPU UI completion before GPU presentation; it does not prove presented-window pixels. Structured observations bind screenshots to actual native input, owned PID/build/fixture and retained frame/pass.
+
+Curated fixture-only images (G:/Repos/rust/Multi_Launcher/docs/plans/jump_mode_review/) total **1319518 bytes**, below8MiB:
+
+- [Baseline dashboard](jump_mode_review/00_baseline_dashboard.png),171568bytes.
+- [Query hints](jump_mode_review/00_query_hints.png),178133bytes.
+- [Dashboard hints after placement repair](jump_mode_review/02_dashboard_hints_active.png),568604bytes; SHA256 f6f455043e592a57de8c24626ba363d0286d559f51e1a79caed5fb6e4b6504af.
+- [Dense note grid hints](jump_mode_review/07_note_grid_hints_active.png),401213bytes; SHA25684595d5fe6a7c72ffc9af2dc012d01a0a57a33a4e968534c88a1c5d4601405f2.
+
+## Harness and testing constraints
+
+[Runner README](../../dev/jump_mode/README.md) documents Baseline/QueryProbe, Phase1, Phase1Enabled with Dashboard/Grid filters and Phase1Disabled. Each owned run has bounded commands/steps/deadline, readiness/foreground/PID checks, native keyboard events, environment/window/DPI metadata and retained receipts. It closes gracefully then performs bounded identity-verified cleanup. It never kills by executable name. Aggregate Phase1+FixturesOnly explicitly rejects before children; child fixture-only modes are supported.
+
+Fresh CWD/AppDataRoot and canonical profile notes/template paths isolate production data. Fixture-only focus throttling is disabled; normal production defaults are unchanged. Fixture semantics are checked through production loaders and hotkey validation.
+
+Per user instruction, **every future profile disables Enable Next Shortcut and Enable Cancel Shortcut** (both optional Paste Sequence hotkeys None/null); the verifier rejects either enabled. The accepted early baseline predates this instruction and remains immutable. Native normal/error toasts stay enabled, so unrelated failures remain visible. Shared future root-list and Settings headless fixtures also set both shortcuts None.
+
+M13 preparation identified required isolated stores for later dialogs: todo.json; empty alarms.json; paste_sequences.json plus empty snippets.json/clipboard_history.json; mkmacros.json/assets/templates and legacy macros.json. Constructors may run before plugin filtering. MkMacro recorder polling has no disabled representation; future native fixtures must use a validated unsent recorder chord and no macro hotkeys. No playback, recording, clipboard mutation, sound or system action is authorized in automation.
+
+## Performance and remaining work
+
+Pre-input CPU baseline at b151ff00660976aefd4d12b780f9fcefd7aa6dbb: test profile,100 inert actions,3-column960×640 root fixture,9 warmups/20 samples, timed frame work only (output disposal excluded). Mean159.54µs, median163.1µs, nearest-rank p95 213.9µs, range97.7–228.5µs. Raw log: G:/Repos/rust/Multi_Launcher/dev/jump_mode/evidence/cpu-baseline/m05-a-root-list-baseline.log. Identical disabled/idle/active after measurements remain M14 work; no performance parity claim yet.
+
+Notes/Todo, Timer/Paste, complex controls/MkMacro, native Phase2 evidence, Clippy/reliability/performance and final smoke/handoff remain required. Existing untracked clipboard_modifiers.json is preserved, unread and excluded from task commits. No PR, merge or history rewrite has been performed. Optional manual-review guidance will be finalized only after M15.

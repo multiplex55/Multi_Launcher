@@ -38,6 +38,12 @@ pub(crate) enum NavigationOwner {
     Settings {
         instance: u64,
     },
+    Notes {
+        instance: u64,
+    },
+    Todo {
+        instance: u64,
+    },
     Blocked,
 }
 
@@ -45,12 +51,50 @@ impl NavigationOwner {
     pub(crate) fn owns_settings(self, instance: u64) -> bool {
         self == Self::Settings { instance }
     }
+
+    fn owns_surface(self, surface: &SurfaceId) -> bool {
+        match surface {
+            SurfaceId::Dashboard | SurfaceId::LauncherResults => self == Self::Root,
+            SurfaceId::Settings { instance } => self.owns_settings(*instance),
+            SurfaceId::Dialog { kind, instance } => match self {
+                Self::Notes {
+                    instance: owner_instance,
+                } => kind == "notes" && *instance == owner_instance,
+                Self::Todo {
+                    instance: owner_instance,
+                } => kind == "todo" && *instance == owner_instance,
+                _ => false,
+            },
+            SurfaceId::Popup { owner, .. } => self.owns_surface(owner),
+        }
+    }
 }
 
 pub(crate) fn settings_layer_id() -> egui::LayerId {
     // `Window::new` hashes the optional title (`Some("Settings")`) as its
     // default area ID. Keep this aligned so owner checks match the real window.
     egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Settings")))
+}
+
+pub(crate) fn notes_dialog_layer_id() -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Quick Notes")))
+}
+
+pub(crate) fn todo_dialog_layer_id() -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Todos")))
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NavigationWindows {
+    pub(crate) settings: Option<u64>,
+    pub(crate) notes: Option<u64>,
+    pub(crate) todo: Option<u64>,
+}
+
+impl NavigationWindows {
+    fn any_open(self) -> bool {
+        self.settings.is_some() || self.notes.is_some() || self.todo.is_some()
+    }
 }
 
 /// Return the last visible top-level ordinary window using egui's public
@@ -80,8 +124,7 @@ pub(crate) fn focused_response_layer(ctx: &egui::Context) -> Option<egui::LayerI
 /// another ordinary window always fails closed.
 pub(crate) fn resolve_layer_navigation_owner(
     ctx: &egui::Context,
-    settings_open: bool,
-    settings_instance: u64,
+    windows: NavigationWindows,
 ) -> NavigationOwner {
     if ctx.viewport_id() != egui::ViewportId::ROOT
         || !ctx.input(|input| input.focused)
@@ -93,21 +136,38 @@ pub(crate) fn resolve_layer_navigation_owner(
 
     let top_window = visible_top_middle_layer(ctx);
     let focused_layer = focused_response_layer(ctx);
-    match top_window {
-        Some(layer) if layer == settings_layer_id() && settings_open => {
-            if focused_layer
-                .is_none_or(|focused| focused == layer || focused.order != egui::Order::Middle)
+    if let Some(layer) = top_window {
+        let owner = if layer == settings_layer_id() {
+            windows
+                .settings
+                .map(|instance| NavigationOwner::Settings { instance })
+        } else if layer == notes_dialog_layer_id() {
+            windows
+                .notes
+                .map(|instance| NavigationOwner::Notes { instance })
+        } else if layer == todo_dialog_layer_id() {
+            windows
+                .todo
+                .map(|instance| NavigationOwner::Todo { instance })
+        } else {
+            None
+        };
+        return match owner {
+            Some(owner)
+                if focused_layer.is_none_or(|focused| {
+                    focused == layer || focused.order != egui::Order::Middle
+                }) =>
             {
-                NavigationOwner::Settings {
-                    instance: settings_instance,
-                }
-            } else {
-                NavigationOwner::Blocked
+                owner
             }
-        }
-        Some(_) => NavigationOwner::Blocked,
-        None if settings_open => NavigationOwner::Blocked,
-        None => NavigationOwner::Root,
+            _ => NavigationOwner::Blocked,
+        };
+    }
+
+    if windows.any_open() || focused_layer.is_some_and(|layer| layer.order == egui::Order::Middle) {
+        NavigationOwner::Blocked
+    } else {
+        NavigationOwner::Root
     }
 }
 
@@ -249,10 +309,7 @@ impl TargetRegistry {
         let popup_open = egui::Popup::is_any_open(ctx);
         self.targets.retain(|target| {
             let root_surface = is_root_surface(target.id().surface());
-            let settings_owned = match target.id().surface() {
-                SurfaceId::Settings { instance } => navigation_owner.owns_settings(*instance),
-                _ => true,
-            };
+            let surface_owned = navigation_owner.owns_surface(target.id().surface());
             let navigation_available = navigation_owner != NavigationOwner::Blocked;
             root_focused
                 && root_viewport
@@ -260,7 +317,7 @@ impl TargetRegistry {
                 && target.eligible
                 && target.enabled
                 && navigation_available
-                && settings_owned
+                && surface_owned
                 && ctx.memory(|memory| memory.allows_interaction(target.layer_id))
                 && (!root_surface
                     || (navigation_owner == NavigationOwner::Root
@@ -362,6 +419,19 @@ impl JumpModeScope {
         }
     }
 
+    pub(crate) fn child_popup_scope(&self, kind: impl Into<String>) -> Self {
+        let instance = match &self.surface {
+            SurfaceId::Settings { instance }
+            | SurfaceId::Dialog { instance, .. }
+            | SurfaceId::Popup { instance, .. } => *instance,
+            SurfaceId::Dashboard | SurfaceId::LauncherResults => self.generation.0,
+        };
+        self.with_surface(
+            SurfaceId::popup(kind, instance, self.surface.clone()),
+            self.generation,
+        )
+    }
+
     pub(crate) fn target_id(&self, local_identity: impl AsRef<str>) -> TargetId {
         let mut semantic = self.identity_namespace.clone();
         semantic.push('/');
@@ -419,14 +489,7 @@ impl JumpModeScope {
             return RegistrationResult::Rejected(RegistrationRejection::InactiveOwner);
         }
         if let Some(owner) = self.navigation_owner {
-            let owner_matches = match &self.surface {
-                SurfaceId::Dashboard | SurfaceId::LauncherResults => owner == NavigationOwner::Root,
-                SurfaceId::Settings { instance } => owner.owns_settings(*instance),
-                SurfaceId::Dialog { .. } | SurfaceId::Popup { .. } => {
-                    owner != NavigationOwner::Blocked
-                }
-            };
-            if !owner_matches {
+            if !owner.owns_surface(&self.surface) {
                 return RegistrationResult::Rejected(RegistrationRejection::InactiveOwner);
             }
         }
@@ -517,6 +580,10 @@ pub(crate) struct JumpModeUi {
     navigation_owner_transitioned: bool,
     settings_open: bool,
     settings_instance: u64,
+    notes_open: bool,
+    notes_instance: u64,
+    todo_open: bool,
+    todo_instance: u64,
     active_session: Option<HintSession>,
     last_outcome: Option<MatchOutcome>,
     root_input_frame: RootInputFrame,
@@ -581,23 +648,58 @@ impl JumpModeUi {
         self.settings_instance
     }
 
-    /// Apply the host's current layer-owner decision. Any owner or Settings
-    /// visibility transition cancels stale navigation and blocks this complete
+    pub(crate) fn observe_notes_visibility(&mut self, open: bool) -> bool {
+        if self.notes_open == open {
+            return false;
+        }
+        self.notes_open = open;
+        if open {
+            self.notes_instance = self.notes_instance.wrapping_add(1).max(1);
+        }
+        true
+    }
+
+    pub(crate) fn notes_instance(&self) -> u64 {
+        self.notes_instance
+    }
+
+    pub(crate) fn observe_todo_visibility(&mut self, open: bool) -> bool {
+        if self.todo_open == open {
+            return false;
+        }
+        self.todo_open = open;
+        if open {
+            self.todo_instance = self.todo_instance.wrapping_add(1).max(1);
+        }
+        true
+    }
+
+    pub(crate) fn todo_instance(&self) -> u64 {
+        self.todo_instance
+    }
+
+    /// Apply the host's current layer-owner decision. Any owner or supported
+    /// dialog visibility transition cancels stale navigation and blocks this complete
     /// egui frame, including all discarded passes.
     pub(crate) fn update_navigation_owner(
         &mut self,
         ctx: &egui::Context,
         candidate: NavigationOwner,
-        settings_visibility_changed: bool,
+        supported_dialog_visibility_changed: bool,
     ) -> NavigationOwner {
-        if settings_visibility_changed || candidate != self.navigation_owner {
+        if supported_dialog_visibility_changed || candidate != self.navigation_owner {
             if self.enabled {
-                if matches!(candidate, NavigationOwner::Settings { .. })
-                    || (settings_visibility_changed && self.settings_open)
+                if matches!(
+                    candidate,
+                    NavigationOwner::Settings { .. }
+                        | NavigationOwner::Notes { .. }
+                        | NavigationOwner::Todo { .. }
+                ) || (supported_dialog_visibility_changed
+                    && (self.settings_open || self.notes_open || self.todo_open))
                 {
-                    // Settings deliberately takes ownership from the launcher
-                    // query. `surrender_focus` is conditional on this exact ID
-                    // still owning focus, so unrelated window editors are safe.
+                    // A supported native dialog deliberately takes ownership
+                    // from the launcher query. `surrender_focus` is conditional
+                    // on this exact ID still owning focus.
                     ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("query_input")));
                 }
                 if let Some(focus) = self.last_completed_focus_handoff.as_ref() {
@@ -819,7 +921,9 @@ impl JumpModeUi {
         registry.revalidate(ctx, navigation_owner, root_targets_allowed);
         let navigation_allowed = match navigation_owner {
             NavigationOwner::Root => root_targets_allowed,
-            NavigationOwner::Settings { .. } => true,
+            NavigationOwner::Settings { .. }
+            | NavigationOwner::Notes { .. }
+            | NavigationOwner::Todo { .. } => true,
             NavigationOwner::Blocked => false,
         };
         let population_changed = navigation_allowed
@@ -1419,6 +1523,44 @@ mod tests {
         .drop_without_applying_deltas();
     }
 
+    fn render_supported_dialog_windows(
+        ctx: &egui::Context,
+        settings_open: bool,
+        notes_open: bool,
+        todo_open: bool,
+        move_to_top: Option<egui::LayerId>,
+    ) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 650.0),
+            )),
+            focused: true,
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| {
+            if settings_open {
+                egui::Window::new("Settings").show(ui.ctx(), |ui| {
+                    let _ = ui.button("Settings body");
+                });
+            }
+            if notes_open {
+                egui::Window::new("Quick Notes").show(ui.ctx(), |ui| {
+                    let _ = ui.button("Notes body");
+                });
+            }
+            if todo_open {
+                egui::Window::new("Todos").show(ui.ctx(), |ui| {
+                    let _ = ui.button("Todos body");
+                });
+            }
+            if let Some(layer) = move_to_top {
+                ui.ctx().move_to_top(layer);
+            }
+        })
+        .drop_without_applying_deltas();
+    }
+
     fn setup(enabled: bool) -> (JumpModeUi, JumpModeScope) {
         let mut jump = JumpModeUi::new(enabled);
         jump.begin_frame();
@@ -1447,7 +1589,13 @@ mod tests {
         render_navigation_windows(&ctx, true, true, false, None);
         assert_eq!(visible_top_middle_layer(&ctx), Some(note_layer));
         assert_eq!(
-            resolve_layer_navigation_owner(&ctx, true, 3),
+            resolve_layer_navigation_owner(
+                &ctx,
+                NavigationWindows {
+                    settings: Some(3),
+                    ..NavigationWindows::default()
+                },
+            ),
             NavigationOwner::Blocked,
             "a newly retained unsupported window above Settings blocks it"
         );
@@ -1455,16 +1603,117 @@ mod tests {
         render_navigation_windows(&ctx, true, true, false, Some(settings_layer));
         assert_eq!(visible_top_middle_layer(&ctx), Some(settings_layer));
         assert_eq!(
-            resolve_layer_navigation_owner(&ctx, true, 3),
+            resolve_layer_navigation_owner(
+                &ctx,
+                NavigationWindows {
+                    settings: Some(3),
+                    ..NavigationWindows::default()
+                },
+            ),
             NavigationOwner::Settings { instance: 3 }
         );
 
         render_navigation_windows(&ctx, true, true, false, Some(note_layer));
         assert_eq!(visible_top_middle_layer(&ctx), Some(note_layer));
         assert_eq!(
-            resolve_layer_navigation_owner(&ctx, true, 3),
+            resolve_layer_navigation_owner(
+                &ctx,
+                NavigationWindows {
+                    settings: Some(3),
+                    ..NavigationWindows::default()
+                },
+            ),
             NavigationOwner::Blocked
         );
+    }
+
+    #[test]
+    fn notes_and_todo_owners_follow_real_window_z_order_and_exact_instances() {
+        let ctx = egui::Context::default();
+        let windows = NavigationWindows {
+            settings: Some(11),
+            notes: Some(22),
+            todo: Some(33),
+        };
+        render_supported_dialog_windows(&ctx, true, true, true, None);
+        assert_eq!(visible_top_middle_layer(&ctx), Some(todo_dialog_layer_id()));
+        assert_eq!(
+            resolve_layer_navigation_owner(&ctx, windows),
+            NavigationOwner::Todo { instance: 33 }
+        );
+
+        render_supported_dialog_windows(&ctx, true, true, true, Some(notes_dialog_layer_id()));
+        assert_eq!(
+            visible_top_middle_layer(&ctx),
+            Some(notes_dialog_layer_id())
+        );
+        assert_eq!(
+            resolve_layer_navigation_owner(&ctx, windows),
+            NavigationOwner::Notes { instance: 22 }
+        );
+
+        render_supported_dialog_windows(&ctx, true, true, true, Some(settings_layer_id()));
+        assert_eq!(visible_top_middle_layer(&ctx), Some(settings_layer_id()));
+        assert_eq!(
+            resolve_layer_navigation_owner(&ctx, windows),
+            NavigationOwner::Settings { instance: 11 }
+        );
+
+        render_supported_dialog_windows(&ctx, true, true, true, Some(todo_dialog_layer_id()));
+        assert_eq!(
+            resolve_layer_navigation_owner(
+                &ctx,
+                NavigationWindows {
+                    todo: None,
+                    ..windows
+                }
+            ),
+            NavigationOwner::Blocked,
+            "a visible dialog without its exact live instance is unsupported"
+        );
+    }
+
+    #[test]
+    fn navigation_scopes_reject_other_dialog_kinds_and_instances() {
+        let ctx = egui::Context::default();
+        let mut jump = JumpModeUi::new(true);
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let owner = NavigationOwner::Notes { instance: 7 };
+        let notes = jump
+            .scope_for_navigation_owner(
+                SurfaceId::dialog("notes", 7),
+                TargetGeneration(1),
+                "notes",
+                egui::ViewportId::ROOT,
+                owner,
+                false,
+            )
+            .unwrap();
+        let wrong_kind = notes.with_surface(SurfaceId::dialog("todo", 7), TargetGeneration(1));
+        let wrong_instance = notes.with_surface(SurfaceId::dialog("notes", 8), TargetGeneration(1));
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let response = ui.button("target");
+            for (scope, identity) in [(&wrong_kind, "todo"), (&wrong_instance, "other-notes")] {
+                assert_eq!(
+                    scope.register(ui, &response, identity, identity, TargetKind::Button, 0),
+                    RegistrationResult::Rejected(RegistrationRejection::InactiveOwner)
+                );
+            }
+            let popup = notes.child_popup_scope("notes-menu");
+            assert!(matches!(
+                popup.register(
+                    ui,
+                    &response,
+                    "menu-item",
+                    "Menu item",
+                    TargetKind::Button,
+                    1
+                ),
+                RegistrationResult::Registered { .. }
+            ));
+        })
+        .drop_without_applying_deltas();
     }
 
     #[test]
@@ -1479,7 +1728,13 @@ mod tests {
         );
         assert_eq!(focused_response_layer(&ctx), Some(note_layer));
         assert_eq!(
-            resolve_layer_navigation_owner(&ctx, true, 1),
+            resolve_layer_navigation_owner(
+                &ctx,
+                NavigationWindows {
+                    settings: Some(1),
+                    ..NavigationWindows::default()
+                },
+            ),
             NavigationOwner::Blocked
         );
 
@@ -1488,7 +1743,7 @@ mod tests {
         render_navigation_windows(&stale_ctx, false, false, false, None);
         assert_eq!(visible_top_middle_layer(&stale_ctx), None);
         assert_eq!(
-            resolve_layer_navigation_owner(&stale_ctx, false, 1),
+            resolve_layer_navigation_owner(&stale_ctx, NavigationWindows::default()),
             NavigationOwner::Root
         );
     }
@@ -1499,7 +1754,13 @@ mod tests {
         render_navigation_windows(&ctx, false, false, false, None);
         assert_eq!(visible_top_middle_layer(&ctx), None);
         assert_eq!(
-            resolve_layer_navigation_owner(&ctx, true, 1),
+            resolve_layer_navigation_owner(
+                &ctx,
+                NavigationWindows {
+                    settings: Some(1),
+                    ..NavigationWindows::default()
+                },
+            ),
             NavigationOwner::Blocked
         );
     }
@@ -1511,7 +1772,13 @@ mod tests {
         egui::Popup::open_id(&ctx, egui::Id::new("jump_mode_owner_popup"));
         assert!(egui::Popup::is_any_open(&ctx));
         assert_eq!(
-            resolve_layer_navigation_owner(&ctx, true, 1),
+            resolve_layer_navigation_owner(
+                &ctx,
+                NavigationWindows {
+                    settings: Some(1),
+                    ..NavigationWindows::default()
+                },
+            ),
             NavigationOwner::Blocked
         );
     }

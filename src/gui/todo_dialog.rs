@@ -18,11 +18,23 @@ pub struct TodoDialog {
     pub persist_tags: bool,
     pending_clear_confirm: bool,
     load_error: Option<String>,
+    generation: u64,
     #[cfg(test)]
     test_window_close_requested: bool,
+    #[cfg(test)]
+    test_row_tag_ids: Vec<(String, egui::Id)>,
 }
 
 impl TodoDialog {
+    pub(crate) fn jump_mode_target_generation(&self) -> crate::gui::jump_mode::TargetGeneration {
+        use std::hash::{Hash, Hasher};
+
+        let mut generation = std::collections::hash_map::DefaultHasher::new();
+        self.generation.hash(&mut generation);
+        self.filter.hash(&mut generation);
+        crate::gui::jump_mode::TargetGeneration(generation.finish())
+    }
+
     pub fn open(&mut self) {
         self.open_from(TODO_FILE);
     }
@@ -52,6 +64,7 @@ impl TodoDialog {
             Ok(entries) => {
                 self.entries = entries;
                 self.load_error = None;
+                self.generation = self.generation.wrapping_add(1).max(1);
                 Ok(())
             }
             Err(error) => {
@@ -66,6 +79,7 @@ impl TodoDialog {
             Ok(committed) => {
                 self.entries = committed;
                 self.load_error = None;
+                self.generation = self.generation.wrapping_add(1).max(1);
                 Ok(())
             }
             Err(error) => {
@@ -164,6 +178,11 @@ impl TodoDialog {
         self.text = text.to_owned();
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_text(&self) -> &str {
+        &self.text
+    }
+
     pub fn test_set_tags(&mut self, tags: &str) {
         self.tags = tags.to_owned();
     }
@@ -172,24 +191,59 @@ impl TodoDialog {
         &self.entries
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_request_clear_confirm(&mut self) {
+        self.pending_clear_confirm = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pending_clear_confirm(&self) -> bool {
+        self.pending_clear_confirm
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_entries(&mut self, entries: Vec<TodoEntry>) {
+        self.entries = entries;
+        self.generation = self.generation.wrapping_add(1).max(1);
+    }
+
     pub fn test_add_todo(&mut self) -> bool {
         self.add_todo()
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        self.ui_with_jump_mode(ctx, app, None);
+    }
+
+    pub(crate) fn ui_with_jump_mode(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        jump_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+    ) {
         #[cfg(test)]
         {
             self.test_window_close_requested = false;
+            self.test_row_tag_ids.clear();
         }
         if !self.open {
             return;
         }
+        let jump_mode_enabled = app.jump_mode_enabled();
+        let focused_widget_at_pass_entry = ctx.memory(|memory| memory.focused());
         let pinned = app.pinned_panels.contains(&crate::gui::Panel::TodoDialog);
         let mut window_open = self.open;
         let mut save_now = false;
         let mut add_now = false;
         let mut clear_confirmed: Option<bool> = None;
         let mut candidate_entries = self.entries.clone();
+        let mut jump_visual_order = 0;
+        let mut enter_add_field_owns_enter = false;
+        let mut native_enter_pressed = false;
+        let clear_confirm_scope = jump_scope
+            .as_ref()
+            .filter(|_| self.pending_clear_confirm)
+            .map(|scope| scope.child_popup_scope("todo-clear-confirm"));
         egui::Window::new("Todos")
             .open(&mut window_open)
             .resizable(true)
@@ -210,7 +264,16 @@ impl TodoDialog {
                 let area_height = ui.available_height();
                 let mut remove: Option<usize> = None;
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.checkbox(&mut self.persist_tags, "Persist Tags");
+                    let persist_tags = ui.checkbox(&mut self.persist_tags, "Persist Tags");
+                    register_todo_jump_target(
+                        jump_scope.as_ref().filter(|_| !self.pending_clear_confirm),
+                        ui,
+                        &persist_tags,
+                        "persist-tags",
+                        "Persist Tags",
+                        crate::gui::jump_mode::TargetKind::Checkbox,
+                        &mut jump_visual_order,
+                    );
                     let field_width = (ui.available_width() - 72.0).clamp(80.0, 240.0);
                     egui::Grid::new("todo_add_grid")
                         .num_columns(2)
@@ -224,6 +287,15 @@ impl TodoDialog {
                                         .desired_width(field_width),
                                 )
                                 .labelled_by(text_label.id);
+                            register_todo_jump_target(
+                                jump_scope.as_ref().filter(|_| !self.pending_clear_confirm),
+                                ui,
+                                &text_resp,
+                                "new-todo",
+                                "New Todo",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut jump_visual_order,
+                            );
                             ui.end_row();
 
                             let tags_label = ui.label("Tags");
@@ -233,6 +305,15 @@ impl TodoDialog {
                                         .desired_width(field_width),
                                 )
                                 .labelled_by(tags_label.id);
+                            register_todo_jump_target(
+                                jump_scope.as_ref().filter(|_| !self.pending_clear_confirm),
+                                ui,
+                                &tags_resp,
+                                "new-todo-tags",
+                                "New Todo Tags",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut jump_visual_order,
+                            );
                             ui.end_row();
 
                             let priority_label = ui.label("Priority");
@@ -249,6 +330,15 @@ impl TodoDialog {
                             let prio_resp = prio_resp.labelled_by(priority_label.id);
                             let add_resp =
                                 with_button_emphasis(ui, add_resp, ButtonEmphasis::Primary);
+                            register_todo_jump_target(
+                                jump_scope.as_ref().filter(|_| !self.pending_clear_confirm),
+                                ui,
+                                &add_resp,
+                                "add",
+                                "Add",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut jump_visual_order,
+                            );
 
                             if text_resp.changed() {
                                 tracing::debug!("Todo text updated: '{}'", self.text);
@@ -257,11 +347,39 @@ impl TodoDialog {
                                 tracing::debug!("Todo tags updated: '{}'", self.tags);
                             }
 
-                            add_now |= add_resp.clicked();
-                            if (text_resp.lost_focus()
-                                || tags_resp.lost_focus()
-                                || prio_resp.lost_focus())
-                                && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                            let add_clicked = add_resp.clicked();
+                            let text_enter_owner = text_resp.has_focus()
+                                || if jump_mode_enabled {
+                                    focused_widget_at_pass_entry == Some(text_resp.id)
+                                } else {
+                                    text_resp.lost_focus()
+                                };
+                            let tags_enter_owner = tags_resp.has_focus()
+                                || if jump_mode_enabled {
+                                    focused_widget_at_pass_entry == Some(tags_resp.id)
+                                } else {
+                                    tags_resp.lost_focus()
+                                };
+                            let priority_enter_owner = prio_resp.has_focus()
+                                || if jump_mode_enabled {
+                                    focused_widget_at_pass_entry == Some(prio_resp.id)
+                                } else {
+                                    prio_resp.lost_focus()
+                                };
+                            enter_add_field_owns_enter |=
+                                text_enter_owner || tags_enter_owner || priority_enter_owner;
+                            native_enter_pressed =
+                                ctx.input(|input| input.key_pressed(egui::Key::Enter));
+                            if add_clicked
+                                && (!jump_mode_enabled
+                                    || !self.pending_clear_confirm
+                                    || !native_enter_pressed)
+                            {
+                                add_now = true;
+                            }
+                            if (!jump_mode_enabled || !self.pending_clear_confirm)
+                                && (text_enter_owner || tags_enter_owner || priority_enter_owner)
+                                && native_enter_pressed
                             {
                                 let modifiers = ctx.input(|i| i.modifiers);
                                 ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
@@ -278,6 +396,15 @@ impl TodoDialog {
                         let clear_button = ui.button("Clear Completed");
                         let clear_button =
                             with_button_emphasis(ui, clear_button, ButtonEmphasis::Destructive);
+                        register_todo_jump_target(
+                            jump_scope.as_ref().filter(|_| !self.pending_clear_confirm),
+                            ui,
+                            &clear_button,
+                            "clear-completed",
+                            "Clear Completed",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut jump_visual_order,
+                        );
                         if clear_button.clicked() {
                             self.pending_clear_confirm = true;
                         }
@@ -288,10 +415,29 @@ impl TodoDialog {
                             let confirm = ui.button("Confirm");
                             let confirm =
                                 with_button_emphasis(ui, confirm, ButtonEmphasis::Destructive);
+                            register_todo_jump_target(
+                                clear_confirm_scope.as_ref(),
+                                ui,
+                                &confirm,
+                                "confirm",
+                                "Confirm clear completed",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut jump_visual_order,
+                            );
                             if confirm.clicked() {
                                 clear_confirmed = Some(true);
                             }
-                            if ui.button("Cancel").clicked() {
+                            let cancel = ui.button("Cancel");
+                            register_todo_jump_target(
+                                clear_confirm_scope.as_ref(),
+                                ui,
+                                &cancel,
+                                "cancel",
+                                "Cancel clear completed",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut jump_visual_order,
+                            );
+                            if cancel.clicked() {
                                 clear_confirmed = Some(false);
                             }
                         });
@@ -299,11 +445,20 @@ impl TodoDialog {
                     ui.separator();
                     ui.horizontal_wrapped(|ui| {
                         let filter_label = ui.label("Filter");
-                        ui.add(
+                        let filter = ui.add(
                             egui::TextEdit::singleline(&mut self.filter)
                                 .desired_width(ui.available_width().min(240.0).max(72.0)),
                         )
                         .labelled_by(filter_label.id);
+                        register_todo_jump_target(
+                            jump_scope.as_ref().filter(|_| !self.pending_clear_confirm),
+                            ui,
+                            &filter,
+                            "filter",
+                            "Filter Todos",
+                            crate::gui::jump_mode::TargetKind::TextEntry,
+                            &mut jump_visual_order,
+                        );
                     });
                     compact_section_heading(ui, "Todo list", None);
                     let indices = Self::filtered_indices(&candidate_entries, &self.filter);
@@ -311,72 +466,123 @@ impl TodoDialog {
                         .max_height(area_height)
                         .show(ui, |ui| {
                             for idx in indices {
-                                ui.horizontal(|ui| {
-                                    let entry = &mut candidate_entries[idx];
-                                    if ui.checkbox(&mut entry.done, "").changed() {
-                                        save_now = true;
-                                    }
-                                    ui.label(entry.text.replace('\n', " "));
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut entry.priority)
-                                                .range(0..=255),
-                                        )
-                                        .changed()
-                                    {
-                                        save_now = true;
-                                    }
-                                    let mut tag_str = entry.tags.join(", ");
-                                    if ui.text_edit_singleline(&mut tag_str).changed() {
-                                        entry.tags = tag_str
-                                            .split(',')
-                                            .map(|t| t.trim())
-                                            .filter(|t| !t.is_empty())
-                                            .map(|t| t.to_string())
-                                            .collect();
-                                        save_now = true;
-                                    }
-                                    let remove_btn = ui.button("Remove");
-                                    let remove_btn = with_button_emphasis(
-                                        ui,
-                                        remove_btn,
-                                        ButtonEmphasis::Destructive,
-                                    );
-                                    remove_btn.context_menu(|ui| {
-                                        ui.label("Link note");
-                                        for note in
-                                            load_notes().unwrap_or_default().into_iter().take(8)
+                                let Some(entry_id) = candidate_entries
+                                    .get(idx)
+                                    .map(|entry| entry.id.clone())
+                                    .filter(|entry_id| !entry_id.is_empty())
+                                else {
+                                    continue;
+                                };
+                                let row_id = ui.id().with(("todo-row", entry_id.as_str()));
+                                ui.scope_builder(egui::UiBuilder::new().id(row_id), |ui| {
+                                    ui.horizontal(|ui| {
+                                        let entry = &mut candidate_entries[idx];
+                                        let done = ui.checkbox(&mut entry.done, "");
+                                        register_todo_jump_target(
+                                            jump_scope
+                                                .as_ref()
+                                                .filter(|_| !self.pending_clear_confirm),
+                                            ui,
+                                            &done,
+                                            format!("todo/{entry_id}/done"),
+                                            format!("{} done", entry.text),
+                                            crate::gui::jump_mode::TargetKind::Checkbox,
+                                            &mut jump_visual_order,
+                                        );
+                                        if done.changed() {
+                                            save_now = true;
+                                        }
+                                        ui.label(entry.text.replace('\n', " "));
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut entry.priority)
+                                                    .range(0..=255),
+                                            )
+                                            .changed()
                                         {
-                                            if ui
-                                                .button(format!(
-                                                    "@note:{} {}",
-                                                    note.slug, note.title
-                                                ))
-                                                .clicked()
+                                            save_now = true;
+                                        }
+                                        let mut tag_str = entry.tags.join(", ");
+                                        let tags = ui.text_edit_singleline(&mut tag_str);
+                                        #[cfg(test)]
+                                        self.test_row_tag_ids
+                                            .push((entry_id.clone(), tags.id));
+                                        register_todo_jump_target(
+                                            jump_scope
+                                                .as_ref()
+                                                .filter(|_| !self.pending_clear_confirm),
+                                            ui,
+                                            &tags,
+                                            format!("todo/{entry_id}/tags"),
+                                            format!("{} tags", entry.text),
+                                            crate::gui::jump_mode::TargetKind::TextEntry,
+                                            &mut jump_visual_order,
+                                        );
+                                        if tags.changed() {
+                                            entry.tags = tag_str
+                                                .split(',')
+                                                .map(|t| t.trim())
+                                                .filter(|t| !t.is_empty())
+                                                .map(|t| t.to_string())
+                                                .collect();
+                                            save_now = true;
+                                        }
+                                        let remove_btn = ui.button("Remove");
+                                        let remove_btn = with_button_emphasis(
+                                            ui,
+                                            remove_btn,
+                                            ButtonEmphasis::Destructive,
+                                        );
+                                        register_todo_jump_target(
+                                            jump_scope
+                                                .as_ref()
+                                                .filter(|_| !self.pending_clear_confirm),
+                                            ui,
+                                            &remove_btn,
+                                            format!("todo/{entry_id}/remove"),
+                                            format!("Remove {}", entry.text),
+                                            crate::gui::jump_mode::TargetKind::Button,
+                                            &mut jump_visual_order,
+                                        );
+                                        remove_btn.context_menu(|ui| {
+                                            ui.label("Link note");
+                                            for note in load_notes()
+                                                .unwrap_or_default()
+                                                .into_iter()
+                                                .take(8)
                                             {
-                                                if !entry
-                                                    .text
-                                                    .contains(&format!("@note:{}", note.slug))
+                                                if ui
+                                                    .button(format!(
+                                                        "@note:{} {}",
+                                                        note.slug, note.title
+                                                    ))
+                                                    .clicked()
                                                 {
-                                                    entry
+                                                    if !entry
                                                         .text
-                                                        .push_str(&format!(" @note:{}", note.slug));
+                                                        .contains(&format!("@note:{}", note.slug))
+                                                    {
+                                                        entry.text.push_str(&format!(
+                                                            " @note:{}",
+                                                            note.slug
+                                                        ));
+                                                    }
+                                                    entry.entity_refs.push(
+                                                        crate::common::entity_ref::EntityRef::new(
+                                                            crate::common::entity_ref::EntityKind::Note,
+                                                            note.slug,
+                                                            Some(note.title),
+                                                        ),
+                                                    );
+                                                    save_now = true;
+                                                    ui.close();
                                                 }
-                                                entry.entity_refs.push(
-                                                    crate::common::entity_ref::EntityRef::new(
-                                                        crate::common::entity_ref::EntityKind::Note,
-                                                        note.slug,
-                                                        Some(note.title),
-                                                    ),
-                                                );
-                                                save_now = true;
-                                                ui.close();
                                             }
+                                        });
+                                        if remove_btn.clicked() {
+                                            remove = Some(idx);
                                         }
                                     });
-                                    if remove_btn.clicked() {
-                                        remove = Some(idx);
-                                    }
                                 });
                             }
                         });
@@ -395,7 +601,8 @@ impl TodoDialog {
 
         if self.open
             && self.load_error.is_none()
-            && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+            && native_enter_pressed
+            && (!jump_mode_enabled || (enter_add_field_owns_enter && !self.pending_clear_confirm))
             && !app.todo_view_dialog.open
         {
             let modifiers = ctx.input(|i| i.modifiers);
@@ -447,6 +654,30 @@ impl TodoDialog {
                 self.tags.clear();
             }
         }
+    }
+}
+
+fn register_todo_jump_target(
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    local_identity: impl AsRef<str>,
+    label: impl Into<String>,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: &mut u64,
+) {
+    let order = *visual_order;
+    *visual_order = visual_order.saturating_add(1);
+    let Some(scope) = scope else {
+        return;
+    };
+    let result = scope.register(ui, response, local_identity, label, kind, order);
+    if let crate::gui::jump_mode::ui::RegistrationResult::Registered {
+        directive: Some(directive),
+        ..
+    } = result
+    {
+        directive.apply_to_response(response);
     }
 }
 
@@ -533,6 +764,44 @@ mod tests {
         let close_requested = dialog.test_window_close_requested;
         output.drop_without_applying_deltas();
         (close_button, close_requested)
+    }
+
+    #[test]
+    fn todo_row_widget_ids_stay_bound_to_entry_when_filter_moves_another_row_to_zero() {
+        let _workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut dialog = TodoDialog::default();
+        dialog.open = true;
+        dialog.test_set_entries(vec![
+            todo_entry("home-id", "home task", &["home-tag"]),
+            todo_entry("work-id", "work task", &["work-tag"]),
+        ]);
+        render_todo_frame(&ctx, &mut dialog, &mut app, Vec::new());
+        let tag_id_a = dialog
+            .test_row_tag_ids
+            .iter()
+            .find_map(|(id, widget_id)| (id == "home-id").then_some(*widget_id))
+            .expect("the first todo has a real tag editor");
+        let tag_id_b = dialog
+            .test_row_tag_ids
+            .iter()
+            .find_map(|(id, widget_id)| (id == "work-id").then_some(*widget_id))
+            .expect("the second todo has a real tag editor");
+        assert_ne!(tag_id_a, tag_id_b);
+
+        ctx.memory_mut(|memory| memory.request_focus(tag_id_a));
+        dialog.filter = "work".into();
+        render_todo_frame(
+            &ctx,
+            &mut dialog,
+            &mut app,
+            vec![egui::Event::Text("x".into())],
+        );
+
+        assert_eq!(dialog.test_row_tag_ids, [("work-id".to_owned(), tag_id_b)]);
+        assert_eq!(dialog.entries[0].tags, vec!["home-tag".to_owned()]);
+        assert_eq!(dialog.entries[1].tags, vec!["work-tag".to_owned()]);
     }
 
     fn click_todo_window_x(
