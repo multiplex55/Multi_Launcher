@@ -141,8 +141,8 @@ For fixture and native-helper validation without starting the app, add
 the manifest and summary; it is not a full Phase 1 catalog result.
 
 M13 Phase 2 runs one isolated native dialog surface per owned app process. Use
-`-Surface` to choose Settings, Notes, Todo, Timer, Paste, or MkMacro; `Settings`
-is the default. Each run uses the production query opener, resolves the exact
+`-Surface` to choose Settings, Notes, Todo, Timer, Paste, MkMacro, or FileSearch;
+`Settings` is the default. Each run uses the production query opener, resolves the exact
 observed root action and dialog target from the current retained hint map, and
 captures only ROOT/F11 receipts whose captured observation matches the same
 frame and UI pass. Dialog state records include redacted draft facts and actual
@@ -165,3 +165,10 @@ reads or mutates the real clipboard. Native acceptance is recorded only after
 the corresponding run produces matching receipts, screenshots, state
 assertions, and verified cleanup; fixture-only validation does not claim a GUI
 result.
+
+The FileSearch profile configures only its isolated `file-search-root`, which
+contains one harmless generated text file. Its native proof opens File Search
+through the `fs` root action, focuses and types into the query field without
+submitting a search, checks that idle Cancel does nothing, and closes with
+Escape. It does not open, copy, or modify a file; QA records only query length,
+search status, Search ID, and form generation.

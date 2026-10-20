@@ -2,6 +2,7 @@ use multi_launcher::actions::{Action, load_actions_typed};
 use multi_launcher::common::persistence::LoadState;
 use multi_launcher::dashboard::config::{DashboardConfig, GridConfig, OverflowMode, SlotConfig};
 use multi_launcher::dashboard::widgets::{ClickBehavior, PinnedQueryResultsConfig};
+use multi_launcher::file_search::settings::FileSearchSettings;
 use multi_launcher::hotkey::validation::validate_hotkey_routes;
 use multi_launcher::mkmacro::hotkeys::{HotkeyDiagnosticSeverity, validate_hotkeys};
 use multi_launcher::mkmacro::store::ASSET_DIRECTORY;
@@ -35,6 +36,9 @@ const NOTE_COUNT: usize = 32;
 const SAFE_PLUGIN: &str = "notes";
 const LAUNCHER_HOTKEY: &str = "Ctrl+Alt+F10";
 const NO_RESULTS_QUERY: &str = "zzzznomatchprobe";
+const FILE_SEARCH_ROOT_DIRECTORY: &str = "file-search-root";
+const FILE_SEARCH_FIXTURE_FILE: &str = "jump-mode-safe-fixture.txt";
+const FILE_SEARCH_FIXTURE_CONTENT: &str = "Jump Mode isolated File Search fixture.\n";
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -60,6 +64,7 @@ struct FixtureManifest {
 struct SafetyManifest {
     profile_isolated_by_working_directory: bool,
     notes_path_supplied_by_ml_notes_dir: bool,
+    clipboard_plugin_enabled: bool,
     clipboard_modify_plugin_enabled: bool,
     macros_enabled: bool,
     network_plugin_enabled: bool,
@@ -68,6 +73,9 @@ struct SafetyManifest {
     reduce_dashboard_work_when_unfocused: bool,
     experimental_jump_mode_enabled: bool,
     mkmacro_plugin_enabled: bool,
+    file_search_root_isolated: bool,
+    file_search_fixture_file_count: usize,
+    file_search_everything_enabled: bool,
     qa_empty_paste_invocation_context: bool,
     paste_next_hotkey_enabled: bool,
     paste_cancel_hotkey_enabled: bool,
@@ -90,6 +98,7 @@ enum Phase2Surface {
     Timer,
     Paste,
     MkMacro,
+    FileSearch,
 }
 
 impl Phase2Surface {
@@ -101,6 +110,7 @@ impl Phase2Surface {
             "timer" => Self::Timer,
             "paste" => Self::Paste,
             "mkmacro" => Self::MkMacro,
+            "file-search" => Self::FileSearch,
             _ => return None,
         })
     }
@@ -113,6 +123,7 @@ impl Phase2Surface {
             Self::Timer => "timer",
             Self::Paste => "paste",
             Self::MkMacro => "mkmacro",
+            Self::FileSearch => "file-search",
         }
     }
 
@@ -124,6 +135,7 @@ impl Phase2Surface {
             Self::Timer => &["notes", "timer"],
             Self::Paste => &["notes", "paste_sequence"],
             Self::MkMacro => &["notes", "mkmacro"],
+            Self::FileSearch => &["notes", "file_search"],
         }
     }
 }
@@ -142,7 +154,7 @@ impl FixtureScenario {
                     .ok_or_else(|| anyhow::anyhow!("unknown Phase 2 surface {surface:?}"))
             }
             value => anyhow::bail!(
-                "unknown fixture scenario {value:?}; expected baseline, query-probe, phase1-enabled, phase1-disabled, or phase2-settings/notes/todo/timer/paste/mkmacro"
+                "unknown fixture scenario {value:?}; expected baseline, query-probe, phase1-enabled, phase1-disabled, or phase2-settings/notes/todo/timer/paste/mkmacro/file-search"
             ),
         }
     }
@@ -191,6 +203,7 @@ impl FixtureScenario {
                 Phase2Surface::Timer => "phase2-timer",
                 Phase2Surface::Paste => "phase2-paste",
                 Phase2Surface::MkMacro => "phase2-mkmacro",
+                Phase2Surface::FileSearch => "phase2-file-search",
             },
         }
     }
@@ -333,6 +346,18 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     settings
         .plugin_settings
         .insert("notes".into(), serialized_note_settings);
+    if scenario.phase2_surface() == Some(Phase2Surface::FileSearch) {
+        let mut file_search_settings = FileSearchSettings::default();
+        file_search_settings.global_search_roots =
+            vec![fs::canonicalize(profile)?.join(FILE_SEARCH_ROOT_DIRECTORY)];
+        file_search_settings.everything_enabled = false;
+        file_search_settings.ripgrep_executable_path =
+            fs::canonicalize(profile)?.join("fixture-rg-unavailable.exe");
+        settings.plugin_settings.insert(
+            "file_search".into(),
+            serde_json::to_value(file_search_settings)?,
+        );
+    }
 
     write_json(&profile.join("settings.json"), &settings)?;
     write_json(&profile.join("actions.json"), &Vec::<Action>::new())?;
@@ -380,6 +405,14 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
             == scenario.enabled_plugins().into_iter().collect(),
         "fixture plugin allowlist does not match the safe scenario-specific allowlist"
     );
+    if scenario.phase2_surface() == Some(Phase2Surface::FileSearch) {
+        verify_file_search_settings(&profile, &settings)?;
+    } else {
+        anyhow::ensure!(
+            !settings.plugin_settings.contains_key("file_search"),
+            "non-File Search fixtures must not configure File Search roots"
+        );
+    }
     anyhow::ensure!(
         settings.plugin_dirs.as_deref() == Some(&[]),
         "external plugin dirs must be disabled"
@@ -720,6 +753,7 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         "fixture manifest claims executable actions"
     );
     anyhow::ensure!(manifest.safety.clipboard_modify_plugin_enabled == false);
+    anyhow::ensure!(manifest.safety.clipboard_plugin_enabled == false);
     anyhow::ensure!(manifest.safety.macros_enabled == false);
     anyhow::ensure!(manifest.safety.network_plugin_enabled == false);
     anyhow::ensure!(manifest.safety.custom_actions_present == false);
@@ -749,6 +783,18 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
             == (scenario.phase2_surface() == Some(Phase2Surface::MkMacro)),
         "fixture manifest MkMacro allowlist claim does not match the selected surface"
     );
+    anyhow::ensure!(
+        manifest.safety.file_search_root_isolated
+            == (scenario.phase2_surface() == Some(Phase2Surface::FileSearch))
+            && manifest.safety.file_search_fixture_file_count
+                == if scenario.phase2_surface() == Some(Phase2Surface::FileSearch) {
+                    1
+                } else {
+                    0
+                }
+            && !manifest.safety.file_search_everything_enabled,
+        "fixture manifest File Search safety claims do not match the selected surface"
+    );
 
     verify_phase2_stores(&profile, scenario.phase2_surface())?;
 
@@ -756,6 +802,71 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     anyhow::ensure!(
         resolved_notes_dir.starts_with(&profile),
         "fixture notes escaped the isolated profile"
+    );
+    Ok(())
+}
+
+fn verify_file_search_settings(profile: &Path, settings: &Settings) -> anyhow::Result<()> {
+    let profile = fs::canonicalize(profile)?;
+    let expected_root = profile.join(FILE_SEARCH_ROOT_DIRECTORY);
+    let value = settings
+        .plugin_settings
+        .get("file_search")
+        .ok_or_else(|| anyhow::anyhow!("File Search fixture settings are missing"))?;
+    let file_search: FileSearchSettings = serde_json::from_value(value.clone())?;
+    anyhow::ensure!(
+        file_search.global_search_roots.len() == 1
+            && file_search.global_search_roots[0] == expected_root
+            && expected_root.starts_with(&profile)
+            && fs::canonicalize(&expected_root)? == expected_root,
+        "File Search must configure only its canonical isolated fixture root"
+    );
+    anyhow::ensure!(
+        !file_search.everything_enabled,
+        "Everything global-search integration must be disabled in the fixture"
+    );
+    anyhow::ensure!(
+        file_search.ripgrep_executable_path == profile.join("fixture-rg-unavailable.exe")
+            && !file_search.ripgrep_executable_path.exists()
+            && file_search.preferred_editor_command.is_empty()
+            && file_search.preferred_editor_args.is_empty()
+            && file_search.preferred_terminal_command.is_empty()
+            && file_search.preferred_terminal_args.is_empty(),
+        "File Search fixture must not configure external tools or commands"
+    );
+    Ok(())
+}
+
+fn verify_file_search_fixture_root(
+    profile: &Path,
+    surface: Option<Phase2Surface>,
+) -> anyhow::Result<()> {
+    let root = profile.join(FILE_SEARCH_ROOT_DIRECTORY);
+    if surface != Some(Phase2Surface::FileSearch) {
+        anyhow::ensure!(
+            !root.exists(),
+            "non-File Search fixture contains an unexpected search root"
+        );
+        return Ok(());
+    }
+
+    let profile = fs::canonicalize(profile)?;
+    let root = fs::canonicalize(root)?;
+    anyhow::ensure!(
+        root == profile.join(FILE_SEARCH_ROOT_DIRECTORY)
+            && root != profile
+            && root.starts_with(&profile),
+        "File Search fixture root must remain inside its isolated profile"
+    );
+    let entries = fs::read_dir(&root)?.collect::<Result<Vec<_>, _>>()?;
+    anyhow::ensure!(
+        entries.len() == 1 && entries[0].file_name() == FILE_SEARCH_FIXTURE_FILE,
+        "File Search fixture root must contain exactly one deterministic harmless file"
+    );
+    anyhow::ensure!(
+        entries[0].file_type()?.is_file()
+            && fs::read(entries[0].path())? == FILE_SEARCH_FIXTURE_CONTENT.as_bytes(),
+        "File Search fixture file must contain only its fixed harmless text"
     );
     Ok(())
 }
@@ -906,6 +1017,14 @@ fn write_phase2_stores(profile: &Path, surface: Option<Phase2Surface>) -> anyhow
         &MkMacroTemplateCatalog::default(),
     )?;
     fs::create_dir_all(profile.join(ASSET_DIRECTORY))?;
+    if surface == Some(Phase2Surface::FileSearch) {
+        let root = profile.join(FILE_SEARCH_ROOT_DIRECTORY);
+        fs::create_dir(&root)?;
+        fs::write(
+            root.join(FILE_SEARCH_FIXTURE_FILE),
+            FILE_SEARCH_FIXTURE_CONTENT,
+        )?;
+    }
 
     let todo_state = load_todos_typed(profile.join(TODO_FILE))?;
     match (surface, todo_state) {
@@ -966,6 +1085,7 @@ fn write_phase2_stores(profile: &Path, surface: Option<Phase2Surface>) -> anyhow
 }
 
 fn verify_phase2_stores(profile: &Path, surface: Option<Phase2Surface>) -> anyhow::Result<()> {
+    verify_file_search_fixture_root(profile, surface)?;
     let todo = match load_todos_typed(profile.join(TODO_FILE))? {
         LoadState::Loaded(entries) => entries,
         LoadState::Missing | LoadState::Empty => {
@@ -1157,6 +1277,7 @@ fn fixture_manifest(note_ids: Vec<String>, scenario: FixtureScenario) -> Fixture
         safety: SafetyManifest {
             profile_isolated_by_working_directory: true,
             notes_path_supplied_by_ml_notes_dir: true,
+            clipboard_plugin_enabled: false,
             clipboard_modify_plugin_enabled: false,
             macros_enabled: false,
             network_plugin_enabled: false,
@@ -1165,6 +1286,13 @@ fn fixture_manifest(note_ids: Vec<String>, scenario: FixtureScenario) -> Fixture
             reduce_dashboard_work_when_unfocused: false,
             experimental_jump_mode_enabled: jump_mode_enabled,
             mkmacro_plugin_enabled: phase2_surface == Some(Phase2Surface::MkMacro),
+            file_search_root_isolated: phase2_surface == Some(Phase2Surface::FileSearch),
+            file_search_fixture_file_count: if phase2_surface == Some(Phase2Surface::FileSearch) {
+                1
+            } else {
+                0
+            },
+            file_search_everything_enabled: false,
             qa_empty_paste_invocation_context: empty_paste_context,
             paste_next_hotkey_enabled: false,
             paste_cancel_hotkey_enabled: false,
@@ -1277,6 +1405,7 @@ mod tests {
             Some(Phase2Surface::Timer),
             Some(Phase2Surface::Paste),
             Some(Phase2Surface::MkMacro),
+            Some(Phase2Surface::FileSearch),
         ] {
             let profile = tempfile::tempdir().unwrap();
             write_phase2_stores(profile.path(), surface).unwrap();

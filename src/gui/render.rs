@@ -23754,6 +23754,143 @@ mod tests {
     }
 
     #[test]
+    fn jump_mode_file_search_lifecycle_reopen_rejects_stale_targets() {
+        use crate::gui::jump_mode::SurfaceId;
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        prepare_actual_file_search_dialog(&ctx, &mut app, workspace.root());
+
+        let original_query_target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Search query")
+            .expect("the open File Search dialog registers its query field")
+            .id()
+            .clone();
+        let original_form_generation = app.file_search_dialog.jump_mode_target_generation();
+
+        app.file_search_dialog
+            .open_with_mode(crate::gui::file_search_dialog::FileSearchMode::Content);
+        app.file_search_dialog.show_ripgrep_missing_prompt = true;
+        for _ in 0..3 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        assert!(
+            app.file_search_dialog.jump_mode_target_generation() > original_form_generation,
+            "mode changes advance the live form generation"
+        );
+        let prompt_labels: Vec<_> = app
+            .jump_mode_ui
+            .retained_registry()
+            .metadata()
+            .map(|target| target.label().to_owned())
+            .collect();
+        assert!(prompt_labels.iter().any(|label| label == "Locate ripgrep"));
+        assert!(prompt_labels.iter().any(|label| label == "Dismiss"));
+
+        let picker_layer = egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("file-search-foreign-picker-window"),
+        );
+        let render_with_picker = |app: &mut LauncherApp, input: egui::RawInput| {
+            let (output, _) = app.run_root_frame_for_test_with(&ctx, input, false, |app, ui| {
+                app.render_root_ui(ui);
+                egui::Window::new("File Search picker window")
+                    .id(picker_layer.id)
+                    .show(ui.ctx(), |_| {});
+                ui.ctx().move_to_top(picker_layer);
+            });
+            output.drop_without_applying_deltas();
+        };
+        for _ in 0..2 {
+            render_with_picker(&mut app, actual_query_input(true));
+        }
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Blocked,
+            "a foreign picker window above the inline rg notice blocks File Search hints"
+        );
+
+        app.file_search_dialog.open = false;
+        for _ in 0..4 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Root
+        );
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .all(|target| {
+                    !matches!(
+                        target.id().surface(),
+                        SurfaceId::Dialog { kind, .. } if kind == "file-search"
+                    )
+                }),
+            "closing File Search clears its current target identities"
+        );
+
+        app.file_search_dialog.open();
+        for _ in 0..4 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::FileSearch,
+                instance: 2,
+            }
+        );
+        let reopened_query_target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Search query")
+            .expect("the reopened dialog registers its current query field")
+            .id();
+        assert_ne!(reopened_query_target, &original_query_target);
+        assert_eq!(
+            reopened_query_target.surface(),
+            &SurfaceId::dialog("file-search", 2)
+        );
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .get(&original_query_target)
+                .is_none()
+        );
+
+        app.set_jump_mode_enabled(false);
+        for _ in 0..2 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        assert!(
+            app.jump_mode_ui.retained_registry().is_empty(),
+            "default-off File Search keeps ordinary UI visible and registers no Jump Mode targets"
+        );
+        drop(workspace);
+    }
+
+    #[test]
     fn jump_mode_file_search_results_use_opaque_duplicate_path_ids_and_select_without_opening() {
         let ctx = egui::Context::default();
         let (workspace, mut app) = root_list_test_app(&ctx, two_results());

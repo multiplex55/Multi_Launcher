@@ -4,7 +4,7 @@ param(
     [switch]$FixturesOnly,
     [ValidateSet('Baseline', 'QueryProbe', 'Phase1', 'Phase1Enabled', 'Phase1Disabled', 'Phase2')][string]$Scenario = 'Baseline',
     [ValidateSet('All', 'Dashboard', 'Grid', 'FinalSmoke')][string]$Screen = 'All',
-    [ValidateSet('Settings', 'Notes', 'Todo', 'Timer', 'Paste', 'MkMacro')][string]$Surface = 'Settings',
+    [ValidateSet('Settings', 'Notes', 'Todo', 'Timer', 'Paste', 'MkMacro', 'FileSearch')][string]$Surface = 'Settings',
     [ValidateRange(5, 120)][int]$CaptureTimeoutSeconds = 45,
     [ValidateRange(1, 30)][int]$GracefulCloseSeconds = 6,
     [ValidateRange(300, 7200)][int]$OverallTimeoutSeconds = 2400
@@ -14,6 +14,10 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $cargoFeatures = 'dev-smoke-binaries,qa-framebuffer-capture'
 $isFinalSmoke = $Scenario -eq 'Phase1Enabled' -and $Screen -eq 'FinalSmoke'
+$phase2SurfaceKey = switch ($Surface) {
+    'FileSearch' { 'file-search' }
+    default { $Surface.ToLowerInvariant() }
+}
 $runMilestone = if ($isFinalSmoke) { 'M15' } elseif ($Scenario -eq 'QueryProbe') { 'M05' } elseif ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'M08' } elseif ($Scenario -eq 'Phase2') { 'M13' } else { 'M01' }
 $runStamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
 $runSuffix = [Guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -22,7 +26,7 @@ $scenarioTag = if ($isFinalSmoke) { 'm15_final_smoke' } else { switch ($Scenario
     'Phase1' { 'm08_phase1' }
     'Phase1Enabled' { 'm08_phase1_enabled' }
     'Phase1Disabled' { 'm08_phase1_disabled' }
-    'Phase2' { "m13_phase2_$($Surface.ToLowerInvariant())" }
+    'Phase2' { "m13_phase2_$phase2SurfaceKey" }
     default { 'm01_baseline' }
 } }
 $runId = "jump_${scenarioTag}_${runStamp}_$runSuffix"
@@ -1650,6 +1654,7 @@ function Get-Phase2SurfaceContract {
         'Timer' { return [pscustomobject]@{ name = 'Timer'; query = 'timer'; action = 'timer:dialog:timer'; args = $null; owner = 'timer'; dialog = 'timer' } }
         'Paste' { return [pscustomobject]@{ name = 'Paste'; query = 'paste'; action = 'paste:open'; args = $null; owner = 'paste_sequence'; dialog = 'paste_sequence' } }
         'MkMacro' { return [pscustomobject]@{ name = 'MkMacro'; query = 'mkmacro'; action = 'mkmacro:dialog'; args = $null; owner = 'mkmacro'; dialog = 'mkmacro' } }
+        'FileSearch' { return [pscustomobject]@{ name = 'FileSearch'; query = 'fs'; action = 'file_search:open'; args = $null; owner = 'file-search'; dialog = 'file-search' } }
         default { throw "unsupported Phase 2 surface $Surface" }
     }
 }
@@ -1977,6 +1982,52 @@ function Test-Phase2WorkflowHelpers {
     try { $null = Get-Phase2Target $ambiguous $contract 'New Todo' 'text_entry' 'new-todo' } catch { $ambiguousRejected = $true }
     if (!$ambiguousRejected) { throw 'Phase 2 target lookup accepted an ambiguous semantic target' }
 
+    $fileSearchContract = [pscustomobject]@{
+        name = 'FileSearch'; query = 'fs'; action = 'file_search:open'; args = $null
+        owner = 'file-search'; dialog = 'file-search'
+    }
+    if ($Surface -eq 'FileSearch') {
+        $actualFileSearchContract = Get-Phase2SurfaceContract
+        if ($actualFileSearchContract.query -cne 'fs' -or
+            $actualFileSearchContract.action -cne 'file_search:open' -or
+            $null -ne $actualFileSearchContract.args -or
+            $actualFileSearchContract.owner -cne 'file-search' -or
+            $actualFileSearchContract.dialog -cne 'file-search') {
+            throw 'File Search runner contract does not match its exact production opener and navigation surface'
+        }
+    }
+    $fileSearchTarget = [pscustomobject]@{
+        target_id = 'opaque-file-search-query-target'
+        label = 'Search query'
+        kind = 'text_entry'
+        eligible = $true
+        semantic_id = [pscustomobject]@{ kind = 'named'; value = 'file-search/10:form/query' }
+        hint = 'CD'
+        rect = @(1, 2, 30, 40)
+        clipped_rect = @(1, 2, 30, 40)
+    }
+    $fileSearchObservation = [pscustomobject]@{
+        navigation_owner = [pscustomobject]@{ kind = 'file-search'; instance = 23 }
+        root_owner_allowed = $false
+        dialog_state = [pscustomobject]@{ surface = 'file-search'; instance = 23 }
+        navigation_targets = @($fileSearchTarget)
+    }
+    $script:phase2OwnerInstance = [long]23
+    $fileSearchResolved = Get-Phase2Target $fileSearchObservation $fileSearchContract 'Search query' 'text_entry' 'form/query' -RequireHint
+    if ($fileSearchResolved.target_id -cne 'opaque-file-search-query-target' -or
+        !(Test-Phase2OwnerSnapshot $fileSearchObservation $fileSearchContract 23)) {
+        throw 'File Search helper did not require its exact current owner and query target'
+    }
+    $wrongFileSearchInstance = $fileSearchObservation.PSObject.Copy()
+    $wrongFileSearchInstance.navigation_owner = [pscustomobject]@{ kind = 'file-search'; instance = 24 }
+    $wrongFileSearchInstance.dialog_state = [pscustomobject]@{ surface = 'file-search'; instance = 24 }
+    $wrongFileSearchRejected = $false
+    try { $null = Get-Phase2Target $wrongFileSearchInstance $fileSearchContract 'Search query' 'text_entry' 'form/query' } catch { $wrongFileSearchRejected = $true }
+    if (!$wrongFileSearchRejected -or (Test-Phase2OwnerSnapshot $wrongFileSearchInstance $fileSearchContract 23)) {
+        throw 'File Search helper accepted a stale dialog instance'
+    }
+    $script:phase2OwnerInstance = [long]7
+
     $rootContract = [pscustomobject]@{ name = 'Notes'; action = 'note:open' }
     $rootTarget = [pscustomobject]@{
         surface = 'launcher_results'
@@ -1995,6 +2046,24 @@ function Test-Phase2WorkflowHelpers {
     $rootObservation.targets = @($rootTarget, $rootTarget.PSObject.Copy())
     if (Test-Phase2RootActionReady $rootObservation $rootContract) {
         throw 'Phase 2 root readiness accepted ambiguous production action targets'
+    }
+    $fileSearchRootTarget = [pscustomobject]@{
+        surface = 'launcher_results'
+        eligible = $true
+        root_action = [pscustomobject]@{ action = $fileSearchContract.action; args = $null }
+    }
+    $fileSearchRootObservation = [pscustomobject]@{
+        root_focused = $true
+        root_owner_allowed = $true
+        navigation_owner = [pscustomobject]@{ kind = 'root' }
+        targets = @($fileSearchRootTarget)
+    }
+    if (!(Test-Phase2RootActionReady $fileSearchRootObservation $fileSearchContract)) {
+        throw 'File Search root helper rejected the exact fs production opener'
+    }
+    $fileSearchRootTarget.root_action.action = 'file_search:start'
+    if (Test-Phase2RootActionReady $fileSearchRootObservation $fileSearchContract) {
+        throw 'File Search root helper accepted an action other than file_search:open'
     }
     if (!(Test-Phase2EmptyPasteContext ([pscustomobject]@{ paste_context_present = $true; paste_context_has_clipboard_text = $false })) -or
         (Test-Phase2EmptyPasteContext ([pscustomobject]@{ paste_context_present = $false; paste_context_has_clipboard_text = $false })) -or
@@ -2029,7 +2098,7 @@ function Test-Phase2WorkflowHelpers {
     $script:phase2OwnerInstance = $savedOwnerInstance
     $script:phase2ActivationCount = $savedActivationCount
     $script:phase2Query = $savedQuery
-    Write-Event 'phase2_helper_regressions_passed' @{ semantic_identity = 'structured named target'; exact_opaque_id = $resolved.target_id; observed_hint = $resolved.hint; ambiguous_target_rejected = $ambiguousRejected; exact_root_action_required = $true; ambiguous_root_action_rejected = $true; explicit_empty_paste_context = $true; clipboard_text_absent = $true; exact_nonempty_notes_focus_required = $true; scoped_wait_closure_preserved_nonzero_owner_count_query = $true }
+    Write-Event 'phase2_helper_regressions_passed' @{ semantic_identity = 'structured named target'; exact_opaque_id = $resolved.target_id; observed_hint = $resolved.hint; ambiguous_target_rejected = $ambiguousRejected; exact_root_action_required = $true; ambiguous_root_action_rejected = $true; file_search_exact_open_action = $true; file_search_query_target_identity = $fileSearchResolved.target_id; file_search_wrong_instance_rejected = $wrongFileSearchRejected; explicit_empty_paste_context = $true; clipboard_text_absent = $true; exact_nonempty_notes_focus_required = $true; scoped_wait_closure_preserved_nonzero_owner_count_query = $true }
 }
 
 function Test-Phase2EmptyPasteContext($DialogState) {
@@ -2459,6 +2528,109 @@ function Invoke-Phase2MkMacroWorkflow($Contract) {
     Add-ReceiptBoundScreenshotAlias $capture 'mkmacro.png'
 }
 
+function Invoke-Phase2FileSearchWorkflow($Contract) {
+    $opened = Invoke-Phase2RootOpener $Contract
+    $waitContext = Get-Phase2WaitContext
+    $empty = Wait-JumpModeObservation {
+        param($state)
+        (Test-Phase2OwnerSnapshot $state $Contract $waitContext.owner_instance) -and
+            $state.dialog_state.file_search_open -eq $true -and
+            $state.dialog_state.file_search_query_char_count -eq 0 -and
+            $state.dialog_state.file_search_status -ceq 'pending' -and
+            $null -eq $state.dialog_state.file_search_search_id -and
+            [long]$state.activation_count -eq [long]$waitContext.activation_count
+    }.GetNewClosure() $CaptureTimeoutSeconds 'File Search opened with an empty query and no active search'
+
+    $active = Start-Phase2Hints $Contract
+    $queryTarget = Get-Phase2Target $active $Contract 'Search query' 'text_entry' 'form/query' -RequireHint
+    $null = Save-Phase2OwnerCapture 16 'file_search_query_hint' $Contract {
+        param($state)
+        $state.dialog_state.file_search_open -eq $true -and
+            $state.dialog_state.file_search_query_char_count -eq 0 -and
+            $state.dialog_state.file_search_status -ceq 'pending' -and
+            $null -eq $state.dialog_state.file_search_search_id -and
+            @($state.navigation_targets | Where-Object {
+                $_.eligible -and $_.label -ceq 'Search query' -and $_.kind -ceq 'text_entry' -and
+                    (Test-Phase2SemanticIdentity $_ 'form/query')
+            }).Count -eq 1
+    }.GetNewClosure() 'active File Search query hint with no submitted search'
+    Close-Phase2Hints $Contract | Out-Null
+    $queryFocus = Complete-Phase2HintTarget $Contract 'Search query' 'text_entry' 'form/query'
+    if ([string]$queryFocus.target.target_id -cne [string]$queryTarget.target_id -or
+        [long]$queryFocus.observation.activation_count -ne [long]$waitContext.activation_count -or
+        [string]$queryFocus.observation.query -cne [string]$waitContext.query) {
+        throw 'File Search query focus did not preserve the exact target, ROOT query and action count'
+    }
+    $queryTargetId = [string]$queryFocus.target.target_id
+    Send-NativeText 'phase2-file-search-safe-query' 'safe test'
+    $typed = Wait-JumpModeObservation {
+        param($state)
+        (Test-Phase2OwnerSnapshot $state $Contract $waitContext.owner_instance) -and
+            $state.dialog_state.file_search_open -eq $true -and
+            $state.dialog_state.file_search_query_char_count -eq 9 -and
+            $state.dialog_state.file_search_status -ceq 'pending' -and
+            $null -eq $state.dialog_state.file_search_search_id -and
+            [string]$state.focused_navigation_destination -ceq $queryTargetId -and
+            [long]$state.activation_count -eq [long]$waitContext.activation_count -and
+            [string]$state.query -ceq [string]$waitContext.query -and !$state.active_session
+    }.GetNewClosure() $CaptureTimeoutSeconds 'File Search field accepted harmless native text without starting a search'
+
+    $cancelFocus = Complete-Phase2HintTarget $Contract 'Cancel' 'button' 'form/actions/cancel'
+    $cancelTargetId = [string]$cancelFocus.target.target_id
+    Invoke-NativeKeyBatch 'phase2-file-search-idle-cancel-enter' ([uint16[]]@(0x0D)) ([string[]]@('Enter'))
+    $idleCancel = Wait-JumpModeObservation {
+        param($state)
+        (Test-Phase2OwnerSnapshot $state $Contract $waitContext.owner_instance) -and
+            !$state.active_session -and
+            $state.dialog_state.file_search_open -eq $true -and
+            $state.dialog_state.file_search_query_char_count -eq 9 -and
+            $state.dialog_state.file_search_status -ceq 'pending' -and
+            $null -eq $state.dialog_state.file_search_search_id -and
+            [string]$state.focused_navigation_destination -ceq $cancelTargetId -and
+            [long]$state.activation_count -eq [long]$waitContext.activation_count -and
+            [string]$state.query -ceq [string]$waitContext.query
+    }.GetNewClosure() $CaptureTimeoutSeconds 'idle File Search Cancel Enter left the dialog and search state unchanged'
+    $capture = Save-Phase2OwnerCapture 17 'file_search_idle_cancel' $Contract {
+        param($state)
+        $state.dialog_state.file_search_open -eq $true -and
+            $state.dialog_state.file_search_query_char_count -eq 9 -and
+            $state.dialog_state.file_search_status -ceq 'pending' -and
+            $null -eq $state.dialog_state.file_search_search_id -and
+            [string]$state.focused_navigation_destination -ceq $cancelTargetId
+    }.GetNewClosure() 'File Search idle Cancel left harmless query text unsubmitted' -Inactive
+
+    Invoke-NativeKeyBatch 'phase2-file-search-escape-close' ([uint16[]]@(0x1B)) ([string[]]@('Escape'))
+    $closed = Wait-JumpModeObservation {
+        param($state)
+        $staleFileSearchTargets = @($state.navigation_targets | Where-Object {
+            $_.surface_identity.kind -ceq 'dialog' -and
+                $_.surface_identity.dialog_kind -ceq 'file-search'
+        })
+        $state.root_focused -and $state.root_owner_allowed -and
+            $state.navigation_owner.kind -ceq 'root' -and !$state.active_session -and
+            $staleFileSearchTargets.Count -eq 0 -and
+            [long]$state.activation_count -eq [long]$waitContext.activation_count -and
+            [string]$state.query -ceq [string]$waitContext.query
+    }.GetNewClosure() $CaptureTimeoutSeconds 'Escape closed idle File Search and returned navigation to ROOT without stale targets'
+    Write-Event 'phase2_file_search_idle_cancel_closed_safely' @{
+        opener_action = $opened.last_action.action_id
+        owner_instance = $waitContext.owner_instance
+        query_target_id = $queryTargetId
+        query_char_count = $typed.dialog_state.file_search_query_char_count
+        query_search_id = $typed.dialog_state.file_search_search_id
+        idle_cancel_target_id = $cancelTargetId
+        idle_cancel_status = $idleCancel.dialog_state.file_search_status
+        activation_count = $closed.activation_count
+        root_query = $closed.query
+        stale_file_search_target_count = 0
+        capture_indexes = @($phase2Captures | ForEach-Object { $_.capture_index })
+        search_started = $false
+        running_search_cancel_claimed = $false
+        file_mutation = $false
+    }
+    Add-ReceiptBoundScreenshotAlias $capture 'file-search.png'
+}
+
 function Invoke-Phase2Workflow {
     $contract = Get-Phase2SurfaceContract
     Write-Event 'phase2_native_sequence_started' @{ surface = $Contract.name; expected_capture_count = $phase2CaptureCount; query_route = $Contract.query; action = $Contract.action; expected_owner = $Contract.owner; paste_empty_context = ($Surface -eq 'Paste') }
@@ -2469,6 +2641,7 @@ function Invoke-Phase2Workflow {
         'Timer' { Invoke-Phase2TimerWorkflow $contract }
         'Paste' { Invoke-Phase2PasteWorkflow $contract $profileRoot }
         'MkMacro' { Invoke-Phase2MkMacroWorkflow $contract }
+        'FileSearch' { Invoke-Phase2FileSearchWorkflow $contract }
     }
     if ($phase2Captures.Count -ne $phase2CaptureCount) { throw "Phase 2 $Surface saved $($phase2Captures.Count) of $phase2CaptureCount required captures" }
     $script:scenarioStatus = 'PASS'
@@ -2688,7 +2861,7 @@ function Update-Scenarios {
             default { 'm01-fixture-validation' }
         }
         status = $fixtureScenarioStatus
-        expected_surface = if ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'typed isolated safe Phase 1 enabled/disabled fixture profiles' } elseif ($Scenario -eq 'Phase2') { "typed isolated Phase 2 $($Surface.ToLowerInvariant()) fixture and required inert stores" } else { 'typed isolated fixture profile with stable safe note data' }
+        expected_surface = if ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'typed isolated safe Phase 1 enabled/disabled fixture profiles' } elseif ($Scenario -eq 'Phase2') { "typed isolated Phase 2 $phase2SurfaceKey fixture and required inert stores" } else { 'typed isolated fixture profile with stable safe note data' }
         capture_target = $null
         capture_trigger = $null
         screenshot = $null
@@ -2703,14 +2876,14 @@ function Update-Scenarios {
                 $suffix = if ($Scenario -eq 'Phase1Enabled' -and $Screen -ne 'All') { "-$($Screen.ToLowerInvariant())" } else { '' }
                 "m08-$($Scenario.ToLowerInvariant())$suffix"
             }
-            'Phase2' { "m13-phase2-$($Surface.ToLowerInvariant())" }
+            'Phase2' { "m13-phase2-$phase2SurfaceKey" }
             default { 'm01-baseline-dashboard' }
         } }
         status = $scenarioStatus
         expected_surface = if ($script:isFinalSmoke) { 'M15 representative end-to-end native smoke: resized dashboard FillQuery and exact note 001 open; only catalog 05 and 09 are asserted' } else { switch ($Scenario) {
             'QueryProbe' { 'active Jump Mode query hint, query focus handoff, and unchanged action count' }
             { $_ -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled') } { "native Phase 1 $Screen dashboard/grid filter, selection, cancellation, note owner, and disabled-gate behavior" }
-            'Phase2' { "native production query opener, exact $($Surface.ToLowerInvariant()) owner, and safe observed input behavior" }
+            'Phase2' { "native production query opener, exact $phase2SurfaceKey owner, and safe observed input behavior" }
             default { 'actual Multi Launcher ROOT viewport with isolated note dashboard' }
         } }
         capture_target = 'ROOT'
@@ -2956,7 +3129,7 @@ try {
         'QueryProbe' { 'query-probe' }
         'Phase1Enabled' { 'phase1-enabled' }
         'Phase1Disabled' { 'phase1-disabled' }
-        'Phase2' { "phase2-$($Surface.ToLowerInvariant())" }
+        'Phase2' { "phase2-$phase2SurfaceKey" }
         default { 'baseline' }
     }
     Write-Summary 'BLOCKED' "Runner is preparing a fresh $Scenario fixture and validating its typed production semantics before launch."
@@ -3025,7 +3198,7 @@ try {
     if ($Scenario -eq 'Phase2') { Test-Phase2WorkflowHelpers }
     $fixtureScenarioStatus = 'PASS'
     $fixtureScenarioReason = 'Typed settings/dashboard and production pinned-query config passed; isolated production note loading/search returned all 32 stable note IDs, four underscore bucket tags, and zero actions for the manifest no-results query; the production hotkey-route validator accepted the isolated fixture chord; side-effect safety checks passed.'
-    if ($Scenario -eq 'Phase2') { $fixtureScenarioReason += " The typed Phase 2 $($Surface.ToLowerInvariant()) store profile and fixture-bound safety identity passed validation; Next/Cancel remain disabled and error notifications enabled." }
+    if ($Scenario -eq 'Phase2') { $fixtureScenarioReason += " The typed Phase 2 $phase2SurfaceKey store profile and fixture-bound safety identity passed validation; Next/Cancel remain disabled and error notifications enabled." }
     if ($Scenario -eq 'Phase1Enabled') {
         $fixtureScenarioReason += ' The negative Jump Mode gate profile was rejected for the expected fixture invariant; Paste Sequence Next and Cancel remained disabled.'
     }
@@ -3074,7 +3247,7 @@ try {
                 'QueryProbe' { 'query-only-probe' }
                 'Phase1Enabled' { "phase1-enabled-$($Screen.ToLowerInvariant())-catalog" }
                 'Phase1Disabled' { 'phase1-disabled-regression' }
-                'Phase2' { "phase2-$($Surface.ToLowerInvariant())-native" }
+                'Phase2' { "phase2-$phase2SurfaceKey-native" }
                 default { 'baseline-dashboard' }
             } }
             target = 'ROOT'
@@ -3093,7 +3266,7 @@ try {
             $qaRequest.jump_mode_observation = [ordered]@{
                 wait_for_active_hints = $false
                 phase2 = [ordered]@{
-                    surface = $Surface.ToLowerInvariant()
+                    surface = $phase2SurfaceKey
                     use_empty_paste_invocation_context = ($Surface -eq 'Paste')
                 }
             }

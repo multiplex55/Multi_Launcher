@@ -9,7 +9,7 @@ Started 2026-10-20 from clean branch `jump`, HEAD `0cb3dabf148dc720ed560626c32ef
 |---|---|---|
 | M0-A | complete | Read active plan, repository instructions and configured roles; inspected Git, owner bridge, renderer, dashboard gaps and isolated runner. |
 | M1 | complete | M1-A `3c3b8e91` / M1-B `8648b2d0` / M1-C `a1181df6` pushed; 32 owner and 5 adapter tests passed, independent owner review clean; fixture-only PASS. |
-| M2 File Search | in_progress | M2-A `b91740f3` pushed: six tests. M2-B complete: seven focused tests plus one later-column mouse-focus regression passed. M2-C integration/native evidence next. |
+| M2 File Search | complete | M2-A `b91740f3` and M2-B `5ffdf9a5` pushed; M2-C fixture PASS and eight focused QA/lifecycle tests passed. Optional native proof `not_run_environment`: repeated process-inventory denial before UI workflow. |
 | M3 Snippets | pending | |
 | M4 Clipboard History | pending | |
 | M5 Dashboard gaps | pending | |
@@ -33,7 +33,7 @@ Started 2026-10-20 from clean branch `jump`, HEAD `0cb3dabf148dc720ed560626c32ef
 
 One focused Nextest slice per checkpoint, at most one adjacent owner slice where justified. No full suite or Clippy during M0–M9. M10 at most two integration slices. M11 one full workspace Nextest (at most one repaired rerun), ordinary checks/docs/format/commits then final Clippy.
 
-Native sessions: 0 / 12; images: 0 / 24. No native evidence yet. Use generated isolated data only; environment blocker receives one diagnostic and one retry.
+Native sessions: 2 / 12; images: 0 / 24. File Search's two owned launches failed before workflow interaction because host process inventory returned Access denied. Both PIDs were absent after retained-handle cleanup; runner receipts retain `cleanup_uncertain`. One diagnostic and one retry exhausted for this environment failure. Do not repeatedly retry the same restriction for later surfaces; continue source/egui evidence unless the environment changes.
 
 ## Coverage inventory
 
@@ -93,3 +93,13 @@ Intermediate failures were corrected at their owners: field-ID mismatch, a fixtu
 Result scope shares the existing collector and binds instance/search/view revision. Complete existing row identities produce opaque local IDs; only clipped-visible responses register. Selection copies response IDs, never Responses or callbacks. Full current-row validation remains at Select/Enter; per-frame focus classification uses IDs/revision rather than cloning the hidden result model. Settings initialization moved into `FileSearchDialogState::from_settings` to keep private adapter state encapsulated.
 
 Evidence includes duplicate Unicode basenames, exact Content match selection then fresh Enter preview, default-off row keyboard behavior, clipping and sort/refinement/new-search invalidation. No native sessions, external file opening or copying in this checkpoint.
+
+### M2-C evidence
+
+File Search now has a canonical `file-search` Phase2 fixture/QA/runner contract using the exact `fs` → `file_search:open` production opener. The profile contains one deterministic harmless file under its sole canonical isolated search root; Everything, external tools and unsafe plugins remain disabled. QA exposes query character count, lifecycle/search identity and form generation, without query text, roots or results.
+
+`pwsh -NoProfile -File dev/jump_mode/run.ps1 -Scenario Phase2 -Surface FileSearch -FixturesOnly`: **PASS**, seven fixture-generator tests passed; receipt `dev/jump_mode/evidence/jump_m13_phase2_file-search_20261020T223540Z_1434fce1/summary.md`. Focused QA/lifecycle Nextest: **8 passed, 5,943 filtered**. Scoped formatting and `git diff --check` passed. Parent inspected all six changed files.
+
+The added real-renderer lifecycle regression covers mode/inline-rg controls, unknown foreground picker blocking, close/reopen instance renewal and stale-target rejection, then default-off empty registry. Existing targeted tests cover Enter/Escape behavior.
+
+Optional native workflow was **not_run_environment**. Normal invocation and the single retry both failed at host process inventory with `Access denied`, before workflow interaction or capture. Receipts remain truthful FAIL records: `dev/jump_mode/evidence/jump_m13_phase2_file-search_20261020T225218Z_f11a5e7f/summary.md` (PID 19584) and `dev/jump_mode/evidence/jump_m13_phase2_file-search_20261020T225308Z_c2d414de/summary.md` (PID 38092). Both retained-handle cleanup attempts were followed by absence of the exact owned PID. No native focus/typing/cancellation claim is made; no images, submitted search, open, copy or file mutation occurred.

@@ -113,6 +113,8 @@ enum Phase2Surface {
     Paste,
     #[serde(rename = "mkmacro")]
     MkMacro,
+    #[serde(rename = "file-search")]
+    FileSearch,
 }
 
 impl Phase2Surface {
@@ -124,6 +126,7 @@ impl Phase2Surface {
             Self::Timer => "timer",
             Self::Paste => "paste",
             Self::MkMacro => "mkmacro",
+            Self::FileSearch => "file-search",
         }
     }
 }
@@ -222,6 +225,11 @@ struct QaDialogState {
     paste_selected_sequence_id: Option<u64>,
     paste_draft_step_count: Option<usize>,
     paste_remove_confirmation_open: Option<bool>,
+    file_search_open: Option<bool>,
+    file_search_query_char_count: Option<usize>,
+    file_search_status: Option<&'static str>,
+    file_search_search_id: Option<u64>,
+    file_search_form_generation: Option<u64>,
     mkmacro_open: Option<bool>,
     mkmacro_draft_revision: Option<u64>,
     mkmacro_selected_id: Option<u64>,
@@ -538,6 +546,7 @@ fn validate_phase2_fixture_capability(
         Phase2Surface::Timer => &["notes", "timer"],
         Phase2Surface::Paste => &["notes", "paste_sequence"],
         Phase2Surface::MkMacro => &["notes", "mkmacro"],
+        Phase2Surface::FileSearch => &["notes", "file_search"],
     };
     if fixture.get("scenario").and_then(serde_json::Value::as_str)
         != Some(expected_scenario.as_str())
@@ -589,6 +598,11 @@ fn validate_phase2_fixture_capability(
             "mkmacro_plugin_enabled",
             request.surface == Phase2Surface::MkMacro,
         ),
+        (
+            "file_search_root_isolated",
+            request.surface == Phase2Surface::FileSearch,
+        ),
+        ("file_search_everything_enabled", false),
     ] {
         if safety.get(key).and_then(serde_json::Value::as_bool) != Some(expected) {
             return Err(format!(
@@ -596,7 +610,22 @@ fn validate_phase2_fixture_capability(
             ));
         }
     }
+    let expected_file_search_count = if request.surface == Phase2Surface::FileSearch {
+        1
+    } else {
+        0
+    };
+    if safety
+        .get("file_search_fixture_file_count")
+        .and_then(serde_json::Value::as_u64)
+        != Some(expected_file_search_count)
+    {
+        return Err(
+            "Phase 2 File Search fixture file count does not match the selected surface".into(),
+        );
+    }
     for key in [
+        "clipboard_plugin_enabled",
         "clipboard_modify_plugin_enabled",
         "macros_enabled",
         "network_plugin_enabled",
@@ -2573,6 +2602,24 @@ fn qa_dialog_state(
             state.mkmacro_action_editor_open =
                 Some(app.mkmacro_dialog.action_editor.draft.is_some());
         }
+        Owner::Dialog {
+            kind: super::jump_mode::ui::NavigationDialogKind::FileSearch,
+            ..
+        } => {
+            let search = &app.file_search_dialog;
+            state.file_search_open = Some(search.open);
+            state.file_search_query_char_count = Some(search.search_text.chars().count());
+            state.file_search_status = Some(match search.current_status {
+                crate::file_search::model::SearchStatus::Pending => "pending",
+                crate::file_search::model::SearchStatus::Running => "running",
+                crate::file_search::model::SearchStatus::Completed => "completed",
+                crate::file_search::model::SearchStatus::Cancelled => "cancelled",
+                crate::file_search::model::SearchStatus::Failed => "failed",
+            });
+            state.file_search_search_id = search.active_search_id.map(|id| id.0);
+            state.file_search_form_generation = Some(search.jump_mode_target_generation().0);
+            state.target_generation = state.file_search_form_generation;
+        }
         Owner::Dialog { .. } => {}
         Owner::Root | Owner::Blocked => unreachable!("handled above"),
     }
@@ -3008,7 +3055,11 @@ mod tests {
             "safety": {
                 "profile_isolated_by_working_directory": true,
                 "notes_path_supplied_by_ml_notes_dir": true,
+                "clipboard_plugin_enabled": false,
                 "mkmacro_plugin_enabled": surface == "mkmacro",
+                "file_search_root_isolated": surface == "file-search",
+                "file_search_fixture_file_count": if surface == "file-search" { 1 } else { 0 },
+                "file_search_everything_enabled": false,
                 "clipboard_modify_plugin_enabled": false,
                 "macros_enabled": false,
                 "network_plugin_enabled": false,
@@ -3041,6 +3092,60 @@ mod tests {
         missing_isolation["safety"]["profile_isolated_by_working_directory"] =
             serde_json::json!(false);
         assert!(validate_phase2_fixture_capability(&missing_isolation, request).is_err());
+
+        let file_search_request = Phase2DialogRequest {
+            surface: Phase2Surface::FileSearch,
+            use_empty_paste_invocation_context: false,
+        };
+        let file_search = phase2_fixture_json("file-search", &["notes", "file_search"], false);
+        assert!(validate_phase2_fixture_capability(&file_search, file_search_request).is_ok());
+        let mut global_search_enabled = file_search.clone();
+        global_search_enabled["safety"]["file_search_everything_enabled"] = serde_json::json!(true);
+        assert!(
+            validate_phase2_fixture_capability(&global_search_enabled, file_search_request)
+                .is_err()
+        );
+        let mut wrong_file_count = file_search;
+        wrong_file_count["safety"]["file_search_fixture_file_count"] = serde_json::json!(2);
+        assert!(
+            validate_phase2_fixture_capability(&wrong_file_count, file_search_request).is_err()
+        );
+    }
+
+    #[test]
+    fn file_search_dialog_observation_reports_only_redacted_lifecycle_facts() {
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = test_launcher_app(&ctx, workspace.root());
+        app.file_search_dialog.open = true;
+        app.file_search_dialog.search_text = "private-search-query".to_owned();
+        app.file_search_dialog.current_status = crate::file_search::model::SearchStatus::Running;
+        app.file_search_dialog.active_search_id = Some(crate::file_search::model::SearchId(77));
+        app.file_search_dialog.custom_roots = vec!["private-root-path".to_owned()];
+        let generation = app.file_search_dialog.jump_mode_target_generation().0;
+
+        let state = qa_dialog_state(
+            &app,
+            &ctx,
+            super::super::jump_mode::ui::NavigationOwner::Dialog {
+                kind: super::super::jump_mode::ui::NavigationDialogKind::FileSearch,
+                instance: 9,
+            },
+            &[],
+        )
+        .expect("the File Search dialog owner has a QA state");
+        let serialized = serde_json::to_value(state).expect("File Search QA state serializes");
+        assert_eq!(serialized["surface"], "file-search");
+        assert_eq!(serialized["instance"], 9);
+        assert_eq!(serialized["file_search_open"], true);
+        assert_eq!(serialized["file_search_query_char_count"], 20);
+        assert_eq!(serialized["file_search_status"], "running");
+        assert_eq!(serialized["file_search_search_id"], 77);
+        assert_eq!(serialized["file_search_form_generation"], generation);
+        assert_eq!(serialized["target_generation"], generation);
+        let text = serialized.to_string();
+        assert!(!text.contains("private-search-query"));
+        assert!(!text.contains("private-root-path"));
     }
 
     #[test]
@@ -3088,6 +3193,14 @@ mod tests {
         assert_eq!(
             decoded.phase2.map(|request| request.surface),
             Some(Phase2Surface::MkMacro)
+        );
+        let file_search: JumpModeObservationRequest = serde_json::from_str(
+            r#"{"wait_for_active_hints":false,"phase2":{"surface":"file-search"}}"#,
+        )
+        .expect("Phase 2 File Search uses the canonical navigation surface kind");
+        assert_eq!(
+            file_search.phase2.map(|request| request.surface),
+            Some(Phase2Surface::FileSearch)
         );
 
         let manifest = RequestManifest {
