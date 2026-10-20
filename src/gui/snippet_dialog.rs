@@ -51,6 +51,9 @@ enum CommitFailure {
 pub struct SnippetDialog {
     pub open: bool,
     entries: Vec<SnippetEntry>,
+    snapshot_generation: u64,
+    view_revision: u64,
+    selected_entry_index: Option<usize>,
     edit_idx: Option<usize>,
     body_edit_session: u64,
     alias: String,
@@ -71,6 +74,8 @@ pub struct SnippetDialog {
     pending_removal: Option<PendingRemoval>,
     #[cfg(test)]
     body_editor_widget_id: Option<egui::Id>,
+    #[cfg(test)]
+    contents_scroll_id: Option<egui::Id>,
 }
 
 fn matches_snippet_filter(entry: &SnippetEntry, filter: &str) -> bool {
@@ -136,55 +141,167 @@ fn body_editor_id_source(session: u64) -> (&'static str, u64) {
     ("snippet_body_editor", session)
 }
 
+fn register_snippet_target(
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    identity: impl AsRef<str>,
+    label: &'static str,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: &mut u64,
+) -> Option<crate::gui::jump_mode::ui::FocusDirective> {
+    crate::gui::jump_mode::ui::register_and_apply_target(
+        scope,
+        ui,
+        response,
+        identity,
+        label,
+        kind,
+        visual_order,
+    )
+}
+
+fn apply_select_focus(
+    response: &egui::Response,
+    directive: Option<crate::gui::jump_mode::ui::FocusDirective>,
+) {
+    if directive == Some(crate::gui::jump_mode::ui::FocusDirective::Select) {
+        response.request_focus();
+    }
+}
+
 fn show_field_definition_row(
     ui: &mut egui::Ui,
     session: u64,
+    field_index: usize,
     key: &str,
     field: &mut SnippetFieldDefinition,
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    visual_order: &mut u64,
+    authorized_owner_pass: bool,
 ) -> bool {
+    let mut field_shadow;
+    let field = if authorized_owner_pass {
+        field
+    } else {
+        field_shadow = field.clone();
+        &mut field_shadow
+    };
     ui.label(key);
-    let mut changed = ui
-        .add_sized(
-            [130.0, ui.spacing().interact_size.y],
-            egui::TextEdit::singleline(&mut field.label)
-                .id_salt(("snippet_prompt_field_label", session, key))
-                .hint_text(key),
-        )
-        .changed();
-    changed |= ui
-        .add_sized(
-            [170.0, 46.0],
-            egui::TextEdit::multiline(&mut field.default_value)
-                .id_salt(("snippet_prompt_field_default", session, key))
-                .desired_rows(2)
-                .hint_text("Default value"),
-        )
-        .changed();
-    changed |= ui.checkbox(&mut field.required, "Required").changed();
+    let label_response = ui.add_sized(
+        [130.0, ui.spacing().interact_size.y],
+        egui::TextEdit::singleline(&mut field.label)
+            .id_salt(("snippet_prompt_field_label", session, key))
+            .hint_text(key),
+    );
+    apply_select_focus(
+        &label_response,
+        register_snippet_target(
+            scope,
+            ui,
+            &label_response,
+            format!("author/prompt-field/{field_index}/label"),
+            "Prompt field label",
+            crate::gui::jump_mode::TargetKind::TextEntry,
+            visual_order,
+        ),
+    );
+    let default_response = ui.add_sized(
+        [170.0, 46.0],
+        egui::TextEdit::multiline(&mut field.default_value)
+            .id_salt(("snippet_prompt_field_default", session, key))
+            .desired_rows(2)
+            .hint_text("Default value"),
+    );
+    apply_select_focus(
+        &default_response,
+        register_snippet_target(
+            scope,
+            ui,
+            &default_response,
+            format!("author/prompt-field/{field_index}/default"),
+            "Prompt field default",
+            crate::gui::jump_mode::TargetKind::TextEntry,
+            visual_order,
+        ),
+    );
+    let required_response = ui.checkbox(&mut field.required, "Required");
+    apply_select_focus(
+        &required_response,
+        register_snippet_target(
+            scope,
+            ui,
+            &required_response,
+            format!("author/prompt-field/{field_index}/required"),
+            "Prompt field required",
+            crate::gui::jump_mode::TargetKind::Checkbox,
+            visual_order,
+        ),
+    );
     let input_kind = match field.input_kind {
         SnippetInputKind::SingleLine => "Single line",
         SnippetInputKind::Multiline => "Multiline",
     };
-    egui::ComboBox::from_id_salt(("snippet_prompt_field_kind", session, key))
+    let combo_identity = format!("author/prompt-field/{field_index}/input-kind");
+    let popup_scope = scope.map(|scope| scope.combo_popup_scope(&combo_identity));
+    let mut kind_changed = false;
+    let combo = egui::ComboBox::from_id_salt(("snippet_prompt_field_kind", session, key))
         .selected_text(input_kind)
         .show_ui(ui, |ui| {
-            changed |= ui
-                .selectable_value(
-                    &mut field.input_kind,
-                    SnippetInputKind::SingleLine,
-                    "Single line",
-                )
-                .changed();
-            changed |= ui
-                .selectable_value(
-                    &mut field.input_kind,
-                    SnippetInputKind::Multiline,
-                    "Multiline",
-                )
-                .changed();
+            let single_line = ui.selectable_value(
+                &mut field.input_kind,
+                SnippetInputKind::SingleLine,
+                "Single line",
+            );
+            kind_changed |= single_line.changed();
+            apply_select_focus(
+                &single_line,
+                register_snippet_target(
+                    popup_scope.as_ref(),
+                    ui,
+                    &single_line,
+                    "option/single-line",
+                    "Single line input",
+                    crate::gui::jump_mode::TargetKind::Selectable,
+                    visual_order,
+                ),
+            );
+            let multiline = ui.selectable_value(
+                &mut field.input_kind,
+                SnippetInputKind::Multiline,
+                "Multiline",
+            );
+            kind_changed |= multiline.changed();
+            apply_select_focus(
+                &multiline,
+                register_snippet_target(
+                    popup_scope.as_ref(),
+                    ui,
+                    &multiline,
+                    "option/multiline",
+                    "Multiline input",
+                    crate::gui::jump_mode::TargetKind::Selectable,
+                    visual_order,
+                ),
+            );
         });
+    apply_select_focus(
+        &combo.response,
+        register_snippet_target(
+            scope,
+            ui,
+            &combo.response,
+            combo_identity,
+            "Prompt field input type",
+            crate::gui::jump_mode::TargetKind::ComboBox,
+            visual_order,
+        ),
+    );
     ui.end_row();
-    changed
+    label_response.changed()
+        || default_response.changed()
+        || required_response.changed()
+        || kind_changed
 }
 
 fn single_line_alias(alias: &str) -> String {
@@ -288,6 +405,11 @@ impl SnippetDialog {
     }
 
     pub fn end_session(&mut self) {
+        if self.open {
+            self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
+            self.advance_view_revision();
+            self.selected_entry_index = None;
+        }
         self.open = false;
         self.reset_editor();
         self.filter.clear();
@@ -325,6 +447,7 @@ impl SnippetDialog {
             return false;
         };
         self.body_edit_session = self.body_edit_session.wrapping_add(1);
+        self.advance_view_revision();
         self.pending_removal = None;
         self.inline_error = None;
         self.edit_idx = Some(index);
@@ -344,6 +467,7 @@ impl SnippetDialog {
 
     fn begin_new(&mut self, alias: &str) {
         self.body_edit_session = self.body_edit_session.wrapping_add(1);
+        self.advance_view_revision();
         self.pending_removal = None;
         self.inline_error = None;
         self.edit_idx = Some(self.entries.len());
@@ -362,6 +486,9 @@ impl SnippetDialog {
     }
 
     fn reset_editor(&mut self) {
+        if self.edit_idx.is_some() {
+            self.advance_view_revision();
+        }
         self.edit_idx = None;
         self.alias.clear();
         self.text.clear();
@@ -394,7 +521,10 @@ impl SnippetDialog {
         candidate.push(tag.to_owned());
         match normalize_snippet_tags(candidate) {
             Ok(tags) => {
-                self.tags = tags;
+                if self.tags != tags {
+                    self.tags = tags;
+                    self.advance_view_revision();
+                }
                 self.tag_error = None;
                 self.inline_error = None;
                 Ok(())
@@ -404,8 +534,12 @@ impl SnippetDialog {
     }
 
     fn remove_editor_tag(&mut self, tag: &str) {
+        let previous_len = self.tags.len();
         self.tags
             .retain(|existing| existing.to_lowercase() != tag.to_lowercase());
+        if self.tags.len() != previous_len {
+            self.advance_view_revision();
+        }
         self.tag_error = None;
         self.inline_error = None;
     }
@@ -434,6 +568,7 @@ impl SnippetDialog {
             return;
         }
         self.prompt_for_fields = enabled;
+        self.advance_view_revision();
         self.inline_error = None;
         if enabled {
             self.refresh_prompted_fields();
@@ -446,6 +581,7 @@ impl SnippetDialog {
     /// Refresh the active discovery view without dropping detached settings for
     /// keys that temporarily disappeared from the text.
     fn refresh_prompted_fields(&mut self) {
+        let previous_keys = self.discovered_field_keys.clone();
         self.discovered_field_keys.clear();
         self.template_error = None;
         if !self.prompt_for_fields {
@@ -463,13 +599,89 @@ impl SnippetDialog {
             }
             Err(error) => self.template_error = Some(error),
         }
+        if self.discovered_field_keys != previous_keys {
+            self.advance_view_revision();
+        }
+    }
+
+    fn advance_view_revision(&mut self) {
+        self.view_revision = self.view_revision.wrapping_add(1);
+    }
+
+    pub(crate) fn jump_mode_target_generation(&self) -> crate::gui::jump_mode::TargetGeneration {
+        crate::gui::jump_mode::TargetGeneration(self.snapshot_generation)
+    }
+
+    pub(crate) fn jump_mode_unsupported_nested_owner_open(&self) -> bool {
+        self.pending_removal.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_open_from(&mut self, path: &str) {
+        self.open_from(path);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_request_removal(&mut self, index: usize) {
+        self.request_removal(index);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_cancel_removal(&mut self) {
+        self.cancel_removal();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_selected_entry_index(&self) -> Option<usize> {
+        self.selected_entry_index
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_is_editing(&self) -> bool {
+        self.edit_idx.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_edit_index(&self) -> Option<usize> {
+        self.edit_idx
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_alias(&self) -> &str {
+        &self.alias
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_text(&self) -> &str {
+        &self.text
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_body_revealed(&self) -> bool {
+        self.body_revealed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_contents_scroll_id(&self) -> Option<egui::Id> {
+        self.contents_scroll_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_body_editor_widget_id(&self) -> Option<egui::Id> {
+        self.body_editor_widget_id
     }
 
     fn field_mut(&mut self, key: &str) -> Option<&mut SnippetFieldDefinition> {
         self.fields.iter_mut().find(|field| field.name == key)
     }
 
-    fn show_prompt_field_settings(&mut self, ui: &mut egui::Ui) {
+    fn show_prompt_field_settings(
+        &mut self,
+        ui: &mut egui::Ui,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        visual_order: &mut u64,
+        authorized_owner_pass: bool,
+    ) {
         if !self.prompt_for_fields {
             if !self.fields.is_empty() {
                 secondary_help(ui, "Field settings are retained while prompting is off.");
@@ -526,16 +738,26 @@ impl SnippetDialog {
                 ui.end_row();
 
                 let mut changed = false;
-                for key in self.discovered_field_keys.clone() {
+                for (field_index, key) in self.discovered_field_keys.clone().into_iter().enumerate()
+                {
                     let Some(field) = self.field_mut(&key) else {
                         ui.label(&key);
                         ui.label("Field settings unavailable");
                         ui.end_row();
                         continue;
                     };
-                    changed |= show_field_definition_row(ui, body_edit_session, &key, field);
+                    changed |= show_field_definition_row(
+                        ui,
+                        body_edit_session,
+                        field_index,
+                        &key,
+                        field,
+                        scope,
+                        visual_order,
+                        authorized_owner_pass,
+                    );
                 }
-                if changed {
+                if changed && authorized_owner_pass {
                     self.inline_error = None;
                 }
             });
@@ -567,6 +789,9 @@ impl SnippetDialog {
 
     fn reveal_contents(&mut self) {
         if self.edit_idx.is_some() {
+            if !self.body_revealed {
+                self.advance_view_revision();
+            }
             self.body_revealed = true;
         }
     }
@@ -576,6 +801,7 @@ impl SnippetDialog {
             return;
         }
         self.hide_contents = hide_contents;
+        self.advance_view_revision();
         let editing_existing = self
             .edit_idx
             .is_some_and(|index| index < self.entries.len());
@@ -756,6 +982,9 @@ impl SnippetDialog {
     fn load_from(&mut self, path: &str) -> anyhow::Result<()> {
         self.pending_removal = None;
         self.inline_error = None;
+        self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
+        self.advance_view_revision();
+        self.selected_entry_index = None;
         match load_snippets(path) {
             Ok(entries) => {
                 self.entries = entries;
@@ -779,6 +1008,9 @@ impl SnippetDialog {
         match update_snapshot(path, expected, candidate, alias_validation) {
             Ok(committed) => {
                 self.entries = committed;
+                self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
+                self.advance_view_revision();
+                self.selected_entry_index = None;
                 self.load_error = None;
                 self.inline_error = None;
                 Ok(())
@@ -822,15 +1054,20 @@ impl SnippetDialog {
             expected_entry,
             expected_entries: self.entries.clone(),
         });
+        self.advance_view_revision();
         self.inline_error = None;
     }
 
     fn cancel_removal(&mut self) {
+        if self.pending_removal.is_some() {
+            self.advance_view_revision();
+        }
         self.pending_removal = None;
         self.inline_error = None;
     }
 
     fn filter_changed(&mut self) {
+        self.advance_view_revision();
         self.pending_removal = None;
         self.inline_error = None;
     }
@@ -887,30 +1124,54 @@ impl SnippetDialog {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) -> Option<SnippetEntry> {
+        self.ui_with_jump_mode(ctx, app, None, true, true)
+    }
+
+    pub(crate) fn ui_with_jump_mode(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        jump_mode_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        first_ui_pass: bool,
+    ) -> Option<SnippetEntry> {
         if !self.open {
             self.end_session();
             return None;
         }
-        let (window_open, save_request, confirm_removal, preview_request) =
-            self.show_window(ctx, || {
-                app.report_error_message("ui operation", "Both fields required");
-            });
+        let authorized_owner_pass = native_ui_owner && first_ui_pass;
+        let (window_open, save_request, confirm_removal, preview_request) = self
+            .show_window_with_jump_mode(
+                ctx,
+                jump_mode_scope.as_ref(),
+                native_ui_owner,
+                authorized_owner_pass,
+                || app.report_error_message("ui operation", "Both fields required"),
+            );
 
-        if save_request {
+        if save_request && authorized_owner_pass {
             match self.save_editor(SNIPPETS_FILE) {
                 Ok(()) => Self::finish_success(app, "Saved snippet"),
                 Err(failure) => Self::report_commit_failure(app, &failure),
             }
         }
-        if confirm_removal {
+        if confirm_removal && authorized_owner_pass {
             match self.confirm_removal(SNIPPETS_FILE) {
                 Ok(true) => Self::finish_success(app, "Removed snippet"),
                 Ok(false) => {}
                 Err(failure) => Self::report_commit_failure(app, &failure),
             }
         }
-        self.apply_window_open(window_open);
-        if preview_request {
+        self.apply_window_open(if native_ui_owner {
+            if authorized_owner_pass {
+                window_open
+            } else {
+                self.open
+            }
+        } else {
+            self.open
+        });
+        if preview_request && authorized_owner_pass {
             self.preview_editor_draft()
         } else {
             None
@@ -922,11 +1183,27 @@ impl SnippetDialog {
         ctx: &egui::Context,
         mut report_required_fields: impl FnMut(),
     ) -> (bool, bool, bool, bool) {
+        self.show_window_with_jump_mode(ctx, None, true, true, &mut report_required_fields)
+    }
+
+    fn show_window_with_jump_mode(
+        &mut self,
+        ctx: &egui::Context,
+        jump_mode_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        authorized_owner_pass: bool,
+        mut report_required_fields: impl FnMut(),
+    ) -> (bool, bool, bool, bool) {
         let mut window_open = self.open;
         let mut close = false;
         let mut save_request = false;
         let mut confirm_removal = false;
         let mut preview_request = false;
+        let initial_view_revision = self.view_revision;
+        let scoped_scope = jump_mode_scope
+            .map(|scope| scope.child_namespace(format!("view/{}", self.view_revision)));
+        let scope = scoped_scope.as_ref();
+        let mut visual_order = 0_u64;
         egui::Window::new("Snippets")
             .default_size((600.0, 500.0))
             .min_width(160.0)
@@ -934,9 +1211,10 @@ impl SnippetDialog {
             .resizable(true)
             .open(&mut window_open)
             .show(ctx, |ui| {
+                ui.add_enabled_ui(native_ui_owner, |ui| {
                 // Resize follows content in egui. Bound both axes here so overflow
                 // scrolls inside the user's chosen size instead of enlarging it.
-                egui::ScrollArea::both()
+                let _contents = egui::ScrollArea::both()
                     .id_salt("snippet_dialog_contents")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -951,7 +1229,21 @@ impl SnippetDialog {
                         Some(error),
                     );
                     let close_response = ui.button("Close");
-                    if with_button_emphasis(ui, close_response, ButtonEmphasis::Primary).clicked() {
+                    apply_select_focus(
+                        &close_response,
+                        register_snippet_target(
+                            scope,
+                            ui,
+                            &close_response,
+                            "load-error/close",
+                            "Close snippets",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut visual_order,
+                        ),
+                    );
+                    if with_button_emphasis(ui, close_response, ButtonEmphasis::Primary).clicked()
+                        && authorized_owner_pass
+                    {
                         close = true;
                     }
                     return;
@@ -966,25 +1258,55 @@ impl SnippetDialog {
                         },
                         Some("Aliases are matched exactly, including case and surrounding spaces."),
                     );
+                    let mut alias_shadow;
+                    let alias_value = if authorized_owner_pass {
+                        &mut self.alias
+                    } else {
+                        alias_shadow = self.alias.clone();
+                        &mut alias_shadow
+                    };
                     let alias = labeled_form_row(ui, "Alias", |ui| {
                         let width = ui.available_width().max(80.0);
                         ui.add_sized(
                             [width, ui.spacing().interact_size.y],
-                            egui::TextEdit::singleline(&mut self.alias)
+                            egui::TextEdit::singleline(alias_value)
                                 .desired_width(f32::INFINITY),
                         )
                     });
-                    if alias.changed() {
+                    apply_select_focus(
+                        &alias,
+                        register_snippet_target(
+                            scope,
+                            ui,
+                            &alias,
+                            "author/alias",
+                            "Snippet alias",
+                            crate::gui::jump_mode::TargetKind::TextEntry,
+                            &mut visual_order,
+                        ),
+                    );
+                    if alias.changed() && authorized_owner_pass {
                         self.inline_error = None;
                     }
                     let mut hide_contents = self.hide_contents;
-                    if ui
+                    let hide_response = ui
                         .checkbox(&mut hide_contents, "Hide contents")
                         .on_hover_text(
                             "Hides previews only; saved text and copied clipboard/history remain plaintext.",
-                        )
-                        .changed()
-                    {
+                        );
+                    apply_select_focus(
+                        &hide_response,
+                        register_snippet_target(
+                            scope,
+                            ui,
+                            &hide_response,
+                            "author/hide-contents",
+                            "Hide snippet contents",
+                            crate::gui::jump_mode::TargetKind::Checkbox,
+                            &mut visual_order,
+                        ),
+                    );
+                    if hide_response.changed() && authorized_owner_pass {
                         self.set_hide_contents(hide_contents);
                     }
                     secondary_help(
@@ -992,13 +1314,24 @@ impl SnippetDialog {
                         "Hiding replaces previews only; saved text and copied clipboard/history remain plaintext. This is not encryption.",
                     );
                     let mut prompt_for_fields = self.prompt_for_fields;
-                    if ui
+                    let prompt_response = ui
                         .checkbox(&mut prompt_for_fields, "Prompt for fields")
                         .on_hover_text(
                             "When enabled, {{field}} placeholders request values before copying.",
-                        )
-                        .changed()
-                    {
+                        );
+                    apply_select_focus(
+                        &prompt_response,
+                        register_snippet_target(
+                            scope,
+                            ui,
+                            &prompt_response,
+                            "author/prompt-for-fields",
+                            "Prompt for fields",
+                            crate::gui::jump_mode::TargetKind::Checkbox,
+                            &mut visual_order,
+                        ),
+                    );
+                    if prompt_response.changed() && authorized_owner_pass {
                         self.set_prompt_for_fields(prompt_for_fields);
                     }
                     ui.small(r"Use {{field}} for an input; prefix with \{{...}} to keep braces literal.");
@@ -1010,23 +1343,65 @@ impl SnippetDialog {
                     );
                     let mut add_tag = false;
                     let mut tag_input_changed = false;
+                    let mut tag_input_response = None;
+                    let mut add_tag_response = None;
+                    let mut tag_input_shadow;
+                    let tag_input_value = if authorized_owner_pass {
+                        &mut self.tag_input
+                    } else {
+                        tag_input_shadow = self.tag_input.clone();
+                        &mut tag_input_shadow
+                    };
                     ui.horizontal(|ui| {
                         let button_width = 64.0;
                         let spacing = ui.spacing().item_spacing.x;
                         let input_width = (ui.available_width() - button_width - spacing).max(80.0);
                         let input = ui.add_sized(
                             [input_width, ui.spacing().interact_size.y],
-                            egui::TextEdit::singleline(&mut self.tag_input)
+                            egui::TextEdit::singleline(tag_input_value)
                                 .hint_text(format!("Add a tag (up to {MAX_SNIPPET_TAG_CHARS} characters)")),
                         );
+                        tag_input_response = Some(input.clone());
                         tag_input_changed = input.changed();
                         add_tag |= input.lost_focus()
-                            && ui.input(|events| events.key_pressed(egui::Key::Enter));
-                        add_tag |= ui
-                            .add_sized([button_width, ui.spacing().interact_size.y], egui::Button::new("Add tag"))
-                            .clicked();
+                            && ui.input(|events| events.key_pressed(egui::Key::Enter))
+                            && authorized_owner_pass;
+                        let add = ui.add_sized(
+                            [button_width, ui.spacing().interact_size.y],
+                            egui::Button::new("Add tag"),
+                        );
+                        add_tag |= add.clicked() && authorized_owner_pass;
+                        add_tag_response = Some(add);
                     });
-                    if tag_input_changed {
+                    if let Some(response) = tag_input_response.as_ref() {
+                        apply_select_focus(
+                            response,
+                            register_snippet_target(
+                                scope,
+                                ui,
+                                response,
+                                "author/tag-input",
+                                "Snippet tag",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut visual_order,
+                            ),
+                        );
+                    }
+                    if let Some(response) = add_tag_response.as_ref() {
+                        apply_select_focus(
+                            response,
+                            register_snippet_target(
+                                scope,
+                                ui,
+                                response,
+                                "author/add-tag",
+                                "Add snippet tag",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            ),
+                        );
+                    }
+                    if tag_input_changed && authorized_owner_pass {
                         self.tag_error = None;
                     }
                     if add_tag {
@@ -1036,12 +1411,24 @@ impl SnippetDialog {
                         secondary_help(ui, "No tags yet. Add up to 16 labels; spaces within a tag are normalized.");
                     } else {
                         ui.horizontal_wrapped(|ui| {
-                            for tag in self.tags.clone() {
-                                if ui
+                            for (tag_index, tag) in self.tags.clone().into_iter().enumerate() {
+                                let response = ui
                                     .selectable_label(true, format!("{tag}  ×"))
                                     .on_hover_text("Remove this tag from the draft.")
-                                    .clicked()
-                                {
+                                    ;
+                                apply_select_focus(
+                                    &response,
+                                    register_snippet_target(
+                                        scope,
+                                        ui,
+                                        &response,
+                                        format!("author/tag/{tag_index}/remove"),
+                                        "Remove snippet tag",
+                                        crate::gui::jump_mode::TargetKind::Button,
+                                        &mut visual_order,
+                                    ),
+                                );
+                                if response.clicked() && authorized_owner_pass {
                                     self.remove_editor_tag(&tag);
                                 }
                             }
@@ -1060,8 +1447,21 @@ impl SnippetDialog {
                     if !suggested_tags.is_empty() {
                         ui.horizontal_wrapped(|ui| {
                             ui.small("Add existing:");
-                            for tag in suggested_tags {
-                                if ui.selectable_label(false, tag.as_str()).clicked() {
+                            for (suggested_index, tag) in suggested_tags.into_iter().enumerate() {
+                                let response = ui.selectable_label(false, tag.as_str());
+                                apply_select_focus(
+                                    &response,
+                                    register_snippet_target(
+                                        scope,
+                                        ui,
+                                        &response,
+                                        format!("author/suggested-tag/{suggested_index}"),
+                                        "Add existing snippet tag",
+                                        crate::gui::jump_mode::TargetKind::Selectable,
+                                        &mut visual_order,
+                                    ),
+                                );
+                                if response.clicked() && authorized_owner_pass {
                                     selected_tags_to_add.push(tag);
                                 }
                             }
@@ -1090,13 +1490,20 @@ impl SnippetDialog {
                         (editor_height / line_height).floor().clamp(4.0, 48.0) as usize;
                     let mut body_changed = false;
                     if self.body_revealed {
+                        let mut body_shadow;
+                        let body_value = if authorized_owner_pass {
+                            &mut self.text
+                        } else {
+                            body_shadow = self.text.clone();
+                            &mut body_shadow
+                        };
                         egui::ScrollArea::both()
                             .id_salt("snippet_dialog_body")
                             .auto_shrink([false, false])
                             .max_height(editor_height)
                             .show(ui, |ui| {
                                 let response = ui.add(
-                                    egui::TextEdit::multiline(&mut self.text)
+                                    egui::TextEdit::multiline(body_value)
                                         .id_salt(body_editor_id_source(
                                             self.body_edit_session,
                                         ))
@@ -1107,22 +1514,66 @@ impl SnippetDialog {
                                 {
                                     self.body_editor_widget_id = Some(response.id);
                                 }
+                                apply_select_focus(
+                                    &response,
+                                    register_snippet_target(
+                                        scope,
+                                        ui,
+                                        &response,
+                                        format!("author/body/{}", self.body_edit_session),
+                                        "Snippet text",
+                                        crate::gui::jump_mode::TargetKind::TextEntry,
+                                        &mut visual_order,
+                                    ),
+                                );
                                 body_changed = response.changed();
                             });
                     } else {
                         ui.label("Contents hidden");
-                        if ui.button("Reveal to Edit").clicked() {
+                        let reveal = ui.button("Reveal to Edit");
+                        apply_select_focus(
+                            &reveal,
+                            register_snippet_target(
+                                scope,
+                                ui,
+                                &reveal,
+                                "author/reveal-contents",
+                                "Reveal snippet contents",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            ),
+                        );
+                        if reveal.clicked() && authorized_owner_pass {
                             self.reveal_contents();
                         }
                     }
-                    if body_changed {
+                    if body_changed && authorized_owner_pass {
                         self.inline_error = None;
                         self.refresh_prompted_fields();
                     }
-                    self.show_prompt_field_settings(ui);
+                    self.show_prompt_field_settings(
+                        ui,
+                        scope,
+                        &mut visual_order,
+                        authorized_owner_pass,
+                    );
                     ui.horizontal(|ui| {
                         let save = ui.button("Save");
-                        if with_button_emphasis(ui, save, ButtonEmphasis::Primary).clicked() {
+                        apply_select_focus(
+                            &save,
+                            register_snippet_target(
+                                scope,
+                                ui,
+                                &save,
+                                "author/save",
+                                "Save snippet",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            ),
+                        );
+                        if with_button_emphasis(ui, save, ButtonEmphasis::Primary).clicked()
+                            && authorized_owner_pass
+                        {
                             if self.alias.trim().is_empty()
                                 || (!self.prompt_for_fields && self.text.trim().is_empty())
                             {
@@ -1135,10 +1586,37 @@ impl SnippetDialog {
                             self.can_preview_editor_draft(),
                             egui::Button::new("Test / Preview"),
                         );
-                        if with_button_emphasis(ui, preview, ButtonEmphasis::Primary).clicked() {
+                        apply_select_focus(
+                            &preview,
+                            register_snippet_target(
+                                scope,
+                                ui,
+                                &preview,
+                                "author/test-preview",
+                                "Test snippet preview",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            ),
+                        );
+                        if with_button_emphasis(ui, preview, ButtonEmphasis::Primary).clicked()
+                            && authorized_owner_pass
+                        {
                             preview_request = true;
                         }
-                        if ui.button("Cancel").clicked() {
+                        let cancel = ui.button("Cancel");
+                        apply_select_focus(
+                            &cancel,
+                            register_snippet_target(
+                                scope,
+                                ui,
+                                &cancel,
+                                "author/cancel",
+                                "Cancel snippet edit",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            ),
+                        );
+                        if cancel.clicked() && authorized_owner_pass {
                             self.cancel_editor();
                         }
                     });
@@ -1159,47 +1637,94 @@ impl SnippetDialog {
                         "Saved snippets",
                         Some("Review, edit, or test your saved snippets."),
                     );
+                    let mut filter_shadow;
+                    let clear_filters_enabled =
+                        !self.filter.is_empty() || !self.selected_tag_filters.is_empty();
+                    let filter_value = if authorized_owner_pass {
+                        &mut self.filter
+                    } else {
+                        filter_shadow = self.filter.clone();
+                        &mut filter_shadow
+                    };
+                    let mut filter_changed = false;
+                    let mut clear_filters_requested = false;
                     ui.horizontal(|ui| {
                         ui.label("Filter");
                         let clear_filter_width = 116.0;
                         let filter_spacing = ui.spacing().item_spacing.x;
                         let filter_width =
                             (ui.available_width() - clear_filter_width - filter_spacing).max(80.0);
-                        if ui
-                            .add_sized(
+                        let filter_response = ui.add_sized(
                                 [filter_width, ui.spacing().interact_size.y],
-                                egui::TextEdit::singleline(&mut self.filter)
+                                egui::TextEdit::singleline(filter_value)
                                     .desired_width(f32::INFINITY),
-                            )
-                            .changed()
-                        {
-                            self.filter_changed();
-                        }
-                        if ui
-                            .add_enabled(
-                                !self.filter.is_empty() || !self.selected_tag_filters.is_empty(),
+                            );
+                        apply_select_focus(
+                            &filter_response,
+                            register_snippet_target(
+                                scope,
+                                ui,
+                                &filter_response,
+                                "list/filter",
+                                "Filter snippets",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut visual_order,
+                            ),
+                        );
+                        filter_changed = filter_response.changed();
+                        let clear_filters = ui.add_enabled(
+                                clear_filters_enabled,
                                 egui::Button::new("Clear Filters").min_size(egui::vec2(
                                     clear_filter_width,
                                     ui.spacing().interact_size.y
                                         + ui.spacing().button_padding.y * 2.0,
                                 )),
-                            )
-                            .clicked()
-                        {
-                            self.clear_filter_state();
-                        }
+                            );
+                        apply_select_focus(
+                            &clear_filters,
+                            register_snippet_target(
+                                scope,
+                                ui,
+                                &clear_filters,
+                                "list/clear-filters",
+                                "Clear snippet filters",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            ),
+                        );
+                        clear_filters_requested = clear_filters.clicked();
                     });
+                    if authorized_owner_pass {
+                        if clear_filters_requested {
+                            self.clear_filter_state();
+                        } else if filter_changed {
+                            self.filter_changed();
+                        }
+                    }
                     let tag_choices = available_snippet_tags(&self.entries, &self.selected_tag_filters);
                     let mut toggled_tags = Vec::new();
                     if !tag_choices.is_empty() {
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Tags:");
-                            for tag in tag_choices {
+                            for (tag_index, tag) in tag_choices.into_iter().enumerate() {
                                 let selected = self
                                     .selected_tag_filters
                                     .iter()
                                     .any(|current| current.to_lowercase() == tag.to_lowercase());
-                                if ui.selectable_label(selected, tag.as_str()).clicked() {
+                                let response = ui.selectable_label(selected, tag.as_str());
+                                apply_select_focus(
+                                    &response,
+                                    register_snippet_target(
+                                        scope,
+                                        ui,
+                                        &response,
+                                        format!("list/tag-filter/{tag_index}"),
+                                        "Filter by snippet tag",
+                                        crate::gui::jump_mode::TargetKind::Selectable,
+                                        &mut visual_order,
+                                    ),
+                                );
+                                if response.clicked() && authorized_owner_pass {
                                     toggled_tags.push(tag);
                                 }
                             }
@@ -1213,6 +1738,13 @@ impl SnippetDialog {
                         &self.filter,
                         &self.selected_tag_filters,
                     );
+                    if authorized_owner_pass
+                        && self
+                            .selected_entry_index
+                            .is_some_and(|selected| !matching_indices.contains(&selected))
+                    {
+                        self.selected_entry_index = None;
+                    }
                     let count_label = if self.selected_tag_filters.is_empty() {
                         format!("{} of {} snippets", matching_indices.len(), self.entries.len())
                     } else {
@@ -1241,122 +1773,218 @@ impl SnippetDialog {
                             .show(ui, |ui| {
                                 for idx in matching_indices {
                                     let entry = self.entries[idx].clone();
-                                    ui.horizontal(|ui| {
-                                        if entry.hide_contents {
-                                            ui.small("Hidden")
-                                                .on_hover_text("Contents are hidden in previews.");
-                                        }
-                                        let spacing = ui.spacing().item_spacing.x;
-                                        let row_height = ui.spacing().interact_size.y
-                                            + ui.spacing().button_padding.y * 2.0;
-                                        let edit_width = 80.0;
-                                        let remove_width = 72.0;
-                                        let preview_width = (ui.available_width()
-                                            - edit_width
-                                            - remove_width
-                                            - spacing * 2.0)
-                                            .max(0.0);
-                                        let preview = format!(
-                                            "{}: {}",
-                                            single_line_alias(&entry.alias),
-                                            snippet_preview_text(&entry)
-                                        );
-                                        let preview_rect = ui
-                                            .allocate_exact_size(
+                                    ui.push_id(("snippet-row", self.snapshot_generation, idx), |ui| {
+                                        ui.horizontal(|ui| {
+                                            if entry.hide_contents {
+                                                ui.small("Hidden")
+                                                    .on_hover_text("Contents are hidden in previews.");
+                                            }
+                                            let spacing = ui.spacing().item_spacing.x;
+                                            let row_height = ui.spacing().interact_size.y
+                                                + ui.spacing().button_padding.y * 2.0;
+                                            let edit_width = 80.0;
+                                            let remove_width = 72.0;
+                                            let preview_width = (ui.available_width()
+                                                - edit_width
+                                                - remove_width
+                                                - spacing * 2.0)
+                                                .max(0.0);
+                                            let preview = format!(
+                                                "{}: {}",
+                                                single_line_alias(&entry.alias),
+                                                snippet_preview_text(&entry)
+                                            );
+                                            let (preview_rect, preview_response) = ui.allocate_exact_size(
                                                 egui::vec2(preview_width, row_height),
-                                                egui::Sense::hover(),
-                                            )
-                                            .0;
-                                        let text_color = ui.visuals().text_color();
-                                        let mut layout_job =
-                                            egui::text::LayoutJob::simple_singleline(
+                                                egui::Sense::click(),
+                                            );
+                                            if self.selected_entry_index == Some(idx) {
+                                                ui.painter().rect_filled(
+                                                    preview_rect,
+                                                    ui.visuals().widgets.inactive.corner_radius,
+                                                    ui.visuals().selection.bg_fill,
+                                                );
+                                            }
+                                            let text_color = ui.visuals().text_color();
+                                            let mut layout_job = egui::text::LayoutJob::simple_singleline(
                                                 preview,
                                                 egui::TextStyle::Body.resolve(ui.style()),
                                                 text_color,
                                             );
-                                        layout_job.wrap.max_width = preview_width;
-                                        layout_job.wrap.max_rows = 1;
-                                        layout_job.wrap.break_anywhere = true;
-                            let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(layout_job));
-                                        let text_position = egui::pos2(
-                                            preview_rect.left(),
-                                            preview_rect.center().y - galley.size().y / 2.0,
-                                        );
-                                        ui.painter().with_clip_rect(preview_rect).galley(
-                                            text_position,
-                                            galley,
-                                            text_color,
-                                        );
+                                            layout_job.wrap.max_width = preview_width;
+                                            layout_job.wrap.max_rows = 1;
+                                            layout_job.wrap.break_anywhere = true;
+                                            let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(layout_job));
+                                            let text_position = egui::pos2(
+                                                preview_rect.left(),
+                                                preview_rect.center().y - galley.size().y / 2.0,
+                                            );
+                                            ui.painter().with_clip_rect(preview_rect).galley(
+                                                text_position,
+                                                galley,
+                                                text_color,
+                                            );
 
-                                        let confirming = self
-                                            .pending_removal
-                                            .as_ref()
-                                            .is_some_and(|pending| pending.index == idx);
-                                        if confirming {
-                                            let confirm = ui.add_sized(
+                                            let preview_identity = format!("entry/{idx}/preview");
+                                            let preview_target_id = scope
+                                                .map(|scope| scope.target_id(&preview_identity));
+                                            let directive = register_snippet_target(
+                                                scope,
+                                                ui,
+                                                &preview_response,
+                                                &preview_identity,
+                                                "Snippet entry",
+                                                crate::gui::jump_mode::TargetKind::Action,
+                                                &mut visual_order,
+                                            );
+                                            if preview_response.clicked() && authorized_owner_pass {
+                                                self.selected_entry_index = Some(idx);
+                                                preview_response.request_focus();
+                                            }
+                                            if directive == Some(crate::gui::jump_mode::ui::FocusDirective::Select)
+                                                && authorized_owner_pass
+                                            {
+                                                self.selected_entry_index = Some(idx);
+                                                preview_response.request_focus();
+                                                if let (Some(scope), Some(target_id)) =
+                                                    (scope, preview_target_id.as_ref())
+                                                {
+                                                    scope.record_select_focus_owner(
+                                                        target_id,
+                                                        preview_response.id,
+                                                    );
+                                                }
+                                            }
+
+                                            let confirming = self
+                                                .pending_removal
+                                                .as_ref()
+                                                .is_some_and(|pending| pending.index == idx);
+                                            if confirming {
+                                                let confirm = ui.add_sized(
                                                     egui::vec2(edit_width, row_height),
                                                     egui::Button::new("Confirm"),
                                                 );
-                                            if with_button_emphasis(
-                                                ui,
-                                                confirm,
-                                                ButtonEmphasis::Destructive,
-                                            )
-                                            .clicked()
-                                            {
-                                                confirm_removal = true;
-                                            }
-                                            if ui
-                                                .add_sized(
-                                                    egui::vec2(remove_width, row_height),
-                                                    egui::Button::new("Cancel"),
+                                                if with_button_emphasis(
+                                                    ui,
+                                                    confirm,
+                                                    ButtonEmphasis::Destructive,
                                                 )
                                                 .clicked()
-                                            {
-                                                self.cancel_removal();
-                                            }
-                                        } else {
-                                            if ui
-                                                .add_sized(
+                                                    && authorized_owner_pass
+                                                {
+                                                    confirm_removal = true;
+                                                }
+                                                if ui
+                                                    .add_sized(
+                                                        egui::vec2(remove_width, row_height),
+                                                        egui::Button::new("Cancel"),
+                                                    )
+                                                    .clicked()
+                                                    && authorized_owner_pass
+                                                {
+                                                    self.cancel_removal();
+                                                }
+                                            } else {
+                                                let edit = ui.add_sized(
                                                     egui::vec2(edit_width, row_height),
                                                     egui::Button::new("Edit"),
-                                                )
-                                                .clicked()
-                                            {
-                                                self.begin_existing(idx);
-                                            }
-                                            if ui
-                                                .add_sized(
+                                                );
+                                                apply_select_focus(
+                                                    &edit,
+                                                    register_snippet_target(
+                                                        scope,
+                                                        ui,
+                                                        &edit,
+                                                        format!("entry/{idx}/edit"),
+                                                        "Edit snippet",
+                                                        crate::gui::jump_mode::TargetKind::Button,
+                                                        &mut visual_order,
+                                                    ),
+                                                );
+                                                if edit.clicked() && authorized_owner_pass {
+                                                    self.begin_existing(idx);
+                                                }
+                                                let remove = ui.add_sized(
                                                     egui::vec2(remove_width, row_height),
                                                     egui::Button::new("Remove"),
-                                                )
-                                                .clicked()
-                                            {
-                                                self.request_removal(idx);
-                                            }
-                                        }
-                                    });
-                                    if !entry.tags.is_empty() {
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.add_space(4.0);
-                                            for tag in &entry.tags {
-                                                ui.small(format!("#{tag}"));
+                                                );
+                                                apply_select_focus(
+                                                    &remove,
+                                                    register_snippet_target(
+                                                        scope,
+                                                        ui,
+                                                        &remove,
+                                                        format!("entry/{idx}/remove"),
+                                                        "Remove snippet",
+                                                        crate::gui::jump_mode::TargetKind::Button,
+                                                        &mut visual_order,
+                                                    ),
+                                                );
+                                                if remove.clicked() && authorized_owner_pass {
+                                                    self.request_removal(idx);
+                                                }
                                             }
                                         });
-                                    }
+                                        if !entry.tags.is_empty() {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.add_space(4.0);
+                                                for tag in &entry.tags {
+                                                    ui.small(format!("#{tag}"));
+                                                }
+                                            });
+                                        }
+                                    });
                                 }
                             });
                     }
                     let add = ui.button("Add Snippet");
-                    if with_button_emphasis(ui, add, ButtonEmphasis::Primary).clicked() {
+                    apply_select_focus(
+                        &add,
+                        register_snippet_target(
+                            scope,
+                            ui,
+                            &add,
+                            "list/add",
+                            "Add snippet",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut visual_order,
+                        ),
+                    );
+                    if with_button_emphasis(ui, add, ButtonEmphasis::Primary).clicked()
+                        && authorized_owner_pass
+                    {
                         self.begin_new("");
                     }
-                    if ui.button("Close").clicked() {
+                    let close_response = ui.button("Close");
+                    apply_select_focus(
+                        &close_response,
+                        register_snippet_target(
+                            scope,
+                            ui,
+                            &close_response,
+                            "list/close",
+                            "Close snippets",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut visual_order,
+                        ),
+                    );
+                    if close_response.clicked() && authorized_owner_pass {
                         close = true;
                     }
+                    }
+                });
+                #[cfg(test)]
+                {
+                    self.contents_scroll_id = Some(_contents.id);
                 }
                 });
             });
+        if self.view_revision != initial_view_revision
+            && let Some(scope) = jump_mode_scope
+        {
+            scope.discard_registered_targets();
+        }
         if close {
             window_open = false;
         }
@@ -1408,6 +2036,9 @@ mod tests {
 
     fn preview_app(ctx: &egui::Context, directory: &tempfile::TempDir) -> crate::gui::LauncherApp {
         let path = |name: &str| directory.path().join(name).to_string_lossy().into_owned();
+        let mut settings = crate::settings::Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         crate::gui::LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
@@ -1415,7 +2046,7 @@ mod tests {
             crate::plugin::PluginManager::new(),
             path("actions.json"),
             path("settings.json"),
-            crate::settings::Settings::default(),
+            settings,
             None,
             None,
             None,
@@ -2172,7 +2803,8 @@ mod tests {
                 },
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        dialog.show_prompt_field_settings(ui);
+                        let mut visual_order = 0;
+                        dialog.show_prompt_field_settings(ui, None, &mut visual_order, true);
                     });
                 },
             )

@@ -3030,6 +3030,16 @@ impl LauncherApp {
         }
     }
 
+    fn snippet_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+
+        self.snippet_dialog.open
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && NavigationDialogKind::Snippets
+                .layer_id()
+                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+    }
+
     fn jump_mode_navigation_input_allowed(
         &self,
         ctx: &egui::Context,
@@ -3217,6 +3227,15 @@ impl LauncherApp {
                     if self
                         .mkmacro_dialog
                         .jump_mode_unsupported_nested_owner_open() =>
+                {
+                    (NavigationOwner::Blocked, combo_popup)
+                }
+                NavigationOwner::Dialog {
+                    kind: NavigationDialogKind::Snippets,
+                    ..
+                } if self
+                    .snippet_dialog
+                    .jump_mode_unsupported_nested_owner_open() =>
                 {
                     (NavigationOwner::Blocked, combo_popup)
                 }
@@ -4884,8 +4903,49 @@ impl LauncherApp {
         let preview_active =
             self.snippet_prompt_dialog.is_open() && self.snippet_prompt_dialog.is_preview_only();
         if !preview_active {
+            let snippet_navigation_owner =
+                self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+            let snippet_scope = match snippet_navigation_owner {
+                crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                    kind: crate::gui::jump_mode::ui::NavigationDialogKind::Snippets,
+                    instance,
+                } => self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("snippets", instance),
+                    self.snippet_dialog.jump_mode_target_generation(),
+                    "snippets-dialog",
+                    ctx.viewport_id(),
+                    snippet_navigation_owner,
+                    false,
+                ),
+                crate::gui::jump_mode::ui::NavigationOwner::Root
+                | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
+            };
+            let snippet_native_owner =
+                self.snippet_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
+            if !snippet_native_owner
+                && let Some(focused) = ctx.memory(|memory| memory.focused())
+                && ctx.read_response(focused).is_some_and(|response| {
+                    Some(response.layer_id)
+                        == crate::gui::jump_mode::ui::NavigationDialogKind::Snippets.layer_id()
+                })
+            {
+                ctx.memory_mut(|memory| memory.surrender_focus(focused));
+            }
             let mut snip_dlg = std::mem::take(&mut self.snippet_dialog);
-            let preview_draft = snip_dlg.ui(&ctx, self);
+            let preview_draft = snip_dlg.ui_with_jump_mode(
+                &ctx,
+                self,
+                snippet_scope,
+                snippet_native_owner,
+                first_ui_pass,
+            );
             self.snippet_dialog = snip_dlg;
             if first_ui_pass && let Some(draft) = preview_draft {
                 match self.begin_snippet_preview(draft) {
@@ -23362,6 +23422,641 @@ mod tests {
                     .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::FileSearch),
             );
         }
+    }
+
+    fn prepare_actual_snippet_dialog(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        snippets_path: &str,
+    ) {
+        app.snippet_dialog.test_open_from(snippets_path);
+        for _ in 0..4 {
+            app.run_root_frame_for_test(ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        if app.jump_mode_enabled() {
+            assert_eq!(
+                app.jump_mode_ui.frame_navigation_owner(),
+                crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                    kind: crate::gui::jump_mode::ui::NavigationDialogKind::Snippets,
+                    instance: 1,
+                },
+                "focused_id={:?}, focused_layer={:?}, top_middle_layer={:?}, popup_open={}, jump_mode_enabled={}, host_allowed={}",
+                ctx.memory(|memory| memory.focused()),
+                crate::gui::jump_mode::ui::focused_response_layer(ctx),
+                crate::gui::jump_mode::ui::visible_top_middle_layer(ctx),
+                egui::Popup::is_any_open(ctx),
+                app.jump_mode_enabled(),
+                app.jump_mode_host_input_allowed(ctx, true),
+            );
+        }
+    }
+
+    fn start_actual_snippet_jump_mode(ctx: &egui::Context, app: &mut LauncherApp) {
+        app.run_root_frame_for_test(
+            ctx,
+            egui::RawInput {
+                events: vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_some());
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::Snippets,
+                instance: 1,
+            },
+        );
+        app.run_root_frame_for_test(
+            ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+    }
+
+    fn snippet_fixture_entry(
+        alias: &str,
+        text: &str,
+        hide_contents: bool,
+        prompt_for_fields: bool,
+        fields: Vec<crate::plugins::snippets::SnippetFieldDefinition>,
+        tags: &[&str],
+    ) -> crate::plugins::snippets::SnippetEntry {
+        crate::plugins::snippets::SnippetEntry {
+            alias: alias.to_owned(),
+            text: text.to_owned(),
+            hide_contents,
+            prompt_for_fields,
+            fields,
+            tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+        }
+    }
+
+    fn snippet_target_ids(app: &LauncherApp, label: &str) -> Vec<crate::gui::jump_mode::TargetId> {
+        app.jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| target.metadata().label() == label)
+            .map(|target| target.id().clone())
+            .collect()
+    }
+
+    fn set_snippet_contents_scroll_offset(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        offset_y: f32,
+    ) {
+        let scroll_id = app
+            .snippet_dialog
+            .test_contents_scroll_id()
+            .expect("the actual Snippets ScrollArea reported its ID");
+        let mut state = egui::scroll_area::State::load(ctx, scroll_id)
+            .expect("the actual Snippets ScrollArea has state");
+        state.offset.y = offset_y;
+        state.store(ctx, scroll_id);
+        for _ in 0..2 {
+            app.run_root_frame_for_test(ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+    }
+
+    fn snippet_hint_for_target(
+        app: &LauncherApp,
+        target: &crate::gui::jump_mode::TargetId,
+    ) -> String {
+        app.jump_mode_ui
+            .active_session()
+            .expect("Jump Mode remains active while addressing Snippets")
+            .hint_map()
+            .hint_for(target)
+            .expect("target currently has a hint")
+            .as_str()
+            .to_owned()
+    }
+
+    fn click_snippet_target(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        target: &crate::gui::jump_mode::TargetId,
+    ) {
+        let position = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|registered| registered.id() == target)
+            .expect("requested Snippets target is registered")
+            .clipped_rect()
+            .center();
+        let press = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..actual_query_input(true)
+        };
+        app.run_root_frame_for_test(ctx, press, false)
+            .0
+            .drop_without_applying_deltas();
+        let release = egui::RawInput {
+            events: vec![egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            ..actual_query_input(true)
+        };
+        app.run_root_frame_for_test(ctx, release, false)
+            .0
+            .drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn jump_mode_snippets_authoring_duplicate_rows_select_without_preview_then_fresh_edit_exact_row()
+     {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+
+        let snippets_path = _workspace
+            .root()
+            .join(crate::plugins::snippets::SNIPPETS_FILE)
+            .to_string_lossy()
+            .into_owned();
+        let entries = vec![
+            snippet_fixture_entry("repeated alias", "first body", false, false, vec![], &[]),
+            snippet_fixture_entry("repeated alias", "second body", false, false, vec![], &[]),
+        ];
+        crate::plugins::snippets::save_snippets(&snippets_path, &entries)
+            .expect("the duplicate alias fixture is writable");
+        prepare_actual_snippet_dialog(&ctx, &mut app, &snippets_path);
+        start_actual_snippet_jump_mode(&ctx, &mut app);
+
+        let row_targets = snippet_target_ids(&app, "Snippet entry");
+        assert_eq!(row_targets.len(), 2);
+        assert_ne!(row_targets[0], row_targets[1]);
+        for target in &row_targets {
+            assert!(!format!("{target:?}").contains("repeated alias"));
+        }
+        let second_row = row_targets
+            .iter()
+            .find(|target| {
+                matches!(
+                    target.semantic(),
+                    crate::gui::jump_mode::SemanticTargetId::Named(identity)
+                        if identity.contains("entry/1/preview")
+                )
+            })
+            .expect("the second underlying entry has its own opaque row identity")
+            .clone();
+        let saved_before = crate::plugins::snippets::load_snippets(&snippets_path).unwrap();
+        let row_hint = snippet_hint_for_target(&app, &second_row);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(row_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.snippet_dialog.test_selected_entry_index(), Some(1));
+        assert!(!app.snippet_dialog.test_is_editing());
+        assert!(!app.snippet_prompt_dialog.is_open());
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.snippet_dialog.test_is_editing());
+        assert!(!app.snippet_prompt_dialog.is_open());
+
+        let edit_target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label() == "Edit snippet"
+                    && matches!(
+                        target.id().semantic(),
+                        crate::gui::jump_mode::SemanticTargetId::Named(identity)
+                            if identity.contains("entry/1/edit")
+                    )
+            })
+            .expect("the second row has a separately addressable Edit button")
+            .id()
+            .clone();
+        start_actual_snippet_jump_mode(&ctx, &mut app);
+        let edit_hint = snippet_hint_for_target(&app, &edit_target);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(edit_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.snippet_dialog.test_is_editing());
+        assert!(!app.snippet_prompt_dialog.is_open());
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.snippet_dialog.test_is_editing());
+        assert_eq!(app.snippet_dialog.test_edit_index(), Some(1));
+        assert_eq!(app.snippet_dialog.test_alias(), "repeated alias");
+        assert_eq!(app.snippet_dialog.test_text(), "second body");
+        assert_eq!(
+            crate::plugins::snippets::load_snippets(&snippets_path).unwrap(),
+            saved_before,
+            "Select and explicit Edit do not save or start a preview"
+        );
+        assert!(!app.snippet_prompt_dialog.is_open());
+    }
+
+    #[test]
+    fn jump_mode_snippets_authoring_filter_and_reload_replace_old_targets() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        let snippets_path = workspace
+            .root()
+            .join(crate::plugins::snippets::SNIPPETS_FILE)
+            .to_string_lossy()
+            .into_owned();
+        crate::plugins::snippets::save_snippets(
+            &snippets_path,
+            &[
+                snippet_fixture_entry("first alias", "body one", false, false, vec![], &[]),
+                snippet_fixture_entry("second alias", "body two", false, false, vec![], &[]),
+            ],
+        )
+        .expect("the Snippets fixture is writable");
+        prepare_actual_snippet_dialog(&ctx, &mut app, &snippets_path);
+        start_actual_snippet_jump_mode(&ctx, &mut app);
+        let old_first = snippet_target_ids(&app, "Snippet entry")
+            .into_iter()
+            .find(|target| {
+                matches!(
+                    target.semantic(),
+                    crate::gui::jump_mode::SemanticTargetId::Named(identity)
+                        if identity.contains("entry/0/preview")
+                )
+            })
+            .expect("the first row is initially visible");
+        let old_generation = old_first.generation();
+
+        let filter_target = snippet_target_ids(&app, "Filter snippets")
+            .into_iter()
+            .next()
+            .expect("the list filter is a registered text target");
+        let filter_hint = snippet_hint_for_target(&app, &filter_target);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(filter_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text("second".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.id() == &old_first)
+        );
+        let filtered_rows = snippet_target_ids(&app, "Snippet entry");
+        assert_eq!(filtered_rows.len(), 1);
+        assert_ne!(filtered_rows[0], old_first);
+        assert_eq!(filtered_rows[0].generation(), old_generation);
+
+        crate::plugins::snippets::save_snippets(
+            &snippets_path,
+            &[snippet_fixture_entry(
+                "replacement",
+                "new body",
+                false,
+                false,
+                vec![],
+                &[],
+            )],
+        )
+        .expect("the replacement snapshot is writable");
+        app.snippet_dialog.test_open_from(&snippets_path);
+        for _ in 0..3 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        let replacement_rows = snippet_target_ids(&app, "Snippet entry");
+        assert_eq!(replacement_rows.len(), 1);
+        assert_ne!(replacement_rows[0], old_first);
+        assert_ne!(replacement_rows[0].generation(), old_generation);
+    }
+
+    #[test]
+    fn jump_mode_snippets_authoring_hidden_fields_stay_private_and_revealed_body_keeps_focus_until_cancel()
+     {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        let snippets_path = workspace
+            .root()
+            .join(crate::plugins::snippets::SNIPPETS_FILE)
+            .to_string_lossy()
+            .into_owned();
+        let private_text = "Stored body {{private_key}}";
+        let private_default = "PRIVATE_DEFAULT_MARKER";
+        let private_tag = "private_tag_marker";
+        let entry = snippet_fixture_entry(
+            "private alias",
+            private_text,
+            true,
+            true,
+            vec![crate::plugins::snippets::SnippetFieldDefinition {
+                name: "private_key".into(),
+                label: "Private label marker".into(),
+                default_value: private_default.into(),
+                required: false,
+                input_kind: crate::plugins::snippets::SnippetInputKind::Multiline,
+            }],
+            &[private_tag],
+        );
+        crate::plugins::snippets::save_snippets(&snippets_path, std::slice::from_ref(&entry))
+            .expect("the private-data fixture is writable");
+        prepare_actual_snippet_dialog(&ctx, &mut app, &snippets_path);
+        start_actual_snippet_jump_mode(&ctx, &mut app);
+        let edit_target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label() == "Edit snippet"
+                    && matches!(
+                        target.id().semantic(),
+                        crate::gui::jump_mode::SemanticTargetId::Named(identity)
+                            if identity.contains("entry/0/edit")
+                    )
+            })
+            .expect("the entry exposes an explicit Edit action")
+            .id()
+            .clone();
+        click_snippet_target(&ctx, &mut app, &edit_target);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+
+        let hidden_labels: Vec<_> = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .map(|target| target.metadata().label())
+            .collect();
+        assert!(hidden_labels.contains(&"Reveal snippet contents"));
+        assert!(!hidden_labels.contains(&"Snippet text"));
+        assert!(!hidden_labels.contains(&"Prompt field label"));
+        assert!(!hidden_labels.contains(&"Prompt field default"));
+        for target in app.jump_mode_ui.retained_registry().targets() {
+            let metadata = format!("{} {:?}", target.metadata().label(), target.id());
+            for secret in [
+                private_text,
+                private_default,
+                private_tag,
+                "private_key",
+                "Private label marker",
+            ] {
+                assert!(
+                    !metadata.contains(secret),
+                    "target metadata leaked {secret:?}"
+                );
+            }
+        }
+
+        let reveal_target = snippet_target_ids(&app, "Reveal snippet contents")
+            .into_iter()
+            .next()
+            .expect("the actual reveal button is registered");
+        click_snippet_target(&ctx, &mut app, &reveal_target);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        let body_targets = snippet_target_ids(&app, "Snippet text");
+        assert!(
+            !body_targets.is_empty(),
+            "body target absent after reveal (editing={}, body_revealed={}, labels={:?})",
+            app.snippet_dialog.test_is_editing(),
+            app.snippet_dialog.test_body_revealed(),
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .map(|target| target.metadata().label())
+                .collect::<Vec<_>>(),
+        );
+        set_snippet_contents_scroll_offset(&ctx, &mut app, 10_000.0);
+        assert_eq!(snippet_target_ids(&app, "Prompt field label").len(), 1);
+        assert_eq!(snippet_target_ids(&app, "Prompt field default").len(), 1);
+        for target in app.jump_mode_ui.retained_registry().targets() {
+            let metadata = format!("{} {:?}", target.metadata().label(), target.id());
+            for secret in [
+                private_text,
+                private_default,
+                private_tag,
+                "private_key",
+                "Private label marker",
+            ] {
+                assert!(
+                    !metadata.contains(secret),
+                    "target metadata leaked {secret:?}"
+                );
+            }
+        }
+
+        set_snippet_contents_scroll_offset(&ctx, &mut app, 0.0);
+        let body_target = snippet_target_ids(&app, "Snippet text")
+            .into_iter()
+            .next()
+            .expect("the body response is visible after scrolling back to it");
+        start_actual_snippet_jump_mode(&ctx, &mut app);
+        let body_hint = snippet_hint_for_target(&app, &body_target);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(body_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        let body_focus = ctx
+            .memory(|memory| memory.focused())
+            .expect("body editor receives focus");
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(" ✨ line\n猫".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.snippet_dialog.test_text().contains("✨ line\n猫"));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(body_focus));
+        assert_eq!(
+            app.snippet_dialog.test_body_editor_widget_id(),
+            Some(body_focus)
+        );
+
+        set_snippet_contents_scroll_offset(&ctx, &mut app, 10_000.0);
+        let cancel_target = snippet_target_ids(&app, "Cancel snippet edit")
+            .into_iter()
+            .next()
+            .expect("Cancel stays available after editing the body");
+        click_snippet_target(&ctx, &mut app, &cancel_target);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!app.snippet_dialog.test_is_editing());
+        assert_eq!(
+            crate::plugins::snippets::load_snippets(&snippets_path).unwrap(),
+            [entry],
+            "typing and Cancel leave the saved snapshot untouched"
+        );
+        assert!(!app.snippet_prompt_dialog.is_open());
+    }
+
+    #[test]
+    fn jump_mode_snippets_authoring_pending_removal_and_prompt_window_block_parent_targets() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        let snippets_path = workspace
+            .root()
+            .join(crate::plugins::snippets::SNIPPETS_FILE)
+            .to_string_lossy()
+            .into_owned();
+        let entry = snippet_fixture_entry(
+            "safe",
+            "Hello {{name}}",
+            false,
+            true,
+            vec![crate::plugins::snippets::SnippetFieldDefinition::new(
+                "name",
+            )],
+            &[],
+        );
+        crate::plugins::snippets::save_snippets(&snippets_path, std::slice::from_ref(&entry))
+            .expect("the Snippets fixture is writable");
+        prepare_actual_snippet_dialog(&ctx, &mut app, &snippets_path);
+        start_actual_snippet_jump_mode(&ctx, &mut app);
+        assert!(!snippet_target_ids(&app, "Snippet entry").is_empty());
+
+        app.snippet_dialog.test_request_removal(0);
+        for _ in 0..2 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked
+        );
+        assert!(snippet_target_ids(&app, "Snippet entry").is_empty());
+        assert!(snippet_target_ids(&app, "Remove snippet").is_empty());
+        assert_eq!(
+            crate::plugins::snippets::load_snippets(&snippets_path).unwrap(),
+            [entry.clone()],
+            "the parent surface cannot confirm removal"
+        );
+
+        app.snippet_dialog.test_cancel_removal();
+        for _ in 0..2 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        app.begin_snippet_preview(entry.clone())
+            .expect("the harmless fixture can open its preview prompt");
+        for _ in 0..2 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        assert!(app.snippet_prompt_dialog.is_open());
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked
+        );
+        assert!(snippet_target_ids(&app, "Snippet entry").is_empty());
+        assert!(app.snippet_dialog.open);
     }
 
     fn seed_actual_file_search_filename_results(
