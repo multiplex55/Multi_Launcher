@@ -28,3 +28,25 @@ proves hint A completed to actual query focus, unchanged empty query/count 0,
 then native X produced query x/count 0. PID 40556 exited 0 gracefully; owned tree gone.
 Both Paste Sequence shortcuts are disabled in this profile. Query-only scope:
 dashboard/grid controls are not yet registered in this screenshot.
+M08 Dashboard filter `jump_m08_phase1_enabled_20261020T014934Z_c5af8d06_dashboard`
+passed catalog 01–05 with retained ROOT/F11 receipts and native observed YA
+selection of Jump QA Note 006, unchanged query/count 0 before fresh Enter, then
+the exact Dashboard FillQuery action/query override and count 1. PID 28440 exited 0
+gracefully, with its owned tree gone. Parent viewed active hints and selected-state PNGs;
+selected outline is clear. [Dashboard hints](02_dashboard_hints_active.png)
+is a fixture-only 1800x1000 image, 567548 bytes. Small Refresh header badges
+obscure the final label letters; this concrete placement issue is reserved
+for bounded M09 repair. No theme redesign is planned.
+[Grid hints](07_note_grid_hints_active.png) comes from the passing nine-capture
+Grid smoke `jump_m08_phase1_enabled_20261020T020713Z_48084286_grid`.
+It is 1800x1000, 401213 bytes, SHA-256
+`84595d5fe6a7c72ffc9af2dc012d01a0a57a33a4e968534c88a1c5d4601405f2`.
+Parent viewed this image and the note-panel ownership capture: all 32 result
+cards are visible, the 33 hints (including query) are unique and prefix-free,
+and the open fixture note suppresses background hints. The normal note-open
+information toast remains visible; error notifications are enabled.
+The trace proves exact duplicate-title slug 001 selection before activation,
+stale-generation rejection after a safe zero-result query edit, a processed
+Enter with no activation, and one exact note open after restoring/reselecting.
+PID 20588 exited 0 gracefully; its owned tree was verified gone. Curated PNGs
+currently total 1318462 bytes, below the 8 MiB budget.

@@ -109,7 +109,17 @@ struct JumpModeObservation {
     logic_frame_id: u64,
     ui_pass_id: u64,
     ui_pass_index: u32,
+    capture_index: u8,
+    capture_count: u8,
+    capture_armed: bool,
     query: String,
+    result_generation: u64,
+    result_count: usize,
+    grid_layout: bool,
+    selected_index: Option<usize>,
+    selected_target_id: Option<String>,
+    selected_action: Option<QaActionObservation>,
+    opened_note_slugs: Vec<String>,
     root_focused: bool,
     root_owner_allowed: bool,
     jump_mode_enabled: bool,
@@ -122,6 +132,11 @@ struct JumpModeObservation {
     focused_widget_id: Option<String>,
     activation_count: u64,
     last_action: Option<QaActivationObservation>,
+    tab_processed_count: u64,
+    last_tab_processed_logic_frame_id: Option<u64>,
+    enter_processed_count: u64,
+    last_enter_processed_logic_frame_id: Option<u64>,
+    prefix_target_ids: Vec<String>,
     targets: Vec<JumpModeTargetObservation>,
 }
 
@@ -140,6 +155,7 @@ enum JumpModeOutcomeObservation {
 #[derive(Clone, Debug, Serialize)]
 struct JumpModeTargetObservation {
     target_id: String,
+    surface: &'static str,
     label: String,
     kind: &'static str,
     rect: [f32; 4],
@@ -148,12 +164,24 @@ struct JumpModeTargetObservation {
     is_query_input: bool,
     focused: bool,
     hint: Option<String>,
+    root_result_index: Option<usize>,
+    root_action: Option<QaActionObservation>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct QaActionObservation {
+    label: String,
+    desc: String,
+    action: String,
+    args: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 struct QaActivationObservation {
     action_id: String,
     label: String,
+    args: Option<String>,
+    query_override: Option<String>,
     source: &'static str,
 }
 
@@ -617,6 +645,10 @@ pub(super) struct FramebufferProbe {
     wait_for_active_hints: bool,
     activation_count: u64,
     last_action: Option<QaActivationObservation>,
+    tab_processed_count: u64,
+    last_tab_processed_logic_frame_id: Option<u64>,
+    enter_processed_count: u64,
+    last_enter_processed_logic_frame_id: Option<u64>,
     latest_jump_mode_observation: Option<JumpModeObservation>,
     geometry_rebuild_count: u64,
     latest_root_list_diagnostic: Option<RootListDiagnostic>,
@@ -668,6 +700,10 @@ impl FramebufferProbe {
                 .is_some_and(|request| request.wait_for_active_hints),
             activation_count: 0,
             last_action: None,
+            tab_processed_count: 0,
+            last_tab_processed_logic_frame_id: None,
+            enter_processed_count: 0,
+            last_enter_processed_logic_frame_id: None,
             latest_jump_mode_observation: None,
             geometry_rebuild_count: 0,
             latest_root_list_diagnostic: None,
@@ -1193,6 +1229,7 @@ impl FramebufferProbe {
     fn record_activation(
         &mut self,
         action: &crate::actions::Action,
+        query_override: Option<&str>,
         source: crate::commands::ActivationSource,
     ) {
         if !self.jump_mode_observation_enabled {
@@ -1202,8 +1239,26 @@ impl FramebufferProbe {
         self.last_action = Some(QaActivationObservation {
             action_id: action.action.clone(),
             label: action.label.clone(),
+            args: action.args.clone(),
+            query_override: query_override.map(str::to_owned),
             source: source.label(),
         });
+    }
+
+    fn record_enter_processed(&mut self) {
+        if !self.jump_mode_observation_enabled {
+            return;
+        }
+        self.enter_processed_count = self.enter_processed_count.saturating_add(1);
+        self.last_enter_processed_logic_frame_id = Some(self.logic_frame_id);
+    }
+
+    fn record_tab_processed(&mut self) {
+        if !self.jump_mode_observation_enabled {
+            return;
+        }
+        self.tab_processed_count = self.tab_processed_count.saturating_add(1);
+        self.last_tab_processed_logic_frame_id = Some(self.logic_frame_id);
     }
 
     fn current_capture_observation_matches(&self, marker: &RetainedPassMarker) -> bool {
@@ -1329,10 +1384,23 @@ impl LauncherApp {
     pub(super) fn qa_framebuffer_record_activation(
         &mut self,
         action: &crate::actions::Action,
+        query_override: Option<&str>,
         source: crate::commands::ActivationSource,
     ) {
         if let Some(probe) = self.qa_framebuffer.as_mut() {
-            probe.record_activation(action, source);
+            probe.record_activation(action, query_override, source);
+        }
+    }
+
+    pub(super) fn qa_framebuffer_record_enter_processed(&mut self) {
+        if let Some(probe) = self.qa_framebuffer.as_mut() {
+            probe.record_enter_processed();
+        }
+    }
+
+    pub(super) fn qa_framebuffer_record_tab_processed(&mut self) {
+        if let Some(probe) = self.qa_framebuffer.as_mut() {
+            probe.record_tab_processed();
         }
     }
 
@@ -1536,6 +1604,9 @@ impl LauncherApp {
             last_action,
             process_pid,
             fixture_manifest_sha256,
+            capture_index,
+            capture_count,
+            capture_armed,
         )) = self
             .qa_framebuffer
             .as_ref()
@@ -1555,6 +1626,9 @@ impl LauncherApp {
                         probe.last_action.clone(),
                         probe.receipt.process.pid,
                         probe.receipt.fixture_manifest_sha256.clone(),
+                        probe.receipt.capture_index,
+                        probe.capture_count,
+                        probe.phase == ProbePhase::Armed,
                     )
                 })
             })
@@ -1591,6 +1665,9 @@ impl LauncherApp {
                 last_action,
                 process_pid,
                 fixture_manifest_sha256,
+                capture_index,
+                capture_count,
+                capture_armed,
             ));
         }
         if let Some(probe) = self.qa_framebuffer.as_mut() {
@@ -1624,6 +1701,9 @@ impl LauncherApp {
                     probe.last_action.clone(),
                     probe.receipt.process.pid,
                     probe.receipt.fixture_manifest_sha256.clone(),
+                    probe.receipt.capture_index,
+                    probe.capture_count,
+                    probe.phase == ProbePhase::Armed,
                 )
             })
         });
@@ -1637,6 +1717,9 @@ impl LauncherApp {
                 last_action,
                 process_pid,
                 fixture_hash,
+                capture_index,
+                capture_count,
+                capture_armed,
             )| {
                 enabled.then(|| {
                     let root_owner_allowed =
@@ -1653,6 +1736,9 @@ impl LauncherApp {
                         last_action,
                         process_pid,
                         fixture_hash,
+                        capture_index,
+                        capture_count,
+                        capture_armed,
                     )
                 })
             },
@@ -1860,6 +1946,9 @@ fn build_jump_mode_observation(
     last_action: Option<QaActivationObservation>,
     process_pid: u32,
     fixture_manifest_sha256: String,
+    capture_index: u8,
+    capture_count: u8,
+    capture_armed: bool,
 ) -> JumpModeObservation {
     let root_focused = ctx.input(|input| input.focused);
     let active_session = app.jump_mode_ui.active_session();
@@ -1868,6 +1957,38 @@ fn build_jump_mode_observation(
         .memory(|memory| memory.focused())
         .map(|focused| format!("{focused:?}"));
     let focused_egui_id = ctx.memory(|memory| memory.focused());
+    let result_generation = app.root_list_geometry.result_generation();
+    let result_count = app.results.len();
+    let selected_index = app.selected;
+    let selected_action = selected_index
+        .filter(|index| *index < result_count)
+        .and_then(|index| app.results.get(index))
+        .map(qa_action_observation);
+    let (tab_processed_count, last_tab_processed_logic_frame_id) = app
+        .qa_framebuffer
+        .as_ref()
+        .map(|probe| {
+            (
+                probe.tab_processed_count,
+                probe.last_tab_processed_logic_frame_id,
+            )
+        })
+        .unwrap_or_default();
+    let (enter_processed_count, last_enter_processed_logic_frame_id) = app
+        .qa_framebuffer
+        .as_ref()
+        .map(|probe| {
+            (
+                probe.enter_processed_count,
+                probe.last_enter_processed_logic_frame_id,
+            )
+        })
+        .unwrap_or_default();
+    let opened_note_slugs = app
+        .note_panels
+        .iter()
+        .map(|panel| panel.note_slug().to_owned())
+        .collect();
 
     let targets: Vec<_> = if root_owner_allowed {
         registry
@@ -1878,8 +1999,21 @@ fn build_jump_mode_observation(
                 let clipped_rect = target.clipped_rect();
                 let is_query_input = target.response_id() == egui::Id::new("query_input")
                     && target.metadata().kind() == super::jump_mode::TargetKind::TextEntry;
+                let root_result_index = match target.metadata().id().semantic() {
+                    super::jump_mode::SemanticTargetId::RootResult(index)
+                        if target.metadata().id().generation().0 == result_generation
+                            && *index < result_count =>
+                    {
+                        Some(*index)
+                    }
+                    _ => None,
+                };
+                let root_action = root_result_index
+                    .and_then(|index| app.results.get(index))
+                    .map(qa_action_observation);
                 JumpModeTargetObservation {
                     target_id: format!("{:?}", target.id()),
+                    surface: target_surface_name(target.metadata().id().surface()),
                     label: target.metadata().label().to_owned(),
                     kind: target_kind_name(target.metadata().kind()),
                     rect: [rect.min.x, rect.min.y, rect.max.x, rect.max.y],
@@ -1895,6 +2029,8 @@ fn build_jump_mode_observation(
                     hint: active_hint_map
                         .and_then(|hint_map| hint_map.hint_for(target.id()))
                         .map(|hint| hint.as_str().to_owned()),
+                    root_result_index,
+                    root_action,
                 }
             })
             .collect()
@@ -1906,6 +2042,28 @@ fn build_jump_mode_observation(
         .iter()
         .find(|target| target.focused)
         .map(|target| target.target_id.clone());
+    let selected_target_id = selected_index.and_then(|selected_index| {
+        targets
+            .iter()
+            .find(|target| target.root_result_index == Some(selected_index))
+            .map(|target| target.target_id.clone())
+    });
+    let prefix_target_ids = active_session
+        .map(|session| {
+            let prefix = session.prefix();
+            targets
+                .iter()
+                .filter(|target| {
+                    target.eligible
+                        && target
+                            .hint
+                            .as_deref()
+                            .is_some_and(|hint| hint.starts_with(prefix))
+                })
+                .map(|target| target.target_id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     let outcome = app
         .jump_mode_ui
         .last_outcome()
@@ -1936,7 +2094,17 @@ fn build_jump_mode_observation(
         logic_frame_id,
         ui_pass_id,
         ui_pass_index,
+        capture_index,
+        capture_count,
+        capture_armed,
         query: app.query.clone(),
+        result_generation,
+        result_count,
+        grid_layout: app.resolved_grid_layout,
+        selected_index,
+        selected_target_id,
+        selected_action,
+        opened_note_slugs,
         root_focused,
         root_owner_allowed,
         jump_mode_enabled: app.jump_mode_ui.is_enabled(),
@@ -1949,7 +2117,21 @@ fn build_jump_mode_observation(
         focused_widget_id,
         activation_count,
         last_action,
+        tab_processed_count,
+        last_tab_processed_logic_frame_id,
+        enter_processed_count,
+        last_enter_processed_logic_frame_id,
+        prefix_target_ids,
         targets,
+    }
+}
+
+fn qa_action_observation(action: &crate::actions::Action) -> QaActionObservation {
+    QaActionObservation {
+        label: action.label.clone(),
+        desc: action.desc.clone(),
+        action: action.action.clone(),
+        args: action.args.clone(),
     }
 }
 
@@ -1963,6 +2145,16 @@ fn target_kind_name(kind: super::jump_mode::TargetKind) -> &'static str {
         super::jump_mode::TargetKind::Slider => "slider",
         super::jump_mode::TargetKind::Tab => "tab",
         super::jump_mode::TargetKind::ComboBox => "combo_box",
+    }
+}
+
+fn target_surface_name(surface: &super::jump_mode::SurfaceId) -> &'static str {
+    match surface {
+        super::jump_mode::SurfaceId::Dashboard => "dashboard",
+        super::jump_mode::SurfaceId::LauncherResults => "launcher_results",
+        super::jump_mode::SurfaceId::Settings { .. } => "settings",
+        super::jump_mode::SurfaceId::Dialog { .. } => "dialog",
+        super::jump_mode::SurfaceId::Popup { .. } => "popup",
     }
 }
 
@@ -2426,6 +2618,10 @@ mod tests {
             wait_for_active_hints: false,
             activation_count: 0,
             last_action: None,
+            tab_processed_count: 0,
+            last_tab_processed_logic_frame_id: None,
+            enter_processed_count: 0,
+            last_enter_processed_logic_frame_id: None,
             latest_jump_mode_observation: None,
             geometry_rebuild_count: 0,
             latest_root_list_diagnostic: None,
@@ -2844,19 +3040,213 @@ mod tests {
             label: "Safe test action".into(),
             desc: String::new(),
             action: "test:noop".into(),
-            args: None,
+            args: Some("safe-argument".into()),
         };
         let (mut probe, _, _) = test_probe(CaptureTrigger::Startup);
-        probe.record_activation(&action, crate::commands::ActivationSource::Enter);
+        probe.record_activation(
+            &action,
+            Some("safe query"),
+            crate::commands::ActivationSource::Enter,
+        );
         assert_eq!(probe.activation_count, 0);
         assert!(probe.last_action.is_none());
 
         probe.jump_mode_observation_enabled = true;
-        probe.record_activation(&action, crate::commands::ActivationSource::Enter);
+        probe.record_activation(
+            &action,
+            Some("safe query"),
+            crate::commands::ActivationSource::Enter,
+        );
         assert_eq!(probe.activation_count, 1);
         let last_action = probe.last_action.as_ref().unwrap();
         assert_eq!(last_action.action_id, "test:noop");
+        assert_eq!(last_action.query_override.as_deref(), Some("safe query"));
+        assert_eq!(last_action.args.as_deref(), Some("safe-argument"));
         assert_eq!(last_action.source, "enter");
+    }
+
+    #[test]
+    fn jump_mode_observation_tracks_processed_enter_frame_when_opted_in() {
+        let (mut probe, _, _) = test_probe(CaptureTrigger::Startup);
+        probe.logic_frame_id = 7;
+        probe.record_enter_processed();
+        assert_eq!(probe.enter_processed_count, 0);
+        assert_eq!(probe.last_enter_processed_logic_frame_id, None);
+
+        probe.jump_mode_observation_enabled = true;
+        probe.record_enter_processed();
+        assert_eq!(probe.enter_processed_count, 1);
+        assert_eq!(probe.last_enter_processed_logic_frame_id, Some(7));
+
+        probe.logic_frame_id = 8;
+        probe.record_enter_processed();
+        assert_eq!(probe.enter_processed_count, 2);
+        assert_eq!(probe.last_enter_processed_logic_frame_id, Some(8));
+    }
+
+    #[test]
+    fn jump_mode_observation_tracks_processed_tab_frame_when_opted_in() {
+        let (mut probe, _, _) = test_probe(CaptureTrigger::Startup);
+        probe.logic_frame_id = 7;
+        probe.record_tab_processed();
+        assert_eq!(probe.tab_processed_count, 0);
+        assert_eq!(probe.last_tab_processed_logic_frame_id, None);
+
+        probe.jump_mode_observation_enabled = true;
+        probe.record_tab_processed();
+        assert_eq!(probe.tab_processed_count, 1);
+        assert_eq!(probe.last_tab_processed_logic_frame_id, Some(7));
+
+        probe.logic_frame_id = 8;
+        probe.record_tab_processed();
+        assert_eq!(probe.tab_processed_count, 2);
+        assert_eq!(probe.last_tab_processed_logic_frame_id, Some(8));
+    }
+
+    #[test]
+    fn jump_mode_observation_resolves_selected_root_payload_from_typed_identity() {
+        use super::super::jump_mode::{
+            SemanticTargetId, SurfaceId, TargetGeneration, TargetId, TargetKind, TargetMetadata,
+        };
+
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = test_launcher_app(&ctx, directory.path());
+        app.jump_mode_ui.set_enabled(true);
+        app.query = "note list".into();
+        app.results = vec![crate::actions::Action {
+            label: "Jump QA Shared Note".into(),
+            desc: "Open isolated fixture note".into(),
+            action: "note:open:jump-qa-note-001".into(),
+            args: Some("note-argument".into()),
+        }];
+        app.selected = Some(0);
+        app.resolved_grid_layout = true;
+
+        app.jump_mode_ui.begin_frame();
+        app.jump_mode_ui.begin_ui_pass();
+        let result_generation = app.root_list_geometry.result_generation();
+        let generation = TargetGeneration(result_generation);
+        let scope = app
+            .jump_mode_ui
+            .scope(
+                SurfaceId::LauncherResults,
+                generation,
+                "launcher-results",
+                egui::ViewportId::ROOT,
+                true,
+            )
+            .unwrap();
+        let dashboard_scope = scope.with_surface(SurfaceId::Dashboard, generation);
+        let target_id = TargetId::new(
+            SurfaceId::LauncherResults,
+            SemanticTargetId::RootResult(0),
+            generation,
+        );
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 560.0),
+                )),
+                focused: true,
+                ..Default::default()
+            },
+            |ui| {
+                let response = ui.button("Jump QA Shared Note");
+                response.request_focus();
+                assert!(matches!(
+                    scope.register_metadata(
+                        ui,
+                        &response,
+                        TargetMetadata::new(
+                            target_id.clone(),
+                            "Jump QA Shared Note",
+                            TargetKind::Action,
+                            0,
+                        ),
+                    ),
+                    super::super::jump_mode::ui::RegistrationResult::Registered { .. }
+                ));
+                let dashboard_response = ui.button("Dashboard fixture target");
+                let dashboard_target_id = TargetId::new(
+                    SurfaceId::Dashboard,
+                    SemanticTargetId::named("fixture-dashboard-target"),
+                    generation,
+                );
+                assert!(matches!(
+                    dashboard_scope.register_metadata(
+                        ui,
+                        &dashboard_response,
+                        TargetMetadata::new(
+                            dashboard_target_id,
+                            "Dashboard fixture target",
+                            TargetKind::Button,
+                            1,
+                        ),
+                    ),
+                    super::super::jump_mode::ui::RegistrationResult::Registered { .. }
+                ));
+            },
+        )
+        .drop_without_applying_deltas();
+        app.jump_mode_ui.finish_ui_pass();
+
+        let observation = build_jump_mode_observation(
+            &app,
+            &ctx,
+            7,
+            3,
+            0,
+            true,
+            app.jump_mode_ui.pass_registry(),
+            0,
+            None,
+            1234,
+            "a".repeat(64),
+            1,
+            14,
+            true,
+        );
+
+        assert_eq!(observation.result_generation, result_generation);
+        assert_eq!(observation.result_count, 1);
+        assert!(observation.grid_layout);
+        assert_eq!(observation.selected_index, Some(0));
+        let target_id_debug = format!("{target_id:?}");
+        assert_eq!(
+            observation.selected_target_id.as_deref(),
+            Some(target_id_debug.as_str())
+        );
+        let root_target = observation
+            .targets
+            .iter()
+            .find(|target| target.root_result_index == Some(0))
+            .unwrap();
+        assert_eq!(root_target.target_id, target_id_debug);
+        assert_eq!(root_target.surface, "launcher_results");
+        let root_action = root_target.root_action.as_ref().unwrap();
+        assert_eq!(root_action.action, "note:open:jump-qa-note-001");
+        assert_eq!(root_action.args.as_deref(), Some("note-argument"));
+        assert_eq!(
+            observation.selected_action.as_ref().unwrap().action,
+            root_action.action
+        );
+        assert_eq!(observation.opened_note_slugs, Vec::<String>::new());
+        assert_eq!(observation.capture_index, 1);
+        assert_eq!(observation.capture_count, 14);
+        assert!(observation.capture_armed);
+
+        // Surface names come from the typed owner enum, not the opaque debug
+        // representation of the target ID consumed by the native runner.
+        let dashboard_target = observation
+            .targets
+            .iter()
+            .find(|target| target.label == "Dashboard fixture target")
+            .unwrap();
+        assert_eq!(dashboard_target.surface, "dashboard");
+        assert_eq!(dashboard_target.root_result_index, None);
+        assert!(dashboard_target.root_action.is_none());
     }
 
     #[test]
@@ -2959,6 +3349,9 @@ mod tests {
             None,
             1234,
             "a".repeat(64),
+            1,
+            1,
+            true,
         );
 
         assert!(observation.root_focused);

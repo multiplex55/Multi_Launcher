@@ -3654,6 +3654,10 @@ impl LauncherApp {
                 }
 
                 let tab = ctx.input(|i| i.key_pressed(egui::Key::Tab));
+                #[cfg(feature = "qa-framebuffer-capture")]
+                if first_ui_pass && !action_sheet_blocks_launcher_input && tab {
+                    self.qa_framebuffer_record_tab_processed();
+                }
                 let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
                 let mut accepted_suggestion = false;
                 if first_ui_pass
@@ -3693,6 +3697,8 @@ impl LauncherApp {
                     && self.note_panels.is_empty()
                     && self.image_panels.is_empty()
                 {
+                    #[cfg(feature = "qa-framebuffer-capture")]
+                    self.qa_framebuffer_record_enter_processed();
                     launch_idx = self.handle_key(egui::Key::Enter);
                 }
 

@@ -1,6 +1,6 @@
 # Jump Mode Results
 
-Work in progress on `feat/jump-mode-2026-10-19-c7e42`, based on `8f94b003a12853735d1cb4689c6ec4e53c4ace8e`. Checkpoints through `37c03b2b` are pushed to origin. The default-off setting, pure hint engine, scoped registry, input routing and clipped overlay are implemented. Real native query hint/focus/typing proof passed with zero action execution and verified cleanup. Grid/list integration is verified; dashboard discrete controls are verified; native catalog and Phase 2 surface integration remain pending.
+Work in progress on `feat/jump-mode-2026-10-19-c7e42`, based on `8f94b003a12853735d1cb4689c6ec4e53c4ace8e`. Checkpoints through `e031a5d3` are pushed to origin. The default-off setting, pure hint engine, scoped registry, input routing and clipped overlay are implemented. Real native query hint/focus/typing proof passed with zero action execution and verified cleanup. Grid/list integration is verified; dashboard discrete controls are verified; native catalog and Phase 2 surface integration remain pending.
 
 ## Architecture and current inventory
 
@@ -97,3 +97,18 @@ Actual native responses now opt in through one lazy focus-only helper, disjoint 
 Supported inventory and explicit gaps are in execution ledger. `cargo nextest run --lib --features 'dev-smoke-binaries qa-framebuffer-capture' -E 'test(jump_mode)'` passed43/5834filtered, default test profile. Real pinned-query cached-action focus->Enter case preserves original RunAction payload/args/query_override exactly once; adapter tests verify identity, focus, clipped/absent targets and activation policy. Policy test does not claim actual root discarded-pass integration. Scoped rustfmt18files and diff checks pass. No destructive/media/clipboard operation executed. Native dashboard/root evidence follows M08.
 M09 pre-review reopened M07 for one P2: positional native slot IDs can transfer completed Refresh focus after config reorder despite safe semantic generation. The sole writer is adding production native identity and actual Dashboard reload/reorder regression; partial M08 fixture work is preserved. No other M06/M07 core finding was reported. This is pending repair, not a completed Phase1 gate.
 M07-B resolved the M09 P2 at its actual owner: explicit native slot UI IDs include slot/widget identity, with generation-bound legacy fallback and distinct header/body scope. Real Dashboard::ui reload/reorder regression passed1/1 after reproducing the instability; Enter remains with slotA. Scoped rustfmt/diff pass. Read-only reviewer closed original finding and reported no other core issues. M08 remains in progress; its partial fixture changes are excluded from this checkpoint.
+
+## M08 native qualification
+All 15 requested Phase 1 catalog images passed across these focused runs. Parent independently rechecked every PNG hash against its scenario and native receipt, frame/pass, fixture hash, process identity and successful owned cleanup. Prior aggregate attempts remain immutable FAIL; no whole-aggregate PASS is claimed.
+
+| Catalog | Accepted run | Result |
+|---|---|---|
+| 01–05 | `jump_m08_phase1_enabled_20261020T014934Z_c5af8d06_dashboard` | Observed YA focused Note 006 with unchanged query/count0; distinct Enter invoked exact Dashboard FillQuery once |
+| 06–14 | `jump_m08_phase1_enabled_20261020T020713Z_48084286_grid` | 32 visible cards; exact duplicate-title slug001 selected before action; stale-generation Enter blocked; restored/reselected slug opened once; query editing/cancel/dense/ownership passed |
+| 18 | `jump_m08_phase1_disabled_20261020T020802Z_db3b2dd1` | Fresh processed-Tab acknowledgements, ordinary ShiftSpace/text, no targets or actions |
+
+All three owned app trees closed gracefully with exit0 and were verified gone (PIDs28440/20588/20440). Grid/disabled executable SHA256: `2127414dec570fbc1a674745e76a37ba75a785aac1f0b3da68c3885e57699616`. The stale test uses production-verified `zzzznomatchprobe` with zero results: generation3→4 clears selection, processed Enter advances once with count0/no opened note, then restored note list generation5 allows a fresh exact001 hint/Enter. No file-watcher or production cache behavior changed.
+
+Final scoped verification: Nextest processed-Tab/Enter filter2passed/5879skipped; earlier observer filter3passed/5877skipped; fixture tests5/5 plus production loader/search/tag/zero-result semantics; headless composed predicate and empty/wrong-PID reader checks; PowerShell AST, scoped rustfmt and diff checks passed. A deliberately invalid gate profile fails before launch with both shortcuts null. Aggregate `Phase1 -FixturesOnly` explicitly fails without launching; child fixture-only commands remain usable.
+
+The runner supports `Phase1`, `Phase1Enabled -Screen Dashboard`, `Phase1Enabled -Screen Grid`, and `Phase1Disabled`, with bounded commands/steps, shared deadline, native owned-window input, environment/window/DPI metadata, retained ROOT/F11 receipts and exact owned cleanup. All future test profiles disable Paste Sequence Next/Cancel while preserving normal/error notifications. Parent viewed representative active/selected/grid/ownership/disabled pixels; curated Dashboard02 and Grid07 bring the set to1318462bytes (<8MiB). Refresh header badges overlap final label letters; bounded M09 placement repair remains pending. Phase2 support is not yet implemented.

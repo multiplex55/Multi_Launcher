@@ -117,7 +117,7 @@ impl LauncherApp {
         source: ActivationSource,
     ) {
         #[cfg(feature = "qa-framebuffer-capture")]
-        self.qa_framebuffer_record_activation(&a, source);
+        self.qa_framebuffer_record_activation(&a, query_override.as_deref(), source);
         self.query_history.reset();
         if let Ok(guard) = ACTIVATION_HOOK.lock()
             && let Some(ref hook) = *guard

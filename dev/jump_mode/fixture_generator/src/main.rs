@@ -18,6 +18,7 @@ const FIXTURE_ID: &str = "jump-mode-m01-v2";
 const NOTE_COUNT: usize = 32;
 const SAFE_PLUGIN: &str = "notes";
 const LAUNCHER_HOTKEY: &str = "Ctrl+Alt+F10";
+const NO_RESULTS_QUERY: &str = "zzzznomatchprobe";
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct FixtureManifest {
@@ -31,6 +32,7 @@ struct FixtureManifest {
     note_ids: Vec<String>,
     action_count: usize,
     external_note_open: String,
+    no_results_query: String,
     safety: SafetyManifest,
 }
 
@@ -51,6 +53,8 @@ struct SafetyManifest {
 enum FixtureScenario {
     Baseline,
     QueryProbe,
+    Phase1Enabled,
+    Phase1Disabled,
 }
 
 impl FixtureScenario {
@@ -58,20 +62,28 @@ impl FixtureScenario {
         match value.as_deref().unwrap_or("baseline") {
             "baseline" => Ok(Self::Baseline),
             "query-probe" => Ok(Self::QueryProbe),
+            "phase1-enabled" => Ok(Self::Phase1Enabled),
+            "phase1-disabled" => Ok(Self::Phase1Disabled),
             value => anyhow::bail!(
-                "unknown fixture scenario {value:?}; expected baseline or query-probe"
+                "unknown fixture scenario {value:?}; expected baseline, query-probe, phase1-enabled, or phase1-disabled"
             ),
         }
     }
 
     fn jump_mode_enabled(self) -> bool {
-        self == Self::QueryProbe
+        matches!(self, Self::QueryProbe | Self::Phase1Enabled)
+    }
+
+    fn phase1(self) -> bool {
+        matches!(self, Self::Phase1Enabled | Self::Phase1Disabled)
     }
 
     fn label(self) -> &'static str {
         match self {
             Self::Baseline => "baseline",
             Self::QueryProbe => "query-probe",
+            Self::Phase1Enabled => "phase1-enabled",
+            Self::Phase1Disabled => "phase1-disabled",
         }
     }
 }
@@ -94,6 +106,8 @@ struct ProductionSemanticsObservation {
     canonical_notes_dir: String,
     loaded_note_count: usize,
     note_queries: Vec<NoteQueryObservation>,
+    no_results_query: String,
+    no_results_count: usize,
     observed_tags: Vec<TagObservation>,
 }
 
@@ -159,7 +173,11 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     settings.quit_hotkey = None;
     settings.paste_sequence.next_hotkey = None;
     settings.paste_sequence.cancel_hotkey = None;
-    settings.window_size = Some((900, 560));
+    settings.window_size = if scenario.phase1() {
+        Some((1800, 1000))
+    } else {
+        Some((900, 560))
+    };
     settings.offscreen_pos = None;
     settings.follow_mouse = false;
     settings.static_location_enabled = false;
@@ -177,6 +195,17 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     settings.screenshot_use_editor = false;
     settings.reduce_dashboard_work_when_unfocused = false;
     settings.experimental_jump_mode_enabled = scenario.jump_mode_enabled();
+    // Keep normal and error notifications visible in every native scenario.
+    // Hiding errors would make the visible test less informative.
+    settings.enable_toasts = true;
+    settings.note_save_on_close = false;
+    if scenario.phase1() {
+        settings.query_results_layout.enabled = true;
+        settings.query_results_layout.rows = 4;
+        settings.query_results_layout.cols = 8;
+        settings.query_results_layout.respect_plugin_capability = false;
+        settings.query_results_layout.plugin_opt_out.clear();
+    }
     settings.note.backlinks_enabled = false;
     settings.note.aliases_enabled = false;
     settings.note.templates_enabled = false;
@@ -200,14 +229,15 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     write_json(&profile.join("settings.json"), &settings)?;
     write_json(&profile.join("actions.json"), &Vec::<Action>::new())?;
 
-    let dashboard = dashboard_fixture();
+    let dashboard = dashboard_fixture(scenario);
     write_json(&profile.join("dashboard.json"), &dashboard)?;
 
     let note_ids = note_ids();
     for (index, note_id) in note_ids.iter().enumerate() {
         let ordinal = index + 1;
+        let title = fixture_note_title(scenario, ordinal);
         let note_text = format!(
-            "# Jump QA Note {ordinal:03}\n\nFixture record {ordinal:03} for the isolated Jump Mode runner.\n\nStable fixture ID: `{note_id}`\nTag: #jump_qa_bucket_{:02}\n",
+            "# {title}\n\nFixture record {ordinal:03} for the isolated Jump Mode runner.\n\nStable fixture ID: `{note_id}`\nTag: #jump_qa_bucket_{:02}\n",
             ((index % 4) + 1)
         );
         fs::write(notes_dir.join(format!("{note_id}.md")), note_text)?;
@@ -249,6 +279,28 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         !settings.reduce_dashboard_work_when_unfocused,
         "fixture must allow dashboard query refreshes while the launcher is initially unfocused"
     );
+    anyhow::ensure!(
+        settings.enable_toasts && settings.show_error_toasts,
+        "fixture must preserve normal and error notifications"
+    );
+    if scenario.phase1() {
+        anyhow::ensure!(
+            settings.window_size == Some((1800, 1000)),
+            "Phase 1 fixture must use its bounded larger viewport"
+        );
+        anyhow::ensure!(
+            settings.query_results_layout.enabled
+                && settings.query_results_layout.rows == 4
+                && settings.query_results_layout.cols == 8
+                && !settings.query_results_layout.respect_plugin_capability
+                && settings.query_results_layout.plugin_opt_out.is_empty(),
+            "Phase 1 fixture must explicitly enable the 4x8 result grid for the notes plugin"
+        );
+        anyhow::ensure!(
+            !settings.note_save_on_close,
+            "Phase 1 fixture must not save or mutate notes when safely closing a panel"
+        );
+    }
     anyhow::ensure!(
         settings.experimental_jump_mode_enabled == scenario.jump_mode_enabled(),
         "fixture Jump Mode setting does not match the requested scenario"
@@ -325,7 +377,7 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
             anyhow::bail!("dashboard.json is not a typed document")
         }
     };
-    let expected_slot_ids = dashboard_slot_ids();
+    let expected_slot_ids = dashboard_slot_ids(scenario);
     let actual_slot_ids: Vec<String> = dashboard
         .slots
         .iter()
@@ -344,11 +396,7 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         "dashboard contains an unexpected widget or click behavior"
     );
 
-    let expected_queries = [
-        ("jump-qa-note-list", "note list"),
-        ("jump-qa-note-tags", "note tags"),
-        ("jump-qa-note-search", "note search"),
-    ];
+    let expected_queries = dashboard_queries(scenario);
     let mut typed_configs = std::collections::HashMap::new();
     for slot in &dashboard.slots {
         let slot_id = slot
@@ -406,10 +454,26 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         .map(|slug| format!("note:open:{slug}"))
         .collect();
     let mut query_observations = Vec::new();
-    for slot_id in ["jump-qa-note-list", "jump-qa-note-search"] {
+    let note_list_slot_ids = if scenario.phase1() {
+        vec![
+            "jump-qa-phase1-list-a",
+            "jump-qa-phase1-list-b",
+            "jump-qa-phase1-list-c",
+        ]
+    } else {
+        vec!["jump-qa-note-list", "jump-qa-note-search"]
+    };
+    for slot_id in note_list_slot_ids {
         let config = typed_configs
             .get(slot_id)
             .ok_or_else(|| anyhow::anyhow!("missing typed config for {slot_id:?}"))?;
+        let expected_query = if scenario.phase1() {
+            "note list"
+        } else if slot_id == "jump-qa-note-list" {
+            "note list"
+        } else {
+            "note search"
+        };
         let mut action_ids: Vec<String> = note_plugin
             .search(&config.query)
             .into_iter()
@@ -421,16 +485,49 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
             "production NotePlugin query {:?} did not return all stable fixture note IDs",
             config.query
         );
+        anyhow::ensure!(
+            config.query == expected_query,
+            "dashboard slot {slot_id:?} did not use the expected production query"
+        );
         query_observations.push(NoteQueryObservation {
             slot_id: slot_id.to_owned(),
             query: config.query.clone(),
             action_ids,
         });
     }
-    let tag_config = typed_configs
-        .get("jump-qa-note-tags")
-        .ok_or_else(|| anyhow::anyhow!("missing typed config for note tags"))?;
-    let tag_actions = note_plugin.search(&tag_config.query);
+    if scenario.phase1() {
+        let command_actions = note_plugin.search("note");
+        anyhow::ensure!(
+            command_actions.iter().any(|action| {
+                action.label == "note list" && action.action == "query:note list"
+            }),
+            "production NotePlugin command query did not expose the safe `note list` FillQuery target"
+        );
+        let mut duplicate_actions: Vec<_> = note_plugin
+            .search("note open Jump QA Shared Note")
+            .into_iter()
+            .map(|action| action.action)
+            .collect();
+        duplicate_actions.sort();
+        anyhow::ensure!(
+            duplicate_actions
+                == [
+                    "note:open:jump-qa-note-001".to_owned(),
+                    "note:open:jump-qa-note-002".to_owned(),
+                ],
+            "duplicate-title fixture records must retain their distinct note slugs"
+        );
+    }
+    let tag_query = if scenario.phase1() {
+        "note tags"
+    } else {
+        typed_configs
+            .get("jump-qa-note-tags")
+            .ok_or_else(|| anyhow::anyhow!("missing typed config for note tags"))?
+            .query
+            .as_str()
+    };
+    let tag_actions = note_plugin.search(tag_query);
     let mut observed_tag_counts = std::collections::BTreeMap::new();
     for action in &tag_actions {
         let tag = action
@@ -448,10 +545,17 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         observed_tag_counts == expected_tag_counts,
         "production NotePlugin tag query did not return the four expected underscore tags"
     );
+    let no_results = note_plugin.search(NO_RESULTS_QUERY);
+    anyhow::ensure!(
+        no_results.is_empty(),
+        "production NotePlugin no-results query unexpectedly returned actions"
+    );
     let production_semantics = ProductionSemanticsObservation {
         canonical_notes_dir: notes_dir.to_string_lossy().into_owned(),
         loaded_note_count: loaded_notes.len(),
         note_queries: query_observations,
+        no_results_query: NO_RESULTS_QUERY.to_owned(),
+        no_results_count: no_results.len(),
         observed_tags: observed_tag_counts
             .iter()
             .map(|(tag, count)| TagObservation {
@@ -515,7 +619,19 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn dashboard_fixture() -> DashboardConfig {
+fn dashboard_fixture(scenario: FixtureScenario) -> DashboardConfig {
+    if scenario.phase1() {
+        return DashboardConfig {
+            version: 1,
+            grid: GridConfig { rows: 2, cols: 2 },
+            slots: vec![
+                dashboard_slot("jump-qa-phase1-list-a", 0, 0, "note list"),
+                dashboard_slot("jump-qa-phase1-list-b", 0, 1, "note list"),
+                dashboard_slot("jump-qa-phase1-list-c", 1, 0, "note list"),
+                dashboard_slot("jump-qa-phase1-commands", 1, 1, "note"),
+            ],
+        };
+    }
     DashboardConfig {
         version: 1,
         grid: GridConfig { rows: 2, cols: 2 },
@@ -545,12 +661,37 @@ fn dashboard_slot(id: &str, row: i32, col: i32, query: &str) -> SlotConfig {
     }
 }
 
-fn dashboard_slot_ids() -> Vec<String> {
+fn dashboard_slot_ids(scenario: FixtureScenario) -> Vec<String> {
+    if scenario.phase1() {
+        return vec![
+            "jump-qa-phase1-list-a".into(),
+            "jump-qa-phase1-list-b".into(),
+            "jump-qa-phase1-list-c".into(),
+            "jump-qa-phase1-commands".into(),
+        ];
+    }
     vec![
         "jump-qa-note-list".into(),
         "jump-qa-note-tags".into(),
         "jump-qa-note-search".into(),
     ]
+}
+
+fn dashboard_queries(scenario: FixtureScenario) -> Vec<(&'static str, &'static str)> {
+    if scenario.phase1() {
+        vec![
+            ("jump-qa-phase1-list-a", "note list"),
+            ("jump-qa-phase1-list-b", "note list"),
+            ("jump-qa-phase1-list-c", "note list"),
+            ("jump-qa-phase1-commands", "note"),
+        ]
+    } else {
+        vec![
+            ("jump-qa-note-list", "note list"),
+            ("jump-qa-note-tags", "note tags"),
+            ("jump-qa-note-search", "note search"),
+        ]
+    }
 }
 
 fn note_ids() -> Vec<String> {
@@ -559,23 +700,33 @@ fn note_ids() -> Vec<String> {
         .collect()
 }
 
+fn fixture_note_title(scenario: FixtureScenario, ordinal: usize) -> String {
+    if scenario.phase1() && ordinal <= 2 {
+        "Jump QA Shared Note".to_owned()
+    } else {
+        format!("Jump QA Note {ordinal:03}")
+    }
+}
+
 fn fixture_manifest(note_ids: Vec<String>, scenario: FixtureScenario) -> FixtureManifest {
     let jump_mode_enabled = scenario.jump_mode_enabled();
     FixtureManifest {
         schema_version: 2,
-        fixture_id: if jump_mode_enabled {
-            "jump-mode-m05-query-probe-v1".to_owned()
-        } else {
-            FIXTURE_ID.to_owned()
+        fixture_id: match scenario {
+            FixtureScenario::QueryProbe => "jump-mode-m05-query-probe-v1".to_owned(),
+            FixtureScenario::Phase1Enabled => "jump-mode-m08-phase1-enabled-v1".to_owned(),
+            FixtureScenario::Phase1Disabled => "jump-mode-m08-phase1-disabled-v1".to_owned(),
+            FixtureScenario::Baseline => FIXTURE_ID.to_owned(),
         },
         scenario: scenario.label().to_owned(),
         experimental_jump_mode_enabled: jump_mode_enabled,
         launcher_hotkey: LAUNCHER_HOTKEY.to_owned(),
         enabled_plugins: vec![SAFE_PLUGIN.to_owned()],
-        dashboard_slot_ids: dashboard_slot_ids(),
+        dashboard_slot_ids: dashboard_slot_ids(scenario),
         note_ids,
         action_count: 0,
         external_note_open: "Neither".to_owned(),
+        no_results_query: NO_RESULTS_QUERY.to_owned(),
         safety: SafetyManifest {
             profile_isolated_by_working_directory: true,
             notes_path_supplied_by_ml_notes_dir: true,
@@ -651,8 +802,43 @@ mod tests {
     }
 
     #[test]
+    fn phase1_fixtures_use_safe_dense_fill_query_slots_and_distinct_note_slugs() {
+        let enabled = fixture_manifest(note_ids(), FixtureScenario::Phase1Enabled);
+        let disabled = fixture_manifest(note_ids(), FixtureScenario::Phase1Disabled);
+        assert!(enabled.experimental_jump_mode_enabled);
+        assert!(!disabled.experimental_jump_mode_enabled);
+        assert_eq!(enabled.dashboard_slot_ids.len(), 4);
+        assert_eq!(enabled.dashboard_slot_ids, disabled.dashboard_slot_ids);
+
+        let dashboard = dashboard_fixture(FixtureScenario::Phase1Enabled);
+        assert_eq!(dashboard.slots.len(), 4);
+        assert_eq!(dashboard.slots[0].settings["query"], "note list");
+        assert_eq!(dashboard.slots[1].settings["query"], "note list");
+        assert_eq!(dashboard.slots[2].settings["query"], "note list");
+        assert_eq!(dashboard.slots[3].settings["query"], "note");
+        assert!(dashboard.slots.iter().all(|slot| {
+            slot.widget == "pinned_query_results" && slot.settings["click_behavior"] == "fill_query"
+        }));
+
+        let slugs = note_ids();
+        assert_eq!(
+            fixture_note_title(FixtureScenario::Phase1Enabled, 1),
+            "Jump QA Shared Note"
+        );
+        assert_eq!(
+            fixture_note_title(FixtureScenario::Phase1Enabled, 2),
+            "Jump QA Shared Note"
+        );
+        assert_ne!(slugs[0], slugs[1]);
+        assert_ne!(
+            fixture_note_title(FixtureScenario::Phase1Enabled, 3),
+            fixture_note_title(FixtureScenario::Phase1Enabled, 1)
+        );
+    }
+
+    #[test]
     fn dashboard_fixture_only_fills_safe_note_queries() {
-        let dashboard = dashboard_fixture();
+        let dashboard = dashboard_fixture(FixtureScenario::Baseline);
         assert_eq!(dashboard.slots.len(), 3);
         for slot in dashboard.slots {
             assert_eq!(slot.widget, "pinned_query_results");

@@ -82,3 +82,40 @@ before sending Shift+Space, the observed query hint, and `X`. It checks
 that the hint handoff focused the real query field, the query stayed empty
 until that handoff, and the action count stayed zero. The default baseline
 request does not enable the observer or send native input.
+
+Phase 1 fixtures use the application's existing global grid configuration
+(`respect_plugin_capability = false`) with no explicit plugin opt-outs. The
+Notes plugin currently declares search capability only. This fixture choice
+exercises the existing grid renderer; production capability and opt-out
+selection remains unchanged. Fixture error notifications stay enabled so
+unexpected failures remain visible. Paste Sequence Next/Cancel shortcuts
+remain disabled independently.
+Run the complete Phase 1 native catalog (dashboard, note grid, query editing,
+cancellation, ownership, dense hints, and the separate disabled-feature case):
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File dev/jump_mode/run.ps1 -Scenario Phase1
+```
+
+`Phase1Enabled` and `Phase1Disabled` run the respective child session directly.
+The aggregate runs them sequentially, checks their status and owned cleanup,
+and copies only receipt-bound, hash-matching PNGs into its screenshot index.
+Enabled captures use actual F11 input and the retained ROOT observation from
+that exact frame/pass. The runner derives hint letters from the observed
+registered targets; a completed hint must preserve the query and activation
+count before a later Enter uses the existing handler. Every screenshot is
+checked against its own captured observation rather than a later state file.
+
+The Phase 1 fixture has four dashboard slots and 32 local notes with distinct
+slugs, including duplicate titles. Its larger window and explicit 4-by-8 grid
+allow the dense case to assert more than 26 actually visible result targets.
+A separate negative profile changes the Jump Mode gate and must fail typed
+validation before launch; both Paste Sequence shortcuts remain disabled.
+For a focused enabled smoke, use `-Scenario Phase1Enabled -Screen Dashboard`
+(catalog 01–05) or `-Scenario Phase1Enabled -Screen Grid` (grid, query,
+cancellation, dense-map and ownership cases). Both filters reuse the same
+scenario implementation and still perform fixture checks and owned cleanup.
+`-CaptureTimeoutSeconds` bounds each observation/capture step;
+`-OverallTimeoutSeconds` supplies the shared run deadline. See each run's
+manifest/events for the exact environment, window/DPI metadata and deadline
+outcome. Dashboard and Grid filters passed native M08 qualification; see JUMP_MODE_RESULTS.md for the accepted run IDs.
