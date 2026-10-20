@@ -284,8 +284,21 @@ impl Dashboard {
                 ),
             );
             let slot_clip = slot_rect.intersect(child.clip_rect());
-            let response =
-                child.scope_builder(egui::UiBuilder::new().max_rect(slot_rect), |slot_ui| {
+            let slot_ui_id = normalized.id.as_deref().map_or_else(
+                || {
+                    egui::Id::new((
+                        "dashboard-slot-legacy",
+                        self.target_generation,
+                        normalized.widget.as_str(),
+                        normalized.row,
+                        normalized.col,
+                    ))
+                },
+                |id| egui::Id::new(("dashboard-slot", id, normalized.widget.as_str())),
+            );
+            let response = child.scope_builder(
+                egui::UiBuilder::new().id(slot_ui_id).max_rect(slot_rect),
+                |slot_ui| {
                     slot_ui.set_clip_rect(slot_clip);
                     slot_ui.set_min_size(slot_rect.size());
                     Self::render_slot(
@@ -297,7 +310,8 @@ impl Dashboard {
                         activation,
                         &mut self.diagnostics,
                     )
-                });
+                },
+            );
             clicked = clicked.or(response.inner);
         }
 
@@ -345,10 +359,13 @@ impl Dashboard {
                 ui.vertical(|ui| {
                     let mut header_action = None;
                     let heading_rect = ui
-                        .horizontal(|ui| {
-                            let resp = ui.heading(&heading);
-                            header_action = slot.widget.header_ui(ui, header_ctx);
-                            resp.rect
+                        .push_id("header", |ui| {
+                            ui.horizontal(|ui| {
+                                let resp = ui.heading(&heading);
+                                header_action = slot.widget.header_ui(ui, header_ctx);
+                                resp.rect
+                            })
+                            .inner
                         })
                         .inner;
                     let header_height = heading_rect.height();
@@ -364,30 +381,34 @@ impl Dashboard {
                         },
                     };
 
-                    let action = match overflow {
-                        OverflowPolicy::Clip => Self::render_clipped_widget(
-                            slot,
-                            ui,
-                            body_ctx,
-                            activation,
-                            body_height,
-                            diagnostics,
-                            &heading,
-                            &diag_key,
-                        ),
-                        OverflowPolicy::Scroll { visibility } => Self::render_scrollable_widget(
-                            slot,
-                            ui,
-                            body_ctx,
-                            activation,
-                            body_height,
-                            slot_clip,
-                            visibility,
-                            diagnostics,
-                            &heading,
-                            &diag_key,
-                        ),
-                    };
+                    let action = ui
+                        .push_id("body", |ui| match overflow {
+                            OverflowPolicy::Clip => Self::render_clipped_widget(
+                                slot,
+                                ui,
+                                body_ctx,
+                                activation,
+                                body_height,
+                                diagnostics,
+                                &heading,
+                                &diag_key,
+                            ),
+                            OverflowPolicy::Scroll { visibility } => {
+                                Self::render_scrollable_widget(
+                                    slot,
+                                    ui,
+                                    body_ctx,
+                                    activation,
+                                    body_height,
+                                    slot_clip,
+                                    visibility,
+                                    diagnostics,
+                                    &heading,
+                                    &diag_key,
+                                )
+                            }
+                        })
+                        .inner;
 
                     header_action.or(action)
                 })
@@ -694,6 +715,16 @@ mod tests {
     #[derive(Default)]
     struct OverflowWidget;
 
+    #[derive(Default, Serialize, Deserialize)]
+    struct FocusButtonConfig {
+        action: String,
+    }
+
+    #[derive(Default)]
+    struct FocusButtonWidget {
+        action: String,
+    }
+
     #[derive(Clone, Copy)]
     struct SlotRecord {
         clip: egui::Rect,
@@ -704,6 +735,8 @@ mod tests {
     static OVERFLOW_RECORDS: Lazy<Mutex<Vec<egui::Rect>>> = Lazy::new(|| Mutex::new(Vec::new()));
     static CREATED: AtomicUsize = AtomicUsize::new(0);
     static UPDATED: AtomicUsize = AtomicUsize::new(0);
+    static FOCUS_BUTTON_IDS: Lazy<Mutex<HashMap<String, egui::Id>>> =
+        Lazy::new(|| Mutex::new(HashMap::new()));
 
     impl Widget for RecordingWidget {
         fn render(
@@ -753,6 +786,41 @@ mod tests {
             let (_, rect) = ui.allocate_space(egui::vec2(320.0, 180.0));
             OVERFLOW_RECORDS.lock().unwrap().push(rect);
             None
+        }
+    }
+
+    impl Widget for FocusButtonWidget {
+        fn render(
+            &mut self,
+            ui: &mut egui::Ui,
+            ctx: &DashboardContext<'_>,
+            _activation: WidgetActivation,
+        ) -> Option<WidgetAction> {
+            let response = ui.button("Refresh");
+            FOCUS_BUTTON_IDS
+                .lock()
+                .unwrap()
+                .insert(self.action.clone(), response.id);
+            if crate::dashboard::widgets::jump_response_clicked(
+                ui,
+                ctx,
+                &response,
+                || "refresh".to_owned(),
+                || "Refresh".to_owned(),
+                0,
+            ) {
+                Some(WidgetAction {
+                    action: Action {
+                        label: "Refresh".to_owned(),
+                        desc: "Test dashboard control".to_owned(),
+                        action: self.action.clone(),
+                        args: None,
+                    },
+                    query_override: None,
+                })
+            } else {
+                None
+            }
         }
     }
 
@@ -808,6 +876,15 @@ mod tests {
         reg
     }
 
+    fn focus_button_registry() -> WidgetRegistry {
+        let mut reg = WidgetRegistry::default();
+        reg.register(
+            "focus_button",
+            WidgetFactory::new(|cfg: FocusButtonConfig| FocusButtonWidget { action: cfg.action }),
+        );
+        reg
+    }
+
     fn dashboard_context<'a>(
         plugins: &'a PluginManager,
         data_cache: &'a DashboardDataCache,
@@ -837,6 +914,44 @@ mod tests {
             jump_mode_scope: None,
             jump_mode_activation_allowed: true,
         }
+    }
+
+    fn dashboard_ui_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(500.0, 240.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn enter_event() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: Some(egui::Key::Enter),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn dashboard_jump_scope(
+        jump: &crate::gui::jump_mode::ui::JumpModeUi,
+        target_generation: u64,
+    ) -> crate::gui::JumpModeScope {
+        use crate::gui::jump_mode::{SurfaceId, TargetGeneration};
+
+        jump.scope(
+            SurfaceId::Dashboard,
+            TargetGeneration(target_generation),
+            "dashboard-test",
+            egui::ViewportId::ROOT,
+            true,
+        )
+        .expect("enabled Jump Mode creates a dashboard scope")
     }
 
     fn dashboard_with_config(path: &Path, registry: WidgetRegistry) -> Dashboard {
@@ -913,6 +1028,127 @@ mod tests {
         assert!((a.max.x - b.min.x).abs() < f32::EPSILON || !a.intersects(b));
         assert_eq!(a.min.y, b.min.y);
         assert_eq!(a.height(), b.height());
+    }
+
+    #[test]
+    fn reloading_reordered_slots_keeps_native_enter_with_the_focused_slot() {
+        use crate::gui::jump_mode::ui::JumpModeUi;
+
+        let slot_a = SlotConfig {
+            id: Some("slot-a".to_owned()),
+            widget: "focus_button".to_owned(),
+            row: 0,
+            col: 0,
+            row_span: 1,
+            col_span: 1,
+            settings: json!({ "action": "refresh-a" }),
+            overflow: OverflowMode::Clip,
+        };
+        let slot_b = SlotConfig {
+            id: Some("slot-b".to_owned()),
+            widget: "focus_button".to_owned(),
+            row: 0,
+            col: 1,
+            row_span: 1,
+            col_span: 1,
+            settings: json!({ "action": "refresh-b" }),
+            overflow: OverflowMode::Clip,
+        };
+        let initial = DashboardConfig {
+            version: 1,
+            grid: GridConfig { rows: 1, cols: 2 },
+            slots: vec![slot_a.clone(), slot_b.clone()],
+        };
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("dashboard.json");
+        initial.save(&path).unwrap();
+        let mut dashboard = Dashboard::new(&path, focus_button_registry(), None);
+        let plugins = PluginManager::new();
+        let data_cache = DashboardDataCache::new();
+        let egui_ctx = egui::Context::default();
+        let mut jump = JumpModeUi::new(true);
+
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let initial_scope = dashboard_jump_scope(&jump, dashboard.target_generation());
+        let target = initial_scope
+            .child_namespace("slot-id:slot-a")
+            .child_namespace("body")
+            .target_id("refresh");
+        jump.finish_ui_pass();
+
+        jump.begin_frame();
+        assert!(jump.queue_focus_intent(target, egui::ViewportId::ROOT, jump.navigation_epoch(),));
+        jump.begin_ui_pass();
+        let mut ctx = dashboard_context(&plugins, &data_cache);
+        ctx.jump_mode_scope = Some(dashboard_jump_scope(&jump, dashboard.target_generation()));
+        egui_ctx
+            .run_ui(dashboard_ui_input(Vec::new()), |ui| {
+                let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500.0, 240.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    assert!(dashboard.ui(ui, &ctx, WidgetActivation::Click).is_none());
+                });
+            })
+            .drop_without_applying_deltas();
+        jump.finish_ui_pass();
+        jump.complete_frame(&egui_ctx, true, true);
+
+        let focused_slot_a_response = FOCUS_BUTTON_IDS
+            .lock()
+            .unwrap()
+            .get("refresh-a")
+            .copied()
+            .expect("slot A rendered a native Refresh response");
+        assert_eq!(
+            egui_ctx.memory(|memory| memory.focused()),
+            Some(focused_slot_a_response),
+            "Jump Mode should focus the actual response owned by slot A"
+        );
+
+        let mut reordered = initial;
+        reordered.slots = vec![
+            SlotConfig {
+                row: 0,
+                col: 0,
+                ..slot_b
+            },
+            SlotConfig {
+                row: 0,
+                col: 1,
+                ..slot_a
+            },
+        ];
+        reordered.save(&path).unwrap();
+        dashboard.reload();
+
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let mut ctx = dashboard_context(&plugins, &data_cache);
+        ctx.jump_mode_scope = Some(dashboard_jump_scope(&jump, dashboard.target_generation()));
+        let mut activated = None;
+        egui_ctx
+            .run_ui(dashboard_ui_input(vec![enter_event()]), |ui| {
+                let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500.0, 240.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    activated = dashboard.ui(ui, &ctx, WidgetActivation::Keyboard);
+                });
+            })
+            .drop_without_applying_deltas();
+        jump.finish_ui_pass();
+        jump.complete_frame(&egui_ctx, true, true);
+
+        let reordered_slot_a_response = FOCUS_BUTTON_IDS
+            .lock()
+            .unwrap()
+            .get("refresh-a")
+            .copied()
+            .expect("slot A rendered again after configuration reload");
+        assert_eq!(reordered_slot_a_response, focused_slot_a_response);
+        let activated = activated.expect("Enter activated the still-focused slot");
+        assert_eq!(activated.action.action, "refresh-a");
+        assert_eq!(activated.action.args, None);
+        assert_eq!(activated.query_override, None);
+        assert_ne!(activated.action.action, "refresh-b");
     }
 
     #[test]

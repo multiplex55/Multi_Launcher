@@ -6,10 +6,10 @@
 - Initial working tree: clean, including tracked task-input documents. No user changes copied/discarded.
 - Environment: Windows PowerShell; rustc/cargo 1.99.0; Nextest 0.9.135; egui/eframe 0.36.2 with local vendor patches.
 - Git branch creation needed sandbox escalation because .git is read-only in the normal sandbox; authorized creation succeeded.
-- Current milestone: M07 dashboard integration verified; checkpointing before M08 native catalog.
+- Current milestone: M07-B native slot identity verified; checkpointing, then M08 resumes with sole writer /root/implementation.
 - Latest GUI evidence: M05 PASS jump_m05_query_probe_20261020T000051Z_b5d58182; curated 00_query_hints.png.
-- Latest checkpoint: M07-A dashboard integration (this checkpoint); previous f6b6f92922ec786cc3dc239ac9e434157dfb97c9.
-- Push status: all checkpoints through M06-A (f6b6f929) pushed successfully; upstream configured.
+- Latest checkpoint: M07-B native slot identity repair (this checkpoint); previous37c03b2b3a4b17a27bf849a23c71f32822008392.
+- Push status: all checkpoints through M07-A (37c03b2b) pushed successfully; upstream configured.
 
 | Milestone | State | Checkpoint / verification | Evidence or dependency |
 |---|---|---|---|
@@ -20,8 +20,8 @@
 | M04 | complete | 24/24 all-Jump Nextest; scoped fmt/diff clean | Copied responses, multipass retention, one-shot intents |
 | M05 | complete | Input/painter tests + native query-only PASS | 000051Z_b5d58182: hint focus, normal typing, count0, owned cleanup |
 | M06 | complete | Actual grid/list targeting;38/38 Jump tests | Native note/grid catalog follows M08 as planned |
-| M07 | complete | Discrete responses/native focus;43/43 Jump tests | Native/root route evidence follows M08 |
-| M08 | pending | Native keyboard acceptance | M01, M06–M07 |
+| M07 | complete |43Jump tests + real Dashboard reload regression1/1 | M09 P2 repaired and read-only closure accepted |
+| M08 | in_progress | Native Phase1 catalog01-14,18 | Sole writer /root/implementation; M01/M06/M07 complete |
 | M09 | pending | Phase 1 review | M02–M08 |
 | M10 | pending | Modal ownership and Settings | M09 |
 | M11 | pending | Notes/Todo/Timer/Paste Sequence | M10 |
@@ -52,7 +52,7 @@ Parent owns branch, ledger, commits and one best-effort push per checkpoint. Pla
 
 ## Next action
 
-M07 verified and checkpointing. M08 native catalog next using bounded handoff below. All future profiles must disable Paste Sequence Next/Cancel shortcuts. M01 populated baseline is complete.
+M07-B repair verified and reviewer closed original P2. Parent checkpoints repair only, preserving partial M08 fixture diff; /root/implementation then resumes M08 from bounded handoff below. All future profiles must disable Paste Sequence Next/Cancel shortcuts. M01 populated baseline is complete.
 
 
 
@@ -175,3 +175,9 @@ M08/M13 capture clarification from focused source read: QA surface_eligibility d
 Shared lazy jump_response_clicked registers actual native Button responses and applies only Focus; Widget trait and original action routing remain intact. Slot header/body namespaces are disjoint; dynamic native and Jump IDs use durable record/execution payload plus duplicate occurrence, with history timestamp. Descriptive text is excluded unless it is dispatched query payload. DashboardContext activation policy limits opted-in click effects to first pass when enabled; collection continues each pass, feature-off behavior preserved.
 Registered: RecentCommands rows; PinnedQueryResults rows/Refresh; QueryList rows/Refresh; Todo Open summary/row; Calendar Open/Add; Tempfiles Add/ClearAll/Refresh/rowOpen/Clear; Timers New/Pause/Cancel; Scratchpad Copy/AppendTimestamp/Refresh; NowPlaying controls; RecycleBin Clean/Refresh; SystemActions rows/Refresh; SystemStatus Refresh. Mainquery remains M05. Unregistered: PinnedCommands and CommandHistory controls; complex Todo inline controls, Scratchpad editor, Calendar date/event controls (later adapters/exact final gaps).
 Verification actual default TEST profile: cargo nextest run --lib --features 'dev-smoke-binaries qa-framebuffer-capture' -E 'test(jump_mode)' exit0,43passed/5834filtered, runtime2.456s. Added actual PinnedQueryResultsWidget preflight/registered focus/freshEnter test preserves existing RunAction Action/args/query_override once without dispatching it. Adapter tests cover duplicate slots/headerbody, nativefocus, clipping/absence, durable identity and policy gating. Direct-mutation test is policy-level; no actual root forced-discard/native claim. Scoped rustfmt18files and source/full diff check pass. Compiler context/helper-shadow/history-borrow mistakes fixed; real-widget test collector setup corrected before final green. Parent reviewed source and test boundaries. M08 still required.
+M09 pre-review: read-only /root/review is reviewing completed M06/M07 core integration through37c03b2b in parallel with the sole M08 writer. It will not inspect in-flight harness changes or run builds. Gate remains pending until M08 evidence and final scoped review are available; no second broad core campaign is planned.
+M09 core pre-review finding P2 (confirmed): production Dashboard::ui creates slot child UIs with positional native IDs; semantic slot/header/body namespaces alone cannot prevent completed Refresh focus transferring from A to B after dashboard config reorder. Current generic duplicate-slot test manually supplies native push_id scopes not present in production. No other M06/M07 core findings. M08 source writer /root/implementation paused with partial fixture_generator changes preserved; approved M07-B repair is stable native slot/header/body identity (generation-aware legacy fallback) and actual Dashboard::ui reload/reorder regression. No serialized migration or unrelated refactor. Parent will commit only repair files/docs, then resume M08.
+## M07-B review repair outcome
+Production Dashboard::ui now uses explicit UiBuilder::id for slotID+widget native owner; legacy missing IDs include target_generation/widget/row/col. Borrowed tuple hashing avoids per-frame string allocation. Header/body native scopes are distinct. Saved configuration format unchanged.
+Actual Dashboard::ui regression with a local test WidgetRegistry renders two controls, focuses A through the Jump scope, saves/reloads reordered/moved slots, then verifies native responseID remains A and freshEnter returns refresh-a only. First attempt using push_id alone failed native-ID equality, reproducing instability; explicit UiBuilder::id repaired the actual owner boundary. `cargo nextest run --cargo-profile fast-dev --features 'dev-smoke-binaries qa-framebuffer-capture' --lib -E 'test(reloading_reordered_slots_keeps_native_enter_with_the_focused_slot)' --no-fail-fast` exit0,1passed. Scoped rustfmt and diff pass.
+Read-only reviewer closed original P2 after inspecting repair/regression; no remaining core findings. Exactly one production Dashboard instance exists; parent namespacing of global native IDs was optional hardening, not a finding, so no expansion. M08 partial fixture diff remains uncommitted and excluded from this repair checkpoint.
