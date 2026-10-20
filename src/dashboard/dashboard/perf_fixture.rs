@@ -304,6 +304,7 @@ impl DashboardCpuFixture {
                 diagnostics: None,
                 show_diagnostics_widget: false,
                 jump_mode_scope: None,
+                jump_mode_activation_allowed: true,
             };
             activated = self
                 .dashboard

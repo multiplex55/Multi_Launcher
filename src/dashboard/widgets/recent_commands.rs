@@ -1,5 +1,6 @@
 use super::{
-    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
+    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    dashboard_action_row_egui_id, edit_typed_settings, jump_action_identity, jump_response_clicked,
 };
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use eframe::egui;
@@ -60,7 +61,7 @@ impl Widget for RecentCommandsWidget {
     fn render(
         &mut self,
         ui: &mut egui::Ui,
-        _ctx: &DashboardContext<'_>,
+        ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
         let mut clicked = None;
@@ -68,13 +69,48 @@ impl Widget for RecentCommandsWidget {
         if let Some(history) = crate::history::with_history(|h| {
             h.iter().take(self.cfg.count).cloned().collect::<Vec<_>>()
         }) {
-            for entry in history {
-                if ui.button(&entry.action.label).clicked() {
-                    clicked = Some(WidgetAction {
-                        action: entry.action.clone(),
-                        query_override: Some(entry.query.clone()),
-                    });
-                }
+            for (order, entry) in history.iter().enumerate() {
+                let occurrence = history[..order]
+                    .iter()
+                    .filter(|previous| {
+                        previous.action.action == entry.action.action
+                            && previous.action.args == entry.action.args
+                            && previous.query == entry.query
+                            && previous.timestamp == entry.timestamp
+                    })
+                    .count();
+                let native_id = dashboard_action_row_egui_id(
+                    ui,
+                    &entry.action,
+                    None,
+                    Some(&entry.query),
+                    Some(entry.timestamp),
+                    occurrence,
+                );
+                ui.push_id(native_id, |ui| {
+                    let response = ui.button(&entry.action.label);
+                    if jump_response_clicked(
+                        ui,
+                        ctx,
+                        &response,
+                        || {
+                            jump_action_identity(
+                                &entry.action,
+                                None,
+                                Some(&entry.query),
+                                Some(entry.timestamp),
+                                occurrence,
+                            )
+                        },
+                        || entry.action.label.clone(),
+                        order as u64,
+                    ) {
+                        clicked = Some(WidgetAction {
+                            action: entry.action.clone(),
+                            query_override: Some(entry.query.clone()),
+                        });
+                    }
+                });
             }
         }
         clicked

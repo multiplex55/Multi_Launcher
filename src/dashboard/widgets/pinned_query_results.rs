@@ -1,7 +1,8 @@
 use super::{
     RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
-    default_refresh_throttle_secs, edit_typed_settings, observe_owned_search_publication,
-    plugin_names, query_suggestions, refresh_schedule, refresh_settings_ui, run_refresh_schedule,
+    dashboard_action_row_egui_id, default_refresh_throttle_secs, edit_typed_settings,
+    jump_action_identity, jump_response_clicked, observe_owned_search_publication, plugin_names,
+    query_suggestions, refresh_schedule, refresh_settings_ui, run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::common::query::{apply_action_filters, split_action_filters};
@@ -404,11 +405,45 @@ impl Widget for PinnedQueryResultsWidget {
             }
 
             let button_width = ui.available_width();
-            for action in &self.cache.data {
-                let response = ui.add_sized([button_width, 28.0], egui::Button::new(&action.label));
-                if response.clicked() {
-                    clicked = Some(self.build_click_action(action));
-                }
+            for (order, action) in self.cache.data.iter().enumerate() {
+                let occurrence = self.cache.data[..order]
+                    .iter()
+                    .filter(|previous| {
+                        previous.action == action.action
+                            && previous.args == action.args
+                            && previous.label == action.label
+                    })
+                    .count();
+                let native_id = dashboard_action_row_egui_id(
+                    ui,
+                    action,
+                    Some(&self.cfg.query),
+                    Some(&action.label),
+                    None,
+                    occurrence,
+                );
+                ui.push_id(native_id, |ui| {
+                    let response =
+                        ui.add_sized([button_width, 28.0], egui::Button::new(&action.label));
+                    if jump_response_clicked(
+                        ui,
+                        ctx,
+                        &response,
+                        || {
+                            jump_action_identity(
+                                action,
+                                Some(&self.cfg.query),
+                                Some(&action.label),
+                                None,
+                                occurrence,
+                            )
+                        },
+                        || action.label.clone(),
+                        order as u64,
+                    ) {
+                        clicked = Some(self.build_click_action(action));
+                    }
+                });
             }
         });
 
@@ -424,11 +459,7 @@ impl Widget for PinnedQueryResultsWidget {
         }
     }
 
-    fn header_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        _ctx: &DashboardContext<'_>,
-    ) -> Option<WidgetAction> {
+    fn header_ui(&mut self, ui: &mut egui::Ui, ctx: &DashboardContext<'_>) -> Option<WidgetAction> {
         let schedule = refresh_schedule(
             self.refresh_interval(),
             self.cfg.refresh_mode,
@@ -448,9 +479,190 @@ impl Widget for PinnedQueryResultsWidget {
                 self.cfg.refresh_interval_secs
             ),
         };
-        if ui.small_button("Refresh").on_hover_text(tooltip).clicked() {
+        let response = ui.small_button("Refresh").on_hover_text(tooltip);
+        if jump_response_clicked(
+            ui,
+            ctx,
+            &response,
+            || "refresh".into(),
+            || "Refresh".into(),
+            0,
+        ) {
             self.refresh_pending = true;
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod jump_mode_tests {
+    use super::*;
+    use crate::actions::ActionIdLookup;
+    use crate::dashboard::data_cache::DashboardDataCache;
+    use crate::gui::jump_mode::ui::JumpModeUi;
+    use crate::gui::jump_mode::{SurfaceId, TargetGeneration};
+    use once_cell::sync::Lazy;
+    use std::collections::HashMap;
+
+    fn input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 650.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn body_scope(jump: &JumpModeUi) -> crate::gui::JumpModeScope {
+        jump.scope(
+            SurfaceId::Dashboard,
+            TargetGeneration(7),
+            "dashboard-test",
+            egui::ViewportId::ROOT,
+            true,
+        )
+        .expect("enabled Jump Mode creates a dashboard scope")
+        .child_namespace("slot-id:pinned-query-results")
+        .child_namespace("body")
+    }
+
+    fn dashboard_context<'a>(
+        plugins: &'a crate::plugin::PluginManager,
+        data_cache: &'a DashboardDataCache,
+        jump_mode_scope: crate::gui::JumpModeScope,
+    ) -> DashboardContext<'a> {
+        static EMPTY_USAGE: Lazy<HashMap<String, u32>> = Lazy::new(HashMap::new);
+        static EMPTY_LOOKUP: Lazy<ActionIdLookup> = Lazy::new(ActionIdLookup::default);
+        DashboardContext {
+            actions: &[],
+            actions_by_id: &EMPTY_LOOKUP,
+            usage: &EMPTY_USAGE,
+            plugins,
+            enabled_plugins: None,
+            default_location: None,
+            data_cache,
+            actions_version: 0,
+            fav_version: 0,
+            notes_version: 0,
+            todo_version: 0,
+            calendar_version: 0,
+            clipboard_version: 0,
+            snippets_version: 0,
+            dashboard_visible: true,
+            dashboard_focused: true,
+            reduce_dashboard_work_when_unfocused: false,
+            diagnostics: None,
+            show_diagnostics_widget: false,
+            jump_mode_scope: Some(jump_mode_scope),
+            jump_mode_activation_allowed: true,
+        }
+    }
+
+    fn enter_event() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: Some(egui::Key::Enter),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn jump_mode_pinned_result_focus_then_enter_preserves_widget_action_payload() {
+        let expected_action = Action {
+            label: "Safe fixture action".into(),
+            desc: "A payload used only to verify routing.".into(),
+            action: "fixture:run".into(),
+            args: Some("--safe-value 17".into()),
+        };
+        let mut config = PinnedQueryResultsConfig {
+            query: "fixture source query".into(),
+            refresh_mode: RefreshMode::Manual,
+            ..Default::default()
+        };
+        config.click_behavior = ClickBehavior::RunAction;
+        let mut widget = PinnedQueryResultsWidget::new(config);
+        widget.cache.data = vec![expected_action.clone()];
+
+        let mut jump = JumpModeUi::new(true);
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let plugins = crate::plugin::PluginManager::new();
+        let data_cache = DashboardDataCache::new();
+        let egui_ctx = egui::Context::default();
+        let initial_context = dashboard_context(&plugins, &data_cache, body_scope(&jump));
+        let mut initial_action = None;
+        egui_ctx
+            .run_ui(input(Vec::new()), |ui| {
+                initial_action = widget.render(ui, &initial_context, WidgetActivation::Click);
+            })
+            .drop_without_applying_deltas();
+        assert!(initial_action.is_none());
+        jump.finish_ui_pass();
+        let target_id = jump
+            .pass_registry()
+            .and_then(|registry| registry.targets().first())
+            .expect("the actual pinned result response is registered")
+            .id()
+            .clone();
+        jump.complete_frame(&egui_ctx, true, true);
+
+        jump.begin_frame();
+        assert!(jump.queue_focus_intent(
+            target_id.clone(),
+            egui::ViewportId::ROOT,
+            jump.navigation_epoch(),
+        ));
+        jump.begin_ui_pass();
+
+        let context = dashboard_context(&plugins, &data_cache, body_scope(&jump));
+        let mut first_frame_action = None;
+        egui_ctx
+            .run_ui(input(Vec::new()), |ui| {
+                first_frame_action = widget.render(ui, &context, WidgetActivation::Click);
+            })
+            .drop_without_applying_deltas();
+        assert!(first_frame_action.is_none(), "jump focus must not activate");
+        jump.finish_ui_pass();
+        let registered = jump
+            .pass_registry()
+            .and_then(|registry| registry.get(&target_id))
+            .expect("the actual pinned result response is registered");
+        assert_eq!(
+            egui_ctx.memory(|memory| memory.focused()),
+            Some(registered.response_id()),
+            "the registered button response receives native focus"
+        );
+        jump.complete_frame(&egui_ctx, true, true);
+
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let context = dashboard_context(&plugins, &data_cache, body_scope(&jump));
+        let mut activation_count = 0;
+        let mut activated_action = None;
+        egui_ctx
+            .run_ui(input(vec![enter_event()]), |ui| {
+                if let Some(action) = widget.render(ui, &context, WidgetActivation::Click) {
+                    activation_count += 1;
+                    activated_action = Some(action);
+                }
+            })
+            .drop_without_applying_deltas();
+
+        assert_eq!(
+            activation_count, 1,
+            "fresh Enter uses the widget route once"
+        );
+        let activated_action = activated_action.expect("the focused row returns its action");
+        assert_eq!(activated_action.action, expected_action);
+        assert_eq!(
+            activated_action.query_override.as_deref(),
+            Some("Safe fixture action")
+        );
+        assert_eq!(widget.cfg.query, "fixture source query");
     }
 }

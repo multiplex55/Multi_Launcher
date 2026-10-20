@@ -1,7 +1,7 @@
 use super::{
     RefreshMode, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
-    default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
-    run_refresh_schedule,
+    default_refresh_throttle_secs, edit_typed_settings, jump_response_clicked, refresh_schedule,
+    refresh_settings_ui, run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::dashboard::DashboardRefreshRequest;
@@ -142,7 +142,15 @@ impl Widget for RecycleBinWidget {
         ui.label(format!("Size: {}", Self::fmt_size(info.size_bytes)));
         ui.label(format!("Items: {}", info.items));
 
-        if ui.button("Clean").clicked() {
+        let response = ui.button("Clean");
+        if jump_response_clicked(
+            ui,
+            ctx,
+            &response,
+            || "recycle-bin:clean".into(),
+            || "Clean".into(),
+            0,
+        ) {
             let action = Self::clean_action();
             return Some(WidgetAction {
                 query_override: Some(action.label.clone()),
@@ -160,11 +168,7 @@ impl Widget for RecycleBinWidget {
         }
     }
 
-    fn header_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        _ctx: &DashboardContext<'_>,
-    ) -> Option<WidgetAction> {
+    fn header_ui(&mut self, ui: &mut egui::Ui, ctx: &DashboardContext<'_>) -> Option<WidgetAction> {
         let schedule = refresh_schedule(
             self.refresh_interval(),
             self.cfg.refresh_mode,
@@ -184,7 +188,15 @@ impl Widget for RecycleBinWidget {
                 self.cfg.refresh_interval_secs
             ),
         };
-        if ui.small_button("Refresh").on_hover_text(tooltip).clicked() {
+        let response = ui.small_button("Refresh").on_hover_text(tooltip);
+        if jump_response_clicked(
+            ui,
+            ctx,
+            &response,
+            || "refresh".into(),
+            || "Refresh".into(),
+            0,
+        ) {
             self.refresh_pending = true;
         }
         None

@@ -1,6 +1,6 @@
 use super::{
     Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
-    query_suggestions,
+    jump_response_clicked, next_jump_duplicate_occurrence, query_suggestions,
 };
 use crate::actions::Action;
 use crate::dashboard::DashboardRefreshRequest;
@@ -272,7 +272,12 @@ impl TodoWidget {
         }
     }
 
-    fn render_summary(&mut self, ui: &mut egui::Ui, todos: &[TodoEntry]) -> Option<WidgetAction> {
+    fn render_summary(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &DashboardContext<'_>,
+        todos: &[TodoEntry],
+    ) -> Option<WidgetAction> {
         let normalized_filter_tags = self.normalized_filter_tags();
         let filtered: Vec<&TodoEntry> = todos
             .iter()
@@ -338,7 +343,15 @@ impl TodoWidget {
             });
             ui.horizontal(|ui| {
                 ui.label(format!("Todos: {done}/{total} done"));
-                if ui.button("Open todos").clicked() {
+                let response = ui.button("Open todos");
+                if jump_response_clicked(
+                    ui,
+                    ctx,
+                    &response,
+                    || "todos:open".into(),
+                    || "Open todos".into(),
+                    0,
+                ) {
                     action = Some(WidgetAction {
                         action: Action {
                             label: "Todos".into(),
@@ -378,6 +391,7 @@ impl TodoWidget {
         }
 
         let mut clicked = None;
+        let mut entry_occurrences = std::collections::HashMap::new();
         let row_height =
             ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y + 8.0;
         let scroll_id = ui.id().with("todo_list_scroll");
@@ -388,44 +402,73 @@ impl TodoWidget {
                 let min_row_width = ui.available_width().max(400.0);
                 for (idx, entry) in entries[range].iter().cloned() {
                     let mut entry_done = entry.done;
-                    ui.horizontal(|ui| {
-                        ui.set_min_width(min_row_width);
-                        if ui.checkbox(&mut entry_done, "").changed() {
-                            if let Err(err) = mark_done(TODO_FILE, idx) {
-                                tracing::error!("Failed to toggle todo #{idx}: {err}");
-                            } else {
-                                ctx.data_cache
-                                    .request_refresh(DashboardRefreshRequest::Todos);
+                    let native_row_id = if entry.id.is_empty() {
+                        ui.id()
+                            .with(("todo-entry-fallback", entry.text.as_str(), idx))
+                    } else {
+                        ui.id().with(("todo-entry", entry.id.as_str()))
+                    };
+                    ui.push_id(native_row_id, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.set_min_width(min_row_width);
+                            if ui.checkbox(&mut entry_done, "").changed() {
+                                if let Err(err) = mark_done(TODO_FILE, idx) {
+                                    tracing::error!("Failed to toggle todo #{idx}: {err}");
+                                } else {
+                                    ctx.data_cache
+                                        .request_refresh(DashboardRefreshRequest::Todos);
+                                }
                             }
-                        }
-                        let mut label = entry.text.clone();
-                        if entry.priority > 0 {
-                            label.push_str(&format!(" (p{})", entry.priority));
-                        }
-                        let text = if entry.done {
-                            egui::RichText::new(label).strikethrough()
-                        } else {
-                            egui::RichText::new(label)
-                        };
-                        ui.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Extend));
-                        if !entry.tags.is_empty() {
-                            let tags = entry.tags.join(", ");
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(format!("#{tags}")).small())
+                            let mut label = entry.text.clone();
+                            if entry.priority > 0 {
+                                label.push_str(&format!(" (p{})", entry.priority));
+                            }
+                            let text = if entry.done {
+                                egui::RichText::new(label).strikethrough()
+                            } else {
+                                egui::RichText::new(label)
+                            };
+                            ui.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Extend));
+                            if !entry.tags.is_empty() {
+                                let tags = entry.tags.join(", ");
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(format!("#{tags}")).small(),
+                                    )
                                     .wrap_mode(egui::TextWrapMode::Extend),
-                            );
-                        }
-                        if ui.small_button("Open").clicked() {
-                            clicked.get_or_insert(WidgetAction {
-                                action: Action {
-                                    label: entry.text.clone(),
-                                    desc: "Todo".into(),
-                                    action: format!("todo:edit:{idx}"),
-                                    args: None,
+                                );
+                            }
+                            let response = ui.small_button("Open");
+                            if jump_response_clicked(
+                                ui,
+                                ctx,
+                                &response,
+                                || {
+                                    let base = if entry.id.is_empty() {
+                                        format!("todo-entry-fallback:{}:{idx}", entry.text)
+                                    } else {
+                                        format!("todo-entry:{}", entry.id)
+                                    };
+                                    let occurrence = next_jump_duplicate_occurrence(
+                                        &mut entry_occurrences,
+                                        base.clone(),
+                                    );
+                                    format!("{base}/open:{occurrence}")
                                 },
-                                query_override: Some(format!("todo edit {}", entry.text)),
-                            });
-                        }
+                                || "Open".into(),
+                                idx as u64,
+                            ) {
+                                clicked.get_or_insert(WidgetAction {
+                                    action: Action {
+                                        label: entry.text.clone(),
+                                        desc: "Todo".into(),
+                                        action: format!("todo:edit:{idx}"),
+                                        args: None,
+                                    },
+                                    query_override: Some(format!("todo edit {}", entry.text)),
+                                });
+                            }
+                        });
                     });
                 }
             });
@@ -459,7 +502,7 @@ impl Widget for TodoWidget {
     ) -> Option<WidgetAction> {
         let snapshot = ctx.data_cache.snapshot();
         let todos = snapshot.todos.as_ref();
-        let mut action = self.render_summary(ui, todos);
+        let mut action = self.render_summary(ui, ctx, todos);
         ui.separator();
         if action.is_none() {
             action = self.render_list(ui, ctx, todos);

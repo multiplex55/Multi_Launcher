@@ -1,6 +1,6 @@
 # Jump Mode Results
 
-Work in progress on `feat/jump-mode-2026-10-19-c7e42`, based on `8f94b003a12853735d1cb4689c6ec4e53c4ace8e`. Checkpoints through `898b733f` are pushed to origin. The default-off setting, pure hint engine, scoped registry, input routing and clipped overlay are implemented. Real native query hint/focus/typing proof passed with zero action execution and verified cleanup. Grid/list integration is verified; dashboard and Phase 2 surface integration remain pending.
+Work in progress on `feat/jump-mode-2026-10-19-c7e42`, based on `8f94b003a12853735d1cb4689c6ec4e53c4ace8e`. Checkpoints through `f6b6f929` are pushed to origin. The default-off setting, pure hint engine, scoped registry, input routing and clipped overlay are implemented. Real native query hint/focus/typing proof passed with zero action execution and verified cleanup. Grid/list integration is verified; dashboard discrete controls are verified; native catalog and Phase 2 surface integration remain pending.
 
 ## Architecture and current inventory
 
@@ -92,3 +92,6 @@ Final Rust verification: `cargo nextest run --cargo-profile fast-dev --features 
 ## M06 grid/list checkpoint
 Visible actual list/grid responses now register result-generation/index identities, including equal-looking actions with distinct arguments. Hint completion changes the existing logical selection and keeps query focus/caret; no action is queued. FreshEnter retains existing action semantics.
 `cargo nextest run --cargo-profile fast-dev --features qa-framebuffer-capture --lib -E 'test(jump_mode)'`:38passed/5834skipped. New actual-root tests prove list/grid selection, fullActionargs, zero execution at completion/sameframeEnter, exactly once afterfreshEnter, query/caret preservation, forceddiscard, clipped/offscreen exclusion, generation cancellation and popupbackground exclusion. Scopedrustfmt/diff pass. M08 provides real note-list/native catalog evidence.
+## M07 dashboard checkpoint
+Actual native responses now opt in through one lazy focus-only helper, disjoint slot/header/body scope and stable native/Jump row identity. Existing clicks/WidgetActions remain the execution owner. First-pass activation policy gates direct effects while enabled; targets collect every pass.
+Supported inventory and explicit gaps are in execution ledger. `cargo nextest run --lib --features 'dev-smoke-binaries qa-framebuffer-capture' -E 'test(jump_mode)'` passed43/5834filtered, default test profile. Real pinned-query cached-action focus->Enter case preserves original RunAction payload/args/query_override exactly once; adapter tests verify identity, focus, clipped/absent targets and activation policy. Policy test does not claim actual root discarded-pass integration. Scoped rustfmt18files and diff checks pass. No destructive/media/clipboard operation executed. Native dashboard/root evidence follows M08.

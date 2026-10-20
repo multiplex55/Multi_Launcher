@@ -1,7 +1,8 @@
 use super::{
     BackgroundLoader, RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext,
-    WidgetSettingsUiResult, default_refresh_throttle_secs, edit_typed_settings, refresh_schedule,
-    refresh_settings_ui, run_refresh_schedule, submit_background_refresh,
+    WidgetSettingsUiResult, default_refresh_throttle_secs, edit_typed_settings,
+    jump_response_clicked, refresh_schedule, refresh_settings_ui, run_refresh_schedule,
+    submit_background_refresh,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -253,14 +254,30 @@ impl Widget for TempfilesWidget {
 
         let mut clicked = None;
         ui.horizontal(|ui| {
-            if ui.button("Add").clicked() {
+            let add_response = ui.button("Add");
+            if jump_response_clicked(
+                ui,
+                ctx,
+                &add_response,
+                || "tempfile:add".into(),
+                || "Add".into(),
+                0,
+            ) {
                 let action = Self::add_action();
                 clicked = Some(WidgetAction {
                     query_override: Some(action.label.clone()),
                     action,
                 });
             }
-            if ui.button("Clear all").clicked() {
+            let clear_all_response = ui.button("Clear all");
+            if jump_response_clicked(
+                ui,
+                ctx,
+                &clear_all_response,
+                || "tempfile:clear-all".into(),
+                || "Clear all".into(),
+                1,
+            ) {
                 let action = Self::clear_all_action();
                 clicked = Some(WidgetAction {
                     query_override: Some(action.label.clone()),
@@ -286,40 +303,58 @@ impl Widget for TempfilesWidget {
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, self.cache.data.len(), |ui, range| {
                 for entry in &self.cache.data[range] {
-                    ui.horizontal(|ui| {
-                        let display_name = entry.alias.as_deref().unwrap_or(&entry.file_name);
-                        ui.add(
-                            egui::Label::new(display_name).wrap_mode(egui::TextWrapMode::Extend),
-                        )
-                        .on_hover_text(entry.path.to_string_lossy());
-                        if let Some(alias) = &entry.alias
-                            && alias != &entry.file_name
-                        {
+                    ui.push_id(("tempfile", entry.path.as_path()), |ui| {
+                        ui.horizontal(|ui| {
+                            let display_name = entry.alias.as_deref().unwrap_or(&entry.file_name);
                             ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(format!("({})", entry.file_name)).small(),
-                                )
-                                .wrap_mode(egui::TextWrapMode::Extend),
-                            );
-                        }
-                        if ui
-                            .small_button("Open")
-                            .on_hover_text("Open file (not folder)")
-                            .clicked()
-                        {
-                            let action = Self::open_action(&entry.path, display_name);
-                            clicked = Some(WidgetAction {
-                                query_override: Some(action.label.clone()),
-                                action,
-                            });
-                        }
-                        if ui.small_button("Clear").clicked() {
-                            let action = Self::remove_action(&entry.path, display_name);
-                            clicked = Some(WidgetAction {
-                                query_override: Some(action.label.clone()),
-                                action,
-                            });
-                        }
+                                egui::Label::new(display_name)
+                                    .wrap_mode(egui::TextWrapMode::Extend),
+                            )
+                            .on_hover_text(entry.path.to_string_lossy());
+                            if let Some(alias) = &entry.alias
+                                && alias != &entry.file_name
+                            {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(format!("({})", entry.file_name))
+                                            .small(),
+                                    )
+                                    .wrap_mode(egui::TextWrapMode::Extend),
+                                );
+                            }
+                            let open_response = ui
+                                .small_button("Open")
+                                .on_hover_text("Open file (not folder)");
+                            if jump_response_clicked(
+                                ui,
+                                ctx,
+                                &open_response,
+                                || format!("tempfile:{}:open", entry.path.to_string_lossy()),
+                                || "Open".into(),
+                                2,
+                            ) {
+                                let action = Self::open_action(&entry.path, display_name);
+                                clicked = Some(WidgetAction {
+                                    query_override: Some(action.label.clone()),
+                                    action,
+                                });
+                            }
+                            let clear_response = ui.small_button("Clear");
+                            if jump_response_clicked(
+                                ui,
+                                ctx,
+                                &clear_response,
+                                || format!("tempfile:{}:clear", entry.path.to_string_lossy()),
+                                || "Clear".into(),
+                                3,
+                            ) {
+                                let action = Self::remove_action(&entry.path, display_name);
+                                clicked = Some(WidgetAction {
+                                    query_override: Some(action.label.clone()),
+                                    action,
+                                });
+                            }
+                        });
                     });
                 }
             });
@@ -336,11 +371,7 @@ impl Widget for TempfilesWidget {
         }
     }
 
-    fn header_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        _ctx: &DashboardContext<'_>,
-    ) -> Option<WidgetAction> {
+    fn header_ui(&mut self, ui: &mut egui::Ui, ctx: &DashboardContext<'_>) -> Option<WidgetAction> {
         let schedule = refresh_schedule(
             self.refresh_interval(),
             self.cfg.refresh_mode,
@@ -360,7 +391,15 @@ impl Widget for TempfilesWidget {
                 self.cfg.refresh_interval_secs
             ),
         };
-        if ui.small_button("Refresh").on_hover_text(tooltip).clicked() {
+        let response = ui.small_button("Refresh").on_hover_text(tooltip);
+        if jump_response_clicked(
+            ui,
+            ctx,
+            &response,
+            || "refresh".into(),
+            || "Refresh".into(),
+            0,
+        ) {
             self.refresh_pending = true;
         }
         None

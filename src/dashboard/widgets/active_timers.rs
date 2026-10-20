@@ -1,5 +1,6 @@
 use super::{
     Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
+    jump_response_clicked,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -86,20 +87,23 @@ impl ActiveTimersWidget {
 }
 
 impl Widget for ActiveTimersWidget {
-    fn header_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        _ctx: &DashboardContext<'_>,
-    ) -> Option<WidgetAction> {
-        ui.small_button("New Timer")
-            .clicked()
-            .then(Self::new_timer_action)
+    fn header_ui(&mut self, ui: &mut egui::Ui, ctx: &DashboardContext<'_>) -> Option<WidgetAction> {
+        let response = ui.small_button("New Timer");
+        jump_response_clicked(
+            ui,
+            ctx,
+            &response,
+            || "timer:new".into(),
+            || "New Timer".into(),
+            0,
+        )
+        .then(Self::new_timer_action)
     }
 
     fn render(
         &mut self,
         ui: &mut egui::Ui,
-        _ctx: &DashboardContext<'_>,
+        ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
         let mut timers = timer::running_timers();
@@ -110,36 +114,56 @@ impl Widget for ActiveTimersWidget {
             ui.label("No running timers");
         }
 
-        for (id, label, remaining, start_ts) in timers.into_iter().take(self.cfg.count) {
-            ui.horizontal(|ui| {
-                ui.label(format!(
-                    "{} – {} left",
-                    label,
-                    Self::format_duration(remaining)
-                ));
-                ui.label(egui::RichText::new(timer::format_ts(start_ts)).small());
-                if ui.small_button("Pause").clicked() {
-                    clicked = Some(WidgetAction {
-                        action: Action {
-                            label: format!("Pause timer {id}"),
-                            desc: "Timer".into(),
-                            action: format!("timer:pause:{id}"),
-                            args: None,
-                        },
-                        query_override: Some("timer pause".into()),
-                    });
-                }
-                if ui.small_button("Cancel").clicked() {
-                    clicked = Some(WidgetAction {
-                        action: Action {
-                            label: format!("Cancel timer {id}"),
-                            desc: "Timer".into(),
-                            action: format!("timer:cancel:{id}"),
-                            args: None,
-                        },
-                        query_override: Some("timer cancel".into()),
-                    });
-                }
+        for (order, (id, label, remaining, start_ts)) in
+            timers.into_iter().take(self.cfg.count).enumerate()
+        {
+            ui.push_id(("timer", id), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "{} – {} left",
+                        label,
+                        Self::format_duration(remaining)
+                    ));
+                    ui.label(egui::RichText::new(timer::format_ts(start_ts)).small());
+                    let pause_response = ui.small_button("Pause");
+                    if jump_response_clicked(
+                        ui,
+                        ctx,
+                        &pause_response,
+                        || format!("timer:{id}:pause"),
+                        || "Pause".into(),
+                        (order * 2) as u64,
+                    ) {
+                        clicked = Some(WidgetAction {
+                            action: Action {
+                                label: format!("Pause timer {id}"),
+                                desc: "Timer".into(),
+                                action: format!("timer:pause:{id}"),
+                                args: None,
+                            },
+                            query_override: Some("timer pause".into()),
+                        });
+                    }
+                    let cancel_response = ui.small_button("Cancel");
+                    if jump_response_clicked(
+                        ui,
+                        ctx,
+                        &cancel_response,
+                        || format!("timer:{id}:cancel"),
+                        || "Cancel".into(),
+                        (order * 2 + 1) as u64,
+                    ) {
+                        clicked = Some(WidgetAction {
+                            action: Action {
+                                label: format!("Cancel timer {id}"),
+                                desc: "Timer".into(),
+                                action: format!("timer:cancel:{id}"),
+                                args: None,
+                            },
+                            query_override: Some("timer cancel".into()),
+                        });
+                    }
+                });
             });
         }
 

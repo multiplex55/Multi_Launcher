@@ -3791,6 +3791,7 @@ impl LauncherApp {
                             ),
                         )
                     }),
+                    jump_mode_activation_allowed: !self.jump_mode_enabled() || first_ui_pass,
                 };
                 if let Some(interval) =
                     crate::dashboard::repaint_interval(crate::dashboard::RepaintPolicyInput {

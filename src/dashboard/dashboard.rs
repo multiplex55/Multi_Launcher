@@ -56,6 +56,9 @@ pub struct DashboardContext<'a> {
     pub diagnostics: Option<DashboardDiagnosticsSnapshot>,
     pub show_diagnostics_widget: bool,
     pub jump_mode_scope: Option<crate::gui::JumpModeScope>,
+    /// Allows widget click activation in this pass. A discarded Jump Mode
+    /// pass still collects targets, but must not repeat direct mutations.
+    pub jump_mode_activation_allowed: bool,
 }
 
 struct SlotRuntime {
@@ -320,11 +323,19 @@ impl Dashboard {
                 },
                 |id| format!("slot-id:{id}"),
             );
-            let mut scoped_context = ctx.clone();
-            scoped_context.jump_mode_scope = Some(scope.child_namespace(slot_identity));
-            scoped_context
+            let slot_scope = scope.child_namespace(slot_identity);
+            let mut header_context = ctx.clone();
+            header_context.jump_mode_scope = Some(slot_scope.child_namespace("header"));
+            let mut body_context = ctx.clone();
+            body_context.jump_mode_scope = Some(slot_scope.child_namespace("body"));
+            (header_context, body_context)
         });
-        let ctx = scoped_context.as_ref().unwrap_or(ctx);
+        let header_ctx = scoped_context
+            .as_ref()
+            .map_or(ctx, |(header_ctx, _)| header_ctx);
+        let body_ctx = scoped_context
+            .as_ref()
+            .map_or(ctx, |(_, body_ctx)| body_ctx);
         let (heading, diag_key) = slot_diagnostics_label(&slot.slot);
 
         ui.set_clip_rect(slot_clip);
@@ -336,7 +347,7 @@ impl Dashboard {
                     let heading_rect = ui
                         .horizontal(|ui| {
                             let resp = ui.heading(&heading);
-                            header_action = slot.widget.header_ui(ui, ctx);
+                            header_action = slot.widget.header_ui(ui, header_ctx);
                             resp.rect
                         })
                         .inner;
@@ -357,7 +368,7 @@ impl Dashboard {
                         OverflowPolicy::Clip => Self::render_clipped_widget(
                             slot,
                             ui,
-                            ctx,
+                            body_ctx,
                             activation,
                             body_height,
                             diagnostics,
@@ -367,7 +378,7 @@ impl Dashboard {
                         OverflowPolicy::Scroll { visibility } => Self::render_scrollable_widget(
                             slot,
                             ui,
-                            ctx,
+                            body_ctx,
                             activation,
                             body_height,
                             slot_clip,
@@ -824,6 +835,7 @@ mod tests {
             diagnostics: None,
             show_diagnostics_widget: true,
             jump_mode_scope: None,
+            jump_mode_activation_allowed: true,
         }
     }
 

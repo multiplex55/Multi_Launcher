@@ -1,5 +1,6 @@
 use super::{
     Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
+    jump_response_clicked,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -81,22 +82,62 @@ impl Widget for NowPlayingWidget {
     fn render(
         &mut self,
         ui: &mut egui::Ui,
-        _ctx: &DashboardContext<'_>,
+        ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
         let mut action = None;
         ui.horizontal_wrapped(|ui| {
-            if self.cfg.show_play && ui.button("Play").clicked() {
-                action = Some(Self::action("Media play", "media:play", "media play"));
+            if self.cfg.show_play {
+                let response = ui.button("Play");
+                if jump_response_clicked(
+                    ui,
+                    ctx,
+                    &response,
+                    || "media:play".into(),
+                    || "Play".into(),
+                    0,
+                ) {
+                    action = Some(Self::action("Media play", "media:play", "media play"));
+                }
             }
-            if self.cfg.show_pause && ui.button("Pause").clicked() {
-                action = Some(Self::action("Media pause", "media:pause", "media pause"));
+            if self.cfg.show_pause {
+                let response = ui.button("Pause");
+                if jump_response_clicked(
+                    ui,
+                    ctx,
+                    &response,
+                    || "media:pause".into(),
+                    || "Pause".into(),
+                    1,
+                ) {
+                    action = Some(Self::action("Media pause", "media:pause", "media pause"));
+                }
             }
-            if self.cfg.show_prev && ui.button("Prev").clicked() {
-                action = Some(Self::action("Media prev", "media:prev", "media prev"));
+            if self.cfg.show_prev {
+                let response = ui.button("Prev");
+                if jump_response_clicked(
+                    ui,
+                    ctx,
+                    &response,
+                    || "media:prev".into(),
+                    || "Prev".into(),
+                    2,
+                ) {
+                    action = Some(Self::action("Media prev", "media:prev", "media prev"));
+                }
             }
-            if self.cfg.show_next && ui.button("Next").clicked() {
-                action = Some(Self::action("Media next", "media:next", "media next"));
+            if self.cfg.show_next {
+                let response = ui.button("Next");
+                if jump_response_clicked(
+                    ui,
+                    ctx,
+                    &response,
+                    || "media:next".into(),
+                    || "Next".into(),
+                    3,
+                ) {
+                    action = Some(Self::action("Media next", "media:next", "media next"));
+                }
             }
         });
         action

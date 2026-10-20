@@ -460,6 +460,7 @@ impl CommandHistoryWidget {
             diagnostics: None,
             show_diagnostics_widget: false,
             jump_mode_scope: None,
+            jump_mode_activation_allowed: true,
         };
         let mut widget = Self::new(CommandHistoryConfig {
             count: pins.len(),
@@ -618,6 +619,7 @@ mod tests {
             diagnostics: None,
             show_diagnostics_widget: false,
             jump_mode_scope: None,
+            jump_mode_activation_allowed: true,
         }
     }
 

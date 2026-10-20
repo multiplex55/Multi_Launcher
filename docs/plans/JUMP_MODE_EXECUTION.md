@@ -6,10 +6,10 @@
 - Initial working tree: clean, including tracked task-input documents. No user changes copied/discarded.
 - Environment: Windows PowerShell; rustc/cargo 1.99.0; Nextest 0.9.135; egui/eframe 0.36.2 with local vendor patches.
 - Git branch creation needed sandbox escalation because .git is read-only in the normal sandbox; authorized creation succeeded.
-- Current milestone: M06 implementation verified; checkpointing before M07 dashboard integration.
+- Current milestone: M07 dashboard integration verified; checkpointing before M08 native catalog.
 - Latest GUI evidence: M05 PASS jump_m05_query_probe_20261020T000051Z_b5d58182; curated 00_query_hints.png.
-- Latest checkpoint: 898b733f7f8b010e10e25e64d4f96410a481fab7 — test(jump): [M05-C] prove native query hint focus handoff.
-- Push status: all checkpoints through M05-C (898b733f) pushed successfully; upstream configured.
+- Latest checkpoint: M07-A dashboard integration (this checkpoint); previous f6b6f92922ec786cc3dc239ac9e434157dfb97c9.
+- Push status: all checkpoints through M06-A (f6b6f929) pushed successfully; upstream configured.
 
 | Milestone | State | Checkpoint / verification | Evidence or dependency |
 |---|---|---|---|
@@ -20,7 +20,7 @@
 | M04 | complete | 24/24 all-Jump Nextest; scoped fmt/diff clean | Copied responses, multipass retention, one-shot intents |
 | M05 | complete | Input/painter tests + native query-only PASS | 000051Z_b5d58182: hint focus, normal typing, count0, owned cleanup |
 | M06 | complete | Actual grid/list targeting;38/38 Jump tests | Native note/grid catalog follows M08 as planned |
-| M07 | pending | Dashboard integration | M05 |
+| M07 | complete | Discrete responses/native focus;43/43 Jump tests | Native/root route evidence follows M08 |
 | M08 | pending | Native keyboard acceptance | M01, M06–M07 |
 | M09 | pending | Phase 1 review | M02–M08 |
 | M10 | pending | Modal ownership and Settings | M09 |
@@ -52,7 +52,7 @@ Parent owns branch, ledger, commits and one best-effort push per checkpoint. Pla
 
 ## Next action
 
-M06 verified and checkpointing. M07 dashboard integration next using bounded handoff below. All future profiles must disable Paste Sequence Next/Cancel shortcuts. M01 populated baseline is complete.
+M07 verified and checkpointing. M08 native catalog next using bounded handoff below. All future profiles must disable Paste Sequence Next/Cancel shortcuts. M01 populated baseline is complete.
 
 
 
@@ -166,3 +166,12 @@ Safe existing commands note:dialog, todo:dialog, timer:dialog:timer/alarm, paste
 ## M06 outcome
 Actual list/grid Responses register generation/index RootResult identities after query processing, so duplicate labels/commands/args remain distinct. Select updates existing selected and requests actual query response focus without cursor reconstruction; only changedselection requests repaint. Existing freshEnter activation remains authoritative. Query-only registry assertions intentionally include visiblecards.
 Verification: cargo nextest run --cargo-profile fast-dev --features qa-framebuffer-capture --lib -E 'test(jump_mode)' exit0;38passed/5834skipped. New tests cover list+grid secondduplicate fullActionargs, unchangedquery/caret, forceddiscard/sameframeEnter0, laterfreshEnter1, virtualized/clipped population, generationcancel and popupownership. Scopedrustfmt/diff clean. Compiler AtomLayoutResponse wrapper mismatch corrected beforetests. Accidental cargo fmt formatting-only churn explicitly restored in native.rs/lib.rs/paste_sequence/playback.rs; no unrelated source diff remains. Native note/prefix/dense screenshots reserved M08.
+## M12 bounded planning handoff
+Reuse shared owner/scope adapters: native checkbox/radio/selectable actualResponse Focus-only; separate radiooptions unless group arrows proven. Vendored slider supports focused bounded orientationarrows, but composite Response switches to embeddedDragValue ID during editing: representative helper may show_value(false) thumb plus explicit boundedDragValue, separate targets. DragValue up/down adjusts, left/right caret. ComboBox.show_ui.response button nativeEnter/Space opens; register visible options in popupscope rather than assume arrowselection. Multiline expliciteditorID truefocus/caret; nativekeys resume afterjump. Customtab/tree/row needs actualowner Enter path.
+MkMacro files mkmacro_dialog/{mod,step_table,navigation,toolbar,macro_properties,macro_list,outline}. ui(ctx) currently noApp: optional scope fromroot host, noAppdependency. table_modal_open/other_modal_open existing guards cover editor/search/package/confirm/keycapture/recording/pickers; suppressunsupported. Durable macroID/MkStep.id/draft_revision/Selection owner. step_table show_with_layout uses visible/folded rows; step_drag Response scoped macroID/stepID, actionname currentlydoubleclickeditor. Jump visible row selects existingSelection, focus existing navigation::table_id; preserve draft/revision/folds/noautoscroll. Don't call full navigate on alreadyvisible target (expands/scrolls); validateIDs and useexistingselection. Separate foldbutton Focus thenEnter Command::Fold; neverplayback. ToolbarState/ToolbarCommand/decide/command_enabled authoritative; nativeautomation onlysafeOutline/propertygroups/navigation, neverRun/Debug/record/capture/playback/Save.
+Properties concrete show_identity Name/Descriptionmultiline/Enabled/FolderCombo; show_playback Speedslider and bounded randomdelay/offsetDragValues; property_group selectableheaders. Resolution leavesdraft+revisionunchanged. Isolated inertDelay/Commentsteps explicitIDs; snapshotdocument/revision/selection/folds/runtime. Focusedtests rowlogicalselection/nochange/noplayback, foldfreshEnterpresentation, multilinetyping, thumb/numericbounds, combopopupownership/activation, unsupportededitorbackgroundblock, offscreen/foldedexclude anddensevisiblepopulation. Existing tests macro_properties property_controls_persist_presentation_without_mutating_macro_or_capture_controls/render_properties/render_contents/accessible_bounds, navigationstableIDs, step_table table_move_shortcuts.../breakpoint_mutation..., macro_list rendering_search... . OneactualrootMkMacro M13scenario; noengine/playbackrefactor.
+M08/M13 capture clarification from focused source read: QA surface_eligibility does NOT reject ordinary Settings/Notes/Todo/Timer/PasteSequence windows (it blocks tools/OCR/prompts/confirmation/ActionSheet/keycapture). Ordinary ROOT dialog catalog14-17 needs no eligibility relaxation: use observer wait_for_active_hints=false. M10 observer target filter must follow active navigation owner rather than root_owner_allowed alone. Keep captureeligibility separate from navigationeligibility; only if an actually required confirmation screenshot hits strictblock should a named sameROOT opt-in policy be considered consistently at arming/revalidation/issue/retained/merge. No speculative new policy now.
+## M07 outcome and exact inventory
+Shared lazy jump_response_clicked registers actual native Button responses and applies only Focus; Widget trait and original action routing remain intact. Slot header/body namespaces are disjoint; dynamic native and Jump IDs use durable record/execution payload plus duplicate occurrence, with history timestamp. Descriptive text is excluded unless it is dispatched query payload. DashboardContext activation policy limits opted-in click effects to first pass when enabled; collection continues each pass, feature-off behavior preserved.
+Registered: RecentCommands rows; PinnedQueryResults rows/Refresh; QueryList rows/Refresh; Todo Open summary/row; Calendar Open/Add; Tempfiles Add/ClearAll/Refresh/rowOpen/Clear; Timers New/Pause/Cancel; Scratchpad Copy/AppendTimestamp/Refresh; NowPlaying controls; RecycleBin Clean/Refresh; SystemActions rows/Refresh; SystemStatus Refresh. Mainquery remains M05. Unregistered: PinnedCommands and CommandHistory controls; complex Todo inline controls, Scratchpad editor, Calendar date/event controls (later adapters/exact final gaps).
+Verification actual default TEST profile: cargo nextest run --lib --features 'dev-smoke-binaries qa-framebuffer-capture' -E 'test(jump_mode)' exit0,43passed/5834filtered, runtime2.456s. Added actual PinnedQueryResultsWidget preflight/registered focus/freshEnter test preserves existing RunAction Action/args/query_override once without dispatching it. Adapter tests cover duplicate slots/headerbody, nativefocus, clipping/absence, durable identity and policy gating. Direct-mutation test is policy-level; no actual root forced-discard/native claim. Scoped rustfmt18files and source/full diff check pass. Compiler context/helper-shadow/history-borrow mistakes fixed; real-widget test collector setup corrected before final green. Parent reviewed source and test boundaries. M08 still required.

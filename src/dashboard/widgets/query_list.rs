@@ -1,8 +1,9 @@
 use super::render::RefreshSchedule;
 use super::{
     RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
-    default_refresh_throttle_secs, edit_typed_settings, observe_search_generation,
-    refresh_schedule, refresh_settings_ui, run_refresh_schedule,
+    dashboard_action_row_egui_id, default_refresh_throttle_secs, edit_typed_settings,
+    jump_action_identity, jump_response_clicked, observe_search_generation, refresh_schedule,
+    refresh_settings_ui, run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -291,23 +292,55 @@ impl Widget for QueryListWidget {
             .id_salt(scroll_id)
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, max_rows, |ui, range| {
-                for action in &self.cache.data[range] {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(
+                for index in range {
+                    let action = &self.cache.data[index];
+                    let occurrence = self.cache.data[..index]
+                        .iter()
+                        .filter(|previous| {
+                            previous.action == action.action
+                                && previous.args == action.args
+                                && previous.label == action.label
+                        })
+                        .count();
+                    let native_id = dashboard_action_row_egui_id(
+                        ui,
+                        action,
+                        Some(&self.cfg.query),
+                        Some(&action.label),
+                        None,
+                        occurrence,
+                    );
+                    ui.push_id(native_id, |ui| {
+                        ui.horizontal(|ui| {
+                            let response = ui.add(
                                 egui::Button::new(&action.label)
                                     .wrap_mode(egui::TextWrapMode::Extend),
-                            )
-                            .clicked()
-                        {
-                            clicked = Some(action.clone());
-                        }
-                        if self.cfg.show_desc {
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(&action.desc).small())
-                                    .wrap_mode(egui::TextWrapMode::Extend),
                             );
-                        }
+                            if jump_response_clicked(
+                                ui,
+                                ctx,
+                                &response,
+                                || {
+                                    jump_action_identity(
+                                        action,
+                                        Some(&self.cfg.query),
+                                        Some(&action.label),
+                                        None,
+                                        occurrence,
+                                    )
+                                },
+                                || action.label.clone(),
+                                index as u64,
+                            ) {
+                                clicked = Some(action.clone());
+                            }
+                            if self.cfg.show_desc {
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(&action.desc).small())
+                                        .wrap_mode(egui::TextWrapMode::Extend),
+                                );
+                            }
+                        });
                     });
                 }
             });
@@ -327,11 +360,7 @@ impl Widget for QueryListWidget {
         }
     }
 
-    fn header_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        _ctx: &DashboardContext<'_>,
-    ) -> Option<WidgetAction> {
+    fn header_ui(&mut self, ui: &mut egui::Ui, ctx: &DashboardContext<'_>) -> Option<WidgetAction> {
         let schedule = refresh_schedule(
             self.refresh_interval(),
             self.cfg.refresh_mode,
@@ -351,7 +380,15 @@ impl Widget for QueryListWidget {
                 self.refresh_interval().as_secs_f32()
             ),
         };
-        if ui.small_button("Refresh").on_hover_text(tooltip).clicked() {
+        let response = ui.small_button("Refresh").on_hover_text(tooltip);
+        if jump_response_clicked(
+            ui,
+            ctx,
+            &response,
+            || "refresh".into(),
+            || "Refresh".into(),
+            0,
+        ) {
             self.refresh_pending = true;
         }
         None

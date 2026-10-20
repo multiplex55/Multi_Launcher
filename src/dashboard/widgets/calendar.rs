@@ -1,5 +1,6 @@
 use super::{
     Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
+    jump_response_clicked,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -221,6 +222,7 @@ impl CalendarWidget {
     fn render_header(
         &mut self,
         ui: &mut egui::Ui,
+        ctx: &DashboardContext<'_>,
         selected_date: NaiveDate,
     ) -> Option<WidgetAction> {
         let mut action = None;
@@ -255,7 +257,15 @@ impl CalendarWidget {
                 }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("+ Add").clicked() {
+                let add_response = ui.small_button("+ Add");
+                if jump_response_clicked(
+                    ui,
+                    ctx,
+                    &add_response,
+                    || "calendar:add".into(),
+                    || "+ Add".into(),
+                    0,
+                ) {
                     let input = format!("{} all-day New event", selected_date.format("%Y-%m-%d"));
                     action = Some(WidgetAction {
                         action: Action {
@@ -267,7 +277,15 @@ impl CalendarWidget {
                         query_override: Some("cal add".into()),
                     });
                 }
-                if ui.small_button("Open").clicked() {
+                let open_response = ui.small_button("Open");
+                if jump_response_clicked(
+                    ui,
+                    ctx,
+                    &open_response,
+                    || "calendar:open".into(),
+                    || "Open calendar".into(),
+                    1,
+                ) {
                     let view = match self.cfg.mode {
                         CalendarWidgetMode::Day => "day",
                         CalendarWidgetMode::Week => "week",
@@ -410,7 +428,7 @@ impl Widget for CalendarWidget {
         let snapshot = ctx.data_cache.snapshot();
         let calendar = snapshot.calendar.as_ref();
 
-        if let Some(action) = self.render_header(ui, selected_date) {
+        if let Some(action) = self.render_header(ui, ctx, selected_date) {
             return Some(action);
         }
 

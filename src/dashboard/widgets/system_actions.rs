@@ -1,7 +1,8 @@
 use super::{
     RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
-    default_refresh_throttle_secs, edit_typed_settings, find_plugin, refresh_schedule,
-    refresh_settings_ui, run_refresh_schedule,
+    dashboard_action_row_egui_id, default_refresh_throttle_secs, edit_typed_settings, find_plugin,
+    jump_action_identity, jump_response_clicked, refresh_schedule, refresh_settings_ui,
+    run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -137,10 +138,36 @@ impl Widget for SystemWidget {
         }
 
         let mut clicked = None;
-        for action in &self.cache.data {
-            if ui.button(&action.label).clicked() {
-                clicked = Some(action.clone());
-            }
+        for (order, action) in self.cache.data.iter().enumerate() {
+            let occurrence = self.cache.data[..order]
+                .iter()
+                .filter(|previous| {
+                    previous.action == action.action
+                        && previous.args == action.args
+                        && previous.label == action.label
+                })
+                .count();
+            let native_id = dashboard_action_row_egui_id(
+                ui,
+                action,
+                None,
+                Some(&action.label),
+                None,
+                occurrence,
+            );
+            ui.push_id(native_id, |ui| {
+                let response = ui.button(&action.label);
+                if jump_response_clicked(
+                    ui,
+                    ctx,
+                    &response,
+                    || jump_action_identity(action, None, Some(&action.label), None, occurrence),
+                    || action.label.clone(),
+                    order as u64,
+                ) {
+                    clicked = Some(action.clone());
+                }
+            });
         }
 
         clicked.map(|action| WidgetAction {
@@ -158,11 +185,7 @@ impl Widget for SystemWidget {
         }
     }
 
-    fn header_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        _ctx: &DashboardContext<'_>,
-    ) -> Option<WidgetAction> {
+    fn header_ui(&mut self, ui: &mut egui::Ui, ctx: &DashboardContext<'_>) -> Option<WidgetAction> {
         let schedule = refresh_schedule(
             self.refresh_interval(),
             self.cfg.refresh_mode,
@@ -182,7 +205,15 @@ impl Widget for SystemWidget {
                 self.cfg.refresh_interval_secs
             ),
         };
-        if ui.small_button("Refresh").on_hover_text(tooltip).clicked() {
+        let response = ui.small_button("Refresh").on_hover_text(tooltip);
+        if jump_response_clicked(
+            ui,
+            ctx,
+            &response,
+            || "refresh".into(),
+            || "Refresh".into(),
+            0,
+        ) {
             self.refresh_pending = true;
         }
         None
