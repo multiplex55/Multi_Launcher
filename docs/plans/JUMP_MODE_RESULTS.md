@@ -1,11 +1,11 @@
 # Jump Mode Results
 
-Implementation is in progress. M00–M11 and M12-A complex controls are complete; M12-B MkMacro is next. M13–M15 remain pending. Phase 1 native evidence is accepted; native Settings/dialog/complex-control evidence remains pending.
+Implementation is in progress. M00–M12 are complete, including complex controls and representative MkMacro integration. M13–M15 remain pending. Phase 1 native evidence is accepted; native Settings/dialog/complex-control evidence remains pending.
 
 - Branch: feat/jump-mode-2026-10-19-c7e42.
 - Starting SHA: 8f94b003a12853735d1cb4689c6ec4e53c4ace8e.
-- Latest completed checkpoint: 1efa8ac29ee0ce7d5ca3dd352229568e50f8a4d6 (M11-B).
-- All checkpoint commits through M11-B were pushed normally to origin; no local-only task commits.
+- Latest completed checkpoint: dae06ea7008b7e6c148800cb211707e681da0c2f (M12-A).
+- All checkpoint commits through M12-A were pushed normally to origin; no local-only task commits.
 - Current ownership, exact historical commands, failures and next action: [execution ledger](JUMP_MODE_EXECUTION.md).
 - This report consolidates accepted results. Earlier failed evidence remains unchanged in the ignored raw evidence directory.
 
@@ -19,7 +19,7 @@ One app-owned bridge holds copied semantic/native IDs, geometry, clips, epochs a
 
 Root result IDs use current result generation and full result index, preserving equal-looking actions with different arguments. Selecting a list/grid card updates the existing logical selection and leaves native focus with the query; later Enter uses the existing full Action/args handler. Dashboard controls use slot/row semantic and native IDs so configuration reorder cannot redirect completed focus.
 
-Root/Settings(instance)/Notes(instance)/Todo(instance)/Timer(instance)/PasteSequence(instance)/Blocked ownership follows actual retained ordinary-window order and focused response layer. Opening/closing/raising a window invalidates navigation and blocks the transition frame across discarded passes. Supported windows use the same input, registry and painter while root editing/autofocus/navigation/Enter yield. Dialog targets require the exact kind and instance; scoped child confirmations retain their parent identity. Existing container Escape/Note Find behavior remains with its owner. Unsupported windows/popups fail closed.
+Root/Settings(instance)/Notes(instance)/Todo(instance)/Timer(instance)/PasteSequence(instance)/MkMacro(instance)/Blocked ownership follows actual retained ordinary-window order and focused response layer. Opening/closing/raising a window invalidates navigation and blocks the transition frame across discarded passes. Supported windows use the same input, registry and painter while root editing/autofocus/navigation/Enter yield. Dialog targets require the exact kind and instance; scoped child confirmations retain their parent identity. Existing container Escape/Note Find behavior remains with its owner. Unsupported windows/popups fail closed.
 
 | Component | Main source ownership |
 |---|---|
@@ -43,7 +43,7 @@ Root/Settings(instance)/Notes(instance)/Todo(instance)/Timer(instance)/PasteSequ
 | Notes/Todo dialogs | Supported basic controls; real egui/headless behavior verified; native evidence pending M13 |
 | Timer/Paste Sequence dialogs | Basic controls supported+verified headless; native evidence follows M13 |
 | Complex control adapters | Representative sliders/numeric/multiline/combos supported+verified headless; native evidence M13; radio adapter tested without inventing product UI |
-| MkMacro representative controls | Pending M12; native proof pending M13 |
+| MkMacro representative controls | Supported + verified headless; native proof pending M13 |
 | Unsupported windows/popups | Background/root suppression verified; supported nested controls still require M11/M12 |
 | Feature disabled | Supported + verified headless/native catalog18 |
 | Performance/Clippy/final smoke | Baseline recorded; M14/M15 remain pending |
@@ -68,14 +68,14 @@ Settings registration covers all eight top-level section toggles, Expand/Collaps
 | M09 | complete | Bounded core/evidence review;8 painter tests and post-fix native Dashboard01–05 |
 | M10 | complete | M10-A63 tests; M10-B67 tests and scoped review; native evidence reserved M13 |
 | M11 | complete | Notes/Todo and Timer/Paste; repaired final83tests + scoped review clean |
-| M12 | in_progress | M12-A accepted:89tests + scoped review; MkMacro follows |
+| M12 | complete | M12-A89tests; M12-B96tests + scoped review closed3P2s |
 | M13 | pending | Extended native screenshots and control semantics |
 | M14 | pending | Focused reliability, after measurements, Clippy and review |
 | M15 | pending | Final representative native smoke, consolidated final status/handoff |
 
 ## Verification
 
-Latest combined command on accepted M12-A source, exit0, **89 passed / 5827 skipped**:
+Latest combined command on accepted M12-B source, exit0, **96 passed / 5827 skipped**:
 
 ~~~powershell
 cargo nextest run --lib --no-fail-fast --cargo-profile fast-dev --features "dev-smoke-binaries qa-framebuffer-capture" -E 'test(jump_mode) | test(actual_root_navigation_owner_follows_settings_and_foreign_window_layers) | test(opening_settings_on_a_discarded_root_pass_cancels_background_navigation) | test(settings_owner_blocks_root_autofocus_and_enter_activation) | test(settings_escape_closes_when_jump_mode_owns_root_navigation) | test(note_find_shortcut_and_escape_leave_dirty_note_open_until_the_next_escape) | test(note_find_shortcut_uses_focused_or_top_note_and_preserves_ctrl_w_close) | test(settings_shell_tests) | test(todo_row_widget_ids_stay_bound_to_entry_when_filter_moves_another_row_to_zero) | test(enter_adds_todo_with_filter_focus) | test(enter_adds_todo_with_tags) | test(ordinary_enter_cannot_activate_root_results_behind_timer_or_paste_dialogs) | test(open_timer_resets_timer_fields_and_arms_duration_focus) | test(open_alarm_clears_pending_timer_focus_and_keeps_alarm_title) | test(paste_saved_row_native_identity_survives_removal_of_an_earlier_row)'
@@ -133,4 +133,6 @@ M13 preparation identified required isolated stores for later dialogs: todo.json
 
 Pre-input CPU baseline at b151ff00660976aefd4d12b780f9fcefd7aa6dbb: test profile,100 inert actions,3-column960×640 root fixture,9 warmups/20 samples, timed frame work only (output disposal excluded). Mean159.54µs, median163.1µs, nearest-rank p95 213.9µs, range97.7–228.5µs. Raw log: G:/Repos/rust/Multi_Launcher/dev/jump_mode/evidence/cpu-baseline/m05-a-root-list-baseline.log. Identical disabled/idle/active after measurements remain M14 work; no performance parity claim yet.
 
-Notes/Todo, Timer/Paste, complex controls/MkMacro, native Phase2 evidence, Clippy/reliability/performance and final smoke/handoff remain required. Existing untracked clipboard_modifiers.json is preserved, unread and excluded from task commits. No PR, merge or history rewrite has been performed. Optional manual-review guidance will be finalized only after M15.
+Native Phase2 evidence, Clippy/reliability/performance and final smoke/handoff remain required. Existing untracked clipboard_modifiers.json is preserved, unread and excluded from task commits. No PR, merge or history rewrite has been performed. Optional manual-review guidance will be finalized only after M15.
+
+M12-B source is frozen after96/96 targeted tests and scoped formatting/diff checks. MkMacro targets cover visible durable macro/step rows, fold buttons, Refresh checks/+Action and representative Name/Description/Enabled/Folder/playback properties. Hinting only selects/focuses; a later native Enter opens the existing safe step editor or action catalog. Row identity survives reorder and duplicate names; clipped rows are excluded. Active recording, action editor, search/package/confirmation/key capture/picker children and foreign windows block underlying navigation. Unsafe toolbar controls remain unregistered. Explicit Select handoff tracks table native focus separately from the semantic row, and exact owned Slider continuity preserves repeated arrow editing across draft generations. Native proof remains M13; all three reviewer findings are closed with no new P1/P2.

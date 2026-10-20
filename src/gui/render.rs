@@ -3052,11 +3052,15 @@ impl LauncherApp {
         let paste_sequence_visibility_changed = self
             .jump_mode_ui
             .observe_paste_sequence_visibility(self.paste_sequence_dialog.open);
+        let mkmacro_visibility_changed = self
+            .jump_mode_ui
+            .observe_mkmacro_visibility(self.mkmacro_dialog.open);
         let supported_dialog_visibility_changed = settings_visibility_changed
             || notes_visibility_changed
             || todo_visibility_changed
             || timer_visibility_changed
-            || paste_sequence_visibility_changed;
+            || paste_sequence_visibility_changed
+            || mkmacro_visibility_changed;
         let (candidate, combo_popup) = if self.jump_mode_host_input_allowed(ctx, root_visible) {
             let windows = crate::gui::jump_mode::ui::NavigationWindows {
                 settings: self
@@ -3075,6 +3079,10 @@ impl LauncherApp {
                     .paste_sequence_dialog
                     .open
                     .then_some(self.jump_mode_ui.paste_sequence_instance()),
+                mkmacro: self
+                    .mkmacro_dialog
+                    .open
+                    .then_some(self.jump_mode_ui.mkmacro_instance()),
             };
             let parent_owner = resolve_layer_navigation_owner_parent(ctx, windows);
             let combo_popup = (parent_owner != NavigationOwner::Blocked
@@ -3093,6 +3101,13 @@ impl LauncherApp {
                 NavigationOwner::Notes { .. }
                     if self.notes_dialog.jump_mode_unsupported_nested_owner_open()
                         || self.unused_assets_dialog.open =>
+                {
+                    (NavigationOwner::Blocked, combo_popup)
+                }
+                NavigationOwner::MkMacro { .. }
+                    if self
+                        .mkmacro_dialog
+                        .jump_mode_unsupported_nested_owner_open() =>
                 {
                     (NavigationOwner::Blocked, combo_popup)
                 }
@@ -4617,6 +4632,7 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
             };
             let mut ed = std::mem::take(&mut self.settings_editor);
@@ -4738,6 +4754,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
@@ -4789,6 +4806,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut paste_sequence_dlg = std::mem::take(&mut self.paste_sequence_dialog);
@@ -4799,7 +4817,30 @@ impl LauncherApp {
         self.macro_dialog = macro_dlg;
         self.mkmacro_dialog
             .set_coordinate_capture_active(self.coordinate_pick_blocks_other_screen_actions());
-        self.mkmacro_dialog.ui(&ctx);
+        self.mkmacro_dialog.sync_external();
+        let mkmacro_owner =
+            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+        let mkmacro_scope = match mkmacro_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::MkMacro { instance } => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("mkmacro", instance),
+                    self.mkmacro_dialog.jump_mode_target_generation(),
+                    "mkmacro-dialog",
+                    ctx.viewport_id(),
+                    mkmacro_owner,
+                    false,
+                )
+            }
+            crate::gui::jump_mode::ui::NavigationOwner::Root
+            | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
+        };
+        self.mkmacro_dialog
+            .ui_with_jump_mode_synced(&ctx, mkmacro_scope);
         if first_ui_pass
             && let Some(preferences) = self
                 .mkmacro_dialog
@@ -4901,6 +4942,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
@@ -4975,6 +5017,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
@@ -23004,6 +23047,101 @@ mod tests {
             .drop_without_applying_deltas();
     }
 
+    fn inert_mkmacro_delay_step(id: u64, label: &str) -> crate::mkmacro::MkStep {
+        crate::mkmacro::MkStep {
+            id,
+            enabled: false,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            metadata: crate::mkmacro::MkStepMetadata {
+                label: label.into(),
+                comment: "Disabled inert Jump Mode fixture; tests never execute it.".into(),
+                ..Default::default()
+            },
+            action: crate::mkmacro::MkAction::Delay(crate::mkmacro::MkDelayPayload {
+                mode: crate::mkmacro::MkDelayMode::Fixed,
+                fixed_ms: 0,
+                minimum_ms: 0,
+                maximum_ms: 0,
+            }),
+        }
+    }
+
+    fn inert_mkmacro(
+        id: u64,
+        name: &str,
+        steps: Vec<crate::mkmacro::MkStep>,
+    ) -> crate::mkmacro::MkMacro {
+        crate::mkmacro::MkMacro {
+            id,
+            name: name.into(),
+            description: "Disabled inert test fixture".into(),
+            enabled: false,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: Default::default(),
+            signature: Default::default(),
+            steps,
+        }
+    }
+
+    fn install_inert_mkmacro_fixture(
+        app: &mut LauncherApp,
+        macros: Vec<crate::mkmacro::MkMacro>,
+        selected_macro_id: u64,
+        preferences: crate::settings::MkMacroPropertiesPreferences,
+    ) {
+        app.mkmacro_dialog.draft.macros = macros;
+        assert!(crate::mkmacro::repair_ids(&mut app.mkmacro_dialog.draft) == false);
+        assert!(
+            app.mkmacro_dialog
+                .draft
+                .macros
+                .iter()
+                .any(|macro_| macro_.id == selected_macro_id)
+        );
+        app.mkmacro_dialog.selected_macro_id = Some(selected_macro_id);
+        app.mkmacro_dialog.mark_dirty();
+        app.mkmacro_dialog
+            .set_macro_properties_preferences(preferences);
+        app.mkmacro_dialog.open = true;
+    }
+
+    fn mkmacro_target_identity_and_response(
+        app: &LauncherApp,
+        semantic: &str,
+    ) -> (crate::gui::jump_mode::TargetId, egui::Id) {
+        let scoped_semantic = mkmacro_target_semantic(semantic);
+        let target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.id().semantic() == &scoped_semantic)
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing MkMacro Jump Mode target {semantic:?}; labels={:?}",
+                    app.jump_mode_ui
+                        .retained_registry()
+                        .targets()
+                        .iter()
+                        .map(|target| target.metadata().label())
+                        .collect::<Vec<_>>()
+                )
+            });
+        (target.id().clone(), target.response_id())
+    }
+
+    fn mkmacro_target_semantic(local_identity: &str) -> crate::gui::jump_mode::SemanticTargetId {
+        crate::gui::jump_mode::SemanticTargetId::named(format!(
+            "mkmacro-dialog/{}:{local_identity}",
+            local_identity.len()
+        ))
+    }
+
     fn settings_root_action() -> Action {
         Action {
             label: "Open Settings".into(),
@@ -23553,6 +23691,741 @@ mod tests {
         );
         assert_eq!(app.paste_sequence_dialog.test_draft_id(), Some(second_id));
         assert!(app.sequence_playback.started_run().is_none());
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_mkmacro_step_hint_selects_then_fresh_enter_opens_the_existing_editor() {
+        let _runtime_lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+
+        let macro_id = 11;
+        let step_ids = [101, 102, 103];
+        let macro_item = inert_mkmacro(
+            macro_id,
+            "Disabled inert steps",
+            step_ids
+                .iter()
+                .enumerate()
+                .map(|(index, id)| {
+                    inert_mkmacro_delay_step(*id, &format!("Inert step {}", index + 1))
+                })
+                .collect(),
+        );
+        install_inert_mkmacro_fixture(
+            &mut app,
+            vec![macro_item],
+            macro_id,
+            crate::settings::MkMacroPropertiesPreferences {
+                master_open: true,
+                identity_open: false,
+                activation_open: false,
+                playback_open: false,
+                recording_open: false,
+                reusable_signature_open: false,
+                ..Default::default()
+            },
+        );
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        let instance = app.jump_mode_ui.mkmacro_instance();
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::MkMacro { instance }
+        );
+        let dialog_targets = app.jump_mode_ui.retained_registry().targets();
+        assert!(
+            dialog_targets.iter().any(|target| {
+                target.id().semantic() == &mkmacro_target_semantic("step/11/102")
+            })
+        );
+        assert!(dialog_targets.iter().all(|target| matches!(
+            target.id().surface(),
+            crate::gui::jump_mode::SurfaceId::Dialog { kind, instance: target_instance }
+                if kind == "mkmacro" && *target_instance == instance
+        )));
+
+        let (step_target_id, _) = mkmacro_target_identity_and_response(&app, "step/11/102");
+        let original_draft = app.mkmacro_dialog.draft.clone();
+        let original_revision = app.mkmacro_dialog.draft_revision();
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let step_hint = dialog_hint_for_label(&app, "Step 2 · Delay");
+        press_dialog_hint_with_enter(&ctx, &mut app, &step_hint);
+        assert_eq!(app.mkmacro_dialog.selection.primary, Some(step_ids[1]));
+        assert_eq!(app.mkmacro_dialog.selection.ids, [step_ids[1]].into());
+        assert_eq!(app.mkmacro_dialog.draft, original_draft);
+        assert_eq!(app.mkmacro_dialog.draft_revision(), original_revision);
+        assert!(
+            app.mkmacro_dialog.action_editor.draft.is_none(),
+            "the Enter paired with completion only selects the step"
+        );
+        assert!(app.test_activation_trace.is_empty());
+
+        release_dialog_hint_enter(&ctx, &mut app);
+        let table_focus = egui::Id::new(("mkmacro_table_focus", macro_id));
+        assert!(
+            ctx.memory(|memory| memory.has_focus(table_focus)),
+            "the existing table keyboard owner receives focus without opening the editor"
+        );
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(
+            app.mkmacro_dialog.action_editor.draft.is_some(),
+            "a distinct later Enter uses the existing Edit command"
+        );
+        assert_eq!(app.mkmacro_dialog.draft, original_draft);
+        assert_eq!(app.mkmacro_dialog.draft_revision(), original_revision);
+        assert_eq!(
+            step_target_id.semantic(),
+            &mkmacro_target_semantic("step/11/102")
+        );
+        assert!(app.test_activation_trace.is_empty());
+        assert!(app.mkmacro_dialog.store.snapshot().macros.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_mkmacro_macro_and_step_targets_keep_native_identity_after_reorder() {
+        let _runtime_lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+
+        let selected_macro_id = 11;
+        let visible_macro_id = 22;
+        let step_ids = (101..181).collect::<Vec<_>>();
+        let selected_macro = inert_mkmacro(
+            selected_macro_id,
+            "Duplicate name",
+            step_ids
+                .iter()
+                .map(|id| inert_mkmacro_delay_step(*id, "Inert step"))
+                .collect(),
+        );
+        let other_macro = inert_mkmacro(
+            visible_macro_id,
+            "Duplicate name",
+            vec![inert_mkmacro_delay_step(201, "Other inert step")],
+        );
+        install_inert_mkmacro_fixture(
+            &mut app,
+            vec![selected_macro, other_macro],
+            selected_macro_id,
+            crate::settings::MkMacroPropertiesPreferences {
+                master_open: true,
+                identity_open: false,
+                activation_open: false,
+                playback_open: false,
+                recording_open: false,
+                reusable_signature_open: false,
+                ..Default::default()
+            },
+        );
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        let first_macro_target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| target.metadata().label() == "Duplicate name")
+            .count();
+        assert_eq!(first_macro_target, 2, "duplicate titles keep distinct IDs");
+        let visible_step_targets = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| target.metadata().label().starts_with("Step "))
+            .count();
+        assert!(
+            visible_step_targets < step_ids.len(),
+            "clipped/offscreen step rows are excluded: {visible_step_targets} of {}",
+            step_ids.len()
+        );
+        let (macro_target_id, macro_response_id) =
+            mkmacro_target_identity_and_response(&app, "macro/22");
+        let (step_target_id, step_response_id) =
+            mkmacro_target_identity_and_response(&app, "step/11/102");
+        assert_ne!(macro_target_id.semantic(), step_target_id.semantic());
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        app.mkmacro_dialog.draft.macros.swap(0, 1);
+        let selected_macro = app
+            .mkmacro_dialog
+            .draft
+            .macros
+            .iter_mut()
+            .find(|macro_| macro_.id == selected_macro_id)
+            .expect("the selected macro remains present");
+        selected_macro.steps.swap(0, 1);
+        app.mkmacro_dialog.mark_dirty();
+        run_dialog_frame(&ctx, &mut app);
+        assert!(
+            app.jump_mode_ui.active_session().is_none(),
+            "reordering the visible projection invalidates the frozen hint session"
+        );
+
+        let (macro_target_after_id, macro_response_after_id) =
+            mkmacro_target_identity_and_response(&app, "macro/22");
+        let (step_target_after_id, step_response_after_id) =
+            mkmacro_target_identity_and_response(&app, "step/11/102");
+        assert_eq!(macro_target_after_id.semantic(), macro_target_id.semantic());
+        assert_eq!(macro_response_after_id, macro_response_id);
+        assert_eq!(step_target_after_id.semantic(), step_target_id.semantic());
+        assert_eq!(step_response_after_id, step_response_id);
+        assert_eq!(
+            step_target_after_id.generation(),
+            app.mkmacro_dialog.jump_mode_target_generation()
+        );
+        assert_ne!(
+            step_target_after_id.generation(),
+            step_target_id.generation()
+        );
+
+        let original_draft = app.mkmacro_dialog.draft.clone();
+        let original_revision = app.mkmacro_dialog.draft_revision();
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let macro_hint = app
+            .jump_mode_ui
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(&macro_target_after_id)
+            .expect("the second duplicate-named macro has its own hint")
+            .as_str()
+            .to_owned();
+        press_dialog_hint_with_enter(&ctx, &mut app, &macro_hint);
+        assert_eq!(app.mkmacro_dialog.selected_macro_id, Some(visible_macro_id));
+        assert!(app.mkmacro_dialog.selection.ids.is_empty());
+        assert_eq!(app.mkmacro_dialog.draft, original_draft);
+        assert_eq!(app.mkmacro_dialog.draft_revision(), original_revision);
+        release_dialog_hint_enter(&ctx, &mut app);
+        let table_focus_id = egui::Id::new(("mkmacro_table_focus", visible_macro_id));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(table_focus_id),
+            "macro selection hands native focus to the newly selected step table"
+        );
+        let (macro_target_current, macro_response_current) =
+            mkmacro_target_identity_and_response(&app, "macro/22");
+        assert_eq!(
+            macro_target_current.generation(),
+            app.mkmacro_dialog.jump_mode_target_generation()
+        );
+        assert_eq!(macro_response_current, macro_response_id);
+        assert!(app.mkmacro_dialog.action_editor.draft.is_none());
+        assert!(app.test_activation_trace.is_empty());
+        assert!(app.mkmacro_dialog.store.snapshot().macros.is_empty());
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_mkmacro_fold_button_only_folds_after_a_distinct_fresh_enter() {
+        let _runtime_lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+
+        let mut opener = inert_mkmacro_delay_step(101, "Repeat opener");
+        opener.action = crate::mkmacro::MkAction::RepeatStart { count: 2 };
+        let inner = inert_mkmacro_delay_step(102, "Inert repeated delay");
+        let mut closer = inert_mkmacro_delay_step(103, "Repeat closer");
+        closer.action = crate::mkmacro::MkAction::RepeatEnd;
+        install_inert_mkmacro_fixture(
+            &mut app,
+            vec![inert_mkmacro(
+                11,
+                "Disabled inert repeat",
+                vec![opener, inner, closer],
+            )],
+            11,
+            crate::settings::MkMacroPropertiesPreferences {
+                master_open: true,
+                identity_open: false,
+                activation_open: false,
+                playback_open: false,
+                recording_open: false,
+                reusable_signature_open: false,
+                ..Default::default()
+            },
+        );
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.metadata().label() == "Collapse block")
+        );
+        let (_, fold_response_id) = mkmacro_target_identity_and_response(&app, "fold/11/101");
+        let original_draft = app.mkmacro_dialog.draft.clone();
+        let original_revision = app.mkmacro_dialog.draft_revision();
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let fold_hint = dialog_hint_for_label(&app, "Collapse block");
+        press_dialog_hint_with_enter(&ctx, &mut app, &fold_hint);
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.metadata().label() == "Collapse block"),
+            "same-frame Enter is consumed and cannot fold the block"
+        );
+        assert_eq!(app.mkmacro_dialog.draft, original_draft);
+        assert_eq!(app.mkmacro_dialog.draft_revision(), original_revision);
+        release_dialog_hint_enter(&ctx, &mut app);
+        assert!(
+            ctx.memory(|memory| memory.has_focus(fold_response_id)),
+            "the fold target's real button response receives hint focus"
+        );
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        release_dialog_hint_enter(&ctx, &mut app);
+        // The existing Fold command is applied after the table's widget pass;
+        // the next pass publishes the updated control label and hidden rows.
+        run_dialog_frame(&ctx, &mut app);
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.metadata().label() == "Expand block"),
+            "fresh Enter invokes the existing fold button"
+        );
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.metadata().label() == "Step 2 · Delay")
+        );
+        assert_eq!(app.mkmacro_dialog.draft, original_draft);
+        assert_eq!(app.mkmacro_dialog.draft_revision(), original_revision);
+        assert!(app.mkmacro_dialog.action_editor.draft.is_none());
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_mkmacro_playback_numeric_target_keeps_its_native_keyboard_owner() {
+        let _runtime_lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        install_inert_mkmacro_fixture(
+            &mut app,
+            vec![inert_mkmacro(11, "Numeric property", Vec::new())],
+            11,
+            crate::settings::MkMacroPropertiesPreferences {
+                master_open: true,
+                identity_open: false,
+                activation_open: false,
+                playback_open: true,
+                recording_open: false,
+                reusable_signature_open: false,
+                ..Default::default()
+            },
+        );
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        let (_, response_id) =
+            mkmacro_target_identity_and_response(&app, "properties/11/speed-value");
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| { target.metadata().label() == "Speed percentage" })
+        );
+        assert_eq!(
+            app.mkmacro_dialog
+                .selected_macro()
+                .unwrap()
+                .playback
+                .speed_percent,
+            100
+        );
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let speed_hint = dialog_hint_for_label(&app, "Speed percentage");
+        press_dialog_hint_with_enter(&ctx, &mut app, &speed_hint);
+        assert_eq!(
+            app.mkmacro_dialog
+                .selected_macro()
+                .unwrap()
+                .playback
+                .speed_percent,
+            100
+        );
+        release_dialog_hint_enter(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::ArrowUp, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.mkmacro_dialog
+                .selected_macro()
+                .unwrap()
+                .playback
+                .speed_percent,
+            101
+        );
+        assert!(
+            ctx.memory(|memory| memory.has_focus(response_id)),
+            "the property DragValue keeps native focus after the first keyboard edit"
+        );
+        assert!(app.test_activation_trace.is_empty());
+        assert!(app.mkmacro_dialog.store.snapshot().macros.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_mkmacro_speed_slider_rebinds_after_native_arrow_updates() {
+        let _runtime_lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        install_inert_mkmacro_fixture(
+            &mut app,
+            vec![inert_mkmacro(11, "Slider property", Vec::new())],
+            11,
+            crate::settings::MkMacroPropertiesPreferences {
+                master_open: true,
+                identity_open: false,
+                activation_open: false,
+                playback_open: true,
+                recording_open: false,
+                reusable_signature_open: false,
+                ..Default::default()
+            },
+        );
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        let (slider_target, slider_response_id) =
+            mkmacro_target_identity_and_response(&app, "properties/11/speed-slider");
+        let original_speed = app
+            .mkmacro_dialog
+            .selected_macro()
+            .unwrap()
+            .playback
+            .speed_percent;
+        let original_revision = app.mkmacro_dialog.draft_revision();
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let slider_hint = app
+            .jump_mode_ui
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(&slider_target)
+            .expect("the native Speed slider thumb has a target")
+            .as_str()
+            .to_owned();
+        press_dialog_hint_with_enter(&ctx, &mut app, &slider_hint);
+        assert_eq!(
+            app.mkmacro_dialog
+                .selected_macro()
+                .unwrap()
+                .playback
+                .speed_percent,
+            original_speed,
+            "hint completion only focuses the slider"
+        );
+        assert_eq!(app.mkmacro_dialog.draft_revision(), original_revision);
+        release_dialog_hint_enter(&ctx, &mut app);
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        let after_first_arrow = app
+            .mkmacro_dialog
+            .selected_macro()
+            .unwrap()
+            .playback
+            .speed_percent;
+        assert!(after_first_arrow > original_speed);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(slider_response_id),
+            "the first native arrow keeps focus on the slider thumb"
+        );
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::ArrowRight,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: true,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(
+            app.mkmacro_dialog
+                .selected_macro()
+                .unwrap()
+                .playback
+                .speed_percent
+                > after_first_arrow,
+            "a native repeat continues to adjust the same slider"
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(slider_response_id)
+        );
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(slider_response_id),
+            "key release completes the native sequence without losing owner focus"
+        );
+        assert!(app.mkmacro_dialog.draft_revision() > original_revision);
+        assert!(app.mkmacro_dialog.store.snapshot().macros.is_empty());
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_mkmacro_nested_and_foreign_foregrounds_remove_background_targets() {
+        let _runtime_lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        install_inert_mkmacro_fixture(
+            &mut app,
+            vec![inert_mkmacro(
+                11,
+                "Background owner fixture",
+                vec![inert_mkmacro_delay_step(101, "Inert row")],
+            )],
+            11,
+            crate::settings::MkMacroPropertiesPreferences::default(),
+        );
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let macro_instance = app.jump_mode_ui.mkmacro_instance();
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::MkMacro {
+                instance: macro_instance
+            }
+        );
+
+        let original_draft = app.mkmacro_dialog.draft.clone();
+        let original_revision = app.mkmacro_dialog.draft_revision();
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let add_action_hint = dialog_hint_for_label(&app, "Add Action");
+        press_dialog_hint_with_enter(&ctx, &mut app, &add_action_hint);
+        assert!(
+            !app.mkmacro_dialog.action_catalog_visible,
+            "hint completion only focuses the safe toolbar button"
+        );
+        assert_eq!(app.mkmacro_dialog.draft, original_draft);
+        assert_eq!(app.mkmacro_dialog.draft_revision(), original_revision);
+        release_dialog_hint_enter(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.mkmacro_dialog.action_catalog_visible);
+        assert_eq!(app.mkmacro_dialog.draft, original_draft);
+        assert_eq!(app.mkmacro_dialog.draft_revision(), original_revision);
+        run_dialog_frame(&ctx, &mut app);
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked
+        );
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .all(|target| {
+                    !matches!(
+                        target.id().surface(),
+                        crate::gui::jump_mode::SurfaceId::Dialog { kind, .. }
+                            if kind == "mkmacro"
+                    )
+                })
+        );
+
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_foreground_settings_surrenders_selected_mkmacro_table_focus() {
+        let _runtime_lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        install_inert_mkmacro_fixture(
+            &mut app,
+            vec![inert_mkmacro(
+                11,
+                "Background owner fixture",
+                vec![inert_mkmacro_delay_step(101, "Inert row")],
+            )],
+            11,
+            crate::settings::MkMacroPropertiesPreferences::default(),
+        );
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        assert!(matches!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
+        ));
+        let (step_target, _) = mkmacro_target_identity_and_response(&app, "step/11/101");
+        let original_draft = app.mkmacro_dialog.draft.clone();
+        let original_revision = app.mkmacro_dialog.draft_revision();
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let step_hint = app
+            .jump_mode_ui
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(&step_target)
+            .expect("the visible step row has a hint")
+            .as_str()
+            .to_owned();
+        press_dialog_hint_with_enter(&ctx, &mut app, &step_hint);
+        assert_eq!(app.mkmacro_dialog.selection.ids, [101].into());
+        assert_eq!(app.mkmacro_dialog.draft, original_draft);
+        assert_eq!(app.mkmacro_dialog.draft_revision(), original_revision);
+        release_dialog_hint_enter(&ctx, &mut app);
+        let table_focus_id = egui::Id::new(("mkmacro_table_focus", 11));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(table_focus_id),
+            "step selection deliberately moves focus off the semantic row response"
+        );
+
+        app.show_settings = true;
+        let render_with_foremost_settings = |app: &mut LauncherApp| {
+            let (output, _) = app.run_root_frame_for_test_with(
+                &ctx,
+                actual_query_input(true),
+                false,
+                |app, ui| {
+                    app.render_root_ui(ui);
+                    ui.ctx()
+                        .move_to_top(crate::gui::jump_mode::ui::settings_layer_id());
+                },
+            );
+            output.drop_without_applying_deltas();
+        };
+        render_with_foremost_settings(&mut app);
+        assert_eq!(
+            crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
+            Some(crate::gui::jump_mode::ui::settings_layer_id()),
+            "the real Settings window is raised above the retained MkMacro window"
+        );
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked,
+            "the window-opening/owner transition frame is fail-closed"
+        );
+        render_with_foremost_settings(&mut app);
+        assert!(matches!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
+        ));
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(
+            !ctx.memory(|memory| memory.has_focus(table_focus_id)),
+            "changing native owners surrenders the actual table focus owner"
+        );
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .all(|target| {
+                    !matches!(
+                        target.id().surface(),
+                        crate::gui::jump_mode::SurfaceId::Dialog { kind, .. }
+                            if kind == "mkmacro"
+                    )
+                })
+        );
         assert!(app.test_activation_trace.is_empty());
         drop(workspace);
     }
@@ -24792,6 +25665,7 @@ mod tests {
                     todo: None,
                     timer: None,
                     paste_sequence: None,
+                    mkmacro: None,
                 },
             ),
             NavigationOwner::Settings { instance: 1 },
@@ -24895,6 +25769,7 @@ mod tests {
                     todo: None,
                     timer: None,
                     paste_sequence: None,
+                    mkmacro: None,
                 }
             ),
         );
@@ -25616,6 +26491,7 @@ mod tests {
                     todo: None,
                     timer: None,
                     paste_sequence: None,
+                    mkmacro: None,
                 }
             ),
             app.confirm_modal.is_open(),

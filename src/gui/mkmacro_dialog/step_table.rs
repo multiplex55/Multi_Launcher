@@ -674,6 +674,17 @@ pub(super) fn show_with_layout(
     d: &mut MkMacroDialog,
     layout: &StepPaneLayout,
 ) -> Option<eframe::egui::Rect> {
+    let mut visual_order = 0;
+    show_with_layout_and_jump_mode(ui, d, layout, None, &mut visual_order)
+}
+
+pub(super) fn show_with_layout_and_jump_mode(
+    ui: &mut eframe::egui::Ui,
+    d: &mut MkMacroDialog,
+    layout: &StepPaneLayout,
+    jump_mode_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    visual_order: &mut u64,
+) -> Option<eframe::egui::Rect> {
     #[cfg(test)]
     {
         d.last_first_step_row_geometry = None;
@@ -787,6 +798,7 @@ pub(super) fn show_with_layout(
     let mut updates = Vec::new();
     let mut breakpoint_toggles = Vec::new();
     let mut command = None;
+    let mut jump_selected_step = None;
     let mut drag_start = None;
     let mut drop_rows = Vec::new();
     let interaction_blocked = d.action_editor.draft.is_some() || table_modal_open(d);
@@ -886,10 +898,45 @@ pub(super) fn show_with_layout(
                         first_row_cell_rects.push(_cell_response.0);
                     }
                     let _cell_response = r.col(|ui| {
-                        let response = ui.push_id((mid, s.id, "step_drag"), |ui| ui.add(
-                            eframe::egui::Label::new(format!("⠿ {}", i + 1))
-                                .sense(eframe::egui::Sense::click_and_drag())
-                        )).inner.on_hover_text("Select or drag this step; selected steps move together");
+                        let response = ui
+                            .scope_builder(
+                                eframe::egui::UiBuilder::new().id(eframe::egui::Id::new((
+                                    "mkmacro_step_row",
+                                    mid,
+                                    s.id,
+                                ))),
+                                |ui| {
+                                    ui.add(
+                                        eframe::egui::Label::new(format!("⠿ {}", i + 1))
+                                            .sense(eframe::egui::Sense::click_and_drag()),
+                                    )
+                                },
+                            )
+                            .inner
+                            .on_hover_text("Select or drag this step; selected steps move together");
+                        let target_identity = format!("step/{mid}/{}", s.id);
+                        if super::jump_mode::register_target(
+                            ui,
+                            jump_mode_scope,
+                            &response,
+                            &target_identity,
+                            format!(
+                                "Step {} · {}",
+                                i + 1,
+                                super::action_catalog::action_name(&s.action)
+                            ),
+                            crate::gui::jump_mode::TargetKind::Action,
+                            visual_order,
+                        ) == Some(crate::gui::jump_mode::ui::FocusDirective::Select)
+                        {
+                            jump_selected_step = Some(s.id);
+                            if let Some(scope) = jump_mode_scope {
+                                scope.record_select_focus_owner(
+                                    &scope.target_id(&target_identity),
+                                    super::navigation::table_id(mid),
+                                );
+                            }
+                        }
                         if response.clicked() {
                             let mods = ui.input(|x| x.modifiers);
                             clicked = Some((i, mods.ctrl, mods.shift));
@@ -938,8 +985,26 @@ pub(super) fn show_with_layout(
                         ui.horizontal(|ui| {
                         if let Some(block) = super::folding::foldable_block(&structure, s.id) {
                             let collapsed = d.editor_state.folds.is_collapsed(mid, s.id);
-                            let response = ui.small_button(if collapsed { "▶" } else { "▼" })
+                            let response = ui
+                                .scope_builder(
+                                    eframe::egui::UiBuilder::new().id(eframe::egui::Id::new((
+                                        "mkmacro_fold_button",
+                                        mid,
+                                        s.id,
+                                    ))),
+                                    |ui| ui.small_button(if collapsed { "▶" } else { "▼" }),
+                                )
+                                .inner
                                 .on_hover_text(if collapsed { "Expand block" } else { "Collapse block" });
+                            super::jump_mode::register_target(
+                                ui,
+                                jump_mode_scope,
+                                &response,
+                                format!("fold/{mid}/{}", s.id),
+                                if collapsed { "Expand block" } else { "Collapse block" },
+                                crate::gui::jump_mode::TargetKind::Button,
+                                visual_order,
+                            );
                             if response.clicked() { command = Some(Command::Fold(s.id)); }
                             response.on_hover_text(format!("{} steps in this block", block.closer_index - block.opener_index));
                         }
@@ -1247,6 +1312,13 @@ pub(super) fn show_with_layout(
     {
         d.selection.click(&rows, i, ctrl, shift);
     }
+    if let Some(step_id) = jump_selected_step
+        && rows.contains(&step_id)
+        && visible.iter().any(|index| rows[*index] == step_id)
+    {
+        d.selection.replace([step_id]);
+        d.navigation.focus_table = true;
+    }
     if !breakpoint_toggles.is_empty() {
         let mut toggled = false;
         if let Some(m) = d.selected_macro_mut() {
@@ -1290,11 +1362,15 @@ pub(super) fn show_with_layout(
         d.navigation.focus_table = false;
     }
     let wants_keyboard_input = ui.ctx().egui_wants_keyboard_input() && !focus_response.has_focus();
+    let other_native_widget_focused = ui
+        .ctx()
+        .memory(|memory| memory.focused().is_some_and(|focused| focused != focus_id));
     let pointer_in_use = ui.ctx().egui_is_using_pointer();
     let popup_open = eframe::egui::Popup::is_any_open(ui.ctx());
     let modal_open = table_modal_open(d);
     let table_owns_input = d.action_editor.draft.is_none()
         && !wants_keyboard_input
+        && !other_native_widget_focused
         && !pointer_in_use
         && !popup_open
         && !modal_open;

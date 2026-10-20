@@ -119,6 +119,16 @@ fn report(dialog: &mut MkMacroDialog, result: anyhow::Result<()>) {
     }
 }
 pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
+    let mut visual_order = 0;
+    show_with_jump_mode(ui, dialog, None, &mut visual_order);
+}
+
+pub(super) fn show_with_jump_mode(
+    ui: &mut eframe::egui::Ui,
+    dialog: &mut MkMacroDialog,
+    jump_mode_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    visual_order: &mut u64,
+) {
     process_recorder_hotkey_capture(ui.ctx(), dialog);
     if dialog.recording_annotation_open {
         show_recording_annotation(ui.ctx(), dialog);
@@ -126,11 +136,19 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
     }
     let state = state(dialog);
     ui.horizontal_wrapped(|ui| {
-        if ui
+        let refresh = ui
             .button("Refresh checks")
-            .on_hover_text("Check external image files and connected monitors")
-            .clicked()
-        {
+            .on_hover_text("Check external image files and connected monitors");
+        super::jump_mode::register_target(
+            ui,
+            jump_mode_scope,
+            &refresh,
+            "toolbar/refresh-checks",
+            "Refresh checks",
+            crate::gui::jump_mode::TargetKind::Button,
+            visual_order,
+        );
+        if refresh.clicked() {
             dialog.refresh_environment();
         }
         let save_button = ui.button("Save");
@@ -191,13 +209,20 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
                 });
             },
         );
-        if ui
-            .add_enabled(
-                dialog.selected_macro().is_some(),
-                eframe::egui::Button::new("+ Action"),
-            )
-            .clicked()
-        {
+        let add_action = ui.add_enabled(
+            dialog.selected_macro().is_some(),
+            eframe::egui::Button::new("+ Action"),
+        );
+        super::jump_mode::register_target(
+            ui,
+            jump_mode_scope,
+            &add_action,
+            "toolbar/add-action",
+            "Add Action",
+            crate::gui::jump_mode::TargetKind::Button,
+            visual_order,
+        );
+        if add_action.clicked() {
             dialog.action_catalog_visible = true;
         }
         if !state.command_enabled(ToolbarCommand::Run) {

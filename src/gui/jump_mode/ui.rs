@@ -50,6 +50,9 @@ pub(crate) enum NavigationOwner {
     PasteSequence {
         instance: u64,
     },
+    MkMacro {
+        instance: u64,
+    },
     Blocked,
 }
 
@@ -75,6 +78,9 @@ impl NavigationOwner {
                 Self::PasteSequence {
                     instance: owner_instance,
                 } => kind == "paste-sequence" && *instance == owner_instance,
+                Self::MkMacro {
+                    instance: owner_instance,
+                } => kind == "mkmacro" && *instance == owner_instance,
                 _ => false,
             },
             SurfaceId::Popup { owner, .. } => self.owns_surface(owner),
@@ -108,6 +114,10 @@ pub(crate) fn paste_sequence_dialog_layer_id() -> egui::LayerId {
     egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Paste Sequences")))
 }
 
+pub(crate) fn mkmacro_dialog_layer_id() -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Middle, egui::Id::new("mkmacro_main_window"))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct NavigationWindows {
     pub(crate) settings: Option<u64>,
@@ -115,6 +125,7 @@ pub(crate) struct NavigationWindows {
     pub(crate) todo: Option<u64>,
     pub(crate) timer: Option<u64>,
     pub(crate) paste_sequence: Option<u64>,
+    pub(crate) mkmacro: Option<u64>,
 }
 
 impl NavigationWindows {
@@ -124,6 +135,7 @@ impl NavigationWindows {
             || self.todo.is_some()
             || self.timer.is_some()
             || self.paste_sequence.is_some()
+            || self.mkmacro.is_some()
     }
 }
 
@@ -196,6 +208,10 @@ pub(crate) fn resolve_layer_navigation_owner_parent(
             windows
                 .paste_sequence
                 .map(|instance| NavigationOwner::PasteSequence { instance })
+        } else if layer == mkmacro_dialog_layer_id() {
+            windows
+                .mkmacro
+                .map(|instance| NavigationOwner::MkMacro { instance })
         } else {
             None
         };
@@ -585,7 +601,17 @@ struct FocusIntent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ConsumedFocusIntent {
     intent: FocusIntent,
-    response_id: egui::Id,
+    /// Native response used to validate the semantic target across passes.
+    target_response_id: egui::Id,
+    /// Some Select targets move focus to a different native widget they own.
+    native_focus_owner_id: Option<egui::Id>,
+}
+
+impl ConsumedFocusIntent {
+    fn focus_owner_id(&self) -> egui::Id {
+        self.native_focus_owner_id
+            .unwrap_or(self.target_response_id)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -697,6 +723,33 @@ impl JumpModeScope {
         )
     }
 
+    /// Record the native widget that owns focus after this Action target's
+    /// owner applies its Select directive. The semantic row and its response
+    /// remain the handoff's identity and continuity check.
+    pub(crate) fn record_select_focus_owner(
+        &self,
+        target_id: &TargetId,
+        focus_owner_id: egui::Id,
+    ) -> bool {
+        if target_id.surface() != &self.surface || target_id.generation() != self.generation {
+            return false;
+        }
+        let Ok(mut collector) = self.collector.lock() else {
+            return false;
+        };
+        let registered_action = collector.registry.targets().iter().any(|target| {
+            target.id() == target_id && target.metadata().kind() == TargetKind::Action
+        });
+        let Some(consumed) = collector.consumed_focus_intent.as_mut() else {
+            return false;
+        };
+        if !registered_action || consumed.intent.target != *target_id {
+            return false;
+        }
+        consumed.native_focus_owner_id = Some(focus_owner_id);
+        true
+    }
+
     /// Register a visible control using its real egui response and current UI
     /// clip. The response itself is never stored in the registry.
     pub(crate) fn register(
@@ -804,7 +857,8 @@ impl JumpModeScope {
                 collector.pending_focus_intent = None;
                 collector.consumed_focus_intent = Some(ConsumedFocusIntent {
                     intent,
-                    response_id: target.response_id,
+                    target_response_id: target.response_id,
+                    native_focus_owner_id: None,
                 });
                 Some(if target.metadata.kind() == TargetKind::Action {
                     FocusDirective::Select
@@ -856,6 +910,8 @@ pub(crate) struct JumpModeUi {
     notes_instance: u64,
     todo_open: bool,
     todo_instance: u64,
+    mkmacro_open: bool,
+    mkmacro_instance: u64,
     timer_window_title: Option<&'static str>,
     timer_instance: u64,
     paste_sequence_open: bool,
@@ -954,6 +1010,21 @@ impl JumpModeUi {
         self.todo_instance
     }
 
+    pub(crate) fn observe_mkmacro_visibility(&mut self, open: bool) -> bool {
+        if self.mkmacro_open == open {
+            return false;
+        }
+        self.mkmacro_open = open;
+        if open {
+            self.mkmacro_instance = self.mkmacro_instance.wrapping_add(1).max(1);
+        }
+        true
+    }
+
+    pub(crate) fn mkmacro_instance(&self) -> u64 {
+        self.mkmacro_instance
+    }
+
     pub(crate) fn observe_timer_window(&mut self, title: Option<&'static str>) -> bool {
         if self.timer_window_title == title {
             return false;
@@ -1021,12 +1092,14 @@ impl JumpModeUi {
                             | NavigationOwner::Todo { .. }
                             | NavigationOwner::Timer { .. }
                             | NavigationOwner::PasteSequence { .. }
+                            | NavigationOwner::MkMacro { .. }
                     ) || (supported_dialog_visibility_changed
                         && (self.settings_open
                             || self.notes_open
                             || self.todo_open
                             || self.timer_window_title.is_some()
-                            || self.paste_sequence_open)))
+                            || self.paste_sequence_open
+                            || self.mkmacro_open)))
                 {
                     // A supported native dialog deliberately takes ownership
                     // from the launcher query. `surrender_focus` is conditional
@@ -1034,10 +1107,10 @@ impl JumpModeUi {
                     ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("query_input")));
                 }
                 if owner_changed && let Some(focus) = self.last_completed_focus_handoff.as_ref() {
-                    ctx.memory_mut(|memory| memory.surrender_focus(focus.response_id));
+                    ctx.memory_mut(|memory| memory.surrender_focus(focus.focus_owner_id()));
                 }
                 if owner_changed && let Some(focus) = self.frame_consumed_focus_intent.as_ref() {
-                    ctx.memory_mut(|memory| memory.surrender_focus(focus.response_id));
+                    ctx.memory_mut(|memory| memory.surrender_focus(focus.focus_owner_id()));
                 }
             }
             self.cancel_all();
@@ -1293,12 +1366,15 @@ impl JumpModeUi {
             .filter(|handoff| registry.get(&handoff.intent.target).is_none())
             .and_then(|handoff| {
                 registry.targets().iter().find(|target| {
-                    target.metadata().kind() == TargetKind::TextEntry
+                    let kind = target.metadata().kind();
+                    let can_rebind = matches!(kind, TargetKind::TextEntry | TargetKind::Slider)
+                        || (kind == TargetKind::Action && handoff.native_focus_owner_id.is_some());
+                    can_rebind
                         && target.id().surface() == handoff.intent.target.surface()
                         && target.id().semantic() == handoff.intent.target.semantic()
                         && target.viewport() == handoff.intent.viewport
                         && target.navigation_epoch() == handoff.intent.epoch
-                        && target.response_id() == handoff.response_id
+                        && target.response_id() == handoff.target_response_id
                 })
             })
             .map(|target| target.id().clone());
@@ -1316,7 +1392,7 @@ impl JumpModeUi {
             .is_some_and(|handoff| registry.get(&handoff.intent.target).is_none())
         {
             if let Some(handoff) = self.last_completed_focus_handoff.take() {
-                ctx.memory_mut(|memory| memory.surrender_focus(handoff.response_id));
+                ctx.memory_mut(|memory| memory.surrender_focus(handoff.focus_owner_id()));
             }
         }
         let navigation_allowed = match navigation_owner {
@@ -1325,7 +1401,8 @@ impl JumpModeUi {
             | NavigationOwner::Notes { .. }
             | NavigationOwner::Todo { .. }
             | NavigationOwner::Timer { .. }
-            | NavigationOwner::PasteSequence { .. } => true,
+            | NavigationOwner::PasteSequence { .. }
+            | NavigationOwner::MkMacro { .. } => true,
             NavigationOwner::Blocked => false,
         };
         let population_changed = navigation_allowed
@@ -1369,7 +1446,7 @@ impl JumpModeUi {
     ) {
         if !self.enabled || !root_visible || ctx.viewport_id() != egui::ViewportId::ROOT {
             if let Some(consumed) = self.frame_consumed_focus_intent.as_ref() {
-                ctx.memory_mut(|memory| memory.surrender_focus(consumed.response_id));
+                ctx.memory_mut(|memory| memory.surrender_focus(consumed.focus_owner_id()));
             }
             self.clear();
             return;
@@ -1398,7 +1475,7 @@ impl JumpModeUi {
                         && target.epoch == consumed.intent.epoch
                 });
             if !still_matches {
-                ctx.memory_mut(|memory| memory.surrender_focus(consumed.response_id));
+                ctx.memory_mut(|memory| memory.surrender_focus(consumed.focus_owner_id()));
             } else {
                 completed_focus_handoff = Some(consumed.clone());
             }
@@ -2207,6 +2284,7 @@ mod tests {
             todo: Some(33),
             timer: None,
             paste_sequence: None,
+            mkmacro: None,
         };
         render_supported_dialog_windows(&ctx, true, true, true, None);
         assert_eq!(visible_top_middle_layer(&ctx), Some(todo_dialog_layer_id()));
@@ -2991,7 +3069,8 @@ mod tests {
                 viewport: egui::ViewportId::ROOT,
                 epoch: NavigationEpoch::default(),
             },
-            response_id: foreign_id,
+            target_response_id: foreign_id,
+            native_focus_owner_id: None,
         });
         jump.set_enabled(false);
         jump.begin_frame();

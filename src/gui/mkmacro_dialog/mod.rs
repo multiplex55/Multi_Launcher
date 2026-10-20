@@ -14,6 +14,7 @@ pub mod image_preview;
 pub mod image_search_controls;
 pub mod image_search_editor;
 mod image_search_test_job;
+mod jump_mode;
 mod key_capture;
 pub mod launcher_action_picker;
 mod macro_list;
@@ -5896,6 +5897,36 @@ impl MkMacroDialog {
         self.draft_revision
     }
 
+    pub(crate) fn jump_mode_target_generation(&self) -> crate::gui::jump_mode::TargetGeneration {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.draft_revision.hash(&mut hasher);
+        self.search.hash(&mut hasher);
+        self.selected_macro_id.hash(&mut hasher);
+
+        let mut collapsed_folders = self.collapsed_folders.iter().copied().collect::<Vec<_>>();
+        collapsed_folders.sort_unstable();
+        collapsed_folders.hash(&mut hasher);
+
+        if let Some(macro_id) = self.selected_macro_id
+            && let Some(structure) = self.cached_structure(macro_id)
+        {
+            for row in self.editor_state.folds.visible_rows(macro_id, &structure) {
+                structure.steps[row].step_id.hash(&mut hasher);
+            }
+        }
+
+        crate::gui::jump_mode::TargetGeneration(hasher.finish())
+    }
+
+    pub(crate) fn jump_mode_unsupported_nested_owner_open(&self) -> bool {
+        let recorder_active = crate::mkmacro::runtime::recorder_snapshot()
+            .is_some_and(|snapshot| snapshot.state != crate::mkmacro::RecorderRuntimeState::Idle)
+            || crate::mkmacro::runtime::record_stop_pending();
+        self.action_editor.draft.is_some() || step_table::table_modal_open(self) || recorder_active
+    }
+
     /// Refresh external image and monitor state without dirtying the document.
     pub fn refresh_environment(&mut self) {
         self.record_draft_revision();
@@ -6927,14 +6958,30 @@ impl MkMacroDialog {
     }
 
     pub fn ui(&mut self, ctx: &eframe::egui::Context) {
+        self.ui_with_jump_mode(ctx, None);
+    }
+
+    pub(crate) fn ui_with_jump_mode(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        jump_mode_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+    ) {
         self.sync_external();
+        self.ui_with_jump_mode_synced(ctx, jump_mode_scope);
+    }
+
+    pub(crate) fn ui_with_jump_mode_synced(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        jump_mode_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+    ) {
         if !self.open {
             self.close_children();
             self.set_selected_macro(None);
             return;
         }
         let mut open = self.open;
-        let _ = self.show_main_window(ctx, &mut open);
+        let _ = self.show_main_window_with_jump_mode(ctx, &mut open, jump_mode_scope.as_ref());
         self.open = open;
         if !self.open {
             self.close_children();
@@ -6945,6 +6992,15 @@ impl MkMacroDialog {
         &mut self,
         ctx: &eframe::egui::Context,
         open: &mut bool,
+    ) -> Option<eframe::egui::Rect> {
+        self.show_main_window_with_jump_mode(ctx, open, None)
+    }
+
+    fn show_main_window_with_jump_mode(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        open: &mut bool,
+        jump_mode_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
     ) -> Option<eframe::egui::Rect> {
         let mut table_viewport = None;
         let viewport_size = ctx.viewport_rect().size();
@@ -6961,7 +7017,7 @@ impl MkMacroDialog {
             .max_size(max_size)
             .resizable(true)
             .show(ctx, |ui| {
-                table_viewport = self.show_contents_with_table_viewport(ui);
+                table_viewport = self.show_contents_with_table_viewport(ui, jump_mode_scope);
             });
         #[cfg(test)]
         {
@@ -6993,11 +7049,12 @@ impl MkMacroDialog {
         );
     }
     pub fn show_contents(&mut self, ui: &mut eframe::egui::Ui) {
-        let _ = self.show_contents_with_table_viewport(ui);
+        let _ = self.show_contents_with_table_viewport(ui, None);
     }
     fn show_contents_with_table_viewport(
         &mut self,
         ui: &mut eframe::egui::Ui,
+        jump_mode_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
     ) -> Option<eframe::egui::Rect> {
         #[cfg(test)]
         let body_assigned = ui.max_rect();
@@ -7009,7 +7066,8 @@ impl MkMacroDialog {
         self.publish_recording_target();
         self.observe_runtime_snapshot(crate::mkmacro::runtime::snapshot());
         self.drain_pending_recording_reviews();
-        toolbar::show(ui, self);
+        let mut jump_visual_order = 0;
+        toolbar::show_with_jump_mode(ui, self, jump_mode_scope, &mut jump_visual_order);
         #[cfg(test)]
         let body_after_toolbar = ui.min_rect();
         let mut table_viewport = None;
@@ -7019,7 +7077,14 @@ impl MkMacroDialog {
                 .id_salt("mkmacro_empty_macro_properties_scroll")
                 .auto_shrink([false, true])
                 .max_height(properties_height)
-                .show(ui, |ui| macro_properties::show(ui, self));
+                .show(ui, |ui| {
+                    macro_properties::show_with_jump_mode(
+                        ui,
+                        self,
+                        jump_mode_scope,
+                        &mut jump_visual_order,
+                    )
+                });
             ui.separator();
             let body_size = ui.available_size();
             ui.allocate_ui_with_layout(
@@ -7043,7 +7108,12 @@ impl MkMacroDialog {
                     strip.cell(|ui| {
                         #[cfg(test)]
                         let assigned = ui.max_rect();
-                        macro_list::show(ui, self);
+                        macro_list::show_with_jump_mode(
+                            ui,
+                            self,
+                            jump_mode_scope,
+                            &mut jump_visual_order,
+                        );
                         #[cfg(test)]
                         {
                             strip_cells[0] = Some(StripCellGeometry {
@@ -7087,11 +7157,24 @@ impl MkMacroDialog {
                             .auto_shrink([false, true])
                             .min_scrolled_height(0.0)
                             .max_height(properties_height)
-                            .show(ui, |ui| macro_properties::show(ui, self));
+                            .show(ui, |ui| {
+                                macro_properties::show_with_jump_mode(
+                                    ui,
+                                    self,
+                                    jump_mode_scope,
+                                    &mut jump_visual_order,
+                                )
+                            });
                         ui.separator();
                         runtime_inspector::show(ui, self, inspector_body_height);
                         ui.separator();
-                        table_viewport = step_table::show_with_layout(ui, self, &step_layout);
+                        table_viewport = step_table::show_with_layout_and_jump_mode(
+                            ui,
+                            self,
+                            &step_layout,
+                            jump_mode_scope,
+                            &mut jump_visual_order,
+                        );
                         #[cfg(test)]
                         {
                             strip_cells[1] = Some(StripCellGeometry {

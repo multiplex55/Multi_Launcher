@@ -75,6 +75,16 @@ fn edit_active_matcher(scope: &mut MkHotkeyScope, edit: impl FnOnce(&mut MkWindo
 }
 
 pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
+    let mut visual_order = 0;
+    show_with_jump_mode(ui, d, None, &mut visual_order);
+}
+
+pub(super) fn show_with_jump_mode(
+    ui: &mut egui::Ui,
+    d: &mut MkMacroDialog,
+    jump_mode_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    visual_order: &mut u64,
+) {
     let before = d.mkmacro_properties_preferences.clone();
     ui.horizontal_wrapped(|ui| {
         ui.strong("Macro Properties");
@@ -105,28 +115,36 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
                 "identity",
                 "Identity",
                 d.mkmacro_properties_preferences.identity_open,
-                |ui| show_identity(ui, d),
+                jump_mode_scope,
+                visual_order,
+                |ui, order| show_identity(ui, d, jump_mode_scope, order),
             );
             d.mkmacro_properties_preferences.activation_open = property_group(
                 ui,
                 "activation",
                 "Activation",
                 d.mkmacro_properties_preferences.activation_open,
-                |ui| show_activation(ui, d),
+                jump_mode_scope,
+                visual_order,
+                |ui, _| show_activation(ui, d),
             );
             d.mkmacro_properties_preferences.playback_open = property_group(
                 ui,
                 "playback",
                 "Playback",
                 d.mkmacro_properties_preferences.playback_open,
-                |ui| show_playback(ui, d),
+                jump_mode_scope,
+                visual_order,
+                |ui, order| show_playback(ui, d, jump_mode_scope, order),
             );
             d.mkmacro_properties_preferences.reusable_signature_open = property_group(
                 ui,
                 "reusable_signature",
                 "Reusable Signature",
                 d.mkmacro_properties_preferences.reusable_signature_open,
-                |ui| super::signature_editor::show(ui, d, macro_id),
+                jump_mode_scope,
+                visual_order,
+                |ui, _| super::signature_editor::show(ui, d, macro_id),
             );
         } else {
             widgets::secondary_help(ui, "Select a macro to edit its properties.");
@@ -136,7 +154,9 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
             "recording",
             "Recording",
             d.mkmacro_properties_preferences.recording_open,
-            |ui| show_recording(ui, d),
+            jump_mode_scope,
+            visual_order,
+            |ui, _| show_recording(ui, d),
         );
     }
 
@@ -162,18 +182,32 @@ fn property_group(
     id: &'static str,
     title: &str,
     mut open: bool,
-    body: impl FnOnce(&mut egui::Ui),
+    jump_mode_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    visual_order: &mut u64,
+    body: impl FnOnce(&mut egui::Ui, &mut u64),
 ) -> bool {
     ui.push_id(("mkmacro_property_group", id), |ui| {
         let arrow = if open { "▼" } else { "▶" };
-        if ui
-            .selectable_label(open, format!("{arrow} {title}"))
-            .clicked()
-        {
+        let response = ui
+            .scope_builder(
+                egui::UiBuilder::new().id(egui::Id::new(("mkmacro_property_group", id))),
+                |ui| ui.selectable_label(open, format!("{arrow} {title}")),
+            )
+            .inner;
+        super::jump_mode::register_target(
+            ui,
+            jump_mode_scope,
+            &response,
+            format!("properties/group/{id}"),
+            title.to_owned(),
+            crate::gui::jump_mode::TargetKind::Selectable,
+            visual_order,
+        );
+        if response.clicked() {
             open = !open;
         }
         if open {
-            ui.indent(("mkmacro_property_body", id), body);
+            ui.indent(("mkmacro_property_body", id), |ui| body(ui, visual_order));
         }
     });
     open
@@ -203,7 +237,12 @@ fn show_compact_summary(ui: &mut egui::Ui, d: &MkMacroDialog) {
     }
 }
 
-fn show_identity(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
+fn show_identity(
+    ui: &mut egui::Ui,
+    d: &mut MkMacroDialog,
+    jump_mode_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    visual_order: &mut u64,
+) {
     let folders = folder_choices(&d.draft.folders);
     let mut folder_change = None;
     let Some(macro_) = d.selected_macro_mut() else {
@@ -211,34 +250,112 @@ fn show_identity(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
     };
     let macro_id = macro_.id;
     let mut changed = false;
-    changed |=
-        widgets::labeled_form_row(ui, "Name", |ui| ui.text_edit_singleline(&mut macro_.name))
-            .changed();
-    changed |= widgets::labeled_form_row(ui, "Description", |ui| {
+    let name = widgets::labeled_form_row(ui, "Name", |ui| {
+        ui.scope_builder(
+            egui::UiBuilder::new().id(egui::Id::new(("mkmacro_property_name", macro_id))),
+            |ui| ui.text_edit_singleline(&mut macro_.name),
+        )
+        .inner
+    });
+    super::jump_mode::register_target(
+        ui,
+        jump_mode_scope,
+        &name,
+        format!("properties/{macro_id}/name"),
+        "Name",
+        crate::gui::jump_mode::TargetKind::TextEntry,
+        visual_order,
+    );
+    changed |= name.changed();
+
+    let description = widgets::labeled_form_row(ui, "Description", |ui| {
         ui.add(
             egui::TextEdit::multiline(&mut macro_.description)
+                .id(egui::Id::new(("mkmacro_property_description", macro_id)))
                 .desired_rows(2)
                 .hint_text("Description"),
         )
-    })
-    .changed();
-    changed |= ui.checkbox(&mut macro_.enabled, "Enabled").changed();
-    let (selected_folder, folder_label) = current_folder_choice(&folders, macro_.folder_id);
-    widgets::labeled_form_row(ui, "Folder", |ui| {
-        egui::ComboBox::from_id_salt(("macro_properties_folder", macro_id))
-            .selected_text(folder_label)
-            .show_ui(ui, |ui| {
-                for (folder_id, name) in &folders {
-                    if ui
-                        .selectable_label(selected_folder == *folder_id, name)
-                        .clicked()
-                    {
-                        folder_change = Some(*folder_id);
-                    }
-                }
-            })
-            .response
     });
+    super::jump_mode::register_target(
+        ui,
+        jump_mode_scope,
+        &description,
+        format!("properties/{macro_id}/description"),
+        "Description",
+        crate::gui::jump_mode::TargetKind::TextEntry,
+        visual_order,
+    );
+    changed |= description.changed();
+
+    let enabled = ui
+        .scope_builder(
+            egui::UiBuilder::new().id(egui::Id::new(("mkmacro_property_enabled", macro_id))),
+            |ui| ui.checkbox(&mut macro_.enabled, "Enabled"),
+        )
+        .inner;
+    super::jump_mode::register_target(
+        ui,
+        jump_mode_scope,
+        &enabled,
+        format!("properties/{macro_id}/enabled"),
+        "Enabled",
+        crate::gui::jump_mode::TargetKind::Checkbox,
+        visual_order,
+    );
+    changed |= enabled.changed();
+
+    let (selected_folder, folder_label) = current_folder_choice(&folders, macro_.folder_id);
+    let popup_scope = jump_mode_scope.map(|scope| scope.combo_popup_scope("properties/folder"));
+    let folder = widgets::labeled_form_row(ui, "Folder", |ui| {
+        ui.scope_builder(
+            egui::UiBuilder::new().id(egui::Id::new(("mkmacro_property_folder", macro_id))),
+            |ui| {
+                egui::ComboBox::from_id_salt(("macro_properties_folder", macro_id))
+                    .selected_text(folder_label)
+                    .show_ui(ui, |ui| {
+                        for (folder_id, name) in &folders {
+                            let option_id = folder_id
+                                .map(|id| egui::Id::new(("mkmacro_folder_option", macro_id, id)))
+                                .unwrap_or_else(|| {
+                                    egui::Id::new(("mkmacro_folder_option", macro_id, "unfiled"))
+                                });
+                            let response = ui
+                                .scope_builder(egui::UiBuilder::new().id(option_id), |ui| {
+                                    ui.selectable_label(selected_folder == *folder_id, name)
+                                })
+                                .inner;
+                            super::jump_mode::register_target(
+                                ui,
+                                popup_scope.as_ref(),
+                                &response,
+                                format!(
+                                    "folder/{}",
+                                    folder_id
+                                        .map_or_else(|| "unfiled".to_owned(), |id| id.to_string())
+                                ),
+                                name.clone(),
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                visual_order,
+                            );
+                            if response.clicked() {
+                                folder_change = Some(*folder_id);
+                            }
+                        }
+                    })
+                    .response
+            },
+        )
+        .inner
+    });
+    super::jump_mode::register_target(
+        ui,
+        jump_mode_scope,
+        &folder,
+        "properties/folder",
+        "Folder",
+        crate::gui::jump_mode::TargetKind::ComboBox,
+        visual_order,
+    );
     if changed {
         d.mark_dirty();
     }
@@ -332,27 +449,110 @@ fn show_activation(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
     }
 }
 
-fn show_playback(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
+fn show_playback(
+    ui: &mut egui::Ui,
+    d: &mut MkMacroDialog,
+    jump_mode_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    visual_order: &mut u64,
+) {
     let Some(macro_) = d.selected_macro_mut() else {
         return;
     };
-    let mut changed = ui
-        .add(egui::Slider::new(&mut macro_.playback.speed_percent, 1..=1000).text("Speed %"))
-        .changed();
-    changed |= ui
-        .add(
-            egui::DragValue::new(&mut macro_.playback.random_delay_ms)
-                .range(0..=60_000)
-                .suffix(" ms random delay"),
+    let macro_id = macro_.id;
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        let speed_slider = ui
+            .scope_builder(
+                egui::UiBuilder::new().id(egui::Id::new(("mkmacro_speed_slider", macro_id))),
+                |ui| {
+                    ui.add(
+                        egui::Slider::new(&mut macro_.playback.speed_percent, 1..=1000)
+                            .text("Speed %")
+                            .show_value(false),
+                    )
+                },
+            )
+            .inner;
+        super::jump_mode::register_target(
+            ui,
+            jump_mode_scope,
+            &speed_slider,
+            format!("properties/{macro_id}/speed-slider"),
+            "Speed",
+            crate::gui::jump_mode::TargetKind::Slider,
+            visual_order,
+        );
+        changed |= speed_slider.changed();
+
+        let speed_value = ui
+            .scope_builder(
+                egui::UiBuilder::new().id(egui::Id::new(("mkmacro_speed_value", macro_id))),
+                |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut macro_.playback.speed_percent)
+                            .range(1..=1000)
+                            .suffix("%"),
+                    )
+                },
+            )
+            .inner;
+        super::jump_mode::register_target(
+            ui,
+            jump_mode_scope,
+            &speed_value,
+            format!("properties/{macro_id}/speed-value"),
+            "Speed percentage",
+            crate::gui::jump_mode::TargetKind::TextEntry,
+            visual_order,
+        );
+        changed |= speed_value.changed();
+    });
+
+    let random_delay = ui
+        .scope_builder(
+            egui::UiBuilder::new().id(egui::Id::new(("mkmacro_random_delay", macro_id))),
+            |ui| {
+                ui.add(
+                    egui::DragValue::new(&mut macro_.playback.random_delay_ms)
+                        .range(0..=60_000)
+                        .suffix(" ms random delay"),
+                )
+            },
         )
-        .changed();
-    changed |= ui
-        .add(
-            egui::DragValue::new(&mut macro_.playback.random_offset_px)
-                .range(0..=10_000)
-                .suffix(" px random offset"),
+        .inner;
+    super::jump_mode::register_target(
+        ui,
+        jump_mode_scope,
+        &random_delay,
+        format!("properties/{macro_id}/random-delay"),
+        "Random delay",
+        crate::gui::jump_mode::TargetKind::TextEntry,
+        visual_order,
+    );
+    changed |= random_delay.changed();
+
+    let random_offset = ui
+        .scope_builder(
+            egui::UiBuilder::new().id(egui::Id::new(("mkmacro_random_offset", macro_id))),
+            |ui| {
+                ui.add(
+                    egui::DragValue::new(&mut macro_.playback.random_offset_px)
+                        .range(0..=10_000)
+                        .suffix(" px random offset"),
+                )
+            },
         )
-        .changed();
+        .inner;
+    super::jump_mode::register_target(
+        ui,
+        jump_mode_scope,
+        &random_offset,
+        format!("properties/{macro_id}/random-offset"),
+        "Random offset",
+        crate::gui::jump_mode::TargetKind::TextEntry,
+        visual_order,
+    );
+    changed |= random_offset.changed();
     if changed {
         d.mark_dirty();
     }

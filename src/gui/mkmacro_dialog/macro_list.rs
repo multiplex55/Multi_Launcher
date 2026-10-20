@@ -224,6 +224,16 @@ fn show_folder_rename(
 }
 
 pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
+    let mut visual_order = 0;
+    show_with_jump_mode(ui, d, None, &mut visual_order);
+}
+
+pub(super) fn show_with_jump_mode(
+    ui: &mut eframe::egui::Ui,
+    d: &mut MkMacroDialog,
+    jump_mode_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    visual_order: &mut u64,
+) {
     let mut command = None;
     let available_height = ui.available_height().max(0.0);
     let item_spacing = ui.spacing().item_spacing.y;
@@ -306,6 +316,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     let mut folder_rows = HashMap::new();
     #[cfg(test)]
     let mut macro_rows = HashMap::new();
+    let mut jump_selected_macro = None;
     let _list_output = eframe::egui::ScrollArea::vertical()
         .id_salt("mkmacro_macro_list_rows")
         .auto_shrink([false, false])
@@ -367,10 +378,40 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         ui.indent("members", |ui| {
                             for m in &group.macros {
                                 ui.push_id(m.id, |ui| {
-                                    let response = ui.selectable_label(
-                                        d.selected_macro_id == Some(m.id),
-                                        &m.name,
+                                    let response = ui
+                                        .scope_builder(
+                                            eframe::egui::UiBuilder::new().id(
+                                                eframe::egui::Id::new(("mkmacro_macro_row", m.id)),
+                                            ),
+                                            |ui| {
+                                                ui.selectable_label(
+                                                    d.selected_macro_id == Some(m.id),
+                                                    &m.name,
+                                                )
+                                            },
+                                        )
+                                        .inner;
+                                    let target_identity = format!("macro/{}", m.id);
+                                    let directive = super::jump_mode::register_target(
+                                        ui,
+                                        jump_mode_scope,
+                                        &response,
+                                        &target_identity,
+                                        m.name.clone(),
+                                        crate::gui::jump_mode::TargetKind::Action,
+                                        visual_order,
                                     );
+                                    if directive
+                                        == Some(crate::gui::jump_mode::ui::FocusDirective::Select)
+                                    {
+                                        jump_selected_macro = Some(m.id);
+                                        if let Some(scope) = jump_mode_scope {
+                                            scope.record_select_focus_owner(
+                                                &scope.target_id(&target_identity),
+                                                super::navigation::table_id(m.id),
+                                            );
+                                        }
+                                    }
                                     #[cfg(test)]
                                     {
                                         macro_rows.insert(m.id, response.rect);
@@ -454,6 +495,11 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     if let Some(id) = clicked {
         d.set_selected_macro(Some(id));
         d.selection.clear();
+    }
+    if let Some(id) = jump_selected_macro {
+        d.set_selected_macro(Some(id));
+        d.selection.clear();
+        d.navigation.focus_table = true;
     }
     if let Some(command) = command {
         apply_command(d, command);
