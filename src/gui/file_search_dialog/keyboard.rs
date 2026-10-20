@@ -30,16 +30,21 @@ impl FileSearchDialogState {
     ) {
         let ctx = ui.ctx();
         let modifiers = ctx.input(|i| i.modifiers);
-        let (text_field_focused, search_submit_field_focused) = ctx.memory(|m| {
-            let focused = m.focused();
+        let focused_id = ctx.memory(|m| m.focused());
+        let (text_field_focused, search_submit_field_focused) = {
+            let focused = focused_id;
             let search_submit = focused.is_some_and(|id| {
                 id == Self::search_field_id()
                     || (0..self.custom_roots.len()).any(|idx| id == Self::root_text_field_id(idx))
             });
             let any_text = search_submit || focused == Some(Self::refinement_field_id());
             (any_text, search_submit)
-        });
-        let menu_or_combo_active = ctx.egui_wants_keyboard_input() && !text_field_focused;
+        };
+        let selected_result_focused = self.has_valid_selected_result_focus_owner(focused_id);
+        let menu_or_combo_active = egui::Popup::is_any_open(ctx)
+            || (!text_field_focused
+                && !selected_result_focused
+                && (ctx.egui_wants_keyboard_input() || focused_id.is_some()));
 
         if modifiers.ctrl && ctx.input(|i| i.key_pressed(egui::Key::F)) {
             self.focus_search_field();
@@ -54,10 +59,10 @@ impl FileSearchDialogState {
 
         if !menu_or_combo_active {
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-                self.select_next_visible_result();
+                self.select_next_visible_result(ctx);
                 ctx.request_repaint();
             } else if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-                self.select_previous_visible_result();
+                self.select_previous_visible_result(ctx);
                 ctx.request_repaint();
             }
         }
@@ -68,12 +73,17 @@ impl FileSearchDialogState {
                 ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                 ctx.request_repaint();
             } else if !text_field_focused {
-                if modifiers.ctrl {
-                    self.open_selected_in_editor();
-                } else if modifiers.alt {
-                    self.reveal_selected_in_explorer();
-                } else {
-                    self.open_selected_result();
+                if self.selection_is_valid() {
+                    if modifiers.ctrl {
+                        self.open_selected_in_editor();
+                    } else if modifiers.alt {
+                        self.reveal_selected_in_explorer();
+                    } else {
+                        self.open_selected_result();
+                    }
+                    ctx.input_mut(|input| {
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                    });
                 }
                 ctx.request_repaint();
             }
@@ -97,7 +107,7 @@ impl FileSearchDialogState {
         }
     }
 
-    pub(super) fn move_selection(&mut self, movement: SelectionMove) {
+    pub(super) fn move_selection(&mut self, movement: SelectionMove, ctx: &egui::Context) {
         let selectable_rows: Vec<_> = self.visible_selectable_result_rows().collect();
         if selectable_rows.is_empty() {
             self.clear_selection();
@@ -123,14 +133,18 @@ impl FileSearchDialogState {
         };
         let row = selectable_rows[next_idx].clone();
         self.select_result(&row);
+        if let Some(response_id) = self.result_row_response_ids.get(&row.id).copied() {
+            ctx.memory_mut(|memory| memory.request_focus(response_id));
+            self.set_selected_result_focus_owner(&row.id, response_id);
+        }
     }
 
-    pub(super) fn select_next_visible_result(&mut self) {
-        self.move_selection(SelectionMove::Next);
+    pub(super) fn select_next_visible_result(&mut self, ctx: &egui::Context) {
+        self.move_selection(SelectionMove::Next, ctx);
     }
 
-    pub(super) fn select_previous_visible_result(&mut self) {
-        self.move_selection(SelectionMove::Previous);
+    pub(super) fn select_previous_visible_result(&mut self, ctx: &egui::Context) {
+        self.move_selection(SelectionMove::Previous, ctx);
     }
 
     pub(super) fn open_selected_in_editor(&mut self) {

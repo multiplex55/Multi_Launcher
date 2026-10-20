@@ -3124,13 +3124,7 @@ impl LauncherApp {
             theme_settings_dialog_open: false,
             theme_settings_dialog: ThemeSettingsDialogState::default(),
             fav_dialog: FavDialog::default(),
-            file_search_dialog: FileSearchDialogState {
-                settings: file_search_settings.clone(),
-                ui_preferences: file_search_settings.ui_preferences.clone(),
-                case_sensitive: file_search_settings.case_sensitive,
-                include_hidden: file_search_settings.include_hidden_files,
-                ..FileSearchDialogState::default()
-            },
+            file_search_dialog: FileSearchDialogState::from_settings(file_search_settings.clone()),
             file_search_coordinator: SearchCoordinator::from_settings(file_search_settings),
             batch_rename_dialog: BatchRenameDialogState::default(),
             batch_rename_coordinator: None,

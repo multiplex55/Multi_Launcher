@@ -230,6 +230,7 @@ struct FilenameTableGeometry {
     body_item_rect: Option<egui::Rect>,
     body_cell_rect: Option<egui::Rect>,
     body_clip_rect: Option<egui::Rect>,
+    body_cell_responses: Vec<(egui::Rect, egui::Rect, egui::Id)>,
 }
 
 #[cfg(not(test))]
@@ -378,7 +379,17 @@ pub struct FileSearchDialogState {
     pub excluded_directory_names_overridden: bool,
     pub last_submitted_request: Option<SearchRequest>,
     pub pending_sort_change: bool,
-    pub(crate) jump_mode_form_generation: u64,
+    jump_mode_form_generation: u64,
+    jump_mode_results_revision: u64,
+    selected_result_focus_owner: Option<SelectedResultFocusOwner>,
+    result_row_response_ids: std::collections::HashMap<FileSearchResultRowId, egui::Id>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelectedResultFocusOwner {
+    row_id: FileSearchResultRowId,
+    response_id: egui::Id,
+    view_revision: u64,
 }
 
 impl Default for FileSearchDialogState {
@@ -416,6 +427,9 @@ impl Default for FileSearchDialogState {
             last_submitted_request: None,
             pending_sort_change: false,
             jump_mode_form_generation: 0,
+            jump_mode_results_revision: 0,
+            selected_result_focus_owner: None,
+            result_row_response_ids: std::collections::HashMap::new(),
         }
     }
 }
@@ -430,8 +444,82 @@ fn validate_ripgrep_selection(path: &std::path::Path) -> Result<PathBuf, String>
 }
 
 impl FileSearchDialogState {
+    pub(crate) fn from_settings(settings: FileSearchSettings) -> Self {
+        Self {
+            ui_preferences: settings.ui_preferences.clone(),
+            case_sensitive: settings.case_sensitive,
+            include_hidden: settings.include_hidden_files,
+            settings,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn jump_mode_target_generation(&self) -> crate::gui::jump_mode::TargetGeneration {
         crate::gui::jump_mode::TargetGeneration(self.jump_mode_form_generation)
+    }
+
+    pub(crate) fn jump_mode_results_target_generation(
+        &self,
+        dialog_instance: u64,
+    ) -> crate::gui::jump_mode::TargetGeneration {
+        crate::gui::jump_mode::TargetGeneration(
+            egui::Id::new((
+                "file-search-results",
+                dialog_instance,
+                self.active_search_id,
+                self.jump_mode_results_revision,
+            ))
+            .value(),
+        )
+    }
+
+    fn invalidate_jump_mode_results(&mut self) {
+        self.jump_mode_results_revision = self.jump_mode_results_revision.wrapping_add(1);
+        self.selected_result_focus_owner = None;
+        self.result_row_response_ids.clear();
+    }
+
+    fn set_selected_result_focus_owner(
+        &mut self,
+        row_id: &FileSearchResultRowId,
+        response_id: egui::Id,
+    ) {
+        self.selected_result_focus_owner = Some(SelectedResultFocusOwner {
+            row_id: row_id.clone(),
+            response_id,
+            view_revision: self.jump_mode_results_revision,
+        });
+    }
+
+    fn has_valid_selected_result_focus_owner(&self, focused_id: Option<egui::Id>) -> bool {
+        let Some(owner) = self.selected_result_focus_owner.as_ref() else {
+            return false;
+        };
+        focused_id == Some(owner.response_id)
+            && self
+                .selected_result
+                .as_ref()
+                .is_some_and(|selected| selected.row_id == owner.row_id)
+            && self.active_search_id == Some(owner.row_id.search_id)
+            && self
+                .result_row_response_ids
+                .get(&owner.row_id)
+                .is_some_and(|response_id| *response_id == owner.response_id)
+            && owner.view_revision == self.jump_mode_results_revision
+    }
+
+    fn is_visible_selectable_result(&self, row_id: &FileSearchResultRowId) -> bool {
+        self.active_search_id == Some(row_id.search_id)
+            && self
+                .visible_selectable_result_rows()
+                .any(|row| row.id == *row_id)
+    }
+
+    fn result_row_local_identity(row_id: &FileSearchResultRowId) -> String {
+        format!(
+            "row/{:016x}",
+            egui::Id::new(result_row_id_source(row_id.search_id, row_id)).value()
+        )
     }
 
     fn invalidate_jump_mode_form(
@@ -476,6 +564,7 @@ impl FileSearchDialogState {
     pub fn open_with_mode(&mut self, mode: FileSearchMode) {
         if self.selected_mode != mode {
             self.jump_mode_form_generation = self.jump_mode_form_generation.wrapping_add(1);
+            self.invalidate_jump_mode_results();
         }
         self.selected_mode = mode;
         self.open();
@@ -490,6 +579,7 @@ impl FileSearchDialogState {
     ) -> Option<SearchId> {
         if self.selected_mode != mode {
             self.jump_mode_form_generation = self.jump_mode_form_generation.wrapping_add(1);
+            self.invalidate_jump_mode_results();
         }
         self.selected_mode = mode;
         if let Some(root) = root {
@@ -725,6 +815,7 @@ impl FileSearchDialogState {
 
     pub fn handle_sort_changed(&mut self) {
         self.mark_ui_preferences_dirty();
+        self.invalidate_jump_mode_results();
         if self.current_status == SearchStatus::Running {
             self.pending_sort_change = true;
         } else if self.current_status == SearchStatus::Completed {
@@ -734,6 +825,7 @@ impl FileSearchDialogState {
     }
 
     fn finalize_completed_results(&mut self) {
+        self.invalidate_jump_mode_results();
         let selected_key = self.selected_result_key();
         let results = std::mem::take(&mut self.results);
         self.results = crate::file_search::sorting::sort_and_dedup_results(
@@ -755,6 +847,7 @@ impl FileSearchDialogState {
 
     pub fn clear_selection(&mut self) {
         self.selected_result = None;
+        self.selected_result_focus_owner = None;
     }
 
     pub fn select_result(&mut self, row: &FileSearchResultRow) {
@@ -779,6 +872,7 @@ impl FileSearchDialogState {
             row_id: row.id.clone(),
             payload,
         });
+        self.selected_result_focus_owner = None;
     }
 
     pub fn selected_result(&self) -> Option<&SelectedFileSearchResult> {
@@ -789,10 +883,8 @@ impl FileSearchDialogState {
         let Some(selected) = &self.selected_result else {
             return false;
         };
-        let is_valid = self
-            .visible_result_rows()
-            .iter()
-            .any(|row| row.id == selected.row_id);
+        let is_valid = self.active_search_id == Some(selected.row_id.search_id)
+            && self.is_visible_selectable_result(&selected.row_id);
         if !is_valid {
             self.clear_selection();
         }
@@ -800,6 +892,7 @@ impl FileSearchDialogState {
     }
 
     pub fn clear_results_and_selection(&mut self) {
+        self.invalidate_jump_mode_results();
         self.results.clear();
         self.result_rows.clear();
         self.refinement_text.clear();
@@ -917,6 +1010,7 @@ impl FileSearchDialogState {
         if self.refinement_text == next {
             return;
         }
+        self.invalidate_jump_mode_results();
         let was_empty = self.refinement_text.trim().is_empty();
         let will_be_empty = next.trim().is_empty();
         if was_empty && !will_be_empty {
@@ -1086,7 +1180,7 @@ impl FileSearchDialogState {
         ctx: &egui::Context,
         coordinator: &mut SearchCoordinator,
     ) -> Vec<FileSearchUiCommand> {
-        self.ui_with_jump_mode_scope(ctx, coordinator, None, true, true)
+        self.ui_with_jump_mode_scope(ctx, coordinator, None, None, true, true)
     }
 
     pub(crate) fn ui_with_jump_mode_scope(
@@ -1094,10 +1188,15 @@ impl FileSearchDialogState {
         ctx: &egui::Context,
         coordinator: &mut SearchCoordinator,
         mut jump_mode_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+        mut jump_mode_results_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
         first_ui_pass: bool,
         navigation_owner: bool,
     ) -> Vec<FileSearchUiCommand> {
+        let results_revision_before_drain = self.jump_mode_results_revision;
         self.drain_events(coordinator);
+        if self.jump_mode_results_revision != results_revision_before_drain {
+            jump_mode_results_scope = None;
+        }
         if self.consume_immediate_repaint_request() {
             ctx.request_repaint();
         }
@@ -1141,6 +1240,7 @@ impl FileSearchDialogState {
                     ui,
                     coordinator,
                     &mut jump_mode_scope,
+                    &mut jump_mode_results_scope,
                     first_ui_pass,
                     navigation_owner,
                 )
@@ -1191,10 +1291,13 @@ impl FileSearchDialogState {
         ui: &mut egui::Ui,
         coordinator: &mut SearchCoordinator,
         jump_mode_scope: &mut Option<crate::gui::jump_mode::ui::JumpModeScope>,
+        jump_mode_results_scope: &mut Option<crate::gui::jump_mode::ui::JumpModeScope>,
         first_ui_pass: bool,
         navigation_owner: bool,
     ) -> Vec<FileSearchUiCommand> {
         let mut commands = Vec::new();
+        let results_revision_at_contents_start = self.jump_mode_results_revision;
+        let mut results_visual_order = 0;
         let committed_owner_pass = first_ui_pass && navigation_owner;
         let unowned_form_state = (!committed_owner_pass).then(|| {
             (
@@ -1687,6 +1790,10 @@ impl FileSearchDialogState {
             navigation_owner,
         ));
         let results_region_size = ui.available_size();
+        if self.jump_mode_results_revision != results_revision_at_contents_start {
+            *jump_mode_results_scope = None;
+        }
+        self.result_row_response_ids.clear();
         ui.allocate_ui_with_layout(results_region_size, *ui.layout(), |ui| {
             ui.push_id(Self::result_list_id(), |ui| {
                 egui::ScrollArea::both()
@@ -1694,11 +1801,21 @@ impl FileSearchDialogState {
                     .auto_shrink([false, false])
                     .show(ui, |ui| match self.selected_mode {
                         FileSearchMode::Filename => {
-                            self.filename_results(ui, coordinator, &mut commands);
+                            self.filename_results(
+                                ui,
+                                coordinator,
+                                &mut commands,
+                                jump_mode_results_scope.as_ref(),
+                                &mut results_visual_order,
+                            );
                         }
-                        FileSearchMode::Content => {
-                            self.content_results(ui, coordinator, &mut commands)
-                        }
+                        FileSearchMode::Content => self.content_results(
+                            ui,
+                            coordinator,
+                            &mut commands,
+                            jump_mode_results_scope.as_ref(),
+                            &mut results_visual_order,
+                        ),
                     });
             });
         });
@@ -1816,11 +1933,45 @@ impl FileSearchDialogState {
         Ok(FileSearchUiCommand::ConfigureRipgrep(abs))
     }
 
+    fn register_jump_mode_result_target(
+        &mut self,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        row: &FileSearchResultRow,
+        label: &'static str,
+        visual_order: &mut u64,
+    ) {
+        let local_identity = Self::result_row_local_identity(&row.id);
+        let target_id = scope.map(|scope| scope.target_id(&local_identity));
+        let directive = crate::gui::jump_mode::ui::register_and_apply_target(
+            scope,
+            ui,
+            response,
+            &local_identity,
+            label,
+            crate::gui::jump_mode::TargetKind::Action,
+            visual_order,
+        );
+        if directive == Some(crate::gui::jump_mode::ui::FocusDirective::Select)
+            && self.is_visible_selectable_result(&row.id)
+        {
+            self.select_result(row);
+            response.request_focus();
+            self.set_selected_result_focus_owner(&row.id, response.id);
+            if let (Some(scope), Some(target_id)) = (scope, target_id) {
+                scope.record_select_focus_owner(&target_id, response.id);
+            }
+        }
+    }
+
     fn filename_results(
         &mut self,
         ui: &mut egui::Ui,
         coordinator: &mut SearchCoordinator,
         commands: &mut Vec<FileSearchUiCommand>,
+        jump_mode_results_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        results_visual_order: &mut u64,
     ) -> FilenameTableGeometry {
         let previous_columns = self.ui_preferences.visible_columns.clone();
         results::ensure_filename_columns_visible(&mut self.ui_preferences);
@@ -1984,6 +2135,8 @@ impl FileSearchDialogState {
                         },
                     };
                     body.row(row_height, |mut row| {
+                        let mut row_target_registered = false;
+                        let mut row_focus_destination_id = None;
                         for column in &visible_columns {
                             #[cfg(test)]
                             let mut item_rect = None;
@@ -2008,9 +2161,38 @@ impl FileSearchDialogState {
                                         _ => results::non_wrapping_selectable_label(ui, is_selected, ""),
                                     }
                                     .on_hover_text(path.display().to_string());
+                                    let response_visible = response
+                                        .rect
+                                        .intersect(ui.clip_rect())
+                                        .is_positive();
+                                    if response_visible
+                                        && (response.has_focus() || response.clicked())
+                                    {
+                                        row_focus_destination_id = Some(response.id);
+                                    } else if response_visible
+                                        && row_focus_destination_id.is_none()
+                                    {
+                                        row_focus_destination_id = Some(response.id);
+                                    }
+                                    if response_visible && !row_target_registered {
+                                        self.register_jump_mode_result_target(
+                                            jump_mode_results_scope,
+                                            ui,
+                                            &response,
+                                            &row_payload,
+                                            "Filename result",
+                                            results_visual_order,
+                                        );
+                                        row_target_registered = true;
+                                    }
                                     #[cfg(test)]
                                     {
                                         item_rect = Some(response.rect);
+                                        geometry.body_cell_responses.push((
+                                            response.rect,
+                                            ui.clip_rect(),
+                                            response.id,
+                                        ));
                                     }
                                     let double_clicked = response.double_clicked();
                                     if is_selected {
@@ -2018,6 +2200,10 @@ impl FileSearchDialogState {
                                     }
                                     if response.clicked() {
                                         self.select_result(&row_payload);
+                                        ui.ctx()
+                                            .memory_mut(|memory| memory.request_focus(response.id));
+                                        self.set_selected_result_focus_owner(&row_id, response.id);
+                                        row_focus_destination_id = Some(response.id);
                                     }
                                     response.context_menu(|ui| {
                                         self.result_context_menu(
@@ -2041,6 +2227,10 @@ impl FileSearchDialogState {
                                 geometry.body_clip_rect = clip_rect;
                             }
                         }
+                        if let Some(response_id) = row_focus_destination_id {
+                            self.result_row_response_ids
+                                .insert(row_id.clone(), response_id);
+                        }
                     });
                 }
             });
@@ -2049,6 +2239,7 @@ impl FileSearchDialogState {
 
     fn clear_selection_if_mode_changed(&mut self, previously_selected_mode: FileSearchMode) {
         if self.selected_mode != previously_selected_mode {
+            self.invalidate_jump_mode_results();
             self.clear_selection();
         }
     }
@@ -2058,6 +2249,8 @@ impl FileSearchDialogState {
         ui: &mut egui::Ui,
         coordinator: &mut SearchCoordinator,
         commands: &mut Vec<FileSearchUiCommand>,
+        jump_mode_results_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        results_visual_order: &mut u64,
     ) {
         let rows = self.visible_result_rows();
         for display_row in rows {
@@ -2095,7 +2288,6 @@ impl FileSearchDialogState {
                         let response =
                             results::non_wrapping_selectable_label(ui, is_selected, row_text)
                                 .on_hover_text(hover_location);
-                        let double_clicked = response.double_clicked();
                         let row_payload = FileSearchResultRow {
                             id: row_id.clone(),
                             payload: FileSearchRowPayload::Content {
@@ -2105,11 +2297,26 @@ impl FileSearchDialogState {
                                 is_last_displayed_match_from_truncated_file,
                             },
                         };
+                        if response.rect.intersect(ui.clip_rect()).is_positive() {
+                            self.result_row_response_ids
+                                .insert(row_id.clone(), response.id);
+                            self.register_jump_mode_result_target(
+                                jump_mode_results_scope,
+                                ui,
+                                &response,
+                                &row_payload,
+                                "Content match",
+                                results_visual_order,
+                            );
+                        }
+                        let double_clicked = response.double_clicked();
                         if is_selected {
                             response.scroll_to_me(Some(egui::Align::Center));
                         }
                         if response.clicked() {
                             self.select_result(&row_payload);
+                            response.request_focus();
+                            self.set_selected_result_focus_owner(&row_id, response.id);
                         }
                         response.context_menu(|ui| {
                             self.content_result_context_menu(
@@ -3849,10 +4056,13 @@ mod tests {
                                         .id_salt(results_scroll_id_source(FileSearchMode::Filename))
                                         .auto_shrink([false, false])
                                         .show(ui, |ui| {
+                                            let mut visual_order = 0;
                                             geometry = Some(state.filename_results(
                                                 ui,
                                                 &mut coordinator,
                                                 &mut commands,
+                                                None,
+                                                &mut visual_order,
                                             ));
                                         });
                                 });
@@ -3906,6 +4116,151 @@ mod tests {
                 "{name} rect {item:?} should fit in its table cell {cell:?}"
             );
         }
+    }
+
+    #[test]
+    fn clicking_non_first_filename_cell_preserves_native_row_focus_owner() {
+        fn draw_filename_table(
+            ctx: &egui::Context,
+            screen_rect: egui::Rect,
+            state: &mut FileSearchDialogState,
+            coordinator: &mut SearchCoordinator,
+            commands: &mut Vec<FileSearchUiCommand>,
+            window_open: &mut bool,
+            events: Vec<egui::Event>,
+        ) -> FilenameTableGeometry {
+            let mut geometry = None;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen_rect),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |root_ui| {
+                    egui::Window::new("File Search focus fixture")
+                        .open(window_open)
+                        .default_size(DEFAULT_WINDOW_SIZE)
+                        .min_size(egui::vec2(520.0, 360.0))
+                        .show(root_ui.ctx(), |ui| {
+                            let results_region_size = ui.available_size();
+                            ui.allocate_ui_with_layout(results_region_size, *ui.layout(), |ui| {
+                                ui.push_id(FileSearchDialogState::result_list_id(), |ui| {
+                                    egui::ScrollArea::both()
+                                        .id_salt(results_scroll_id_source(FileSearchMode::Filename))
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            let mut visual_order = 0;
+                                            geometry = Some(state.filename_results(
+                                                ui,
+                                                coordinator,
+                                                commands,
+                                                None,
+                                                &mut visual_order,
+                                            ));
+                                        });
+                                });
+                            });
+                        });
+                },
+            );
+            output.drop_without_applying_deltas();
+            geometry.expect("filename results should render")
+        }
+
+        let search_id = SearchId(74);
+        let mut state = FileSearchDialogState {
+            selected_mode: FileSearchMode::Filename,
+            active_search_id: Some(search_id),
+            current_status: SearchStatus::Running,
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: search_id,
+            result: filename_search_result("/tmp/focus-target.txt"),
+        });
+        state.apply_event(SearchEvent::Completed { id: search_id });
+        state.ui_preferences.visible_columns = vec![
+            crate::file_search::settings::FileSearchColumn::Name,
+            crate::file_search::settings::FileSearchColumn::Directory,
+            crate::file_search::settings::FileSearchColumn::MatchQuality,
+        ];
+
+        let ctx = egui::Context::default();
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 720.0));
+        let mut coordinator = SearchCoordinator::new();
+        let mut commands = Vec::new();
+        let mut window_open = true;
+        let mut geometry = FilenameTableGeometry::default();
+        for _ in 0..3 {
+            geometry = draw_filename_table(
+                &ctx,
+                screen_rect,
+                &mut state,
+                &mut coordinator,
+                &mut commands,
+                &mut window_open,
+                Vec::new(),
+            );
+        }
+
+        let (directory_cell_rect, directory_clip_rect, directory_response_id) = geometry
+            .body_cell_responses
+            .get(1)
+            .copied()
+            .expect("the second visible cell is the Directory response");
+        let click_rect = directory_cell_rect.intersect(directory_clip_rect);
+        assert!(click_rect.is_positive(), "Directory cell is visible");
+        let click_position = click_rect.center();
+        let press = draw_filename_table(
+            &ctx,
+            screen_rect,
+            &mut state,
+            &mut coordinator,
+            &mut commands,
+            &mut window_open,
+            vec![
+                egui::Event::PointerMoved(click_position),
+                egui::Event::PointerButton {
+                    pos: click_position,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        assert!(!press.body_cell_responses.is_empty());
+        let _ = draw_filename_table(
+            &ctx,
+            screen_rect,
+            &mut state,
+            &mut coordinator,
+            &mut commands,
+            &mut window_open,
+            vec![egui::Event::PointerButton {
+                pos: click_position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+
+        let focused_id = ctx.memory(|memory| memory.focused());
+        let selected_row_id = state
+            .selected_result()
+            .expect("a single click selects the filename row")
+            .row_id
+            .clone();
+        assert_eq!(focused_id, Some(directory_response_id));
+        assert_eq!(
+            state.result_row_response_ids.get(&selected_row_id),
+            Some(&directory_response_id)
+        );
+        assert!(state.has_valid_selected_result_focus_owner(focused_id));
+        assert!(
+            !state.preview_dialog.open,
+            "a single click does not open the file"
+        );
     }
 
     #[test]
@@ -4118,27 +4473,27 @@ mod tests {
             });
         }
 
-        state.move_selection(keyboard::SelectionMove::Next);
+        state.move_selection(keyboard::SelectionMove::Next, &egui::Context::default());
         assert_eq!(
             state.selected_result().unwrap().row_id.path,
             PathBuf::from("/tmp/a.txt")
         );
-        state.move_selection(keyboard::SelectionMove::Next);
+        state.move_selection(keyboard::SelectionMove::Next, &egui::Context::default());
         assert_eq!(
             state.selected_result().unwrap().row_id.path,
             PathBuf::from("/tmp/b.txt")
         );
-        state.move_selection(keyboard::SelectionMove::Next);
+        state.move_selection(keyboard::SelectionMove::Next, &egui::Context::default());
         assert_eq!(
             state.selected_result().unwrap().row_id.path,
             PathBuf::from("/tmp/b.txt")
         );
-        state.move_selection(keyboard::SelectionMove::Previous);
+        state.move_selection(keyboard::SelectionMove::Previous, &egui::Context::default());
         assert_eq!(
             state.selected_result().unwrap().row_id.path,
             PathBuf::from("/tmp/a.txt")
         );
-        state.move_selection(keyboard::SelectionMove::Previous);
+        state.move_selection(keyboard::SelectionMove::Previous, &egui::Context::default());
         assert_eq!(
             state.selected_result().unwrap().row_id.path,
             PathBuf::from("/tmp/a.txt")
@@ -4639,7 +4994,7 @@ mod tests {
             });
         }
         state.set_refinement_text("b.txt");
-        state.move_selection(keyboard::SelectionMove::Next);
+        state.move_selection(keyboard::SelectionMove::Next, &egui::Context::default());
         assert_eq!(
             state.selected_result().unwrap().row_id.path,
             PathBuf::from("/tmp/b.txt")
@@ -4884,7 +5239,10 @@ mod tests {
                 truncated: false,
             }),
         });
-        state.move_selection(crate::gui::file_search_dialog::keyboard::SelectionMove::Next);
+        state.move_selection(
+            crate::gui::file_search_dialog::keyboard::SelectionMove::Next,
+            &egui::Context::default(),
+        );
         assert!(matches!(
             state.selected_result().unwrap().payload,
             SelectedFileSearchResultPayload::Content { .. }

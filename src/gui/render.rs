@@ -5010,19 +5010,33 @@ impl LauncherApp {
         let file_search_was_open = self.file_search_dialog.open;
         let file_search_owner =
             self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let file_search_scope = match file_search_owner {
+        let (file_search_scope, file_search_results_scope) = match file_search_owner {
             crate::gui::jump_mode::ui::NavigationOwner::Dialog {
                 kind: crate::gui::jump_mode::ui::NavigationDialogKind::FileSearch,
                 instance,
-            } if self.jump_mode_enabled() => self.jump_mode_ui.scope_for_navigation_owner(
-                crate::gui::jump_mode::SurfaceId::dialog("file-search", instance),
-                self.file_search_dialog.jump_mode_target_generation(),
-                "file-search-dialog",
-                ctx.viewport_id(),
-                file_search_owner,
-                false,
-            ),
-            _ => None,
+            } if self.jump_mode_enabled() => {
+                let surface = crate::gui::jump_mode::SurfaceId::dialog("file-search", instance);
+                (
+                    self.jump_mode_ui.scope_for_navigation_owner(
+                        surface.clone(),
+                        self.file_search_dialog.jump_mode_target_generation(),
+                        "file-search-dialog",
+                        ctx.viewport_id(),
+                        file_search_owner,
+                        false,
+                    ),
+                    self.jump_mode_ui.scope_for_navigation_owner(
+                        surface,
+                        self.file_search_dialog
+                            .jump_mode_results_target_generation(instance),
+                        "file-search-results",
+                        ctx.viewport_id(),
+                        file_search_owner,
+                        false,
+                    ),
+                )
+            }
+            _ => (None, None),
         };
         let file_search_is_current_owner =
             self.file_search_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
@@ -5030,6 +5044,7 @@ impl LauncherApp {
             &ctx,
             &mut self.file_search_coordinator,
             file_search_scope,
+            file_search_results_scope,
             first_ui_pass,
             file_search_is_current_owner,
         );
@@ -23349,6 +23364,95 @@ mod tests {
         }
     }
 
+    fn seed_actual_file_search_filename_results(
+        app: &mut LauncherApp,
+        search_id: crate::file_search::model::SearchId,
+        paths: &[std::path::PathBuf],
+    ) {
+        use crate::file_search::model::{
+            FileKind, FilenameRank, FilenameResult, SearchEvent, SearchResult,
+        };
+
+        let state = &mut app.file_search_dialog;
+        state.selected_mode = crate::gui::file_search_dialog::FileSearchMode::Filename;
+        state.active_search_id = Some(search_id);
+        state.current_status = crate::file_search::model::SearchStatus::Running;
+        state.clear_results_and_selection();
+        state.active_search_id = Some(search_id);
+        for (arrival_index, path) in paths.iter().enumerate() {
+            state.apply_event(SearchEvent::Result {
+                id: search_id,
+                result: SearchResult::Filename(FilenameResult {
+                    path: path.clone(),
+                    file_name: path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                    parent_directory: path.parent().map(std::path::Path::to_path_buf),
+                    kind: FileKind::Other,
+                    size: None,
+                    modified: None,
+                    rank: FilenameRank::ExactFilename,
+                    match_quality: FilenameRank::ExactFilename,
+                    filename_match_ranges: Vec::new(),
+                    path_match_ranges: Vec::new(),
+                    arrival_index,
+                }),
+            });
+        }
+        state.apply_event(SearchEvent::Completed { id: search_id });
+    }
+
+    fn seed_actual_file_search_content_result(
+        app: &mut LauncherApp,
+        search_id: crate::file_search::model::SearchId,
+        path: &std::path::Path,
+        line: &str,
+    ) {
+        use crate::file_search::model::{
+            ContentFileResult, ContentMatch, SearchEvent, SearchResult,
+        };
+
+        let state = &mut app.file_search_dialog;
+        state.selected_mode = crate::gui::file_search_dialog::FileSearchMode::Content;
+        state.active_search_id = Some(search_id);
+        state.current_status = crate::file_search::model::SearchStatus::Running;
+        state.clear_results_and_selection();
+        state.active_search_id = Some(search_id);
+        state.apply_event(SearchEvent::Result {
+            id: search_id,
+            result: SearchResult::ContentFile(ContentFileResult {
+                path: path.to_path_buf(),
+                file_name: path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                modified: None,
+                filename_relevance: None,
+                arrival_index: 0,
+                total_matches: 1,
+                matches: vec![ContentMatch::new(1, line.to_owned(), 0, line.len())],
+                truncated: false,
+            }),
+        });
+        state.apply_event(SearchEvent::Completed { id: search_id });
+    }
+
+    fn actual_file_search_result_target_ids(
+        app: &LauncherApp,
+        label: &str,
+    ) -> Vec<crate::gui::jump_mode::TargetId> {
+        app.jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| target.metadata().label() == label)
+            .map(|target| target.metadata().id().clone())
+            .collect()
+    }
+
     #[test]
     fn jump_mode_file_search_form_registers_visible_controls_by_mode() {
         use crate::gui::jump_mode::ui::NavigationOwner;
@@ -23646,6 +23750,307 @@ mod tests {
             Some(crate::file_search::model::SearchId(42))
         );
         assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_file_search_results_use_opaque_duplicate_path_ids_and_select_without_opening() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+
+        let first_path = workspace.root().join("α").join("同じ名前.txt");
+        let second_path = workspace.root().join("β").join("同じ名前.txt");
+        seed_actual_file_search_filename_results(
+            &mut app,
+            crate::file_search::model::SearchId(31),
+            &[first_path.clone(), second_path.clone()],
+        );
+        prepare_actual_file_search_dialog(&ctx, &mut app, workspace.root());
+        start_actual_root_jump_mode(&ctx, &mut app);
+
+        let result_targets = actual_file_search_result_target_ids(&app, "Filename result");
+        assert_eq!(result_targets.len(), 2);
+        assert_ne!(result_targets[0], result_targets[1]);
+        let target_metadata: Vec<_> = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| target.metadata().label() == "Filename result")
+            .map(|target| {
+                assert!(!format!("{:?}", target.metadata().id()).contains("同じ名前"));
+                target.response_id()
+            })
+            .collect();
+
+        let result_hint = dialog_hint_for_label(&app, "Filename result");
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(result_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+
+        let selected = app
+            .file_search_dialog
+            .selected_result()
+            .expect("Jump Mode selects a current filename row");
+        assert!([&first_path, &second_path].contains(&&selected.row_id.path));
+        assert!(!app.file_search_dialog.preview_dialog.open);
+        assert!(app.file_search_dialog.warning_error_message.is_none());
+        assert!(app.test_activation_trace.is_empty());
+        let focused_id = ctx.memory(|memory| memory.focused());
+        assert!(
+            target_metadata
+                .iter()
+                .any(|response_id| Some(*response_id) == focused_id)
+        );
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_file_search_results_focus_then_enter_previews_one_content_match() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+
+        let content_path = workspace.root().join("needle_source.rs");
+        let source_line = "needle content in an isolated fixture";
+        std::fs::write(&content_path, format!("{source_line}\nsecond line\n"))
+            .expect("the fixture source file should be writable");
+        seed_actual_file_search_content_result(
+            &mut app,
+            crate::file_search::model::SearchId(32),
+            &content_path,
+            source_line,
+        );
+        prepare_actual_file_search_dialog(&ctx, &mut app, workspace.root());
+        start_actual_root_jump_mode(&ctx, &mut app);
+
+        assert_eq!(
+            actual_file_search_result_target_ids(&app, "Content match").len(),
+            1
+        );
+        let result_hint = dialog_hint_for_label(&app, "Content match");
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(result_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.file_search_dialog.selected_result().is_some());
+        assert!(!app.file_search_dialog.preview_dialog.open);
+        assert!(
+            app.file_search_dialog
+                .preview_dialog
+                .current_request
+                .is_none()
+        );
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        let request = app
+            .file_search_dialog
+            .preview_dialog
+            .current_request
+            .as_ref()
+            .expect("a later Enter opens the selected Content preview")
+            .clone();
+        assert!(app.file_search_dialog.preview_dialog.open);
+        assert_eq!(request.path, content_path);
+        assert_eq!(request.selected_match.as_ref().unwrap().line, 1);
+        assert_eq!(
+            request
+                .selected_match
+                .as_ref()
+                .unwrap()
+                .source_line
+                .as_deref(),
+            Some(source_line)
+        );
+        assert_eq!(
+            app.file_search_dialog
+                .preview_dialog
+                .selected_match
+                .as_ref()
+                .unwrap()
+                .line_number,
+            1
+        );
+        assert!(app.test_activation_trace.is_empty());
+
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert_eq!(
+            app.file_search_dialog
+                .preview_dialog
+                .current_request
+                .as_ref(),
+            Some(&request),
+            "the consumed Enter does not trigger a second preview on a later frame"
+        );
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_file_search_results_default_off_arrow_then_enter_keeps_native_flow() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(false);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+
+        let content_path = workspace.root().join("native_keyboard_source.rs");
+        let source_line = "native keyboard selection fixture";
+        std::fs::write(&content_path, format!("{source_line}\n"))
+            .expect("the fixture source file should be writable");
+        seed_actual_file_search_content_result(
+            &mut app,
+            crate::file_search::model::SearchId(35),
+            &content_path,
+            source_line,
+        );
+        prepare_actual_file_search_dialog(&ctx, &mut app, workspace.root());
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.file_search_dialog.selected_result().is_some());
+        let focused_row = ctx.memory(|memory| memory.focused());
+        assert!(focused_row.is_some());
+        assert_ne!(
+            focused_row,
+            Some(crate::gui::file_search_dialog::FileSearchDialogState::search_field_id())
+        );
+        assert!(!app.file_search_dialog.preview_dialog.open);
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.file_search_dialog.preview_dialog.open);
+        assert_eq!(
+            app.file_search_dialog
+                .preview_dialog
+                .current_request
+                .as_ref()
+                .map(|request| request.path.as_path()),
+            Some(content_path.as_path())
+        );
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_file_search_results_clip_rows_and_refresh_identity_on_view_changes() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+
+        let paths: Vec<_> = (0..80)
+            .map(|index| workspace.root().join(format!("row-{index:03}.txt")))
+            .collect();
+        seed_actual_file_search_filename_results(
+            &mut app,
+            crate::file_search::model::SearchId(33),
+            &paths,
+        );
+        prepare_actual_file_search_dialog(&ctx, &mut app, workspace.root());
+        start_actual_root_jump_mode(&ctx, &mut app);
+
+        let all_row_ids = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| target.metadata().label() == "Filename result")
+            .map(|target| target.metadata().id().clone())
+            .collect::<Vec<_>>();
+        assert!(!all_row_ids.is_empty());
+        assert!(
+            all_row_ids.len() < paths.len(),
+            "offscreen result rows are not registered: {} of {}",
+            all_row_ids.len(),
+            paths.len()
+        );
+
+        app.file_search_dialog.set_refinement_text("row-001");
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        let refined_row_ids = actual_file_search_result_target_ids(&app, "Filename result");
+        assert_eq!(refined_row_ids.len(), 1);
+        assert!(
+            all_row_ids
+                .iter()
+                .all(|old_id| !refined_row_ids.contains(old_id))
+        );
+
+        app.file_search_dialog.ui_preferences.filename_sort =
+            crate::file_search::settings::FileSearchFilenameSort::FilenameDescending;
+        app.file_search_dialog.handle_sort_changed();
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        let sorted_row_ids = actual_file_search_result_target_ids(&app, "Filename result");
+        assert_eq!(sorted_row_ids.len(), 1);
+        assert!(
+            refined_row_ids
+                .iter()
+                .all(|old_id| !sorted_row_ids.contains(old_id))
+        );
+
+        seed_actual_file_search_filename_results(
+            &mut app,
+            crate::file_search::model::SearchId(34),
+            &[workspace.root().join("fresh-result.txt")],
+        );
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        let refreshed_row_ids = actual_file_search_result_target_ids(&app, "Filename result");
+        assert_eq!(refreshed_row_ids.len(), 1);
+        assert!(
+            sorted_row_ids
+                .iter()
+                .all(|old_id| !refreshed_row_ids.contains(old_id))
+        );
         drop(workspace);
     }
 

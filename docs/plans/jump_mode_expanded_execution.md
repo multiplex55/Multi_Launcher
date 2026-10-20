@@ -9,7 +9,7 @@ Started 2026-10-20 from clean branch `jump`, HEAD `0cb3dabf148dc720ed560626c32ef
 |---|---|---|
 | M0-A | complete | Read active plan, repository instructions and configured roles; inspected Git, owner bridge, renderer, dashboard gaps and isolated runner. |
 | M1 | complete | M1-A `3c3b8e91` / M1-B `8648b2d0` / M1-C `a1181df6` pushed; 32 owner and 5 adapter tests passed, independent owner review clean; fixture-only PASS. |
-| M2 File Search | in_progress | M2-A form complete: six focused tests passed. M2-B visible result identity/selection next; M2-C integration/native evidence pending. |
+| M2 File Search | in_progress | M2-A `b91740f3` pushed: six tests. M2-B complete: seven focused tests plus one later-column mouse-focus regression passed. M2-C integration/native evidence next. |
 | M3 Snippets | pending | |
 | M4 Clipboard History | pending | |
 | M5 Dashboard gaps | pending | |
@@ -37,9 +37,9 @@ Native sessions: 0 / 12; images: 0 / 24. No native evidence yet. Use generated i
 
 ## Coverage inventory
 
-All eight inventories pending implementation; individual unsupported pointer-only, passive or foreign-popup controls will be recorded with their actual boundary. No universal coverage claim.
+Remaining checkpoint inventories are pending; individual unsupported pointer-only, passive or foreign-popup controls will be recorded with their actual boundary. No universal coverage claim.
 
-File Search form (M2-A): query, directory roots/Add folder/Remove, refinement/Clear, Filename/Content, Global/Directory, case/hidden toggles, Search/Cancel/enabled Open, Export anchor, matching/sort/type/extension/exclusion filters, Global roots/Filters/Diagnostics headings, enabled Copy diagnostics, inline Locate ripgrep/Dismiss. Only currently drawn enabled responses register. Generic Export menu options use native menu access and remain outside hints; native picker internals are excluded. Results are not yet registered.
+File Search (M2-A/B): query, directory roots/Add folder/Remove, refinement/Clear, Filename/Content, Global/Directory, case/hidden toggles, Search/Cancel/enabled Open, Export anchor, matching/sort/type/extension/exclusion filters, Global roots/Filters/Diagnostics headings, enabled Copy diagnostics, inline Locate ripgrep/Dismiss; currently visible Filename rows (one eligible cell per row) and Content match responses. Only currently drawn enabled responses register. Generic Export menu options use native menu access and remain outside hints; native picker internals, passive group headings and truncation notices are excluded.
 
 ## Git and final gates
 
@@ -85,3 +85,11 @@ No fixture source changes were needed. `root_list_app_at` already constructs an 
 Real renderer regressions prove hint focus followed by typing and one fresh Enter, default-off ordinary Enter, mode-dependent/disabled inventory and background field/button rejection. Exact query/root/refinement widget IDs now match keyboard helpers; the early handler consumes Enter once. Normal native eligibility is independent of the Jump enabled gate; the shared Jump resolver remains unchanged.
 
 Intermediate failures were corrected at their owners: field-ID mismatch, a fixture forcing all popups visible, and ordinary-input gating when Jump is disabled. Diagnostics is tested while actually visible rather than bypassing clip checks. No result targets, backend changes, native sessions or screenshots in M2-A.
+
+### M2-B evidence
+
+`cargo nextest run --lib -E 'test(gui::render::tests::jump_mode_file_search_results_) | test(gui::file_search_dialog::tests::stable_keys_remain_unchanged_after_sorting_rows) | test(gui::file_search_dialog::tests::keyboard_activation_uses_selected_row_key_after_reordering) | test(gui::file_search_dialog::tests::hidden_rows_are_excluded_from_keyboard_navigation)'`: **7 passed, 5,901 skipped**. Parent then found a later-column native-focus mismatch; the narrow fix prefers an actually focused/clicked visible cell over the default first cell. Exact regression `clicking_non_first_filename_cell_preserves_native_row_focus_owner`: **1 passed, 5,908 skipped**. Scoped rustfmt and diff check passed.
+
+Result scope shares the existing collector and binds instance/search/view revision. Complete existing row identities produce opaque local IDs; only clipped-visible responses register. Selection copies response IDs, never Responses or callbacks. Full current-row validation remains at Select/Enter; per-frame focus classification uses IDs/revision rather than cloning the hidden result model. Settings initialization moved into `FileSearchDialogState::from_settings` to keep private adapter state encapsulated.
+
+Evidence includes duplicate Unicode basenames, exact Content match selection then fresh Enter preview, default-off row keyboard behavior, clipping and sort/refinement/new-search invalidation. No native sessions, external file opening or copying in this checkpoint.
