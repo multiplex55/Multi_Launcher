@@ -3,7 +3,7 @@
 param(
     [switch]$FixturesOnly,
     [ValidateSet('Baseline', 'QueryProbe', 'Phase1', 'Phase1Enabled', 'Phase1Disabled', 'Phase2')][string]$Scenario = 'Baseline',
-    [ValidateSet('All', 'Dashboard', 'Grid')][string]$Screen = 'All',
+    [ValidateSet('All', 'Dashboard', 'Grid', 'FinalSmoke')][string]$Screen = 'All',
     [ValidateSet('Settings', 'Notes', 'Todo', 'Timer', 'Paste', 'MkMacro')][string]$Surface = 'Settings',
     [ValidateRange(5, 120)][int]$CaptureTimeoutSeconds = 45,
     [ValidateRange(1, 30)][int]$GracefulCloseSeconds = 6,
@@ -13,18 +13,20 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $cargoFeatures = 'dev-smoke-binaries,qa-framebuffer-capture'
+$isFinalSmoke = $Scenario -eq 'Phase1Enabled' -and $Screen -eq 'FinalSmoke'
+$runMilestone = if ($isFinalSmoke) { 'M15' } elseif ($Scenario -eq 'QueryProbe') { 'M05' } elseif ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'M08' } elseif ($Scenario -eq 'Phase2') { 'M13' } else { 'M01' }
 $runStamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
 $runSuffix = [Guid]::NewGuid().ToString('N').Substring(0, 8)
-$scenarioTag = switch ($Scenario) {
+$scenarioTag = if ($isFinalSmoke) { 'm15_final_smoke' } else { switch ($Scenario) {
     'QueryProbe' { 'm05_query_probe' }
     'Phase1' { 'm08_phase1' }
     'Phase1Enabled' { 'm08_phase1_enabled' }
     'Phase1Disabled' { 'm08_phase1_disabled' }
     'Phase2' { "m13_phase2_$($Surface.ToLowerInvariant())" }
     default { 'm01_baseline' }
-}
+} }
 $runId = "jump_${scenarioTag}_${runStamp}_$runSuffix"
-if ($Scenario -eq 'Phase1Enabled' -and $Screen -ne 'All') { $runId = "${runId}_$($Screen.ToLowerInvariant())" }
+if ($Scenario -eq 'Phase1Enabled' -and $Screen -notin @('All', 'FinalSmoke')) { $runId = "${runId}_$($Screen.ToLowerInvariant())" }
 $evidenceRoot = Join-Path $repoRoot "dev\jump_mode\evidence\$runId"
 $profileRoot = Join-Path $evidenceRoot 'profile'
 $captureRoot = Join-Path $evidenceRoot 'capture'
@@ -46,6 +48,7 @@ $startedAt = [DateTime]::UtcNow
 $runDeadlineUtc = $startedAt.AddSeconds($OverallTimeoutSeconds)
 $targetDirectory = $null
 $previousTargetDirectory = $env:CARGO_TARGET_DIR
+$nativeQueryProbeInitialized = $false
 $process = $null
 $stdoutTask = $null
 $stderrTask = $null
@@ -67,12 +70,12 @@ $postCleanupState = 'not_started'
 $ownedTreeSnapshot = @()
 $ownedTreeVerified = $false
 $scenarioStatus = 'BLOCKED'
-$scenarioReason = switch ($Scenario) {
+$scenarioReason = if ($isFinalSmoke) { 'M15 final representative smoke has not started.' } else { switch ($Scenario) {
     'QueryProbe' { 'Native Jump Mode query probe has not started.' }
     { $_ -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled') } { 'Native Phase 1 Jump Mode scenarios have not started.' }
     'Phase2' { "Native Phase 2 $Surface workflow has not started." }
     default { 'Baseline capture has not started.' }
-}
+} }
 $fixtureScenarioStatus = 'BLOCKED'
 $fixtureScenarioReason = 'Fixture validation has not started.'
 $cleanupIssues = [Collections.Generic.List[string]]::new()
@@ -85,10 +88,11 @@ $foregroundActivationAttempted = $false
 $jumpObservationPath = Join-Path $captureRoot 'jump-observation.json'
 $phase1Captures = [Collections.Generic.List[object]]::new()
 $phase1CaptureCount = if ($Scenario -eq 'Phase1Enabled') {
-    switch ($Screen) { 'Dashboard' { 5 } 'Grid' { 9 } default { 14 } }
+    switch ($Screen) { 'Dashboard' { 5 } 'Grid' { 9 } 'FinalSmoke' { 2 } default { 14 } }
 } elseif ($Scenario -eq 'Phase1Disabled') { 1 } else { 0 }
 $phase1BaseActivationCount = 1
 $appWindowMetadata = $null
+$finalSmokeResizeMetadata = $null
 $phase2CaptureCount = if ($Scenario -eq 'Phase2' -and $Surface -eq 'Settings') { 3 } elseif ($Scenario -eq 'Phase2') { 2 } else { 0 }
 $phase2NextCaptureIndex = 1
 $phase2Captures = [Collections.Generic.List[object]]::new()
@@ -239,6 +243,7 @@ function Get-PngDimensions([string]$Path) {
 }
 
 function Initialize-NativeQueryProbe {
+    if ($script:nativeQueryProbeInitialized) { return }
     $nativeType = @'
 using System;
 using System.Runtime.InteropServices;
@@ -302,10 +307,23 @@ public static class JumpModeNativeProbe {
     private static extern bool GetWindowRect(IntPtr window, out Rect rect);
 
     [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetClientRect(IntPtr window, out Rect rect);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+
+    [DllImport("user32.dll", SetLastError = true)]
     private static extern uint GetDpiForWindow(IntPtr window);
 
     public static uint ForegroundProcessId() {
         IntPtr window = GetForegroundWindow();
+        if (window == IntPtr.Zero) return 0;
+        uint processId;
+        GetWindowThreadProcessId(window, out processId);
+        return processId;
+    }
+
+    public static uint WindowProcessId(IntPtr window) {
         if (window == IntPtr.Zero) return 0;
         uint processId;
         GetWindowThreadProcessId(window, out processId);
@@ -343,20 +361,44 @@ public static class JumpModeNativeProbe {
         return success;
     }
 
+    public static bool TryGetClientBounds(IntPtr window, out int left, out int top, out int right, out int bottom) {
+        Rect rect;
+        bool success = GetClientRect(window, out rect);
+        left = rect.left;
+        top = rect.top;
+        right = rect.right;
+        bottom = rect.bottom;
+        return success;
+    }
+
+    public static bool ResizeWindowWithoutActivation(IntPtr window, int width, int height) {
+        const uint SWP_NOMOVE = 0x0002;
+        const uint SWP_NOZORDER = 0x0004;
+        const uint SWP_NOACTIVATE = 0x0010;
+        return SetWindowPos(window, IntPtr.Zero, 0, 0, width, height,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
     public static uint WindowDpi(IntPtr window) {
         return GetDpiForWindow(window);
     }
 }
 '@
     Add-Type -TypeDefinition $nativeType -Language CSharp -ErrorAction Stop
+    $script:nativeQueryProbeInitialized = $true
 }
 
 function Get-OwnedWindowMetadata {
+    if (!(Test-RetainedProcessIdentity)) { throw 'retained app process identity changed before reading its window metadata' }
     $process.Refresh()
     $window = $process.MainWindowHandle
     if ($window -eq [IntPtr]::Zero) { throw 'owned app main window is unavailable for metadata capture' }
+    $windowProcessId = [int][JumpModeNativeProbe]::WindowProcessId($window)
+    if ($windowProcessId -ne $processId) { throw "main window belongs to PID $windowProcessId instead of retained PID $processId" }
     $left = 0; $top = 0; $right = 0; $bottom = 0
     $hasBounds = [JumpModeNativeProbe]::TryGetWindowBounds($window, [ref]$left, [ref]$top, [ref]$right, [ref]$bottom)
+    $clientLeft = 0; $clientTop = 0; $clientRight = 0; $clientBottom = 0
+    $hasClientBounds = [JumpModeNativeProbe]::TryGetClientBounds($window, [ref]$clientLeft, [ref]$clientTop, [ref]$clientRight, [ref]$clientBottom)
     $windowDpi = $null
     try {
         $observedDpi = [JumpModeNativeProbe]::WindowDpi($window)
@@ -364,8 +406,127 @@ function Get-OwnedWindowMetadata {
     } catch { }
     return [ordered]@{
         hwnd = ('0x{0:X}' -f $window.ToInt64())
+        process_id = $windowProcessId
         bounds = if ($hasBounds) { [ordered]@{ left = $left; top = $top; right = $right; bottom = $bottom; width = $right - $left; height = $bottom - $top } } else { $null }
+        client_bounds = if ($hasClientBounds) { [ordered]@{ left = $clientLeft; top = $clientTop; right = $clientRight; bottom = $clientBottom; width = $clientRight - $clientLeft; height = $clientBottom - $clientTop } } else { $null }
         dpi = $windowDpi
+    }
+}
+
+function Resize-OwnedWindowForFinalSmoke {
+    if (!$script:isFinalSmoke) { throw 'owned-window resize is only available to the M15 FinalSmoke scenario' }
+    if (!(Test-RetainedProcessIdentity)) { throw 'retained app process identity changed before FinalSmoke resize' }
+    $process.Refresh()
+    $window = $process.MainWindowHandle
+    if ($window -eq [IntPtr]::Zero) { throw 'owned app main window is unavailable for FinalSmoke resize' }
+    $before = Get-OwnedWindowMetadata
+    if ($before.process_id -ne $processId -or $before.hwnd -cne ('0x{0:X}' -f $window.ToInt64())) {
+        throw 'FinalSmoke resize HWND does not match the retained app process and main-window handle'
+    }
+    if (!$before.bounds -or !$before.client_bounds -or $before.bounds.width -le 0 -or $before.bounds.height -le 0 -or
+        $before.client_bounds.width -le 0 -or $before.client_bounds.height -le 0) {
+        throw 'FinalSmoke resize requires valid owned outer-window and client-area bounds'
+    }
+    $beforeState = Wait-JumpModeObservation {
+        param($state)
+        $state.capture_armed -and [int]$state.capture_index -eq 1 -and [int]$state.capture_count -eq 2 -and
+            [int]$state.process_pid -eq $processId -and [string]$state.fixture_manifest_sha256 -ceq $fixtureHash -and
+            $state.root_focused -and $state.root_owner_allowed
+    } ([Math]::Min($CaptureTimeoutSeconds, 15)) 'FinalSmoke initial ROOT observer and two-capture request readiness before resize'
+
+    $targetWidth = [int][Math]::Floor([double]$before.bounds.width * 0.85)
+    $targetHeight = [int][Math]::Floor([double]$before.bounds.height * 0.85)
+    if ($targetWidth -le 0 -or $targetHeight -le 0 -or $targetWidth -ge $before.bounds.width -or $targetHeight -ge $before.bounds.height) {
+        throw 'FinalSmoke resize target is not a strictly smaller positive window size'
+    }
+    if (!(Test-RetainedProcessIdentity)) { throw 'retained app process identity changed immediately before SetWindowPos' }
+    $process.Refresh()
+    if ($process.MainWindowHandle -ne $window -or [int][JumpModeNativeProbe]::WindowProcessId($window) -ne $processId) {
+        throw 'owned main-window identity changed before SetWindowPos'
+    }
+    if (![JumpModeNativeProbe]::ResizeWindowWithoutActivation($window, $targetWidth, $targetHeight)) {
+        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "SetWindowPos failed for retained PID $processId / HWND $($before.hwnd) (Win32 error $errorCode)"
+    }
+
+    $afterState = Wait-JumpModeObservation {
+        param($state)
+        $state.capture_armed -and [int]$state.capture_index -eq 1 -and [int]$state.capture_count -eq 2 -and
+            [int64]$state.logic_frame_id -gt [int64]$beforeState.logic_frame_id -and
+            [int]$state.process_pid -eq $processId -and [string]$state.fixture_manifest_sha256 -ceq $fixtureHash -and
+            $state.root_focused -and $state.root_owner_allowed
+    } ([Math]::Min($CaptureTimeoutSeconds, 15)) 'new retained ROOT frame after owned-window resize'
+    $after = Get-OwnedWindowMetadata
+    if ($after.hwnd -cne $before.hwnd -or $after.process_id -ne $processId -or
+        !$after.client_bounds -or $after.client_bounds.width -ge $before.client_bounds.width -or
+        $after.client_bounds.height -ge $before.client_bounds.height) {
+        throw 'FinalSmoke resize did not produce a smaller client area on the same owned HWND'
+    }
+    if ([JumpModeNativeProbe]::ForegroundProcessId() -ne $processId) {
+        throw 'FinalSmoke resize unexpectedly changed foreground ownership; refusing subsequent native input'
+    }
+    $script:appWindowMetadata = $after
+    $script:finalSmokeResizeMetadata = $after
+    Write-Event 'final_smoke_owned_window_resized' @{
+        hwnd = $after.hwnd
+        process_id = $processId
+        process_started_at_utc = $processStartUtc.ToString('O')
+        requested_outer_size = @{ width = $targetWidth; height = $targetHeight }
+        before_window = $before
+        after_window = $after
+        before_logic_frame_id = $beforeState.logic_frame_id
+        after_logic_frame_id = $afterState.logic_frame_id
+        capture_index = $afterState.capture_index
+        capture_count = $afterState.capture_count
+        foreground_process_id = [JumpModeNativeProbe]::ForegroundProcessId()
+        activation_flags = @('SWP_NOMOVE', 'SWP_NOZORDER', 'SWP_NOACTIVATE')
+    }
+    return $after
+}
+
+function Get-FinalSmokeCaptureClientBinding($Png, $Captured) {
+    if (!$script:isFinalSmoke) { return $null }
+    if (!$script:finalSmokeResizeMetadata -or !$script:finalSmokeResizeMetadata.client_bounds) {
+        throw 'FinalSmoke capture has no verified post-resize client-area metadata'
+    }
+    $current = Get-OwnedWindowMetadata
+    $expected = $script:finalSmokeResizeMetadata
+    if ($current.hwnd -cne $expected.hwnd -or $current.process_id -ne $processId -or
+        $current.client_bounds.width -ne $expected.client_bounds.width -or
+        $current.client_bounds.height -ne $expected.client_bounds.height) {
+        throw 'owned HWND/client dimensions changed between resize readiness and ROOT capture'
+    }
+    $clientWidth = [int]$current.client_bounds.width
+    $clientHeight = [int]$current.client_bounds.height
+    $scales = [Collections.Generic.List[object]]::new()
+    $scales.Add([pscustomobject]@{ Name = 'client_pixels'; Value = 1.0 })
+    if ($null -ne $Captured.native_pixels_per_point -and [double]$Captured.native_pixels_per_point -gt 0) {
+        $scales.Add([pscustomobject]@{ Name = 'native_pixels_per_point'; Value = [double]$Captured.native_pixels_per_point })
+    }
+    if ([double]$Captured.pixels_per_point -gt 0) {
+        $scales.Add([pscustomobject]@{ Name = 'pixels_per_point'; Value = [double]$Captured.pixels_per_point })
+    }
+    $matchedScale = $null
+    foreach ($scale in $scales) {
+        $expectedWidth = [int][Math]::Round($clientWidth * $scale.Value)
+        $expectedHeight = [int][Math]::Round($clientHeight * $scale.Value)
+        if ([Math]::Abs([int]$Png.Width - $expectedWidth) -le 1 -and [Math]::Abs([int]$Png.Height - $expectedHeight) -le 1) {
+            $matchedScale = $scale.Name
+            break
+        }
+    }
+    if (!$matchedScale) {
+        throw "ROOT PNG $($Png.Width)x$($Png.Height) does not match owned client area ${clientWidth}x${clientHeight} at client/egui pixel scale"
+    }
+    return [ordered]@{
+        hwnd = $current.hwnd
+        process_id = $processId
+        client_bounds = $current.client_bounds
+        png_width = [int]$Png.Width
+        png_height = [int]$Png.Height
+        pixels_per_point = [double]$Captured.pixels_per_point
+        native_pixels_per_point = $Captured.native_pixels_per_point
+        matched_scale = $matchedScale
     }
 }
 
@@ -732,6 +893,7 @@ function Save-WorkflowCapture([int]$CatalogNumber, [string]$Name, [scriptblock]$
     if ([string]$receipt.capture_semantics -cne 'ROOT framebuffer pixels; CPU UI completion before GPU presentation') { throw 'capture receipt semantics do not identify the native ROOT framebuffer boundary' }
     if (!(& $Predicate $capturedObservation)) { throw "catalog $CatalogNumber receipt captured state does not satisfy $Description" }
     $png = Get-PngDimensions $sourcePngPath
+    $windowClientCaptureBinding = Get-FinalSmokeCaptureClientBinding $png $captured
     $pngHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourcePngPath).Hash.ToLowerInvariant()
     if ([string]$receipt.saved.png_sha256 -cne $pngHash) { throw 'saved PNG hash does not match its native ROOT capture receipt' }
     $screenshotFileName = '{0:D2}_{1}.png' -f $CatalogNumber, $Name
@@ -772,6 +934,7 @@ function Save-WorkflowCapture([int]$CatalogNumber, [string]$Name, [scriptblock]$
         pixels_per_point = $captured.pixels_per_point
         native_pixels_per_point = $captured.native_pixels_per_point
         zoom_factor = $captured.zoom_factor
+        owned_client_capture_binding = $windowClientCaptureBinding
     }
     if ($Phase2) {
         $script:phase2Captures.Add($record)
@@ -798,7 +961,17 @@ function Save-WorkflowCapture([int]$CatalogNumber, [string]$Name, [scriptblock]$
 }
 
 function Save-Phase1Capture([int]$CatalogNumber, [string]$Name, [scriptblock]$Predicate, [string]$Description) {
+    if ($script:isFinalSmoke -and $CatalogNumber -notin @(5, 9)) { return $null }
     return Save-WorkflowCapture $CatalogNumber $Name $Predicate $Description
+}
+
+function Test-Phase1FinalSmokeCaptureContract {
+    if (!$script:isFinalSmoke) { return }
+    $selectedCatalogs = @(1..14 | Where-Object { $_ -in @(5, 9) })
+    if ($script:phase1CaptureCount -ne 2 -or ($selectedCatalogs -join ',') -cne '5,9') {
+        throw 'M15 FinalSmoke must request exactly two receipt captures for catalog 05 and catalog 09'
+    }
+    Write-Event 'm15_final_smoke_capture_contract_passed' @{ capture_count = $script:phase1CaptureCount; catalog_numbers = $selectedCatalogs; full_phase1_catalog_claim = $false }
 }
 
 function Save-Phase2Capture([int]$CatalogNumber, [string]$Name, [scriptblock]$Predicate, [string]$Description) {
@@ -819,7 +992,8 @@ function Add-ReceiptBoundScreenshotAlias($Capture, [string]$AliasName) {
 
 function Invoke-Phase1EnabledWorkflow {
     $script:phase1BaseActivationCount = if ($Screen -eq 'Grid') { 0 } else { 1 }
-    Write-Event 'phase1_enabled_native_sequence_started' @{ expected_capture_count = $phase1CaptureCount; screen = $Screen; jump_mode_enabled = $true }
+    $sequenceEvent = if ($script:isFinalSmoke) { 'm15_final_smoke_native_sequence_started' } else { 'phase1_enabled_native_sequence_started' }
+    Write-Event $sequenceEvent @{ expected_capture_count = $phase1CaptureCount; screen = $Screen; jump_mode_enabled = $true; full_phase1_catalog = !$script:isFinalSmoke }
     if ($Screen -ne 'Grid') {
     $baseline = Ensure-Phase1QueryFocus 'phase1-dashboard'
     $baseline = Wait-JumpModeObservation {
@@ -1238,6 +1412,32 @@ function Invoke-Phase1EnabledWorkflow {
             $state.query -ceq 'note list' -and $opened.Count -eq 1 -and $opened[0] -ceq 'jump-qa-note-001'
     }.GetNewClosure()
     $null = Save-Phase1Capture 9 'note_opened_by_fresh_enter' $noteOpenedPredicate 'fresh Enter opened exactly the typed note target once'
+
+    if ($script:isFinalSmoke) {
+        $finalCatalogNumbers = @($script:phase1Captures | ForEach-Object { [int]$_.catalog_number })
+        if ($script:phase1Captures.Count -ne 2 -or ($finalCatalogNumbers -join ',') -cne '5,9') {
+            throw "M15 FinalSmoke saved catalog captures [$($finalCatalogNumbers -join ',')] instead of [5,9]"
+        }
+        $script:scenarioStatus = 'PASS'
+        $script:scenarioReason = 'The M15 representative native smoke verified Dashboard catalog 05 and exact note-open catalog 09 with receipt-bound ROOT captures. It does not claim the full Phase 1 catalog or disabled-gate case.'
+        $script:runStatus = 'PASS'
+        $script:phase = 'm15_final_smoke_complete'
+        Update-Scenarios
+        Write-Event 'm15_final_smoke_assertions_passed' @{
+            capture_count = $script:phase1Captures.Count
+            catalog_numbers = $finalCatalogNumbers
+            dashboard_action_id = $filledQuery.last_action.action_id
+            dashboard_activation_count = $filledQuery.activation_count
+            note_target_id = $noteTargetId
+            note_action = $noteOpened.last_action
+            opened_note_slugs = @($noteOpened.opened_note_slugs)
+            total_activation_count = $noteOpened.activation_count
+            resize = $script:finalSmokeResizeMetadata
+            full_phase1_catalog_claim = $false
+        }
+        Write-Summary 'PASS' 'The two-capture M15 representative smoke verified the Dashboard FillQuery action and exact note 001 open after fresh native Enter input. Only catalog 05 and 09 were captured; the complete Phase 1 catalog and disabled-gate case are not claimed by this run. Closing the app and verifying its owned process tree.'
+        return
+    }
 
     $noteOwnerPredicate = {
         param($state)
@@ -2497,7 +2697,7 @@ function Update-Scenarios {
         reason = $fixtureScenarioReason
     }
     $runScenario = [ordered]@{
-        scenario_id = switch ($Scenario) {
+        scenario_id = if ($script:isFinalSmoke) { 'm15-final-smoke' } else { switch ($Scenario) {
             'QueryProbe' { 'm05-query-only' }
             { $_ -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled') } {
                 $suffix = if ($Scenario -eq 'Phase1Enabled' -and $Screen -ne 'All') { "-$($Screen.ToLowerInvariant())" } else { '' }
@@ -2505,14 +2705,14 @@ function Update-Scenarios {
             }
             'Phase2' { "m13-phase2-$($Surface.ToLowerInvariant())" }
             default { 'm01-baseline-dashboard' }
-        }
+        } }
         status = $scenarioStatus
-        expected_surface = switch ($Scenario) {
+        expected_surface = if ($script:isFinalSmoke) { 'M15 representative end-to-end native smoke: resized dashboard FillQuery and exact note 001 open; only catalog 05 and 09 are asserted' } else { switch ($Scenario) {
             'QueryProbe' { 'active Jump Mode query hint, query focus handoff, and unchanged action count' }
             { $_ -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled') } { "native Phase 1 $Screen dashboard/grid filter, selection, cancellation, note owner, and disabled-gate behavior" }
             'Phase2' { "native production query opener, exact $($Surface.ToLowerInvariant()) owner, and safe observed input behavior" }
             default { 'actual Multi Launcher ROOT viewport with isolated note dashboard' }
-        }
+        } }
         capture_target = 'ROOT'
         capture_trigger = if ($Scenario -in @('Phase1Enabled', 'Phase1Disabled', 'Phase2')) { 'f11' } elseif ($Scenario -eq 'Phase1') { 'child native F11 receipts' } else { 'startup' }
         screenshot = if ($screenshotPath) { $screenshotPath } else { $null }
@@ -2733,7 +2933,7 @@ try {
     Write-Json $manifestPath ([ordered]@{
         schema_version = 1
         run_id = $runId
-        milestone = if ($Scenario -eq 'QueryProbe') { 'M05' } elseif ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'M08' } elseif ($Scenario -eq 'Phase2') { 'M13' } else { 'M01' }
+        milestone = $runMilestone
         status = $runStatus
         phase = $phase
         started_at_utc = $startedAt.ToString('O')
@@ -2829,11 +3029,13 @@ try {
     if ($Scenario -eq 'Phase1Enabled') {
         $fixtureScenarioReason += ' The negative Jump Mode gate profile was rejected for the expected fixture invariant; Paste Sequence Next and Cancel remained disabled.'
     }
+    if ($isFinalSmoke) { Test-Phase1FinalSmokeCaptureContract }
     $phase = 'fixture_checked'
     Update-Scenarios
     Write-Summary 'BLOCKED' 'Fixture validation passed typed production widget config and production note loader/search checks: 32 list results, 32 search results, and four underscore bucket tags. The production hotkey-route validator accepted the isolated chord. The profile has an explicit `notes` allowlist, empty custom actions, disabled screenshot side effects, and isolated notes/template paths.'
 
     if ($FixturesOnly) {
+        if ($isFinalSmoke) { Initialize-NativeQueryProbe }
         $scenarioStatus = 'BLOCKED'
         $scenarioReason = "$Scenario app launch was not requested in fixture-only mode."
         $runStatus = 'PASS'
@@ -2868,13 +3070,13 @@ try {
         $isPhase2Run = $Scenario -eq 'Phase2'
         $qaRequest = [ordered]@{
             run_id = $runId
-            request_id = switch ($Scenario) {
+            request_id = if ($isFinalSmoke) { 'm15-final-smoke-dashboard-note-open' } else { switch ($Scenario) {
                 'QueryProbe' { 'query-only-probe' }
                 'Phase1Enabled' { "phase1-enabled-$($Screen.ToLowerInvariant())-catalog" }
                 'Phase1Disabled' { 'phase1-disabled-regression' }
                 'Phase2' { "phase2-$($Surface.ToLowerInvariant())-native" }
                 default { 'baseline-dashboard' }
-            }
+            } }
             target = 'ROOT'
             trigger = if ($isPhase1Run -or $isPhase2Run) { 'f11' } else { 'startup' }
             capture_count = if ($isPhase1Run) { $phase1CaptureCount } elseif ($isPhase2Run) { $phase2CaptureCount } else { 1 }
@@ -2945,7 +3147,7 @@ try {
         Write-Json $manifestPath ([ordered]@{
             schema_version = 1
             run_id = $runId
-            milestone = if ($Scenario -eq 'QueryProbe') { 'M05' } elseif ($isPhase1Run) { 'M08' } elseif ($isPhase2Run) { 'M13' } else { 'M01' }
+            milestone = $runMilestone
             status = $runStatus
             phase = $phase
             started_at_utc = $startedAt.ToString('O')
@@ -3070,6 +3272,7 @@ try {
             Initialize-NativeQueryProbe
             Assert-OwnedForeground
             $appWindowMetadata = Get-OwnedWindowMetadata
+            if ($isFinalSmoke) { $appWindowMetadata = Resize-OwnedWindowForFinalSmoke }
             Write-Event 'owned_app_window_metadata' @{ os_version = [Environment]::OSVersion.VersionString; architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString(); session_id = $processSessionId; window = $appWindowMetadata }
             $phase = 'phase1_waiting_for_input'
             Write-Summary 'BLOCKED' "App launched from the verified $fixtureScenarioArgument profile. Waiting for the actual retained ROOT targets before running bounded native Phase 1 input."
@@ -3182,7 +3385,7 @@ try {
         $finalManifest = [ordered]@{
             schema_version = 1
             run_id = $runId
-            milestone = if ($Scenario -eq 'QueryProbe') { 'M05' } elseif ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'M08' } elseif ($Scenario -eq 'Phase2') { 'M13' } else { 'M01' }
+            milestone = $runMilestone
             status = $runStatus
             phase = $phase
             started_at_utc = $startedAt.ToString('O')
@@ -3206,6 +3409,8 @@ try {
             build_receipt_identity = $buildReceiptIdentity
             capture = if ($Scenario -eq 'Phase1') {
                 [ordered]@{ request = 'child qa-framebuffer-request.json'; output_dir = 'screenshots'; index = 'phase1-index.json'; source = 'child native ROOT/F11 receipts bound to retained frames'; count = $phase1Captures.Count }
+            } elseif ($isFinalSmoke) {
+                [ordered]@{ request = 'qa-framebuffer-request.json'; output_dir = 'capture'; source = 'two native ROOT/F11 receipts bound to their exact retained observations and resized owned client area'; count = $phase1Captures.Count; captures = @($phase1Captures.ToArray()); resized_window = $finalSmokeResizeMetadata }
             } elseif ($Scenario -eq 'Phase2') {
                 [ordered]@{ request = 'qa-framebuffer-request.json'; output_dir = 'capture'; source = 'native ROOT/F11 receipts bound to captured retained observations'; surface = $Surface; count = $phase2Captures.Count; captures = @($phase2Captures.ToArray()) }
             } elseif ($captureReceipt) {
@@ -3222,6 +3427,8 @@ try {
                 "Fixture validation passed. The $Scenario GUI scenario remains blocked because this invocation did not request an app launch."
             } elseif ($Scenario -eq 'QueryProbe') {
                 'Fixture validation, receipt-bound active-query capture, native Shift+Space activation, map-derived query focus handoff, unchanged activation count, normal query text edit, and owned-process cleanup passed.'
+            } elseif ($isFinalSmoke) {
+                'The M15 representative smoke passed with exactly two receipt-bound ROOT captures: catalog 05 after the Dashboard FillQuery Enter action and catalog 09 after the exact note 001 open Enter action. This run does not assert the complete Phase 1 catalog. The owned window was resized without moving, changing z-order, or activating it; captured client dimensions matched the ROOT PNG scale, and process cleanup was verified.'
             } elseif ($Scenario -eq 'Phase1') {
                 'Both isolated Phase 1 app runs passed: enabled catalog 01–14 and disabled-gate case 18. All fifteen screenshots are receipt-bound native ROOT/F11 captures, and each child process tree was verified gone.'
             } elseif ($Scenario -eq 'Phase2') {
@@ -3237,6 +3444,8 @@ try {
         } elseif ($runStatus -eq 'BLOCKED') {
             $blockedDetails = if ($Scenario -eq 'QueryProbe') {
                 'Fixture validation passed, but the native query-only probe did not complete. See the event log, latest Jump Mode observation, capture receipt, and failure detail.'
+            } elseif ($isFinalSmoke) {
+                'The M15 representative smoke did not satisfy its two-capture Dashboard/note-open checks, owned-window resize/frame readiness, receipt/client-size binding, or cleanup assertion. See the event log, per-capture records, and failure detail.'
             } elseif ($Scenario -eq 'Phase1') {
                 'One or both Phase 1 child scenarios did not satisfy all native input, retained capture, fixture identity, or owned cleanup assertions. See phase1-index.json and each child evidence directory.'
             } elseif ($Scenario -eq 'Phase2') {
@@ -3246,8 +3455,7 @@ try {
             }
             Write-Summary $runStatus $blockedDetails
         }
-        $milestoneLabel = if ($Scenario -eq 'QueryProbe') { 'M05' } elseif ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'M08' } elseif ($Scenario -eq 'Phase2') { 'M13' } else { 'M01' }
-        Write-Output "$milestoneLabel status: $runStatus"
+        Write-Output "$runMilestone status: $runStatus"
         Write-Output "Evidence: $evidenceRoot"
         if ($runStatus -eq 'FAIL') { exit 1 }
     }

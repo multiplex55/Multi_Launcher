@@ -4,8 +4,8 @@ M00–M14 are complete. All six native dialog workflows and the disabled-feature
 
 - Branch: feat/jump-mode-2026-10-19-c7e42.
 - Starting SHA: 8f94b003a12853735d1cb4689c6ec4e53c4ace8e.
-- Latest completed checkpoint: f8375cc3dedd7f74bcced246c316afa001e8ee24 (M13-B native evidence).
-- All checkpoint commits through M13-B were pushed normally to origin; no local-only task commits.
+- Final Rust source checkpoint: 774fd160476d9df432d2e565e990ab294280ba48 (M14-A). M15 runner/evidence/docs checkpoint follows.
+- All checkpoint commits through M14-A were pushed normally to origin; no local-only task commits.
 - Current ownership, exact historical commands, failures and next action: [execution ledger](JUMP_MODE_EXECUTION.md).
 - This report consolidates accepted results. Earlier failed evidence remains unchanged in the ignored raw evidence directory.
 
@@ -40,14 +40,14 @@ The complete changed-source inventory groups into: settings model/save/editor st
 | Root query | Supported + verified headless/native: leader/hint/focus, text/caret, ordinary typing afterward |
 | Root list/grid, note cards | Supported + verified headless/native: selection before action, full payload, duplicate-title exact slug, stale generation |
 | Dashboard discrete controls | Supported + verified representative native FillQuery; full registered inventory below |
-| Settings basic controls | Supported headless; native checkbox/slider/numeric/Cancel verified (20ea511d); compact-header badge placement pending M14 |
+| Settings basic controls | Supported headless; native checkbox/slider/numeric/Cancel verified (20ea511d); compact-header source placement repaired M14; native visual closure M15 |
 | Notes/Todo dialogs | Supported + verified headless/native: Notes focus/newline/Cancel (665061ad); Todo safe Add once (d9288141) |
 | Timer/Paste Sequence dialogs | Supported + verified headless/native: Timer text/Sound/Cancel (cb635122), Paste empty context/manual row load/Keep/Cancel (e086058e) |
 | Complex control adapters | Representative sliders/numeric/multiline/combos supported+verified headless; native Settings slider/numeric and Timer Sound combo verified; radio adapter tested without inventing product UI |
 | MkMacro representative controls | Supported + verified headless/native macro/step selection and actual table focus (5f0e4761); later Enter opens blocked editor |
 | Unsupported windows/popups | Background/root suppression verified; recognized combos and Todo/Paste inline confirmations supported headless; other nested owners blocked |
 | Feature disabled | Supported + verified headless/native catalog18 |
-| Performance/Clippy/final smoke | Baseline recorded; M14/M15 remain pending |
+| Performance/Clippy/final smoke | Current visible CPU comparison and focused checks complete; unrelated baseline Clippy/format failures recorded; M15 native smoke in progress |
 
 Dashboard registration covers RecentCommands rows; PinnedQueryResults/QueryList rows and Refresh; Todo summary/row Open; Calendar Open/Add; Temp Add/ClearAll/Refresh/row Open/Clear; Timer New/Pause/Cancel; Scratchpad Copy/AppendTimestamp/Refresh; NowPlaying controls; Recycle Clean/Refresh; SystemActions rows/Refresh; SystemStatus Refresh. Native automation activates only safe fixture note FillQuery actions. PinnedCommands/CommandHistory and complex Todo/Scratchpad/Calendar controls remain unregistered.
 
@@ -84,7 +84,7 @@ cargo nextest run --lib --no-fail-fast --cargo-profile fast-dev --features "dev-
 
 The real Settings test verifies focus before action, distinct Enter/Space/text, disabled footer exclusion, draft/runtime isolation and Cancel restoration. One actual run_ui/request_discard verifies final keyboard/pointer checkbox state, section state, text and caret. Existing general-save/runtime tests cover committed apply/publication/rollback. Scoped rustfmt and diff checks pass. Warnings were existing vendored epaint/egui/image warnings. Scoped independent review has no remaining concrete finding. A source-local replay allegation was retracted after tracing egui's real event-clearing lifecycle; unnecessary rollback code was removed.
 
-Earlier scoped accepted checks include M09 paint/parent-clip8 passed/5877 skipped; M08 processed Tab/Enter2 passed/5879 skipped and observer3 passed/5877 skipped; fixture tests5/5 plus production note/search/tag/zero-result semantics and PowerShell parser/reader/predicate checks. Exact historical commands/results and repaired failures are in the execution ledger. No full repository suite, final Clippy or final performance qualification is claimed.
+Earlier scoped accepted checks include M09 paint/parent-clip8 passed/5877 skipped; M08 processed Tab/Enter2 passed/5879 skipped and observer3 passed/5877 skipped; fixture tests5/5 plus production note/search/tag/zero-result semantics and PowerShell parser/reader/predicate checks. Exact historical commands/results and repaired failures are in the execution ledger. No full repository suite was run. Final scoped Clippy/performance outcomes, including unrelated repository-check failures, are recorded in M14 below.
 
 Notes/Todo basic controls now use the same owner/registry. Notes uses visible slug-bound rows, management/search controls and edit Save/Cancel; its draft multiline editor is now registered in M12-A. Todo covers draft/filter/tag fields, Add, row completion/tag editing/Remove and clear-confirmation controls; priority DragValue is now registered and verified with actual u8 arrow/bounds tests in M12-A. Completion only focuses; fresh native Enter performs the existing action. Exact-instance, popup, draft preservation, immediate-next-frame non-Add safety and feature-off behavior are covered. The earlier exact Todo row-identity/legacy run passed2/2; both cases are included in the current89-test union. Accepted M13 native runs below now cover representative Notes/Todo behavior.
 
@@ -186,3 +186,17 @@ cargo nextest run --lib --no-fail-fast --cargo-profile fast-dev --features "dev-
 
 
 M14 final checks and source release: `cargo check --bin multi_launcher` PASS; `cargo clippy --all-targets --features "dev-smoke-binaries qa-framebuffer-capture"` FAIL exit1 solely on two denied pre-existing Pinboard test-helper `never_loop` lints (src/pinboard/live.rs:2313,2346). That file is unchanged from starting8f94. Four feature-authored collapsible-if warnings were fixed; final Clippy no longer reports them. `cargo fmt --check` FAIL on untouched baseline formatting in src/bin/radial_acceptance/native.rs, src/lib.rs, src/paste_sequence/playback.rs. `rustfmt --edition 2024 --config skip_children=true --check src/gui/jump_mode/paint.rs src/gui/jump_mode/ui.rs src/gui/render.rs src/settings_editor/render.rs src/gui/paste_sequence_dialog.rs` PASS and `git diff --check` PASS. No unrelated lint/format fixes, no full suite. Final read-only review had no concrete high/medium finding; parent inspected subsequent legacy-placement guard and four syntactic let-chain changes. Source frozen/released. M14 complete with explicit unrelated repository-check exceptions; M15 native visual acceptance remains required.
+## M15 final native smoke
+
+Frozen source checkpoint774fd160, runner M15 working changes; each command uses `pwsh -NoProfile -ExecutionPolicy Bypass -File dev/jump_mode/run.ps1` plus the arguments below. Every native command used the established escalated execution route. FixtureOnly preflight98ccf72c passed7/7 tests and typed verification without launching GUI.
+
+| Arguments | Actual evidence | Result |
+|---|---|---|
+| `-Scenario Phase1Enabled -Screen FinalSmoke` | [Root smoke summary](G:/Repos/rust/Multi_Launcher/dev/jump_mode/evidence/jump_m15_final_smoke_20261020T113712Z_4c58c867/summary.md) | PASS; catalog05 FillQuery count1,09 exact note001 count2; same owned HWND/client1800×1000→1527×844,DPI96,receipt PNGs match;PID35132 graceful0/treegone |
+| `-Scenario Phase2 -Surface Settings` | [Settings functional run](G:/Repos/rust/Multi_Launcher/dev/jump_mode/evidence/jump_m13_phase2_settings_20261020T113805Z_6684e9b2/summary.md) | Functional PASS/PID12684 graceful0/treegone; visual closure failed: header overlap gone but several assigned compact hints hidden. Retained unchanged; final anchored-placement repair/recheck pending |
+| `-Scenario Phase2 -Surface Notes` | [Notes smoke summary](G:/Repos/rust/Multi_Launcher/dev/jump_mode/evidence/jump_m13_phase2_notes_20261020T113852Z_3f65bb1a/summary.md) | PASS; actual content editor focus/edit/cancel,32notes preserved;PID21992 graceful0/treegone |
+| `-Scenario Phase1Disabled` | [Disabled smoke summary](G:/Repos/rust/Multi_Launcher/dev/jump_mode/evidence/jump_m08_phase1_disabled_20261020T113933Z_e40459d2/summary.md) | PASS; ordinary query ` x`,disabled/inactive,0targets/0actions;PID18144 graceful0/treegone |
+
+Parent independently checked every retained capture's PID/fixture/frame/pass/PNG hash bindings and representative Root/Notes/Settings pixels. FinalSmoke claims only catalog05/09; prior full Phase1 evidence remains the earlier focused catalog runs. Native Settings15/16 exposed a genuine remaining visibility defect despite functional PASS; final source repair must pass a real clip-min25 regression and fresh Settings pixels before M15 completion.
+
+M15 narrow visual repair adds one candidate after the actual Settings heading, preserving native target IDs and the existing clipping/occlusion rules. The real x=25 clip regression and affected paint/Settings tests passed9/9 (3b5d03b6,5927skipped), with scoped formatting/diff checks. Exact command is in the execution ledger. Fresh Settings15/16 pixels remain required; earlier functional run is not upgraded.

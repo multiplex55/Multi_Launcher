@@ -340,12 +340,24 @@ fn badge_rect(
             size,
         ),
     ];
-    let outside = candidates.into_iter().find(|candidate| {
-        ui_clip_rect.contains_rect(*candidate)
-            && !candidate.intersects(visible_target)
-            && (paint_label_rect.is_none() || clears_label(*candidate))
-            && !is_occluded(*candidate)
+    let right_of_heading = paint_label_rect.map(|heading| {
+        egui::Rect::from_min_size(
+            egui::pos2(
+                heading.right() + BADGE_LABEL_GAP + BADGE_MARGIN,
+                heading.center().y - size.y * 0.5,
+            ),
+            size,
+        )
     });
+    let outside = right_of_heading
+        .into_iter()
+        .chain(candidates)
+        .find(|candidate| {
+            ui_clip_rect.contains_rect(*candidate)
+                && !candidate.intersects(visible_target)
+                && (paint_label_rect.is_none() || clears_label(*candidate))
+                && !is_occluded(*candidate)
+        });
     outside.or_else(|| {
         (inside_fits && (paint_label_rect.is_none() || clears_label(inside))).then_some(inside)
     })
@@ -664,7 +676,8 @@ mod tests {
             egui::pos2(target.right() + 8.0, target.top() - 1.0),
             egui::vec2(90.0, 18.0),
         );
-        let parent_clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(240.0, 240.0));
+        let parent_clip =
+            egui::Rect::from_min_size(egui::pos2(25.0, 0.0), egui::vec2(240.0, 240.0));
 
         for hint_width in [6.0, 12.0] {
             let badge = badge_rect(
@@ -684,7 +697,7 @@ mod tests {
                 !badge.expand(BADGE_LABEL_GAP).intersects(actual_heading),
                 "a {hint_width}-point hint must leave the actual heading readable"
             );
-            assert!(badge.max.x <= target.left() - BADGE_MARGIN);
+            assert!(badge.min.x >= actual_heading.right() + BADGE_LABEL_GAP + BADGE_MARGIN);
         }
     }
 

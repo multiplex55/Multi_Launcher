@@ -120,6 +120,26 @@ scenario implementation and still perform fixture checks and owned cleanup.
 manifest/events for the exact environment, window/DPI metadata and deadline
 outcome. Dashboard and Grid filters passed native M08 qualification; see JUMP_MODE_RESULTS.md for the accepted run IDs.
 
+The M15 final representative smoke runs the same dashboard and grid paths but
+retains only catalog 05 (Dashboard FillQuery after fresh Enter) and catalog 09
+(the exact note 001 open after fresh Enter), then exits the grid workflow. It
+does not claim the remaining Phase 1 catalog or the disabled-gate case. Before
+native input, the runner resizes only the launched app's verified HWND using
+`SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE`; it waits for a newer retained
+ROOT frame and records the resulting client rectangle. Each selected ROOT PNG
+is bound to that same HWND/process and checked against its observed client
+dimensions and framebuffer pixel scale.
+
+Run the two-capture M15 final smoke with one command:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File dev/jump_mode/run.ps1 -Scenario Phase1Enabled -Screen FinalSmoke
+```
+
+For fixture and native-helper validation without starting the app, add
+`-FixturesOnly`. A FinalSmoke result records its explicit two-capture scope in
+the manifest and summary; it is not a full Phase 1 catalog result.
+
 M13 Phase 2 runs one isolated native dialog surface per owned app process. Use
 `-Surface` to choose Settings, Notes, Todo, Timer, Paste, or MkMacro; `Settings`
 is the default. Each run uses the production query opener, resolves the exact
