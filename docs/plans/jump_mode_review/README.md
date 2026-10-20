@@ -48,10 +48,18 @@ M13 selected-state additions (actual ROOT/F11 pixels, parent viewed; each receip
 | [Settings numeric focus](17_settings_numeric_selected.png) | Inactive overlay; actual Fuzzy weight numeric focus before fresh native Up; later Cancel preserves runtime | jump_m13_phase2_settings_20261020T093421Z_20ea511d |
 | [Notes content focus](17_notes_content_selected.png) | Inactive overlay; actual empty multiline editor focus before ordinary typing/newline; later Cancel preserves32 notes | jump_m13_phase2_notes_20261020T093507Z_665061ad |
 
-Both are1800x1000 at pixels-per-point1.0, graceful exit0/ownedtreegone. Settings328310bytes, SHA2564af2cb39cfb3aaf029f76a1c15113ffa4120a8d314e81752230fe46685071196; Notes381682bytes, SHA2561cb4b880073f2e3d3349fbd2b4dbeaee82d3ec1eaf1eb8ecd74440ccd7725be5. All8curatedPNGs total2744955bytes. Settings active-header hint placement still needs the documented M14 repair; no pre-repair active Settings PNG is curated here. All six Phase2 native workflows and the disabled recheck are accepted; M14/M15 repair/final checks remain.
+Both are1800x1000 at pixels-per-point1.0, graceful exit0/ownedtreegone. Settings328310bytes, SHA2564af2cb39cfb3aaf029f76a1c15113ffa4120a8d314e81752230fe46685071196; Notes381682bytes, SHA2561cb4b880073f2e3d3349fbd2b4dbeaee82d3ec1eaf1eb8ecd74440ccd7725be5. All8curatedPNGs total2744955bytes. Settings active-header placement is corrected and accepted in the final M15 screenshots below. No pre-repair active Settings PNG is curated. All six Phase2 workflows and final representative smoke are accepted.
 | Image | State | Source run |
 |---|---|---|
 | [Paste Sequence loaded](17_paste_sequence_loaded.png) | Manual fixture row loaded after hint focus + fresh Enter; context present/clipboard-text absent; no playback | jump_m13_phase2_paste_20261020T102403Z_e086058e |
 | [MkMacro step selection](17_mkmacro_step_selected.png) | Disabled macro1/Delay step1 selected with actual native table focus, unchanged revision and idle runtime/recorder before later safe editor Enter | jump_m13_phase2_mkmacro_20261020T102454Z_5f0e4761 |
 
 Parent viewed both actual selected images and checked receipt PID/fixture/frame/pass/PNG hashes; graceful exit0/ownedtreegone. Paste385024bytes/SHA256cf659e49e2cf4486fd9892e83f049a6449f37c5aa196a6a9be137c18e40fdcf0; MkMacro330421bytes/SHA2569cf81dca75a9da309f1830cb6db4641f11508e982f2712f2782c31c3c631ed13. These are accepted fixture-only captures, not the earlier failed Paste context run. All eight PNGs total2744955bytes (<8MiB).
+Final M15 additions, accepted after the compact-header repair:
+
+| Image | Actual retained state | Source run |
+|---|---|---|
+| [Settings active hints](16_settings_hints_final.png) | Visible section badges after the actual readable heading; active Settings owner; checkbox draft false/runtime true and fuzzy draft1.1 | jump_m13_phase2_settings_20261020T114315Z_12e41b61,capture16 |
+| [Resized exact note opened](09_resized_note_opened_final.png) | Native hint selection then distinct Enter opens only jump-qa-note-001; action count2 after earlier dashboard FillQuery; smaller owned client1527×844 | jump_m15_final_smoke_20261020T113712Z_4c58c867,capture09 |
+
+Parent checked each receipt PID/fixture/frame/pass/PNG hash and actual pixels. Settings340691bytes/SHA25681ce7295d280c920f5757ede56a4496cc7a8ab0ae85f74d004e84da924416308; resized note340935bytes/SHA2567e4acff17f20ad3887302a7c13069eb441cd21cea84ff58aea85fdd725dfdb0b. Source copies are byte-identical. Both owned processes exited gracefully0 with verified owned-tree cleanup. Ten curated PNGs now total3426581bytes, below8MiB. Earlier subtotal paragraphs describe their historical checkpoint. Captures are ROOT CPU UI completion before GPU presentation; native96DPI/1.0scale only. M00–M15 complete; see the final Results for exact checks, baseline lint/format exceptions, coverage and optional review.

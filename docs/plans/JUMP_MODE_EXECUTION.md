@@ -6,10 +6,10 @@
 - Initial working tree: clean, including tracked task-input documents. No user changes copied/discarded.
 - Environment: Windows PowerShell; rustc/cargo 1.99.0; Nextest 0.9.135; egui/eframe 0.36.2 with local vendor patches.
 - Git branch creation needed sandbox escalation because .git is read-only in the normal sandbox; authorized creation succeeded.
-- Current milestone: M15 final representative native smoke/handoff. M14 source frozen; parent owns docs/Git; runner writer released after checkpoint.
-- Latest GUI evidence: all six M13 native surfaces and disabled recheck PASS; parent receipt/representative-pixel/cleanup checks accepted. Exact run IDs/failures below; all eight curated PNGs total2744955bytes. Compact header layout repair is M14.
-- Latest checkpoint: 774fd160476d9df432d2e565e990ab294280ba48 — fix(jump): [M14-A] harden input and compact badge placement.
-- Push status: all checkpoints through M14-A (774fd160) pushed successfully; upstream configured.
+- Current milestone: M00–M15 complete. Source and native evidence frozen; final documentation/image handoff checkpoint.
+- Latest GUI evidence: final root smoke4c58c867, Settings12e41b61, Notes3f65bb1a and Disablede40459d2 PASS; actual compact badges visible, owned resize verified, all owned processes cleaned. Ten curated PNGs total3426581bytes.
+- Final Rust/runner source checkpoint: ff7124054174a52bc785b2485764fad4b54e6bcc — fix(jump): [M15-A] retain compact hints and final smoke evidence. Final documentation/image checkpoint is the handoff HEAD.
+- Push status: all source checkpoints through M15-A (ff712405) pushed successfully; final documentation/image checkpoint receives one normal best-effort push.
 
 | Milestone | State | Checkpoint / verification | Evidence or dependency |
 |---|---|---|---|
@@ -28,7 +28,7 @@
 | M12 | complete | M12-A89tests; M12-B96tests and all3P2 findings closed | Native extended evidence follows M13 |
 | M13 | complete | Six native surfaces + disabled recheck accepted; Escape/context owners repaired | Actual receipts/cleanup/curated pixels; compact badge repair moves to M14 |
 | M14 | complete | 109focused tests; visible CPU comparison; source review; default check | Scoped fmt passes; unrelated baseline fmt/Clippy failures documented |
-| M15 | in_progress | Final representative smoke and handoff | M14 source frozen |
+| M15 | complete | Final root/Settings/Notes/disabled native smoke; visual closure and owned resize | Source ff712405; final docs/images handoff |
 
 ## Verified source ownership
 
@@ -514,3 +514,15 @@ M15-A compactpaintrepairfrozen/released: right-of-actualheadingcandidatebeforele
 cargo nextest run --lib --no-fail-fast --cargo-profile fast-dev --features "dev-smoke-binaries qa-framebuffer-capture" --status-level fail --final-status-level fail -E 'test(gui::jump_mode::paint::tests) | test(jump_mode_focuses_real_settings_controls_and_later_egui_keys_activate_them)'
 ~~~
 Scopedrustfmt/diffPASS. Sourcecheckpointrunner/README+paintnow; onefreshSettingsnative15/16requiredaftercheckpoint, noRoot/Notes/Disabledrerun. Thisisfinalboundedcompactrepaircycle2; donotclaimvisualacceptancebeforeactualpixels. No furtherRustchangesplanned.
+
+## Final M15 acceptance
+
+Source checkpoint ff7124054174a52bc785b2485764fad4b54e6bcc was committed and pushed normally. The one fresh Settings run, jump_m13_phase2_settings_20261020T114315Z_12e41b61, passed. PID31600 exited gracefully with code0; owned_tree_gone was verified without forced cleanup. The parent viewed actual15/16 pixels: Paste D, Launcher E and Search F badges are visible beside readable titles. A final read-only /root/input check confirmed Hotkeys C in16. No remaining compact-header finding was identified.
+
+The parent verified every receipt PID/fixture/frame/pass/PNG hash binding: capture15 frame/pass149,16 frame/pass1336,17 frame/pass1669 (inactive numeric focus). Hashes:15 dda79e23c038ef4c828d0db8d768b9d6d865c48500db717cb9fe6420763c8248;16 81ce7295d280c920f5757ede56a4496cc7a8ab0ae85f74d004e84da924416308;17 4af2cb39cfb3aaf029f76a1c15113ffa4120a8d314e81752230fe46685071196. Checkbox/slider/numeric changes and Cancel preserving runtime also passed.
+
+Two byte-identical images were curated:16_settings_hints_final.png (340691bytes) and09_resized_note_opened_final.png (340935bytes, SHA2567e4acff17f20ad3887302a7c13069eb441cd21cea84ff58aea85fdd725dfdb0b). Ten curated PNGs total3,426,581bytes, below8MiB. Failed and functionally-passing/visually-incomplete histories remain unchanged; raw evidence is not staged. Results now includes the mission, branch/base/final source, touched module groups, coverage, exact checks and outcomes, performance, absolute screenshot index, limitations and optional post-completion review.
+
+Final checks:109 focused tests passed, then9 affected paint/Settings tests passed; final feature binary build passed through the native Settings runner;7 fixture tests, parser, scoped formatting and diff checks passed. Whole formatting fails on three unchanged baseline files; feature Clippy fails on two unchanged Pinboard never_loop errors. Four feature-authored warnings were fixed. No full suite or additional native campaign was run.
+
+M00–M15 are complete with the explicit baseline-check exceptions and DPI/multi-monitor/unsupported-control coverage boundaries recorded in Results. No required code or native work remains. Final Git/curated inspection and documentation checkpoint follow, with one normal push attempt. No PR, merge or history rewrite. The unknown clipboard_modifiers.json remains unread, untouched and excluded. The future-test Next/Cancel-disabled policy is committed in AGENTS.md and enforced by fixtures; production defaults and unrelated error notifications are preserved.
