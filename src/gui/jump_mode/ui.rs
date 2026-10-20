@@ -29,6 +29,88 @@ pub(crate) enum FocusDirective {
     Select,
 }
 
+/// The sole surface allowed to receive Jump Mode navigation in this frame.
+/// Unsupported windows and transient owners deliberately map to `Blocked`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) enum NavigationOwner {
+    #[default]
+    Root,
+    Settings {
+        instance: u64,
+    },
+    Blocked,
+}
+
+impl NavigationOwner {
+    pub(crate) fn owns_settings(self, instance: u64) -> bool {
+        self == Self::Settings { instance }
+    }
+}
+
+pub(crate) fn settings_layer_id() -> egui::LayerId {
+    // `Window::new` hashes the optional title (`Some("Settings")`) as its
+    // default area ID. Keep this aligned so owner checks match the real window.
+    egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Settings")))
+}
+
+/// Return the last visible top-level ordinary window using egui's public
+/// layer order. Stale area IDs remain in the order list, so visibility is
+/// checked against the previous completed pass.
+pub(crate) fn visible_top_middle_layer(ctx: &egui::Context) -> Option<egui::LayerId> {
+    ctx.memory(|memory| {
+        memory
+            .layer_ids()
+            .filter(|layer| {
+                layer.order == egui::Order::Middle
+                    && memory.areas().parent_layer(*layer).is_none()
+                    && memory.areas().visible_last_frame(layer)
+            })
+            .last()
+    })
+}
+
+pub(crate) fn focused_response_layer(ctx: &egui::Context) -> Option<egui::LayerId> {
+    ctx.memory(|memory| memory.focused())
+        .and_then(|focused| ctx.read_response(focused))
+        .map(|response| response.layer_id)
+}
+
+/// Resolve ownership from retained egui layer order and the focused response.
+/// Root focus may remain in the background while Settings is raised; focus in
+/// another ordinary window always fails closed.
+pub(crate) fn resolve_layer_navigation_owner(
+    ctx: &egui::Context,
+    settings_open: bool,
+    settings_instance: u64,
+) -> NavigationOwner {
+    if ctx.viewport_id() != egui::ViewportId::ROOT
+        || !ctx.input(|input| input.focused)
+        || egui::Popup::is_any_open(ctx)
+        || ctx.memory(|memory| memory.top_modal_layer().is_some())
+    {
+        return NavigationOwner::Blocked;
+    }
+
+    let top_window = visible_top_middle_layer(ctx);
+    let focused_layer = focused_response_layer(ctx);
+    match top_window {
+        Some(layer) if layer == settings_layer_id() && settings_open => {
+            if focused_layer
+                .is_none_or(|focused| focused == layer || focused.order != egui::Order::Middle)
+            {
+                NavigationOwner::Settings {
+                    instance: settings_instance,
+                }
+            } else {
+                NavigationOwner::Blocked
+            }
+        }
+        Some(_) => NavigationOwner::Blocked,
+        None if settings_open => NavigationOwner::Blocked,
+        None => NavigationOwner::Root,
+    }
+}
+
 impl FocusDirective {
     pub(crate) fn apply_to_response(self, response: &egui::Response) {
         if self == Self::Focus {
@@ -156,19 +238,34 @@ impl TargetRegistry {
             .retain(|target| surface_priority(target.id().surface()) == priority);
     }
 
-    fn revalidate(&mut self, ctx: &egui::Context, root_owner_allowed: bool) {
+    fn revalidate(
+        &mut self,
+        ctx: &egui::Context,
+        navigation_owner: NavigationOwner,
+        root_targets_allowed: bool,
+    ) {
         let root_focused = ctx.input(|input| input.focused);
         let root_viewport = ctx.viewport_id() == egui::ViewportId::ROOT;
         let popup_open = egui::Popup::is_any_open(ctx);
         self.targets.retain(|target| {
             let root_surface = is_root_surface(target.id().surface());
+            let settings_owned = match target.id().surface() {
+                SurfaceId::Settings { instance } => navigation_owner.owns_settings(*instance),
+                _ => true,
+            };
+            let navigation_available = navigation_owner != NavigationOwner::Blocked;
             root_focused
                 && root_viewport
                 && target.viewport == egui::ViewportId::ROOT
                 && target.eligible
                 && target.enabled
+                && navigation_available
+                && settings_owned
                 && ctx.memory(|memory| memory.allows_interaction(target.layer_id))
-                && (!root_surface || (root_owner_allowed && !popup_open))
+                && (!root_surface
+                    || (navigation_owner == NavigationOwner::Root
+                        && root_targets_allowed
+                        && !popup_open))
                 && (!popup_open || is_popup_surface(target.id().surface()))
         });
         self.prefer_active_surface();
@@ -240,6 +337,7 @@ pub struct JumpModeScope {
     viewport: egui::ViewportId,
     epoch: NavigationEpoch,
     root_owner_allowed: bool,
+    navigation_owner: Option<NavigationOwner>,
 }
 
 impl JumpModeScope {
@@ -319,6 +417,18 @@ impl JumpModeScope {
             && (!self.root_owner_allowed || egui::Popup::is_any_open(ctx))
         {
             return RegistrationResult::Rejected(RegistrationRejection::InactiveOwner);
+        }
+        if let Some(owner) = self.navigation_owner {
+            let owner_matches = match &self.surface {
+                SurfaceId::Dashboard | SurfaceId::LauncherResults => owner == NavigationOwner::Root,
+                SurfaceId::Settings { instance } => owner.owns_settings(*instance),
+                SurfaceId::Dialog { .. } | SurfaceId::Popup { .. } => {
+                    owner != NavigationOwner::Blocked
+                }
+            };
+            if !owner_matches {
+                return RegistrationResult::Rejected(RegistrationRejection::InactiveOwner);
+            }
         }
         if !ctx.memory(|memory| memory.allows_interaction(response.layer_id)) {
             return RegistrationResult::Rejected(RegistrationRejection::BlockedLayer);
@@ -402,6 +512,11 @@ impl JumpModeScope {
 pub(crate) struct JumpModeUi {
     enabled: bool,
     navigation_epoch: NavigationEpoch,
+    navigation_owner: NavigationOwner,
+    frame_navigation_owner: NavigationOwner,
+    navigation_owner_transitioned: bool,
+    settings_open: bool,
+    settings_instance: u64,
     active_session: Option<HintSession>,
     last_outcome: Option<MatchOutcome>,
     root_input_frame: RootInputFrame,
@@ -411,6 +526,7 @@ pub(crate) struct JumpModeUi {
     pass_registry: Option<TargetRegistry>,
     retained_registry: TargetRegistry,
     frame_consumed_focus_intent: Option<ConsumedFocusIntent>,
+    last_completed_focus_handoff: Option<ConsumedFocusIntent>,
 }
 
 impl JumpModeUi {
@@ -443,9 +559,71 @@ impl JumpModeUi {
         self.pass_registry = None;
         self.frame_consumed_focus_intent = None;
         self.root_input_frame = RootInputFrame::default();
+        self.frame_navigation_owner = self.navigation_owner;
+        self.navigation_owner_transitioned = false;
         if !self.enabled {
             self.clear();
         }
+    }
+
+    pub(crate) fn observe_settings_visibility(&mut self, open: bool) -> bool {
+        if self.settings_open == open {
+            return false;
+        }
+        self.settings_open = open;
+        if open {
+            self.settings_instance = self.settings_instance.wrapping_add(1).max(1);
+        }
+        true
+    }
+
+    pub(crate) fn settings_instance(&self) -> u64 {
+        self.settings_instance
+    }
+
+    /// Apply the host's current layer-owner decision. Any owner or Settings
+    /// visibility transition cancels stale navigation and blocks this complete
+    /// egui frame, including all discarded passes.
+    pub(crate) fn update_navigation_owner(
+        &mut self,
+        ctx: &egui::Context,
+        candidate: NavigationOwner,
+        settings_visibility_changed: bool,
+    ) -> NavigationOwner {
+        if settings_visibility_changed || candidate != self.navigation_owner {
+            if self.enabled {
+                if matches!(candidate, NavigationOwner::Settings { .. })
+                    || (settings_visibility_changed && self.settings_open)
+                {
+                    // Settings deliberately takes ownership from the launcher
+                    // query. `surrender_focus` is conditional on this exact ID
+                    // still owning focus, so unrelated window editors are safe.
+                    ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("query_input")));
+                }
+                if let Some(focus) = self.last_completed_focus_handoff.as_ref() {
+                    ctx.memory_mut(|memory| memory.surrender_focus(focus.response_id));
+                }
+                if let Some(focus) = self.frame_consumed_focus_intent.as_ref() {
+                    ctx.memory_mut(|memory| memory.surrender_focus(focus.response_id));
+                }
+            }
+            self.cancel_all();
+            self.last_completed_focus_handoff = None;
+            self.navigation_owner = candidate;
+            self.navigation_owner_transitioned = true;
+            self.root_input_frame.owner_blocked = true;
+            self.held_captured_keys.clear();
+        }
+        self.frame_navigation_owner = if self.navigation_owner_transitioned {
+            NavigationOwner::Blocked
+        } else {
+            self.navigation_owner
+        };
+        self.frame_navigation_owner
+    }
+
+    pub(crate) fn frame_navigation_owner(&self) -> NavigationOwner {
+        self.frame_navigation_owner
     }
 
     /// Resolve the root's first visible-frame input owner before any menu or
@@ -454,10 +632,10 @@ impl JumpModeUi {
     pub(crate) fn handle_root_input(
         &mut self,
         ctx: &egui::Context,
-        root_owner_allowed: bool,
+        navigation_input_allowed: bool,
         first_ui_pass: bool,
     ) {
-        if !root_owner_allowed {
+        if !navigation_input_allowed {
             self.root_input_frame.owner_blocked = true;
             if !ctx.input(|input| input.focused) && self.active_session.is_some() {
                 self.capture_unfocused_owner_loss_events(ctx);
@@ -465,7 +643,7 @@ impl JumpModeUi {
         }
 
         if first_ui_pass {
-            if !root_owner_allowed {
+            if !navigation_input_allowed {
                 self.cancel_for_owner_loss();
             } else if self.enabled && !self.root_input_frame.owner_blocked {
                 self.process_root_input_events(ctx);
@@ -509,6 +687,44 @@ impl JumpModeUi {
         viewport: egui::ViewportId,
         root_owner_allowed: bool,
     ) -> Option<JumpModeScope> {
+        self.make_scope(
+            surface,
+            generation,
+            identity_namespace,
+            viewport,
+            root_owner_allowed,
+            None,
+        )
+    }
+
+    pub(crate) fn scope_for_navigation_owner(
+        &self,
+        surface: SurfaceId,
+        generation: TargetGeneration,
+        identity_namespace: impl Into<String>,
+        viewport: egui::ViewportId,
+        navigation_owner: NavigationOwner,
+        root_targets_allowed: bool,
+    ) -> Option<JumpModeScope> {
+        self.make_scope(
+            surface,
+            generation,
+            identity_namespace,
+            viewport,
+            root_targets_allowed,
+            Some(navigation_owner),
+        )
+    }
+
+    fn make_scope(
+        &self,
+        surface: SurfaceId,
+        generation: TargetGeneration,
+        identity_namespace: impl Into<String>,
+        viewport: egui::ViewportId,
+        root_owner_allowed: bool,
+        navigation_owner: Option<NavigationOwner>,
+    ) -> Option<JumpModeScope> {
         Some(JumpModeScope {
             collector: Arc::clone(self.collector.as_ref()?),
             surface,
@@ -517,6 +733,7 @@ impl JumpModeUi {
             viewport,
             epoch: self.navigation_epoch,
             root_owner_allowed,
+            navigation_owner,
         })
     }
 
@@ -539,17 +756,42 @@ impl JumpModeUi {
 
     /// Revalidate and reconcile the just-finished pass before its geometry is
     /// used for visual feedback. Retained-frame ownership remains in
-    /// `complete_frame`, after egui has finished the whole frame.
+    /// `complete_frame_for_navigation_owner`, after egui has finished the whole frame.
+    /// This root-only adapter is used by focused tests.
+    #[cfg(test)]
     pub(crate) fn prepare_pass_for_paint(
         &mut self,
         ctx: &egui::Context,
         root_owner_allowed: bool,
         root_visible: bool,
     ) -> bool {
+        self.prepare_pass_for_navigation_owner(
+            ctx,
+            if root_owner_allowed {
+                NavigationOwner::Root
+            } else {
+                NavigationOwner::Blocked
+            },
+            root_owner_allowed,
+            root_visible,
+        )
+    }
+
+    pub(crate) fn prepare_pass_for_navigation_owner(
+        &mut self,
+        ctx: &egui::Context,
+        navigation_owner: NavigationOwner,
+        root_targets_allowed: bool,
+        root_visible: bool,
+    ) -> bool {
         if !self.enabled || !root_visible || ctx.viewport_id() != egui::ViewportId::ROOT {
             return false;
         }
-        if !root_owner_allowed {
+        if navigation_owner == NavigationOwner::Blocked {
+            self.cancel_for_owner_loss();
+            return false;
+        }
+        if navigation_owner == NavigationOwner::Root && !root_targets_allowed {
             self.cancel_for_owner_loss();
             return false;
         }
@@ -557,7 +799,12 @@ impl JumpModeUi {
         let Some(mut completed) = self.pass_registry.take() else {
             return true;
         };
-        self.reconcile_current_registry(ctx, &mut completed, true);
+        self.reconcile_current_registry(
+            ctx,
+            &mut completed,
+            navigation_owner,
+            root_targets_allowed,
+        );
         self.pass_registry = Some(completed);
         true
     }
@@ -566,10 +813,16 @@ impl JumpModeUi {
         &mut self,
         ctx: &egui::Context,
         registry: &mut TargetRegistry,
-        root_owner_allowed: bool,
+        navigation_owner: NavigationOwner,
+        root_targets_allowed: bool,
     ) {
-        registry.revalidate(ctx, root_owner_allowed);
-        let population_changed = root_owner_allowed
+        registry.revalidate(ctx, navigation_owner, root_targets_allowed);
+        let navigation_allowed = match navigation_owner {
+            NavigationOwner::Root => root_targets_allowed,
+            NavigationOwner::Settings { .. } => true,
+            NavigationOwner::Blocked => false,
+        };
+        let population_changed = navigation_allowed
             && self.active_session.as_mut().is_some_and(|session| {
                 session
                     .reconcile_targets(registry.targets().iter().map(|target| target.id().clone()))
@@ -581,11 +834,31 @@ impl JumpModeUi {
         }
     }
 
-    /// Retain only the final UI pass after egui has completed the whole frame.
+    /// Root-only test adapter for `complete_frame_for_navigation_owner`.
+    #[cfg(test)]
     pub(crate) fn complete_frame(
         &mut self,
         ctx: &egui::Context,
         root_owner_allowed: bool,
+        root_visible: bool,
+    ) {
+        self.complete_frame_for_navigation_owner(
+            ctx,
+            if root_owner_allowed {
+                NavigationOwner::Root
+            } else {
+                NavigationOwner::Blocked
+            },
+            root_owner_allowed,
+            root_visible,
+        );
+    }
+
+    pub(crate) fn complete_frame_for_navigation_owner(
+        &mut self,
+        ctx: &egui::Context,
+        navigation_owner: NavigationOwner,
+        root_targets_allowed: bool,
         root_visible: bool,
     ) {
         if !self.enabled || !root_visible || ctx.viewport_id() != egui::ViewportId::ROOT {
@@ -596,13 +869,21 @@ impl JumpModeUi {
             return;
         }
 
-        if !root_owner_allowed {
+        if navigation_owner == NavigationOwner::Blocked
+            || (navigation_owner == NavigationOwner::Root && !root_targets_allowed)
+        {
             self.cancel_for_owner_loss();
         }
 
         let mut completed = self.pass_registry.take().unwrap_or_default();
-        self.reconcile_current_registry(ctx, &mut completed, root_owner_allowed);
+        self.reconcile_current_registry(
+            ctx,
+            &mut completed,
+            navigation_owner,
+            root_targets_allowed,
+        );
         let pending_intent = self.pending_focus_intent.take();
+        let mut completed_focus_handoff = None;
         if let Some(consumed) = self.frame_consumed_focus_intent.as_ref() {
             let still_matches = pending_intent.as_ref() == Some(&consumed.intent)
                 && completed.targets.iter().any(|target| {
@@ -612,7 +893,12 @@ impl JumpModeUi {
                 });
             if !still_matches {
                 ctx.memory_mut(|memory| memory.surrender_focus(consumed.response_id));
+            } else {
+                completed_focus_handoff = Some(consumed.clone());
             }
+        }
+        if let Some(completed_focus_handoff) = completed_focus_handoff {
+            self.last_completed_focus_handoff = Some(completed_focus_handoff);
         }
         self.retained_registry = completed;
         self.collector = None;
@@ -669,6 +955,7 @@ impl JumpModeUi {
         self.pass_registry = None;
         self.retained_registry = TargetRegistry::default();
         self.frame_consumed_focus_intent = None;
+        self.last_completed_focus_handoff = None;
     }
 
     fn clear(&mut self) {
@@ -681,10 +968,13 @@ impl JumpModeUi {
         self.pass_registry = None;
         self.retained_registry = TargetRegistry::default();
         self.frame_consumed_focus_intent = None;
+        self.last_completed_focus_handoff = None;
     }
 
     pub(crate) fn root_input_owner_allowed(&self, root_owner_allowed: bool) -> bool {
-        root_owner_allowed && !self.root_input_frame.owner_blocked
+        root_owner_allowed
+            && self.frame_navigation_owner == NavigationOwner::Root
+            && !self.root_input_frame.owner_blocked
     }
 
     fn process_root_input_events(&mut self, ctx: &egui::Context) {
@@ -1093,6 +1383,42 @@ mod tests {
             .drop_without_applying_deltas();
     }
 
+    fn render_navigation_windows(
+        ctx: &egui::Context,
+        settings_open: bool,
+        note_open: bool,
+        focus_note: bool,
+        move_to_top: Option<egui::LayerId>,
+    ) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 650.0),
+            )),
+            focused: true,
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| {
+            if settings_open {
+                egui::Window::new("Settings").show(ui.ctx(), |_| {});
+            }
+            if note_open {
+                egui::Window::new("Unsupported note")
+                    .id(egui::Id::new("unsupported_note_window"))
+                    .show(ui.ctx(), |ui| {
+                        let response = ui.add(egui::TextEdit::singleline(&mut String::new()));
+                        if focus_note {
+                            response.request_focus();
+                        }
+                    });
+            }
+            if let Some(layer) = move_to_top {
+                ui.ctx().move_to_top(layer);
+            }
+        })
+        .drop_without_applying_deltas();
+    }
+
     fn setup(enabled: bool) -> (JumpModeUi, JumpModeScope) {
         let mut jump = JumpModeUi::new(enabled);
         jump.begin_frame();
@@ -1107,6 +1433,331 @@ mod tests {
             )
             .expect("enabled bridge creates a render scope");
         (jump, scope)
+    }
+
+    #[test]
+    fn settings_owner_tracks_actual_top_window_order() {
+        let ctx = egui::Context::default();
+        let settings_layer = settings_layer_id();
+        let note_layer = egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("unsupported_note_window"),
+        );
+
+        render_navigation_windows(&ctx, true, true, false, None);
+        assert_eq!(visible_top_middle_layer(&ctx), Some(note_layer));
+        assert_eq!(
+            resolve_layer_navigation_owner(&ctx, true, 3),
+            NavigationOwner::Blocked,
+            "a newly retained unsupported window above Settings blocks it"
+        );
+
+        render_navigation_windows(&ctx, true, true, false, Some(settings_layer));
+        assert_eq!(visible_top_middle_layer(&ctx), Some(settings_layer));
+        assert_eq!(
+            resolve_layer_navigation_owner(&ctx, true, 3),
+            NavigationOwner::Settings { instance: 3 }
+        );
+
+        render_navigation_windows(&ctx, true, true, false, Some(note_layer));
+        assert_eq!(visible_top_middle_layer(&ctx), Some(note_layer));
+        assert_eq!(
+            resolve_layer_navigation_owner(&ctx, true, 3),
+            NavigationOwner::Blocked
+        );
+    }
+
+    #[test]
+    fn settings_does_not_take_foreign_focused_window_and_stale_layers_are_ignored() {
+        let ctx = egui::Context::default();
+        let settings_layer = settings_layer_id();
+        render_navigation_windows(&ctx, true, true, false, None);
+        render_navigation_windows(&ctx, true, true, true, Some(settings_layer));
+        let note_layer = egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("unsupported_note_window"),
+        );
+        assert_eq!(focused_response_layer(&ctx), Some(note_layer));
+        assert_eq!(
+            resolve_layer_navigation_owner(&ctx, true, 1),
+            NavigationOwner::Blocked
+        );
+
+        let stale_ctx = egui::Context::default();
+        render_navigation_windows(&stale_ctx, true, false, false, None);
+        render_navigation_windows(&stale_ctx, false, false, false, None);
+        assert_eq!(visible_top_middle_layer(&stale_ctx), None);
+        assert_eq!(
+            resolve_layer_navigation_owner(&stale_ctx, false, 1),
+            NavigationOwner::Root
+        );
+    }
+
+    #[test]
+    fn settings_with_no_retained_window_layer_fails_closed_until_it_is_visible() {
+        let ctx = egui::Context::default();
+        render_navigation_windows(&ctx, false, false, false, None);
+        assert_eq!(visible_top_middle_layer(&ctx), None);
+        assert_eq!(
+            resolve_layer_navigation_owner(&ctx, true, 1),
+            NavigationOwner::Blocked
+        );
+    }
+
+    #[test]
+    fn popup_takeover_blocks_layer_owner_resolution() {
+        let ctx = egui::Context::default();
+        render_navigation_windows(&ctx, true, false, false, None);
+        egui::Popup::open_id(&ctx, egui::Id::new("jump_mode_owner_popup"));
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert_eq!(
+            resolve_layer_navigation_owner(&ctx, true, 1),
+            NavigationOwner::Blocked
+        );
+    }
+
+    #[test]
+    fn owner_transition_blocks_all_discarded_passes_then_stabilizes() {
+        let ctx = egui::Context::default();
+        let mut jump = JumpModeUi::new(true);
+        jump.begin_frame();
+        assert!(jump.observe_settings_visibility(true));
+        let owner =
+            jump.update_navigation_owner(&ctx, NavigationOwner::Settings { instance: 1 }, true);
+        assert_eq!(owner, NavigationOwner::Blocked);
+        jump.handle_root_input(&ctx, false, true);
+        assert!(jump.active_session().is_none());
+
+        jump.begin_ui_pass();
+        jump.finish_ui_pass();
+        assert_eq!(
+            jump.update_navigation_owner(&ctx, NavigationOwner::Settings { instance: 1 }, false,),
+            NavigationOwner::Blocked
+        );
+        assert!(!jump.prepare_pass_for_navigation_owner(
+            &ctx,
+            NavigationOwner::Blocked,
+            false,
+            true,
+        ));
+
+        jump.begin_frame();
+        assert_eq!(
+            jump.update_navigation_owner(&ctx, NavigationOwner::Settings { instance: 1 }, false,),
+            NavigationOwner::Settings { instance: 1 }
+        );
+        assert_eq!(jump.settings_instance(), 1);
+        assert!(jump.observe_settings_visibility(false));
+        assert!(!jump.observe_settings_visibility(false));
+        assert!(jump.observe_settings_visibility(true));
+        assert_eq!(jump.settings_instance(), 2);
+    }
+
+    #[test]
+    fn settings_owner_keeps_the_shared_hint_input_session_alive() {
+        let ctx = egui::Context::default();
+        let settings_owner = NavigationOwner::Settings { instance: 1 };
+        let settings_surface = SurfaceId::Settings { instance: 1 };
+        let mut jump = JumpModeUi::new(true);
+
+        ctx.run_ui(root_input_raw(Vec::new()), |_| {
+            jump.begin_frame();
+            assert!(jump.observe_settings_visibility(true));
+            assert_eq!(
+                jump.update_navigation_owner(&ctx, settings_owner, true),
+                NavigationOwner::Blocked,
+                "the opening transition cannot route input"
+            );
+        })
+        .drop_without_applying_deltas();
+
+        ctx.run_ui(root_input_raw(Vec::new()), |ui| {
+            jump.begin_frame();
+            assert_eq!(
+                jump.update_navigation_owner(&ctx, settings_owner, false),
+                settings_owner
+            );
+            jump.begin_ui_pass();
+            let scope = jump
+                .scope_for_navigation_owner(
+                    settings_surface.clone(),
+                    TargetGeneration(1),
+                    "settings",
+                    ctx.viewport_id(),
+                    settings_owner,
+                    false,
+                )
+                .expect("stable Settings owner receives its local collection scope");
+            let response = ui.button("Settings target");
+            assert!(matches!(
+                scope.register(
+                    ui,
+                    &response,
+                    "settings-target",
+                    "Settings target",
+                    TargetKind::Button,
+                    1,
+                ),
+                RegistrationResult::Registered { .. }
+            ));
+            jump.finish_ui_pass();
+        })
+        .drop_without_applying_deltas();
+        assert!(jump.prepare_pass_for_navigation_owner(&ctx, settings_owner, false, true));
+        jump.complete_frame_for_navigation_owner(&ctx, settings_owner, false, true);
+        assert_eq!(jump.retained_registry().len(), 1);
+
+        ctx.run_ui(
+            root_input_raw(vec![
+                egui::Event::Key {
+                    key: egui::Key::Space,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::SHIFT,
+                },
+                egui::Event::Text(" ".into()),
+            ]),
+            |ui| {
+                jump.begin_frame();
+                assert_eq!(
+                    jump.update_navigation_owner(&ctx, settings_owner, false),
+                    settings_owner
+                );
+                jump.handle_root_input(&ctx, true, true);
+                assert!(
+                    jump.active_session().is_some(),
+                    "the shared input router starts from retained Settings targets"
+                );
+
+                jump.begin_ui_pass();
+                let scope = jump
+                    .scope_for_navigation_owner(
+                        settings_surface.clone(),
+                        TargetGeneration(1),
+                        "settings",
+                        ctx.viewport_id(),
+                        settings_owner,
+                        false,
+                    )
+                    .expect("Settings pass remains registered while hints are active");
+                let response = ui.button("Settings target");
+                assert!(matches!(
+                    scope.register(
+                        ui,
+                        &response,
+                        "settings-target",
+                        "Settings target",
+                        TargetKind::Button,
+                        1,
+                    ),
+                    RegistrationResult::Registered { .. }
+                ));
+                jump.finish_ui_pass();
+            },
+        )
+        .drop_without_applying_deltas();
+        assert!(jump.prepare_pass_for_navigation_owner(&ctx, settings_owner, false, true));
+        jump.complete_frame_for_navigation_owner(&ctx, settings_owner, false, true);
+        assert!(
+            jump.active_session().is_some(),
+            "Settings pass reconciliation preserves its active shared-router session"
+        );
+    }
+
+    #[test]
+    fn entering_settings_surrenders_only_the_background_query_focus() {
+        let ctx = egui::Context::default();
+        let query_id = egui::Id::new("query_input");
+        ctx.run_ui(root_input_raw(Vec::new()), |ui| {
+            let response = ui.add(egui::TextEdit::singleline(&mut String::new()).id(query_id));
+            response.request_focus();
+        })
+        .drop_without_applying_deltas();
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+
+        let mut jump = JumpModeUi::new(true);
+        jump.begin_frame();
+        let settings_opened = jump.observe_settings_visibility(true);
+        assert_eq!(
+            jump.update_navigation_owner(
+                &ctx,
+                NavigationOwner::Settings { instance: 1 },
+                settings_opened,
+            ),
+            NavigationOwner::Blocked
+        );
+        assert!(!ctx.memory(|memory| memory.has_focus(query_id)));
+
+        let note_ctx = egui::Context::default();
+        render_navigation_windows(&note_ctx, false, true, true, None);
+        let note_layer = egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("unsupported_note_window"),
+        );
+        let focused = note_ctx.memory(|memory| memory.focused()).unwrap();
+        let mut jump = JumpModeUi::new(true);
+        jump.begin_frame();
+        jump.update_navigation_owner(&note_ctx, NavigationOwner::Blocked, false);
+        assert_eq!(note_ctx.memory(|memory| memory.focused()), Some(focused));
+        assert_eq!(focused_response_layer(&note_ctx), Some(note_layer));
+    }
+
+    #[test]
+    fn disabled_settings_transition_preserves_native_focus_and_clears_old_handoff() {
+        let query_ctx = egui::Context::default();
+        let query_id = egui::Id::new("query_input");
+        query_ctx
+            .run_ui(root_input_raw(Vec::new()), |ui| {
+                ui.add(egui::TextEdit::singleline(&mut String::new()).id(query_id))
+                    .request_focus();
+            })
+            .drop_without_applying_deltas();
+        assert!(query_ctx.memory(|memory| memory.has_focus(query_id)));
+        let mut disabled_jump = JumpModeUi::new(false);
+        disabled_jump.begin_frame();
+        assert!(disabled_jump.observe_settings_visibility(true));
+        disabled_jump.update_navigation_owner(&query_ctx, NavigationOwner::Blocked, true);
+        assert!(
+            query_ctx.memory(|memory| memory.has_focus(query_id)),
+            "the default-off feature does not surrender ordinary query focus"
+        );
+
+        let ctx = egui::Context::default();
+        let foreign_id = egui::Id::new("foreign_window_editor");
+        ctx.run_ui(root_input_raw(Vec::new()), |ui| {
+            egui::Window::new("Foreign editor")
+                .id(egui::Id::new("foreign_editor_window"))
+                .show(ui.ctx(), |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut String::new()).id(foreign_id))
+                        .request_focus();
+                });
+        })
+        .drop_without_applying_deltas();
+        assert!(ctx.memory(|memory| memory.has_focus(foreign_id)));
+
+        let mut jump = JumpModeUi::new(true);
+        jump.last_completed_focus_handoff = Some(ConsumedFocusIntent {
+            intent: FocusIntent {
+                target: TargetId::root_result(TargetGeneration(1), 0),
+                viewport: egui::ViewportId::ROOT,
+                epoch: NavigationEpoch::default(),
+            },
+            response_id: foreign_id,
+        });
+        jump.set_enabled(false);
+        jump.begin_frame();
+        assert!(jump.observe_settings_visibility(true));
+        jump.update_navigation_owner(&ctx, NavigationOwner::Blocked, true);
+        assert!(ctx.memory(|memory| memory.has_focus(foreign_id)));
+
+        jump.set_enabled(true);
+        jump.begin_frame();
+        jump.update_navigation_owner(&ctx, NavigationOwner::Settings { instance: 1 }, false);
+        assert!(
+            ctx.memory(|memory| memory.has_focus(foreign_id)),
+            "disabling Jump Mode clears any stored focus ID before later owner changes"
+        );
     }
 
     fn root_input_raw(events: Vec<egui::Event>) -> egui::RawInput {

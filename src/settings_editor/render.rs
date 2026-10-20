@@ -154,7 +154,12 @@ fn settings_footer_reserved_height(ui: &egui::Ui) -> f32 {
 }
 
 impl SettingsEditor {
-    pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+    pub fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        _jump_mode_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+    ) {
         let mut open = app.show_settings;
         let mut cancel = false;
         egui::Window::new("Settings")
@@ -1218,7 +1223,7 @@ mod settings_shell_tests {
             ..Default::default()
         });
         let mut editor = std::mem::take(&mut app.settings_editor);
-        editor.ui(ctx, app);
+        editor.ui(ctx, app, None);
         app.settings_editor = editor;
         let output = ctx.end_pass();
         fn collect(shape: &egui::epaint::Shape, labels: &mut Vec<(String, egui::Rect)>) {

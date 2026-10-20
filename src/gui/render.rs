@@ -2964,7 +2964,7 @@ impl LauncherApp {
         }
     }
 
-    fn jump_mode_root_targets_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+    fn jump_mode_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         let screen_draw_owns_input = !matches!(
             self.screen_draw_controller.state(),
             crate::screen_draw::ScreenDrawState::NoSession
@@ -2975,7 +2975,8 @@ impl LauncherApp {
             && self.visible_flag.load(Ordering::Relaxed)
             && ctx.viewport_id() == egui::ViewportId::ROOT
             && ctx.input(|input| input.focused)
-            && !self.any_panel_open()
+            && !self.pin_list_open
+            && !self.ocr_surface_visible()
             && !self.confirm_modal.is_open()
             && !self.action_sheet.is_open()
             && self.macro_prompt.pending.is_none()
@@ -2991,23 +2992,87 @@ impl LauncherApp {
             && ctx.memory(|memory| memory.top_modal_layer().is_none())
     }
 
+    fn jump_mode_navigation_input_allowed(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        navigation_owner: crate::gui::jump_mode::ui::NavigationOwner,
+    ) -> bool {
+        navigation_owner != crate::gui::jump_mode::ui::NavigationOwner::Blocked
+            && self.jump_mode_host_input_allowed(ctx, root_visible)
+    }
+
+    fn jump_mode_root_targets_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        self.jump_mode_host_input_allowed(ctx, root_visible)
+            && !self.jump_mode_unsupported_panel_open()
+    }
+
+    fn jump_mode_unsupported_panel_open(&self) -> bool {
+        Self::TRACKED_PANELS
+            .iter()
+            .copied()
+            .filter(|panel| *panel != super::Panel::Settings)
+            .any(|panel| self.is_panel_open(panel))
+    }
+
+    fn jump_mode_navigation_owner_candidate(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> (crate::gui::jump_mode::ui::NavigationOwner, bool) {
+        use crate::gui::jump_mode::ui::{NavigationOwner, resolve_layer_navigation_owner};
+
+        let settings_visibility_changed = self
+            .jump_mode_ui
+            .observe_settings_visibility(self.show_settings);
+        let candidate = if self.jump_mode_host_input_allowed(ctx, root_visible) {
+            let owner = resolve_layer_navigation_owner(
+                ctx,
+                self.show_settings,
+                self.jump_mode_ui.settings_instance(),
+            );
+            if owner == NavigationOwner::Root && self.jump_mode_unsupported_panel_open() {
+                NavigationOwner::Blocked
+            } else {
+                owner
+            }
+        } else {
+            NavigationOwner::Blocked
+        };
+        (candidate, settings_visibility_changed)
+    }
+
+    fn resolve_jump_mode_navigation_owner(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> crate::gui::jump_mode::ui::NavigationOwner {
+        let (candidate, settings_visibility_changed) =
+            self.jump_mode_navigation_owner_candidate(ctx, root_visible);
+        self.jump_mode_ui
+            .update_navigation_owner(ctx, candidate, settings_visibility_changed)
+    }
+
     fn jump_mode_root_scope_for_current_results(
         &self,
         ctx: &egui::Context,
         root_visible: bool,
     ) -> Option<crate::gui::jump_mode::ui::JumpModeScope> {
-        let root_owner_allowed = self
+        let root_targets_allowed = self
             .jump_mode_ui
             .root_input_owner_allowed(self.jump_mode_root_targets_allowed(ctx, root_visible));
-        root_owner_allowed
+        (root_targets_allowed
+            && self.jump_mode_ui.frame_navigation_owner()
+                == crate::gui::jump_mode::ui::NavigationOwner::Root)
             .then(|| {
-                self.jump_mode_ui.scope(
+                self.jump_mode_ui.scope_for_navigation_owner(
                     crate::gui::jump_mode::SurfaceId::LauncherResults,
                     crate::gui::jump_mode::TargetGeneration(
                         self.root_list_geometry.result_generation(),
                     ),
                     "launcher-results",
                     ctx.viewport_id(),
+                    crate::gui::jump_mode::ui::NavigationOwner::Root,
                     true,
                 )
             })
@@ -3042,23 +3107,29 @@ impl LauncherApp {
 
     fn complete_jump_mode_frame(&mut self, ctx: &egui::Context) {
         let root_visible = self.visible_flag.load(Ordering::Relaxed);
-        let root_owner_allowed = self
-            .jump_mode_ui
-            .root_input_owner_allowed(self.jump_mode_root_targets_allowed(ctx, root_visible));
-        self.jump_mode_ui
-            .complete_frame(ctx, root_owner_allowed, root_visible);
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let root_targets_allowed = self.jump_mode_root_targets_allowed(ctx, root_visible)
+            && navigation_owner == crate::gui::jump_mode::ui::NavigationOwner::Root;
+        self.jump_mode_ui.complete_frame_for_navigation_owner(
+            ctx,
+            navigation_owner,
+            root_targets_allowed,
+            root_visible,
+        );
     }
 
     fn finish_and_paint_jump_mode_ui_pass(&mut self, ctx: &egui::Context, root_visible: bool) {
         self.jump_mode_ui.finish_ui_pass();
         let root_visible = root_visible && self.visible_flag.load(Ordering::Relaxed);
-        let root_owner_allowed = self
-            .jump_mode_ui
-            .root_input_owner_allowed(self.jump_mode_root_targets_allowed(ctx, root_visible));
-        if self
-            .jump_mode_ui
-            .prepare_pass_for_paint(ctx, root_owner_allowed, root_visible)
-        {
+        let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let root_targets_allowed = self.jump_mode_root_targets_allowed(ctx, root_visible)
+            && navigation_owner == crate::gui::jump_mode::ui::NavigationOwner::Root;
+        if self.jump_mode_ui.prepare_pass_for_navigation_owner(
+            ctx,
+            navigation_owner,
+            root_targets_allowed,
+            root_visible,
+        ) {
             crate::gui::jump_mode::paint::paint(ctx, &self.jump_mode_ui);
         }
     }
@@ -3073,10 +3144,23 @@ impl LauncherApp {
         if let Some(logic) = self.root_frame_logic.as_mut() {
             logic.ui_passes = frame_logic.ui_passes;
         }
-        let root_owner_allowed =
-            self.jump_mode_root_targets_allowed(&ctx, frame_logic.should_be_visible);
+        let (navigation_owner_candidate, settings_visibility_changed) =
+            self.jump_mode_navigation_owner_candidate(&ctx, frame_logic.should_be_visible);
+        let owner_transition_pending = settings_visibility_changed
+            || navigation_owner_candidate != self.jump_mode_ui.frame_navigation_owner();
+        let navigation_input_allowed = !owner_transition_pending
+            && self.jump_mode_navigation_input_allowed(
+                &ctx,
+                frame_logic.should_be_visible,
+                navigation_owner_candidate,
+            );
         self.jump_mode_ui
-            .handle_root_input(&ctx, root_owner_allowed, first_ui_pass);
+            .handle_root_input(&ctx, navigation_input_allowed, first_ui_pass);
+        self.jump_mode_ui.update_navigation_owner(
+            &ctx,
+            navigation_owner_candidate,
+            settings_visibility_changed,
+        );
         self.show_screenshot_pins(&ctx);
         self.pin_list_open = self.show_screenshot_pin_list(&ctx, self.pin_list_open);
         if frame_logic.should_be_visible {
@@ -3399,6 +3483,13 @@ impl LauncherApp {
         }
         let action_sheet_blocks_launcher_input =
             self.action_sheet.is_open() || snippet_prompt_owns_input;
+        // When Jump Mode is enabled, keyboard ownership belongs exclusively
+        // to the retained navigation surface. A newly opened surface can be
+        // blocked until its layer order is visible on the next pass.
+        let root_navigation_allowed = !self.jump_mode_enabled()
+            || (self.jump_mode_ui.frame_navigation_owner()
+                == crate::gui::jump_mode::ui::NavigationOwner::Root
+                && !self.any_panel_open());
 
         let mut deferred_universal_action = None;
         let mut deferred_radial_authoring_add = None;
@@ -3452,8 +3543,9 @@ impl LauncherApp {
 
             scale_ui(ui, self.query_scale, |ui| {
                 let input_id = query_input_id;
-                let query_owned_focus = ui.ctx().memory(|memory| memory.has_focus(input_id));
-                let numpad_navigation = if first_ui_pass {
+                let query_owned_focus = root_navigation_allowed
+                    && ui.ctx().memory(|memory| memory.has_focus(input_id));
+                let numpad_navigation = if first_ui_pass && root_navigation_allowed {
                     ui.ctx().input_mut(|input| {
                         consume_physical_numpad_navigation(
                             query_owned_focus,
@@ -3471,11 +3563,12 @@ impl LauncherApp {
                     &mut self.query,
                     input_id,
                     self.query_scale,
-                    !action_sheet_blocks_launcher_input,
+                    !action_sheet_blocks_launcher_input && root_navigation_allowed,
                 )
                 .output;
                 if self.move_cursor_end
                     && !action_sheet_blocks_launcher_input
+                    && root_navigation_allowed
                     && query_output.response.enabled()
                     && query_output.response.has_focus()
                 {
@@ -3500,11 +3593,12 @@ impl LauncherApp {
                     self.focus_query,
                     self.file_search_dialog.open,
                 ) && !action_sheet_blocks_launcher_input
+                    && root_navigation_allowed
                 {
                     query_response.request_focus();
                     self.focus_query = false;
                 }
-                let query_has_focus = query_response.has_focus();
+                let query_has_focus = root_navigation_allowed && query_response.has_focus();
 
                 self.query_history.synchronize(&self.query);
                 if first_ui_pass && query_response.changed() {
@@ -3516,7 +3610,10 @@ impl LauncherApp {
                     self.handle_query_text_changed_after_intent();
                 }
 
-                let history_direction = if !first_ui_pass || action_sheet_blocks_launcher_input {
+                let history_direction = if !first_ui_pass
+                    || action_sheet_blocks_launcher_input
+                    || !root_navigation_allowed
+                {
                     None
                 } else {
                     ctx.input_mut(|input| {
@@ -3529,7 +3626,10 @@ impl LauncherApp {
                     self.navigate_query_history(direction);
                 }
 
-                if first_ui_pass && !action_sheet_blocks_launcher_input {
+                if first_ui_pass
+                    && !action_sheet_blocks_launcher_input
+                    && root_navigation_allowed
+                {
                     for direction in numpad_navigation {
                         self.handle_key(direction.navigation_key());
                     }
@@ -3636,6 +3736,7 @@ impl LauncherApp {
 
                 if first_ui_pass
                     && !action_sheet_blocks_launcher_input
+                    && root_navigation_allowed
                     && history_direction.is_none()
                     && Self::launcher_query_keyboard_enabled(query_has_focus)
                 {
@@ -3655,13 +3756,18 @@ impl LauncherApp {
 
                 let tab = ctx.input(|i| i.key_pressed(egui::Key::Tab));
                 #[cfg(feature = "qa-framebuffer-capture")]
-                if first_ui_pass && !action_sheet_blocks_launcher_input && tab {
+                if first_ui_pass
+                    && !action_sheet_blocks_launcher_input
+                    && root_navigation_allowed
+                    && tab
+                {
                     self.qa_framebuffer_record_tab_processed();
                 }
                 let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
                 let mut accepted_suggestion = false;
                 if first_ui_pass
                     && !action_sheet_blocks_launcher_input
+                    && root_navigation_allowed
                     && Self::launcher_query_keyboard_enabled(query_has_focus)
                     && (tab || (enter && self.selected.is_none()))
                 {
@@ -3681,6 +3787,7 @@ impl LauncherApp {
                 let mut launch_idx: Option<usize> = None;
                 if first_ui_pass
                     && !action_sheet_blocks_launcher_input
+                    && root_navigation_allowed
                     && !accepted_suggestion
                     && enter
                     && Self::launcher_enter_activation_enabled(
@@ -4417,8 +4524,24 @@ impl LauncherApp {
         }
         let show_settings = self.show_settings;
         if show_settings {
+            let navigation_owner =
+                self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+            let settings_scope = match navigation_owner {
+                crate::gui::jump_mode::ui::NavigationOwner::Settings { instance } => {
+                    self.jump_mode_ui.scope_for_navigation_owner(
+                        crate::gui::jump_mode::SurfaceId::Settings { instance },
+                        crate::gui::jump_mode::TargetGeneration(instance),
+                        "settings",
+                        ctx.viewport_id(),
+                        navigation_owner,
+                        false,
+                    )
+                }
+                crate::gui::jump_mode::ui::NavigationOwner::Root
+                | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
+            };
             let mut ed = std::mem::take(&mut self.settings_editor);
-            ed.ui(&ctx, self);
+            ed.ui(&ctx, self, settings_scope);
             self.settings_editor = ed;
         }
         let show_plugin = self.show_plugins;
@@ -7876,6 +7999,8 @@ mod tests {
         settings.hotkey = None;
         settings.quit_hotkey = None;
         settings.help_hotkey = None;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         settings.enable_toasts = false;
         settings.show_inline_errors = false;
         settings.show_error_toasts = false;
@@ -23044,6 +23169,240 @@ mod tests {
     }
 
     #[test]
+    fn opening_settings_on_a_discarded_root_pass_cancels_background_navigation() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        start_actual_root_jump_mode(&ctx, &mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+
+        let mut opened_settings = false;
+        let (output, passes) =
+            app.run_root_frame_for_test_with(&ctx, actual_query_input(true), true, |app, ui| {
+                if !opened_settings {
+                    app.show_settings = true;
+                    opened_settings = true;
+                }
+                app.render_root_ui(ui);
+            });
+        output.drop_without_applying_deltas();
+
+        assert!(passes >= 2, "the first pass is deliberately discarded");
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(app.jump_mode_ui.retained_registry().is_empty());
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked
+        );
+        assert!(
+            !ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))),
+            "opening Settings yields the background query's native focus"
+        );
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn actual_root_navigation_owner_follows_settings_and_foreign_window_layers() {
+        use crate::gui::jump_mode::ui::{NavigationOwner, settings_layer_id};
+
+        fn render_with_unsupported_window(
+            ctx: &egui::Context,
+            app: &mut LauncherApp,
+            raise_settings: bool,
+            focus_note: bool,
+        ) -> NavigationOwner {
+            let note_layer = egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::new("unsupported_note_window"),
+            );
+            let (output, _) = app.run_root_frame_for_test_with(
+                ctx,
+                actual_query_input(true),
+                false,
+                |app, ui| {
+                    app.render_root_ui(ui);
+                    egui::Window::new("Unsupported note")
+                        .id(egui::Id::new("unsupported_note_window"))
+                        .show(ui.ctx(), |ui| {
+                            let mut note_text = String::new();
+                            let response = ui.add(
+                                egui::TextEdit::singleline(&mut note_text)
+                                    .id(egui::Id::new("unsupported_note_editor")),
+                            );
+                            if focus_note {
+                                response.request_focus();
+                            }
+                        });
+                    ui.ctx().move_to_top(if raise_settings {
+                        settings_layer_id()
+                    } else {
+                        note_layer
+                    });
+                },
+            );
+            output.drop_without_applying_deltas();
+            app.jump_mode_ui.frame_navigation_owner()
+        }
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.show_settings = true;
+
+        // Newly-created windows are retained at their creation order first.
+        // Raising Settings only changes the completed layer order, so the
+        // second frame blocks the owner transition before a third can use it.
+        assert_eq!(
+            render_with_unsupported_window(&ctx, &mut app, true, false),
+            NavigationOwner::Blocked
+        );
+        assert_eq!(
+            render_with_unsupported_window(&ctx, &mut app, true, false),
+            NavigationOwner::Blocked,
+        );
+        assert_eq!(
+            crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
+            Some(settings_layer_id()),
+            "the manually raised Settings layer is retained after the transition frame"
+        );
+        assert_eq!(
+            crate::gui::jump_mode::ui::resolve_layer_navigation_owner(
+                &ctx,
+                app.show_settings,
+                app.jump_mode_ui.settings_instance(),
+            ),
+            NavigationOwner::Settings { instance: 1 },
+            "the retained Settings layer owns navigation after the transition frame"
+        );
+        assert_eq!(
+            render_with_unsupported_window(&ctx, &mut app, true, false),
+            NavigationOwner::Settings { instance: 1 },
+        );
+
+        assert_eq!(
+            render_with_unsupported_window(&ctx, &mut app, false, false),
+            NavigationOwner::Blocked,
+            "an unsupported ordinary window above Settings blocks root navigation"
+        );
+
+        assert_eq!(
+            render_with_unsupported_window(&ctx, &mut app, true, false),
+            NavigationOwner::Blocked
+        );
+        assert_eq!(
+            render_with_unsupported_window(&ctx, &mut app, true, false),
+            NavigationOwner::Settings { instance: 1 },
+            "Settings above a supported-but-unintegrated window owns navigation"
+        );
+        assert_eq!(
+            render_with_unsupported_window(&ctx, &mut app, true, true),
+            NavigationOwner::Blocked,
+            "focus inside a foreign window blocks even when Settings is foremost"
+        );
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn settings_owner_blocks_root_autofocus_and_enter_activation() {
+        use crate::gui::jump_mode::ui::NavigationOwner;
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.selected = Some(0);
+        app.show_settings = true;
+        for _ in 0..2 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        let candidate = app.jump_mode_navigation_owner_candidate(&ctx, true).0;
+        let gates = (
+            app.jump_mode_enabled(),
+            app.visible_flag.load(Ordering::Relaxed),
+            ctx.viewport_id(),
+            ctx.viewport_id() == egui::ViewportId::ROOT,
+            ctx.input(|input| input.focused),
+            app.pin_list_open,
+            app.ocr_surface_visible(),
+            app.confirm_modal.is_open(),
+            app.action_sheet.is_open(),
+        );
+        let prompt_gates = (
+            app.macro_prompt.pending.is_some(),
+            app.macro_parameter_prompt.owns_input(),
+            app.snippet_prompt_dialog.is_open(),
+            app.root_frame_logic
+                .as_ref()
+                .is_some_and(|logic| logic.snippet_prompt_owns_input),
+            app.screen_draw_controller.toolbar_open(),
+            egui::Popup::is_any_open(&ctx),
+            ctx.memory(|memory| memory.top_modal_layer().is_some()),
+        );
+        let top_layer = crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx);
+        let top_is_settings = top_layer == Some(crate::gui::jump_mode::ui::settings_layer_id());
+        let resolver_facts = (
+            ctx.viewport_id(),
+            ctx.input(|input| input.focused),
+            egui::Popup::is_any_open(&ctx),
+            ctx.memory(|memory| memory.top_modal_layer()),
+            top_layer,
+            top_is_settings,
+            crate::gui::jump_mode::ui::focused_response_layer(&ctx),
+            app.show_settings,
+            app.jump_mode_ui.settings_instance(),
+            app.pin_list_open,
+            app.ocr_surface_visible(),
+            app.screen_draw_controller.toolbar_open(),
+        );
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Settings { instance: 1 },
+            "candidate={candidate:?}, direct={:?}, resolver_facts={resolver_facts:?}, gates={gates:?}, prompts={prompt_gates:?}",
+            crate::gui::jump_mode::ui::resolve_layer_navigation_owner(
+                &ctx,
+                app.show_settings,
+                app.jump_mode_ui.settings_instance()
+            ),
+        );
+        assert!(!ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+
+        let query_before = app.query.clone();
+        app.focus_query = true;
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+
+        assert_eq!(
+            app.query, query_before,
+            "Settings prevents root query edits"
+        );
+        assert_eq!(app.selected, Some(0));
+        assert!(app.focus_query, "background autofocus remains pending");
+        assert!(!ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+        assert!(
+            app.test_activation_trace.is_empty(),
+            "Enter cannot activate a root result"
+        );
+        drop(workspace);
+    }
+
+    #[test]
     fn jump_mode_leader_is_captured_before_a_focused_root_button() {
         let ctx = egui::Context::default();
         let safe_action = Action {
@@ -23110,6 +23469,9 @@ mod tests {
 
         app.set_jump_mode_enabled(true);
         prepare_actual_query_frame(&ctx, &mut app);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
         app.run_root_frame_for_test(
             &ctx,
             egui::RawInput {
@@ -23149,7 +23511,17 @@ mod tests {
         .drop_without_applying_deltas();
         assert!(app.jump_mode_ui.active_session().is_none());
         assert_eq!(app.query, query_before_focus_loss);
+        assert!(
+            !ctx.input(|input| input
+                .events
+                .iter()
+                .any(|event| { matches!(event, egui::Event::Text(text) if text == "a") })),
+            "the formerly owned native focus-loss frame is captured before owner cancellation"
+        );
 
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
         app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
             .0
             .drop_without_applying_deltas();
@@ -23180,6 +23552,9 @@ mod tests {
         assert!(app.jump_mode_ui.active_session().is_none());
         assert_eq!(app.query, query_before_owner_change);
         app.show_settings = false;
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
         app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
             .0
             .drop_without_applying_deltas();
@@ -23588,6 +23963,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         prepare_actual_query_frame(&ctx, &mut app);
+        app.set_jump_mode_enabled(true);
         app.note_save_on_close = false;
         app.note_confirm_discard_unsaved_changes = true;
 
@@ -23666,6 +24042,69 @@ mod tests {
         assert_eq!(app.note_panels.len(), 1);
         assert!(app.note_panels[0].note_close_observation().pending_discard);
         assert!(app.note_panels[0].has_unsaved_changes());
+    }
+
+    #[test]
+    fn settings_escape_closes_when_jump_mode_owns_root_navigation() {
+        use crate::gui::jump_mode::ui::NavigationOwner;
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.show_settings = true;
+        for _ in 0..3 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        assert!(app.show_settings);
+        let candidate = app.jump_mode_navigation_owner_candidate(&ctx, true).0;
+        let top_layer = crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx);
+        let top_is_settings = top_layer == Some(crate::gui::jump_mode::ui::settings_layer_id());
+        let resolver_facts = (
+            ctx.viewport_id(),
+            ctx.input(|input| input.focused),
+            egui::Popup::is_any_open(&ctx),
+            ctx.memory(|memory| memory.top_modal_layer()),
+            top_layer,
+            top_is_settings,
+            crate::gui::jump_mode::ui::focused_response_layer(&ctx),
+            app.show_settings,
+            app.jump_mode_ui.settings_instance(),
+            app.pin_list_open,
+            app.ocr_surface_visible(),
+            app.screen_draw_controller.toolbar_open(),
+        );
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Settings { instance: 1 },
+            "candidate={candidate:?}, direct={:?}, resolver_facts={resolver_facts:?}, modal={}, sheet={}, screen_draw={:?}",
+            crate::gui::jump_mode::ui::resolve_layer_navigation_owner(
+                &ctx,
+                app.show_settings,
+                app.jump_mode_ui.settings_instance()
+            ),
+            app.confirm_modal.is_open(),
+            app.action_sheet.is_open(),
+            app.screen_draw_controller.state()
+        );
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+
+        assert!(!app.show_settings, "Escape remains a container command");
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
     }
 
     #[test]
