@@ -197,6 +197,23 @@ impl ScreenDrawCommandHost for LauncherApp {
     }
 }
 
+impl LauncherApp {
+    pub(super) fn paste_sequence_invocation_context_for_open(
+        &mut self,
+    ) -> Result<
+        crate::paste_sequence::SequenceInvocationContext,
+        crate::paste_sequence::SequencePreflightError,
+    > {
+        #[cfg(feature = "qa-framebuffer-capture")]
+        let use_empty_qa_context = self.qa_framebuffer_use_empty_paste_invocation_context();
+        #[cfg(not(feature = "qa-framebuffer-capture"))]
+        let use_empty_qa_context = false;
+        choose_paste_open_context(use_empty_qa_context, || {
+            self.capture_sequence_context(crate::commands::ActivationSource::Click)
+        })
+    }
+}
+
 impl DialogCommandHost for LauncherApp {
     fn open_qr_dialog(&mut self, initial_text: Option<&str>) {
         self.qr_dialog.open(initial_text);
@@ -231,14 +248,6 @@ impl DialogCommandHost for LauncherApp {
     }
 
     fn open_paste_sequence_dialog(&mut self) {
-        #[cfg(feature = "qa-framebuffer-capture")]
-        let use_empty_qa_context = self.qa_framebuffer_use_empty_paste_invocation_context();
-        #[cfg(not(feature = "qa-framebuffer-capture"))]
-        let use_empty_qa_context = false;
-        let context = choose_paste_open_context(use_empty_qa_context, || {
-            self.capture_sequence_context(crate::commands::ActivationSource::Click)
-        });
-        self.paste_sequence_dialog.open_with_context(context);
         self.focus_panel(super::Panel::PasteSequenceDialog);
     }
 
@@ -1425,6 +1434,15 @@ impl LauncherApp {
         crate::paste_sequence::SequenceInvocationContext,
         crate::paste_sequence::SequencePreflightError,
     > {
+        #[cfg(test)]
+        {
+            self.test_sequence_context_capture_calls =
+                self.test_sequence_context_capture_calls.saturating_add(1);
+            assert!(
+                !self.test_sequence_context_capture_forbidden,
+                "test forbids capture_sequence_context before any OS clipboard access"
+            );
+        }
         let timestamp = chrono::Local::now().fixed_offset();
         let origin = select_sequence_origin_window(
             source,

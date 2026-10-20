@@ -917,6 +917,10 @@ pub struct LauncherApp {
     /// rather than in the macro broker.
     #[cfg(test)]
     pub(crate) test_activation_trace: Vec<(Action, ActivationSource)>,
+    #[cfg(test)]
+    pub(crate) test_sequence_context_capture_forbidden: bool,
+    #[cfg(test)]
+    pub(crate) test_sequence_context_capture_calls: usize,
     pub usage: HashMap<String, u32>,
     /// IDs registered through the legacy public `global_hotkey::Hotkey` API.
     /// The launcher itself routes configured hotkeys through the main runtime.
@@ -2987,6 +2991,10 @@ impl LauncherApp {
             test_last_activation: None,
             #[cfg(test)]
             test_activation_trace: Vec::new(),
+            #[cfg(test)]
+            test_sequence_context_capture_forbidden: false,
+            #[cfg(test)]
+            test_sequence_context_capture_calls: 0,
             usage: usage::load_usage(USAGE_FILE).unwrap_or_default(),
             registered_hotkeys: Mutex::new(HashMap::new()),
             show_editor: false,
@@ -4490,8 +4498,7 @@ impl LauncherApp {
             Panel::ShellCmdDialog => self.shell_cmd_dialog.ensure_open(),
             Panel::SnippetDialog => self.snippet_dialog.ensure_open(),
             Panel::PasteSequenceDialog => {
-                let context =
-                    self.capture_sequence_context(crate::commands::ActivationSource::Click);
+                let context = self.paste_sequence_invocation_context_for_open();
                 self.paste_sequence_dialog.open_with_context(context);
             }
             Panel::HashGeneratorDialog => self.hash_generator_dialog.ensure_open(),
@@ -8986,15 +8993,18 @@ mod tests {
     }
 
     #[test]
-    fn open_file_search_disables_launcher_wide_escape_handling() {
+    fn launcher_escape_defers_to_file_search_and_native_popup() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         app.file_search_dialog.open = true;
         app.visible_flag.store(true, Ordering::SeqCst);
 
         assert!(!LauncherApp::launcher_escape_handling_enabled(
-            app.file_search_dialog.open
+            app.file_search_dialog.open,
+            false,
         ));
+        assert!(!LauncherApp::launcher_escape_handling_enabled(false, true));
+        assert!(LauncherApp::launcher_escape_handling_enabled(false, false));
         assert!(app.visible_flag.load(Ordering::SeqCst));
     }
 

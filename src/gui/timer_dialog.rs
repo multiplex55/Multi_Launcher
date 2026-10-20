@@ -20,6 +20,7 @@ pub(crate) struct TimerDialogQaObservation {
     pub(crate) mode: &'static str,
     pub(crate) duration_text_chars: usize,
     pub(crate) label_text_chars: usize,
+    pub(crate) sound_index: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -41,6 +42,7 @@ impl TimerDialog {
             mode,
             duration_text_chars: value.chars().count(),
             label_text_chars: self.label.chars().count(),
+            sound_index: self.sound_idx,
         }
     }
 
@@ -388,6 +390,20 @@ mod tests {
 
         dialog.open_timer();
         assert_eq!(dialog.title(), "Create Timer");
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    #[test]
+    fn qa_observation_reports_the_actual_sound_selection() {
+        let mut dialog = TimerDialog {
+            sound_idx: 3,
+            ..Default::default()
+        };
+
+        assert_eq!(dialog.qa_observation().sound_index, 3);
+
+        dialog.open_timer();
+        assert_eq!(dialog.qa_observation().sound_index, 0);
     }
 }
 

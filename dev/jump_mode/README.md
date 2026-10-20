@@ -119,3 +119,29 @@ scenario implementation and still perform fixture checks and owned cleanup.
 `-OverallTimeoutSeconds` supplies the shared run deadline. See each run's
 manifest/events for the exact environment, window/DPI metadata and deadline
 outcome. Dashboard and Grid filters passed native M08 qualification; see JUMP_MODE_RESULTS.md for the accepted run IDs.
+
+M13 Phase 2 runs one isolated native dialog surface per owned app process. Use
+`-Surface` to choose Settings, Notes, Todo, Timer, Paste, or MkMacro; `Settings`
+is the default. Each run uses the production query opener, resolves the exact
+observed root action and dialog target from the current retained hint map, and
+captures only ROOT/F11 receipts whose captured observation matches the same
+frame and UI pass. Dialog state records include redacted draft facts and actual
+focus/selection ownership. The Paste fixture additionally requests the
+QA-only empty invocation context through the validated request; normal
+production paste behavior is unchanged.
+
+For example, run only the Settings surface:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File dev/jump_mode/run.ps1 -Scenario Phase2 -Surface Settings
+```
+
+Other surfaces use the same bounded entry point, for example
+`-Scenario Phase2 -Surface Notes` or `-Scenario Phase2 -Surface Paste`. Each
+child requests at most three ROOT/F11 captures, checks owned foreground input
+and current owner identity, and closes through the retained owned process. The
+runner never starts timers, plays or records macros, sends paste sequences, or
+reads or mutates the real clipboard. Native acceptance is recorded only after
+the corresponding run produces matching receipts, screenshots, state
+assertions, and verified cleanup; fixture-only validation does not claim a GUI
+result.

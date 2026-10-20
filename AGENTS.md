@@ -727,6 +727,8 @@ The size of the migration determines the size of the verification effort. A migr
 
 # Testing Standard
 
+For all future app tests and test profiles, disable Paste Sequences' **Enable Next Shortcut** and **Enable Cancel Shortcut** settings (`next_hotkey = None`, `cancel_hotkey = None`) before constructing the application. This avoids shortcut-registration error toasts during testing. Preserve production defaults; do not globally mute error notifications as a substitute.
+
 Cargo Nextest is the preferred Rust test runner for this repository.
 
 Use targeted Nextest invocations whenever they provide meaningful coverage of the code being changed.

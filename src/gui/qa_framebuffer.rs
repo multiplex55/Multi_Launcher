@@ -111,6 +111,7 @@ enum Phase2Surface {
     Todo,
     Timer,
     Paste,
+    #[serde(rename = "mkmacro")]
     MkMacro,
 }
 
@@ -147,6 +148,7 @@ struct JumpModeObservation {
     capture_count: u8,
     capture_armed: bool,
     query: String,
+    effective_fuzzy_weight: f32,
     result_generation: u64,
     result_count: usize,
     grid_layout: bool,
@@ -167,6 +169,7 @@ struct JumpModeObservation {
     focused_widget_id: Option<String>,
     focused_navigation_destination: Option<String>,
     dialog_state: Option<QaDialogState>,
+    mkmacro_action_editor_open: bool,
     activation_count: u64,
     last_action: Option<QaActivationObservation>,
     tab_processed_count: u64,
@@ -191,6 +194,10 @@ struct QaDialogState {
     target_generation: Option<u64>,
     settings_draft_jump_mode: Option<bool>,
     settings_committed_jump_mode: Option<bool>,
+    settings_draft_fuzzy_weight: Option<f32>,
+    settings_committed_fuzzy_weight: Option<f32>,
+    settings_draft_debug_logging: Option<bool>,
+    settings_committed_debug_logging: Option<bool>,
     notes_open: Option<bool>,
     notes_entry_count: Option<usize>,
     notes_editing: Option<bool>,
@@ -205,7 +212,9 @@ struct QaDialogState {
     timer_mode: Option<&'static str>,
     timer_duration_chars: Option<usize>,
     timer_label_chars: Option<usize>,
+    timer_sound_index: Option<usize>,
     active_timer_count: Option<usize>,
+    active_alarm_count: Option<usize>,
     paste_open: Option<bool>,
     paste_context_present: Option<bool>,
     paste_context_has_clipboard_text: Option<bool>,
@@ -222,6 +231,7 @@ struct QaDialogState {
     mkmacro_document_macro_count: Option<usize>,
     mkmacro_active_runtime: Option<bool>,
     mkmacro_recorder_active: Option<bool>,
+    mkmacro_action_editor_open: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2339,6 +2349,7 @@ fn build_jump_mode_observation(
         capture_count,
         capture_armed,
         query: app.query.clone(),
+        effective_fuzzy_weight: app.fuzzy_weight,
         result_generation,
         result_count,
         grid_layout: app.resolved_grid_layout,
@@ -2359,6 +2370,7 @@ fn build_jump_mode_observation(
         focused_widget_id,
         focused_navigation_destination,
         dialog_state,
+        mkmacro_action_editor_open: app.mkmacro_dialog.action_editor.draft.is_some(),
         activation_count,
         last_action,
         tab_processed_count,
@@ -2496,6 +2508,11 @@ fn qa_dialog_state(
             state.settings_draft_jump_mode =
                 Some(app.settings_editor.experimental_jump_mode_enabled);
             state.settings_committed_jump_mode = Some(app.jump_mode_ui.is_enabled());
+            state.settings_draft_fuzzy_weight = Some(app.settings_editor.fuzzy_weight);
+            state.settings_committed_fuzzy_weight = Some(app.fuzzy_weight);
+            state.settings_draft_debug_logging = Some(app.settings_editor.debug_logging);
+            state.settings_committed_debug_logging =
+                Some(app.settings_editor.baseline_settings.debug_logging);
         }
         Owner::Notes { .. } => {
             let observation = app.notes_dialog.qa_observation();
@@ -2520,7 +2537,14 @@ fn qa_dialog_state(
             state.timer_mode = Some(observation.mode);
             state.timer_duration_chars = Some(observation.duration_text_chars);
             state.timer_label_chars = Some(observation.label_text_chars);
+            state.timer_sound_index = Some(observation.sound_index);
             state.active_timer_count = Some(crate::plugins::timer::active_timers().len());
+            state.active_alarm_count = Some(
+                crate::plugins::timer::ACTIVE_TIMERS
+                    .lock()
+                    .map(|timers| timers.values().filter(|entry| entry.persist).count())
+                    .unwrap_or(usize::MAX),
+            );
         }
         Owner::PasteSequence { .. } => {
             let observation = app.paste_sequence_dialog.qa_observation();
@@ -2544,6 +2568,8 @@ fn qa_dialog_state(
             state.mkmacro_document_macro_count = Some(observation.document_macro_count);
             state.mkmacro_active_runtime = Some(observation.runtime_active);
             state.mkmacro_recorder_active = Some(observation.recorder_active);
+            state.mkmacro_action_editor_open =
+                Some(app.mkmacro_dialog.action_editor.draft.is_some());
         }
         Owner::Root | Owner::Blocked => unreachable!("handled above"),
     }
@@ -3015,7 +3041,52 @@ mod tests {
     }
 
     #[test]
+    fn typed_paste_open_keeps_bound_empty_context_through_panel_ensure_open() {
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = test_launcher_app(&ctx, workspace.root());
+        app.paste_sequence_dialog
+            .use_test_data_sources(workspace.root().join("paste_sequences.json"));
+
+        let (mut probe, _jobs, _outcomes) =
+            test_probe_for_target(CaptureTrigger::F11, CaptureTarget::Root);
+        probe.jump_mode_observation_enabled = true;
+        probe.phase2_request = Some(Phase2DialogRequest {
+            surface: Phase2Surface::Paste,
+            use_empty_paste_invocation_context: true,
+        });
+        app.qa_framebuffer = Some(probe);
+        app.test_sequence_context_capture_forbidden = true;
+
+        app.activate_action(
+            crate::actions::Action {
+                label: "Open Paste Sequences".into(),
+                desc: "Paste Sequences".into(),
+                action: "paste:open".into(),
+                args: None,
+            },
+            None,
+            crate::commands::ActivationSource::Enter,
+        );
+
+        assert_eq!(app.test_sequence_context_capture_calls, 0);
+        let observation = app.paste_sequence_dialog.qa_observation();
+        assert!(observation.open);
+        assert!(observation.invocation_context_present);
+        assert!(!observation.invocation_context_has_clipboard_text);
+    }
+
+    #[test]
     fn phase2_request_is_root_f11_and_empty_context_is_paste_only() {
+        let decoded: JumpModeObservationRequest = serde_json::from_str(
+            r#"{"wait_for_active_hints":false,"phase2":{"surface":"mkmacro"}}"#,
+        )
+        .expect("runner's mkmacro surface spelling is part of the request contract");
+        assert_eq!(
+            decoded.phase2.map(|request| request.surface),
+            Some(Phase2Surface::MkMacro)
+        );
+
         let manifest = RequestManifest {
             run_id: "phase2".into(),
             request_id: "paste".into(),
@@ -3046,6 +3117,7 @@ mod tests {
 
     #[test]
     fn todo_dialog_observation_reports_registry_target_generation() {
+        let _workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let ctx = egui::Context::default();
         let directory = tempfile::tempdir().unwrap();
         let app = test_launcher_app(&ctx, directory.path());
@@ -3063,7 +3135,46 @@ mod tests {
     }
 
     #[test]
+    fn settings_observation_separates_draft_weight_from_effective_runtime_weight() {
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = test_launcher_app(&ctx, workspace.root());
+        app.fuzzy_weight = 1.75;
+        app.settings_editor.fuzzy_weight = 0.75;
+
+        let state = qa_dialog_state(
+            &app,
+            &ctx,
+            super::super::jump_mode::ui::NavigationOwner::Settings { instance: 12 },
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(state.settings_draft_fuzzy_weight, Some(0.75));
+        assert_eq!(state.settings_committed_fuzzy_weight, Some(1.75));
+    }
+
+    #[test]
+    fn timer_dialog_observation_reports_actual_sound_index() {
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = test_launcher_app(&ctx, workspace.root());
+        app.timer_dialog.open_timer();
+
+        let state = qa_dialog_state(
+            &app,
+            &ctx,
+            super::super::jump_mode::ui::NavigationOwner::Timer { instance: 12 },
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(state.timer_sound_index, Some(0));
+    }
+
+    #[test]
     fn mkmacro_observation_separates_selected_step_from_actual_table_focus() {
+        let _workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let ctx = egui::Context::default();
         let directory = tempfile::tempdir().unwrap();
         let mut app = test_launcher_app(&ctx, directory.path());
@@ -3704,6 +3815,7 @@ mod tests {
             SemanticTargetId, SurfaceId, TargetGeneration, TargetId, TargetKind, TargetMetadata,
         };
 
+        let _workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let ctx = egui::Context::default();
         let directory = tempfile::tempdir().unwrap();
         let mut app = test_launcher_app(&ctx, directory.path());
@@ -3846,6 +3958,7 @@ mod tests {
 
     #[test]
     fn jump_mode_observer_recognizes_the_real_registered_query_text_entry_and_hint() {
+        let _workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let ctx = egui::Context::default();
         let directory = tempfile::tempdir().unwrap();
         let mut app = test_launcher_app(&ctx, directory.path());
@@ -4150,6 +4263,7 @@ mod tests {
 
     #[test]
     fn qr_armed_wrappers_cancel_hidden_and_modal_takeover_but_keep_root_f11_armed() {
+        let _workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let data_dir = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let mut app = test_launcher_app(&ctx, data_dir.path());

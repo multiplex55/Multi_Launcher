@@ -1,11 +1,11 @@
 # Jump Mode Results
 
-Implementation is in progress. M00–M12 are complete, including complex controls and representative MkMacro integration. M13-A safe fixture/observation foundation is accepted; native workflow/evidence work remains active. M14–M15 remain pending. Phase 1 native evidence is accepted; native Settings/dialog/complex-control evidence remains pending.
+M00–M13 are complete. All six native dialog workflows and the disabled-feature recheck passed, with receipt and owned-process cleanup verification. M14–M15 remain pending: compact Settings header-badge repair, focused reliability/performance/lints, and final representative smoke/handoff.
 
 - Branch: feat/jump-mode-2026-10-19-c7e42.
 - Starting SHA: 8f94b003a12853735d1cb4689c6ec4e53c4ace8e.
-- Latest completed checkpoint: b7a1e4cb9622a51429f2d761155e5840dc3559d3 (M12-B).
-- All checkpoint commits through M12-B were pushed normally to origin; no local-only task commits.
+- Latest completed checkpoint: 3944cab7d5310ea6e670b75f91c262cd053829b5 (M13-A foundation).
+- All checkpoint commits through M13-A were pushed normally to origin; no local-only task commits.
 - Current ownership, exact historical commands, failures and next action: [execution ledger](JUMP_MODE_EXECUTION.md).
 - This report consolidates accepted results. Earlier failed evidence remains unchanged in the ignored raw evidence directory.
 
@@ -39,12 +39,12 @@ Root/Settings(instance)/Notes(instance)/Todo(instance)/Timer(instance)/PasteSequ
 | Root query | Supported + verified headless/native: leader/hint/focus, text/caret, ordinary typing afterward |
 | Root list/grid, note cards | Supported + verified headless/native: selection before action, full payload, duplicate-title exact slug, stale generation |
 | Dashboard discrete controls | Supported + verified representative native FillQuery; full registered inventory below |
-| Settings basic controls | Supported + verified real egui widgets/headless; native screenshots pending M13 |
-| Notes/Todo dialogs | Supported basic controls; real egui/headless behavior verified; native evidence pending M13 |
-| Timer/Paste Sequence dialogs | Basic controls supported+verified headless; native evidence follows M13 |
-| Complex control adapters | Representative sliders/numeric/multiline/combos supported+verified headless; native evidence M13; radio adapter tested without inventing product UI |
-| MkMacro representative controls | Supported + verified headless; native proof pending M13 |
-| Unsupported windows/popups | Background/root suppression verified; supported nested controls still require M11/M12 |
+| Settings basic controls | Supported headless; native checkbox/slider/numeric/Cancel verified (20ea511d); compact-header badge placement pending M14 |
+| Notes/Todo dialogs | Supported + verified headless/native: Notes focus/newline/Cancel (665061ad); Todo safe Add once (d9288141) |
+| Timer/Paste Sequence dialogs | Supported + verified headless/native: Timer text/Sound/Cancel (cb635122), Paste empty context/manual row load/Keep/Cancel (e086058e) |
+| Complex control adapters | Representative sliders/numeric/multiline/combos supported+verified headless; native Settings slider/numeric and Timer Sound combo verified; radio adapter tested without inventing product UI |
+| MkMacro representative controls | Supported + verified headless/native macro/step selection and actual table focus (5f0e4761); later Enter opens blocked editor |
+| Unsupported windows/popups | Background/root suppression verified; recognized combos and Todo/Paste inline confirmations supported headless; other nested owners blocked |
 | Feature disabled | Supported + verified headless/native catalog18 |
 | Performance/Clippy/final smoke | Baseline recorded; M14/M15 remain pending |
 
@@ -69,7 +69,7 @@ Settings registration covers all eight top-level section toggles, Expand/Collaps
 | M10 | complete | M10-A63 tests; M10-B67 tests and scoped review; native evidence reserved M13 |
 | M11 | complete | Notes/Todo and Timer/Paste; repaired final83tests + scoped review clean |
 | M12 | complete | M12-A89tests; M12-B96tests + scoped review closed3P2s |
-| M13 | in_progress | M13-A foundation accepted (2fixture+5QA+6compatibility); native workflow/evidence next |
+| M13 | complete | Six native surfaces + disabled recheck; shared Escape/context-owner repairs; scoped checks and curated images |
 | M14 | pending | Focused reliability, after measurements, Clippy and review |
 | M15 | pending | Final representative native smoke, consolidated final status/handoff |
 
@@ -122,12 +122,20 @@ Phase1 cases passed across focused runs; **no whole-aggregate PASS** is claimed.
 
 The ROOT framebuffer records CPU UI completion before GPU presentation; it does not prove presented-window pixels. Structured observations bind screenshots to actual native input, owned PID/build/fixture and retained frame/pass.
 
-Curated fixture-only images (G:/Repos/rust/Multi_Launcher/docs/plans/jump_mode_review/) total **1319518 bytes**, below8MiB:
+Curated fixture-only images (G:/Repos/rust/Multi_Launcher/docs/plans/jump_mode_review/) total **2744955 bytes**, below8MiB:
 
 - [Baseline dashboard](jump_mode_review/00_baseline_dashboard.png),171568bytes.
 - [Query hints](jump_mode_review/00_query_hints.png),178133bytes.
 - [Dashboard hints after placement repair](jump_mode_review/02_dashboard_hints_active.png),568604bytes; SHA256 f6f455043e592a57de8c24626ba363d0286d559f51e1a79caed5fb6e4b6504af.
 - [Dense note grid hints](jump_mode_review/07_note_grid_hints_active.png),401213bytes; SHA25684595d5fe6a7c72ffc9af2dc012d01a0a57a33a4e968534c88a1c5d4601405f2.
+
+M13 native runs accepted so far:
+
+- [Settings summary](../../dev/jump_mode/evidence/jump_m13_phase2_settings_20261020T093421Z_20ea511d/summary.md): exact opener once; checkbox draft false/runtime true; slider1.0→1.05; numeric1.05→1.1; inactive exact focused numeric capture; later Up→1.2; Cancel runtime1.0/Jump true. PID32812 graceful exit0/tree gone. Three receipt PID/fixture/frame/pass/PNG hash bindings independently checked; selected pixels viewed.
+- [Notes summary](../../dev/jump_mode/evidence/jump_m13_phase2_notes_20261020T093507Z_665061ad/summary.md): exact note:dialog opener once; inactive content-editor focus before typing;18 characters and native newline, then Cancel leaves32notes. PID14600 graceful exit0/tree gone. Two receipt bindings independently checked and selected pixels viewed.
+- [Todo summary](../../dev/jump_mode/evidence/jump_m13_phase2_todo_20261020T093921Z_d9288141/summary.md): map-derived New Todo focus, typing and later Enter adds exactly one isolated entry; PID36528 graceful exit0/tree gone. Parent independently checked both receipt PID/fixture/frame/pass/PNG hash bindings and actual17 pixels. The narrow Todo window clips the row list, so the added ID is proven by captured state rather than a visible row.
+
+Curated selected-state additions: [Settings numeric focus](jump_mode_review/17_settings_numeric_selected.png),328310bytes/SHA2564af2cb39cfb3aaf029f76a1c15113ffa4120a8d314e81752230fe46685071196; [Notes content focus](jump_mode_review/17_notes_content_selected.png),381682bytes/SHA2561cb4b880073f2e3d3349fbd2b4dbeaee82d3ec1eaf1eb8ecd74440ccd7725be5. Total remains below8MiB. Failed fixture/Settings/Todo attempts are retained unchanged, with exact causes/cleanup in the ledger. No whole Phase2 aggregate PASS is claimed.
 
 ## Harness and testing constraints
 
@@ -143,6 +151,17 @@ M13 preparation identified required isolated stores for later dialogs: todo.json
 
 Pre-input CPU baseline at b151ff00660976aefd4d12b780f9fcefd7aa6dbb: test profile,100 inert actions,3-column960×640 root fixture,9 warmups/20 samples, timed frame work only (output disposal excluded). Mean159.54µs, median163.1µs, nearest-rank p95 213.9µs, range97.7–228.5µs. Raw log: G:/Repos/rust/Multi_Launcher/dev/jump_mode/evidence/cpu-baseline/m05-a-root-list-baseline.log. Identical disabled/idle/active after measurements remain M14 work; no performance parity claim yet.
 
-Native Phase2 evidence, Clippy/reliability/performance and final smoke/handoff remain required. Existing untracked clipboard_modifiers.json is preserved, unread and excluded from task commits. No PR, merge or history rewrite has been performed. Optional manual-review guidance will be finalized only after M15.
+Compact badge repair, Clippy/reliability/performance and final smoke/handoff remain required. Existing untracked clipboard_modifiers.json is preserved, unread and excluded from task commits. No PR, merge or history rewrite has been performed. Optional manual-review guidance will be finalized only after M15.
 
 M12-B source is frozen after96/96 targeted tests and scoped formatting/diff checks. MkMacro targets cover visible durable macro/step rows, fold buttons, Refresh checks/+Action and representative Name/Description/Enabled/Folder/playback properties. Hinting only selects/focuses; a later native Enter opens the existing safe step editor or action catalog. Row identity survives reorder and duplicate names; clipped rows are excluded. Active recording, action editor, search/package/confirmation/key capture/picker children and foreign windows block underlying navigation. Unsafe toolbar controls remain unregistered. Explicit Select handoff tracks table native focus separately from the semantic row, and exact owned Slider continuity preserves repeated arrow editing across draft generations. Native proof remains M13; all three reviewer findings are closed with no new P1/P2.
+M13 Timer native [cb635122 summary](../../dev/jump_mode/evidence/jump_m13_phase2_timer_20261020T101148Z_cb635122/summary.md) passed after fixing shared Escape ownership: an open native popup handles Escape before its containing dialog. Actual Sound option hint then fresh Enter changes index0→1 with activation1/timers0/alarms0; native Escape dismisses the popup, Duration/Name accept normal typing, and Cancel closes without Start/Play. Both receipt PID/fixture/frame/pass/PNG hashes independently checked, actual17 pixels viewed; PID26028 graceful exit0/owned tree gone. Focused Escape regression3/3 passed (607480c3); earlier popup-readiness test failures and two native Timer failures remain immutable in the ledger.
+
+M13-B final accepted additions:
+
+- [Paste Sequence](../../dev/jump_mode/evidence/jump_m13_phase2_paste_20261020T102403Z_e086058e/summary.md): actual typed `paste:open` once, context present/clipboard-text absent, manual saved row loads0→1 step, Keep/Cancel and store/history hashes unchanged. PID33836 graceful exit0/tree gone.
+- [MkMacro](../../dev/jump_mode/evidence/jump_m13_phase2_mkmacro_20261020T102454Z_5f0e4761/summary.md): selected macro1/step1 and actual native table focus, unchanged revision and inactive runtime/recorder at selected capture; later Enter opens actual editor with Blocked owner/zero background targets. Post-editor runtime/revision are not directly exposed while Blocked. PID25140 graceful exit0/tree gone.
+- [Disabled recheck](../../dev/jump_mode/evidence/jump_m08_phase1_disabled_20261020T102531Z_97af62fd/summary.md): ordinary Shift+Space/X text, query ` x`, zero targets/actions; PID6832 graceful exit0/tree gone.
+
+Parent independently checked every accepted retained receipt's PID/fixture/frame/pass/PNG hash bindings and representative selected pixels. Curated Paste/MkMacro images are byte-identical fixture screenshots, bringing eight PNGs to2744955bytes. Actual metadata is1800×1000 at scale1; non-1×DPI/multiple-monitor operation is not claimed. Dense32-target evidence was reviewed earlier; the compact-header collision is an explicit M14 repair and active-session resize/final smaller-window visual closure follows in M14/M15.
+
+The failed Paste run6f8d9115 exposed duplicate initialization: the approved empty context was overwritten by `focus_panel`→`ensure_open`, which read clipboard context. Selection now belongs to one `ensure_open` path; the typed opener no longer opens twice. A full typed-action regression forbids clipboard capture before the OS getter, asserts zero capture calls, and preserves the empty context (2/2 scoped tests, ec49eabf). No paste ran and no clipboard mutation occurred; agents did not inspect/log clipboard contents. The first post-fix ordinary-sandbox attempt1937e223 failed process inventory with access denied and retains `cleanup_uncertain`; exact PID7724 was later absent. Its lifecycle proof is not upgraded. The accepted escalated retry has verified owned-tree cleanup. All future native runs use the established escalated runner route.

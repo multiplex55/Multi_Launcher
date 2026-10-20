@@ -1790,8 +1790,11 @@ impl LauncherApp {
         query_has_focus && !file_search_open
     }
 
-    pub(crate) fn launcher_escape_handling_enabled(file_search_open: bool) -> bool {
-        !file_search_open
+    pub(crate) fn launcher_escape_handling_enabled(
+        file_search_open: bool,
+        native_popup_open: bool,
+    ) -> bool {
+        !file_search_open && !native_popup_open
     }
 
     pub(crate) fn launcher_query_focus_should_be_requested(
@@ -3788,7 +3791,10 @@ impl LauncherApp {
 
                 if first_ui_pass
                     && !action_sheet_blocks_launcher_input
-                    && Self::launcher_escape_handling_enabled(self.file_search_dialog.open)
+                    && Self::launcher_escape_handling_enabled(
+                        self.file_search_dialog.open,
+                        egui::Popup::is_any_open(&ctx),
+                    )
                     && ctx.input(|i| i.key_pressed(egui::Key::Escape))
                 {
                     if self.any_panel_open() {
@@ -23047,6 +23053,74 @@ mod tests {
             .drop_without_applying_deltas();
     }
 
+    fn wait_for_timer_sound_option_target(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+    ) -> crate::gui::jump_mode::TargetId {
+        use crate::gui::jump_mode::TargetKind;
+        use crate::gui::jump_mode::ui::NavigationOwner;
+
+        let timer_instance = app.jump_mode_ui.timer_instance();
+        for _ in 0..8 {
+            let owner = app.jump_mode_ui.frame_navigation_owner();
+            let target = app
+                .jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| {
+                    target.metadata().label() == "Sound: Alarm.wav"
+                        && target.metadata().kind() == TargetKind::Selectable
+                        && target.eligible()
+                        && owner
+                            == (NavigationOwner::Timer {
+                                instance: timer_instance,
+                            })
+                        && owner.owns_surface(target.id().surface())
+                });
+            if let Some(target) = target {
+                return target.id().clone();
+            }
+            run_dialog_frame(ctx, app);
+        }
+
+        panic!(
+            "Timer sound option was not published as an eligible popup target; owner={:?}, targets={:?}",
+            app.jump_mode_ui.frame_navigation_owner(),
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .map(|target| {
+                    (
+                        target.metadata().label(),
+                        target.metadata().kind(),
+                        target.id().surface(),
+                        target.eligible(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    fn tap_root_key(ctx: &egui::Context, app: &mut LauncherApp, key: egui::Key) {
+        for event in [
+            key_press(key, egui::Modifiers::NONE),
+            key_release(key, egui::Modifiers::NONE),
+        ] {
+            app.run_root_frame_for_test(
+                ctx,
+                egui::RawInput {
+                    events: vec![event],
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+        }
+    }
+
     fn inert_mkmacro_delay_step(id: u64, label: &str) -> crate::mkmacro::MkStep {
         crate::mkmacro::MkStep {
             id,
@@ -23273,6 +23347,89 @@ mod tests {
         );
         assert_eq!(app.timer_dialog.test_duration(), "17s");
         assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    #[test]
+    fn timer_popup_escape_closes_popup_before_parent_and_jump_escape_cancels_first() {
+        use crate::gui::jump_mode::ui::NavigationOwner;
+
+        {
+            let ctx = egui::Context::default();
+            let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            app.set_jump_mode_enabled(true);
+            app.enable_toasts = true;
+            app.show_error_toasts = true;
+            prepare_actual_query_frame(&ctx, &mut app);
+            app.timer_dialog.open_timer();
+            for _ in 0..3 {
+                run_dialog_frame(&ctx, &mut app);
+            }
+
+            start_actual_root_jump_mode(&ctx, &mut app);
+            assert!(app.jump_mode_ui.active_session().is_some());
+            assert!(!egui::Popup::is_any_open(&ctx));
+            tap_root_key(&ctx, &mut app, egui::Key::Escape);
+            assert!(app.jump_mode_ui.active_session().is_none());
+            assert!(app.timer_dialog.open);
+            assert!(!egui::Popup::is_any_open(&ctx));
+            drop(app);
+            drop(workspace);
+        }
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        app.enable_toasts = true;
+        app.show_error_toasts = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.timer_dialog.open_timer();
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Timer {
+                instance: app.jump_mode_ui.timer_instance()
+            }
+        );
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let sound_hint = dialog_hint_for_label(&app, "Sound");
+        press_dialog_hint_with_enter(&ctx, &mut app, &sound_hint);
+        release_dialog_hint_enter(&ctx, &mut app);
+        assert!(app.timer_dialog.open);
+        assert!(app.jump_mode_ui.active_session().is_none());
+
+        tap_root_key(&ctx, &mut app, egui::Key::Enter);
+        assert!(egui::Popup::is_any_open(&ctx));
+        let popup_option_target = wait_for_timer_sound_option_target(&ctx, &mut app);
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let option_hint = dialog_hint_for_label(&app, "Sound: Alarm.wav");
+        assert!(app.jump_mode_ui.active_session().is_some());
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .get(&popup_option_target)
+                .is_some_and(|target| target.eligible())
+        );
+        press_dialog_hint_with_enter(&ctx, &mut app, &option_hint);
+        release_dialog_hint_enter(&ctx, &mut app);
+        tap_root_key(&ctx, &mut app, egui::Key::Enter);
+        assert_eq!(app.timer_dialog.qa_observation().sound_index, 1);
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert!(app.jump_mode_ui.active_session().is_none());
+
+        tap_root_key(&ctx, &mut app, egui::Key::Escape);
+        assert!(!egui::Popup::is_any_open(&ctx));
+        assert!(app.timer_dialog.open);
+        assert_eq!(app.timer_dialog.qa_observation().sound_index, 1);
+
+        tap_root_key(&ctx, &mut app, egui::Key::Escape);
+        assert!(!app.timer_dialog.open);
+        drop(app);
         drop(workspace);
     }
 
