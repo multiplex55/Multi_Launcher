@@ -6,10 +6,10 @@
 - Initial working tree: clean, including tracked task-input documents. No user changes copied/discarded.
 - Environment: Windows PowerShell; rustc/cargo 1.99.0; Nextest 0.9.135; egui/eframe 0.36.2 with local vendor patches.
 - Git branch creation needed sandbox escalation because .git is read-only in the normal sandbox; authorized creation succeeded.
-- Current milestone: M01 baseline accepted; M05 native query proof next.
-- Latest GUI evidence: accepted baseline jump_m01_20261019T232227Z_fc7bc04b; curated 00_baseline_dashboard.png.
-- Latest checkpoint: 7a537081946e2cd49fe634c7a7b5d846bec84c89 — feat(jump): [M05-B] paint clipped hints and focus feedback.
-- Push status: all checkpoints through M05-B (7a537081) pushed successfully to origin; upstream configured.
+- Current milestone: M05 native query proof accepted; M06 grid integration next.
+- Latest GUI evidence: M05 PASS jump_m05_query_probe_20261020T000051Z_b5d58182; curated 00_query_hints.png.
+- Latest checkpoint: M05-C native query proof (this checkpoint); previous b67effb4332268c3e85590f4f1c3b2353c5b2ef7.
+- Push status: all prior checkpoints pushed; M05-C receives one normal push after commit; upstream configured.
 
 | Milestone | State | Checkpoint / verification | Evidence or dependency |
 |---|---|---|---|
@@ -18,7 +18,7 @@
 | M02 | complete | M02-A 3 tests + M02-B ownership regression passed | Real general apply/publication/rollback covered |
 | M03 | complete | 10/10 targeted Nextest tests; scoped fmt/diff | Typed IDs, frozen mapping, prefix-free matching |
 | M04 | complete | 24/24 all-Jump Nextest; scoped fmt/diff clean | Copied responses, multipass retention, one-shot intents |
-| M05 | in_progress | M05-A input + M05-B painter; 33/33 all-Jump tests | Native query-only proof remains pending |
+| M05 | complete | Input/painter tests + native query-only PASS | 000051Z_b5d58182: hint focus, normal typing, count0, owned cleanup |
 | M06 | pending | Grid integration | M05 |
 | M07 | pending | Dashboard integration | M05 |
 | M08 | pending | Native keyboard acceptance | M01, M06–M07 |
@@ -52,7 +52,7 @@ Parent owns branch, ledger, commits and one best-effort push per checkpoint. Pla
 
 ## Next action
 
-M05-B painter committed/pushed. Sole fixture implementer owns M01-B concrete scheduling/tag repair, production semantic checks and one owned baseline; parent reviews actual PNG/content before acceptance. Native query-only Jump proof follows. M01-B fixture root-cause handoff is ready; populated dashboard baseline remains incomplete until semantic and rendered-content proof.
+M05 native proof accepted and checkpointing. Next sole implementer owns M06 grid integration using bounded handoff below. All future profiles must disable Paste Sequence Next/Cancel shortcuts. M01 populated baseline is complete.
 
 
 
@@ -139,3 +139,21 @@ Production plugin.rs search_plugin_with_ticket invokes NotePlugin.search synchro
 - Warning run jump_m01_20261019T232004Z_28069510 marked FAIL, original pixels/receipt/lifecycle retained. Fresh jump_m01_20261019T232227Z_fc7bc04b: production semantics PASS, 3 fixture tests PASS, actual 900x560 populated dashboard visually accepted by parent, no warning. PID23360 gracefully exited0, owned_tree_gone, no forced cleanup. Automated runner originally BLOCKED content; explicit baseline_visual_review.json records parent acceptance and scenarios/manifest now PASS.
 - Curated fixture-only PNG is docs/plans/jump_mode_review/00_baseline_dashboard.png (171568 bytes); raw logs/evidence remain ignored.
 - NEW USER CONSTRAINT: disable Enable Next Shortcut and Enable Cancel Shortcut for all future test profiles. Generator now writes paste_sequence.next_hotkey=None and cancel_hotkey=None; verifier rejects either enabled, README records it. Existing baseline predates this steering and remains immutable. Production defaults unchanged. Fixture-only follow-up jump_m01_20261019T232417Z_6468abe4 PASS: 3 tests, generate/production verify exit0, persisted Next/Cancel null confirmed.
+## M06 selection invariant clarification
+Read-only follow-up confirmed changed/empty-query search and command replacement clear selection after installing results; background catalog refresh is flushed before query Enter handling. Universal action snapshot restoration intentionally restores captured results and their captured selection together. Preserve that owner behavior; do not introduce parallel selection state or clear all selections indiscriminately in the geometry invalidator. Generation must guard deferred Jump intents. Existing singleton Enter fallback after a legitimately cleared selection remains ordinary launcher behavior and is not stale-index reuse.
+## M05 native query checkpoint (in progress)
+Single implementer owns opt-in QA observation in existing framebuffer probe, current-pass snapshot retained at frame completion, actual fixture hash binding, narrow root-owner accessor and existing activate_action count observation. QueryProbe fixture/runner wiring follows. Observer must remain read-only, survive capture completion without a repaint loop, suppress stale background entries, and preserve legacy requests when absent. Native keyboard batches require owned foreground PID and neutral modifiers. All future fixture profiles keep Next/Cancel shortcuts disabled. No native Jump scenario is passed before the real run.
+Template-isolation follow-up: read-only directory metadata shows the default template directory was created and last written 2026-06-26, before this goal. No directory creation by the earlier rejected run was observed; no private template file contents were inspected. Accepted/future runs explicitly isolate the path.
+## M10 bounded planning handoff
+Settings is rendered late as an ordinary egui Window, while the existing root eligibility boolean also cancels navigation. M10 must separate a single keyboard owner (root/Settings instance/blocked) from root target eligibility; use it consistently before controls, during collection/paint and retained completion. Observe real show_settings transitions centrally because callers toggle it directly; keep instance identity outside the replaceable editor. Root registration/autofocus/Enter must yield while Settings owns input. Unsupported nested popups suppress/cancel safely.
+Basic Settings registration uses real section toggle Response (first CollapsingState tuple element), Expand/Collapse, Save/Cancel, native checkbox/single-line text and basic buttons. TopLevelSettingsSection persistent_id provides stable section keys. Defer combo/slider/DragValue/multiline/delegated complex controls to M12. Draft experimental flag remains effective only after successful existing save publication; Cancel preserves runtime flag. Narrow actual-root tests: owner/background exclusion, section Enter, checkbox Space, text typing/caret, disabled Save, close/reopen identity, popup suppression, saved disable cleanup and one discarded-pass case.
+M05 native probe iterations: run234721Z_68604e0f failed before any input because the owned-window readiness condition was bounded at2s while actual startup took about6s. Extended only that condition poll to15s with process/identity checks. Run235126Z_229cb2e8 reached active native ShiftSpace/query hint with root focus/ownership, empty query and activation_count0; the probe incorrectly required query editor focus before handoff. Corrected driver and capture readiness to assert query focus only after map-derived hint completion, with a regression proving active hints can be valid while query unfocused. Both failed runs and exact owned cleanup evidence are retained; neither is passed. Corrected run235733Z_1a37d53b is pending.
+Run235733Z_1a37d53b captured a real active query overlay (parent viewed900x560 PNG: query badgeA, status, populated isolateddashboard, no warning/toast) but failed before typing the hint: Get-ObservedQueryTarget stored candidates in PowerShell automatic Matches, overwritten by successful regex before returning. Parent diagnosed from null target/hint events. Rename candidates and prove pure-script helper returns exact mocked ID/hint. Preserve native run as FAIL; pixels demonstrate overlay only, not focus handoff.
+## M08 bounded planning handoff
+Reuse run.ps1 native ownership/input and ROOT/F11 capture_count batches<=16; issue each F11 only after previous numbered receipt saved/rearmed. wait_for_active_hints=false for diverse phase1 captures, existing query-only true contract stays narrow. Extend existing observer with current surface/resultgeneration, typed-resolved card index/full Action args, actual selected destination/action, opened note slugs, matching prefix state; do not infer selection from Completed or parse Debug IDs. Bind each numbered PNG to receipt.captured observation and identical frame/pass/PID/build/fixture identity, evaluate screenshot predicate there.
+Phase1 sequence captures01-14 on enabled fixture then18 in separate disabled owned instance. Use safe dashboard FillQuery action, then native note list and map-derived note selection, later freshEnter verifies exact payload/delta and actual openedslug. Unsupported note dialog14 excludes root; close via established native path without edits. Cancellation needs actual multichar population; dense13 must prove>26 visible eligiblecontrols, not merely filecount. Fixture grid expliciton, boundedlargerviewport, duplicatetitles/distinctslugs. Allprofiles Next/CancelNone. Focused observer/multicapture tests, negativefixture FAIL, one nominal native group; retain failures/cleanup. No new expectation DSL, OCR, dispatch or arbitrary sleeps.
+
+## M05-C native query proof accepted
+Run jump_m05_query_probe_20261020T000051Z_b5d58182 PASS: 4 fixture tests and production semantic verification, actual retained ROOT active query hintA, native map-derived A -> exact query focus with query empty/activation_count0, nativeX -> queryx/count0. Parent reviewed events, receipt and graceful exit0/owned_tree_gone for PID40556. Curated PNG178133bytes SHA25650b14f02a5d4165af7f5fc110dcde35d65a976ad0408eb2dec31bb6579c9c816 matches parent-viewed actual pixels. No warning/toast. Failed iterations remain FAIL with original evidence. M05 complete; M06/M07/M08 coverage remains required.
+M05-C scoped verification: combined fast-dev QA/Jump filter had58passed and1setup failure after focus-contract change; real-widget regression now explicitly surrenders query focus, then exact final filter test(jump_mode_observer_recognizes_the_real_registered_query_text_entry_and_hint) passed1/5868skipped. No production correction followed. Native runner passed4fixturetests, semantic verifier, persisted Test-ObservedQueryTargetLookup regression and real query probe. Scoped rustfmt, PowerShell parser and diff check pass. No broader suite rerun required.
+

@@ -1,6 +1,6 @@
 # Jump Mode Results
 
-Work in progress on `feat/jump-mode-2026-10-19-c7e42`, based on `8f94b003a12853735d1cb4689c6ec4e53c4ace8e`. Checkpoints through `7a537081` are pushed to origin. The default-off setting, pure hint engine and scoped target/focus registry are implemented; keyboard routing is verified on the actual root query path. The overlay painter is verified headlessly; native overlay proof and end-to-end surface integration remain pending.
+Work in progress on `feat/jump-mode-2026-10-19-c7e42`, based on `8f94b003a12853735d1cb4689c6ec4e53c4ace8e`. Checkpoints through `b67effb4` are pushed to origin. The default-off setting, pure hint engine and scoped target/focus registry are implemented; keyboard routing is verified on the actual root query path. The overlay painter is verified headlessly; native overlay proof and end-to-end surface integration remain pending.
 
 ## Architecture and current inventory
 
@@ -84,3 +84,8 @@ Owned run command: `pwsh -NoProfile -ExecutionPolicy Bypass -File dev/jump_mode/
 All future test profiles now disable Paste Sequence Enable Next Shortcut and Enable Cancel Shortcut, per user steering: both optional hotkeys are None and the verifier rejects enabling either. The accepted baseline predates that instruction; its original artifacts are preserved. Normal application defaults remain unchanged.
 
 Future-shortcut constraint verified by fixture-only run jump_m01_20261019T232417Z_6468abe4: 3 tests passed, generation/production semantic verification exit 0; both persisted shortcut fields are null. No native run was requested in this fixture-only check.
+## M05-C native query proof
+[Query hint screenshot](jump_mode_review/00_query_hints.png) and run `jump_m05_query_probe_20261020T000051Z_b5d58182` prove native Shift+Space, actual active map, map-derived A focus handoff, zero action activation, and normal X typing afterward. Retained receipt identifies pass9; completion independently reports actual query editor focus. PID40556 exited0 gracefully; owned tree verified gone. Parent inspected structured trace/cleanup and matching-hash actual pixels. Both test shortcuts persisted null; no warning/toast appears.
+
+Earlier native runs remain FAIL: too-short2s owned-window readiness (no input), pre-handoff query-focus requirement (leader only), PowerShell automatic Matches overwrite (leader and real PNG, no hint). Corrected bounded condition poll, focus-stage contract and candidate variable at their owners; regression checks accompany the fixes. No action-card/dashboard/native activation coverage is claimed yet; M06 onward remains required.
+Final Rust verification: `cargo nextest run --cargo-profile fast-dev --features dev-smoke-binaries,qa-framebuffer-capture --lib -E 'test(jump_mode_observer_recognizes_the_real_registered_query_text_entry_and_hint)'` passed1/5868skipped. Combined filter previously passed58 with this one setup failure; exact corrected test now passes. Four fixture tests, persisted PowerShell helper regression, production semantic validation, parser, scoped rustfmt and diff checks passed.

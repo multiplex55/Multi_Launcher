@@ -23,6 +23,8 @@ const LAUNCHER_HOTKEY: &str = "Ctrl+Alt+F10";
 struct FixtureManifest {
     schema_version: u32,
     fixture_id: String,
+    scenario: String,
+    experimental_jump_mode_enabled: bool,
     launcher_hotkey: String,
     enabled_plugins: Vec<String>,
     dashboard_slot_ids: Vec<String>,
@@ -42,6 +44,36 @@ struct SafetyManifest {
     custom_actions_present: bool,
     dashboard_click_behavior: String,
     reduce_dashboard_work_when_unfocused: bool,
+    experimental_jump_mode_enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FixtureScenario {
+    Baseline,
+    QueryProbe,
+}
+
+impl FixtureScenario {
+    fn parse(value: Option<String>) -> anyhow::Result<Self> {
+        match value.as_deref().unwrap_or("baseline") {
+            "baseline" => Ok(Self::Baseline),
+            "query-probe" => Ok(Self::QueryProbe),
+            value => anyhow::bail!(
+                "unknown fixture scenario {value:?}; expected baseline or query-probe"
+            ),
+        }
+    }
+
+    fn jump_mode_enabled(self) -> bool {
+        self == Self::QueryProbe
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::QueryProbe => "query-probe",
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -82,18 +114,31 @@ fn run() -> anyhow::Result<()> {
         .next()
         .map(PathBuf::from)
         .ok_or_else(|| anyhow::anyhow!("profile path is required"))?;
+    let scenario = args
+        .next()
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("fixture scenario argument must be valid Unicode"))
+        })
+        .transpose()?;
+    let scenario = FixtureScenario::parse(scenario)?;
     anyhow::ensure!(args.next().is_none(), "unexpected extra argument");
 
     match mode.as_str() {
-        "generate" => generate(&profile)?,
-        "verify" => verify(&profile)?,
+        "generate" => generate(&profile, scenario)?,
+        "verify" => verify(&profile, scenario)?,
         _ => anyhow::bail!("unknown mode {mode:?}; expected generate or verify"),
     }
-    println!("fixture {mode} verified at {}", profile.display());
+    println!(
+        "fixture {mode} verified at {} for {}",
+        profile.display(),
+        scenario.label()
+    );
     Ok(())
 }
 
-fn generate(profile: &Path) -> anyhow::Result<()> {
+fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     anyhow::ensure!(
         !profile.exists(),
         "refusing to overwrite an existing fixture profile: {}",
@@ -131,6 +176,7 @@ fn generate(profile: &Path) -> anyhow::Result<()> {
     settings.screenshot_auto_save = false;
     settings.screenshot_use_editor = false;
     settings.reduce_dashboard_work_when_unfocused = false;
+    settings.experimental_jump_mode_enabled = scenario.jump_mode_enabled();
     settings.note.backlinks_enabled = false;
     settings.note.aliases_enabled = false;
     settings.note.templates_enabled = false;
@@ -167,12 +213,12 @@ fn generate(profile: &Path) -> anyhow::Result<()> {
         fs::write(notes_dir.join(format!("{note_id}.md")), note_text)?;
     }
 
-    let manifest = fixture_manifest(note_ids);
+    let manifest = fixture_manifest(note_ids, scenario);
     write_json(&profile.join("fixture_manifest.json"), &manifest)?;
-    verify(profile)
+    verify(profile, scenario)
 }
 
-fn verify(profile: &Path) -> anyhow::Result<()> {
+fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     anyhow::ensure!(profile.is_dir(), "fixture profile is not a directory");
     let profile = fs::canonicalize(profile)?;
     let (notes_dir, _templates_dir) = set_isolated_fixture_dirs(&profile)?;
@@ -202,6 +248,10 @@ fn verify(profile: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(
         !settings.reduce_dashboard_work_when_unfocused,
         "fixture must allow dashboard query refreshes while the launcher is initially unfocused"
+    );
+    anyhow::ensure!(
+        settings.experimental_jump_mode_enabled == scenario.jump_mode_enabled(),
+        "fixture Jump Mode setting does not match the requested scenario"
     );
     anyhow::ensure!(
         settings.plugin_settings.contains_key("clipboard_modify"),
@@ -439,7 +489,7 @@ fn verify(profile: &Path) -> anyhow::Result<()> {
     let manifest: FixtureManifest =
         serde_json::from_slice(&fs::read(profile.join("fixture_manifest.json"))?)?;
     anyhow::ensure!(
-        manifest == fixture_manifest(note_ids()),
+        manifest == fixture_manifest(note_ids(), scenario),
         "fixture manifest is stale"
     );
     anyhow::ensure!(
@@ -451,6 +501,11 @@ fn verify(profile: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(manifest.safety.network_plugin_enabled == false);
     anyhow::ensure!(manifest.safety.custom_actions_present == false);
     anyhow::ensure!(manifest.safety.reduce_dashboard_work_when_unfocused == false);
+    anyhow::ensure!(
+        manifest.experimental_jump_mode_enabled == scenario.jump_mode_enabled()
+            && manifest.safety.experimental_jump_mode_enabled == scenario.jump_mode_enabled(),
+        "fixture manifest Jump Mode gate does not match the requested scenario"
+    );
 
     let resolved_notes_dir = fs::canonicalize(notes_dir)?;
     anyhow::ensure!(
@@ -504,10 +559,17 @@ fn note_ids() -> Vec<String> {
         .collect()
 }
 
-fn fixture_manifest(note_ids: Vec<String>) -> FixtureManifest {
+fn fixture_manifest(note_ids: Vec<String>, scenario: FixtureScenario) -> FixtureManifest {
+    let jump_mode_enabled = scenario.jump_mode_enabled();
     FixtureManifest {
-        schema_version: 1,
-        fixture_id: FIXTURE_ID.to_owned(),
+        schema_version: 2,
+        fixture_id: if jump_mode_enabled {
+            "jump-mode-m05-query-probe-v1".to_owned()
+        } else {
+            FIXTURE_ID.to_owned()
+        },
+        scenario: scenario.label().to_owned(),
+        experimental_jump_mode_enabled: jump_mode_enabled,
         launcher_hotkey: LAUNCHER_HOTKEY.to_owned(),
         enabled_plugins: vec![SAFE_PLUGIN.to_owned()],
         dashboard_slot_ids: dashboard_slot_ids(),
@@ -523,6 +585,7 @@ fn fixture_manifest(note_ids: Vec<String>) -> FixtureManifest {
             custom_actions_present: false,
             dashboard_click_behavior: "fill_query".to_owned(),
             reduce_dashboard_work_when_unfocused: false,
+            experimental_jump_mode_enabled: jump_mode_enabled,
         },
     }
 }
@@ -567,13 +630,24 @@ mod tests {
         assert_eq!(unique.len(), ids.len());
         assert_eq!(ids.first().map(String::as_str), Some("jump-qa-note-001"));
         assert_eq!(ids.last().map(String::as_str), Some("jump-qa-note-032"));
-        let fixture = fixture_manifest(ids);
+        let fixture = fixture_manifest(ids, FixtureScenario::Baseline);
         assert_eq!(fixture.enabled_plugins, ["notes"]);
         assert_eq!(fixture.action_count, 0);
         assert_eq!(LAUNCHER_HOTKEY, "Ctrl+Alt+F10");
         assert!(!fixture.safety.clipboard_modify_plugin_enabled);
         assert!(!fixture.safety.macros_enabled);
         assert!(!fixture.safety.network_plugin_enabled);
+        assert!(!fixture.experimental_jump_mode_enabled);
+        assert!(!fixture.safety.experimental_jump_mode_enabled);
+    }
+
+    #[test]
+    fn query_probe_fixture_explicitly_enables_the_experimental_gate() {
+        let fixture = fixture_manifest(note_ids(), FixtureScenario::QueryProbe);
+        assert_eq!(fixture.scenario, "query-probe");
+        assert_eq!(fixture.fixture_id, "jump-mode-m05-query-probe-v1");
+        assert!(fixture.experimental_jump_mode_enabled);
+        assert!(fixture.safety.experimental_jump_mode_enabled);
     }
 
     #[test]

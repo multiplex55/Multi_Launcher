@@ -67,3 +67,18 @@ If the runner detects a non-interactive Windows session, it still records the
 fixture and environment result, marks the GUI scenario `NOT_RUN_ENVIRONMENT`,
 and does not create a synthetic screenshot. A failed build, capture, or cleanup
 is recorded in the evidence folder and returns a nonzero exit code.
+
+Run the bounded M05 query-only native probe with a separate explicitly
+Jump-enabled fixture:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File dev/jump_mode/run.ps1 -Scenario QueryProbe
+```
+
+This opt-in request records only retained ROOT UI state, waits for the actual
+query hint, and binds its screenshot receipt to that same retained pass. The
+runner verifies the owned app is foreground and no modifier is already held
+before sending Shift+Space, the observed query hint, and `X`. It checks
+that the hint handoff focused the real query field, the query stayed empty
+until that handoff, and the action count stayed zero. The default baseline
+request does not enable the observer or send native input.

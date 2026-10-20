@@ -2991,6 +2991,16 @@ impl LauncherApp {
             && ctx.memory(|memory| memory.top_modal_layer().is_none())
     }
 
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn qa_framebuffer_jump_root_owner_allowed(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        let allowed = self.jump_mode_root_targets_allowed(ctx, root_visible);
+        self.jump_mode_ui.root_input_owner_allowed(allowed)
+    }
+
     fn complete_jump_mode_frame(&mut self, ctx: &egui::Context) {
         let root_visible = self.visible_flag.load(Ordering::Relaxed);
         let root_owner_allowed = self

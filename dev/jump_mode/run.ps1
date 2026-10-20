@@ -2,6 +2,7 @@
 [CmdletBinding()]
 param(
     [switch]$FixturesOnly,
+    [ValidateSet('Baseline', 'QueryProbe')][string]$Scenario = 'Baseline',
     [ValidateRange(5, 120)][int]$CaptureTimeoutSeconds = 45,
     [ValidateRange(1, 30)][int]$GracefulCloseSeconds = 6
 )
@@ -11,7 +12,8 @@ $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $cargoFeatures = 'dev-smoke-binaries,qa-framebuffer-capture'
 $runStamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
 $runSuffix = [Guid]::NewGuid().ToString('N').Substring(0, 8)
-$runId = "jump_m01_${runStamp}_$runSuffix"
+$scenarioTag = if ($Scenario -eq 'QueryProbe') { 'm05_query_probe' } else { 'm01_baseline' }
+$runId = "jump_${scenarioTag}_${runStamp}_$runSuffix"
 $evidenceRoot = Join-Path $repoRoot "dev\jump_mode\evidence\$runId"
 $profileRoot = Join-Path $evidenceRoot 'profile'
 $captureRoot = Join-Path $evidenceRoot 'capture'
@@ -53,7 +55,7 @@ $postCleanupState = 'not_started'
 $ownedTreeSnapshot = @()
 $ownedTreeVerified = $false
 $scenarioStatus = 'BLOCKED'
-$scenarioReason = 'Baseline capture has not started.'
+$scenarioReason = if ($Scenario -eq 'QueryProbe') { 'Native Jump Mode query probe has not started.' } else { 'Baseline capture has not started.' }
 $fixtureScenarioStatus = 'BLOCKED'
 $fixtureScenarioReason = 'Fixture validation has not started.'
 $cleanupIssues = [Collections.Generic.List[string]]::new()
@@ -62,6 +64,8 @@ $phase = 'initializing'
 $failureText = $null
 $interactive = [Environment]::UserInteractive
 $sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+$foregroundActivationAttempted = $false
+$jumpObservationPath = Join-Path $captureRoot 'jump-observation.json'
 
 function Write-Json([string]$Path, $Value) {
     $json = ConvertTo-Json -InputObject $Value -Depth 32
@@ -92,7 +96,7 @@ function Record-CleanupIssue([string]$Step, [string]$Message) {
 
 function Write-Summary([string]$Status, [string]$Details) {
     $lines = @(
-        "# Jump Mode M01 baseline run $runId",
+        "# Jump Mode $Scenario run $runId",
         '',
         "Status: **$Status**",
         '',
@@ -106,7 +110,7 @@ function Write-Summary([string]$Status, [string]$Details) {
         ''
     )
     if ($screenshotPath) {
-        $lines += "Baseline screenshot: ``$screenshotPath`` ($screenshotWidth x $screenshotHeight PNG pixels)"
+        $lines += "Screenshot: ``$screenshotPath`` ($screenshotWidth x $screenshotHeight PNG pixels)"
     }
     if ($processId) {
         $lines += "Owned process: PID $processId started $($processStartUtc.ToString('O')); cleanup state: $postCleanupState."
@@ -130,6 +134,201 @@ function Get-PngDimensions([string]$Path) {
     $height = ([uint32]$bytes[20] -shl 24) -bor ([uint32]$bytes[21] -shl 16) -bor ([uint32]$bytes[22] -shl 8) -bor [uint32]$bytes[23]
     if ($width -eq 0 -or $height -eq 0) { throw 'captured PNG has empty dimensions' }
     return [pscustomobject]@{ Width = [int]$width; Height = [int]$height; Bytes = $bytes.Length }
+}
+
+function Initialize-NativeQueryProbe {
+    $nativeType = @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class JumpModeNativeProbe {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KeyboardInput {
+        public ushort virtualKey;
+        public ushort scanCode;
+        public uint flags;
+        public uint time;
+        public UIntPtr extraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MouseInput {
+        public int dx;
+        public int dy;
+        public uint mouseData;
+        public uint flags;
+        public uint time;
+        public UIntPtr extraInfo;
+    }
+
+    [StructLayout(LayoutKind.Explicit, Size = 32)]
+    private struct InputUnion {
+        [FieldOffset(0)] public KeyboardInput keyboard;
+        [FieldOffset(0)] public MouseInput mouse;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Input {
+        public uint type;
+        public InputUnion data;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint SendInput(uint count, [In] Input[] inputs, int size);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int key);
+
+    public static uint ForegroundProcessId() {
+        IntPtr window = GetForegroundWindow();
+        if (window == IntPtr.Zero) return 0;
+        uint processId;
+        GetWindowThreadProcessId(window, out processId);
+        return processId;
+    }
+
+    public static bool ActivateWindow(IntPtr window) {
+        return window != IntPtr.Zero && SetForegroundWindow(window);
+    }
+
+    public static bool ModifierIsDown() {
+        int[] modifiers = { 0x10, 0x11, 0x12, 0x5B, 0x5C };
+        foreach (int key in modifiers) {
+            if ((GetAsyncKeyState(key) & 0x8000) != 0) return true;
+        }
+        return false;
+    }
+
+    public static bool SendKey(ushort virtualKey, bool keyUp) {
+        Input input = new Input();
+        input.type = 1;
+        input.data.keyboard.virtualKey = virtualKey;
+        input.data.keyboard.flags = keyUp ? 0x0002u : 0u;
+        Input[] inputs = { input };
+        return SendInput(1, inputs, Marshal.SizeOf(typeof(Input))) == 1;
+    }
+}
+'@
+    Add-Type -TypeDefinition $nativeType -Language CSharp -ErrorAction Stop
+}
+
+function Read-JumpModeObservation {
+    if (!(Test-Path -LiteralPath $jumpObservationPath -PathType Leaf)) { return $null }
+    try {
+        $observation = Get-Content -Raw -LiteralPath $jumpObservationPath | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+    if ([int]$observation.process_pid -ne $processId) { throw 'Jump Mode observation PID does not match the retained app process' }
+    if ([string]$observation.fixture_manifest_sha256 -ne $fixtureHash) { throw 'Jump Mode observation fixture hash does not match the verified isolated fixture' }
+    return $observation
+}
+
+function Wait-JumpModeObservation([scriptblock]$Predicate, [int]$TimeoutSeconds, [string]$Description) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $process.Refresh()
+        if ($process.HasExited) {
+            $script:processExitCode = $process.ExitCode
+            throw "isolated app exited while waiting for $Description (exit $script:processExitCode)"
+        }
+        $observation = Read-JumpModeObservation
+        if ($null -ne $observation -and (& $Predicate $observation)) { return $observation }
+        Start-Sleep -Milliseconds 100
+    }
+    throw "timed out after $TimeoutSeconds seconds waiting for $Description"
+}
+
+function Get-ObservedQueryTarget($Observation) {
+    $queryCandidates = @($Observation.targets | Where-Object {
+        $_.is_query_input -and $_.kind -eq 'text_entry' -and $_.eligible
+    })
+    if ($queryCandidates.Count -ne 1) { throw "Jump Mode observation has $($queryCandidates.Count) eligible query TextEntry targets" }
+    if (!$queryCandidates[0].hint -or [string]$queryCandidates[0].hint -notmatch '^[A-Z]+$') {
+        throw 'the observed query target has no valid active Jump Mode hint'
+    }
+    return $queryCandidates[0]
+}
+
+function Test-ObservedQueryTargetLookup {
+    $expected = [pscustomobject]@{
+        target_id = 'fixture-query-target'
+        hint = 'AA'
+        is_query_input = $true
+        kind = 'text_entry'
+        eligible = $true
+    }
+    $target = Get-ObservedQueryTarget ([pscustomobject]@{ targets = @($expected) })
+    if ($target.target_id -cne $expected.target_id -or $target.hint -cne $expected.hint) {
+        throw 'observed query target lookup did not preserve the exact target ID and hint'
+    }
+}
+
+function Assert-OwnedForeground {
+    if (!(Test-RetainedProcessIdentity)) { throw 'retained app process identity changed before native keyboard input' }
+    $foregroundPid = [JumpModeNativeProbe]::ForegroundProcessId()
+    if ($foregroundPid -ne $processId) {
+        if ($script:foregroundActivationAttempted) {
+            throw "foreground input owner changed to PID $foregroundPid; refusing native keyboard input"
+        }
+        $windowDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min($CaptureTimeoutSeconds, 15))
+        $window = [IntPtr]::Zero
+        while ([DateTime]::UtcNow -lt $windowDeadline -and $window -eq [IntPtr]::Zero) {
+            if (!(Test-RetainedProcessIdentity)) { throw 'retained app process identity changed while locating its window' }
+            $process.Refresh()
+            if ($process.HasExited) {
+                $script:processExitCode = $process.ExitCode
+                throw "isolated app exited before creating its main window (exit $script:processExitCode)"
+            }
+            $window = $process.MainWindowHandle
+            if ($window -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 100 }
+        }
+        if ($window -eq [IntPtr]::Zero) { throw "the retained app process did not create a main window within $([Math]::Min($CaptureTimeoutSeconds, 15)) seconds" }
+        $script:foregroundActivationAttempted = $true
+        $null = [JumpModeNativeProbe]::ActivateWindow($window)
+        $foregroundDeadline = [DateTime]::UtcNow.AddSeconds(3)
+        do {
+            if ([JumpModeNativeProbe]::ForegroundProcessId() -eq $processId) { break }
+            Start-Sleep -Milliseconds 100
+        } while ([DateTime]::UtcNow -lt $foregroundDeadline)
+        $foregroundPid = [JumpModeNativeProbe]::ForegroundProcessId()
+        if ($foregroundPid -ne $processId) { throw "could not focus the owned app window; foreground PID is $foregroundPid" }
+    }
+    if ([JumpModeNativeProbe]::ModifierIsDown()) {
+        throw 'a Ctrl, Alt, Shift, or Windows key was already held; refusing native keyboard input'
+    }
+}
+
+function Invoke-NativeKeyBatch([string]$Name, [uint16[]]$Keys, [string[]]$KeyLabels) {
+    if ($Keys.Count -ne $KeyLabels.Count -or $Keys.Count -eq 0) { throw 'native key batch is empty or malformed' }
+    Assert-OwnedForeground
+    $pressed = [Collections.Generic.List[uint16]]::new()
+    $sendFailure = $null
+    try {
+        foreach ($key in $Keys) {
+            if (![JumpModeNativeProbe]::SendKey($key, $false)) { throw "SendInput key-down failed in $Name" }
+            $pressed.Add($key)
+        }
+    } catch {
+        $sendFailure = $_.Exception.Message
+    } finally {
+        for ($index = $pressed.Count - 1; $index -ge 0; $index--) {
+            if (![JumpModeNativeProbe]::SendKey($pressed[$index], $true)) {
+                $sendFailure = "SendInput key-up failed while releasing keys from $Name"
+            }
+        }
+    }
+    if ($sendFailure) { throw $sendFailure }
+    Write-Event 'native_key_batch_sent' @{ name = $Name; keys = $KeyLabels; count = $Keys.Count; foreground_pid = $processId }
 }
 
 function Complete-ProcessLogs {
@@ -343,18 +542,18 @@ function Update-Scenarios {
         pixel_height = $null
         reason = $fixtureScenarioReason
     }
-    $baselineScenario = [ordered]@{
-        scenario_id = 'm01-baseline-dashboard'
+    $runScenario = [ordered]@{
+        scenario_id = if ($Scenario -eq 'QueryProbe') { 'm05-query-only' } else { 'm01-baseline-dashboard' }
         status = $scenarioStatus
-        expected_surface = 'actual Multi Launcher ROOT viewport with isolated note dashboard'
+        expected_surface = if ($Scenario -eq 'QueryProbe') { 'active Jump Mode query hint, query focus handoff, and unchanged action count' } else { 'actual Multi Launcher ROOT viewport with isolated note dashboard' }
         capture_target = 'ROOT'
         capture_trigger = 'startup'
-        screenshot = if ($screenshotPath) { 'screenshots/00_baseline_dashboard.png' } else { $null }
+        screenshot = if ($screenshotPath) { $screenshotPath } else { $null }
         pixel_width = $screenshotWidth
         pixel_height = $screenshotHeight
         reason = $scenarioReason
     }
-    Write-Json $scenariosPath @($fixtureScenario, $baselineScenario)
+    Write-Json $scenariosPath @($fixtureScenario, $runScenario)
 }
 
 try {
@@ -367,7 +566,7 @@ try {
     Write-Json $manifestPath ([ordered]@{
         schema_version = 1
         run_id = $runId
-        milestone = 'M01'
+        milestone = if ($Scenario -eq 'QueryProbe') { 'M05' } else { 'M01' }
         status = $runStatus
         phase = $phase
         started_at_utc = $startedAt.ToString('O')
@@ -383,7 +582,8 @@ try {
         cleanup = $null
     })
     Update-Scenarios
-    Write-Summary 'BLOCKED' 'Runner is preparing a fresh profile and validating the M01 fixture before launch.'
+    $fixtureScenarioArgument = if ($Scenario -eq 'QueryProbe') { 'query-probe' } else { 'baseline' }
+    Write-Summary 'BLOCKED' "Runner is preparing a fresh $Scenario fixture and validating its typed production semantics before launch."
     Write-Event 'run_created' @{ run_id = $runId; profile = $profileRoot; interactive = $interactive; session_id = $sessionId }
 
     $metadataOutput = & cargo metadata --no-deps --format-version 1 --manifest-path (Join-Path $repoRoot 'Cargo.toml') 2>> (Join-Path $evidenceRoot 'metadata.stderr.log')
@@ -402,10 +602,10 @@ try {
     if ($fixtureTestsExitCode -ne 0) { throw 'fixture generator tests failed; see fixture-tests logs' }
 
     Write-Event 'fixture_generation_started' @{ profile = $profileRoot }
-    & cargo run --quiet --manifest-path (Join-Path $repoRoot 'Cargo.toml') --profile fast-dev --features $cargoFeatures --bin jump_mode_fixture -- generate $profileRoot 1> $fixtureStdoutPath 2> $fixtureStderrPath
+    & cargo run --quiet --manifest-path (Join-Path $repoRoot 'Cargo.toml') --profile fast-dev --features $cargoFeatures --bin jump_mode_fixture -- generate $profileRoot $fixtureScenarioArgument 1> $fixtureStdoutPath 2> $fixtureStderrPath
     $fixtureGenerateExitCode = $LASTEXITCODE
     if ($fixtureGenerateExitCode -ne 0) { throw 'fixture generation failed; see fixture logs' }
-    & cargo run --quiet --manifest-path (Join-Path $repoRoot 'Cargo.toml') --profile fast-dev --features $cargoFeatures --bin jump_mode_fixture -- verify $profileRoot 1>> $fixtureStdoutPath 2>> $fixtureStderrPath
+    & cargo run --quiet --manifest-path (Join-Path $repoRoot 'Cargo.toml') --profile fast-dev --features $cargoFeatures --bin jump_mode_fixture -- verify $profileRoot $fixtureScenarioArgument 1>> $fixtureStdoutPath 2>> $fixtureStderrPath
     $fixtureVerifyExitCode = $LASTEXITCODE
     Write-Event 'fixture_generation_completed' @{ generate_exit_code = $fixtureGenerateExitCode; verify_exit_code = $fixtureVerifyExitCode }
     if ($fixtureVerifyExitCode -ne 0) { throw 'fixture verification failed; see fixture logs' }
@@ -419,7 +619,7 @@ try {
 
     if ($FixturesOnly) {
         $scenarioStatus = 'BLOCKED'
-        $scenarioReason = 'Baseline app launch was not requested in fixture-only mode.'
+        $scenarioReason = "$Scenario app launch was not requested in fixture-only mode."
         $runStatus = 'PASS'
         $phase = 'complete'
         Update-Scenarios
@@ -448,9 +648,9 @@ try {
 
         if (Test-Path -LiteralPath $captureRoot) { throw 'QA framebuffer output leaf must be absent before app launch' }
         $qaRequestPath = Join-Path $evidenceRoot 'qa-framebuffer-request.json'
-        Write-Json $qaRequestPath ([ordered]@{
+        $qaRequest = [ordered]@{
             run_id = $runId
-            request_id = 'baseline-dashboard'
+            request_id = if ($Scenario -eq 'QueryProbe') { 'query-only-probe' } else { 'baseline-dashboard' }
             target = 'ROOT'
             trigger = 'startup'
             capture_count = 1
@@ -458,7 +658,11 @@ try {
             output_dir = $captureRoot
             fixture_manifest_sha256 = $fixtureHash
             build_receipt_identity = $buildReceiptIdentity
-        })
+        }
+        if ($Scenario -eq 'QueryProbe') {
+            $qaRequest.jump_mode_observation = [ordered]@{ wait_for_active_hints = $true }
+        }
+        Write-Json $qaRequestPath $qaRequest
         $psi = [Diagnostics.ProcessStartInfo]::new()
         $psi.FileName = $executablePath
         $psi.WorkingDirectory = $profileRoot
@@ -507,7 +711,7 @@ try {
         Write-Json $manifestPath ([ordered]@{
             schema_version = 1
             run_id = $runId
-            milestone = 'M01'
+            milestone = if ($Scenario -eq 'QueryProbe') { 'M05' } else { 'M01' }
             status = $runStatus
             phase = $phase
             started_at_utc = $startedAt.ToString('O')
@@ -519,55 +723,151 @@ try {
             fixture_manifest_sha256 = $fixtureHash
             executable = [ordered]@{ path = $executablePath; sha256 = $executableHash; pid = $processId; started_at_utc = $processStartUtc.ToString('O') }
             build_receipt_identity = $buildReceiptIdentity
-            capture = [ordered]@{ request = 'qa-framebuffer-request.json'; output_dir = 'capture'; source = 'qa-framebuffer-capture ROOT/Startup; CPU UI completion before GPU presentation' }
+            capture = [ordered]@{ request = 'qa-framebuffer-request.json'; output_dir = 'capture'; source = 'qa-framebuffer-capture ROOT/Startup; CPU UI completion before GPU presentation'; scenario = $Scenario }
             cleanup = $null
         })
-        Write-Summary 'BLOCKED' 'App launched from the isolated profile. Waiting for a ROOT/Startup framebuffer receipt and a valid PNG.'
+        if ($Scenario -eq 'QueryProbe') {
+            Test-ObservedQueryTargetLookup
+            Write-Event 'query_target_lookup_regression_passed' @{ target_id = 'fixture-query-target'; hint = 'AA' }
+            Initialize-NativeQueryProbe
+            Assert-OwnedForeground
+            $phase = 'query_probe_waiting_for_input'
+            Write-Summary 'BLOCKED' 'App launched from the verified Jump-enabled isolated profile. Waiting for the actual retained ROOT query state before native input.'
+            $baselineObservation = Wait-JumpModeObservation {
+                param($state)
+                $queryTargets = @($state.targets | Where-Object { $_.is_query_input -and $_.kind -eq 'text_entry' -and $_.eligible })
+                $state.root_focused -and $state.root_owner_allowed -and $state.jump_mode_enabled -and
+                    !$state.active_session -and $state.query -eq '' -and $state.activation_count -eq 0 -and
+                    $queryTargets.Count -eq 1
+            } $CaptureTimeoutSeconds 'focused isolated launcher query and disabled Jump Mode baseline'
+            Write-Event 'query_baseline_observed' @{ logic_frame_id = $baselineObservation.logic_frame_id; ui_pass_id = $baselineObservation.ui_pass_id; query = $baselineObservation.query; activation_count = $baselineObservation.activation_count }
 
-        $receiptPath = Join-Path $captureRoot 'receipt.json'
-        $sourcePngPath = Join-Path $captureRoot 'framebuffer.png'
-        $deadline = [DateTime]::UtcNow.AddSeconds($CaptureTimeoutSeconds)
-        while ([DateTime]::UtcNow -lt $deadline) {
-            $process.Refresh()
-            if ($process.HasExited) {
-                $processExitCode = $process.ExitCode
-                throw "isolated app exited before the capture became ready (exit $processExitCode)"
-            }
-            if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
-                $candidate = Get-Content -Raw -LiteralPath $receiptPath | ConvertFrom-Json
-                if ($candidate.status -eq 'failed') {
-                    throw "QA framebuffer capture failed: $($candidate.failure)"
+            Invoke-NativeKeyBatch 'shift-space-leader' ([uint16[]]@(0x10, 0x20)) ([string[]]@('Shift', 'Space'))
+            $activeObservation = Wait-JumpModeObservation {
+                param($state)
+                $queryTargets = @($state.targets | Where-Object { $_.is_query_input -and $_.kind -eq 'text_entry' -and $_.eligible -and $_.hint -match '^[A-Z]+$' })
+                $state.root_focused -and $state.root_owner_allowed -and $state.jump_mode_enabled -and
+                    $state.active_session -and $state.query -eq '' -and $state.activation_count -eq 0 -and
+                    $queryTargets.Count -eq 1
+            } $CaptureTimeoutSeconds 'active query hint with preserved query and zero activations'
+            $queryTarget = Get-ObservedQueryTarget $activeObservation
+            Write-Event 'query_hint_observed' @{ logic_frame_id = $activeObservation.logic_frame_id; ui_pass_id = $activeObservation.ui_pass_id; query_target_id = $queryTarget.target_id; hint = $queryTarget.hint; prefix = $activeObservation.prefix; activation_count = $activeObservation.activation_count }
+
+            $receiptPath = Join-Path $captureRoot 'receipt.json'
+            $sourcePngPath = Join-Path $captureRoot 'framebuffer.png'
+            $deadline = [DateTime]::UtcNow.AddSeconds($CaptureTimeoutSeconds)
+            while ([DateTime]::UtcNow -lt $deadline) {
+                $process.Refresh()
+                if ($process.HasExited) {
+                    $processExitCode = $process.ExitCode
+                    throw "isolated app exited before the query hint capture became ready (exit $processExitCode)"
                 }
-                if ($candidate.status -eq 'saved' -and (Test-Path -LiteralPath $sourcePngPath -PathType Leaf)) {
-                    $captureReceipt = $candidate
-                    break
+                if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
+                    try { $candidate = Get-Content -Raw -LiteralPath $receiptPath | ConvertFrom-Json } catch { $candidate = $null }
+                    if ($candidate.status -eq 'failed') { throw "QA framebuffer query capture failed: $($candidate.failure)" }
+                    if ($candidate.status -eq 'saved' -and (Test-Path -LiteralPath $sourcePngPath -PathType Leaf)) {
+                        $captureReceipt = $candidate
+                        break
+                    }
                 }
+                Start-Sleep -Milliseconds 100
             }
-            Start-Sleep -Milliseconds 200
+            if (!$captureReceipt) { throw "timed out after $CaptureTimeoutSeconds seconds waiting for the active-query ROOT/Startup receipt" }
+            if ([int]$captureReceipt.process.pid -ne $processId) { throw 'capture receipt PID does not match the process launched by this runner' }
+            if ([string]$captureReceipt.executable.sha256 -ne $executableHash) { throw 'capture receipt executable hash does not match the built binary' }
+            if ([string]$captureReceipt.fixture_manifest_sha256 -ne $fixtureHash) { throw 'capture receipt fixture hash does not match the isolated fixture' }
+            $capturedObservation = $captureReceipt.captured.jump_mode_observation
+            if (!$capturedObservation -or !$capturedObservation.active_session -or !$capturedObservation.root_focused -or !$capturedObservation.root_owner_allowed) { throw 'capture receipt has no matching active, owned ROOT query-hint snapshot' }
+            if ($capturedObservation.query -ne '' -or $capturedObservation.activation_count -ne 0) { throw 'capture receipt query changed or an action executed before the query hint was selected' }
+            $capturedQueryTarget = Get-ObservedQueryTarget $capturedObservation
+            if ($capturedQueryTarget.target_id -ne $queryTarget.target_id -or $capturedQueryTarget.hint -ne $queryTarget.hint) { throw 'captured query hint does not match the latest observed active target map' }
+            if ($captureReceipt.captured.logic_frame_id -ne $capturedObservation.logic_frame_id -or $captureReceipt.captured.ui_pass_id -ne $capturedObservation.ui_pass_id) { throw 'capture receipt does not identify the same retained UI pass as its Jump Mode snapshot' }
+            $png = Get-PngDimensions $sourcePngPath
+            $pngHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourcePngPath).Hash.ToLowerInvariant()
+            if ([string]$captureReceipt.saved.png_sha256 -ne $pngHash) { throw 'saved PNG hash does not match the native ROOT screenshot receipt' }
+            Copy-Item -LiteralPath $sourcePngPath -Destination (Join-Path $screenshotsRoot '00_query_hints.png')
+            $screenshotPath = 'screenshots/00_query_hints.png'
+            $screenshotWidth = $png.Width
+            $screenshotHeight = $png.Height
+            Write-Event 'query_hint_capture_saved' @{ screenshot = $screenshotPath; width = $screenshotWidth; height = $screenshotHeight; bytes = $png.Bytes; sha256 = $pngHash; capture_semantics = $captureReceipt.capture_semantics; receipt = 'capture/receipt.json'; query_target_id = $capturedQueryTarget.target_id; hint = $capturedQueryTarget.hint; logic_frame_id = $capturedObservation.logic_frame_id; ui_pass_id = $capturedObservation.ui_pass_id }
+
+            $hintIndex = 0
+            foreach ($character in ([string]$queryTarget.hint).ToCharArray()) {
+                $hintIndex++
+                $hintKey = [uint16][char]$character
+                Invoke-NativeKeyBatch "query-target-hint-$hintIndex" ([uint16[]]@($hintKey)) ([string[]]@([string]$character))
+            }
+            $completedObservation = Wait-JumpModeObservation {
+                param($state)
+                $state.root_focused -and $state.root_owner_allowed -and !$state.active_session -and
+                    $state.query -eq '' -and $state.activation_count -eq 0 -and $state.query_focused -and
+                    $state.outcome.kind -eq 'completed' -and $state.outcome.target_id -eq $state.query_target_id -and
+                    $state.focused_destination -eq $state.query_target_id
+            } $CaptureTimeoutSeconds 'completed query target focus handoff with no action execution'
+            Write-Event 'query_hint_focus_completed' @{ logic_frame_id = $completedObservation.logic_frame_id; ui_pass_id = $completedObservation.ui_pass_id; query_target_id = $completedObservation.query_target_id; outcome = $completedObservation.outcome; query = $completedObservation.query; activation_count = $completedObservation.activation_count; focused_widget_id = $completedObservation.focused_widget_id }
+
+            Invoke-NativeKeyBatch 'normal-query-edit-x' ([uint16[]]@([char]'X')) ([string[]]@('X'))
+            $editedObservation = Wait-JumpModeObservation {
+                param($state)
+                $state.root_focused -and $state.root_owner_allowed -and !$state.active_session -and
+                    $state.query -eq 'x' -and $state.activation_count -eq 0 -and $state.query_focused
+            } $CaptureTimeoutSeconds 'normal query text edit after Jump Mode focus handoff'
+            Write-Event 'query_edit_observed' @{ logic_frame_id = $editedObservation.logic_frame_id; ui_pass_id = $editedObservation.ui_pass_id; query = $editedObservation.query; activation_count = $editedObservation.activation_count; focused_widget_id = $editedObservation.focused_widget_id }
+            $scenarioStatus = 'PASS'
+            $scenarioReason = 'Native Shift+Space displayed the actual query hint without changing the query or executing actions; the map-derived query hint focused the real query TextEntry, and native X then edited the query normally. The retained capture receipt references the matching active-hint UI pass.'
+            $runStatus = 'PASS'
+            $phase = 'query_probe_complete'
+            Update-Scenarios
+            Write-Event 'query_probe_assertions_passed' @{ query_target_id = $completedObservation.query_target_id; hint = $queryTarget.hint; query_after_leader = ''; query_after_edit = $editedObservation.query; activation_count = $editedObservation.activation_count; capture = 'screenshots/00_query_hints.png' }
+            Write-Summary 'PASS' 'Native Shift+Space, active query hint, map-derived focus handoff, unchanged activation count, normal query edit, and receipt-bound PNG assertions passed. Closing the app and verifying its owned process tree.'
+        } else {
+            Write-Summary 'BLOCKED' 'App launched from the isolated profile. Waiting for a ROOT/Startup framebuffer receipt and a valid PNG.'
+
+            $receiptPath = Join-Path $captureRoot 'receipt.json'
+            $sourcePngPath = Join-Path $captureRoot 'framebuffer.png'
+            $deadline = [DateTime]::UtcNow.AddSeconds($CaptureTimeoutSeconds)
+            while ([DateTime]::UtcNow -lt $deadline) {
+                $process.Refresh()
+                if ($process.HasExited) {
+                    $processExitCode = $process.ExitCode
+                    throw "isolated app exited before the capture became ready (exit $processExitCode)"
+                }
+                if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
+                    $candidate = Get-Content -Raw -LiteralPath $receiptPath | ConvertFrom-Json
+                    if ($candidate.status -eq 'failed') {
+                        throw "QA framebuffer capture failed: $($candidate.failure)"
+                    }
+                    if ($candidate.status -eq 'saved' -and (Test-Path -LiteralPath $sourcePngPath -PathType Leaf)) {
+                        $captureReceipt = $candidate
+                        break
+                    }
+                }
+                Start-Sleep -Milliseconds 200
+            }
+            if (!$captureReceipt) { throw "timed out after $CaptureTimeoutSeconds seconds waiting for the ROOT/Startup capture receipt" }
+            if ([int]$captureReceipt.process.pid -ne $processId) { throw 'capture receipt PID does not match the process launched by this runner' }
+            if ([string]$captureReceipt.executable.sha256 -ne $executableHash) { throw 'capture receipt executable hash does not match the built binary' }
+            if ([string]$captureReceipt.fixture_manifest_sha256 -ne $fixtureHash) { throw 'capture receipt fixture hash does not match the isolated fixture' }
+            $png = Get-PngDimensions $sourcePngPath
+            Copy-Item -LiteralPath $sourcePngPath -Destination (Join-Path $screenshotsRoot '00_baseline_dashboard.png')
+            $screenshotPath = 'screenshots/00_baseline_dashboard.png'
+            $screenshotWidth = $png.Width
+            $screenshotHeight = $png.Height
+            $scenarioStatus = 'BLOCKED'
+            $scenarioReason = 'A real ROOT/Startup framebuffer and matching receipt were saved. Dashboard fixture content is not confirmed by capture metadata; no OCR or pixel-golden assertion is used.'
+            $runStatus = 'BLOCKED'
+            Update-Scenarios
+            Write-Event 'baseline_capture_saved' @{
+                screenshot = $screenshotPath
+                width = $screenshotWidth
+                height = $screenshotHeight
+                bytes = $png.Bytes
+                capture_semantics = $captureReceipt.capture_semantics
+                receipt = 'capture/receipt.json'
+            }
+            $phase = 'process_cleanup'
+            Write-Summary 'BLOCKED' 'A real app ROOT/Startup framebuffer was saved and validated. Dashboard fixture content remains unconfirmed by capture metadata. Closing the app and verifying its owned process tree.'
         }
-        if (!$captureReceipt) { throw "timed out after $CaptureTimeoutSeconds seconds waiting for the ROOT/Startup capture receipt" }
-        if ([int]$captureReceipt.process.pid -ne $processId) { throw 'capture receipt PID does not match the process launched by this runner' }
-        if ([string]$captureReceipt.executable.sha256 -ne $executableHash) { throw 'capture receipt executable hash does not match the built binary' }
-        if ([string]$captureReceipt.fixture_manifest_sha256 -ne $fixtureHash) { throw 'capture receipt fixture hash does not match the isolated fixture' }
-        $png = Get-PngDimensions $sourcePngPath
-        Copy-Item -LiteralPath $sourcePngPath -Destination (Join-Path $screenshotsRoot '00_baseline_dashboard.png')
-        $screenshotPath = 'screenshots/00_baseline_dashboard.png'
-        $screenshotWidth = $png.Width
-        $screenshotHeight = $png.Height
-        $scenarioStatus = 'BLOCKED'
-        $scenarioReason = 'A real ROOT/Startup framebuffer and matching receipt were saved. Dashboard fixture content is not confirmed by capture metadata; no OCR or pixel-golden assertion is used.'
-        $runStatus = 'BLOCKED'
-        Update-Scenarios
-        Write-Event 'baseline_capture_saved' @{
-            screenshot = $screenshotPath
-            width = $screenshotWidth
-            height = $screenshotHeight
-            bytes = $png.Bytes
-            capture_semantics = $captureReceipt.capture_semantics
-            receipt = 'capture/receipt.json'
-        }
-        $phase = 'process_cleanup'
-        Write-Summary 'BLOCKED' 'A real app ROOT/Startup framebuffer was saved and validated. Dashboard fixture content remains unconfirmed by capture metadata. Closing the app and verifying its owned process tree.'
     }
 } catch {
     $runStatus = 'FAIL'
@@ -615,7 +915,7 @@ try {
         $finalManifest = [ordered]@{
             schema_version = 1
             run_id = $runId
-            milestone = 'M01'
+            milestone = if ($Scenario -eq 'QueryProbe') { 'M05' } else { 'M01' }
             status = $runStatus
             phase = $phase
             started_at_utc = $startedAt.ToString('O')
@@ -636,7 +936,9 @@ try {
         Write-Json $manifestPath $finalManifest
         if ($runStatus -eq 'PASS') {
             $passDetails = if ($FixturesOnly) {
-                'Fixture validation passed. The baseline dashboard scenario remains blocked because this invocation did not request a GUI launch.'
+                "Fixture validation passed. The $Scenario GUI scenario remains blocked because this invocation did not request an app launch."
+            } elseif ($Scenario -eq 'QueryProbe') {
+                'Fixture validation, receipt-bound active-query capture, native Shift+Space activation, map-derived query focus handoff, unchanged activation count, normal query text edit, and owned-process cleanup passed.'
             } else {
                 'Fixture validation, ROOT capture, and owned-process cleanup passed.'
             }
@@ -646,9 +948,15 @@ try {
         } elseif ($runStatus -eq 'FAIL') {
             Write-Summary $runStatus 'The run did not meet its current acceptance criteria.'
         } elseif ($runStatus -eq 'BLOCKED') {
-            Write-Summary $runStatus 'Fixture validation and real ROOT capture completed, with owned-process cleanup recorded. Dashboard fixture content remains blocked until a readiness signal can establish that isolated note results are visible.'
+            $blockedDetails = if ($Scenario -eq 'QueryProbe') {
+                'Fixture validation passed, but the native query-only probe did not complete. See the event log, latest Jump Mode observation, capture receipt, and failure detail.'
+            } else {
+                'Fixture validation and real ROOT capture completed, with owned-process cleanup recorded. Dashboard fixture content remains blocked until a readiness signal can establish that isolated note results are visible.'
+            }
+            Write-Summary $runStatus $blockedDetails
         }
-        Write-Output "M01 status: $runStatus"
+        $milestoneLabel = if ($Scenario -eq 'QueryProbe') { 'M05' } else { 'M01' }
+        Write-Output "$milestoneLabel status: $runStatus"
         Write-Output "Evidence: $evidenceRoot"
         if ($runStatus -eq 'FAIL') { exit 1 }
     }

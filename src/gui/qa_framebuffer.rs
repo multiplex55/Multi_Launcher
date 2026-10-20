@@ -19,6 +19,7 @@ pub const REQUEST_MANIFEST_ENV: &str = "ML_QA_FRAMEBUFFER_REQUEST_MANIFEST";
 const BENCH_MODE_ENV: &str = "ML_TRACK_C_BENCH_MODE";
 const PNG_FILE_NAME: &str = "framebuffer.png";
 const RECEIPT_FILE_NAME: &str = "receipt.json";
+const JUMP_OBSERVATION_FILE_NAME: &str = "jump-observation.json";
 const SCREENSHOT_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 const QR_STARTUP_CAPTURE_TIMEOUT: Duration = Duration::from_secs(120);
 const WRITER_QUEUE_CAPACITY: usize = 2;
@@ -86,9 +87,74 @@ struct RequestManifest {
     capture_count: u8,
     #[serde(default)]
     diagnostics: bool,
+    #[serde(default)]
+    jump_mode_observation: Option<JumpModeObservationRequest>,
     output_dir: PathBuf,
     fixture_manifest_sha256: String,
     build_receipt_identity: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JumpModeObservationRequest {
+    #[serde(default)]
+    wait_for_active_hints: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct JumpModeObservation {
+    observed_at_unix_ms: u64,
+    fixture_manifest_sha256: String,
+    process_pid: u32,
+    logic_frame_id: u64,
+    ui_pass_id: u64,
+    ui_pass_index: u32,
+    query: String,
+    root_focused: bool,
+    root_owner_allowed: bool,
+    jump_mode_enabled: bool,
+    active_session: bool,
+    prefix: Option<String>,
+    outcome: Option<JumpModeOutcomeObservation>,
+    query_target_id: Option<String>,
+    query_focused: bool,
+    focused_destination: Option<String>,
+    focused_widget_id: Option<String>,
+    activation_count: u64,
+    last_action: Option<QaActivationObservation>,
+    targets: Vec<JumpModeTargetObservation>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum JumpModeOutcomeObservation {
+    NoTargets,
+    Partial { matching_targets: usize },
+    Completed { target_id: String },
+    Invalid,
+    NoTarget,
+    Cancelled,
+    SessionClosed,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct JumpModeTargetObservation {
+    target_id: String,
+    label: String,
+    kind: &'static str,
+    rect: [f32; 4],
+    clipped_rect: [f32; 4],
+    eligible: bool,
+    is_query_input: bool,
+    focused: bool,
+    hint: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct QaActivationObservation {
+    action_id: String,
+    label: String,
+    source: &'static str,
 }
 
 const fn default_capture_count() -> u8 {
@@ -131,6 +197,9 @@ impl QaFramebufferRequest {
         let manifest: RequestManifest = serde_json::from_slice(&manifest_bytes)
             .map_err(|error| format!("invalid QA framebuffer manifest: {error}"))?;
         validate_manifest(&manifest)?;
+        if manifest.jump_mode_observation.is_some() {
+            verify_fixture_manifest_binding(&manifest.fixture_manifest_sha256)?;
+        }
 
         let executable_path = std::env::current_exe()
             .map_err(|error| format!("failed to identify current executable: {error}"))?;
@@ -213,6 +282,9 @@ fn validate_manifest(manifest: &RequestManifest) -> Result<(), String> {
     if manifest.diagnostics && manifest.target != CaptureTarget::Root {
         return Err("root geometry diagnostics require the ROOT capture target".into());
     }
+    if manifest.jump_mode_observation.is_some() && manifest.target != CaptureTarget::Root {
+        return Err("Jump Mode observation requires the ROOT capture target".into());
+    }
     if !is_sha256(&manifest.fixture_manifest_sha256) {
         return Err("manifest fixture_manifest_sha256 must be 64 hexadecimal characters".into());
     }
@@ -249,6 +321,30 @@ fn absolute_output_dir(path: &Path) -> Result<PathBuf, String> {
 
 fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn verify_fixture_manifest_binding(expected_sha256: &str) -> Result<(), String> {
+    let working_dir = std::env::current_dir()
+        .map_err(|error| format!("failed to identify fixture working directory: {error}"))?;
+    let working_dir = fs::canonicalize(&working_dir).map_err(|error| {
+        format!(
+            "failed to canonicalize fixture working directory {}: {error}",
+            working_dir.display()
+        )
+    })?;
+    let manifest_path =
+        fs::canonicalize(working_dir.join("fixture_manifest.json")).map_err(|error| {
+            format!("failed to resolve fixture_manifest.json from app cwd: {error}")
+        })?;
+    if manifest_path.parent() != Some(working_dir.as_path()) {
+        return Err("fixture_manifest.json resolved outside the isolated working directory".into());
+    }
+    let actual_sha256 = sha256_file(&manifest_path)
+        .map_err(|error| format!("failed to hash isolated fixture_manifest.json: {error}"))?;
+    if actual_sha256 != expected_sha256 {
+        return Err("fixture_manifest.json hash does not match the QA request".into());
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -366,6 +462,8 @@ struct FrameEvidence {
     tool_owner: bool,
     modal_or_key_capture_owner: bool,
     eligible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jump_mode_observation: Option<JumpModeObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     qr_observation: Option<QrRenderEvidence>,
 }
@@ -510,10 +608,16 @@ pub(super) struct VisibleRowDiagnostic {
 }
 
 pub(super) struct FramebufferProbe {
+    output_dir: PathBuf,
     token: UserData,
     target: CaptureTarget,
     capture_count: u8,
     diagnostics_enabled: bool,
+    jump_mode_observation_enabled: bool,
+    wait_for_active_hints: bool,
+    activation_count: u64,
+    last_action: Option<QaActivationObservation>,
+    latest_jump_mode_observation: Option<JumpModeObservation>,
     geometry_rebuild_count: u64,
     latest_root_list_diagnostic: Option<RootListDiagnostic>,
     phase: ProbePhase,
@@ -550,13 +654,21 @@ impl FramebufferProbe {
         let target = request.manifest.target;
         let capture_count = request.manifest.capture_count;
         let diagnostics_enabled = request.manifest.diagnostics;
+        let observation_request = request.manifest.jump_mode_observation.as_ref();
         let token = UserData::new(ScreenshotToken(1));
         let receipt = CompletionReceipt::new(&request, reply_timeout);
         let mut probe = Self {
+            output_dir: request.output_dir.clone(),
             token,
             target,
             capture_count,
             diagnostics_enabled,
+            jump_mode_observation_enabled: observation_request.is_some(),
+            wait_for_active_hints: observation_request
+                .is_some_and(|request| request.wait_for_active_hints),
+            activation_count: 0,
+            last_action: None,
+            latest_jump_mode_observation: None,
             geometry_rebuild_count: 0,
             latest_root_list_diagnostic: None,
             phase: ProbePhase::Armed,
@@ -714,6 +826,7 @@ impl FramebufferProbe {
         &mut self,
         ctx: &egui::Context,
         eligibility: SurfaceEligibility,
+        jump_root_owner_allowed: bool,
         evidence: FrameEvidence,
     ) {
         if self.phase != ProbePhase::Ready {
@@ -725,6 +838,19 @@ impl FramebufferProbe {
         }
         if self.current_ui_pass_id.is_none() {
             return;
+        }
+        if self.wait_for_active_hints {
+            let observation = evidence.jump_mode_observation.as_ref();
+            if !jump_root_owner_allowed
+                || !observation.is_some_and(active_query_hint_snapshot)
+                || observation.is_some_and(|observation| {
+                    observation.query != evidence.query
+                        || observation.activation_count != self.activation_count
+                })
+            {
+                self.fail("Jump Mode query state regressed before screenshot issue");
+                return;
+            }
         }
         self.receipt.issued = Some(evidence);
         self.issue_logic_frame_id = Some(self.logic_frame_id);
@@ -788,7 +914,7 @@ impl FramebufferProbe {
         match self.phase {
             ProbePhase::Ready => {
                 frame_evidence.evidence_stage = "qr_screenshot_api_issued_after_child_callback";
-                self.issue_screenshot_if_ready(ctx, root_eligibility, frame_evidence);
+                self.issue_screenshot_if_ready(ctx, root_eligibility, true, frame_evidence);
             }
             ProbePhase::Issued => {
                 let Some(issue_parent_frame) = self.issue_logic_frame_id else {
@@ -854,6 +980,7 @@ impl FramebufferProbe {
         &mut self,
         ctx: &egui::Context,
         final_eligibility: SurfaceEligibility,
+        jump_mode_observation: Option<JumpModeObservation>,
     ) {
         let Some(mut marker) = self.retained_pass.take() else {
             if self.phase_requires_eligibility() {
@@ -876,11 +1003,27 @@ impl FramebufferProbe {
                     .qr_observation
                     .as_ref()
                     .is_none_or(|observation| observation.eligible);
+            evidence.jump_mode_observation = jump_mode_observation.clone();
+        }
+        if let Some(observation) = jump_mode_observation {
+            self.latest_jump_mode_observation = Some(observation.clone());
+            if let Err(error) = write_jump_mode_observation(&self.output_dir, &observation) {
+                self.fail_jump_mode_observation(format!(
+                    "failed to write Jump Mode observation: {error}"
+                ));
+                return;
+            }
         }
 
         match self.phase {
             ProbePhase::Armed if self.receipt.trigger == CaptureTrigger::Startup => {
-                if marker.eligibility.eligible() {
+                let active_hints_ready = !self.wait_for_active_hints
+                    || marker
+                        .evidence
+                        .as_ref()
+                        .and_then(|evidence| evidence.jump_mode_observation.as_ref())
+                        .is_some_and(active_query_hint_snapshot);
+                if marker.eligibility.eligible() && active_hints_ready {
                     self.phase = ProbePhase::Ready;
                     ctx.request_repaint_of(ViewportId::ROOT);
                 }
@@ -899,6 +1042,10 @@ impl FramebufferProbe {
                 if marker.logic_frame_id == issue_frame {
                     if !marker.eligibility.eligible() {
                         self.fail(marker.eligibility.failure_reason());
+                    } else if !self.current_capture_observation_matches(&marker) {
+                        self.fail(
+                            "Jump Mode query state regressed at screenshot issue frame completion",
+                        );
                     } else if self.target == CaptureTarget::Qr {
                         let Some(baseline) =
                             self.latest_qr_observation.as_ref().filter(|observation| {
@@ -915,6 +1062,10 @@ impl FramebufferProbe {
                 {
                     if !marker.eligibility.eligible() {
                         self.fail(marker.eligibility.failure_reason());
+                    } else if !self.current_capture_observation_matches(&marker) {
+                        self.fail(
+                            "Jump Mode query state regressed at expected capture frame completion",
+                        );
                     } else {
                         let Some(mut captured) = marker.evidence.clone() else {
                             self.fail("retained capture frame omitted its provenance snapshot");
@@ -1019,10 +1170,14 @@ impl FramebufferProbe {
     }
 
     fn needs_retained_marker(&self) -> bool {
-        matches!(
-            self.phase,
-            ProbePhase::Armed | ProbePhase::Ready | ProbePhase::Issued | ProbePhase::AwaitingReply
-        )
+        self.jump_mode_observation_enabled
+            || matches!(
+                self.phase,
+                ProbePhase::Armed
+                    | ProbePhase::Ready
+                    | ProbePhase::Issued
+                    | ProbePhase::AwaitingReply
+            )
     }
 
     fn needs_input_eligibility(&self) -> bool {
@@ -1030,15 +1185,69 @@ impl FramebufferProbe {
     }
 
     fn needs_root_logic(&self) -> bool {
-        self.needs_input_eligibility() || self.phase == ProbePhase::Saving
+        self.needs_input_eligibility()
+            || self.phase == ProbePhase::Saving
+            || self.jump_mode_observation_enabled
+    }
+
+    fn record_activation(
+        &mut self,
+        action: &crate::actions::Action,
+        source: crate::commands::ActivationSource,
+    ) {
+        if !self.jump_mode_observation_enabled {
+            return;
+        }
+        self.activation_count = self.activation_count.saturating_add(1);
+        self.last_action = Some(QaActivationObservation {
+            action_id: action.action.clone(),
+            label: action.label.clone(),
+            source: source.label(),
+        });
+    }
+
+    fn current_capture_observation_matches(&self, marker: &RetainedPassMarker) -> bool {
+        if !self.wait_for_active_hints {
+            return true;
+        }
+        let Some(issued) = self
+            .receipt
+            .issued
+            .as_ref()
+            .and_then(|evidence| evidence.jump_mode_observation.as_ref())
+        else {
+            return false;
+        };
+        marker
+            .evidence
+            .as_ref()
+            .and_then(|evidence| evidence.jump_mode_observation.as_ref())
+            .is_some_and(|current| {
+                active_query_hint_snapshot(current)
+                    && current.query == issued.query
+                    && current.activation_count == issued.activation_count
+            })
     }
 
     fn fail(&mut self, reason: impl Into<String>) {
         if !self.phase_requires_eligibility() {
             return;
         }
+        self.set_failed(reason.into());
+    }
+
+    fn fail_jump_mode_observation(&mut self, reason: impl Into<String>) {
+        if !self.jump_mode_observation_enabled
+            || matches!(self.phase, ProbePhase::Complete | ProbePhase::Failed)
+        {
+            return;
+        }
+        self.set_failed(reason.into());
+    }
+
+    fn set_failed(&mut self, reason: String) {
         self.receipt.status = ReceiptStatus::Failed;
-        self.receipt.failure = Some(reason.into());
+        self.receipt.failure = Some(reason);
         self.phase = ProbePhase::Failed;
         let _ = self
             .writer_tx
@@ -1115,6 +1324,16 @@ impl LauncherApp {
         }
         self.qa_framebuffer = Some(FramebufferProbe::new(request, self.egui_ctx.clone())?);
         Ok(())
+    }
+
+    pub(super) fn qa_framebuffer_record_activation(
+        &mut self,
+        action: &crate::actions::Action,
+        source: crate::commands::ActivationSource,
+    ) {
+        if let Some(probe) = self.qa_framebuffer.as_mut() {
+            probe.record_activation(action, source);
+        }
     }
 
     pub(super) fn qa_framebuffer_root_diagnostics_enabled(&self) -> bool {
@@ -1250,7 +1469,7 @@ impl LauncherApp {
             return;
         };
         let eligibility = surface_eligibility(self, ctx, logical_root_visible);
-        let evidence = frame_evidence(
+        let mut evidence = frame_evidence(
             self,
             ctx,
             logic_frame_id,
@@ -1260,8 +1479,45 @@ impl LauncherApp {
             logical_root_visible,
             eligibility,
         );
+        let (jump_root_owner_allowed, jump_mode_enabled, jump_session_active, activation_count) =
+            self.qa_framebuffer
+                .as_ref()
+                .map_or((false, false, false, 0), |probe| {
+                    (
+                        self.qa_framebuffer_jump_root_owner_allowed(ctx, logical_root_visible),
+                        self.jump_mode_enabled(),
+                        self.jump_mode_ui.active_session().is_some(),
+                        probe.activation_count,
+                    )
+                });
+        let observation = self
+            .qa_framebuffer
+            .as_ref()
+            .and_then(|probe| probe.latest_jump_mode_observation.clone());
+        evidence.jump_mode_observation = observation.clone();
+        let live_observation_matches = self.qa_framebuffer.as_ref().is_none_or(|probe| {
+            !probe.wait_for_active_hints
+                || (jump_root_owner_allowed
+                    && jump_mode_enabled
+                    && jump_session_active
+                    && self.query == evidence.query
+                    && observation.as_ref().is_some_and(|observation| {
+                        active_query_hint_snapshot(observation)
+                            && observation.query == self.query
+                            && observation.activation_count == activation_count
+                    }))
+        });
         if let Some(probe) = self.qa_framebuffer.as_mut() {
-            probe.issue_screenshot_if_ready(ctx, eligibility, evidence);
+            if !live_observation_matches {
+                probe.fail("Jump Mode query state regressed before screenshot issue");
+            } else {
+                probe.issue_screenshot_if_ready(
+                    ctx,
+                    eligibility,
+                    jump_root_owner_allowed,
+                    evidence,
+                );
+            }
         }
     }
 
@@ -1270,7 +1526,17 @@ impl LauncherApp {
         ctx: &egui::Context,
         logical_root_visible: bool,
     ) {
-        let Some((logic_frame_id, ui_pass_id, ui_pass_index, should_record_evidence)) = self
+        let Some((
+            logic_frame_id,
+            ui_pass_id,
+            ui_pass_index,
+            should_record_evidence,
+            observe_jump_mode,
+            activation_count,
+            last_action,
+            process_pid,
+            fixture_manifest_sha256,
+        )) = self
             .qa_framebuffer
             .as_ref()
             .filter(|probe| probe.needs_retained_marker())
@@ -1284,6 +1550,11 @@ impl LauncherApp {
                             && probe
                                 .issue_logic_frame_id
                                 .is_some_and(|issue_frame| probe.logic_frame_id > issue_frame),
+                        probe.jump_mode_observation_enabled,
+                        probe.activation_count,
+                        probe.last_action.clone(),
+                        probe.receipt.process.pid,
+                        probe.receipt.fixture_manifest_sha256.clone(),
                     )
                 })
             })
@@ -1291,7 +1562,7 @@ impl LauncherApp {
             return;
         };
         let eligibility = surface_eligibility(self, ctx, logical_root_visible);
-        let evidence = should_record_evidence.then(|| {
+        let mut evidence = (should_record_evidence || observe_jump_mode).then(|| {
             frame_evidence(
                 self,
                 ctx,
@@ -1303,6 +1574,25 @@ impl LauncherApp {
                 eligibility,
             )
         });
+        let jump_root_owner_allowed =
+            self.qa_framebuffer_jump_root_owner_allowed(ctx, logical_root_visible);
+        if let Some(evidence) = evidence.as_mut()
+            && observe_jump_mode
+        {
+            evidence.jump_mode_observation = Some(build_jump_mode_observation(
+                self,
+                ctx,
+                logic_frame_id,
+                ui_pass_id,
+                ui_pass_index,
+                jump_root_owner_allowed,
+                self.jump_mode_ui.pass_registry(),
+                activation_count,
+                last_action,
+                process_pid,
+                fixture_manifest_sha256,
+            ));
+        }
         if let Some(probe) = self.qa_framebuffer.as_mut() {
             probe.finish_ui_pass(eligibility, evidence);
         }
@@ -1323,8 +1613,52 @@ impl LauncherApp {
             .and_then(|probe| probe.retained_pass.as_ref())
             .is_some_and(|marker| marker.eligibility.logical_root_visible);
         let eligibility = surface_eligibility(self, &ctx, logical_root_visible);
+        let observation_details = self.qa_framebuffer.as_ref().and_then(|probe| {
+            probe.retained_pass.as_ref().map(|marker| {
+                (
+                    marker.logic_frame_id,
+                    marker.ui_pass_id,
+                    marker.ui_pass_index,
+                    probe.jump_mode_observation_enabled,
+                    probe.activation_count,
+                    probe.last_action.clone(),
+                    probe.receipt.process.pid,
+                    probe.receipt.fixture_manifest_sha256.clone(),
+                )
+            })
+        });
+        let jump_mode_observation = observation_details.and_then(
+            |(
+                logic_frame_id,
+                ui_pass_id,
+                ui_pass_index,
+                enabled,
+                activation_count,
+                last_action,
+                process_pid,
+                fixture_hash,
+            )| {
+                enabled.then(|| {
+                    let root_owner_allowed =
+                        self.qa_framebuffer_jump_root_owner_allowed(&ctx, logical_root_visible);
+                    build_jump_mode_observation(
+                        self,
+                        &ctx,
+                        logic_frame_id,
+                        ui_pass_id,
+                        ui_pass_index,
+                        root_owner_allowed,
+                        self.jump_mode_ui.pass_registry(),
+                        activation_count,
+                        last_action,
+                        process_pid,
+                        fixture_hash,
+                    )
+                })
+            },
+        );
         if let Some(probe) = self.qa_framebuffer.as_mut() {
-            probe.finish_retained_ui_frame(&ctx, eligibility);
+            probe.finish_retained_ui_frame(&ctx, eligibility, jump_mode_observation);
         }
     }
 }
@@ -1486,7 +1820,149 @@ fn frame_evidence(
         tool_owner: eligibility.tool_owner,
         modal_or_key_capture_owner: eligibility.modal_or_key_capture_owner,
         eligible: eligibility.eligible(),
+        jump_mode_observation: None,
         qr_observation: None,
+    }
+}
+
+fn active_query_hint_snapshot(observation: &JumpModeObservation) -> bool {
+    observation.root_focused
+        && observation.root_owner_allowed
+        && observation.jump_mode_enabled
+        && observation.active_session
+        && observation.query_target_id.is_some()
+        && observation.targets.iter().any(|target| {
+            target.is_query_input
+                && target.kind == "text_entry"
+                && target.eligible
+                && target.hint.is_some()
+        })
+}
+
+fn write_jump_mode_observation(
+    output_dir: &Path,
+    observation: &JumpModeObservation,
+) -> std::io::Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(observation).map_err(std::io::Error::other)?;
+    bytes.push(b'\n');
+    fs::write(output_dir.join(JUMP_OBSERVATION_FILE_NAME), bytes)
+}
+
+fn build_jump_mode_observation(
+    app: &LauncherApp,
+    ctx: &egui::Context,
+    logic_frame_id: u64,
+    ui_pass_id: u64,
+    ui_pass_index: u32,
+    root_owner_allowed: bool,
+    registry: Option<&super::jump_mode::ui::TargetRegistry>,
+    activation_count: u64,
+    last_action: Option<QaActivationObservation>,
+    process_pid: u32,
+    fixture_manifest_sha256: String,
+) -> JumpModeObservation {
+    let root_focused = ctx.input(|input| input.focused);
+    let active_session = app.jump_mode_ui.active_session();
+    let active_hint_map = active_session.map(|session| session.hint_map());
+    let focused_widget_id = ctx
+        .memory(|memory| memory.focused())
+        .map(|focused| format!("{focused:?}"));
+    let focused_egui_id = ctx.memory(|memory| memory.focused());
+
+    let targets: Vec<_> = if root_owner_allowed {
+        registry
+            .into_iter()
+            .flat_map(|registry| registry.targets())
+            .map(|target| {
+                let rect = target.rect();
+                let clipped_rect = target.clipped_rect();
+                let is_query_input = target.response_id() == egui::Id::new("query_input")
+                    && target.metadata().kind() == super::jump_mode::TargetKind::TextEntry;
+                JumpModeTargetObservation {
+                    target_id: format!("{:?}", target.id()),
+                    label: target.metadata().label().to_owned(),
+                    kind: target_kind_name(target.metadata().kind()),
+                    rect: [rect.min.x, rect.min.y, rect.max.x, rect.max.y],
+                    clipped_rect: [
+                        clipped_rect.min.x,
+                        clipped_rect.min.y,
+                        clipped_rect.max.x,
+                        clipped_rect.max.y,
+                    ],
+                    eligible: target.eligible() && target.enabled(),
+                    is_query_input,
+                    focused: Some(target.response_id()) == focused_egui_id,
+                    hint: active_hint_map
+                        .and_then(|hint_map| hint_map.hint_for(target.id()))
+                        .map(|hint| hint.as_str().to_owned()),
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let query_target = targets.iter().find(|target| target.is_query_input);
+    let focused_destination = targets
+        .iter()
+        .find(|target| target.focused)
+        .map(|target| target.target_id.clone());
+    let outcome = app
+        .jump_mode_ui
+        .last_outcome()
+        .map(|outcome| match outcome {
+            super::jump_mode::MatchOutcome::NoTargets => JumpModeOutcomeObservation::NoTargets,
+            super::jump_mode::MatchOutcome::Partial { matching_targets } => {
+                JumpModeOutcomeObservation::Partial {
+                    matching_targets: *matching_targets,
+                }
+            }
+            super::jump_mode::MatchOutcome::Completed(target) => {
+                JumpModeOutcomeObservation::Completed {
+                    target_id: format!("{target:?}"),
+                }
+            }
+            super::jump_mode::MatchOutcome::Invalid => JumpModeOutcomeObservation::Invalid,
+            super::jump_mode::MatchOutcome::NoTarget => JumpModeOutcomeObservation::NoTarget,
+            super::jump_mode::MatchOutcome::Cancelled => JumpModeOutcomeObservation::Cancelled,
+            super::jump_mode::MatchOutcome::SessionClosed => {
+                JumpModeOutcomeObservation::SessionClosed
+            }
+        });
+
+    JumpModeObservation {
+        observed_at_unix_ms: unix_millis(),
+        fixture_manifest_sha256,
+        process_pid,
+        logic_frame_id,
+        ui_pass_id,
+        ui_pass_index,
+        query: app.query.clone(),
+        root_focused,
+        root_owner_allowed,
+        jump_mode_enabled: app.jump_mode_ui.is_enabled(),
+        active_session: active_session.is_some(),
+        prefix: active_session.map(|session| session.prefix().to_owned()),
+        outcome,
+        query_target_id: query_target.map(|target| target.target_id.clone()),
+        query_focused: ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))),
+        focused_destination,
+        focused_widget_id,
+        activation_count,
+        last_action,
+        targets,
+    }
+}
+
+fn target_kind_name(kind: super::jump_mode::TargetKind) -> &'static str {
+    match kind {
+        super::jump_mode::TargetKind::Action => "action",
+        super::jump_mode::TargetKind::Button => "button",
+        super::jump_mode::TargetKind::TextEntry => "text_entry",
+        super::jump_mode::TargetKind::Selectable => "selectable",
+        super::jump_mode::TargetKind::Checkbox => "checkbox",
+        super::jump_mode::TargetKind::Slider => "slider",
+        super::jump_mode::TargetKind::Tab => "tab",
+        super::jump_mode::TargetKind::ComboBox => "combo_box",
     }
 }
 
@@ -1848,6 +2324,7 @@ mod tests {
                 trigger,
                 capture_count: 1,
                 diagnostics: false,
+                jump_mode_observation: None,
                 output_dir: output_dir.clone(),
                 fixture_manifest_sha256: "a".repeat(64),
                 build_receipt_identity: "test-build".into(),
@@ -1895,6 +2372,7 @@ mod tests {
             tool_owner: false,
             modal_or_key_capture_owner: false,
             eligible: true,
+            jump_mode_observation: None,
             qr_observation: None,
         }
     }
@@ -1939,10 +2417,16 @@ mod tests {
         let (writer_tx, writer_rx) = mpsc::sync_channel(WRITER_QUEUE_CAPACITY);
         let (outcome_tx, outcome_rx) = mpsc::sync_channel(1);
         let mut probe = FramebufferProbe {
+            output_dir: PathBuf::from("unused"),
             token,
             target,
             capture_count,
             diagnostics_enabled: false,
+            jump_mode_observation_enabled: false,
+            wait_for_active_hints: false,
+            activation_count: 0,
+            last_action: None,
+            latest_jump_mode_observation: None,
             geometry_rebuild_count: 0,
             latest_root_list_diagnostic: None,
             phase: ProbePhase::Armed,
@@ -1975,9 +2459,9 @@ mod tests {
         ctx.begin_pass(egui::RawInput::default());
         probe.start_ui_pass(0);
         let issue_evidence = test_evidence(1, probe.current_ui_pass_id.unwrap(), 0);
-        probe.issue_screenshot_if_ready(ctx, eligibility, issue_evidence.clone());
+        probe.issue_screenshot_if_ready(ctx, eligibility, true, issue_evidence.clone());
         probe.finish_ui_pass(eligibility, Some(issue_evidence));
-        probe.finish_retained_ui_frame(ctx, eligibility);
+        probe.finish_retained_ui_frame(ctx, eligibility, None);
         ctx.end_pass().drop_without_applying_deltas();
         assert_eq!(probe.phase, ProbePhase::Issued);
     }
@@ -2001,7 +2485,7 @@ mod tests {
         probe.start_ui_pass(1);
         let retained_evidence = test_evidence(2, probe.current_ui_pass_id.unwrap(), 1);
         probe.finish_ui_pass(eligibility, Some(retained_evidence));
-        probe.finish_retained_ui_frame(ctx, eligibility);
+        probe.finish_retained_ui_frame(ctx, eligibility, None);
         ctx.end_pass().drop_without_applying_deltas();
         assert_eq!(probe.phase, ProbePhase::AwaitingReply);
         assert_eq!(probe.capture_logic_frame_id, Some(2));
@@ -2060,7 +2544,7 @@ mod tests {
             final_pass_eligibility,
             Some(test_evidence(3, probe.current_ui_pass_id.unwrap(), 0)),
         );
-        probe.finish_retained_ui_frame(ctx, eligible_surface());
+        probe.finish_retained_ui_frame(ctx, eligible_surface(), None);
         let output = ctx.end_pass();
         output.drop_without_applying_deltas();
     }
@@ -2092,7 +2576,7 @@ mod tests {
         assert_eq!(probe.logic_frame_id, 1);
         probe.start_ui_pass(0);
         probe.finish_ui_pass(eligibility, None);
-        probe.finish_retained_ui_frame(ctx, eligibility);
+        probe.finish_retained_ui_frame(ctx, eligibility, None);
         ctx.end_pass().drop_without_applying_deltas();
         assert_eq!(probe.phase, ProbePhase::Ready);
     }
@@ -2126,7 +2610,7 @@ mod tests {
             Some(test_evidence(2, retained_pass, 1)),
         );
         probe.finish_ui_pass(eligibility, Some(test_evidence(2, retained_pass, 1)));
-        probe.finish_retained_ui_frame(ctx, eligibility);
+        probe.finish_retained_ui_frame(ctx, eligibility, None);
         ctx.end_pass().drop_without_applying_deltas();
 
         assert_eq!(probe.phase, ProbePhase::Issued);
@@ -2182,7 +2666,7 @@ mod tests {
         }));
 
         probe.finish_ui_pass(final_eligibility, None);
-        probe.finish_retained_ui_frame(ctx, final_eligibility);
+        probe.finish_retained_ui_frame(ctx, final_eligibility, None);
         ctx.end_pass().drop_without_applying_deltas();
     }
 
@@ -2275,6 +2759,7 @@ mod tests {
             trigger: CaptureTrigger::F11,
             capture_count: 1,
             diagnostics: false,
+            jump_mode_observation: None,
             output_dir: PathBuf::from("output"),
             fixture_manifest_sha256: "a".repeat(64),
             build_receipt_identity: "test-build".into(),
@@ -2301,11 +2786,203 @@ mod tests {
 
         assert_eq!(manifest.capture_count, 1);
         assert!(!manifest.diagnostics);
+        assert!(manifest.jump_mode_observation.is_none());
         validate_manifest(&manifest).unwrap();
         assert_eq!(
             capture_artifact_names(1, 1),
             ("framebuffer.png".into(), "receipt.json".into())
         );
+    }
+
+    #[test]
+    fn jump_mode_observation_is_root_only_and_opt_in() {
+        let make_manifest = |target| RequestManifest {
+            run_id: "query-probe".into(),
+            request_id: "query-only".into(),
+            target,
+            trigger: CaptureTrigger::Startup,
+            capture_count: 1,
+            diagnostics: false,
+            jump_mode_observation: Some(JumpModeObservationRequest {
+                wait_for_active_hints: true,
+            }),
+            output_dir: PathBuf::from("capture"),
+            fixture_manifest_sha256: "a".repeat(64),
+            build_receipt_identity: "test-build".into(),
+        };
+        let root = make_manifest(CaptureTarget::Root);
+        validate_manifest(&root).unwrap();
+
+        let child = make_manifest(CaptureTarget::Qr);
+        assert_eq!(
+            validate_manifest(&child).unwrap_err(),
+            "Jump Mode observation requires the ROOT capture target"
+        );
+    }
+
+    #[test]
+    fn armed_observer_errors_are_reported_without_changing_legacy_armed_failure_behavior() {
+        let (mut legacy, _, _) = test_probe(CaptureTrigger::Startup);
+        legacy.fail("legacy startup wait remains nonterminal");
+        assert_eq!(legacy.phase, ProbePhase::Armed);
+
+        let (mut observed, writer_rx, _) = test_probe(CaptureTrigger::Startup);
+        observed.jump_mode_observation_enabled = true;
+        observed.fail_jump_mode_observation("observation output failed");
+        assert_eq!(observed.phase, ProbePhase::Failed);
+        assert_eq!(observed.receipt.status, ReceiptStatus::Failed);
+        assert_eq!(
+            observed.receipt.failure.as_deref(),
+            Some("observation output failed")
+        );
+        assert!(matches!(writer_rx.try_recv(), Ok(WriterJob::Failure(_))));
+    }
+
+    #[test]
+    fn activation_observation_counts_only_when_jump_probe_is_opted_in() {
+        let action = crate::actions::Action {
+            label: "Safe test action".into(),
+            desc: String::new(),
+            action: "test:noop".into(),
+            args: None,
+        };
+        let (mut probe, _, _) = test_probe(CaptureTrigger::Startup);
+        probe.record_activation(&action, crate::commands::ActivationSource::Enter);
+        assert_eq!(probe.activation_count, 0);
+        assert!(probe.last_action.is_none());
+
+        probe.jump_mode_observation_enabled = true;
+        probe.record_activation(&action, crate::commands::ActivationSource::Enter);
+        assert_eq!(probe.activation_count, 1);
+        let last_action = probe.last_action.as_ref().unwrap();
+        assert_eq!(last_action.action_id, "test:noop");
+        assert_eq!(last_action.source, "enter");
+    }
+
+    #[test]
+    fn jump_mode_observer_recognizes_the_real_registered_query_text_entry_and_hint() {
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = test_launcher_app(&ctx, directory.path());
+        app.jump_mode_ui.set_enabled(true);
+
+        let render_query_targets = |app: &mut LauncherApp, raw_input: egui::RawInput| {
+            ctx.run_ui(raw_input, |ui| {
+                app.jump_mode_ui.begin_frame();
+                app.jump_mode_ui.handle_root_input(&ctx, true, true);
+                app.jump_mode_ui.begin_ui_pass();
+                let scope = app
+                    .jump_mode_ui
+                    .scope(
+                        super::super::jump_mode::SurfaceId::LauncherResults,
+                        super::super::jump_mode::TargetGeneration(1),
+                        "launcher-results",
+                        egui::ViewportId::ROOT,
+                        true,
+                    )
+                    .unwrap();
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut app.query).id(egui::Id::new("query_input")),
+                );
+                response.request_focus();
+                assert!(matches!(
+                    scope.register(
+                        ui,
+                        &response,
+                        "query_input",
+                        "Search query",
+                        super::super::jump_mode::TargetKind::TextEntry,
+                        0,
+                    ),
+                    super::super::jump_mode::ui::RegistrationResult::Registered { .. }
+                ));
+                let response = ui.button("Safe target");
+                assert!(matches!(
+                    scope.register(
+                        ui,
+                        &response,
+                        "safe-button",
+                        "Safe target",
+                        super::super::jump_mode::TargetKind::Button,
+                        1,
+                    ),
+                    super::super::jump_mode::ui::RegistrationResult::Registered { .. }
+                ));
+            })
+            .drop_without_applying_deltas();
+            app.jump_mode_ui.finish_ui_pass();
+            assert!(app.jump_mode_ui.prepare_pass_for_paint(&ctx, true, true));
+        };
+        let input = |events| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 560.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        };
+
+        render_query_targets(&mut app, input(Vec::new()));
+        app.jump_mode_ui.complete_frame(&ctx, true, true);
+
+        render_query_targets(
+            &mut app,
+            input(vec![
+                Event::Key {
+                    key: Key::Space,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::SHIFT,
+                },
+                Event::Key {
+                    key: Key::Space,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: Modifiers::SHIFT,
+                },
+            ]),
+        );
+        assert!(app.jump_mode_ui.active_session().is_some());
+        ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("query_input")));
+        let observation = build_jump_mode_observation(
+            &app,
+            &ctx,
+            2,
+            2,
+            0,
+            true,
+            app.jump_mode_ui.pass_registry(),
+            0,
+            None,
+            1234,
+            "a".repeat(64),
+        );
+
+        assert!(observation.root_focused);
+        assert!(observation.root_owner_allowed);
+        assert!(observation.active_session);
+        assert!(!observation.query_focused);
+        assert!(observation.query_target_id.is_some());
+        assert!(active_query_hint_snapshot(&observation));
+        let query_target = observation
+            .targets
+            .iter()
+            .find(|target| target.is_query_input)
+            .unwrap();
+        assert_eq!(query_target.kind, "text_entry");
+        assert_ne!(query_target.target_id, "query_input");
+        assert!(
+            query_target
+                .hint
+                .as_deref()
+                .is_some_and(|hint| !hint.is_empty())
+        );
+        assert_eq!(query_target.focused, observation.query_focused);
+
+        app.jump_mode_ui.complete_frame(&ctx, true, true);
     }
 
     #[test]
@@ -2317,6 +2994,7 @@ mod tests {
             trigger,
             capture_count,
             diagnostics: false,
+            jump_mode_observation: None,
             output_dir: PathBuf::from("output"),
             fixture_manifest_sha256: "a".repeat(64),
             build_receipt_identity: "test-build".into(),
@@ -2415,6 +3093,7 @@ mod tests {
                 trigger: CaptureTrigger::Startup,
                 capture_count: 1,
                 diagnostics: false,
+                jump_mode_observation: None,
                 output_dir: output_dir.path().to_path_buf(),
                 fixture_manifest_sha256: "a".repeat(64),
                 build_receipt_identity: "test-build".into(),
@@ -2902,7 +3581,7 @@ mod tests {
             .try_send(WriterJob::Failure(receipt))
             .unwrap();
         prepare_save_attempt(&mut full);
-        full.finish_retained_ui_frame(&egui::Context::default(), eligible_surface());
+        full.finish_retained_ui_frame(&egui::Context::default(), eligible_surface(), None);
         assert_eq!(full.phase, ProbePhase::Failed);
         assert!(full.receipt.saved.is_none());
         assert!(matches!(writer_rx.try_recv(), Ok(WriterJob::AwaitReply(_))));
@@ -2911,7 +3590,7 @@ mod tests {
         let (mut disconnected, writer_rx, _outcome_tx) = test_probe(CaptureTrigger::Startup);
         drop(writer_rx);
         prepare_save_attempt(&mut disconnected);
-        disconnected.finish_retained_ui_frame(&egui::Context::default(), eligible_surface());
+        disconnected.finish_retained_ui_frame(&egui::Context::default(), eligible_surface(), None);
         assert_eq!(disconnected.phase, ProbePhase::Failed);
         assert!(disconnected.receipt.saved.is_none());
     }
@@ -2935,6 +3614,7 @@ mod tests {
                 trigger: CaptureTrigger::Startup,
                 capture_count: 1,
                 diagnostics: false,
+                jump_mode_observation: None,
                 output_dir: output_dir.clone(),
                 fixture_manifest_sha256: "a".repeat(64),
                 build_receipt_identity: "test-build".into(),
