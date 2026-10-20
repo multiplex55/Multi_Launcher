@@ -4541,7 +4541,7 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
             };
             let mut ed = std::mem::take(&mut self.settings_editor);
-            ed.ui(&ctx, self, settings_scope);
+            ed.ui(&ctx, self, settings_scope, first_ui_pass);
             self.settings_editor = ed;
         }
         let show_plugin = self.show_plugins;

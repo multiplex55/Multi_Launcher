@@ -1,5 +1,9 @@
 use super::state::SettingsEditor;
 use crate::gui::LauncherApp;
+use crate::gui::jump_mode::{
+    TargetKind,
+    ui::{JumpModeScope, RegistrationResult},
+};
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
 use crate::settings::NoteViewMode;
 use eframe::egui;
@@ -84,11 +88,122 @@ impl TopLevelSettingsSection {
     }
 }
 
+/// Optional, frame-local adapter for the native controls owned by this editor.
+/// It registers only the real `Response`s returned by the existing widgets.
+struct SettingsJumpTargets {
+    scope: Option<JumpModeScope>,
+    next_visual_order: u64,
+    first_ui_pass: bool,
+    activation_guarded: bool,
+}
+
+impl SettingsJumpTargets {
+    fn new(scope: Option<JumpModeScope>, first_ui_pass: bool, activation_guarded: bool) -> Self {
+        Self {
+            scope,
+            next_visual_order: 0,
+            first_ui_pass,
+            activation_guarded,
+        }
+    }
+
+    fn register(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: &'static str,
+        label: impl Into<String>,
+        kind: TargetKind,
+    ) {
+        let visual_order = self.next_visual_order;
+        self.next_visual_order = self.next_visual_order.saturating_add(1);
+        self.register_at(ui, response, identity, label, kind, visual_order);
+    }
+
+    fn reserve_order(&mut self) -> u64 {
+        let visual_order = self.next_visual_order;
+        self.next_visual_order = self.next_visual_order.saturating_add(1);
+        visual_order
+    }
+
+    fn register_at(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: &'static str,
+        label: impl Into<String>,
+        kind: TargetKind,
+        visual_order: u64,
+    ) {
+        let Some(scope) = self.scope.as_ref() else {
+            return;
+        };
+        if let RegistrationResult::Registered {
+            directive: Some(directive),
+            ..
+        } = scope.register(ui, response, identity, label, kind, visual_order)
+        {
+            directive.apply_to_response(response);
+        }
+    }
+
+    fn checkbox(
+        &mut self,
+        ui: &mut egui::Ui,
+        value: &mut bool,
+        identity: &'static str,
+        label: &str,
+    ) -> egui::Response {
+        let response = ui.checkbox(value, label);
+        self.register(ui, &response, identity, label, TargetKind::Checkbox);
+        response
+    }
+
+    fn text_edit_singleline(
+        &mut self,
+        ui: &mut egui::Ui,
+        value: &mut String,
+        identity: &'static str,
+        label: &str,
+    ) -> egui::Response {
+        let response = ui.text_edit_singleline(value);
+        self.register(ui, &response, identity, label, TargetKind::TextEntry);
+        response
+    }
+
+    fn response(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: &'static str,
+        label: &str,
+        kind: TargetKind,
+    ) {
+        self.register(ui, response, identity, label, kind);
+    }
+
+    fn button(
+        &mut self,
+        ui: &mut egui::Ui,
+        identity: &'static str,
+        label: &'static str,
+    ) -> egui::Response {
+        let response = ui.button(label);
+        self.register(ui, &response, identity, label, TargetKind::Button);
+        response
+    }
+
+    fn clicked(&self, response: &egui::Response) -> bool {
+        response.clicked() && (!self.activation_guarded || self.first_ui_pass)
+    }
+}
+
 fn show_settings_section(
     ui: &mut egui::Ui,
     section: TopLevelSettingsSection,
     forced_open: Option<bool>,
-    add_contents: impl FnOnce(&mut egui::Ui),
+    targets: &mut SettingsJumpTargets,
+    add_contents: impl FnOnce(&mut egui::Ui, &mut SettingsJumpTargets),
 ) -> egui::Rect {
     let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
         ui.ctx(),
@@ -98,14 +213,22 @@ fn show_settings_section(
     if let Some(open) = forced_open {
         state.set_open(open);
     }
-    let (_, header, _) = state
-        .show_header(ui, |ui| {
-            ui.heading(section.title());
-        })
-        .body(|ui| {
-            crate::gui::theme::widgets::secondary_help(ui, section.description());
-            add_contents(ui);
-        });
+    let header_visual_order = targets.reserve_order();
+    let header = state.show_header(ui, |ui| {
+        ui.heading(section.title());
+    });
+    let (toggle_response, header, _) = header.body(|ui| {
+        crate::gui::theme::widgets::secondary_help(ui, section.description());
+        add_contents(ui, targets);
+    });
+    targets.register_at(
+        ui,
+        &toggle_response,
+        section.persistent_id(),
+        section.title(),
+        TargetKind::Button,
+        header_visual_order,
+    );
     header.response.rect
 }
 
@@ -158,8 +281,11 @@ impl SettingsEditor {
         &mut self,
         ctx: &egui::Context,
         app: &mut LauncherApp,
-        _jump_mode_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+        jump_mode_scope: Option<JumpModeScope>,
+        first_ui_pass: bool,
     ) {
+        let mut jump_targets =
+            SettingsJumpTargets::new(jump_mode_scope, first_ui_pass, app.jump_mode_enabled());
         let mut open = app.show_settings;
         let mut cancel = false;
         egui::Window::new("Settings")
@@ -179,10 +305,17 @@ impl SettingsEditor {
                         let top_level_expand_request = ui
                             .horizontal(|ui| {
                                 let mut request = None;
-                                if ui.button("Expand all").clicked() {
+                                let expand =
+                                    jump_targets.button(ui, "sections.expand_all", "Expand all");
+                                if jump_targets.clicked(&expand) {
                                     request = Some(true);
                                 }
-                                if ui.button("Collapse all").clicked() {
+                                let collapse = jump_targets.button(
+                                    ui,
+                                    "sections.collapse_all",
+                                    "Collapse all",
+                                );
+                                if jump_targets.clicked(&collapse) {
                                     request = Some(false);
                                 }
                                 request
@@ -196,7 +329,8 @@ impl SettingsEditor {
                             ui,
                             TopLevelSettingsSection::Hotkeys,
                             top_level_expand_request,
-                            |ui| self.render_hotkey_section(ui),
+                            &mut jump_targets,
+                            |ui, targets| self.render_hotkey_section(ui, targets),
                         );
                         let reveal_paste = std::mem::take(&mut self.reveal_paste_sequence);
                         let paste_header = show_settings_section(
@@ -207,10 +341,11 @@ impl SettingsEditor {
                             } else {
                                 top_level_expand_request
                             },
-                            |ui| {
+                            &mut jump_targets,
+                            |ui, targets| {
                                 ui.label(app.paste_sequence_shortcut_summary());
                                 ui.separator();
-                                self.render_paste_sequence_section(ui);
+                                self.render_paste_sequence_section(ui, targets);
                             },
                         );
                         if reveal_paste {
@@ -220,37 +355,43 @@ impl SettingsEditor {
                             ui,
                             TopLevelSettingsSection::LauncherWindow,
                             top_level_expand_request,
-                            |ui| self.render_launcher_window_section(ui, app),
+                            &mut jump_targets,
+                            |ui, targets| self.render_launcher_window_section(ui, app, targets),
                         );
                         show_settings_section(
                             ui,
                             TopLevelSettingsSection::SearchResults,
                             top_level_expand_request,
-                            |ui| self.render_search_results_section(ui),
+                            &mut jump_targets,
+                            |ui, targets| self.render_search_results_section(ui, targets),
                         );
                         show_settings_section(
                             ui,
                             TopLevelSettingsSection::ActionsFeedback,
                             top_level_expand_request,
-                            |ui| self.render_actions_safety_feedback_section(ui),
+                            &mut jump_targets,
+                            |ui, targets| self.render_actions_safety_feedback_section(ui, targets),
                         );
                         show_settings_section(
                             ui,
                             TopLevelSettingsSection::Dashboard,
                             top_level_expand_request,
-                            |ui| self.render_dashboard_section(ui, app),
+                            &mut jump_targets,
+                            |ui, targets| self.render_dashboard_section(ui, app, targets),
                         );
                         show_settings_section(
                             ui,
                             TopLevelSettingsSection::Radial,
                             top_level_expand_request,
-                            |ui| self.render_radial_section(ui, app),
+                            &mut jump_targets,
+                            |ui, targets| self.render_radial_section(ui, app, targets),
                         );
                         show_settings_section(
                             ui,
                             TopLevelSettingsSection::Plugins,
                             top_level_expand_request,
-                            |ui| self.render_plugin_sections(ui, app),
+                            &mut jump_targets,
+                            |ui, targets| self.render_plugin_sections(ui, app, targets),
                         );
                         self.expand_request = None;
                     });
@@ -259,19 +400,24 @@ impl SettingsEditor {
                 ui.horizontal_wrapped(|ui| {
                     let pending = app.settings_save_pending();
                     let save = ui.add_enabled(!pending, egui::Button::new("Save"));
-                    if crate::gui::theme::widgets::with_button_emphasis(
+                    let save = crate::gui::theme::widgets::with_button_emphasis(
                         ui,
                         save,
                         crate::gui::theme::widgets::ButtonEmphasis::Primary,
-                    )
-                    .clicked()
-                    {
+                    );
+                    jump_targets.response(ui, &save, "footer.save", "Save", TargetKind::Button);
+                    if jump_targets.clicked(&save) {
                         self.save_settings(ctx, app);
                     }
-                    if ui
-                        .add_enabled(!pending, egui::Button::new("Cancel"))
-                        .clicked()
-                    {
+                    let cancel_button = ui.add_enabled(!pending, egui::Button::new("Cancel"));
+                    jump_targets.register(
+                        ui,
+                        &cancel_button,
+                        "footer.cancel",
+                        "Cancel",
+                        TargetKind::Button,
+                    );
+                    if jump_targets.clicked(&cancel_button) {
                         cancel = true;
                     }
                     if app.settings_save_reconciliation_required() {
@@ -288,25 +434,39 @@ impl SettingsEditor {
         app.show_settings = open;
     }
 
-    fn render_paste_sequence_section(&mut self, ui: &mut egui::Ui) {
+    fn render_paste_sequence_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        targets: &mut SettingsJumpTargets,
+    ) {
         render_paste_shortcut(
             ui,
             "Next",
+            "paste.next.enabled",
+            "paste.next.hotkey",
             &mut self.paste_next_enabled,
             &mut self.paste_sequence.next_hotkey,
+            targets,
         );
         render_paste_shortcut(
             ui,
             "Cancel",
+            "paste.cancel.enabled",
+            "paste.cancel.hotkey",
             &mut self.paste_cancel_enabled,
             &mut self.paste_sequence.cancel_hotkey,
+            targets,
         );
-        ui.checkbox(
+        targets.checkbox(
+            ui,
             &mut self.paste_sequence.escape_cancel_enabled,
+            "paste.escape_cancel",
             "Escape cancels active playback",
         );
-        ui.checkbox(
+        targets.checkbox(
+            ui,
             &mut self.paste_sequence.keep_dialog_visible_during_playback,
+            "paste.keep_visible",
             "Keep Paste Sequences dialog visible during playback",
         );
         crate::gui::theme::widgets::secondary_help(
@@ -319,9 +479,14 @@ impl SettingsEditor {
         );
     }
 
-    fn render_hotkey_section(&mut self, ui: &mut egui::Ui) {
+    fn render_hotkey_section(&mut self, ui: &mut egui::Ui, targets: &mut SettingsJumpTargets) {
         crate::gui::theme::widgets::labeled_form_row(ui, "Launcher hotkey", |ui| {
-            let resp = ui.text_edit_singleline(&mut self.hotkey);
+            let resp = targets.text_edit_singleline(
+                ui,
+                &mut self.hotkey,
+                "hotkeys.launcher",
+                "Launcher hotkey",
+            );
             if resp.changed() {
                 self.hotkey_valid = crate::hotkey::parse_hotkey(&self.hotkey).is_some();
                 if self.hotkey_valid {
@@ -331,20 +496,44 @@ impl SettingsEditor {
             hotkey_indicator(ui, self.hotkey_valid);
             resp
         });
-        self.render_optional_hotkey(ui, "Enable quit hotkey", "Quit hotkey", HotkeyKind::Quit);
-        self.render_optional_hotkey(ui, "Enable help hotkey", "Help hotkey", HotkeyKind::Help);
+        self.render_optional_hotkey(
+            ui,
+            targets,
+            "Enable quit hotkey",
+            "Quit hotkey",
+            HotkeyKind::Quit,
+        );
+        self.render_optional_hotkey(
+            ui,
+            targets,
+            "Enable help hotkey",
+            "Help hotkey",
+            HotkeyKind::Help,
+        );
     }
 
-    fn render_radial_section(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
+    fn render_radial_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        targets: &mut SettingsJumpTargets,
+    ) {
         use crate::commands::RadialCommandHost;
         use crate::radial::model::{
             InteractionMode, RadialSafetyPolicy, SubmenuPresentation, TooltipScope, TriggerScope,
         };
 
-        ui.checkbox(&mut self.radial_enabled, "Enable radial menus");
+        targets.checkbox(
+            ui,
+            &mut self.radial_enabled,
+            "radial.enabled",
+            "Enable radial menus",
+        );
         ui.add_enabled_ui(self.radial_enabled, |ui| {
-            ui.checkbox(
+            targets.checkbox(
+                ui,
                 &mut self.radial_shared_tap_hold,
+                "radial.shared_tap_hold",
                 "Share the launcher hotkey between tap and hold",
             );
             if self.radial_shared_tap_hold {
@@ -403,8 +592,10 @@ impl SettingsEditor {
             ui,
             "Tooltip delay is independent of the launcher hold threshold and item dwell delay.",
         );
-            ui.checkbox(
+            targets.checkbox(
+                ui,
                 &mut self.radial_show_expected_layout_diagnostics,
+                "radial.expected_layout_diagnostics",
                 "Show expected label-layout diagnostics",
             );
 
@@ -491,8 +682,10 @@ impl SettingsEditor {
                         "Always confirm destructive radial actions",
                     );
                 });
-            let global_inputs = ui.checkbox(
+            let global_inputs = targets.checkbox(
+                ui,
                 &mut self.radial_global_item_inputs,
+                "radial.global_item_inputs",
                 "Allow process-wide radial item shortcuts and hotstrings",
             );
             if global_inputs.changed() && !self.radial_global_item_inputs {
@@ -549,10 +742,12 @@ impl SettingsEditor {
         );
         });
         ui.horizontal(|ui| {
-            if ui.button("Edit menus...").clicked() {
+            let edit_menus = targets.button(ui, "radial.edit_menus", "Edit menus...");
+            if targets.clicked(&edit_menus) {
                 RadialCommandHost::open_radial_editor(app, false);
             }
-            if ui.button("Edit skins...").clicked() {
+            let edit_skins = targets.button(ui, "radial.edit_skins", "Edit skins...");
+            if targets.clicked(&edit_skins) {
                 RadialCommandHost::open_radial_editor(app, true);
             }
         });
@@ -563,7 +758,12 @@ impl SettingsEditor {
                         ui,
                         "Existing submenu presentations were converted to Same center.",
                     );
-                    if ui.button("Restore previous submenu presentation").clicked() {
+                    let restore = targets.button(
+                        ui,
+                        "radial.restore_submenu_presentation",
+                        "Restore previous submenu presentation",
+                    );
+                    if targets.clicked(&restore) {
                         app.request_radial_submenu_migration_restore();
                     }
                 }
@@ -600,6 +800,7 @@ impl SettingsEditor {
     fn render_optional_hotkey(
         &mut self,
         ui: &mut egui::Ui,
+        targets: &mut SettingsJumpTargets,
         toggle_label: &str,
         field_label: &str,
         kind: HotkeyKind,
@@ -618,10 +819,14 @@ impl SettingsEditor {
                 &mut self.last_valid_help_hotkey,
             ),
         };
-        ui.checkbox(enabled, toggle_label);
+        let (toggle_identity, field_identity) = match kind {
+            HotkeyKind::Quit => ("hotkeys.quit.enabled", "hotkeys.quit.value"),
+            HotkeyKind::Help => ("hotkeys.help.enabled", "hotkeys.help.value"),
+        };
+        targets.checkbox(ui, enabled, toggle_identity, toggle_label);
         if *enabled {
             crate::gui::theme::widgets::labeled_form_row(ui, field_label, |ui| {
-                let resp = ui.text_edit_singleline(value);
+                let resp = targets.text_edit_singleline(ui, value, field_identity, field_label);
                 if resp.changed() {
                     *valid = crate::hotkey::parse_hotkey(value).is_some();
                     if *valid {
@@ -634,30 +839,66 @@ impl SettingsEditor {
         }
     }
 
-    fn render_actions_safety_feedback_section(&mut self, ui: &mut egui::Ui) {
+    fn render_actions_safety_feedback_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        targets: &mut SettingsJumpTargets,
+    ) {
         ui.label(egui::RichText::new("After running an action").strong());
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.hide_after_run, "Hide window after running action");
-            ui.checkbox(&mut self.preserve_command, "Preserve command after run");
-            ui.checkbox(&mut self.clear_query_after_run, "Clear query after run");
+            targets.checkbox(
+                ui,
+                &mut self.hide_after_run,
+                "actions.hide_after_run",
+                "Hide window after running action",
+            );
+            targets.checkbox(
+                ui,
+                &mut self.preserve_command,
+                "actions.preserve_command",
+                "Preserve command after run",
+            );
+            targets.checkbox(
+                ui,
+                &mut self.clear_query_after_run,
+                "actions.clear_query_after_run",
+                "Clear query after run",
+            );
         });
 
         ui.label(egui::RichText::new("Safety").strong());
-        ui.checkbox(
+        targets.checkbox(
+            ui,
             &mut self.require_confirm_destructive,
+            "actions.confirm_destructive",
             "Require confirm for destructive actions",
         );
 
         ui.label(egui::RichText::new("Notifications and errors").strong());
-        ui.checkbox(&mut self.show_toasts, "Enable toast notifications");
+        targets.checkbox(
+            ui,
+            &mut self.show_toasts,
+            "feedback.toasts",
+            "Enable toast notifications",
+        );
         if self.show_toasts {
             crate::gui::theme::widgets::labeled_form_row(ui, "Toast duration (s)", |ui| {
                 ui.add(egui::Slider::new(&mut self.toast_duration, 0.1..=5.0).text(""))
             });
         }
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.show_inline_errors, "Show inline errors");
-            ui.checkbox(&mut self.show_error_toasts, "Show error toasts");
+            targets.checkbox(
+                ui,
+                &mut self.show_inline_errors,
+                "feedback.inline_errors",
+                "Show inline errors",
+            );
+            targets.checkbox(
+                ui,
+                &mut self.show_error_toasts,
+                "feedback.error_toasts",
+                "Show error toasts",
+            );
         });
 
         ui.label(egui::RichText::new("Diagnostics and refresh").strong());
@@ -673,8 +914,10 @@ impl SettingsEditor {
                     ui.selectable_value(&mut self.debug_logging, true, "Enabled");
                 });
         });
-        ui.checkbox(
+        targets.checkbox(
+            ui,
             &mut self.disable_timer_updates,
+            "feedback.disable_timer_updates",
             "Disable timer auto refresh",
         );
         crate::gui::theme::widgets::labeled_form_row(ui, "Timer refresh rate (s)", |ui| {
@@ -689,14 +932,36 @@ impl SettingsEditor {
         });
     }
 
-    fn render_launcher_window_section(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
-        ui.checkbox(&mut self.always_on_top, "Always on top");
+    fn render_launcher_window_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        targets: &mut SettingsJumpTargets,
+    ) {
+        targets.checkbox(
+            ui,
+            &mut self.always_on_top,
+            "launcher.always_on_top",
+            "Always on top",
+        );
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.show_launcher_icon, "Show Launcher Icon");
-            ui.checkbox(&mut self.show_launcher_title, "Show Launcher Title");
+            targets.checkbox(
+                ui,
+                &mut self.show_launcher_icon,
+                "launcher.show_icon",
+                "Show Launcher Icon",
+            );
+            targets.checkbox(
+                ui,
+                &mut self.show_launcher_title,
+                "launcher.show_title",
+                "Show Launcher Title",
+            );
         });
-        ui.checkbox(
+        targets.checkbox(
+            ui,
             &mut self.experimental_jump_mode_enabled,
+            "launcher.experimental_jump_mode",
             "Experimental Jump Mode",
         )
         .on_hover_text(
@@ -711,12 +976,22 @@ impl SettingsEditor {
             })
             .inner
         });
-        let follow_mouse_resp = ui.checkbox(&mut self.follow_mouse, "Follow mouse");
+        let follow_mouse_resp = targets.checkbox(
+            ui,
+            &mut self.follow_mouse,
+            "launcher.follow_mouse",
+            "Follow mouse",
+        );
         if follow_mouse_resp.changed() && self.follow_mouse {
             self.static_enabled = false;
         }
         ui.add_enabled_ui(!self.follow_mouse, |ui| {
-            ui.checkbox(&mut self.static_enabled, "Use static position");
+            targets.checkbox(
+                ui,
+                &mut self.static_enabled,
+                "launcher.static_position",
+                "Use static position",
+            );
         });
         if !self.follow_mouse && self.static_enabled {
             crate::gui::theme::widgets::labeled_form_row(ui, "Static X / Y / W / H", |ui| {
@@ -729,8 +1004,8 @@ impl SettingsEditor {
                     ui.add(egui::DragValue::new(&mut self.static_w));
                     ui.label("H");
                     ui.add(egui::DragValue::new(&mut self.static_h));
-                    let snapshot = ui.button("Snapshot");
-                    if snapshot.clicked() {
+                    let snapshot = targets.button(ui, "launcher.snapshot", "Snapshot");
+                    if targets.clicked(&snapshot) {
                         self.static_x = app.window_pos.0;
                         self.static_y = app.window_pos.1;
                         self.static_w = app.window_size.0;
@@ -747,20 +1022,36 @@ impl SettingsEditor {
         crate::gui::theme::widgets::labeled_form_row(ui, "List scale", |ui| {
             ui.add(egui::Slider::new(&mut self.list_scale, 0.5..=5.0).text(""))
         });
-        if ui.button("Open Theme Settings...").clicked() {
+        let theme_settings =
+            targets.button(ui, "launcher.open_theme_settings", "Open Theme Settings...");
+        if targets.clicked(&theme_settings) {
             app.open_theme_settings_dialog();
         }
     }
 
-    fn render_search_results_section(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(&mut self.query_autocomplete, "Enable query autocomplete");
+    fn render_search_results_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        targets: &mut SettingsJumpTargets,
+    ) {
+        targets.checkbox(
+            ui,
+            &mut self.query_autocomplete,
+            "search.autocomplete",
+            "Enable query autocomplete",
+        );
         crate::gui::theme::widgets::labeled_form_row(ui, "Fuzzy weight", |ui| {
             ui.add(egui::Slider::new(&mut self.fuzzy_weight, 0.0..=5.0).text(""))
         });
         crate::gui::theme::widgets::labeled_form_row(ui, "Usage weight", |ui| {
             ui.add(egui::Slider::new(&mut self.usage_weight, 0.0..=5.0).text(""))
         });
-        ui.checkbox(&mut self.match_exact, "Match exact");
+        targets.checkbox(
+            ui,
+            &mut self.match_exact,
+            "search.match_exact",
+            "Match exact",
+        );
         crate::gui::theme::widgets::labeled_form_row(ui, "Page jump", |ui| {
             ui.add(
                 egui::DragValue::new(&mut self.page_jump)
@@ -768,8 +1059,10 @@ impl SettingsEditor {
                     .speed(1),
             )
         });
-        ui.checkbox(
+        targets.checkbox(
+            ui,
             &mut self.query_results_layout_enabled,
+            "search.grid_layout",
             "Display results in grid layout",
         );
         ui.add_enabled_ui(self.query_results_layout_enabled, |ui| {
@@ -792,59 +1085,97 @@ impl SettingsEditor {
             });
             self.query_results_layout_rows = self.query_results_layout_rows.max(1);
             self.query_results_layout_cols = self.query_results_layout_cols.max(1);
-            ui.checkbox(
+            targets.checkbox(
+                ui,
                 &mut self.query_results_layout_respect_plugin_capability,
+                "search.respect_plugin_capability",
                 "Respect plugin list/grid capability",
             );
             ui.horizontal(|ui| {
                 ui.label("Force list for plugins (comma separated)");
-                ui.text_edit_singleline(&mut self.query_results_layout_plugin_opt_out);
+                targets.text_edit_singleline(
+                    ui,
+                    &mut self.query_results_layout_plugin_opt_out,
+                    "search.plugin_opt_out",
+                    "Force list for plugins",
+                );
             });
         });
     }
 
-    fn render_dashboard_section(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
-        ui.checkbox(
+    fn render_dashboard_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        targets: &mut SettingsJumpTargets,
+    ) {
+        targets.checkbox(
+            ui,
             &mut self.dashboard_enabled,
+            "dashboard.enabled",
             "Enable dashboard when query is empty",
         );
         ui.horizontal(|ui| {
             ui.label("Dashboard config path");
-            ui.text_edit_singleline(&mut self.dashboard_path);
+            targets.text_edit_singleline(
+                ui,
+                &mut self.dashboard_path,
+                "dashboard.path",
+                "Dashboard config path",
+            );
         });
         ui.horizontal(|ui| {
             ui.label("Default location");
-            ui.text_edit_singleline(&mut self.dashboard_default_location);
+            targets.text_edit_singleline(
+                ui,
+                &mut self.dashboard_default_location,
+                "dashboard.default_location",
+                "Default location",
+            );
         });
-        ui.checkbox(
+        targets.checkbox(
+            ui,
             &mut self.dashboard_show_when_empty,
+            "dashboard.show_when_empty",
             "Show dashboard when the search box is blank",
         );
-        ui.checkbox(
+        targets.checkbox(
+            ui,
             &mut self.reduce_dashboard_work_when_unfocused,
+            "dashboard.reduce_work_unfocused",
             "Reduce dashboard work when not focused",
         );
         if self.debug_logging || cfg!(debug_assertions) {
-            ui.checkbox(
+            targets.checkbox(
+                ui,
                 &mut self.show_dashboard_diagnostics,
+                "dashboard.diagnostics",
                 "Show dashboard diagnostics (dev)",
             );
         }
-        if ui.button("Customize Dashboard...").clicked() {
+        let customize = targets.button(ui, "dashboard.customize", "Customize Dashboard...");
+        if targets.clicked(&customize) {
             app.show_dashboard_editor = true;
         }
     }
 
-    fn render_plugin_sections(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
+    fn render_plugin_sections(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        targets: &mut SettingsJumpTargets,
+    ) {
         ui.separator();
-        if ui
-            .button(if self.plugins_expanded {
+        let toggle_sections = targets.button(
+            ui,
+            "plugins.toggle_sections",
+            if self.plugins_expanded {
                 "Collapse plugin sections"
             } else {
                 "Expand plugin sections"
-            })
-            .clicked()
-        {
+            },
+        );
+        if targets.clicked(&toggle_sections) {
             self.plugins_expanded = !self.plugins_expanded;
             self.expand_request = Some(self.plugins_expanded);
         }
@@ -1172,14 +1503,37 @@ enum ClipboardModifySettingsCommand {
 fn render_paste_shortcut(
     ui: &mut egui::Ui,
     name: &str,
+    enabled_identity: &'static str,
+    value_identity: &'static str,
     enabled: &mut bool,
     value: &mut Option<String>,
+    targets: &mut SettingsJumpTargets,
 ) {
     ui.horizontal_wrapped(|ui| {
-        ui.checkbox(enabled, format!("Enable {name} shortcut"));
+        let enable_label = format!("Enable {name} shortcut");
+        let enabled_response = ui.checkbox(enabled, &enable_label);
+        targets.response(
+            ui,
+            &enabled_response,
+            enabled_identity,
+            &enable_label,
+            TargetKind::Checkbox,
+        );
         ui.add_enabled_ui(*enabled, |ui| {
             let text = value.get_or_insert_with(String::new);
-            ui.add(egui::TextEdit::singleline(text).hint_text(format!("{name} shortcut")));
+            let response =
+                ui.add(egui::TextEdit::singleline(text).hint_text(format!("{name} shortcut")));
+            targets.response(
+                ui,
+                &response,
+                value_identity,
+                match name {
+                    "Next" => "Next shortcut",
+                    "Cancel" => "Cancel shortcut",
+                    _ => "Paste Sequence shortcut",
+                },
+                TargetKind::TextEntry,
+            );
         });
         if !*enabled {
             ui.label("Disabled");
@@ -1223,7 +1577,7 @@ mod settings_shell_tests {
             ..Default::default()
         });
         let mut editor = std::mem::take(&mut app.settings_editor);
-        editor.ui(ctx, app, None);
+        editor.ui(ctx, app, None, true);
         app.settings_editor = editor;
         let output = ctx.end_pass();
         fn collect(shape: &egui::epaint::Shape, labels: &mut Vec<(String, egui::Rect)>) {
@@ -1271,6 +1625,253 @@ mod settings_shell_tests {
                 ],
             );
         }
+    }
+
+    fn settings_test_app(
+        ctx: &egui::Context,
+        directory: &tempfile::TempDir,
+        mut settings: crate::settings::Settings,
+    ) -> LauncherApp {
+        use std::sync::{Arc, atomic::AtomicBool};
+
+        settings.index_paths = Some(Vec::new());
+        settings.plugin_dirs = Some(Vec::new());
+        settings.enabled_plugins = Some(std::collections::HashSet::new());
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        settings
+            .save(directory.path().join("settings.json").to_str().unwrap())
+            .unwrap();
+
+        LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            crate::plugin::PluginManager::new_inert_for_test(),
+            directory
+                .path()
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings,
+            None,
+            None,
+            Some(std::collections::HashSet::new()),
+            Some(std::collections::HashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn settings_jump_frame(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        jump: &mut crate::gui::jump_mode::ui::JumpModeUi,
+        events: Vec<egui::Event>,
+        focus_target: Option<crate::gui::jump_mode::TargetId>,
+        first_ui_pass: bool,
+    ) -> Vec<crate::gui::jump_mode::ui::RegisteredTarget> {
+        use crate::gui::jump_mode::ui::NavigationOwner;
+        use crate::gui::jump_mode::{SurfaceId, TargetGeneration};
+
+        ctx.begin_pass(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 900.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        });
+        jump.begin_frame();
+        let owner = NavigationOwner::Settings {
+            instance: jump.settings_instance(),
+        };
+        assert_eq!(jump.update_navigation_owner(ctx, owner, false), owner);
+        if let Some(target) = focus_target {
+            assert!(jump.queue_focus_intent(target, ctx.viewport_id(), jump.navigation_epoch()));
+        }
+        jump.begin_ui_pass();
+        let scope = jump
+            .scope_for_navigation_owner(
+                SurfaceId::Settings {
+                    instance: jump.settings_instance(),
+                },
+                TargetGeneration(jump.settings_instance()),
+                "settings",
+                ctx.viewport_id(),
+                owner,
+                false,
+            )
+            .expect("enabled Settings owner creates a collection scope");
+        let mut editor = std::mem::take(&mut app.settings_editor);
+        editor.ui(ctx, app, Some(scope), first_ui_pass);
+        app.settings_editor = editor;
+        jump.finish_ui_pass();
+        let targets = jump
+            .pass_registry()
+            .expect("Settings pass is collected")
+            .targets()
+            .to_vec();
+        let output = ctx.end_pass();
+        assert!(jump.prepare_pass_for_navigation_owner(ctx, owner, false, true));
+        jump.complete_frame_for_navigation_owner(ctx, owner, false, true);
+        output.drop_without_applying_deltas();
+        targets
+    }
+
+    fn settings_jump_discard_frame(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        jump: &mut crate::gui::jump_mode::ui::JumpModeUi,
+        events: Vec<egui::Event>,
+    ) -> (
+        Vec<crate::gui::jump_mode::ui::RegisteredTarget>,
+        Vec<SettingsDiscardPassState>,
+        usize,
+    ) {
+        use crate::gui::jump_mode::ui::NavigationOwner;
+        use crate::gui::jump_mode::{SurfaceId, TargetGeneration};
+
+        let owner = NavigationOwner::Settings {
+            instance: jump.settings_instance(),
+        };
+        jump.begin_frame();
+        assert_eq!(jump.update_navigation_owner(ctx, owner, false), owner);
+        let mut state_after_pass = Vec::new();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1100.0, 900.0),
+                )),
+                focused: true,
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let first_ui_pass = ui.output(|output| output.num_completed_passes == 0);
+                jump.begin_ui_pass();
+                let scope = jump
+                    .scope_for_navigation_owner(
+                        SurfaceId::Settings {
+                            instance: jump.settings_instance(),
+                        },
+                        TargetGeneration(jump.settings_instance()),
+                        "settings",
+                        ctx.viewport_id(),
+                        owner,
+                        false,
+                    )
+                    .expect("enabled Settings owner creates a collection scope");
+                let mut editor = std::mem::take(&mut app.settings_editor);
+                editor.ui(ctx, app, Some(scope), first_ui_pass);
+                app.settings_editor = editor;
+                jump.finish_ui_pass();
+                let hotkey_cursor = jump
+                    .pass_registry()
+                    .and_then(|registry| {
+                        registry
+                            .targets()
+                            .iter()
+                            .find(|target| target.metadata().label() == "Launcher hotkey")
+                    })
+                    .and_then(|target| egui::TextEdit::load_state(ctx, target.response_id()))
+                    .and_then(|state| state.cursor.char_range().map(|range| range.primary.index.0));
+                let paste_body_visible = jump.pass_registry().is_some_and(|registry| {
+                    registry
+                        .targets()
+                        .iter()
+                        .any(|target| target.metadata().label() == "Enable Next shortcut")
+                });
+                state_after_pass.push(SettingsDiscardPassState {
+                    quit_hotkey_enabled: app.settings_editor.quit_hotkey_enabled,
+                    hotkey: app.settings_editor.hotkey.clone(),
+                    hotkey_cursor,
+                    paste_body_visible,
+                });
+                if first_ui_pass {
+                    ui.ctx()
+                        .request_discard("Settings native-control state test");
+                }
+            },
+        );
+        let targets = jump
+            .pass_registry()
+            .expect("retained Settings pass is collected")
+            .targets()
+            .to_vec();
+        assert!(jump.prepare_pass_for_navigation_owner(ctx, owner, false, true));
+        jump.complete_frame_for_navigation_owner(ctx, owner, false, true);
+        let passes = output.platform_output.num_completed_passes;
+        output.drop_without_applying_deltas();
+        (targets, state_after_pass, passes)
+    }
+
+    fn target_by_label<'a>(
+        targets: &'a [crate::gui::jump_mode::ui::RegisteredTarget],
+        label: &str,
+    ) -> &'a crate::gui::jump_mode::ui::RegisteredTarget {
+        targets
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .unwrap_or_else(|| {
+                let available = targets
+                    .iter()
+                    .map(|target| target.metadata().label())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                panic!("missing Settings Jump target {label}; available: {available}")
+            })
+    }
+
+    fn settings_scroll_until_target(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        jump: &mut crate::gui::jump_mode::ui::JumpModeUi,
+        mut targets: Vec<crate::gui::jump_mode::ui::RegisteredTarget>,
+        wanted_label: &str,
+    ) -> Vec<crate::gui::jump_mode::ui::RegisteredTarget> {
+        let scroll_position = target_by_label(&targets, "Expand all").rect().center();
+        for _ in 0..16 {
+            if targets
+                .iter()
+                .any(|target| target.metadata().label() == wanted_label)
+            {
+                return targets;
+            }
+            targets = settings_jump_frame(
+                ctx,
+                app,
+                jump,
+                vec![
+                    egui::Event::PointerMoved(scroll_position),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -180.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                None,
+                true,
+            );
+        }
+        target_by_label(&targets, wanted_label);
+        targets
+    }
+
+    struct SettingsDiscardPassState {
+        quit_hotkey_enabled: bool,
+        hotkey: String,
+        hotkey_cursor: Option<usize>,
+        paste_body_visible: bool,
     }
 
     #[test]
@@ -1361,6 +1962,261 @@ mod settings_shell_tests {
         assert_eq!(app.settings_editor.paste_sequence, settings.paste_sequence);
     }
 
+    #[test]
+    fn jump_mode_focuses_real_settings_controls_and_later_egui_keys_activate_them() {
+        use crate::gui::jump_mode::ui::{JumpModeUi, NavigationOwner};
+
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let mut settings = crate::settings::Settings::default();
+        settings.experimental_jump_mode_enabled = true;
+        let mut app = settings_test_app(&ctx, &directory, settings);
+        app.show_settings = true;
+        for _ in 0..3 {
+            paste_settings_frame(&ctx, &mut app, Vec::new());
+        }
+        paste_settings_click(&ctx, &mut app, "Expand all");
+
+        let mut jump = JumpModeUi::new(true);
+        let settings_owner = NavigationOwner::Settings { instance: 1 };
+        let setup_output = ctx.run_ui(
+            egui::RawInput {
+                focused: true,
+                ..Default::default()
+            },
+            |ui| {
+                jump.begin_frame();
+                assert!(jump.observe_settings_visibility(true));
+                assert_eq!(
+                    jump.update_navigation_owner(&ctx, settings_owner, true),
+                    NavigationOwner::Blocked,
+                    "the newly opened Settings owner waits for retained window ordering"
+                );
+                ui.label("Settings owner setup");
+            },
+        );
+        setup_output.drop_without_applying_deltas();
+
+        let mut targets = settings_jump_frame(&ctx, &mut app, &mut jump, Vec::new(), None, true);
+        app.settings_save_reconciliation_required = true;
+        let disabled_targets =
+            settings_jump_frame(&ctx, &mut app, &mut jump, Vec::new(), None, true);
+        assert!(
+            disabled_targets
+                .iter()
+                .all(|target| !matches!(target.metadata().label(), "Save" | "Cancel")),
+            "disabled footer controls are excluded from the registry"
+        );
+        app.settings_save_reconciliation_required = false;
+        assert!(app.jump_mode_enabled());
+        let collapse = target_by_label(&targets, "Collapse all").clone();
+        let focused = settings_jump_frame(
+            &ctx,
+            &mut app,
+            &mut jump,
+            Vec::new(),
+            Some(collapse.id().clone()),
+            true,
+        );
+        assert!(
+            target_by_label(&focused, "Launcher hotkey").eligible(),
+            "focus handoff never activates Expand/Collapse"
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(collapse.response_id()),
+            "the one-shot intent focuses the real Settings button response"
+        );
+
+        let enter = egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let collapsed =
+            settings_jump_frame(&ctx, &mut app, &mut jump, vec![enter.clone()], None, true);
+        assert!(
+            collapsed
+                .iter()
+                .all(|target| target.metadata().label() != "Launcher hotkey"),
+            "a later native Enter activates Collapse all"
+        );
+        let expand = target_by_label(&collapsed, "Expand all").clone();
+        settings_jump_frame(
+            &ctx,
+            &mut app,
+            &mut jump,
+            Vec::new(),
+            Some(expand.id().clone()),
+            true,
+        );
+        targets = settings_jump_frame(&ctx, &mut app, &mut jump, vec![enter.clone()], None, true);
+        assert!(target_by_label(&targets, "Launcher hotkey").eligible());
+
+        let checkbox = target_by_label(&targets, "Enable quit hotkey").clone();
+        let quit_hotkey_before = app.settings_editor.quit_hotkey_enabled;
+        settings_jump_frame(
+            &ctx,
+            &mut app,
+            &mut jump,
+            Vec::new(),
+            Some(checkbox.id().clone()),
+            true,
+        );
+        assert_eq!(app.settings_editor.quit_hotkey_enabled, quit_hotkey_before);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(checkbox.response_id()),
+            "checkbox intent uses its actual egui response"
+        );
+        let space = egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let (_, checkbox_values, checkbox_passes) =
+            settings_jump_discard_frame(&ctx, &mut app, &mut jump, vec![space]);
+        assert_eq!(checkbox_passes, 2, "egui retains its second pass");
+        assert_eq!(checkbox_values.len(), checkbox_passes);
+        assert_ne!(
+            checkbox_values[0].quit_hotkey_enabled, quit_hotkey_before,
+            "the first native pass applies the Space activation"
+        );
+        assert_eq!(
+            checkbox_values[1].quit_hotkey_enabled, checkbox_values[0].quit_hotkey_enabled,
+            "the actual discarded pass retains the first pass's checkbox state"
+        );
+
+        let pointer_checkbox = target_by_label(&targets, "Enable quit hotkey").clone();
+        let pointer_click =
+            std::iter::once(egui::Event::PointerMoved(pointer_checkbox.rect().center()))
+                .chain(
+                    [true, false]
+                        .into_iter()
+                        .map(|pressed| egui::Event::PointerButton {
+                            pos: pointer_checkbox.rect().center(),
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        }),
+                )
+                .collect();
+        let before_pointer = app.settings_editor.quit_hotkey_enabled;
+        let (_, pointer_values, pointer_passes) =
+            settings_jump_discard_frame(&ctx, &mut app, &mut jump, pointer_click);
+        assert_eq!(
+            pointer_passes, 2,
+            "pointer activation also requests a retry"
+        );
+        assert_eq!(pointer_values[0].quit_hotkey_enabled, !before_pointer);
+        assert_eq!(
+            pointer_values[1].quit_hotkey_enabled,
+            pointer_values[0].quit_hotkey_enabled
+        );
+
+        let paste_header = target_by_label(&targets, "Paste Sequences").clone();
+        settings_jump_frame(
+            &ctx,
+            &mut app,
+            &mut jump,
+            Vec::new(),
+            Some(paste_header.id().clone()),
+            true,
+        );
+        let (collapsed_targets, header_values, header_passes) =
+            settings_jump_discard_frame(&ctx, &mut app, &mut jump, vec![enter.clone()]);
+        assert_eq!(header_passes, 2, "section toggles survive the retry");
+        assert!(target_by_label(&targets, "Enable Next shortcut").eligible());
+        assert!(
+            collapsed_targets
+                .iter()
+                .all(|target| target.metadata().label() != "Enable Next shortcut")
+        );
+        assert!(header_values.iter().all(|pass| !pass.paste_body_visible));
+
+        let launcher_hotkey = target_by_label(&targets, "Launcher hotkey").clone();
+        settings_jump_frame(
+            &ctx,
+            &mut app,
+            &mut jump,
+            Vec::new(),
+            Some(launcher_hotkey.id().clone()),
+            true,
+        );
+        let original_hotkey = app.settings_editor.hotkey.clone();
+        let (_, hotkey_values, hotkey_passes) = settings_jump_discard_frame(
+            &ctx,
+            &mut app,
+            &mut jump,
+            vec![egui::Event::Text("q".into())],
+        );
+        assert_eq!(hotkey_passes, 2, "text entry is checked in a retained pass");
+        assert_eq!(hotkey_values[0].hotkey, format!("{original_hotkey}q"));
+        assert_eq!(hotkey_values[1].hotkey, hotkey_values[0].hotkey);
+        assert_ne!(app.settings_editor.hotkey, original_hotkey);
+        assert!(app.settings_editor.hotkey.contains('q'));
+        assert_eq!(
+            hotkey_values[1].hotkey_cursor,
+            Some(original_hotkey.chars().count() + 1),
+            "the retained TextEdit pass keeps its caret after the inserted character"
+        );
+
+        targets = settings_scroll_until_target(
+            &ctx,
+            &mut app,
+            &mut jump,
+            targets,
+            "Experimental Jump Mode",
+        );
+        let jump_mode_toggle = target_by_label(&targets, "Experimental Jump Mode").clone();
+        settings_jump_frame(
+            &ctx,
+            &mut app,
+            &mut jump,
+            Vec::new(),
+            Some(jump_mode_toggle.id().clone()),
+            true,
+        );
+        settings_jump_frame(
+            &ctx,
+            &mut app,
+            &mut jump,
+            vec![egui::Event::Key {
+                key: egui::Key::Space,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            None,
+            true,
+        );
+        assert!(!app.settings_editor.experimental_jump_mode_enabled);
+        assert!(app.jump_mode_enabled(), "draft edits do not change runtime");
+
+        let cancel = target_by_label(&targets, "Cancel").clone();
+        settings_jump_frame(
+            &ctx,
+            &mut app,
+            &mut jump,
+            Vec::new(),
+            Some(cancel.id().clone()),
+            true,
+        );
+        settings_jump_frame(&ctx, &mut app, &mut jump, vec![enter], None, true);
+        assert!(!app.show_settings);
+        assert!(
+            app.jump_mode_enabled(),
+            "Cancel keeps the committed runtime flag"
+        );
+        assert!(app.settings_editor.experimental_jump_mode_enabled);
+    }
+
     fn draw_sections(ctx: &egui::Context, expand_all: Option<bool>) -> (Vec<bool>, Vec<egui::Id>) {
         let mut open_states = Vec::new();
         let mut ids = Vec::new();
@@ -1376,9 +2232,10 @@ mod settings_shell_tests {
                 if let Some(open) = expand_all {
                     set_all_settings_sections_open(ui, open);
                 }
+                let mut targets = SettingsJumpTargets::new(None, true, false);
                 for section in TopLevelSettingsSection::ALL {
                     let id = section.egui_id(ui);
-                    show_settings_section(ui, section, None, |ui| {
+                    show_settings_section(ui, section, None, &mut targets, |ui, _| {
                         ui.label("section content");
                     });
                     open_states.push(
