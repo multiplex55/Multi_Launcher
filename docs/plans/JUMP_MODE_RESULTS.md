@@ -1,11 +1,11 @@
 # Jump Mode Results
 
-Implementation is in progress. M00–M11 are complete; M12 complex controls/MkMacro is next. M12–M15 remain pending. Phase 1 native evidence is accepted; native Settings/dialog/complex-control evidence remains pending.
+Implementation is in progress. M00–M11 and M12-A complex controls are complete; M12-B MkMacro is next. M13–M15 remain pending. Phase 1 native evidence is accepted; native Settings/dialog/complex-control evidence remains pending.
 
 - Branch: feat/jump-mode-2026-10-19-c7e42.
 - Starting SHA: 8f94b003a12853735d1cb4689c6ec4e53c4ace8e.
-- Latest completed checkpoint: 1ce05985c4bbd668f0d63b80bc319ef28e2e5f39 (M11-A).
-- All checkpoint commits through M11-A were pushed normally to origin; no local-only task commits.
+- Latest completed checkpoint: 1efa8ac29ee0ce7d5ca3dd352229568e50f8a4d6 (M11-B).
+- All checkpoint commits through M11-B were pushed normally to origin; no local-only task commits.
 - Current ownership, exact historical commands, failures and next action: [execution ledger](JUMP_MODE_EXECUTION.md).
 - This report consolidates accepted results. Earlier failed evidence remains unchanged in the ignored raw evidence directory.
 
@@ -42,7 +42,7 @@ Root/Settings(instance)/Notes(instance)/Todo(instance)/Timer(instance)/PasteSequ
 | Settings basic controls | Supported + verified real egui widgets/headless; native screenshots pending M13 |
 | Notes/Todo dialogs | Supported basic controls; real egui/headless behavior verified; native evidence pending M13 |
 | Timer/Paste Sequence dialogs | Basic controls supported+verified headless; native evidence follows M13 |
-| Combo/slider/DragValue/radio/multiline adapters | Pending M12; currently unregistered |
+| Complex control adapters | Representative sliders/numeric/multiline/combos supported+verified headless; native evidence M13; radio adapter tested without inventing product UI |
 | MkMacro representative controls | Pending M12; native proof pending M13 |
 | Unsupported windows/popups | Background/root suppression verified; supported nested controls still require M11/M12 |
 | Feature disabled | Supported + verified headless/native catalog18 |
@@ -50,7 +50,7 @@ Root/Settings(instance)/Notes(instance)/Todo(instance)/Timer(instance)/PasteSequ
 
 Dashboard registration covers RecentCommands rows; PinnedQueryResults/QueryList rows and Refresh; Todo summary/row Open; Calendar Open/Add; Temp Add/ClearAll/Refresh/row Open/Clear; Timer New/Pause/Cancel; Scratchpad Copy/AppendTimestamp/Refresh; NowPlaying controls; Recycle Clean/Refresh; SystemActions rows/Refresh; SystemStatus Refresh. Native automation activates only safe fixture note FillQuery actions. PinnedCommands/CommandHistory and complex Todo/Scratchpad/Calendar controls remain unregistered.
 
-Settings registration covers all eight top-level section toggles, Expand/Collapse all, Save/Cancel, direct built-in checkboxes/single-line fields and simple buttons in Hotkeys, Paste Sequences, Launcher, Search, Actions/Feedback, Dashboard and Radial. The Plugins section header is supported; delegated plugin/Note editor controls and complex controls remain unregistered. Disabled pending-save footer controls are excluded. The section target is the actual collapse-toggle Response, with existing persistent section identity.
+Settings registration covers all eight top-level section toggles, Expand/Collapse all, Save/Cancel, direct built-in checkboxes/single-line fields and simple buttons in Hotkeys, Paste Sequences, Launcher, Search, Actions/Feedback, Dashboard and Radial. The Plugins section header is supported; delegated plugin/Note settings controls and unlisted complex controls remain unregistered. Disabled pending-save footer controls are excluded. The section target is the actual collapse-toggle Response, with existing persistent section identity.
 
 ## Milestones
 
@@ -68,14 +68,14 @@ Settings registration covers all eight top-level section toggles, Expand/Collaps
 | M09 | complete | Bounded core/evidence review;8 painter tests and post-fix native Dashboard01–05 |
 | M10 | complete | M10-A63 tests; M10-B67 tests and scoped review; native evidence reserved M13 |
 | M11 | complete | Notes/Todo and Timer/Paste; repaired final83tests + scoped review clean |
-| M12 | pending | Complex controls/MkMacro |
+| M12 | in_progress | M12-A accepted:89tests + scoped review; MkMacro follows |
 | M13 | pending | Extended native screenshots and control semantics |
 | M14 | pending | Focused reliability, after measurements, Clippy and review |
 | M15 | pending | Final representative native smoke, consolidated final status/handoff |
 
 ## Verification
 
-Latest combined command on repaired M11-B source, exit0, **83 passed / 5827 skipped**:
+Latest combined command on accepted M12-A source, exit0, **89 passed / 5827 skipped**:
 
 ~~~powershell
 cargo nextest run --lib --no-fail-fast --cargo-profile fast-dev --features "dev-smoke-binaries qa-framebuffer-capture" -E 'test(jump_mode) | test(actual_root_navigation_owner_follows_settings_and_foreign_window_layers) | test(opening_settings_on_a_discarded_root_pass_cancels_background_navigation) | test(settings_owner_blocks_root_autofocus_and_enter_activation) | test(settings_escape_closes_when_jump_mode_owns_root_navigation) | test(note_find_shortcut_and_escape_leave_dirty_note_open_until_the_next_escape) | test(note_find_shortcut_uses_focused_or_top_note_and_preserves_ctrl_w_close) | test(settings_shell_tests) | test(todo_row_widget_ids_stay_bound_to_entry_when_filter_moves_another_row_to_zero) | test(enter_adds_todo_with_filter_focus) | test(enter_adds_todo_with_tags) | test(ordinary_enter_cannot_activate_root_results_behind_timer_or_paste_dialogs) | test(open_timer_resets_timer_fields_and_arms_duration_focus) | test(open_alarm_clears_pending_timer_focus_and_keeps_alarm_title) | test(paste_saved_row_native_identity_survives_removal_of_an_earlier_row)'
@@ -85,10 +85,16 @@ The real Settings test verifies focus before action, distinct Enter/Space/text, 
 
 Earlier scoped accepted checks include M09 paint/parent-clip8 passed/5877 skipped; M08 processed Tab/Enter2 passed/5879 skipped and observer3 passed/5877 skipped; fixture tests5/5 plus production note/search/tag/zero-result semantics and PowerShell parser/reader/predicate checks. Exact historical commands/results and repaired failures are in the execution ledger. No full repository suite, final Clippy or final performance qualification is claimed.
 
-Notes/Todo basic controls now use the same owner/registry. Notes uses visible slug-bound rows, management/search controls and edit Save/Cancel; multiline remains M12. Todo covers draft/filter/tag fields, Add, row completion/tag editing/Remove and clear-confirmation controls; priority DragValue remains M12. Completion only focuses; fresh native Enter performs the existing action. Exact-instance, popup, draft preservation, immediate-next-frame non-Add safety and feature-off behavior are covered. The earlier exact Todo row-identity/legacy run passed2/2; both cases are included in the current83-test union. Native dialog proof remains pending M13.
+Notes/Todo basic controls now use the same owner/registry. Notes uses visible slug-bound rows, management/search controls and edit Save/Cancel; its draft multiline editor is now registered in M12-A. Todo covers draft/filter/tag fields, Add, row completion/tag editing/Remove and clear-confirmation controls; priority DragValue is now registered and verified with actual u8 arrow/bounds tests in M12-A. Completion only focuses; fresh native Enter performs the existing action. Exact-instance, popup, draft preservation, immediate-next-frame non-Add safety and feature-off behavior are covered. The earlier exact Todo row-identity/legacy run passed2/2; both cases are included in the current89-test union. Native dialog proof remains pending M13.
 
 
-Timer basic targets cover Duration/Time, Name, Play, Start and Cancel; Sound combo follows M12. Native Timer/Alarm title changes invalidate the old instance. Paste covers saved rows, New/Remove Saved/Playback Settings, name/hotkey/playback choices, simple step-management buttons and footer controls with their existing enablement. Source/advanced editors remain unregistered pending M12. Saved rows have durable semantic and explicit native IDs. Remove Saved confirmation owns only Confirm/Keep; opening and closing discard stale targets immediately. Production action handlers are unchanged; tests use only inert row loading, Keep and cancellation, never timer start/sound or paste execution. Focused5/5 initially passed; scoped review then found a same-pass confirmation handoff defect. After repair, its strengthened exact test passed1/1 and the final union passed83/83 (run e1cc9e15-a854-49d1-af06-7861b7b3ba35). Bounded reviewer closed the transition defect with no new finding. Native evidence remains M13.
+Timer basic targets cover Duration/Time, Name, Play, Start and Cancel; Sound combo is now registered in M12-A. Native Timer/Alarm title changes invalidate the old instance. Paste covers saved rows, New/Remove Saved/Playback Settings, name/hotkey/playback choices, simple step-management buttons and footer controls with their existing enablement. Source/advanced Paste editors remain unregistered. Saved rows have durable semantic and explicit native IDs. Remove Saved confirmation owns only Confirm/Keep; opening and closing discard stale targets immediately. Production action handlers are unchanged; tests use only inert row loading, Keep and cancellation, never timer start/sound or paste execution. Focused5/5 initially passed; scoped review then found a same-pass confirmation handoff defect. After repair, its strengthened exact test passed1/1 and the final union passed83/83 (run e1cc9e15-a854-49d1-af06-7861b7b3ba35). Bounded reviewer closed the transition defect with no new finding. Native evidence remains M13.
+
+M12-A adds distinct thumb/numeric targets to the five existing Settings float rows: Toast duration0.1–5, Query/List scale0.5–5, Fuzzy/Usage weight0–5. Debug logging and Timer Sound expose their actual combo anchors and visible options. Notes draft multiline uses native caret/input; Todo priority uses native integer editing. Radio focus/Space behavior is verified at the adapter level; no new Settings radio UI was added.
+
+Recognized native combos require exactly one current owned anchor, actual foreground popup layer and focus in the parent or that popup. The invisible sizing pass and owner-transition passes expose no eligible targets; only narrow anchor provenance survives until the actual popup is interactive. Unknown/foreign/stale popups remain blocked. Existing inline Todo/Paste confirmations retain their separate child scopes. Real foreign Foreground TextEdit regression proves its leader/text remain untouched with the combo still open.
+
+Actual native-widget tests cover focus without mutation, later numeric/radio/text actions, multiline typing/newline, combo option focus/activation/Escape, first and repeated slider arrows and continuous Todo priority arrows at0/255. A final focused3/3 run passed, then the literal combined filter passed89/89. Early integer/no-op, range, first-arrow focus and fixture-kinetic-scroll failures are documented in the execution ledger. Narrow vendored fixes clamp keyboard increments, give zero-decimal keyboard input a meaningful signed step without changing pointer sensitivity, and allow native key filters on newly focused widgets. One-shot focus seeds native editor/slider filters; exact owned TextEntry identity preserves focus across legitimate save generations. Scoped review closed both popup and numeric/focus findings; no high/medium finding remains. Native control evidence is still pending M13.
 ## Actual native evidence
 
 All raw paths are under G:/Repos/rust/Multi_Launcher/dev/jump_mode/evidence/. Each accepted run retains summary.md, scenarios.json, events.jsonl, manifest, PNG/receipt/hash bindings and process_lifecycle.json. Parent/reviewer rechecked identities, frame/pass and owned cleanup.

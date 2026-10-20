@@ -496,10 +496,11 @@ impl Widget for DragValue<'_> {
         let max_decimals = max_decimals
             .unwrap_or(auto_decimals + 2)
             .at_least(min_decimals);
+        let integer_keyboard_step = max_decimals == 0;
         let auto_decimals = auto_decimals.clamp(min_decimals, max_decimals);
 
-        let change = ui.input_mut(|input| {
-            let mut change = 0.0;
+        let (keyboard_change, accesskit_change) = ui.input_mut(|input| {
+            let mut keyboard_change = 0.0;
 
             if is_kb_editing {
                 // This deliberately doesn't listen for left and right arrow keys,
@@ -511,15 +512,17 @@ impl Widget for DragValue<'_> {
                 // assume this behavior, so having a separate mode for incrementing
                 // and decrementing, that supports all arrow keys, would be
                 // problematic.
-                change += input.count_and_consume_key(Modifiers::NONE, Key::ArrowUp) as f64
+                keyboard_change += input.count_and_consume_key(Modifiers::NONE, Key::ArrowUp)
+                    as f64
                     - input.count_and_consume_key(Modifiers::NONE, Key::ArrowDown) as f64;
             }
 
             use accesskit::Action;
-            change += input.num_accesskit_action_requests(id, Action::Increment) as f64
+            let accesskit_change = input.num_accesskit_action_requests(id, Action::Increment)
+                as f64
                 - input.num_accesskit_action_requests(id, Action::Decrement) as f64;
 
-            change
+            (keyboard_change, accesskit_change)
         });
 
         ui.input(|input| {
@@ -535,9 +538,23 @@ impl Widget for DragValue<'_> {
             value = clamp_value_to_range(value, range.clone());
         }
 
-        if change != 0.0 {
-            value += speed * change;
+        if keyboard_change != 0.0 || accesskit_change != 0.0 {
+            // Integral and zero-decimal controls cannot represent sub-unit
+            // keyboard increments. Keep the configured drag speed for pointer
+            // movement and AccessKit's advertised increment, but give Up/Down
+            // at least one whole unit when the control displays no decimals.
+            let keyboard_step = if integer_keyboard_step {
+                if speed == 0.0 {
+                    0.0
+                } else {
+                    speed.signum() * speed.abs().max(1.0)
+                }
+            } else {
+                speed
+            };
+            value += keyboard_step * keyboard_change + speed * accesskit_change;
             value = emath::round_to_decimals(value, auto_decimals);
+            value = clamp_value_to_range(value, range.clone());
         }
 
         if old_value != value {

@@ -899,10 +899,11 @@ impl Memory {
     /// This allows you to control whether the widget will loose focus
     /// when the user presses tab, arrow keys, or escape.
     ///
-    /// You must first give focus to the widget before calling this.
+    /// You must first give focus to the widget before calling this. This also
+    /// applies to focus requested during the current frame, so callers can set
+    /// the correct filter before the next frame routes its keyboard events.
     pub fn set_focus_lock_filter(&mut self, id: Id, event_filter: EventFilter) {
-        if self.had_focus_last_frame(id)
-            && self.has_focus(id)
+        if self.has_focus(id)
             && let Some(focused) = &mut self.focus_mut().focused_widget
             && focused.id == id
         {

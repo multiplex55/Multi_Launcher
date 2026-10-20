@@ -25,7 +25,7 @@ impl NavigationEpoch {
 /// the owning component and neither directive invokes an action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FocusDirective {
-    Focus,
+    Focus(TargetKind),
     Select,
 }
 
@@ -156,9 +156,18 @@ pub(crate) fn resolve_layer_navigation_owner(
     ctx: &egui::Context,
     windows: NavigationWindows,
 ) -> NavigationOwner {
+    if egui::Popup::is_any_open(ctx) {
+        return NavigationOwner::Blocked;
+    }
+    resolve_layer_navigation_owner_parent(ctx, windows)
+}
+
+pub(crate) fn resolve_layer_navigation_owner_parent(
+    ctx: &egui::Context,
+    windows: NavigationWindows,
+) -> NavigationOwner {
     if ctx.viewport_id() != egui::ViewportId::ROOT
         || !ctx.input(|input| input.focused)
-        || egui::Popup::is_any_open(ctx)
         || ctx.memory(|memory| memory.top_modal_layer().is_some())
     {
         return NavigationOwner::Blocked;
@@ -209,10 +218,134 @@ pub(crate) fn resolve_layer_navigation_owner(
     }
 }
 
+pub(crate) fn resolve_layer_navigation_owner_with_combo_popup(
+    ctx: &egui::Context,
+    windows: NavigationWindows,
+    combo_popup: Option<&ComboPopupOwner>,
+) -> NavigationOwner {
+    let parent_owner = resolve_layer_navigation_owner_parent(ctx, windows);
+    if parent_owner == NavigationOwner::Blocked {
+        return NavigationOwner::Blocked;
+    }
+    if egui::Popup::is_any_open(ctx) {
+        if combo_popup.is_some_and(|popup| popup.is_current(ctx, parent_owner)) {
+            parent_owner
+        } else {
+            NavigationOwner::Blocked
+        }
+    } else if combo_popup.is_some() {
+        NavigationOwner::Blocked
+    } else {
+        parent_owner
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ComboPopupOwner {
+    parent_owner: NavigationOwner,
+    anchor_id: TargetId,
+    response_id: egui::Id,
+    anchor_layer: egui::LayerId,
+    popup_layer: egui::LayerId,
+    popup_surface: SurfaceId,
+}
+
+impl ComboPopupOwner {
+    fn parent_and_focus_are_current(
+        &self,
+        ctx: &egui::Context,
+        parent_owner: NavigationOwner,
+    ) -> bool {
+        self.parent_owner == parent_owner
+            && parent_owner.owns_surface(self.anchor_id.surface())
+            && egui::ComboBox::is_open(ctx, self.response_id)
+            && egui::Popup::is_any_open(ctx)
+            && visible_top_middle_layer(ctx) == Some(self.anchor_layer)
+            && focused_response_layer(ctx)
+                .is_none_or(|layer| layer == self.anchor_layer || layer == self.popup_layer)
+    }
+
+    /// The first visible ComboBox popup pass is deliberately non-interactive
+    /// while egui measures its contents. Preserve the exact open anchor across
+    /// that pass so the next rendered pass can verify the popup layer before
+    /// taking ownership; this is provenance only, never an eligible target.
+    fn is_sizing_pass(&self, ctx: &egui::Context, parent_owner: NavigationOwner) -> bool {
+        if !self.parent_and_focus_are_current(ctx, parent_owner) {
+            return false;
+        }
+
+        let popup_id = self.response_id.with("popup");
+        let Some(rect) = ctx.memory(|memory| memory.area_rect(popup_id)) else {
+            return false;
+        };
+        rect.width() > 0.0
+            && rect.height() > 0.0
+            && egui::containers::AreaState::load(ctx, popup_id)
+                .is_some_and(|state| !state.interactable)
+    }
+
+    fn is_current(&self, ctx: &egui::Context, parent_owner: NavigationOwner) -> bool {
+        if !self.parent_and_focus_are_current(ctx, parent_owner) {
+            return false;
+        }
+
+        let popup_id = self.response_id.with("popup");
+        let Some(rect) = ctx.memory(|memory| memory.area_rect(popup_id)) else {
+            return false;
+        };
+        rect.width() > 0.0
+            && rect.height() > 0.0
+            && ctx.layer_id_at(rect.center()) == Some(self.popup_layer)
+    }
+}
+
+fn combo_popup_surface(anchor_id: &TargetId) -> SurfaceId {
+    let instance = match anchor_id.surface() {
+        SurfaceId::Settings { instance }
+        | SurfaceId::Dialog { instance, .. }
+        | SurfaceId::Popup { instance, .. } => *instance,
+        SurfaceId::Dashboard | SurfaceId::LauncherResults => anchor_id.generation().0,
+    };
+    let semantic = match anchor_id.semantic() {
+        SemanticTargetId::Named(value) => value.clone(),
+        SemanticTargetId::RootResult(index) => format!("root-result:{index}"),
+    };
+    SurfaceId::popup(
+        format!("combo:{semantic}"),
+        instance,
+        anchor_id.surface().clone(),
+    )
+}
+
 impl FocusDirective {
     pub(crate) fn apply_to_response(self, response: &egui::Response) {
-        if self == Self::Focus {
-            response.request_focus();
+        let Self::Focus(kind) = self else {
+            return;
+        };
+        response.request_focus();
+        let event_filter = match kind {
+            // Native editors use arrows for caret movement or value stepping.
+            // Seed that lock with the one-shot focus transfer so egui does not
+            // treat the first post-hint arrow as focus navigation.
+            TargetKind::TextEntry => Some(egui::EventFilter {
+                horizontal_arrows: true,
+                vertical_arrows: true,
+                ..Default::default()
+            }),
+            // The widget installs its orientation-specific filter once it has
+            // rendered with focus. Until then, preserve the first native arrow
+            // on either axis for an orientation-agnostic Slider target.
+            TargetKind::Slider => Some(egui::EventFilter {
+                horizontal_arrows: true,
+                vertical_arrows: true,
+                ..Default::default()
+            }),
+            _ => None,
+        };
+        if let Some(event_filter) = event_filter {
+            response.ctx.memory_mut(|memory| {
+                memory.set_focus_lock_filter(response.id, event_filter);
+            });
         }
     }
 }
@@ -281,6 +414,9 @@ impl RegisteredTarget {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TargetRegistry {
     targets: Vec<RegisteredTarget>,
+    // Combo anchors are retained separately when the popup becomes the active
+    // surface, so the next frame can prove which native popup owns navigation.
+    combo_anchors: Vec<RegisteredTarget>,
 }
 
 impl TargetRegistry {
@@ -305,6 +441,12 @@ impl TargetRegistry {
     }
 
     fn prefer_active_surface(&mut self) {
+        self.combo_anchors = self
+            .targets
+            .iter()
+            .filter(|target| target.metadata.kind() == TargetKind::ComboBox)
+            .cloned()
+            .collect();
         let Some(priority) = self
             .targets
             .iter()
@@ -341,14 +483,19 @@ impl TargetRegistry {
         ctx: &egui::Context,
         navigation_owner: NavigationOwner,
         root_targets_allowed: bool,
+        active_combo_popup: Option<&ComboPopupOwner>,
     ) {
         let root_focused = ctx.input(|input| input.focused);
         let root_viewport = ctx.viewport_id() == egui::ViewportId::ROOT;
         let popup_open = egui::Popup::is_any_open(ctx);
         self.targets.retain(|target| {
             let root_surface = is_root_surface(target.id().surface());
+            let popup_target = is_popup_surface(target.id().surface());
             let surface_owned = navigation_owner.owns_surface(target.id().surface());
             let navigation_available = navigation_owner != NavigationOwner::Blocked;
+            let popup_surface_owned = active_combo_popup
+                .as_ref()
+                .is_some_and(|popup| popup.popup_surface == *target.id().surface());
             root_focused
                 && root_viewport
                 && target.viewport == egui::ViewportId::ROOT
@@ -361,9 +508,70 @@ impl TargetRegistry {
                     || (navigation_owner == NavigationOwner::Root
                         && root_targets_allowed
                         && !popup_open))
-                && (!popup_open || is_popup_surface(target.id().surface()))
+                && if popup_open {
+                    popup_target && popup_surface_owned
+                } else {
+                    // Popup surfaces are also used by existing inline child
+                    // confirmations. Native ComboBox children are only
+                    // admitted while their exact egui popup is open.
+                    true
+                }
         });
-        self.prefer_active_surface();
+        self.combo_anchors.retain(|target| {
+            root_focused
+                && root_viewport
+                && target.viewport == egui::ViewportId::ROOT
+                && target.eligible
+                && target.enabled
+                && navigation_owner != NavigationOwner::Blocked
+                && navigation_owner.owns_surface(target.id().surface())
+                && ctx.memory(|memory| memory.allows_interaction(target.layer_id))
+        });
+    }
+
+    fn open_combo_popup(
+        &self,
+        ctx: &egui::Context,
+        parent_owner: NavigationOwner,
+    ) -> Result<Option<ComboPopupOwner>, ()> {
+        if !egui::Popup::is_any_open(ctx) {
+            return Ok(None);
+        }
+
+        let mut open_anchor = None;
+        for anchor in &self.combo_anchors {
+            if anchor.viewport != egui::ViewportId::ROOT
+                || !anchor.enabled
+                || !anchor.eligible
+                || !parent_owner.owns_surface(anchor.id().surface())
+                || !egui::ComboBox::is_open(ctx, anchor.response_id)
+            {
+                continue;
+            }
+            if open_anchor.is_some() {
+                return Err(());
+            }
+            open_anchor = Some(anchor);
+        }
+
+        let Some(anchor) = open_anchor else {
+            return Err(());
+        };
+        let popup_id = anchor.response_id.with("popup");
+        let owner = ComboPopupOwner {
+            parent_owner,
+            anchor_id: anchor.id().clone(),
+            response_id: anchor.response_id,
+            anchor_layer: anchor.layer_id,
+            popup_layer: egui::LayerId::new(egui::Order::Foreground, popup_id),
+            popup_surface: combo_popup_surface(anchor.id()),
+        };
+        if visible_top_middle_layer(ctx) != Some(anchor.layer_id)
+            || !(owner.is_current(ctx, parent_owner) || owner.is_sizing_pass(ctx, parent_owner))
+        {
+            return Err(());
+        }
+        Ok(Some(owner))
     }
 }
 
@@ -468,6 +676,11 @@ impl JumpModeScope {
             SurfaceId::popup(kind, instance, self.surface.clone()),
             self.generation,
         )
+    }
+
+    pub(crate) fn combo_popup_scope(&self, anchor_identity: impl AsRef<str>) -> Self {
+        let anchor_id = self.target_id(anchor_identity);
+        self.with_surface(combo_popup_surface(&anchor_id), self.generation)
     }
 
     pub(crate) fn target_id(&self, local_identity: impl AsRef<str>) -> TargetId {
@@ -596,7 +809,7 @@ impl JumpModeScope {
                 Some(if target.metadata.kind() == TargetKind::Action {
                     FocusDirective::Select
                 } else {
-                    FocusDirective::Focus
+                    FocusDirective::Focus(target.metadata.kind())
                 })
             }
             _ => None,
@@ -636,6 +849,7 @@ pub(crate) struct JumpModeUi {
     navigation_owner: NavigationOwner,
     frame_navigation_owner: NavigationOwner,
     navigation_owner_transitioned: bool,
+    active_combo_popup: Option<ComboPopupOwner>,
     settings_open: bool,
     settings_instance: u64,
     notes_open: bool,
@@ -770,46 +984,66 @@ impl JumpModeUi {
         self.paste_sequence_instance
     }
 
-    /// Apply the host's current layer-owner decision. Any owner or supported
-    /// dialog visibility transition cancels stale navigation and blocks this complete
-    /// egui frame, including all discarded passes.
+    /// Apply the host's current owner and supported-popup decision. Owner,
+    /// dialog-visibility, or popup transitions cancel stale navigation and
+    /// block this complete egui frame, including all discarded passes.
     pub(crate) fn update_navigation_owner(
         &mut self,
         ctx: &egui::Context,
         candidate: NavigationOwner,
         supported_dialog_visibility_changed: bool,
     ) -> NavigationOwner {
-        if supported_dialog_visibility_changed || candidate != self.navigation_owner {
+        self.update_navigation_owner_with_combo_popup(
+            ctx,
+            candidate,
+            supported_dialog_visibility_changed,
+            None,
+        )
+    }
+
+    pub(crate) fn update_navigation_owner_with_combo_popup(
+        &mut self,
+        ctx: &egui::Context,
+        candidate: NavigationOwner,
+        supported_dialog_visibility_changed: bool,
+        combo_popup: Option<ComboPopupOwner>,
+    ) -> NavigationOwner {
+        let owner_changed =
+            supported_dialog_visibility_changed || candidate != self.navigation_owner;
+        let popup_changed = combo_popup != self.active_combo_popup;
+        if owner_changed || popup_changed {
             if self.enabled {
-                if matches!(
-                    candidate,
-                    NavigationOwner::Settings { .. }
-                        | NavigationOwner::Notes { .. }
-                        | NavigationOwner::Todo { .. }
-                        | NavigationOwner::Timer { .. }
-                        | NavigationOwner::PasteSequence { .. }
-                ) || (supported_dialog_visibility_changed
-                    && (self.settings_open
-                        || self.notes_open
-                        || self.todo_open
-                        || self.timer_window_title.is_some()
-                        || self.paste_sequence_open))
+                if owner_changed
+                    && (matches!(
+                        candidate,
+                        NavigationOwner::Settings { .. }
+                            | NavigationOwner::Notes { .. }
+                            | NavigationOwner::Todo { .. }
+                            | NavigationOwner::Timer { .. }
+                            | NavigationOwner::PasteSequence { .. }
+                    ) || (supported_dialog_visibility_changed
+                        && (self.settings_open
+                            || self.notes_open
+                            || self.todo_open
+                            || self.timer_window_title.is_some()
+                            || self.paste_sequence_open)))
                 {
                     // A supported native dialog deliberately takes ownership
                     // from the launcher query. `surrender_focus` is conditional
                     // on this exact ID still owning focus.
                     ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("query_input")));
                 }
-                if let Some(focus) = self.last_completed_focus_handoff.as_ref() {
+                if owner_changed && let Some(focus) = self.last_completed_focus_handoff.as_ref() {
                     ctx.memory_mut(|memory| memory.surrender_focus(focus.response_id));
                 }
-                if let Some(focus) = self.frame_consumed_focus_intent.as_ref() {
+                if owner_changed && let Some(focus) = self.frame_consumed_focus_intent.as_ref() {
                     ctx.memory_mut(|memory| memory.surrender_focus(focus.response_id));
                 }
             }
             self.cancel_all();
             self.last_completed_focus_handoff = None;
             self.navigation_owner = candidate;
+            self.active_combo_popup = combo_popup;
             self.navigation_owner_transitioned = true;
             self.root_input_frame.owner_blocked = true;
             self.held_captured_keys.clear();
@@ -820,6 +1054,30 @@ impl JumpModeUi {
             self.navigation_owner
         };
         self.frame_navigation_owner
+    }
+
+    pub(crate) fn combo_popup_transition_pending(
+        &self,
+        candidate: Option<&ComboPopupOwner>,
+    ) -> bool {
+        self.active_combo_popup.as_ref() != candidate
+    }
+
+    pub(crate) fn resolve_combo_popup_owner(
+        &self,
+        ctx: &egui::Context,
+        parent_owner: NavigationOwner,
+    ) -> Option<ComboPopupOwner> {
+        if let Some(active) = self.active_combo_popup.as_ref()
+            && (active.is_current(ctx, parent_owner) || active.is_sizing_pass(ctx, parent_owner))
+        {
+            return Some(active.clone());
+        }
+        let registry = self
+            .pass_registry
+            .as_ref()
+            .unwrap_or(&self.retained_registry);
+        registry.open_combo_popup(ctx, parent_owner).ok().flatten()
     }
 
     pub(crate) fn frame_navigation_owner(&self) -> NavigationOwner {
@@ -1023,8 +1281,36 @@ impl JumpModeUi {
         navigation_owner: NavigationOwner,
         root_targets_allowed: bool,
     ) {
-        registry.revalidate(ctx, navigation_owner, root_targets_allowed);
-        if self
+        registry.revalidate(
+            ctx,
+            navigation_owner,
+            root_targets_allowed,
+            self.active_combo_popup.as_ref(),
+        );
+        let replacement_focus_target = self
+            .last_completed_focus_handoff
+            .as_ref()
+            .filter(|handoff| registry.get(&handoff.intent.target).is_none())
+            .and_then(|handoff| {
+                registry.targets().iter().find(|target| {
+                    target.metadata().kind() == TargetKind::TextEntry
+                        && target.id().surface() == handoff.intent.target.surface()
+                        && target.id().semantic() == handoff.intent.target.semantic()
+                        && target.viewport() == handoff.intent.viewport
+                        && target.navigation_epoch() == handoff.intent.epoch
+                        && target.response_id() == handoff.response_id
+                })
+            })
+            .map(|target| target.id().clone());
+        if let Some(target) = replacement_focus_target {
+            // A native editor can commit a value and advance its owner
+            // generation while keeping the exact same editor widget. Keep
+            // that native focus continuity, but rebind the handoff to the
+            // current target identity so owner changes can still surrender it.
+            if let Some(handoff) = self.last_completed_focus_handoff.as_mut() {
+                handoff.intent.target = target;
+            }
+        } else if self
             .last_completed_focus_handoff
             .as_ref()
             .is_some_and(|handoff| registry.get(&handoff.intent.target).is_none())
@@ -1176,6 +1462,7 @@ impl JumpModeUi {
         self.retained_registry = TargetRegistry::default();
         self.frame_consumed_focus_intent = None;
         self.last_completed_focus_handoff = None;
+        self.active_combo_popup = None;
     }
 
     fn clear(&mut self) {
@@ -1189,6 +1476,7 @@ impl JumpModeUi {
         self.retained_registry = TargetRegistry::default();
         self.frame_consumed_focus_intent = None;
         self.last_completed_focus_handoff = None;
+        self.active_combo_popup = None;
     }
 
     pub(crate) fn root_input_owner_allowed(&self, root_owner_allowed: bool) -> bool {
@@ -1603,6 +1891,173 @@ mod tests {
             .drop_without_applying_deltas();
     }
 
+    fn register_and_apply_focus(
+        ui: &egui::Ui,
+        scope: &JumpModeScope,
+        response: &egui::Response,
+        identity: &str,
+        label: &str,
+        kind: TargetKind,
+        order: u64,
+    ) -> RegistrationResult {
+        let result = scope.register(ui, response, identity, label, kind, order);
+        if let RegistrationResult::Registered {
+            directive: Some(directive),
+            ..
+        } = &result
+        {
+            directive.apply_to_response(response);
+        }
+        result
+    }
+
+    fn render_jump_root_frame(
+        ctx: &egui::Context,
+        jump: &mut JumpModeUi,
+        events: Vec<egui::Event>,
+        focus_identity: Option<&str>,
+        mut render: impl FnMut(&mut egui::Ui, &JumpModeScope),
+    ) -> Vec<RegisteredTarget> {
+        jump.begin_frame();
+        assert_eq!(
+            jump.update_navigation_owner(ctx, NavigationOwner::Root, false),
+            NavigationOwner::Root
+        );
+        if let Some(identity) = focus_identity {
+            let target = named_scope_target(
+                SurfaceId::LauncherResults,
+                TargetGeneration(1),
+                "native",
+                identity,
+            );
+            assert!(jump.queue_focus_intent(
+                target,
+                egui::ViewportId::ROOT,
+                jump.navigation_epoch(),
+            ));
+        }
+        jump.begin_ui_pass();
+        let scope = jump
+            .scope(
+                SurfaceId::LauncherResults,
+                TargetGeneration(1),
+                "native",
+                egui::ViewportId::ROOT,
+                true,
+            )
+            .expect("enabled Jump Mode creates a root scope");
+        let output = ctx.run_ui(root_input_raw(events), |root| {
+            egui::CentralPanel::default().show(root, |ui| render(ui, &scope));
+        });
+        jump.finish_ui_pass();
+        assert!(jump.prepare_pass_for_navigation_owner(ctx, NavigationOwner::Root, true, true,));
+        jump.complete_frame_for_navigation_owner(ctx, NavigationOwner::Root, true, true);
+        let targets = jump.retained_registry().targets().to_vec();
+        output.drop_without_applying_deltas();
+        targets
+    }
+
+    fn render_settings_combo_frame(
+        ctx: &egui::Context,
+        jump: &mut JumpModeUi,
+        selected: &mut usize,
+        events: Vec<egui::Event>,
+        focus_target: Option<TargetId>,
+    ) -> (
+        egui::Id,
+        Vec<RegisteredTarget>,
+        Option<ComboPopupOwner>,
+        NavigationOwner,
+    ) {
+        let owner = NavigationOwner::Settings { instance: 1 };
+        let windows = NavigationWindows {
+            settings: Some(1),
+            ..NavigationWindows::default()
+        };
+        jump.begin_frame();
+        let pre_popup = jump.resolve_combo_popup_owner(ctx, owner);
+        let pre_candidate =
+            resolve_layer_navigation_owner_with_combo_popup(ctx, windows, pre_popup.as_ref());
+        let pre_owner =
+            jump.update_navigation_owner_with_combo_popup(ctx, pre_candidate, false, pre_popup);
+        if let Some(target) = focus_target {
+            assert_eq!(pre_owner, owner, "focus only resolves for the stable owner");
+            assert!(jump.queue_focus_intent(
+                target,
+                egui::ViewportId::ROOT,
+                jump.navigation_epoch(),
+            ));
+        }
+
+        jump.begin_ui_pass();
+        let parent_scope = jump
+            .scope_for_navigation_owner(
+                SurfaceId::Settings { instance: 1 },
+                TargetGeneration(1),
+                "settings",
+                egui::ViewportId::ROOT,
+                owner,
+                false,
+            )
+            .expect("enabled Settings owner creates a scope");
+        let popup_scope = parent_scope.combo_popup_scope("choice");
+        let mut anchor_id = None;
+        let output = ctx.run_ui(root_input_raw(events), |ctx| {
+            egui::Window::new("Settings").show(ctx, |ui| {
+                let combo = egui::ComboBox::from_id_salt("jump-mode-native-choice")
+                    .selected_text(if *selected == 0 { "First" } else { "Second" })
+                    .show_ui(ui, |ui| {
+                        for (index, label) in ["First", "Second"].into_iter().enumerate() {
+                            let response = ui.selectable_value(selected, index, label);
+                            register_and_apply_focus(
+                                ui,
+                                &popup_scope,
+                                &response,
+                                if index == 0 {
+                                    "option/first"
+                                } else {
+                                    "option/second"
+                                },
+                                label,
+                                TargetKind::Selectable,
+                                index as u64,
+                            );
+                        }
+                    });
+                anchor_id = Some(combo.response.id);
+                register_and_apply_focus(
+                    ui,
+                    &parent_scope,
+                    &combo.response,
+                    "choice",
+                    "Choice",
+                    TargetKind::ComboBox,
+                    0,
+                );
+            });
+        });
+        jump.finish_ui_pass();
+        let combo_popup = jump.resolve_combo_popup_owner(ctx, owner);
+        let candidate =
+            resolve_layer_navigation_owner_with_combo_popup(ctx, windows, combo_popup.as_ref());
+        let routed_owner = jump.update_navigation_owner_with_combo_popup(
+            ctx,
+            candidate,
+            false,
+            combo_popup.clone(),
+        );
+        let _ = jump.prepare_pass_for_navigation_owner(ctx, routed_owner, false, true);
+        jump.complete_frame_for_navigation_owner(ctx, routed_owner, false, true);
+        let targets = jump.retained_registry().targets().to_vec();
+        output.drop_without_applying_deltas();
+        (
+            anchor_id.expect("Settings renders the actual ComboBox response"),
+            targets,
+            combo_popup,
+            routed_owner,
+        )
+    }
+
     fn render_navigation_windows(
         ctx: &egui::Context,
         settings_open: bool,
@@ -1899,6 +2354,414 @@ mod tests {
             ),
             NavigationOwner::Blocked
         );
+    }
+
+    #[test]
+    fn combo_popup_uses_exact_foreground_owner_and_later_native_option_activation() {
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let ctx = egui::Context::default();
+        let owner = NavigationOwner::Settings { instance: 1 };
+        let windows = NavigationWindows {
+            settings: Some(1),
+            ..NavigationWindows::default()
+        };
+        let mut jump = JumpModeUi::new(true);
+        let mut selected = 0;
+
+        // The first visible Settings pass establishes the real owner layer.
+        let (_, _, _, first_owner) =
+            render_settings_combo_frame(&ctx, &mut jump, &mut selected, Vec::new(), None);
+        assert_eq!(first_owner, NavigationOwner::Blocked);
+
+        let combo_target = named_scope_target(
+            SurfaceId::Settings { instance: 1 },
+            TargetGeneration(1),
+            "settings",
+            "choice",
+        );
+        let (combo_response, _, _, focus_owner) = render_settings_combo_frame(
+            &ctx,
+            &mut jump,
+            &mut selected,
+            Vec::new(),
+            Some(combo_target.clone()),
+        );
+        assert_eq!(focus_owner, owner);
+        assert_eq!(selected, 0, "focusing the real ComboBox does not select");
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(combo_response));
+
+        let (combo_response, _, opened_popup, open_transition) = render_settings_combo_frame(
+            &ctx,
+            &mut jump,
+            &mut selected,
+            vec![key(egui::Key::Enter)],
+            None,
+        );
+        assert_eq!(
+            selected, 0,
+            "Enter opens the ComboBox without choosing an option"
+        );
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert_eq!(open_transition, NavigationOwner::Blocked);
+        let combo_popup = opened_popup.expect("the current ComboBox owns its popup");
+        assert_eq!(combo_popup.response_id, combo_response);
+        assert_eq!(
+            resolve_layer_navigation_owner_with_combo_popup(&ctx, windows, Some(&combo_popup),),
+            NavigationOwner::Blocked,
+            "the non-interactive sizing pass cannot own navigation"
+        );
+        assert!(
+            egui::containers::AreaState::load(&ctx, combo_response.with("popup"))
+                .is_some_and(|state| !state.interactable),
+            "the first popup pass is sizing-only"
+        );
+        assert_eq!(
+            resolve_layer_navigation_owner_with_combo_popup(&ctx, windows, None),
+            NavigationOwner::Blocked,
+            "an open popup is not attributed to a surface without its exact ComboBox owner"
+        );
+
+        let (_, transition_targets, recognized_popup, transition_owner) =
+            render_settings_combo_frame(&ctx, &mut jump, &mut selected, Vec::new(), None);
+        assert_eq!(transition_owner, NavigationOwner::Blocked);
+        assert!(
+            transition_targets.is_empty(),
+            "the owner transition stays target-free"
+        );
+        assert!(
+            egui::containers::AreaState::load(&ctx, combo_response.with("popup"))
+                .is_some_and(|state| state.interactable),
+            "the next actual render makes the popup interactive"
+        );
+        let recognized_popup = recognized_popup.expect("the exact live ComboBox is retained");
+        assert_eq!(
+            resolve_layer_navigation_owner_with_combo_popup(&ctx, windows, Some(&recognized_popup)),
+            owner,
+            "the interactive popup recovers only through its retained exact anchor"
+        );
+
+        let (_, open_targets, recognized_popup, stable_owner) =
+            render_settings_combo_frame(&ctx, &mut jump, &mut selected, Vec::new(), None);
+        assert_eq!(stable_owner, owner);
+        let recognized_popup = recognized_popup.expect("the popup remains recognized");
+        assert!(open_targets.len() >= 2);
+        assert!(open_targets.iter().all(|target| {
+            target.id().surface() == &recognized_popup.popup_surface
+                && target.metadata().kind() == TargetKind::Selectable
+        }));
+        assert!(
+            open_targets
+                .iter()
+                .any(|target| target.metadata().label() == "Second")
+        );
+
+        let mut ambiguous = jump.retained_registry().clone();
+        let mut duplicate_anchor = ambiguous
+            .combo_anchors
+            .first()
+            .expect("the registry keeps the visible ComboBox anchor")
+            .clone();
+        duplicate_anchor.metadata = TargetMetadata::new(
+            named_scope_target(
+                SurfaceId::Settings { instance: 1 },
+                TargetGeneration(1),
+                "settings",
+                "duplicate-choice",
+            ),
+            "Duplicate Choice",
+            TargetKind::ComboBox,
+            1,
+        );
+        ambiguous.combo_anchors.push(duplicate_anchor);
+        assert!(
+            ambiguous.open_combo_popup(&ctx, owner).is_err(),
+            "two live anchors matching an open popup are ambiguous and fail closed"
+        );
+
+        let option_target = named_scope_target(
+            combo_popup_surface(&combo_target),
+            TargetGeneration(1),
+            "settings",
+            "option/second",
+        );
+        let (_, focused_options, _, focused_owner) = render_settings_combo_frame(
+            &ctx,
+            &mut jump,
+            &mut selected,
+            Vec::new(),
+            Some(option_target),
+        );
+        assert_eq!(focused_owner, owner);
+        assert_eq!(selected, 0, "focusing a popup option does not select it");
+        let focused_option = focused_options
+            .iter()
+            .find(|target| target.metadata().label() == "Second")
+            .expect("the visible second option is registered");
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(focused_option.response_id())
+        );
+
+        render_settings_combo_frame(
+            &ctx,
+            &mut jump,
+            &mut selected,
+            vec![key(egui::Key::Enter)],
+            None,
+        );
+        assert_eq!(
+            selected, 1,
+            "a fresh native Enter selects the focused option"
+        );
+
+        egui::Popup::open_id(&ctx, egui::Id::new("unrecognized-native-popup"));
+        assert!(egui::Popup::is_any_open(&ctx));
+        let unknown_popup = jump.resolve_combo_popup_owner(&ctx, owner);
+        assert!(unknown_popup.is_none());
+        assert_eq!(
+            resolve_layer_navigation_owner_with_combo_popup(&ctx, windows, unknown_popup.as_ref(),),
+            NavigationOwner::Blocked,
+            "an unrelated popup cannot inherit the Settings navigation owner"
+        );
+    }
+
+    #[test]
+    fn combo_popup_with_foreign_foreground_editor_blocks_hints_and_preserves_text_input() {
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let ctx = egui::Context::default();
+        let owner = NavigationOwner::Settings { instance: 1 };
+        let windows = NavigationWindows {
+            settings: Some(1),
+            ..NavigationWindows::default()
+        };
+        let mut jump = JumpModeUi::new(true);
+        let mut selected = 0;
+
+        let (_, _, _, first_owner) =
+            render_settings_combo_frame(&ctx, &mut jump, &mut selected, Vec::new(), None);
+        assert_eq!(first_owner, NavigationOwner::Blocked);
+        let combo_target = named_scope_target(
+            SurfaceId::Settings { instance: 1 },
+            TargetGeneration(1),
+            "settings",
+            "choice",
+        );
+        let (combo_response, _, _, focus_owner) = render_settings_combo_frame(
+            &ctx,
+            &mut jump,
+            &mut selected,
+            Vec::new(),
+            Some(combo_target),
+        );
+        assert_eq!(focus_owner, owner);
+
+        render_settings_combo_frame(
+            &ctx,
+            &mut jump,
+            &mut selected,
+            vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+            None,
+        );
+        let (_, _, _, sizing_owner) =
+            render_settings_combo_frame(&ctx, &mut jump, &mut selected, Vec::new(), None);
+        assert_eq!(sizing_owner, NavigationOwner::Blocked);
+        let (_, _, popup_owner, stable_owner) =
+            render_settings_combo_frame(&ctx, &mut jump, &mut selected, Vec::new(), None);
+        assert_eq!(stable_owner, owner);
+        let popup_owner = popup_owner.expect("the real Settings ComboBox owns its popup");
+
+        let editor_id = egui::Id::new("jump-mode-foreign-foreground-editor");
+        let mut text = String::new();
+        let mut editor_layer = None;
+        let mut editor_rect = None;
+        let popup_rect = ctx
+            .memory(|memory| memory.area_rect(combo_response.with("popup")))
+            .expect("the live ComboBox popup has geometry");
+        let focus_output = ctx.run_ui(root_input_raw(Vec::new()), |ctx| {
+            egui::Window::new("Settings").show(ctx, |ui| {
+                egui::ComboBox::from_id_salt("jump-mode-native-choice")
+                    .selected_text(if selected == 0 { "First" } else { "Second" })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut selected, 0, "First");
+                        ui.selectable_value(&mut selected, 1, "Second");
+                    });
+            });
+            egui::Area::new(egui::Id::new("jump-mode-foreign-foreground-area"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(egui::pos2(20.0, 560.0))
+                .show(ctx, |ui| {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut text)
+                            .id(editor_id)
+                            .desired_width(180.0),
+                    );
+                    response.request_focus();
+                    editor_layer = Some(response.layer_id);
+                    editor_rect = Some(response.rect);
+                });
+        });
+        focus_output.drop_without_applying_deltas();
+
+        let editor_layer = editor_layer.expect("the foreground TextEdit was rendered");
+        let editor_rect = editor_rect.expect("the foreground TextEdit has a real response rect");
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(editor_id));
+        assert_eq!(focused_response_layer(&ctx), Some(editor_layer));
+        assert_eq!(editor_layer.order, egui::Order::Foreground);
+        assert_ne!(editor_layer, popup_owner.popup_layer);
+        assert!(!editor_rect.contains(popup_rect.center()));
+        assert_eq!(
+            ctx.layer_id_at(popup_rect.center()),
+            Some(popup_owner.popup_layer),
+            "the foreign editor is focused away from the live popup"
+        );
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert!(jump.resolve_combo_popup_owner(&ctx, owner).is_none());
+        assert_eq!(
+            resolve_layer_navigation_owner_with_combo_popup(&ctx, windows, None),
+            NavigationOwner::Blocked,
+            "foreign foreground focus cannot inherit the ComboBox owner"
+        );
+
+        let events = vec![
+            key(egui::Key::Space, egui::Modifiers::SHIFT),
+            egui::Event::Text(" ".into()),
+            key(egui::Key::A, egui::Modifiers::NONE),
+            egui::Event::Text("a".into()),
+        ];
+        let mut remaining_after_router = Vec::new();
+        let routed_output = ctx.run_ui(root_input_raw(events.clone()), |ctx| {
+            jump.begin_frame();
+            let popup_candidate = jump.resolve_combo_popup_owner(ctx, owner);
+            let candidate = resolve_layer_navigation_owner_with_combo_popup(
+                ctx,
+                windows,
+                popup_candidate.as_ref(),
+            );
+            assert_eq!(candidate, NavigationOwner::Blocked);
+            let transition_pending = jump.combo_popup_transition_pending(popup_candidate.as_ref());
+            let input_allowed = !transition_pending && candidate != NavigationOwner::Blocked;
+            jump.handle_root_input(ctx, input_allowed, true);
+            remaining_after_router = ctx.input(|input| input.events.clone());
+            let routed_owner = jump.update_navigation_owner_with_combo_popup(
+                ctx,
+                candidate,
+                false,
+                popup_candidate,
+            );
+            assert_eq!(routed_owner, NavigationOwner::Blocked);
+
+            jump.begin_ui_pass();
+            egui::Window::new("Settings").show(ctx, |ui| {
+                egui::ComboBox::from_id_salt("jump-mode-native-choice")
+                    .selected_text(if selected == 0 { "First" } else { "Second" })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut selected, 0, "First");
+                        ui.selectable_value(&mut selected, 1, "Second");
+                    });
+            });
+            egui::Area::new(egui::Id::new("jump-mode-foreign-foreground-area"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(egui::pos2(20.0, 560.0))
+                .show(ctx, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut text)
+                            .id(editor_id)
+                            .desired_width(180.0),
+                    );
+                });
+            jump.finish_ui_pass();
+            jump.prepare_pass_for_navigation_owner(ctx, routed_owner, false, true);
+            jump.complete_frame_for_navigation_owner(ctx, routed_owner, false, true);
+        });
+        routed_output.drop_without_applying_deltas();
+
+        assert_eq!(
+            remaining_after_router, events,
+            "Jump Mode captures no input"
+        );
+        assert_eq!(
+            text, " a",
+            "the focused native editor receives the leader text"
+        );
+        assert_eq!(
+            selected, 0,
+            "foreign focus does not activate a ComboBox option"
+        );
+        assert!(jump.active_session().is_none());
+        assert!(jump.retained_registry().targets().is_empty());
+    }
+
+    #[test]
+    fn native_combo_escape_closes_without_changing_the_selected_value() {
+        let ctx = egui::Context::default();
+        let mut selected = 0;
+        let mut response_id = None;
+        ctx.run_ui(root_input_raw(Vec::new()), |root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                let combo = egui::ComboBox::from_id_salt("jump-mode-native-escape")
+                    .selected_text(if selected == 0 { "First" } else { "Second" })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut selected, 0, "First");
+                        ui.selectable_value(&mut selected, 1, "Second");
+                    });
+                response_id = Some(combo.response.id);
+            });
+        })
+        .drop_without_applying_deltas();
+
+        egui::Popup::open_id(
+            &ctx,
+            response_id
+                .expect("the real ComboBox response is rendered")
+                .with("popup"),
+        );
+        ctx.run_ui(root_input_raw(Vec::new()), |root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                egui::ComboBox::from_id_salt("jump-mode-native-escape")
+                    .selected_text("First")
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut selected, 0, "First");
+                        ui.selectable_value(&mut selected, 1, "Second");
+                    });
+            });
+        })
+        .drop_without_applying_deltas();
+        assert!(egui::Popup::is_any_open(&ctx));
+
+        ctx.run_ui(
+            root_input_raw(vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]),
+            |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    egui::ComboBox::from_id_salt("jump-mode-native-escape")
+                        .selected_text("First")
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut selected, 0, "First");
+                            ui.selectable_value(&mut selected, 1, "Second");
+                        });
+                });
+            },
+        )
+        .drop_without_applying_deltas();
+        assert!(!egui::Popup::is_any_open(&ctx));
+        assert_eq!(selected, 0, "Escape only dismisses the native popup");
     }
 
     #[test]
@@ -2892,7 +3755,7 @@ mod tests {
                 result,
                 RegistrationResult::Registered {
                     id: target_id.clone(),
-                    directive: Some(FocusDirective::Focus),
+                    directive: Some(FocusDirective::Focus(TargetKind::Button)),
                 }
             );
             if let RegistrationResult::Registered {
@@ -2918,6 +3781,367 @@ mod tests {
         let has_shapes = !output.shapes.is_empty();
         output.drop_without_applying_deltas();
         assert!(has_shapes);
+    }
+
+    #[test]
+    fn jump_mode_native_complex_widgets_keep_their_normal_keyboard_semantics() {
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+
+        let ctx = egui::Context::default();
+        let mut jump = JumpModeUi::new(true);
+        let mut slider_value = 1.0_f32;
+        let slider_targets =
+            render_jump_root_frame(&ctx, &mut jump, Vec::new(), Some("slider"), |ui, scope| {
+                let response =
+                    ui.add(egui::Slider::new(&mut slider_value, 0.0..=2.0).show_value(false));
+                assert!(matches!(
+                    register_and_apply_focus(
+                        ui,
+                        scope,
+                        &response,
+                        "slider",
+                        "Slider",
+                        TargetKind::Slider,
+                        0,
+                    ),
+                    RegistrationResult::Registered {
+                        directive: Some(FocusDirective::Focus(TargetKind::Slider)),
+                        ..
+                    }
+                ));
+            });
+        assert_eq!(slider_value, 1.0, "focus does not adjust a slider");
+        let slider_id = slider_targets[0].response_id();
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(slider_id));
+        render_jump_root_frame(
+            &ctx,
+            &mut jump,
+            vec![key(egui::Key::ArrowRight)],
+            None,
+            |ui, scope| {
+                let response =
+                    ui.add(egui::Slider::new(&mut slider_value, 0.0..=2.0).show_value(false));
+                register_and_apply_focus(
+                    ui,
+                    scope,
+                    &response,
+                    "slider",
+                    "Slider",
+                    TargetKind::Slider,
+                    0,
+                );
+            },
+        );
+        assert!(slider_value > 1.0 && slider_value <= 2.0);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(slider_id),
+            "the first native slider arrow stays with the jumped-to control"
+        );
+        slider_value = 2.0;
+        render_jump_root_frame(
+            &ctx,
+            &mut jump,
+            vec![key(egui::Key::ArrowRight)],
+            None,
+            |ui, scope| {
+                let response =
+                    ui.add(egui::Slider::new(&mut slider_value, 0.0..=2.0).show_value(false));
+                register_and_apply_focus(
+                    ui,
+                    scope,
+                    &response,
+                    "slider",
+                    "Slider",
+                    TargetKind::Slider,
+                    0,
+                );
+            },
+        );
+        assert_eq!(
+            slider_value, 2.0,
+            "native slider keys retain the upper bound"
+        );
+
+        let ctx = egui::Context::default();
+        let mut jump = JumpModeUi::new(true);
+        let mut number = 2.0_f32;
+        let number_targets =
+            render_jump_root_frame(&ctx, &mut jump, Vec::new(), Some("number"), |ui, scope| {
+                let response = ui.add(
+                    egui::DragValue::new(&mut number)
+                        .range(0.0..=3.0)
+                        .speed(0.5),
+                );
+                register_and_apply_focus(
+                    ui,
+                    scope,
+                    &response,
+                    "number",
+                    "Number",
+                    TargetKind::TextEntry,
+                    0,
+                );
+            });
+        assert_eq!(number, 2.0, "focus does not change a DragValue");
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(number_targets[0].response_id())
+        );
+        let number_arrow_targets = render_jump_root_frame(
+            &ctx,
+            &mut jump,
+            vec![key(egui::Key::ArrowUp)],
+            None,
+            |ui, scope| {
+                let response = ui.add(
+                    egui::DragValue::new(&mut number)
+                        .range(0.0..=3.0)
+                        .speed(0.5),
+                );
+                register_and_apply_focus(
+                    ui,
+                    scope,
+                    &response,
+                    "number",
+                    "Number",
+                    TargetKind::TextEntry,
+                    0,
+                );
+            },
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(number_arrow_targets[0].response_id())
+        );
+        assert!(number > 2.0 && number <= 3.0);
+        number = 3.0;
+        render_jump_root_frame(
+            &ctx,
+            &mut jump,
+            vec![key(egui::Key::ArrowUp)],
+            None,
+            |ui, scope| {
+                let response = ui.add(
+                    egui::DragValue::new(&mut number)
+                        .range(0.0..=3.0)
+                        .speed(0.5),
+                );
+                register_and_apply_focus(
+                    ui,
+                    scope,
+                    &response,
+                    "number",
+                    "Number",
+                    TargetKind::TextEntry,
+                    0,
+                );
+            },
+        );
+        assert_eq!(number, 3.0, "native DragValue keys retain the upper bound");
+        number = 0.0;
+        render_jump_root_frame(
+            &ctx,
+            &mut jump,
+            vec![key(egui::Key::ArrowDown)],
+            None,
+            |ui, scope| {
+                let response = ui.add(
+                    egui::DragValue::new(&mut number)
+                        .range(0.0..=3.0)
+                        .speed(0.5),
+                );
+                register_and_apply_focus(
+                    ui,
+                    scope,
+                    &response,
+                    "number",
+                    "Number",
+                    TargetKind::TextEntry,
+                    0,
+                );
+            },
+        );
+        assert_eq!(number, 0.0, "native DragValue keys retain the lower bound");
+
+        let ctx = egui::Context::default();
+        let mut jump = JumpModeUi::new(true);
+        let mut unclamped_existing = 4.0_f32;
+        render_jump_root_frame(
+            &ctx,
+            &mut jump,
+            Vec::new(),
+            Some("unclamped"),
+            |ui, scope| {
+                let response = ui.add(
+                    egui::DragValue::new(&mut unclamped_existing)
+                        .range(0.0..=3.0)
+                        .clamp_existing_to_range(false),
+                );
+                register_and_apply_focus(
+                    ui,
+                    scope,
+                    &response,
+                    "unclamped",
+                    "Unclamped existing value",
+                    TargetKind::TextEntry,
+                    0,
+                );
+            },
+        );
+        assert_eq!(
+            unclamped_existing, 4.0,
+            "clamp_existing_to_range(false) preserves untouched values"
+        );
+        render_jump_root_frame(
+            &ctx,
+            &mut jump,
+            vec![key(egui::Key::ArrowUp)],
+            None,
+            |ui, scope| {
+                let response = ui.add(
+                    egui::DragValue::new(&mut unclamped_existing)
+                        .range(0.0..=3.0)
+                        .clamp_existing_to_range(false),
+                );
+                register_and_apply_focus(
+                    ui,
+                    scope,
+                    &response,
+                    "unclamped",
+                    "Unclamped existing value",
+                    TargetKind::TextEntry,
+                    0,
+                );
+            },
+        );
+        assert_eq!(
+            unclamped_existing, 3.0,
+            "native keyboard edits still clamp an out-of-range existing value"
+        );
+
+        let ctx = egui::Context::default();
+        let mut jump = JumpModeUi::new(true);
+        let mut selected = false;
+        render_jump_root_frame(
+            &ctx,
+            &mut jump,
+            Vec::new(),
+            Some("radio/second"),
+            |ui, scope| {
+                let first = ui.radio_value(&mut selected, false, "First");
+                register_and_apply_focus(
+                    ui,
+                    scope,
+                    &first,
+                    "radio/first",
+                    "First",
+                    TargetKind::Selectable,
+                    0,
+                );
+                let second = ui.radio_value(&mut selected, true, "Second");
+                register_and_apply_focus(
+                    ui,
+                    scope,
+                    &second,
+                    "radio/second",
+                    "Second",
+                    TargetKind::Selectable,
+                    1,
+                );
+            },
+        );
+        assert!(!selected, "the radio focus handoff never selects");
+        render_jump_root_frame(
+            &ctx,
+            &mut jump,
+            vec![key(egui::Key::Space)],
+            None,
+            |ui, scope| {
+                let first = ui.radio_value(&mut selected, false, "First");
+                register_and_apply_focus(
+                    ui,
+                    scope,
+                    &first,
+                    "radio/first",
+                    "First",
+                    TargetKind::Selectable,
+                    0,
+                );
+                let second = ui.radio_value(&mut selected, true, "Second");
+                register_and_apply_focus(
+                    ui,
+                    scope,
+                    &second,
+                    "radio/second",
+                    "Second",
+                    TargetKind::Selectable,
+                    1,
+                );
+            },
+        );
+        assert!(selected, "a later native Space activates the focused radio");
+
+        let ctx = egui::Context::default();
+        let mut jump = JumpModeUi::new(true);
+        let mut text = String::new();
+        let editor_id = egui::Id::new("jump-mode-native-multiline-editor");
+        render_jump_root_frame(&ctx, &mut jump, Vec::new(), Some("editor"), |ui, scope| {
+            let response = ui.add(
+                egui::TextEdit::multiline(&mut text)
+                    .id(editor_id)
+                    .desired_rows(3),
+            );
+            register_and_apply_focus(
+                ui,
+                scope,
+                &response,
+                "editor",
+                "Editor",
+                TargetKind::TextEntry,
+                0,
+            );
+        });
+        assert!(
+            text.is_empty(),
+            "the multiline focus handoff does not edit text"
+        );
+        render_jump_root_frame(
+            &ctx,
+            &mut jump,
+            vec![
+                egui::Event::Text("a".into()),
+                key(egui::Key::Enter),
+                egui::Event::Text("b".into()),
+            ],
+            None,
+            |ui, scope| {
+                let response = ui.add(
+                    egui::TextEdit::multiline(&mut text)
+                        .id(editor_id)
+                        .desired_rows(3),
+                );
+                register_and_apply_focus(
+                    ui,
+                    scope,
+                    &response,
+                    "editor",
+                    "Editor",
+                    TargetKind::TextEntry,
+                    0,
+                );
+            },
+        );
+        assert_eq!(
+            text, "a\nb",
+            "native text and Enter preserve the editor caret"
+        );
     }
 
     #[test]

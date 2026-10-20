@@ -182,6 +182,61 @@ impl SettingsJumpTargets {
         self.register(ui, response, identity, label, kind);
     }
 
+    fn slider_with_numeric_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        value: &mut f32,
+        range: std::ops::RangeInclusive<f32>,
+        identity: &'static str,
+        label: &'static str,
+        numeric_identity: &'static str,
+        numeric_label: &'static str,
+    ) -> egui::Response {
+        let slider = ui.add(
+            egui::Slider::new(value, range.clone())
+                .text("")
+                .show_value(false),
+        );
+        self.response(ui, &slider, identity, label, TargetKind::Slider);
+
+        let numeric = ui.add(egui::DragValue::new(value).range(range).speed(0.1));
+        self.response(
+            ui,
+            &numeric,
+            numeric_identity,
+            numeric_label,
+            TargetKind::TextEntry,
+        );
+        slider | numeric
+    }
+
+    fn combo_popup_scope(&self, identity: &'static str) -> Option<JumpModeScope> {
+        self.scope
+            .as_ref()
+            .map(|scope| scope.combo_popup_scope(identity))
+    }
+
+    fn popup_option(
+        &mut self,
+        popup_scope: Option<&JumpModeScope>,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: &'static str,
+        label: &'static str,
+    ) {
+        let order = self.reserve_order();
+        let Some(scope) = popup_scope else {
+            return;
+        };
+        if let RegistrationResult::Registered {
+            directive: Some(directive),
+            ..
+        } = scope.register(ui, response, identity, label, TargetKind::Selectable, order)
+        {
+            directive.apply_to_response(response);
+        }
+    }
+
     fn button(
         &mut self,
         ui: &mut egui::Ui,
@@ -883,7 +938,15 @@ impl SettingsEditor {
         );
         if self.show_toasts {
             crate::gui::theme::widgets::labeled_form_row(ui, "Toast duration (s)", |ui| {
-                ui.add(egui::Slider::new(&mut self.toast_duration, 0.1..=5.0).text(""))
+                targets.slider_with_numeric_editor(
+                    ui,
+                    &mut self.toast_duration,
+                    0.1..=5.0,
+                    "feedback.toast_duration",
+                    "Toast duration",
+                    "feedback.toast_duration/value",
+                    "Toast duration value",
+                )
             });
         }
         ui.horizontal_wrapped(|ui| {
@@ -903,16 +966,41 @@ impl SettingsEditor {
 
         ui.label(egui::RichText::new("Diagnostics and refresh").strong());
         ui.horizontal(|ui| {
-            egui::ComboBox::from_label("Debug logging")
+            let combo_identity = "feedback.debug_logging";
+            let combo_order = targets.reserve_order();
+            let popup_scope = targets.combo_popup_scope(combo_identity);
+            let combo = egui::ComboBox::from_label("Debug logging")
                 .selected_text(if self.debug_logging {
                     "Enabled"
                 } else {
                     "Disabled"
                 })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.debug_logging, false, "Disabled");
-                    ui.selectable_value(&mut self.debug_logging, true, "Enabled");
+                    let disabled = ui.selectable_value(&mut self.debug_logging, false, "Disabled");
+                    targets.popup_option(
+                        popup_scope.as_ref(),
+                        ui,
+                        &disabled,
+                        "option/disabled",
+                        "Debug logging: Disabled",
+                    );
+                    let enabled = ui.selectable_value(&mut self.debug_logging, true, "Enabled");
+                    targets.popup_option(
+                        popup_scope.as_ref(),
+                        ui,
+                        &enabled,
+                        "option/enabled",
+                        "Debug logging: Enabled",
+                    );
                 });
+            targets.register_at(
+                ui,
+                &combo.response,
+                combo_identity,
+                "Debug logging",
+                TargetKind::ComboBox,
+                combo_order,
+            );
         });
         targets.checkbox(
             ui,
@@ -1017,10 +1105,26 @@ impl SettingsEditor {
             });
         }
         crate::gui::theme::widgets::labeled_form_row(ui, "Query scale", |ui| {
-            ui.add(egui::Slider::new(&mut self.query_scale, 0.5..=5.0).text(""))
+            targets.slider_with_numeric_editor(
+                ui,
+                &mut self.query_scale,
+                0.5..=5.0,
+                "launcher.query_scale",
+                "Query scale",
+                "launcher.query_scale/value",
+                "Query scale value",
+            )
         });
         crate::gui::theme::widgets::labeled_form_row(ui, "List scale", |ui| {
-            ui.add(egui::Slider::new(&mut self.list_scale, 0.5..=5.0).text(""))
+            targets.slider_with_numeric_editor(
+                ui,
+                &mut self.list_scale,
+                0.5..=5.0,
+                "launcher.list_scale",
+                "List scale",
+                "launcher.list_scale/value",
+                "List scale value",
+            )
         });
         let theme_settings =
             targets.button(ui, "launcher.open_theme_settings", "Open Theme Settings...");
@@ -1041,10 +1145,26 @@ impl SettingsEditor {
             "Enable query autocomplete",
         );
         crate::gui::theme::widgets::labeled_form_row(ui, "Fuzzy weight", |ui| {
-            ui.add(egui::Slider::new(&mut self.fuzzy_weight, 0.0..=5.0).text(""))
+            targets.slider_with_numeric_editor(
+                ui,
+                &mut self.fuzzy_weight,
+                0.0..=5.0,
+                "search.fuzzy_weight",
+                "Fuzzy weight",
+                "search.fuzzy_weight/value",
+                "Fuzzy weight value",
+            )
         });
         crate::gui::theme::widgets::labeled_form_row(ui, "Usage weight", |ui| {
-            ui.add(egui::Slider::new(&mut self.usage_weight, 0.0..=5.0).text(""))
+            targets.slider_with_numeric_editor(
+                ui,
+                &mut self.usage_weight,
+                0.0..=5.0,
+                "search.usage_weight",
+                "Usage weight",
+                "search.usage_weight/value",
+                "Usage weight value",
+            )
         });
         targets.checkbox(
             ui,
@@ -1604,12 +1724,18 @@ mod settings_shell_tests {
 
     fn paste_settings_click(ctx: &egui::Context, app: &mut LauncherApp, label: &str) {
         let labels = paste_settings_frame(ctx, app, vec![]);
-        let pos = labels
+        let label_rect = labels
             .iter()
             .find(|(text, _)| text == label)
             .unwrap_or_else(|| panic!("missing {label}"))
-            .1
-            .center();
+            .1;
+        let mut pos = label_rect.center();
+        if label == "Search & Results" {
+            // Custom Settings headers paint their title as a label; egui's
+            // collapsing interaction is the narrow disclosure control just
+            // to its left.
+            pos.x = label_rect.left() - 8.0;
+        }
         for pressed in [true, false] {
             paste_settings_frame(
                 ctx,
@@ -2215,6 +2341,192 @@ mod settings_shell_tests {
             "Cancel keeps the committed runtime flag"
         );
         assert!(app.settings_editor.experimental_jump_mode_enabled);
+    }
+
+    #[test]
+    fn jump_mode_settings_slider_and_value_editor_are_distinct_native_targets() {
+        use crate::gui::jump_mode::ui::{JumpModeUi, NavigationOwner};
+
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let mut settings = crate::settings::Settings::default();
+        settings.experimental_jump_mode_enabled = true;
+        let mut app = settings_test_app(&ctx, &directory, settings);
+        app.show_settings = true;
+        for _ in 0..3 {
+            paste_settings_frame(&ctx, &mut app, Vec::new());
+        }
+        paste_settings_click(&ctx, &mut app, "Expand all");
+        paste_settings_click(&ctx, &mut app, "Collapse all");
+        paste_settings_click(&ctx, &mut app, "Search & Results");
+
+        let mut jump = JumpModeUi::new(true);
+        let settings_owner = NavigationOwner::Settings { instance: 1 };
+        let setup_output = ctx.run_ui(
+            egui::RawInput {
+                focused: true,
+                ..Default::default()
+            },
+            |ui| {
+                jump.begin_frame();
+                assert!(jump.observe_settings_visibility(true));
+                assert_eq!(
+                    jump.update_navigation_owner(&ctx, settings_owner, true),
+                    NavigationOwner::Blocked,
+                    "the newly opened Settings owner waits for retained window ordering"
+                );
+                ui.label("Settings slider owner setup");
+            },
+        );
+        setup_output.drop_without_applying_deltas();
+
+        let targets = settings_jump_frame(&ctx, &mut app, &mut jump, Vec::new(), None, true);
+        let slider = target_by_label(&targets, "Fuzzy weight").clone();
+        assert!(
+            slider.clipped_rect().contains_rect(slider.rect()),
+            "the actual Settings slider is fully visible before focus handoff"
+        );
+        let numeric = target_by_label(&targets, "Fuzzy weight value").clone();
+        assert!(slider.eligible());
+        assert!(numeric.eligible());
+        assert_eq!(
+            slider.metadata().kind(),
+            crate::gui::jump_mode::TargetKind::Slider
+        );
+        assert_eq!(
+            numeric.metadata().kind(),
+            crate::gui::jump_mode::TargetKind::TextEntry
+        );
+        assert_ne!(
+            slider.id(),
+            numeric.id(),
+            "semantic IDs distinguish the slider thumb from its numeric editor"
+        );
+        assert_ne!(
+            slider.response_id(),
+            numeric.response_id(),
+            "the actual egui slider and DragValue responses have distinct native IDs"
+        );
+
+        let original = app.settings_editor.fuzzy_weight;
+        let focused = settings_jump_frame(
+            &ctx,
+            &mut app,
+            &mut jump,
+            Vec::new(),
+            Some(slider.id().clone()),
+            true,
+        );
+        assert_eq!(
+            target_by_label(&focused, "Fuzzy weight").response_id(),
+            slider.response_id()
+        );
+        assert_eq!(
+            target_by_label(&focused, "Fuzzy weight").rect(),
+            slider.rect(),
+            "the Settings slider geometry remains stationary through focus handoff"
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(slider.response_id())
+        );
+        assert_eq!(
+            app.settings_editor.fuzzy_weight, original,
+            "focusing either control does not change the setting"
+        );
+        settings_jump_frame(
+            &ctx,
+            &mut app,
+            &mut jump,
+            vec![egui::Event::Key {
+                key: egui::Key::ArrowRight,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            None,
+            true,
+        );
+        assert!(app.settings_editor.fuzzy_weight > original);
+        assert!(app.settings_editor.fuzzy_weight <= 5.0);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(slider.response_id()),
+            "the first native slider arrow keeps focus on the actual thumb response"
+        );
+        let after_first_arrow = app.settings_editor.fuzzy_weight;
+        settings_jump_frame(
+            &ctx,
+            &mut app,
+            &mut jump,
+            vec![egui::Event::Key {
+                key: egui::Key::ArrowRight,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            None,
+            true,
+        );
+        assert!(app.settings_editor.fuzzy_weight > after_first_arrow);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(slider.response_id()),
+            "subsequent native slider arrows remain focused without another hint"
+        );
+
+        let before_numeric = app.settings_editor.fuzzy_weight;
+        settings_jump_frame(
+            &ctx,
+            &mut app,
+            &mut jump,
+            Vec::new(),
+            Some(numeric.id().clone()),
+            true,
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(numeric.response_id())
+        );
+        settings_jump_frame(
+            &ctx,
+            &mut app,
+            &mut jump,
+            vec![egui::Event::Key {
+                key: egui::Key::ArrowUp,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            None,
+            true,
+        );
+        assert!(app.settings_editor.fuzzy_weight > before_numeric);
+        assert!(app.settings_editor.fuzzy_weight <= 5.0);
+
+        app.settings_editor.fuzzy_weight = 5.0;
+        settings_jump_frame(
+            &ctx,
+            &mut app,
+            &mut jump,
+            vec![egui::Event::Key {
+                key: egui::Key::ArrowUp,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            None,
+            true,
+        );
+        assert_eq!(
+            app.settings_editor.fuzzy_weight, 5.0,
+            "the actual Settings DragValue does not step above its configured maximum"
+        );
     }
 
     fn draw_sections(ctx: &egui::Context, expand_all: Option<bool>) -> (Vec<bool>, Vec<egui::Id>) {

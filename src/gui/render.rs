@@ -2988,7 +2988,6 @@ impl LauncherApp {
                 .is_some_and(|logic| logic.snippet_prompt_owns_input)
             && !screen_draw_owns_input
             && !self.screen_draw_controller.toolbar_open()
-            && !egui::Popup::is_any_open(ctx)
             && ctx.memory(|memory| memory.top_modal_layer().is_none())
     }
 
@@ -3004,6 +3003,7 @@ impl LauncherApp {
 
     fn jump_mode_root_targets_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         self.jump_mode_host_input_allowed(ctx, root_visible)
+            && !egui::Popup::is_any_open(ctx)
             && !self.jump_mode_unsupported_panel_open()
     }
 
@@ -3028,8 +3028,15 @@ impl LauncherApp {
         &mut self,
         ctx: &egui::Context,
         root_visible: bool,
-    ) -> (crate::gui::jump_mode::ui::NavigationOwner, bool) {
-        use crate::gui::jump_mode::ui::{NavigationOwner, resolve_layer_navigation_owner};
+    ) -> (
+        crate::gui::jump_mode::ui::NavigationOwner,
+        bool,
+        Option<crate::gui::jump_mode::ui::ComboPopupOwner>,
+    ) {
+        use crate::gui::jump_mode::ui::{
+            NavigationOwner, resolve_layer_navigation_owner_parent,
+            resolve_layer_navigation_owner_with_combo_popup,
+        };
 
         let settings_visibility_changed = self
             .jump_mode_ui
@@ -3050,7 +3057,7 @@ impl LauncherApp {
             || todo_visibility_changed
             || timer_visibility_changed
             || paste_sequence_visibility_changed;
-        let candidate = if self.jump_mode_host_input_allowed(ctx, root_visible) {
+        let (candidate, combo_popup) = if self.jump_mode_host_input_allowed(ctx, root_visible) {
             let windows = crate::gui::jump_mode::ui::NavigationWindows {
                 settings: self
                     .show_settings
@@ -3069,23 +3076,32 @@ impl LauncherApp {
                     .open
                     .then_some(self.jump_mode_ui.paste_sequence_instance()),
             };
-            let owner = resolve_layer_navigation_owner(ctx, windows);
+            let parent_owner = resolve_layer_navigation_owner_parent(ctx, windows);
+            let combo_popup = (parent_owner != NavigationOwner::Blocked
+                && egui::Popup::is_any_open(ctx))
+            .then(|| {
+                self.jump_mode_ui
+                    .resolve_combo_popup_owner(ctx, parent_owner)
+            })
+            .flatten();
+            let owner =
+                resolve_layer_navigation_owner_with_combo_popup(ctx, windows, combo_popup.as_ref());
             match owner {
                 NavigationOwner::Root if self.jump_mode_unsupported_panel_open() => {
-                    NavigationOwner::Blocked
+                    (NavigationOwner::Blocked, combo_popup)
                 }
                 NavigationOwner::Notes { .. }
                     if self.notes_dialog.jump_mode_unsupported_nested_owner_open()
                         || self.unused_assets_dialog.open =>
                 {
-                    NavigationOwner::Blocked
+                    (NavigationOwner::Blocked, combo_popup)
                 }
-                _ => owner,
+                _ => (owner, combo_popup),
             }
         } else {
-            NavigationOwner::Blocked
+            (NavigationOwner::Blocked, None)
         };
-        (candidate, supported_dialog_visibility_changed)
+        (candidate, supported_dialog_visibility_changed, combo_popup)
     }
 
     fn resolve_jump_mode_navigation_owner(
@@ -3093,10 +3109,14 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
     ) -> crate::gui::jump_mode::ui::NavigationOwner {
-        let (candidate, settings_visibility_changed) =
+        let (candidate, settings_visibility_changed, combo_popup) =
             self.jump_mode_navigation_owner_candidate(ctx, root_visible);
-        self.jump_mode_ui
-            .update_navigation_owner(ctx, candidate, settings_visibility_changed)
+        self.jump_mode_ui.update_navigation_owner_with_combo_popup(
+            ctx,
+            candidate,
+            settings_visibility_changed,
+            combo_popup,
+        )
     }
 
     fn jump_mode_root_scope_for_current_results(
@@ -3190,10 +3210,16 @@ impl LauncherApp {
         if let Some(logic) = self.root_frame_logic.as_mut() {
             logic.ui_passes = frame_logic.ui_passes;
         }
-        let (navigation_owner_candidate, supported_dialog_visibility_changed) =
-            self.jump_mode_navigation_owner_candidate(&ctx, frame_logic.should_be_visible);
+        let (
+            navigation_owner_candidate,
+            supported_dialog_visibility_changed,
+            combo_popup_candidate,
+        ) = self.jump_mode_navigation_owner_candidate(&ctx, frame_logic.should_be_visible);
         let owner_transition_pending = supported_dialog_visibility_changed
-            || navigation_owner_candidate != self.jump_mode_ui.frame_navigation_owner();
+            || navigation_owner_candidate != self.jump_mode_ui.frame_navigation_owner()
+            || self
+                .jump_mode_ui
+                .combo_popup_transition_pending(combo_popup_candidate.as_ref());
         let navigation_input_allowed = !owner_transition_pending
             && self.jump_mode_navigation_input_allowed(
                 &ctx,
@@ -3202,10 +3228,11 @@ impl LauncherApp {
             );
         self.jump_mode_ui
             .handle_root_input(&ctx, navigation_input_allowed, first_ui_pass);
-        self.jump_mode_ui.update_navigation_owner(
+        self.jump_mode_ui.update_navigation_owner_with_combo_popup(
             &ctx,
             navigation_owner_candidate,
             supported_dialog_visibility_changed,
+            combo_popup_candidate,
         );
         self.show_screenshot_pins(&ctx);
         self.pin_list_open = self.show_screenshot_pin_list(&ctx, self.pin_list_open);
@@ -4154,7 +4181,7 @@ impl LauncherApp {
                                                             idx,
                                                         );
                                                     }
-                                                    crate::gui::jump_mode::ui::FocusDirective::Focus => {
+                                                    crate::gui::jump_mode::ui::FocusDirective::Focus(_) => {
                                                         directive.apply_to_response(&resp);
                                                     }
                                                 }
@@ -4371,7 +4398,7 @@ impl LauncherApp {
                                                         idx,
                                                     );
                                                 }
-                                                crate::gui::jump_mode::ui::FocusDirective::Focus => {
+                                                crate::gui::jump_mode::ui::FocusDirective::Focus(_) => {
                                                     directive.apply_to_response(&resp);
                                                 }
                                             }
@@ -23985,6 +24012,164 @@ mod tests {
             .expect("read both isolated Todos after the feature-off fallback");
         assert_eq!(persisted.len(), 2);
         assert_eq!(persisted[1].text, "off-mode button focus draft");
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_todo_priority_uses_native_integer_keyboard_steps_and_bounds() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.todo_dialog.open();
+        app.todo_dialog.test_set_entries(vec![
+            crate::plugins::todo::TodoEntry {
+                id: "jump-priority-low".into(),
+                text: "Priority low".into(),
+                done: false,
+                priority: 0,
+                tags: Vec::new(),
+                entity_refs: Vec::new(),
+            },
+            crate::plugins::todo::TodoEntry {
+                id: "jump-priority-high".into(),
+                text: "Priority high".into(),
+                done: false,
+                priority: u8::MAX,
+                tags: Vec::new(),
+                entity_refs: Vec::new(),
+            },
+        ]);
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        resize_todo_window_in_test(&ctx, &mut app, 120.0);
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        let retained_priority_target = |app: &LauncherApp, label: &str| {
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.metadata().label() == label)
+                .unwrap_or_else(|| {
+                    panic!("the visible Todo priority target {label:?} is registered")
+                })
+                .clone()
+        };
+        let low_target = retained_priority_target(&app, "Priority low priority");
+        let high_target = retained_priority_target(&app, "Priority high priority");
+        assert_eq!(
+            low_target.metadata().kind(),
+            crate::gui::jump_mode::TargetKind::TextEntry
+        );
+        assert_eq!(
+            high_target.metadata().kind(),
+            crate::gui::jump_mode::TargetKind::TextEntry
+        );
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let low_hint = dialog_hint_for_label(&app, "Priority low priority");
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(low_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.todo_dialog.test_entries()[0].priority, 0);
+        assert!(
+            ctx.memory(|memory| memory.has_focus(low_target.response_id())),
+            "hint completion focuses the actual u8 DragValue without editing it"
+        );
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::ArrowUp, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.todo_dialog.test_entries()[0].priority,
+            1,
+            "a fresh native ArrowUp advances an integer priority by one"
+        );
+        assert!(
+            ctx.memory(|memory| memory.has_focus(low_target.response_id())),
+            "the edited priority remains focused for the next native key"
+        );
+
+        for (key, expected, assertion) in [
+            (
+                egui::Key::ArrowDown,
+                0,
+                "ArrowDown returns priority to zero",
+            ),
+            (
+                egui::Key::ArrowDown,
+                0,
+                "the lower bound prevents decrement below zero",
+            ),
+        ] {
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![key_press(key, egui::Modifiers::NONE)],
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+            assert_eq!(
+                app.todo_dialog.test_entries()[0].priority,
+                expected,
+                "{assertion}"
+            );
+            assert!(ctx.memory(|memory| memory.has_focus(low_target.response_id())));
+        }
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let high_hint = dialog_hint_for_label(&app, "Priority high priority");
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(high_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.todo_dialog.test_entries()[1].priority, u8::MAX);
+        assert!(ctx.memory(|memory| memory.has_focus(high_target.response_id())));
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::ArrowUp, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.todo_dialog.test_entries()[1].priority,
+            u8::MAX,
+            "the upper bound prevents increment beyond u8::MAX"
+        );
+        assert!(ctx.memory(|memory| memory.has_focus(high_target.response_id())));
+
         drop(workspace);
     }
 

@@ -148,14 +148,37 @@ impl TimerDialog {
                 });
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Sound");
-                    egui::ComboBox::from_id_salt("sound_select")
+                    let sound_combo = egui::ComboBox::from_id_salt("sound_select")
                         .width(ui.available_width().min(160.0).max(72.0))
                         .selected_text(crate::sound::SOUND_NAMES[self.sound_idx])
                         .show_ui(ui, |ui| {
+                            let popup_scope = jump_scope
+                                .as_ref()
+                                .map(|scope| scope.combo_popup_scope("sound"));
                             for (idx, name) in crate::sound::SOUND_NAMES.iter().enumerate() {
-                                ui.selectable_value(&mut self.sound_idx, idx, *name);
+                                let option = ui.selectable_value(&mut self.sound_idx, idx, *name);
+                                if let Some(scope) = popup_scope.as_ref() {
+                                    register_timer_jump_target(
+                                        Some(scope),
+                                        ui,
+                                        &option,
+                                        format!("sound/option/{idx}"),
+                                        format!("Sound: {name}"),
+                                        crate::gui::jump_mode::TargetKind::Selectable,
+                                        &mut jump_visual_order,
+                                    );
+                                }
                             }
                         });
+                    register_timer_jump_target(
+                        jump_scope.as_ref(),
+                        ui,
+                        &sound_combo.response,
+                        "sound",
+                        "Sound",
+                        crate::gui::jump_mode::TargetKind::ComboBox,
+                        &mut jump_visual_order,
+                    );
                     let play_button = ui.button("Play");
                     register_timer_jump_target(
                         jump_scope.as_ref(),
@@ -262,8 +285,8 @@ fn register_timer_jump_target(
     scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
     ui: &egui::Ui,
     response: &egui::Response,
-    local_identity: &'static str,
-    label: &'static str,
+    local_identity: impl AsRef<str>,
+    label: impl Into<String>,
     kind: crate::gui::jump_mode::TargetKind,
     visual_order: &mut u64,
 ) {

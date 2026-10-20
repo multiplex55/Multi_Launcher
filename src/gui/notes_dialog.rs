@@ -1662,10 +1662,29 @@ impl NotesDialog {
                         .min_scrolled_height(editor_max_height.min(64.0))
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
+                            let note_identity = self
+                                .entries
+                                .get(idx)
+                                .map(|note| note.slug.as_str())
+                                .unwrap_or("new-note");
+                            let editor_id = ui.make_persistent_id((
+                                "jump-mode-note-editor",
+                                note_identity,
+                            ));
                             let output = egui::TextEdit::multiline(&mut self.text)
+                                .id(editor_id)
                                 .desired_width(f32::INFINITY)
                                 .desired_rows(10)
                                 .show(ui);
+                            register_jump_mode_target(
+                                jump_scope.as_ref(),
+                                ui,
+                                &output.response,
+                                "edit/content",
+                                "Note content",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut jump_visual_order,
+                            );
                             let resp = output.response.clone();
                             let caret_char_idx =
                                 output.cursor_range.map(|range| range.primary.index.0);

@@ -493,13 +493,25 @@ impl TodoDialog {
                                             save_now = true;
                                         }
                                         ui.label(entry.text.replace('\n', " "));
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut entry.priority)
-                                                    .range(0..=255),
-                                            )
-                                            .changed()
+                                        let priority = ui.add(
+                                            egui::DragValue::new(&mut entry.priority)
+                                                .range(0..=255),
+                                        );
+                                        if let Some(scope) = jump_scope
+                                            .as_ref()
+                                            .filter(|_| !self.pending_clear_confirm)
                                         {
+                                            register_todo_jump_target(
+                                                Some(scope),
+                                                ui,
+                                                &priority,
+                                                format!("todo/{entry_id}/priority"),
+                                                format!("{} priority", entry.text),
+                                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                                &mut jump_visual_order,
+                                            );
+                                        }
+                                        if priority.changed() {
                                             save_now = true;
                                         }
                                         let mut tag_str = entry.tags.join(", ");
