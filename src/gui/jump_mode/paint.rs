@@ -25,6 +25,7 @@ struct BadgeModel {
     target_rect: egui::Rect,
     clipped_rect: egui::Rect,
     ui_clip_rect: egui::Rect,
+    paint_label_rect: Option<egui::Rect>,
     layer_id: egui::LayerId,
 }
 
@@ -107,6 +108,7 @@ fn build_overlay_model(
                 target_rect: target.rect(),
                 clipped_rect: target.clipped_rect(),
                 ui_clip_rect: target.ui_clip_rect(),
+                paint_label_rect: target.paint_label_rect(),
                 layer_id: target.layer_id(),
             });
         }
@@ -240,6 +242,7 @@ fn paint_badge(
         badge.ui_clip_rect,
         galley.size(),
         target_label.size(),
+        badge.paint_label_rect,
         is_occluded,
     ) else {
         return;
@@ -275,6 +278,7 @@ fn badge_rect(
     ui_clip_rect: egui::Rect,
     text_size: egui::Vec2,
     target_label_size: egui::Vec2,
+    paint_label_rect: Option<egui::Rect>,
     is_occluded: impl Fn(egui::Rect) -> bool,
 ) -> Option<egui::Rect> {
     let size = text_size + BADGE_PADDING * 2.0;
@@ -290,7 +294,10 @@ fn badge_rect(
         return None;
     }
 
-    let label_rect = egui::Rect::from_center_size(target_rect.center(), target_label_size);
+    let label_rect = paint_label_rect
+        .unwrap_or_else(|| egui::Rect::from_center_size(target_rect.center(), target_label_size));
+    let clears_label =
+        |candidate: egui::Rect| !candidate.expand(BADGE_LABEL_GAP).intersects(label_rect);
     let inside = egui::Rect::from_min_size(
         egui::pos2(
             visible_target.right() - BADGE_MARGIN - size.x,
@@ -299,8 +306,7 @@ fn badge_rect(
         size,
     );
     let inside_fits = visible_target.contains_rect(inside);
-    if inside_fits && !inside.expand(BADGE_LABEL_GAP).intersects(label_rect) && !is_occluded(inside)
-    {
+    if inside_fits && clears_label(inside) && !is_occluded(inside) {
         return Some(inside);
     }
 
@@ -337,9 +343,12 @@ fn badge_rect(
     let outside = candidates.into_iter().find(|candidate| {
         ui_clip_rect.contains_rect(*candidate)
             && !candidate.intersects(visible_target)
+            && (paint_label_rect.is_none() || clears_label(*candidate))
             && !is_occluded(*candidate)
     });
-    outside.or_else(|| inside_fits.then_some(inside))
+    outside.or_else(|| {
+        (inside_fits && (paint_label_rect.is_none() || clears_label(inside))).then_some(inside)
+    })
 }
 
 fn is_occluded_by_registered_target(
@@ -582,9 +591,15 @@ mod tests {
         let label = egui::Rect::from_center_size(target.center(), egui::vec2(42.0, 16.0));
         let text_size = egui::vec2(10.0, 12.0);
 
-        let badge = badge_rect(target, target, parent_clip, text_size, label.size(), |_| {
-            false
-        })
+        let badge = badge_rect(
+            target,
+            target,
+            parent_clip,
+            text_size,
+            label.size(),
+            None,
+            |_| false,
+        )
         .expect("there is room to place the badge next to the button");
         assert!(parent_clip.contains_rect(badge));
         assert!(badge.min.x >= target.right());
@@ -592,11 +607,16 @@ mod tests {
         assert!(!badge.intersects(label));
 
         let scroll_clip = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(90.0, 80.0));
-        let clipped_badge =
-            badge_rect(target, target, scroll_clip, text_size, label.size(), |_| {
-                false
-            })
-            .expect("the badge fits below the target within the parent clip");
+        let clipped_badge = badge_rect(
+            target,
+            target,
+            scroll_clip,
+            text_size,
+            label.size(),
+            None,
+            |_| false,
+        )
+        .expect("the badge fits below the target within the parent clip");
         assert!(scroll_clip.contains_rect(clipped_badge));
         assert!(clipped_badge.min.y >= target.bottom());
         assert!(!clipped_badge.intersects(target));
@@ -609,6 +629,7 @@ mod tests {
             crowded_parent_clip,
             text_size,
             label.size(),
+            None,
             |_| true,
         )
         .expect("a compact target retains its badge when all outside placements are occupied");
@@ -627,12 +648,44 @@ mod tests {
             parent_clip,
             egui::vec2(10.0, 12.0),
             label.size(),
+            None,
             |_| false,
         )
         .expect("wide controls retain an inside badge");
 
         assert!(target.contains_rect(badge));
         assert!(!badge.intersects(label));
+    }
+
+    #[test]
+    fn compact_settings_arrow_badges_clear_the_actual_adjacent_heading() {
+        let target = egui::Rect::from_min_size(egui::pos2(25.0, 100.0), egui::vec2(18.0, 16.0));
+        let actual_heading = egui::Rect::from_min_size(
+            egui::pos2(target.right() + 8.0, target.top() - 1.0),
+            egui::vec2(90.0, 18.0),
+        );
+        let parent_clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(240.0, 240.0));
+
+        for hint_width in [6.0, 12.0] {
+            let badge = badge_rect(
+                target,
+                target,
+                parent_clip,
+                egui::vec2(hint_width, 12.0),
+                actual_heading.size(),
+                Some(actual_heading),
+                |_| false,
+            )
+            .expect("the compact heading has room for an outside badge");
+
+            assert!(parent_clip.contains_rect(badge));
+            assert!(!badge.intersects(target));
+            assert!(
+                !badge.expand(BADGE_LABEL_GAP).intersects(actual_heading),
+                "a {hint_width}-point hint must leave the actual heading readable"
+            );
+            assert!(badge.max.x <= target.left() - BADGE_MARGIN);
+        }
     }
 
     #[test]
@@ -662,6 +715,7 @@ mod tests {
             target.ui_clip_rect(),
             hint.size(),
             label.size(),
+            None,
             |candidate| {
                 is_occluded_by_registered_target(
                     registry,

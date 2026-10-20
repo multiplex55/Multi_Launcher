@@ -375,6 +375,7 @@ pub(crate) struct RegisteredTarget {
     rect: egui::Rect,
     clipped_rect: egui::Rect,
     ui_clip_rect: egui::Rect,
+    paint_label_rect: Option<egui::Rect>,
     enabled: bool,
     eligible: bool,
     epoch: NavigationEpoch,
@@ -411,6 +412,10 @@ impl RegisteredTarget {
 
     pub(crate) fn ui_clip_rect(&self) -> egui::Rect {
         self.ui_clip_rect
+    }
+
+    pub(crate) fn paint_label_rect(&self) -> Option<egui::Rect> {
+        self.paint_label_rect
     }
 
     pub(crate) fn enabled(&self) -> bool {
@@ -763,7 +768,25 @@ impl JumpModeScope {
     ) -> RegistrationResult {
         let metadata =
             TargetMetadata::new(self.target_id(local_identity), label, kind, visual_order);
-        self.register_metadata(ui, response, metadata)
+        self.register_metadata_with_paint_label_rect(ui, response, metadata, None)
+    }
+
+    /// Register a target with the actual text rect painted beside its native
+    /// response. This geometry is copied into the current-pass registry only
+    /// for non-interactive badge placement.
+    pub(crate) fn register_with_paint_label_rect(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        local_identity: impl AsRef<str>,
+        label: impl Into<String>,
+        kind: TargetKind,
+        visual_order: u64,
+        paint_label_rect: egui::Rect,
+    ) -> RegistrationResult {
+        let metadata =
+            TargetMetadata::new(self.target_id(local_identity), label, kind, visual_order);
+        self.register_metadata_with_paint_label_rect(ui, response, metadata, Some(paint_label_rect))
     }
 
     pub(crate) fn register_metadata(
@@ -771,6 +794,16 @@ impl JumpModeScope {
         ui: &egui::Ui,
         response: &egui::Response,
         metadata: TargetMetadata,
+    ) -> RegistrationResult {
+        self.register_metadata_with_paint_label_rect(ui, response, metadata, None)
+    }
+
+    fn register_metadata_with_paint_label_rect(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        metadata: TargetMetadata,
+        paint_label_rect: Option<egui::Rect>,
     ) -> RegistrationResult {
         if metadata.id().surface() != &self.surface || metadata.id().generation() != self.generation
         {
@@ -792,10 +825,10 @@ impl JumpModeScope {
         {
             return RegistrationResult::Rejected(RegistrationRejection::InactiveOwner);
         }
-        if let Some(owner) = self.navigation_owner {
-            if !owner.owns_surface(&self.surface) {
-                return RegistrationResult::Rejected(RegistrationRejection::InactiveOwner);
-            }
+        if let Some(owner) = self.navigation_owner
+            && !owner.owns_surface(&self.surface)
+        {
+            return RegistrationResult::Rejected(RegistrationRejection::InactiveOwner);
         }
         if !ctx.memory(|memory| memory.allows_interaction(response.layer_id)) {
             return RegistrationResult::Rejected(RegistrationRejection::BlockedLayer);
@@ -821,6 +854,9 @@ impl JumpModeScope {
             rect,
             clipped_rect,
             ui_clip_rect,
+            paint_label_rect: paint_label_rect
+                .map(|label_rect| label_rect.intersect(ui_clip_rect))
+                .filter(|label_rect| rect_is_usable(*label_rect)),
             enabled: true,
             eligible: true,
             epoch: self.epoch,
@@ -1390,10 +1426,9 @@ impl JumpModeUi {
             .last_completed_focus_handoff
             .as_ref()
             .is_some_and(|handoff| registry.get(&handoff.intent.target).is_none())
+            && let Some(handoff) = self.last_completed_focus_handoff.take()
         {
-            if let Some(handoff) = self.last_completed_focus_handoff.take() {
-                ctx.memory_mut(|memory| memory.surrender_focus(handoff.focus_owner_id()));
-            }
+            ctx.memory_mut(|memory| memory.surrender_focus(handoff.focus_owner_id()));
         }
         let navigation_allowed = match navigation_owner {
             NavigationOwner::Root => root_targets_allowed,
@@ -1663,10 +1698,10 @@ impl JumpModeUi {
                         captured_text_only_indices.insert(text_index);
                     }
                 }
-                if self.root_input_frame.resolved || self.root_input_frame.capture_text_remainder {
-                    if matches!(*key, egui::Key::Enter | egui::Key::Space) {
-                        continue;
-                    }
+                if (self.root_input_frame.resolved || self.root_input_frame.capture_text_remainder)
+                    && matches!(*key, egui::Key::Enter | egui::Key::Space)
+                {
+                    continue;
                 }
                 if *repeat {
                     continue;
@@ -3485,6 +3520,87 @@ mod tests {
             .is_empty()
         );
         assert!(jump.active_session().is_none(), "second leader cancels");
+
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![key_event(egui::Key::Space, false, false, leader)],
+            )
+            .is_empty()
+        );
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![key_event(
+                    egui::Key::Backspace,
+                    false,
+                    false,
+                    egui::Modifiers::NONE,
+                )],
+            )
+            .is_empty()
+        );
+        let long_hint_map = HintMap::assign((0..1000).map(|index| {
+            TargetMetadata::new(
+                TargetId::root_result(TargetGeneration(1), index),
+                format!("Target {index}"),
+                TargetKind::Button,
+                index as u64,
+            )
+        }))
+        .expect("the synthetic target identities are unique");
+        let three_letter_hint = long_hint_map
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.hint.as_str().len() >= 3)
+            .expect("the large map includes multi-character prefixes")
+            .hint
+            .as_str()
+            .to_owned();
+        let prefix: String = three_letter_hint.chars().take(2).collect();
+        jump.active_session = Some(HintSession::new(long_hint_map));
+        assert!(
+            run_root_input_frame(&mut jump, &ctx, vec![egui::Event::Text(prefix.clone())],)
+                .is_empty()
+        );
+        assert_eq!(jump.active_session().unwrap().prefix(), prefix);
+
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![key_event(
+                    egui::Key::Backspace,
+                    true,
+                    false,
+                    egui::Modifiers::NONE,
+                )],
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            jump.active_session().unwrap().prefix(),
+            &prefix[..1],
+            "the first rapid Backspace erases one character"
+        );
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(egui::Key::Backspace, false, false, egui::Modifiers::NONE,),
+                    key_event(egui::Key::Backspace, true, false, egui::Modifiers::NONE,),
+                ],
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            jump.active_session().unwrap().prefix(),
+            "",
+            "a second Backspace after a release erases the remaining prefix"
+        );
     }
 
     fn named_scope_target(

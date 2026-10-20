@@ -567,10 +567,11 @@ impl PasteSequenceDialog {
         if self.open && !window_open {
             self.close_from_window(app);
         }
-        if initial_confirmation_id.is_some() && self.remove_confirmation.is_none() {
-            if let Some(scope) = initial_confirmation_scope.as_ref() {
-                scope.discard_registered_targets();
-            }
+        if initial_confirmation_id.is_some()
+            && self.remove_confirmation.is_none()
+            && let Some(scope) = initial_confirmation_scope.as_ref()
+        {
+            scope.discard_registered_targets();
         }
     }
 

@@ -135,13 +135,47 @@ impl SettingsJumpTargets {
         kind: TargetKind,
         visual_order: u64,
     ) {
+        self.register_at_with_paint_label_rect(
+            ui,
+            response,
+            identity,
+            label,
+            kind,
+            visual_order,
+            None,
+        );
+    }
+
+    fn register_at_with_paint_label_rect(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: &'static str,
+        label: impl Into<String>,
+        kind: TargetKind,
+        visual_order: u64,
+        paint_label_rect: Option<egui::Rect>,
+    ) {
         let Some(scope) = self.scope.as_ref() else {
             return;
+        };
+        let label = label.into();
+        let registration = match paint_label_rect {
+            Some(rect) => scope.register_with_paint_label_rect(
+                ui,
+                response,
+                identity,
+                label,
+                kind,
+                visual_order,
+                rect,
+            ),
+            None => scope.register(ui, response, identity, label, kind, visual_order),
         };
         if let RegistrationResult::Registered {
             directive: Some(directive),
             ..
-        } = scope.register(ui, response, identity, label, kind, visual_order)
+        } = registration
         {
             directive.apply_to_response(response);
         }
@@ -269,20 +303,22 @@ fn show_settings_section(
         state.set_open(open);
     }
     let header_visual_order = targets.reserve_order();
+    let mut title_rect = egui::Rect::NOTHING;
     let header = state.show_header(ui, |ui| {
-        ui.heading(section.title());
+        title_rect = ui.heading(section.title()).rect;
     });
     let (toggle_response, header, _) = header.body(|ui| {
         crate::gui::theme::widgets::secondary_help(ui, section.description());
         add_contents(ui, targets);
     });
-    targets.register_at(
+    targets.register_at_with_paint_label_rect(
         ui,
         &toggle_response,
         section.persistent_id(),
         section.title(),
         TargetKind::Button,
         header_visual_order,
+        Some(title_rect),
     );
     header.response.rect
 }
@@ -2125,6 +2161,14 @@ mod settings_shell_tests {
         setup_output.drop_without_applying_deltas();
 
         let mut targets = settings_jump_frame(&ctx, &mut app, &mut jump, Vec::new(), None, true);
+        let hotkeys_header = target_by_label(&targets, "Hotkeys");
+        let hotkeys_title_rect = hotkeys_header
+            .paint_label_rect()
+            .expect("the collapsible section registers its actual painted heading rect");
+        assert!(
+            hotkeys_title_rect.left() >= hotkeys_header.rect().right(),
+            "the Settings heading is painted to the right of its native collapse response"
+        );
         app.settings_save_reconciliation_required = true;
         let disabled_targets =
             settings_jump_frame(&ctx, &mut app, &mut jump, Vec::new(), None, true);

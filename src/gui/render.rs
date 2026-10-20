@@ -8334,6 +8334,184 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "M14 CPU comparison; same 100-action root-list fixture in disabled, idle, and active states"]
+    fn jump_mode_cpu_root_list_disabled_idle_active() {
+        const WARMUPS: usize = 9;
+        const SAMPLES: usize = 20;
+        const VIEW_WIDTH: f32 = 960.0;
+        const VIEW_HEIGHT: f32 = 640.0;
+        const ACTION_COUNT: usize = 100;
+
+        let source_sha = std::env::var("ML_JUMP_MODE_CPU_SOURCE_SHA")
+            .expect("the M14 probe records its exact checkpoint plus source state");
+        let profile = std::env::var("ML_JUMP_MODE_CPU_PROFILE")
+            .expect("the M14 probe records its Cargo build profile");
+        assert_eq!(
+            profile, "test",
+            "the comparison uses the historical test profile"
+        );
+
+        for (scenario, jump_enabled, active) in [
+            ("disabled", false, false),
+            ("idle", true, false),
+            ("active", true, true),
+        ] {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) =
+                root_list_test_app(&ctx, (0..ACTION_COUNT).map(root_list_action).collect());
+            app.set_jump_mode_enabled(jump_enabled);
+            app.query_results_layout.enabled = true;
+            app.query_results_layout.cols = 3;
+            app.query_results_layout.respect_plugin_capability = false;
+            app.recompute_query_results_layout();
+            assert!(app.resolved_grid_layout);
+
+            let mut frame_index = 0;
+            app.visible_flag.store(true, Ordering::SeqCst);
+            app.restore_flag.store(false, Ordering::SeqCst);
+            app.last_visible = true;
+            app.focus_query = false;
+            app.follow_mouse = false;
+            focus_launcher_query(&ctx, &mut app);
+            let output = run_root_list_frame(
+                &ctx,
+                &mut app,
+                frame_index,
+                VIEW_WIDTH,
+                VIEW_HEIGHT,
+                Vec::new(),
+            );
+            frame_index += 1;
+            output.drop_without_applying_deltas();
+
+            if active {
+                let output = run_root_list_frame(
+                    &ctx,
+                    &mut app,
+                    frame_index,
+                    VIEW_WIDTH,
+                    VIEW_HEIGHT,
+                    vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                );
+                frame_index += 1;
+                output.drop_without_applying_deltas();
+                assert!(app.jump_mode_ui.active_session().is_some());
+
+                let output = run_root_list_frame(
+                    &ctx,
+                    &mut app,
+                    frame_index,
+                    VIEW_WIDTH,
+                    VIEW_HEIGHT,
+                    vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                );
+                frame_index += 1;
+                output.drop_without_applying_deltas();
+            }
+
+            for _ in 0..WARMUPS {
+                let output = run_root_list_frame(
+                    &ctx,
+                    &mut app,
+                    frame_index,
+                    VIEW_WIDTH,
+                    VIEW_HEIGHT,
+                    Vec::new(),
+                );
+                frame_index += 1;
+                output.drop_without_applying_deltas();
+            }
+
+            assert_eq!(
+                app.jump_mode_ui.active_session().is_some(),
+                active,
+                "the measured scenario has its intended session state"
+            );
+            let visible_root_rows = app.test_root_rendered_rows.len();
+            let registered_root_targets = app
+                .jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .filter(|target| {
+                    matches!(
+                        target.id().surface(),
+                        crate::gui::jump_mode::SurfaceId::LauncherResults
+                    ) && matches!(
+                        target.id().semantic(),
+                        crate::gui::jump_mode::SemanticTargetId::RootResult(_)
+                    )
+                })
+                .count();
+            if jump_enabled {
+                assert!(registered_root_targets > 0);
+                assert!(registered_root_targets <= visible_root_rows);
+            } else {
+                assert_eq!(registered_root_targets, 0);
+            }
+            let eligible_targets = app.jump_mode_ui.retained_registry().len();
+            assert!(
+                visible_root_rows > 0,
+                "each comparison scenario renders the actual root result grid"
+            );
+            eprintln!(
+                "M14_CPU_ROOT_LIST scenario={scenario} source_sha={source_sha} profile={profile} fixture=root_list_action_fixture count={ACTION_COUNT} viewport={}x{} grid_cols=3 jump_enabled={jump_enabled} active_session={active} visible_root_rows={visible_root_rows} registered_root_targets={registered_root_targets} eligible_targets={eligible_targets} warmups={WARMUPS} samples={SAMPLES} timing=run_root_list_frame output_disposal=outside_timing",
+                VIEW_WIDTH as u32, VIEW_HEIGHT as u32,
+            );
+
+            for sample_index in 0..SAMPLES {
+                let started = std::time::Instant::now();
+                let output = run_root_list_frame(
+                    &ctx,
+                    &mut app,
+                    frame_index,
+                    VIEW_WIDTH,
+                    VIEW_HEIGHT,
+                    Vec::new(),
+                );
+                let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+                frame_index += 1;
+                let sample_visible_root_rows = app.test_root_rendered_rows.len();
+                let sample_registered_root_targets = app
+                    .jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .filter(|target| {
+                        matches!(
+                            target.id().surface(),
+                            crate::gui::jump_mode::SurfaceId::LauncherResults
+                        ) && matches!(
+                            target.id().semantic(),
+                            crate::gui::jump_mode::SemanticTargetId::RootResult(_)
+                        )
+                    })
+                    .count();
+                let sample_eligible_targets = app.jump_mode_ui.retained_registry().len();
+                eprintln!(
+                    "M14_CPU_ROOT_LIST_SAMPLE scenario={scenario} sample_index={sample_index} elapsed_ns={elapsed_ns} visible_root_rows={sample_visible_root_rows} registered_root_targets={sample_registered_root_targets} eligible_targets={sample_eligible_targets}"
+                );
+                output.drop_without_applying_deltas();
+                assert!(sample_visible_root_rows > 0);
+                if jump_enabled {
+                    assert!(sample_registered_root_targets > 0);
+                    assert!(sample_registered_root_targets <= sample_visible_root_rows);
+                } else {
+                    assert_eq!(sample_registered_root_targets, 0);
+                }
+                assert_eq!(app.jump_mode_ui.active_session().is_some(), active);
+                assert!(
+                    app.test_activation_trace.is_empty(),
+                    "synthetic root actions are never activated by the CPU probe"
+                );
+            }
+        }
+    }
+
     fn run_root_list_frame_with_pass_count(
         ctx: &egui::Context,
         app: &mut LauncherApp,
@@ -25562,6 +25740,30 @@ mod tests {
                 "hint completion and same-frame Enter only select"
             );
 
+            for _ in 0..2 {
+                app.run_root_frame_for_test(
+                    &ctx,
+                    egui::RawInput {
+                        events: vec![egui::Event::Key {
+                            key: egui::Key::Enter,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: true,
+                            modifiers: egui::Modifiers::NONE,
+                        }],
+                        ..actual_query_input(true)
+                    },
+                    false,
+                )
+                .0
+                .drop_without_applying_deltas();
+                assert_eq!(app.selected, Some(1));
+                assert!(
+                    app.test_activation_trace.is_empty(),
+                    "a held/repeated completion Enter cannot activate the selected result"
+                );
+            }
+
             app.run_root_frame_for_test(
                 &ctx,
                 egui::RawInput {
@@ -25657,6 +25859,149 @@ mod tests {
             "a frozen session is canceled when its result generation changes"
         );
         assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_active_targets_track_resized_viewport_geometry() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) =
+            root_list_test_app(&ctx, (0..100).map(root_list_action).collect::<Vec<_>>());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        app.query_results_layout.enabled = true;
+        app.query_results_layout.cols = 3;
+        app.query_results_layout.respect_plugin_capability = false;
+        app.recompute_query_results_layout();
+        assert!(app.resolved_grid_layout);
+        prepare_actual_query_frame(&ctx, &mut app);
+
+        let before_viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("the grid records its clipped result viewport");
+        let before_generation = app.root_list_geometry.result_generation();
+        let before_geometry: std::collections::HashMap<_, _> = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .map(|target| (target.id().clone(), (target.rect(), target.clipped_rect())))
+            .collect();
+        let before_ids: std::collections::HashSet<_> = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .map(|target| target.id().clone())
+            .collect();
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let hint = root_result_hint(&app, 0);
+        let mut resized_input = actual_query_input(true);
+        resized_input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(760.0, 650.0),
+        ));
+        app.run_root_frame_for_test(&ctx, resized_input, false)
+            .0
+            .drop_without_applying_deltas();
+
+        assert_eq!(
+            app.root_list_geometry.result_generation(),
+            before_generation
+        );
+        assert!(
+            app.jump_mode_ui.active_session().is_some(),
+            "a width-only viewport resize keeps the frozen result population active"
+        );
+        let after_viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("the resized grid records its clipped result viewport");
+        assert!(after_viewport.width() < before_viewport.width());
+        let after_registry = app.jump_mode_ui.retained_registry();
+        let after_ids: std::collections::HashSet<_> = after_registry
+            .targets()
+            .iter()
+            .map(|target| target.id().clone())
+            .collect();
+        assert_eq!(
+            after_ids, before_ids,
+            "the same visible semantic population retains its frozen hint map"
+        );
+        let clipped_geometry_updated = after_registry.targets().iter().any(|target| {
+            before_geometry
+                .get(target.id())
+                .is_some_and(|(_, before_clipped_rect)| {
+                    target.clipped_rect() != *before_clipped_rect
+                })
+        });
+        assert!(
+            clipped_geometry_updated,
+            "resizing from {}pt to {}pt updates current target clipping",
+            before_viewport.width(),
+            after_viewport.width()
+        );
+        for target in after_registry.targets().iter().filter(|target| {
+            matches!(
+                target.id().surface(),
+                crate::gui::jump_mode::SurfaceId::LauncherResults
+            ) && matches!(
+                target.id().semantic(),
+                crate::gui::jump_mode::SemanticTargetId::RootResult(_)
+            )
+        }) {
+            assert_eq!(
+                target.clipped_rect(),
+                target.rect().intersect(target.ui_clip_rect()),
+                "the retained target uses its current-frame clipping"
+            );
+            assert!(target.clipped_rect().intersects(after_viewport));
+        }
+        assert_eq!(
+            root_result_hint(&app, 0),
+            hint,
+            "a viewport-only resize preserves the frozen assignment"
+        );
+
+        let mut post_resize_input = actual_query_input(true);
+        post_resize_input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(760.0, 650.0),
+        ));
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(hint)],
+                ..post_resize_input
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.selected, Some(0));
+        assert!(app.jump_mode_ui.active_session().is_none());
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let mut population_change_input = actual_query_input(true);
+        population_change_input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(560.0, 650.0),
+        ));
+        app.run_root_frame_for_test(&ctx, population_change_input, false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(
+            app.jump_mode_ui.active_session().is_none(),
+            "a narrower resize that changes the visible target population cancels the frozen session"
+        );
+        assert_eq!(
+            app.jump_mode_ui.last_outcome(),
+            Some(&crate::gui::jump_mode::MatchOutcome::Cancelled)
+        );
+        assert_eq!(app.selected, Some(0));
+        assert!(
+            app.test_activation_trace.is_empty(),
+            "resizing or selecting a hint never activates the result"
+        );
         drop(workspace);
     }
 
