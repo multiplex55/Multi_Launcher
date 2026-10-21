@@ -28888,7 +28888,7 @@ mod tests {
         assert_eq!(snippet_target_ids(&app, "Cancel snippet removal").len(), 1);
         assert_eq!(
             crate::plugins::snippets::load_snippets(&snippets_path).unwrap(),
-            [entry.clone()],
+            std::slice::from_ref(&entry),
             "a pending confirmation is only a focus target until a later key"
         );
 
@@ -28918,7 +28918,7 @@ mod tests {
         .drop_without_applying_deltas();
         assert_eq!(
             crate::plugins::snippets::load_snippets(&snippets_path).unwrap(),
-            [entry.clone()],
+            std::slice::from_ref(&entry),
             "hint completion and a same-frame Enter cannot confirm removal"
         );
         assert_eq!(
@@ -28944,7 +28944,7 @@ mod tests {
         .drop_without_applying_deltas();
         assert_eq!(
             crate::plugins::snippets::load_snippets(&snippets_path).unwrap(),
-            [entry.clone()],
+            std::slice::from_ref(&entry),
             "a held Enter repeat cannot cross the confirmation handoff"
         );
         app.run_root_frame_for_test(
@@ -29074,7 +29074,7 @@ mod tests {
                 );
             }
         }
-        assert!(snippet_target_ids(&app, "Snippet input").len() > 0);
+        assert!(!snippet_target_ids(&app, "Snippet input").is_empty());
         assert_eq!(snippet_target_ids(&app, "Copy snippet").len(), 1);
         assert_eq!(snippet_target_ids(&app, "Cancel snippet prompt").len(), 1);
 
@@ -30670,7 +30670,7 @@ mod tests {
         preferences: crate::settings::MkMacroPropertiesPreferences,
     ) {
         app.mkmacro_dialog.draft.macros = macros;
-        assert!(crate::mkmacro::repair_ids(&mut app.mkmacro_dialog.draft) == false);
+        assert!(!crate::mkmacro::repair_ids(&mut app.mkmacro_dialog.draft));
         assert!(
             app.mkmacro_dialog
                 .draft
@@ -30965,7 +30965,7 @@ mod tests {
             .map(|metadata| metadata.label())
             .collect::<Vec<_>>();
         assert!(
-            !transition_labels.iter().any(|label| *label == "Duration"),
+            !transition_labels.contains(&"Duration"),
             "the transition frame cannot retain old timer targets: {transition_labels:?}"
         );
         for _ in 0..2 {
@@ -30977,11 +30977,8 @@ mod tests {
             .metadata()
             .map(|metadata| metadata.label())
             .collect::<Vec<_>>();
-        assert!(labels.iter().any(|label| *label == "Time"), "{labels:?}");
-        assert!(
-            !labels.iter().any(|label| *label == "Duration"),
-            "{labels:?}"
-        );
+        assert!(labels.contains(&"Time"), "{labels:?}");
+        assert!(!labels.contains(&"Duration"), "{labels:?}");
         assert!(app.test_activation_trace.is_empty());
         drop(workspace);
     }
@@ -32224,9 +32221,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(
-            visible_note_labels
-                .iter()
-                .any(|label| *label == "Shared title (duplicate-first)"),
+            visible_note_labels.contains(&"Shared title (duplicate-first)"),
             "the real first note row is visible and registered: {visible_note_labels:?}"
         );
         assert!(

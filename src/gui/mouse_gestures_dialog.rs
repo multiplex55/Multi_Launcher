@@ -2275,10 +2275,11 @@ impl MgGesturesDialog {
         {
             self.binding_dialog.activation_key_release_required = false;
         }
-        if delete_layer_owner && !activation_key_held {
-            if let Some(pending) = self.pending_delete.as_mut() {
-                pending.activation_key_release_required = false;
-            }
+        if delete_layer_owner
+            && !activation_key_held
+            && let Some(pending) = self.pending_delete.as_mut()
+        {
+            pending.activation_key_release_required = false;
         }
     }
 }

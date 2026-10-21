@@ -11809,16 +11809,16 @@ fn style_value_widget(
                     correlation,
                 );
             }
-            if let Some(pass) = ui_pass.as_deref() {
-                if let Some(jump) = pass.jump.as_ref() {
-                    jump.register(
-                        ui,
-                        &response,
-                        &format!("style/{:016x}", radial_value_digest(&accessible_name)),
-                        "Style control",
-                        TargetKind::Checkbox,
-                    );
-                }
+            if let Some(pass) = ui_pass.as_deref()
+                && let Some(jump) = pass.jump.as_ref()
+            {
+                jump.register(
+                    ui,
+                    &response,
+                    &format!("style/{:016x}", radial_value_digest(&accessible_name)),
+                    "Style control",
+                    TargetKind::Checkbox,
+                );
             }
             (response.changed() || response.lost_focus())
                 .then(|| (serde_json::json!(value), widget_edit_phase(&response)))
@@ -11841,16 +11841,16 @@ fn style_value_widget(
                     )
                 }
             });
-            if let Some(pass) = ui_pass.as_deref() {
-                if let Some(jump) = pass.jump.as_ref() {
-                    jump.register(
-                        ui,
-                        &response,
-                        &format!("style/{:016x}", radial_value_digest(&accessible_name)),
-                        "Style value",
-                        TargetKind::Slider,
-                    );
-                }
+            if let Some(pass) = ui_pass.as_deref()
+                && let Some(jump) = pass.jump.as_ref()
+            {
+                jump.register(
+                    ui,
+                    &response,
+                    &format!("style/{:016x}", radial_value_digest(&accessible_name)),
+                    "Style value",
+                    TargetKind::Slider,
+                );
             }
             (response.changed() || response.drag_stopped() || response.lost_focus())
                 .then(|| (serde_json::json!(value), widget_edit_phase(&response)))
@@ -11890,16 +11890,16 @@ fn style_value_widget(
                     ),
                 )
             });
-            if let Some(pass) = ui_pass.as_deref() {
-                if let Some(jump) = pass.jump.as_ref() {
-                    jump.register(
-                        ui,
-                        &response,
-                        &format!("style/{:016x}", radial_value_digest(&accessible_name)),
-                        "Style color",
-                        TargetKind::Button,
-                    );
-                }
+            if let Some(pass) = ui_pass.as_deref()
+                && let Some(jump) = pass.jump.as_ref()
+            {
+                jump.register(
+                    ui,
+                    &response,
+                    &format!("style/{:016x}", radial_value_digest(&accessible_name)),
+                    "Style color",
+                    TargetKind::Button,
+                );
             }
             (response.changed() || response.drag_stopped() || response.lost_focus()).then(|| {
                 (
@@ -11935,23 +11935,23 @@ fn style_value_widget(
                     format!("{accessible_name} y"),
                 )
             });
-            if let Some(pass) = ui_pass.as_deref() {
-                if let Some(jump) = pass.jump.as_ref() {
-                    jump.register(
-                        ui,
-                        &x_response,
-                        &format!("style/{:016x}/x", radial_value_digest(&accessible_name)),
-                        "Style offset x",
-                        TargetKind::Slider,
-                    );
-                    jump.register(
-                        ui,
-                        &y_response,
-                        &format!("style/{:016x}/y", radial_value_digest(&accessible_name)),
-                        "Style offset y",
-                        TargetKind::Slider,
-                    );
-                }
+            if let Some(pass) = ui_pass.as_deref()
+                && let Some(jump) = pass.jump.as_ref()
+            {
+                jump.register(
+                    ui,
+                    &x_response,
+                    &format!("style/{:016x}/x", radial_value_digest(&accessible_name)),
+                    "Style offset x",
+                    TargetKind::Slider,
+                );
+                jump.register(
+                    ui,
+                    &y_response,
+                    &format!("style/{:016x}/y", radial_value_digest(&accessible_name)),
+                    "Style offset y",
+                    TargetKind::Slider,
+                );
             }
             let response = if x_response.changed() || x_response.drag_stopped() {
                 x_response
@@ -12124,19 +12124,19 @@ fn style_value_widget(
                 info.label = Some(accessible_name.into());
                 info
             });
-            if let Some(pass) = ui_pass.as_deref() {
-                if let Some(jump) = pass.jump.as_ref() {
-                    jump.register(
-                        ui,
-                        &response,
-                        &format!(
-                            "style/{:016x}/font-name",
-                            radial_value_digest(&accessible_name)
-                        ),
-                        "Font family",
-                        TargetKind::TextEntry,
-                    );
-                }
+            if let Some(pass) = ui_pass.as_deref()
+                && let Some(jump) = pass.jump.as_ref()
+            {
+                jump.register(
+                    ui,
+                    &response,
+                    &format!(
+                        "style/{:016x}/font-name",
+                        radial_value_digest(&accessible_name)
+                    ),
+                    "Font family",
+                    TargetKind::TextEntry,
+                );
             }
             if response.changed() || response.lost_focus() {
                 Some((
@@ -12160,16 +12160,16 @@ fn style_value_widget(
                 info.label = Some(accessible_name.into());
                 info
             });
-            if let Some(pass) = ui_pass.as_deref() {
-                if let Some(jump) = pass.jump.as_ref() {
-                    jump.register(
-                        ui,
-                        &response,
-                        &format!("style/{:016x}/text", radial_value_digest(&accessible_name)),
-                        "Style text",
-                        TargetKind::TextEntry,
-                    );
-                }
+            if let Some(pass) = ui_pass.as_deref()
+                && let Some(jump) = pass.jump.as_ref()
+            {
+                jump.register(
+                    ui,
+                    &response,
+                    &format!("style/{:016x}/text", radial_value_digest(&accessible_name)),
+                    "Style text",
+                    TargetKind::TextEntry,
+                );
             }
             (response.changed() || response.lost_focus()).then(|| {
                 (
@@ -12196,19 +12196,19 @@ fn style_value_widget(
                 info.label = Some(accessible_name.into());
                 info
             });
-            if let Some(pass) = ui_pass.as_deref() {
-                if let Some(jump) = pass.jump.as_ref() {
-                    jump.register(
-                        ui,
-                        &path_response,
-                        &format!(
-                            "style/{:016x}/resource",
-                            radial_value_digest(&accessible_name)
-                        ),
-                        "Style resource path",
-                        TargetKind::TextEntry,
-                    );
-                }
+            if let Some(pass) = ui_pass.as_deref()
+                && let Some(jump) = pass.jump.as_ref()
+            {
+                jump.register(
+                    ui,
+                    &path_response,
+                    &format!(
+                        "style/{:016x}/resource",
+                        radial_value_digest(&accessible_name)
+                    ),
+                    "Style resource path",
+                    TargetKind::TextEntry,
+                );
             }
             let mut resource = payload.clone();
             if let Some(object) = resource.as_object_mut() {
@@ -12231,19 +12231,19 @@ fn style_value_widget(
                         format!("{accessible_name} resource index"),
                     )
                 });
-                if let Some(pass) = ui_pass.as_deref() {
-                    if let Some(jump) = pass.jump.as_ref() {
-                        jump.register(
-                            ui,
-                            &index_response,
-                            &format!(
-                                "style/{:016x}/resource-index",
-                                radial_value_digest(&accessible_name)
-                            ),
-                            "Style resource index",
-                            TargetKind::Slider,
-                        );
-                    }
+                if let Some(pass) = ui_pass.as_deref()
+                    && let Some(jump) = pass.jump.as_ref()
+                {
+                    jump.register(
+                        ui,
+                        &index_response,
+                        &format!(
+                            "style/{:016x}/resource-index",
+                            radial_value_digest(&accessible_name)
+                        ),
+                        "Style resource index",
+                        TargetKind::Slider,
+                    );
                 }
                 if let Some(object) = resource.as_object_mut() {
                     object.insert("index".into(), serde_json::json!(index));

@@ -1409,15 +1409,15 @@ impl JsonUtilityDialogState {
             self.editor.service_projection(ctx);
         }
         let current_tree_target_generation = self.observe_tree_target_generation();
-        if current_tree_target_generation != tree_target_generation {
-            if let Some(scope) = tree_scope.as_ref() {
-                scope.discard_registered_namespace();
-            }
+        if current_tree_target_generation != tree_target_generation
+            && let Some(scope) = tree_scope.as_ref()
+        {
+            scope.discard_registered_namespace();
         }
-        if self.editor.generation != editor_generation_before_ui {
-            if let Some(scope) = document_action_scope.as_ref() {
-                scope.discard_registered_namespace();
-            }
+        if self.editor.generation != editor_generation_before_ui
+            && let Some(scope) = document_action_scope.as_ref()
+        {
+            scope.discard_registered_namespace();
         }
     }
 

@@ -347,9 +347,9 @@ impl MouseGestureSettingsDialog {
                 let mut changed = false;
                 let enabled = ui.checkbox(&mut self.settings.enabled, "Enable mouse gestures");
                 #[cfg(test)]
-                let _response_capture = {
+                {
                     enable_checkbox = Some(enabled.clone());
-                };
+                }
                 register_mouse_gesture_settings_target(
                     scope, ui, &enabled, "enabled", "Enable mouse gestures",
                     crate::gui::jump_mode::TargetKind::Checkbox, &mut visual_order,
