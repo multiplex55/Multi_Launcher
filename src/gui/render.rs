@@ -2859,9 +2859,6 @@ impl LauncherApp {
         let snippet_prompt_owns_input = visible_input_allowed
             && self.snippet_prompt_dialog.is_open()
             && !self.ocr_surface_visible();
-        if snippet_prompt_owns_input {
-            self.route_snippet_prompt_keyboard(ctx);
-        }
 
         let query_geometry_cause = self.run_runtime_tick(ctx, frame);
         let (visibility_request, visibility_invocation_id, should_be_visible, just_became_visible) =
@@ -2972,6 +2969,15 @@ impl LauncherApp {
     }
 
     fn native_ui_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        self.native_ui_host_input_allowed_for_snippet_prompt(ctx, root_visible, false)
+    }
+
+    fn native_ui_host_input_allowed_for_snippet_prompt(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        exact_prompt_owner: bool,
+    ) -> bool {
         let screen_draw_owns_input = !matches!(
             self.screen_draw_controller.state(),
             crate::screen_draw::ScreenDrawState::NoSession
@@ -2984,17 +2990,59 @@ impl LauncherApp {
             && !self.pin_list_open
             && !self.ocr_surface_visible()
             && !self.confirm_modal.is_open()
-            && !self.action_sheet.is_open()
+            // An exact foreground snippet prompt suspends the action sheet in
+            // render_root_ui; the still-open sheet is its launcher parent,
+            // not a competing foreground input owner.
+            && (exact_prompt_owner || !self.action_sheet.is_open())
             && self.macro_prompt.pending.is_none()
             && !self.macro_parameter_prompt.owns_input()
-            && !self.snippet_prompt_dialog.is_open()
+            && (exact_prompt_owner || !self.snippet_prompt_dialog.is_open())
             && !self
                 .root_frame_logic
                 .as_ref()
-                .is_some_and(|logic| logic.snippet_prompt_owns_input)
+                .is_some_and(|logic| logic.snippet_prompt_owns_input && !exact_prompt_owner)
             && !screen_draw_owns_input
             && !self.screen_draw_controller.toolbar_open()
             && ctx.memory(|memory| memory.top_modal_layer().is_none())
+    }
+
+    fn snippet_prompt_native_ui_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        let Some(session) = self.snippet_prompt_dialog.session() else {
+            return false;
+        };
+        let generation = session.generation;
+        self.snippet_prompt_dialog.is_open()
+            && self.native_ui_host_input_allowed_for_snippet_prompt(ctx, root_visible, true)
+            && crate::gui::jump_mode::ui::resolve_snippet_prompt_navigation_owner(ctx, generation)
+                == (crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { generation })
+    }
+
+    fn snippet_prompt_initial_focus_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        let Some(session) = self.snippet_prompt_dialog.session() else {
+            return false;
+        };
+        let generation = session.generation;
+        if !self.snippet_prompt_dialog.is_open()
+            || !self.native_ui_host_input_allowed_for_snippet_prompt(ctx, root_visible, true)
+            || egui::Popup::is_any_open(ctx)
+        {
+            return false;
+        }
+
+        let prompt_layer = crate::gui::jump_mode::ui::snippet_prompt_layer_id(generation);
+        let snippets_layer = crate::gui::jump_mode::ui::NavigationDialogKind::Snippets.layer_id();
+        let known_layer = |layer| layer == prompt_layer || Some(layer) == snippets_layer;
+        crate::gui::jump_mode::ui::visible_top_middle_layer(ctx).is_none_or(known_layer)
+            && crate::gui::jump_mode::ui::focused_response_layer(ctx)
+                .is_none_or(|layer| layer.order != egui::Order::Middle || known_layer(layer))
     }
 
     fn file_search_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
@@ -3046,8 +3094,21 @@ impl LauncherApp {
         root_visible: bool,
         navigation_owner: crate::gui::jump_mode::ui::NavigationOwner,
     ) -> bool {
-        navigation_owner != crate::gui::jump_mode::ui::NavigationOwner::Blocked
-            && self.jump_mode_host_input_allowed(ctx, root_visible)
+        use crate::gui::jump_mode::ui::NavigationOwner;
+
+        navigation_owner != NavigationOwner::Blocked
+            && match navigation_owner {
+                NavigationOwner::SnippetPrompt { generation } => {
+                    self.jump_mode_enabled()
+                        && self.snippet_prompt_native_ui_owner_current(ctx, root_visible)
+                        && self
+                            .snippet_prompt_dialog
+                            .session()
+                            .is_some_and(|session| session.generation == generation)
+                        && !self.snippet_prompt_dialog.is_sequence_preflight()
+                }
+                _ => self.jump_mode_host_input_allowed(ctx, root_visible),
+            }
     }
 
     fn jump_mode_root_targets_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
@@ -3177,7 +3238,23 @@ impl LauncherApp {
             || paste_sequence_visibility_changed
             || mkmacro_visibility_changed
             || owned_dialog_visibility_changed;
-        let (candidate, combo_popup) = if self.jump_mode_host_input_allowed(ctx, root_visible) {
+        let prompt_is_open = self.snippet_prompt_dialog.is_open();
+        let prompt_native_owner = self.snippet_prompt_native_ui_owner_current(ctx, root_visible);
+        let prompt_generation = self
+            .snippet_prompt_dialog
+            .session()
+            .map(|session| session.generation);
+        let (candidate, combo_popup) = if prompt_is_open {
+            match (prompt_native_owner, prompt_generation) {
+                (true, Some(generation))
+                    if self.jump_mode_enabled()
+                        && !self.snippet_prompt_dialog.is_sequence_preflight() =>
+                {
+                    (NavigationOwner::SnippetPrompt { generation }, None)
+                }
+                _ => (NavigationOwner::Blocked, None),
+            }
+        } else if self.jump_mode_host_input_allowed(ctx, root_visible) {
             use crate::gui::jump_mode::ui::NavigationDialogKind;
             let windows = crate::gui::jump_mode::ui::NavigationWindows {
                 settings: self
@@ -3213,6 +3290,21 @@ impl LauncherApp {
             .flatten();
             let owner =
                 resolve_layer_navigation_owner_with_combo_popup(ctx, windows, combo_popup.as_ref());
+            let owner = match owner {
+                NavigationOwner::Dialog {
+                    kind: NavigationDialogKind::Snippets,
+                    instance: parent_instance,
+                } => self
+                    .snippet_dialog
+                    .jump_mode_pending_removal_identity()
+                    .map_or(owner, |(confirmation_instance, _)| {
+                        NavigationOwner::SnippetRemoval {
+                            parent_instance,
+                            confirmation_instance,
+                        }
+                    }),
+                _ => owner,
+            };
             match owner {
                 NavigationOwner::Root if self.jump_mode_unsupported_panel_open() => {
                     (NavigationOwner::Blocked, combo_popup)
@@ -3227,15 +3319,6 @@ impl LauncherApp {
                     if self
                         .mkmacro_dialog
                         .jump_mode_unsupported_nested_owner_open() =>
-                {
-                    (NavigationOwner::Blocked, combo_popup)
-                }
-                NavigationOwner::Dialog {
-                    kind: NavigationDialogKind::Snippets,
-                    ..
-                } if self
-                    .snippet_dialog
-                    .jump_mode_unsupported_nested_owner_open() =>
                 {
                     (NavigationOwner::Blocked, combo_popup)
                 }
@@ -3377,6 +3460,15 @@ impl LauncherApp {
             supported_dialog_visibility_changed,
             combo_popup_candidate,
         );
+        if first_ui_pass
+            && self.snippet_prompt_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+        {
+            // Jump Mode gets the exact prompt's event stream first. In
+            // particular, Escape cancels an active hint session before it can
+            // dismiss the prompt; prompt-specific shortcuts handle only the
+            // events that remain after the normal Jump capture pass.
+            self.route_snippet_prompt_keyboard(&ctx);
+        }
         self.show_screenshot_pins(&ctx);
         self.pin_list_open = self.show_screenshot_pin_list(&ctx, self.pin_list_open);
         if frame_logic.should_be_visible {
@@ -4765,6 +4857,8 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
             };
             let mut ed = std::mem::take(&mut self.settings_editor);
@@ -4889,6 +4983,8 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut timer_dlg = std::mem::take(&mut self.timer_dialog);
@@ -4917,6 +5013,36 @@ impl LauncherApp {
                     snippet_navigation_owner,
                     false,
                 ),
+                crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval {
+                    parent_instance,
+                    confirmation_instance,
+                } => self
+                    .snippet_dialog
+                    .jump_mode_pending_removal_identity()
+                    .filter(|(current_confirmation, _)| {
+                        *current_confirmation == confirmation_instance
+                    })
+                    .and_then(|(_, index)| {
+                        let snapshot_generation = self.snippet_dialog.jump_mode_target_generation();
+                        self.jump_mode_ui.scope_for_navigation_owner(
+                            crate::gui::jump_mode::SurfaceId::popup(
+                                "snippet-removal",
+                                confirmation_instance,
+                                crate::gui::jump_mode::SurfaceId::dialog(
+                                    "snippets",
+                                    parent_instance,
+                                ),
+                            ),
+                            snapshot_generation,
+                            format!(
+                                "snippet-removal/{}/{}/{}",
+                                snapshot_generation.0, confirmation_instance, index
+                            ),
+                            ctx.viewport_id(),
+                            snippet_navigation_owner,
+                            false,
+                        )
+                    }),
                 crate::gui::jump_mode::ui::NavigationOwner::Root
                 | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
@@ -4925,6 +5051,7 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
             };
             let snippet_native_owner =
@@ -4982,6 +5109,8 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut paste_sequence_dlg = std::mem::take(&mut self.paste_sequence_dialog);
@@ -5013,6 +5142,8 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         self.mkmacro_dialog
@@ -5158,6 +5289,8 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
@@ -5234,6 +5367,8 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut todo_dlg = std::mem::take(&mut self.todo_dialog);
@@ -5350,8 +5485,43 @@ impl LauncherApp {
                 ConfirmationResult::None => {}
             }
         }
-        let snippet_prompt_action = self.snippet_prompt_dialog.show(&ctx);
-        if first_ui_pass {
+        let prompt_native_owner =
+            self.snippet_prompt_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
+        let prompt_initial_focus_owner = !prompt_native_owner
+            && first_ui_pass
+            && self.snippet_prompt_initial_focus_owner_current(&ctx, frame_logic.should_be_visible);
+        let prompt_scope = self
+            .snippet_prompt_dialog
+            .session()
+            .filter(|_| {
+                prompt_native_owner
+                    && self.jump_mode_enabled()
+                    && !self.snippet_prompt_dialog.is_sequence_preflight()
+            })
+            .and_then(|session| {
+                let generation = session.generation;
+                let owner =
+                    crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { generation };
+                (self.jump_mode_ui.frame_navigation_owner() == owner).then(|| {
+                    self.jump_mode_ui.scope_for_navigation_owner(
+                        crate::gui::jump_mode::SurfaceId::dialog("snippet-prompt", generation),
+                        crate::gui::jump_mode::TargetGeneration(generation),
+                        "snippet-prompt",
+                        ctx.viewport_id(),
+                        owner,
+                        false,
+                    )
+                })
+            })
+            .flatten();
+        let snippet_prompt_action = self.snippet_prompt_dialog.show_with_jump_mode(
+            &ctx,
+            prompt_scope,
+            prompt_native_owner,
+            first_ui_pass,
+            prompt_initial_focus_owner,
+        );
+        if first_ui_pass && prompt_native_owner {
             match snippet_prompt_action {
                 Some(super::snippet_prompt_dialog::SnippetPromptUiAction::Submit) => {
                     let _ = self.submit_snippet_prompt();
@@ -23429,6 +23599,7 @@ mod tests {
         app: &mut LauncherApp,
         snippets_path: &str,
     ) {
+        app.snippet_dialog.test_use_persistence_path(snippets_path);
         app.snippet_dialog.test_open_from(snippets_path);
         for _ in 0..4 {
             app.run_root_frame_for_test(ctx, actual_query_input(true), false)
@@ -23992,7 +24163,7 @@ mod tests {
     }
 
     #[test]
-    fn jump_mode_snippets_authoring_pending_removal_and_prompt_window_block_parent_targets() {
+    fn jump_mode_snippets_privacy_pending_removal_and_prompt_have_exact_owners() {
         let ctx = egui::Context::default();
         let (workspace, mut app) = root_list_test_app(&ctx, two_results());
         app.set_jump_mode_enabled(true);
@@ -24025,16 +24196,113 @@ mod tests {
                 .0
                 .drop_without_applying_deltas();
         }
+        let removal_owner = app.jump_mode_ui.frame_navigation_owner();
+        let crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval {
+            parent_instance,
+            confirmation_instance,
+        } = removal_owner
+        else {
+            panic!("the captured row confirmation owns the exact popup scope: {removal_owner:?}");
+        };
         assert_eq!(
-            app.jump_mode_ui.frame_navigation_owner(),
-            crate::gui::jump_mode::ui::NavigationOwner::Blocked
+            Some(parent_instance),
+            app.jump_mode_ui
+                .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::Snippets)
         );
+        assert_eq!(confirmation_instance, 1);
         assert!(snippet_target_ids(&app, "Snippet entry").is_empty());
         assert!(snippet_target_ids(&app, "Remove snippet").is_empty());
+        assert!(snippet_target_ids(&app, "Edit snippet").is_empty());
+        assert!(snippet_target_ids(&app, "Add snippet").is_empty());
+        assert!(snippet_target_ids(&app, "Close snippets").is_empty());
+        assert_eq!(snippet_target_ids(&app, "Confirm snippet removal").len(), 1);
+        assert_eq!(snippet_target_ids(&app, "Cancel snippet removal").len(), 1);
         assert_eq!(
             crate::plugins::snippets::load_snippets(&snippets_path).unwrap(),
             [entry.clone()],
-            "the parent surface cannot confirm removal"
+            "a pending confirmation is only a focus target until a later key"
+        );
+
+        let confirm_target = snippet_target_ids(&app, "Confirm snippet removal")[0].clone();
+        let confirm_response = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.id() == &confirm_target)
+            .expect("the child owner registered the actual Confirm response")
+            .response_id();
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let confirm_hint = snippet_hint_for_target(&app, &confirm_target);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![
+                    egui::Event::Text(confirm_hint),
+                    key_press(egui::Key::Enter, egui::Modifiers::NONE),
+                ],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            crate::plugins::snippets::load_snippets(&snippets_path).unwrap(),
+            [entry.clone()],
+            "hint completion and a same-frame Enter cannot confirm removal"
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(confirm_response)
+        );
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: true,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            crate::plugins::snippets::load_snippets(&snippets_path).unwrap(),
+            [entry.clone()],
+            "a held Enter repeat cannot cross the confirmation handoff"
+        );
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(
+            crate::plugins::snippets::load_snippets(&snippets_path)
+                .unwrap()
+                .is_empty(),
+            "only the later distinct Enter confirms the captured fixture row"
         );
 
         app.snippet_dialog.test_cancel_removal();
@@ -24053,10 +24321,409 @@ mod tests {
         assert!(app.snippet_prompt_dialog.is_open());
         assert_eq!(
             app.jump_mode_ui.frame_navigation_owner(),
-            crate::gui::jump_mode::ui::NavigationOwner::Blocked
+            crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt {
+                generation: app
+                    .snippet_prompt_dialog
+                    .session()
+                    .expect("Preview keeps its transient session")
+                    .generation,
+            }
         );
         assert!(snippet_target_ids(&app, "Snippet entry").is_empty());
+        assert!(snippet_target_ids(&app, "Copy snippet").is_empty());
+        assert_eq!(
+            snippet_target_ids(&app, "Return to snippet editor").len(),
+            1
+        );
         assert!(app.snippet_dialog.open);
+    }
+
+    #[test]
+    fn jump_mode_snippet_prompt_tracks_exact_generation_and_blocks_foreign_middle_owner() {
+        use crate::gui::jump_mode::ui::NavigationOwner;
+
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+
+        let private_alias = "private-snippet-alias";
+        let private_body = "private-body-marker {{private_field_key}}";
+        let private_default = "private-default-marker";
+        let private_tag = "private-tag-marker";
+        let mut private_field =
+            crate::plugins::snippets::SnippetFieldDefinition::new("private_field_key");
+        private_field.label = "Private field label".into();
+        private_field.default_value = private_default.into();
+        let private_entry = snippet_fixture_entry(
+            private_alias,
+            private_body,
+            false,
+            true,
+            vec![private_field],
+            &[private_tag],
+        );
+        request_test_prompt(&mut app, private_entry);
+        let first_generation = app
+            .snippet_prompt_dialog
+            .session()
+            .expect("the fixture opens a transient prompt")
+            .generation;
+        for _ in 0..4 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::SnippetPrompt {
+                generation: first_generation,
+            }
+        );
+        let first_targets: Vec<_> = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .map(|target| target.id().clone())
+            .collect();
+        assert!(!first_targets.is_empty());
+        for target in app.jump_mode_ui.retained_registry().targets() {
+            let metadata = format!("{} {:?}", target.metadata().label(), target.id());
+            for private_value in [
+                private_alias,
+                private_body,
+                private_default,
+                private_tag,
+                "private_field_key",
+                "Private field label",
+            ] {
+                assert!(
+                    !metadata.contains(private_value),
+                    "prompt target metadata leaked {private_value:?}"
+                );
+            }
+        }
+        assert!(snippet_target_ids(&app, "Snippet input").len() > 0);
+        assert_eq!(snippet_target_ids(&app, "Copy snippet").len(), 1);
+        assert_eq!(snippet_target_ids(&app, "Cancel snippet prompt").len(), 1);
+
+        let mut replacement_field =
+            crate::plugins::snippets::SnippetFieldDefinition::new("replacement_key");
+        replacement_field.default_value = "replacement-default-marker".into();
+        let replacement = snippet_fixture_entry(
+            "replacement-alias",
+            "replacement-body-marker {{replacement_key}}",
+            false,
+            true,
+            vec![replacement_field],
+            &[],
+        );
+        request_test_prompt(&mut app, replacement);
+        let replacement_generation = app
+            .snippet_prompt_dialog
+            .session()
+            .expect("replacing the prompt renews its session")
+            .generation;
+        assert_ne!(replacement_generation, first_generation);
+        for _ in 0..4 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::SnippetPrompt {
+                generation: replacement_generation,
+            }
+        );
+        let replacement_targets: Vec<_> = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .map(|target| target.id().clone())
+            .collect();
+        assert!(!replacement_targets.is_empty());
+        assert!(
+            first_targets
+                .iter()
+                .all(|old_target| !replacement_targets.contains(old_target)),
+            "a replaced prompt cannot retain targets from its prior generation"
+        );
+
+        let foreign_window_id = egui::Id::new("m3b_foreign_middle_window");
+        let draw_foreign_window = |app: &mut LauncherApp, ui: &mut egui::Ui| {
+            app.render_root_ui(ui);
+            egui::Window::new("Foreign owner")
+                .id(foreign_window_id)
+                .collapsible(false)
+                .show(ui.ctx(), |ui| {
+                    ui.label("This window owns foreground input.")
+                });
+        };
+        app.run_root_frame_for_test_with(
+            &ctx,
+            actual_query_input(true),
+            false,
+            draw_foreign_window,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
+            Some(egui::LayerId::new(egui::Order::Middle, foreign_window_id,)),
+            "the fixture must put a real foreign Window above the prompt"
+        );
+
+        app.run_root_frame_for_test_with(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)],
+                ..actual_query_input(true)
+            },
+            false,
+            draw_foreign_window,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.snippet_prompt_dialog.is_open());
+        assert_eq!(app.snippet_prompt_dialog.feedback(), None);
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Blocked
+        );
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+    }
+
+    #[test]
+    fn jump_mode_snippet_prompt_escape_field_copy_hints_remain_focus_only_until_fresh_submit() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+
+        let entry = prompted_test_entry();
+        let snippets_path = workspace
+            .root()
+            .join(crate::plugins::snippets::SNIPPETS_FILE)
+            .to_string_lossy()
+            .into_owned();
+        crate::plugins::snippets::save_snippets(&snippets_path, &[])
+            .expect("the isolated current store is empty until the fake submit seam");
+        request_test_prompt(&mut app, entry.clone());
+        let generation = app
+            .snippet_prompt_dialog
+            .session()
+            .expect("the prompt session exists")
+            .generation;
+        for _ in 0..4 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        assert!(app.snippet_prompt_native_ui_owner_current(&ctx, true));
+        let query_before = app.query.clone();
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.snippet_prompt_dialog.is_open());
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert_eq!(app.query, query_before);
+
+        let field_target = snippet_target_ids(&app, "Snippet input")
+            .into_iter()
+            .find(|target| {
+                matches!(
+                    target.semantic(),
+                    crate::gui::jump_mode::SemanticTargetId::Named(identity)
+                        if identity.contains("field/0")
+                )
+            })
+            .expect("the first actual editable field has a generic target identity");
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let field_hint = snippet_hint_for_target(&app, &field_target);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(field_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(ctx.memory(|memory| {
+            memory.has_focus(egui::Id::new(("snippet_prompt_field", generation, "name")))
+        }));
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text("Ada".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.snippet_prompt_dialog
+                .session()
+                .and_then(|session| session.values.get("name"))
+                .map(String::as_str),
+            Some("Ada"),
+            "native typing continues in the field after Jump focus"
+        );
+
+        let copy_target = snippet_target_ids(&app, "Copy snippet")
+            .into_iter()
+            .next()
+            .expect("the enabled Copy action is a real response target");
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let copy_hint = snippet_hint_for_target(&app, &copy_target);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![
+                    egui::Event::Text(copy_hint),
+                    key_press(egui::Key::Enter, egui::Modifiers::CTRL),
+                ],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(
+            app.snippet_prompt_dialog.is_open(),
+            "a Copy hint and same-frame Ctrl+Enter only focus the actual response"
+        );
+        assert_eq!(app.snippet_prompt_dialog.feedback(), None);
+        assert_eq!(app.query, query_before);
+
+        let mut copied = Vec::new();
+        let mut submit_result = None;
+        let output = ctx.run_ui(
+            prompt_raw_input(vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)]),
+            |ctx| {
+                assert!(app.snippet_prompt_native_ui_owner_current(ctx, true));
+                assert!(app.route_snippet_prompt_keyboard_with(ctx, |app| {
+                    submit_result = Some(app.submit_snippet_prompt_with_test_backends(
+                        |alias| (alias == entry.alias).then(|| entry.clone()).ok_or(()),
+                        |text| {
+                            copied.push(text.to_owned());
+                            Ok(())
+                        },
+                    ));
+                }));
+                assert!(!ctx.input(|input| input.key_pressed(egui::Key::Enter)));
+            },
+        );
+        output.drop_without_applying_deltas();
+        assert_eq!(copied, ["Hello Ada\n"]);
+        assert!(
+            submit_result
+                .expect("the fresh native key submits once")
+                .is_ok()
+        );
+        assert!(app.snippet_prompt_dialog.session().is_none());
+        assert_eq!(app.query, query_before);
+    }
+
+    #[test]
+    fn jump_mode_snippet_prompt_sequence_preflight_keeps_native_keys_without_jump_targets() {
+        use crate::gui::jump_mode::ui::NavigationOwner;
+
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+
+        let entry = prompted_test_entry();
+        let sequence = crate::paste_sequence::Sequence {
+            id: crate::paste_sequence::SequenceId::from_raw(1)
+                .expect("the safe preflight fixture has a nonzero ID"),
+            name: "Safe prompt preflight".into(),
+            hotkey: None,
+            mode: crate::paste_sequence::PlaybackMode::ManualAdvance,
+            delay_ms: 0,
+            steps: vec![crate::paste_sequence::Step::SnippetRef {
+                alias: entry.alias.clone(),
+            }],
+        };
+        let target = crate::paste_sequence::SequenceTarget::from_external_window(
+            crate::active_window::ExternalForegroundWindow {
+                hwnd: 111,
+                process_id: 222,
+                thread_id: 333,
+                title: None,
+            },
+            444,
+        )
+        .expect("the deterministic external target is valid");
+        let flow = crate::paste_sequence::SequencePreflight::begin(
+            sequence,
+            std::slice::from_ref(&entry),
+            &[],
+            crate::paste_sequence::SequenceInvocationContext::new(
+                chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05+00:00")
+                    .expect("the fixed preflight timestamp is valid"),
+                None,
+                target,
+            ),
+        )
+        .expect("the isolated snippet reference can start in-memory preflight");
+        app.snippet_prompt_dialog
+            .begin_sequence_preflight(&ctx, flow)
+            .expect("the first prompted step opens normally");
+        let generation = app
+            .snippet_prompt_dialog
+            .session()
+            .expect("preflight has a current prompt")
+            .generation;
+        let first_field = egui::Id::new(("snippet_prompt_field", generation, "name"));
+        let next_field = egui::Id::new(("snippet_prompt_field", generation, "message"));
+        for _ in 0..4 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        assert!(app.snippet_prompt_dialog.is_sequence_preflight());
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Blocked
+        );
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+        assert!(ctx.memory(|memory| memory.has_focus(first_field)));
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Tab, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.snippet_prompt_dialog.is_open());
+        assert!(app.snippet_prompt_dialog.is_sequence_preflight());
+        assert!(ctx.memory(|memory| memory.has_focus(next_field)));
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
     }
 
     fn seed_actual_file_search_filename_results(

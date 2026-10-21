@@ -254,6 +254,20 @@ impl SnippetPromptDialog {
 
     fn replace_session(&mut self, ctx: &egui::Context, mut session: SnippetPromptSession) -> u64 {
         self.clear_widget_state(ctx);
+        // Preview starts from the Snippets editor, whose native focus can stay
+        // on that lower window while the new prompt is first painted. Drop
+        // only that known parent focus so the prompt can become the exact
+        // foreground owner on its next frame; foreign Middle layers stay
+        // untouched and continue to block it.
+        if crate::gui::jump_mode::ui::NavigationDialogKind::Snippets
+            .layer_id()
+            .is_some_and(|layer| {
+                crate::gui::jump_mode::ui::focused_response_layer(ctx) == Some(layer)
+            })
+            && let Some(focused) = ctx.memory(|memory| memory.focused())
+        {
+            ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        }
         self.generation = self.generation.wrapping_add(1).max(1);
         session.generation = self.generation;
         self.session = Some(session);
@@ -309,6 +323,17 @@ impl SnippetPromptDialog {
     }
 
     pub(crate) fn show(&mut self, ctx: &egui::Context) -> Option<SnippetPromptUiAction> {
+        self.show_with_jump_mode(ctx, None, true, true, false)
+    }
+
+    pub(crate) fn show_with_jump_mode(
+        &mut self,
+        ctx: &egui::Context,
+        jump_mode_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        first_ui_pass: bool,
+        allow_initial_focus: bool,
+    ) -> Option<SnippetPromptUiAction> {
         if !self.open {
             return None;
         }
@@ -320,8 +345,22 @@ impl SnippetPromptDialog {
         let generation = session.generation;
         let initial_focus = session.initial_focus.clone();
         let preview_only = matches!(&session.mode, SnippetPromptMode::PreviewOnly { .. });
-        let mut focus_target = self.pending_focus.take();
-        if self.focused_generation != Some(generation) {
+        let scoped_scope = jump_mode_scope
+            .map(|scope| scope.child_namespace(format!("snippet-prompt/{generation}")));
+        let scope = scoped_scope.as_ref();
+        let mut visual_order = 0_u64;
+        let authorized_owner_pass = native_ui_owner && first_ui_pass;
+        let mut focus_target = if authorized_owner_pass {
+            self.pending_focus.take()
+        } else if allow_initial_focus && self.focused_generation != Some(generation) {
+            // The new Window is not visible in the completed layer inventory
+            // until this paint finishes. Establish only its first field focus
+            // while the renderer has verified a safe launcher-parent foreground.
+            initial_focus.clone().map(PromptFocusTarget::Field)
+        } else {
+            None
+        };
+        if authorized_owner_pass && self.focused_generation != Some(generation) {
             self.focused_generation = Some(generation);
             if focus_target.is_none() {
                 focus_target = initial_focus.map(PromptFocusTarget::Field);
@@ -389,49 +428,50 @@ impl SnippetPromptDialog {
             .max_size(max_size)
             .open(&mut opened)
             .show(ctx, |ui| {
-                let Some(session) = self.session.as_mut() else {
-                    return;
-                };
-                if preview_only {
-                    semantic_status(
-                        ui,
-                        StatusTone::Warning,
-                        "Preview mode",
-                        Some("Copying is disabled."),
-                    );
-                }
-                if let Some(attribution) = session.sequence_step {
-                    ui.weak(format!(
-                        "Sequence step {} of {} · prompt {} of {}",
-                        attribution.step_index + 1,
-                        attribution.total_steps,
-                        attribution.prompt_index + 1,
-                        attribution.total_prompts
-                    ));
-                }
-                if session.prepared.parsed.has_system_variables() {
-                    ui.weak(
-                        "Automatic values are captured once per run; unavailable clipboard or window-title values are empty.",
-                    );
-                }
+                ui.add_enabled_ui(native_ui_owner, |ui| {
+                    let Some(session) = self.session.as_mut() else {
+                        return;
+                    };
+                    if preview_only {
+                        semantic_status(
+                            ui,
+                            StatusTone::Warning,
+                            "Preview mode",
+                            Some("Copying is disabled."),
+                        );
+                    }
+                    if let Some(attribution) = session.sequence_step {
+                        ui.weak(format!(
+                            "Sequence step {} of {} · prompt {} of {}",
+                            attribution.step_index + 1,
+                            attribution.total_steps,
+                            attribution.prompt_index + 1,
+                            attribution.total_prompts
+                        ));
+                    }
+                    if session.prepared.parsed.has_system_variables() {
+                        ui.weak(
+                            "Automatic values are captured once per run; unavailable clipboard or window-title values are empty.",
+                        );
+                    }
 
-                let footer_height = prompt_button_height(ui);
-                let feedback_height = feedback.map_or(0.0, |error| {
-                    prompt_status_height(ui, "Prompt issue", error.message())
-                });
-                let vertical_spacing = ui.spacing().item_spacing.y
-                    * if feedback.is_some() { 2.0 } else { 1.0 };
-                let body_height = (ui.available_height()
-                    - footer_height
-                    - feedback_height
-                    - vertical_spacing)
-                    .max(24.0);
-                let _body_output = egui::ScrollArea::vertical()
-                    .id_salt(("snippet_prompt_body", generation))
-                    .auto_shrink([false, false])
-                    .max_height(body_height)
-                    .show(ui, |ui| {
-                        for field in &session.prepared.fields {
+                    let footer_height = prompt_button_height(ui);
+                    let feedback_height = feedback.map_or(0.0, |error| {
+                        prompt_status_height(ui, "Prompt issue", error.message())
+                    });
+                    let vertical_spacing = ui.spacing().item_spacing.y
+                        * if feedback.is_some() { 2.0 } else { 1.0 };
+                    let body_height = (ui.available_height()
+                        - footer_height
+                        - feedback_height
+                        - vertical_spacing)
+                        .max(24.0);
+                    let _body_output = egui::ScrollArea::vertical()
+                        .id_salt(("snippet_prompt_body", generation))
+                        .auto_shrink([false, false])
+                        .max_height(body_height)
+                        .show(ui, |ui| {
+                        for (field_index, field) in session.prepared.fields.iter().enumerate() {
                             ui.horizontal_wrapped(|ui| {
                                 ui.strong(field.display_label().as_ref());
                                 if field.required {
@@ -439,7 +479,17 @@ impl SnippetPromptDialog {
                                 }
                             });
 
-                            let value = session.values.entry(field.name.clone()).or_default();
+                            let mut value_shadow;
+                            let value = if authorized_owner_pass {
+                                session.values.entry(field.name.clone()).or_default()
+                            } else {
+                                value_shadow = session
+                                    .values
+                                    .get(&field.name)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                &mut value_shadow
+                            };
                             let id = field_widget_id(generation, &field.name);
                             let response = match field.input_kind {
                                 SnippetInputKind::SingleLine => ui.add(
@@ -455,7 +505,21 @@ impl SnippetPromptDialog {
                                         .desired_width(f32::INFINITY),
                                 ),
                             };
-                            value_changed |= response.changed();
+                            let field_identity = format!("field/{field_index}");
+                            let directive = crate::gui::jump_mode::ui::register_and_apply_target(
+                                scope,
+                                ui,
+                                &response,
+                                &field_identity,
+                                "Snippet input",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut visual_order,
+                            );
+                            if directive == Some(crate::gui::jump_mode::ui::FocusDirective::Select)
+                            {
+                                response.request_focus();
+                            }
+                            value_changed |= response.changed() && authorized_owner_pass;
                             if matches!(&focus_target, Some(PromptFocusTarget::Field(key)) if key == &field.name)
                             {
                                 response.request_focus();
@@ -526,15 +590,15 @@ impl SnippetPromptDialog {
                     ));
                 }
 
-                if let Some(error) = feedback {
-                    semantic_status(
-                        ui,
-                        StatusTone::Error,
-                        "Prompt issue",
-                        Some(error.message()),
-                    );
-                }
-                ui.horizontal(|ui| {
+                    if let Some(error) = feedback {
+                        semantic_status(
+                            ui,
+                            StatusTone::Error,
+                            "Prompt issue",
+                            Some(error.message()),
+                        );
+                    }
+                    ui.horizontal(|ui| {
                     if !preview_only {
                         let submit_label = session.sequence_step.map_or("Copy", |attribution| {
                             if attribution.prompt_index + 1 < attribution.total_prompts {
@@ -555,11 +619,32 @@ impl SnippetPromptDialog {
                                 rect: response.rect,
                             });
                         }
-                        self.copy_widget_id = Some(response.id);
+                        if authorized_owner_pass {
+                            self.copy_widget_id = Some(response.id);
+                        }
+                        let submit_identity = "copy";
+                        let submit_label = if session.sequence_step.is_some() {
+                            "Prepare snippet sequence"
+                        } else {
+                            "Copy snippet"
+                        };
+                        let directive = crate::gui::jump_mode::ui::register_and_apply_target(
+                            scope,
+                            ui,
+                            &response,
+                            submit_identity,
+                            submit_label,
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut visual_order,
+                        );
+                        if directive == Some(crate::gui::jump_mode::ui::FocusDirective::Select) {
+                            response.request_focus();
+                        }
                         if matches!(&focus_target, Some(PromptFocusTarget::Copy)) {
                             response.request_focus();
                         }
                         if with_button_emphasis(ui, response, ButtonEmphasis::Primary).clicked()
+                            && authorized_owner_pass
                             && action.is_none()
                         {
                             action = Some(SnippetPromptUiAction::Submit);
@@ -582,7 +667,27 @@ impl SnippetPromptDialog {
                             rect: response.rect,
                         });
                     }
-                    self.cancel_widget_id = Some(response.id);
+                    if authorized_owner_pass {
+                        self.cancel_widget_id = Some(response.id);
+                    }
+                    let cancel_directive = crate::gui::jump_mode::ui::register_and_apply_target(
+                        scope,
+                        ui,
+                        &response,
+                        "cancel",
+                        if preview_only {
+                            "Return to snippet editor"
+                        } else {
+                            "Cancel snippet prompt"
+                        },
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut visual_order,
+                    );
+                    if cancel_directive
+                        == Some(crate::gui::jump_mode::ui::FocusDirective::Select)
+                    {
+                        response.request_focus();
+                    }
                     if matches!(&focus_target, Some(PromptFocusTarget::Cancel)) {
                         response.request_focus();
                     }
@@ -591,9 +696,12 @@ impl SnippetPromptDialog {
                     } else {
                         ButtonEmphasis::Ordinary
                     };
-                    if with_button_emphasis(ui, response, emphasis).clicked() {
+                    if with_button_emphasis(ui, response, emphasis).clicked()
+                        && authorized_owner_pass
+                    {
                         action = Some(SnippetPromptUiAction::Cancel);
                     }
+                    });
                 });
             });
 
@@ -619,11 +727,15 @@ impl SnippetPromptDialog {
             };
         }
 
-        self.open = opened;
-        if value_changed {
+        self.open = if authorized_owner_pass {
+            opened
+        } else {
+            self.open
+        };
+        if authorized_owner_pass && value_changed {
             self.feedback = None;
         }
-        if !opened {
+        if authorized_owner_pass && !opened {
             Some(SnippetPromptUiAction::Cancel)
         } else {
             action

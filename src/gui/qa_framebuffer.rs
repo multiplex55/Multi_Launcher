@@ -2474,6 +2474,11 @@ fn qa_navigation_owner(owner: super::jump_mode::ui::NavigationOwner) -> QaNaviga
         Owner::PasteSequence { instance } => ("paste_sequence", Some(instance)),
         Owner::MkMacro { instance } => ("mkmacro", Some(instance)),
         Owner::Dialog { kind, instance } => (kind.surface_kind(), Some(instance)),
+        Owner::SnippetRemoval {
+            confirmation_instance,
+            ..
+        } => ("snippet_removal", Some(confirmation_instance)),
+        Owner::SnippetPrompt { generation } => ("snippet_prompt", Some(generation)),
         Owner::Blocked => ("blocked", None),
     };
     QaNavigationOwner { kind, instance }
@@ -2527,6 +2532,11 @@ fn qa_dialog_state(
         Owner::PasteSequence { instance } => ("paste_sequence", instance),
         Owner::MkMacro { instance } => ("mkmacro", instance),
         Owner::Dialog { kind, instance } => (kind.surface_kind(), instance),
+        Owner::SnippetRemoval {
+            confirmation_instance,
+            ..
+        } => ("snippet-removal", confirmation_instance),
+        Owner::SnippetPrompt { generation } => ("snippet-prompt", generation),
     };
     let mut state = QaDialogState {
         surface: Some(surface),
@@ -2620,7 +2630,7 @@ fn qa_dialog_state(
             state.file_search_form_generation = Some(search.jump_mode_target_generation().0);
             state.target_generation = state.file_search_form_generation;
         }
-        Owner::Dialog { .. } => {}
+        Owner::Dialog { .. } | Owner::SnippetRemoval { .. } | Owner::SnippetPrompt { .. } => {}
         Owner::Root | Owner::Blocked => unreachable!("handled above"),
     }
     Some(state)

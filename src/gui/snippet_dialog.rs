@@ -15,6 +15,7 @@ use egui_toast::{Toast, ToastKind, ToastOptions};
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingRemoval {
     index: usize,
+    confirmation_instance: u64,
     expected_entry: SnippetEntry,
     expected_entries: Vec<SnippetEntry>,
 }
@@ -53,6 +54,7 @@ pub struct SnippetDialog {
     entries: Vec<SnippetEntry>,
     snapshot_generation: u64,
     view_revision: u64,
+    removal_instance: u64,
     selected_entry_index: Option<usize>,
     edit_idx: Option<usize>,
     body_edit_session: u64,
@@ -72,6 +74,8 @@ pub struct SnippetDialog {
     load_error: Option<String>,
     inline_error: Option<String>,
     pending_removal: Option<PendingRemoval>,
+    #[cfg(test)]
+    persistence_path_override: Option<String>,
     #[cfg(test)]
     body_editor_widget_id: Option<egui::Id>,
     #[cfg(test)]
@@ -612,8 +616,10 @@ impl SnippetDialog {
         crate::gui::jump_mode::TargetGeneration(self.snapshot_generation)
     }
 
-    pub(crate) fn jump_mode_unsupported_nested_owner_open(&self) -> bool {
-        self.pending_removal.is_some()
+    pub(crate) fn jump_mode_pending_removal_identity(&self) -> Option<(u64, usize)> {
+        self.pending_removal
+            .as_ref()
+            .map(|pending| (pending.confirmation_instance, pending.index))
     }
 
     #[cfg(test)]
@@ -629,6 +635,11 @@ impl SnippetDialog {
     #[cfg(test)]
     pub(crate) fn test_cancel_removal(&mut self) {
         self.cancel_removal();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_use_persistence_path(&mut self, path: &str) {
+        self.persistence_path_override = Some(path.to_owned());
     }
 
     #[cfg(test)]
@@ -1049,8 +1060,10 @@ impl SnippetDialog {
         let Some(expected_entry) = self.entries.get(index).cloned() else {
             return;
         };
+        self.removal_instance = self.removal_instance.wrapping_add(1).max(1);
         self.pending_removal = Some(PendingRemoval {
             index,
+            confirmation_instance: self.removal_instance,
             expected_entry,
             expected_entries: self.entries.clone(),
         });
@@ -1139,6 +1152,14 @@ impl SnippetDialog {
             self.end_session();
             return None;
         }
+        #[cfg(test)]
+        let persistence_path_override = self.persistence_path_override.clone();
+        #[cfg(test)]
+        let persistence_path = persistence_path_override
+            .as_deref()
+            .unwrap_or(SNIPPETS_FILE);
+        #[cfg(not(test))]
+        let persistence_path = SNIPPETS_FILE;
         let authorized_owner_pass = native_ui_owner && first_ui_pass;
         let (window_open, save_request, confirm_removal, preview_request) = self
             .show_window_with_jump_mode(
@@ -1150,13 +1171,13 @@ impl SnippetDialog {
             );
 
         if save_request && authorized_owner_pass {
-            match self.save_editor(SNIPPETS_FILE) {
+            match self.save_editor(persistence_path) {
                 Ok(()) => Self::finish_success(app, "Saved snippet"),
                 Err(failure) => Self::report_commit_failure(app, &failure),
             }
         }
         if confirm_removal && authorized_owner_pass {
-            match self.confirm_removal(SNIPPETS_FILE) {
+            match self.confirm_removal(persistence_path) {
                 Ok(true) => Self::finish_success(app, "Removed snippet"),
                 Ok(false) => {}
                 Err(failure) => Self::report_commit_failure(app, &failure),
@@ -1202,7 +1223,12 @@ impl SnippetDialog {
         let initial_view_revision = self.view_revision;
         let scoped_scope = jump_mode_scope
             .map(|scope| scope.child_namespace(format!("view/{}", self.view_revision)));
-        let scope = scoped_scope.as_ref();
+        let removal_scope = self.pending_removal.as_ref().and(scoped_scope.as_ref());
+        let scope = self
+            .pending_removal
+            .is_none()
+            .then_some(scoped_scope.as_ref())
+            .flatten();
         let mut visual_order = 0_u64;
         egui::Window::new("Snippets")
             .default_size((600.0, 500.0))
@@ -1856,14 +1882,37 @@ impl SnippetDialog {
                                                 }
                                             }
 
-                                            let confirming = self
+                                            let confirmation_instance = self
                                                 .pending_removal
                                                 .as_ref()
-                                                .is_some_and(|pending| pending.index == idx);
-                                            if confirming {
-                                                let confirm = ui.add_sized(
-                                                    egui::vec2(edit_width, row_height),
-                                                    egui::Button::new("Confirm"),
+                                                .filter(|pending| pending.index == idx)
+                                                .map(|pending| pending.confirmation_instance);
+                                            if let Some(confirmation_instance) = confirmation_instance {
+                                                let confirm = ui
+                                                    .push_id(
+                                                        (
+                                                            "snippet-removal-confirm",
+                                                            confirmation_instance,
+                                                        ),
+                                                        |ui| {
+                                                            ui.add_sized(
+                                                                egui::vec2(edit_width, row_height),
+                                                                egui::Button::new("Confirm"),
+                                                            )
+                                                        },
+                                                    )
+                                                    .inner;
+                                                apply_select_focus(
+                                                    &confirm,
+                                                    register_snippet_target(
+                                                        removal_scope,
+                                                        ui,
+                                                        &confirm,
+                                                        "removal/confirm",
+                                                        "Confirm snippet removal",
+                                                        crate::gui::jump_mode::TargetKind::Button,
+                                                        &mut visual_order,
+                                                    ),
                                                 );
                                                 if with_button_emphasis(
                                                     ui,
@@ -1875,14 +1924,33 @@ impl SnippetDialog {
                                                 {
                                                     confirm_removal = true;
                                                 }
-                                                if ui
-                                                    .add_sized(
-                                                        egui::vec2(remove_width, row_height),
-                                                        egui::Button::new("Cancel"),
+                                                let cancel = ui
+                                                    .push_id(
+                                                        (
+                                                            "snippet-removal-cancel",
+                                                            confirmation_instance,
+                                                        ),
+                                                        |ui| {
+                                                            ui.add_sized(
+                                                                egui::vec2(remove_width, row_height),
+                                                                egui::Button::new("Cancel"),
+                                                            )
+                                                        },
                                                     )
-                                                    .clicked()
-                                                    && authorized_owner_pass
-                                                {
+                                                    .inner;
+                                                apply_select_focus(
+                                                    &cancel,
+                                                    register_snippet_target(
+                                                        removal_scope,
+                                                        ui,
+                                                        &cancel,
+                                                        "removal/cancel",
+                                                        "Cancel snippet removal",
+                                                        crate::gui::jump_mode::TargetKind::Button,
+                                                        &mut visual_order,
+                                                    ),
+                                                );
+                                                if cancel.clicked() && authorized_owner_pass {
                                                     self.cancel_removal();
                                                 }
                                             } else {

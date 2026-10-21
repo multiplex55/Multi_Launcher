@@ -155,6 +155,18 @@ pub(crate) enum NavigationOwner {
         kind: NavigationDialogKind,
         instance: u64,
     },
+    /// Inline removal confirmation within the current Snippets window. The
+    /// parent window and confirmation have separate identities so crossing
+    /// either boundary invalidates the previous hint session.
+    SnippetRemoval {
+        parent_instance: u64,
+        confirmation_instance: u64,
+    },
+    /// One exact, transient snippet prompt window. Its generation is also
+    /// part of the window's egui layer ID.
+    SnippetPrompt {
+        generation: u64,
+    },
     Blocked,
 }
 
@@ -191,9 +203,32 @@ impl NavigationOwner {
                     kind: owner_kind,
                     instance: owner_instance,
                 } => kind == owner_kind.surface_kind() && *instance == owner_instance,
+                Self::SnippetPrompt { generation } => {
+                    kind == "snippet-prompt" && *instance == generation
+                }
                 _ => false,
             },
-            SurfaceId::Popup { owner, .. } => self.owns_surface(owner),
+            SurfaceId::Popup {
+                kind,
+                instance,
+                owner,
+            } => match self {
+                Self::SnippetRemoval {
+                    parent_instance,
+                    confirmation_instance,
+                } => {
+                    kind == "snippet-removal"
+                        && *instance == confirmation_instance
+                        && matches!(
+                            owner.as_ref(),
+                            SurfaceId::Dialog {
+                                kind,
+                                instance,
+                            } if kind == "snippets" && *instance == parent_instance
+                        )
+                }
+                _ => self.owns_surface(owner),
+            },
         }
     }
 }
@@ -226,6 +261,40 @@ pub(crate) fn paste_sequence_dialog_layer_id() -> egui::LayerId {
 
 pub(crate) fn mkmacro_dialog_layer_id() -> egui::LayerId {
     egui::LayerId::new(egui::Order::Middle, egui::Id::new("mkmacro_main_window"))
+}
+
+pub(crate) fn snippet_prompt_layer_id(generation: u64) -> egui::LayerId {
+    egui::LayerId::new(
+        egui::Order::Middle,
+        egui::Id::new(("snippet_prompt_window", generation)),
+    )
+}
+
+/// A snippet prompt is a transient owner rather than a member of the stable
+/// dialog inventory. It owns navigation only while its current session's real
+/// window is the exact visible top layer in the focused ROOT viewport.
+pub(crate) fn resolve_snippet_prompt_navigation_owner(
+    ctx: &egui::Context,
+    generation: u64,
+) -> NavigationOwner {
+    if ctx.viewport_id() != egui::ViewportId::ROOT
+        || !ctx.input(|input| input.focused)
+        || ctx.memory(|memory| memory.top_modal_layer().is_some())
+        || egui::Popup::is_any_open(ctx)
+    {
+        return NavigationOwner::Blocked;
+    }
+
+    let layer = snippet_prompt_layer_id(generation);
+    let focused_layer = focused_response_layer(ctx);
+    if visible_top_middle_layer(ctx) == Some(layer)
+        && focused_layer
+            .is_none_or(|focused| focused == layer || focused.order != egui::Order::Middle)
+    {
+        NavigationOwner::SnippetPrompt { generation }
+    } else {
+        NavigationOwner::Blocked
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1621,7 +1690,9 @@ impl JumpModeUi {
             | NavigationOwner::Timer { .. }
             | NavigationOwner::PasteSequence { .. }
             | NavigationOwner::MkMacro { .. }
-            | NavigationOwner::Dialog { .. } => true,
+            | NavigationOwner::Dialog { .. }
+            | NavigationOwner::SnippetRemoval { .. }
+            | NavigationOwner::SnippetPrompt { .. } => true,
             NavigationOwner::Blocked => false,
         };
         let population_changed = navigation_allowed
