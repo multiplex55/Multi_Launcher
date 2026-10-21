@@ -3048,16 +3048,20 @@ impl LauncherApp {
     fn file_search_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
 
-        if !self.file_search_dialog.open
-            || !self.native_ui_host_input_allowed(ctx, root_visible)
-            || egui::Popup::is_any_open(ctx)
-        {
+        if !self.file_search_dialog.open || !self.native_ui_host_input_allowed(ctx, root_visible) {
             return false;
         }
         let Some(file_search_layer) = NavigationDialogKind::FileSearch.layer_id() else {
             return false;
         };
         if visible_top_middle_layer(ctx) != Some(file_search_layer) {
+            return false;
+        }
+        let popup_open = egui::Popup::is_any_open(ctx);
+        let owned_popup_layer = self
+            .file_search_dialog
+            .current_owned_native_popup_layer(ctx);
+        if popup_open && owned_popup_layer.is_none() {
             return false;
         }
 
@@ -3072,9 +3076,10 @@ impl LauncherApp {
                         egui::Order::Background | egui::Order::Middle
                     )
             }),
-            Some(id) => ctx
-                .read_response(id)
-                .is_some_and(|response| response.layer_id == file_search_layer),
+            Some(id) => ctx.read_response(id).is_some_and(|response| {
+                response.layer_id == file_search_layer
+                    || owned_popup_layer == Some(response.layer_id)
+            }),
         }
     }
 
@@ -23820,6 +23825,63 @@ mod tests {
         }
     }
 
+    fn click_file_search_at(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        position: egui::Pos2,
+        button: egui::PointerButton,
+    ) {
+        for pressed in [true, false] {
+            let mut events = if pressed {
+                vec![egui::Event::PointerMoved(position)]
+            } else {
+                Vec::new()
+            };
+            events.push(egui::Event::PointerButton {
+                pos: position,
+                button,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            app.run_root_frame_for_test(
+                ctx,
+                egui::RawInput {
+                    events,
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+        }
+    }
+
+    fn dismiss_file_search_popup_if_open(ctx: &egui::Context, app: &mut LauncherApp) {
+        if !egui::Popup::is_any_open(ctx) {
+            return;
+        }
+        for event in [
+            key_press(egui::Key::Escape, egui::Modifiers::NONE),
+            key_release(egui::Key::Escape, egui::Modifiers::NONE),
+        ] {
+            app.run_root_frame_for_test(
+                ctx,
+                egui::RawInput {
+                    events: vec![event],
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+        }
+        assert!(!egui::Popup::is_any_open(ctx));
+        assert!(
+            app.file_search_dialog.open,
+            "Escape closes the popup, not File Search"
+        );
+    }
+
     fn prepare_actual_snippet_dialog(
         ctx: &egui::Context,
         app: &mut LauncherApp,
@@ -26435,6 +26497,229 @@ mod tests {
             app.file_search_coordinator.active_search_id(),
             Some(crate::file_search::model::SearchId(1))
         );
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_file_search_native_popup_columns_persist_only_for_exact_menu_anchors() {
+        use crate::gui::file_search_dialog::FileSearchTestPopupControl as PopupControl;
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        prepare_actual_file_search_dialog(&ctx, &mut app, workspace.root());
+
+        let columns_anchor = app
+            .file_search_dialog
+            .test_native_popup_control_rect(PopupControl::ColumnsAnchor)
+            .expect("the actual Columns menu button is rendered");
+        click_file_search_at(
+            &ctx,
+            &mut app,
+            columns_anchor.center(),
+            egui::PointerButton::Primary,
+        );
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert!(app.file_search_native_ui_owner_current(&ctx, true));
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked,
+            "an exact native menu does not make its parent a Jump Mode owner"
+        );
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+
+        let size_toggle = app
+            .file_search_dialog
+            .test_native_popup_control_rect(PopupControl::SizeColumnToggle)
+            .expect("the real Size checkbox is rendered in the open Columns popup");
+        click_file_search_at(
+            &ctx,
+            &mut app,
+            size_toggle.center(),
+            egui::PointerButton::Primary,
+        );
+        assert!(
+            app.file_search_dialog
+                .ui_preferences
+                .visible_columns
+                .contains(&crate::file_search::settings::FileSearchColumn::Size)
+        );
+        assert!(!app.file_search_dialog.ui_preferences_dirty);
+        let persisted =
+            Settings::load(&app.settings_path).expect("settings persist in the isolated workspace");
+        let persisted_file_search: crate::file_search::settings::FileSearchSettings =
+            serde_json::from_value(
+                persisted
+                    .plugin_settings
+                    .get("file_search")
+                    .expect("File Search preferences were persisted")
+                    .clone(),
+            )
+            .expect("persisted File Search settings deserialize");
+        assert!(
+            persisted_file_search
+                .ui_preferences
+                .visible_columns
+                .contains(&crate::file_search::settings::FileSearchColumn::Size)
+        );
+
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        dismiss_file_search_popup_if_open(&ctx, &mut app);
+
+        let export_anchor = app
+            .file_search_dialog
+            .test_native_popup_control_rect(PopupControl::ExportAnchor)
+            .expect("the existing Export popup remains present");
+        click_file_search_at(
+            &ctx,
+            &mut app,
+            export_anchor.center(),
+            egui::PointerButton::Primary,
+        );
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert!(
+            !app.file_search_native_ui_owner_current(&ctx, true),
+            "the existing Export popup uses its own action validation and is not a general native-owner grant"
+        );
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked
+        );
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+
+        dismiss_file_search_popup_if_open(&ctx, &mut app);
+
+        app.set_jump_mode_enabled(false);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        let columns_anchor = app
+            .file_search_dialog
+            .test_native_popup_control_rect(PopupControl::ColumnsAnchor)
+            .expect("the Columns menu remains available with Jump Mode disabled");
+        click_file_search_at(
+            &ctx,
+            &mut app,
+            columns_anchor.center(),
+            egui::PointerButton::Primary,
+        );
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.file_search_native_ui_owner_current(&ctx, true));
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+        let modified_toggle = app
+            .file_search_dialog
+            .test_native_popup_control_rect(PopupControl::ModifiedColumnToggle)
+            .expect("the real Modified checkbox is rendered with Jump Mode disabled");
+        click_file_search_at(
+            &ctx,
+            &mut app,
+            modified_toggle.center(),
+            egui::PointerButton::Primary,
+        );
+        assert!(
+            app.file_search_dialog
+                .ui_preferences
+                .visible_columns
+                .contains(&crate::file_search::settings::FileSearchColumn::Modified)
+        );
+        assert!(!app.file_search_dialog.ui_preferences_dirty);
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_file_search_native_popup_row_menu_keeps_its_safe_nested_search_effect() {
+        use crate::gui::file_search_dialog::FileSearchTestPopupControl as PopupControl;
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        prepare_actual_file_search_dialog(&ctx, &mut app, workspace.root());
+
+        let nested_root = workspace.root().join("owned-popup-root");
+        std::fs::create_dir_all(&nested_root).expect("the search root is isolated");
+        let safe_file = nested_root.join("fixture.txt");
+        std::fs::write(&safe_file, "safe fixture text\n").expect("the fixture file is disposable");
+        app.file_search_dialog.search_text = "fixture".to_owned();
+        seed_actual_file_search_filename_results(
+            &mut app,
+            crate::file_search::model::SearchId(902),
+            std::slice::from_ref(&safe_file),
+        );
+        for _ in 0..2 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+
+        let result = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Filename result")
+            .expect("the generated File Search result has a real visible response");
+        let result_rect = result.clipped_rect();
+        assert!(result_rect.is_positive());
+        click_file_search_at(
+            &ctx,
+            &mut app,
+            result_rect.center(),
+            egui::PointerButton::Secondary,
+        );
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert!(app.file_search_native_ui_owner_current(&ctx, true));
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked
+        );
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+        let nested_search = app
+            .file_search_dialog
+            .test_native_popup_control_rect(PopupControl::NestedContentSearch)
+            .expect("the current row's nested-search command is a real visible menu item");
+        click_file_search_at(
+            &ctx,
+            &mut app,
+            nested_search.center(),
+            egui::PointerButton::Primary,
+        );
+
+        assert_eq!(
+            app.file_search_dialog.selected_mode,
+            crate::gui::file_search_dialog::FileSearchMode::Content
+        );
+        assert_eq!(
+            app.file_search_dialog.selected_scope,
+            crate::gui::file_search_dialog::FileSearchScopeMode::Directory
+        );
+        assert_eq!(
+            app.file_search_dialog.custom_roots,
+            vec![nested_root.display().to_string()]
+        );
+        assert_ne!(
+            app.file_search_dialog.active_search_id,
+            Some(crate::file_search::model::SearchId(902)),
+            "the exact current result menu starts a new search in the generated directory"
+        );
+        assert!(app.test_activation_trace.is_empty());
         drop(workspace);
     }
 

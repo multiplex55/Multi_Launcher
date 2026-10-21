@@ -383,6 +383,10 @@ pub struct FileSearchDialogState {
     jump_mode_results_revision: u64,
     selected_result_focus_owner: Option<SelectedResultFocusOwner>,
     result_row_response_ids: std::collections::HashMap<FileSearchResultRowId, egui::Id>,
+    native_popup_anchors: Vec<FileSearchNativePopupAnchor>,
+    #[cfg(test)]
+    test_native_popup_control_rects:
+        std::collections::HashMap<FileSearchTestPopupControl, egui::Rect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,6 +394,36 @@ struct SelectedResultFocusOwner {
     row_id: FileSearchResultRowId,
     response_id: egui::Id,
     view_revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileSearchNativePopupAnchorOwner {
+    Columns {
+        form_generation: u64,
+    },
+    Results {
+        form_generation: u64,
+        search_id: SearchId,
+        results_revision: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileSearchNativePopupAnchor {
+    popup_id: egui::Id,
+    response_id: egui::Id,
+    anchor_layer: egui::LayerId,
+    owner: FileSearchNativePopupAnchorOwner,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum FileSearchTestPopupControl {
+    ColumnsAnchor,
+    SizeColumnToggle,
+    ModifiedColumnToggle,
+    NestedContentSearch,
+    ExportAnchor,
 }
 
 impl Default for FileSearchDialogState {
@@ -430,6 +464,9 @@ impl Default for FileSearchDialogState {
             jump_mode_results_revision: 0,
             selected_result_focus_owner: None,
             result_row_response_ids: std::collections::HashMap::new(),
+            native_popup_anchors: Vec::new(),
+            #[cfg(test)]
+            test_native_popup_control_rects: std::collections::HashMap::new(),
         }
     }
 }
@@ -471,6 +508,108 @@ impl FileSearchDialogState {
             ))
             .value(),
         )
+    }
+
+    fn record_native_popup_anchor(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        owner: FileSearchNativePopupAnchorOwner,
+    ) {
+        let Some(file_search_layer) =
+            crate::gui::jump_mode::ui::NavigationDialogKind::FileSearch.layer_id()
+        else {
+            return;
+        };
+        if response.layer_id != file_search_layer
+            || !response.enabled()
+            || !response.rect.intersect(ui.clip_rect()).is_positive()
+        {
+            return;
+        }
+
+        self.native_popup_anchors.push(FileSearchNativePopupAnchor {
+            popup_id: egui::Popup::default_response_id(response),
+            response_id: response.id,
+            anchor_layer: response.layer_id,
+            owner,
+        });
+    }
+
+    fn record_results_popup_anchor(&mut self, ui: &egui::Ui, response: &egui::Response) {
+        let Some(search_id) = self.active_search_id else {
+            return;
+        };
+        self.record_native_popup_anchor(
+            ui,
+            response,
+            FileSearchNativePopupAnchorOwner::Results {
+                form_generation: self.jump_mode_form_generation,
+                search_id,
+                results_revision: self.jump_mode_results_revision,
+            },
+        );
+    }
+
+    pub(crate) fn current_owned_native_popup_layer(
+        &self,
+        ctx: &egui::Context,
+    ) -> Option<egui::LayerId> {
+        if !self.open || !egui::Popup::is_any_open(ctx) {
+            return None;
+        }
+
+        self.native_popup_anchors.iter().find_map(|anchor| {
+            let owner_is_current = match anchor.owner {
+                FileSearchNativePopupAnchorOwner::Columns { form_generation } => {
+                    self.selected_mode == FileSearchMode::Filename
+                        && self.jump_mode_form_generation == form_generation
+                }
+                FileSearchNativePopupAnchorOwner::Results {
+                    form_generation,
+                    search_id,
+                    results_revision,
+                } => {
+                    self.jump_mode_form_generation == form_generation
+                        && self.active_search_id == Some(search_id)
+                        && self.jump_mode_results_revision == results_revision
+                }
+            };
+            if !owner_is_current {
+                return None;
+            }
+
+            let response = ctx.read_response(anchor.response_id)?;
+            if !response.enabled() || response.layer_id != anchor.anchor_layer {
+                return None;
+            }
+            if !egui::Popup::is_id_open(ctx, anchor.popup_id) {
+                return None;
+            }
+
+            let popup_layer = egui::LayerId::new(egui::Order::Foreground, anchor.popup_id);
+            let popup_rect = ctx.memory(|memory| memory.area_rect(anchor.popup_id))?;
+            (popup_rect.is_positive() && ctx.layer_id_at(popup_rect.center()) == Some(popup_layer))
+                .then_some(popup_layer)
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_native_popup_control_rect(
+        &self,
+        control: FileSearchTestPopupControl,
+    ) -> Option<egui::Rect> {
+        self.test_native_popup_control_rects.get(&control).copied()
+    }
+
+    #[cfg(test)]
+    fn record_test_native_popup_control(
+        &mut self,
+        control: FileSearchTestPopupControl,
+        response: &egui::Response,
+    ) {
+        self.test_native_popup_control_rects
+            .insert(control, response.rect);
     }
 
     fn invalidate_jump_mode_results(&mut self) {
@@ -1204,6 +1343,7 @@ impl FileSearchDialogState {
             ctx.request_repaint_after(ACTIVE_SEARCH_REPAINT_INTERVAL);
         }
         if !self.open {
+            self.native_popup_anchors.clear();
             return Vec::new();
         }
         let open_before = self.open;
@@ -1222,7 +1362,10 @@ impl FileSearchDialogState {
                 });
             }
         }
-        if committed_owner_pass && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if committed_owner_pass
+            && !egui::Popup::is_any_open(ctx)
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        {
             if self.handle_escape(coordinator) == FileSearchEscapeAction::Cancel {
                 ctx.request_repaint();
             }
@@ -1296,6 +1439,9 @@ impl FileSearchDialogState {
         navigation_owner: bool,
     ) -> Vec<FileSearchUiCommand> {
         let mut commands = Vec::new();
+        self.native_popup_anchors.clear();
+        #[cfg(test)]
+        self.test_native_popup_control_rects.clear();
         let results_revision_at_contents_start = self.jump_mode_results_revision;
         let mut results_visual_order = 0;
         let committed_owner_pass = first_ui_pass && navigation_owner;
@@ -1313,7 +1459,7 @@ impl FileSearchDialogState {
                 self.excluded_directory_names_overridden,
             )
         });
-        if committed_owner_pass {
+        if committed_owner_pass && !egui::Popup::is_any_open(ui.ctx()) {
             self.handle_result_keyboard_shortcuts(ui, coordinator);
         }
         widgets::compact_section_heading(
@@ -1607,6 +1753,11 @@ impl FileSearchDialogState {
                 ui.ctx().request_repaint();
             }
             let export_button = ui.button("Export");
+            #[cfg(test)]
+            self.record_test_native_popup_control(
+                FileSearchTestPopupControl::ExportAnchor,
+                &export_button,
+            );
             let export_popup_id = egui::Popup::default_response_id(&export_button);
             let export_popup_layer = egui::LayerId::new(egui::Order::Foreground, export_popup_id);
             let export_popup_current = egui::Popup::is_id_open(ui.ctx(), export_popup_id)
@@ -1979,14 +2130,26 @@ impl FileSearchDialogState {
             self.ui_preferences_dirty = true;
         }
         ui.horizontal(|ui| {
-            ui.menu_button("Columns", |ui| {
+            let columns = ui.menu_button("Columns", |ui| {
                 let mut dirty = false;
                 for column in results::OPTIONAL_FILENAME_COLUMNS {
                     let mut visible = self.ui_preferences.visible_columns.contains(column);
-                    if ui
-                        .checkbox(&mut visible, results::column_label(*column))
-                        .changed()
-                    {
+                    let checkbox = ui.checkbox(&mut visible, results::column_label(*column));
+                    #[cfg(test)]
+                    match column {
+                        crate::file_search::settings::FileSearchColumn::Size => self
+                            .record_test_native_popup_control(
+                                FileSearchTestPopupControl::SizeColumnToggle,
+                                &checkbox,
+                            ),
+                        crate::file_search::settings::FileSearchColumn::Modified => self
+                            .record_test_native_popup_control(
+                                FileSearchTestPopupControl::ModifiedColumnToggle,
+                                &checkbox,
+                            ),
+                        _ => {}
+                    }
+                    if checkbox.changed() {
                         dirty |= results::set_filename_column_visible(
                             &mut self.ui_preferences,
                             *column,
@@ -2004,6 +2167,18 @@ impl FileSearchDialogState {
                     self.ui_preferences_dirty = true;
                 }
             });
+            self.record_native_popup_anchor(
+                ui,
+                &columns.response,
+                FileSearchNativePopupAnchorOwner::Columns {
+                    form_generation: self.jump_mode_form_generation,
+                },
+            );
+            #[cfg(test)]
+            self.record_test_native_popup_control(
+                FileSearchTestPopupControl::ColumnsAnchor,
+                &columns.response,
+            );
         });
 
         let visible_rows = self.visible_result_rows();
@@ -2165,6 +2340,9 @@ impl FileSearchDialogState {
                                         .rect
                                         .intersect(ui.clip_rect())
                                         .is_positive();
+                                    if response_visible {
+                                        self.record_results_popup_anchor(ui, &response);
+                                    }
                                     if response_visible
                                         && (response.has_focus() || response.clicked())
                                     {
@@ -2260,6 +2438,9 @@ impl FileSearchDialogState {
                         let response = ui
                             .label(egui::RichText::new(header).strong())
                             .on_hover_text(path.display().to_string());
+                        if response.rect.intersect(ui.clip_rect()).is_positive() {
+                            self.record_results_popup_anchor(ui, &response);
+                        }
                         response.context_menu(|ui| {
                             self.result_context_menu(ui, &path, false, None, coordinator, commands)
                         });
@@ -2298,6 +2479,7 @@ impl FileSearchDialogState {
                             },
                         };
                         if response.rect.intersect(ui.clip_rect()).is_positive() {
+                            self.record_results_popup_anchor(ui, &response);
                             self.result_row_response_ids
                                 .insert(row_id.clone(), response.id);
                             self.register_jump_mode_result_target(
@@ -2654,10 +2836,19 @@ impl FileSearchDialogState {
             ui.ctx().request_repaint();
             ui.close();
         }
-        if ui
-            .button("Start content search beneath this directory")
-            .clicked()
+        let nested_content_search = ui.button("Start content search beneath this directory");
+        #[cfg(test)]
+        if nested_content_search
+            .rect
+            .intersect(ui.clip_rect())
+            .is_positive()
         {
+            self.record_test_native_popup_control(
+                FileSearchTestPopupControl::NestedContentSearch,
+                &nested_content_search,
+            );
+        }
+        if nested_content_search.clicked() {
             self.start_nested_search(path, is_directory, FileSearchMode::Content, coordinator);
             ui.ctx().request_repaint();
             ui.close();
