@@ -1158,6 +1158,39 @@ impl JumpModeScope {
             collector.pending_focus_intent = None;
         }
     }
+
+    /// Remove only this namespace's targets and pending focus intent from the
+    /// current pass. Dialog form controls can therefore keep a stable native
+    /// focus surface while document-dependent child targets are invalidated.
+    pub(crate) fn discard_registered_namespace(&self) {
+        let Ok(mut collector) = self.collector.lock() else {
+            return;
+        };
+        if collector.closed {
+            return;
+        }
+        let namespace_prefix = format!("{}/", self.identity_namespace);
+        let belongs_to_namespace = |id: &TargetId| {
+            id.surface() == &self.surface
+                && id.generation() == self.generation
+                && matches!(
+                    id.semantic(),
+                    super::SemanticTargetId::Named(identity)
+                        if identity.starts_with(&namespace_prefix)
+                )
+        };
+        collector
+            .registry
+            .targets
+            .retain(|target| !belongs_to_namespace(target.id()));
+        if collector
+            .pending_focus_intent
+            .as_ref()
+            .is_some_and(|intent| belongs_to_namespace(&intent.target))
+        {
+            collector.pending_focus_intent = None;
+        }
+    }
 }
 
 /// Register a current-pass response through an optional Jump Mode scope and
@@ -4534,6 +4567,155 @@ mod tests {
         );
         assert_eq!(jump.retained_registry().targets().len(), 1);
         assert_eq!(jump.retained_registry().targets()[0].id(), &target_id);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn jump_mode_json_namespace_discard_preserves_form_targets_and_cleans_consumed_focus() {
+        let ctx = egui::Context::default();
+        let kind = NavigationDialogKind::JsonUtility;
+        let instance = 23;
+        let owner = NavigationOwner::Dialog { kind, instance };
+        let surface = SurfaceId::dialog(kind.surface_kind(), instance);
+        let form_generation = TargetGeneration(instance);
+        let tree_generation = TargetGeneration(8);
+        let window = |ctx: &egui::Context| {
+            ctx.run_ui(root_input_raw(Vec::new()), |ui| {
+                egui::Window::new("JSON Utility")
+                    .id(egui::Id::new("json_utility_dialog"))
+                    .show(ui.ctx(), |_| {});
+            })
+            .drop_without_applying_deltas();
+        };
+        window(&ctx);
+
+        let mut jump = JumpModeUi::new(true);
+        jump.begin_frame();
+        assert_eq!(
+            jump.update_navigation_owner(&ctx, owner, false),
+            NavigationOwner::Blocked
+        );
+        jump.begin_frame();
+        assert_eq!(jump.update_navigation_owner(&ctx, owner, false), owner);
+        jump.begin_ui_pass();
+        let form_scope = jump
+            .scope_for_navigation_owner(
+                surface.clone(),
+                form_generation,
+                "json-utility/form",
+                egui::ViewportId::ROOT,
+                owner,
+                false,
+            )
+            .expect("the current JSON Utility owner receives a scope");
+        let tree_scope = form_scope
+            .child_namespace("tree")
+            .with_surface(surface.clone(), tree_generation);
+        let tree_target = tree_scope.target_id("node/4");
+        jump.finish_ui_pass();
+        jump.begin_frame();
+        assert_eq!(jump.update_navigation_owner(&ctx, owner, false), owner);
+        assert!(jump.queue_focus_intent(
+            tree_target.clone(),
+            egui::ViewportId::ROOT,
+            jump.navigation_epoch(),
+        ));
+        jump.begin_ui_pass();
+        let form_scope = jump
+            .scope_for_navigation_owner(
+                surface.clone(),
+                form_generation,
+                "json-utility/form",
+                egui::ViewportId::ROOT,
+                owner,
+                false,
+            )
+            .expect("the current JSON Utility owner receives a scope");
+        let tree_scope = form_scope
+            .child_namespace("tree")
+            .with_surface(surface.clone(), tree_generation);
+        let sibling_scope = form_scope.child_namespace("document/7");
+
+        let mut form_id = None;
+        let mut sibling_id = None;
+        let mut row_id = None;
+        let mut form_order = 0;
+        let mut sibling_order = 0;
+        let mut tree_order = 0;
+        let output = ctx.run_ui(root_input_raw(Vec::new()), |ui| {
+            egui::Window::new("JSON Utility")
+                .id(egui::Id::new("json_utility_dialog"))
+                .show(ui.ctx(), |window_ui| {
+                    let form_response = window_ui.button("Text");
+                    form_id = Some(form_response.id);
+                    let _ = register_and_apply_target(
+                        Some(&form_scope),
+                        window_ui,
+                        &form_response,
+                        "view/text",
+                        "Text view",
+                        TargetKind::Tab,
+                        &mut form_order,
+                    );
+
+                    let sibling_response = window_ui.button("Format");
+                    sibling_id = Some(sibling_response.id);
+                    let _ = register_and_apply_target(
+                        Some(&sibling_scope),
+                        window_ui,
+                        &sibling_response,
+                        "format",
+                        "Format JSON",
+                        TargetKind::Button,
+                        &mut sibling_order,
+                    );
+
+                    let row_response = window_ui.button("Node");
+                    row_id = Some(row_response.id);
+                    assert_eq!(
+                        register_and_apply_target(
+                            Some(&tree_scope),
+                            window_ui,
+                            &row_response,
+                            "node/4",
+                            "JSON tree node",
+                            TargetKind::Action,
+                            &mut tree_order,
+                        ),
+                        Some(FocusDirective::Select)
+                    );
+                    row_response.request_focus();
+                    assert!(tree_scope.record_select_focus_owner(&tree_target, row_response.id));
+                    tree_scope.discard_registered_namespace();
+                });
+        });
+
+        jump.finish_ui_pass();
+        let pass_registry = jump.pass_registry().expect("the pass has a registry");
+        assert_eq!(pass_registry.targets().len(), 2);
+        assert!(
+            pass_registry
+                .targets()
+                .iter()
+                .any(|target| target.id() == &form_scope.target_id("view/text"))
+        );
+        assert!(
+            pass_registry
+                .targets()
+                .iter()
+                .any(|target| target.id() == &sibling_scope.target_id("format"))
+        );
+        assert!(
+            pass_registry
+                .targets()
+                .iter()
+                .all(|target| target.id() != &tree_target)
+        );
+        assert!(jump.prepare_pass_for_navigation_owner(&ctx, owner, false, true));
+        jump.complete_frame_for_navigation_owner(&ctx, owner, false, true);
+        assert_ne!(ctx.memory(|memory| memory.focused()), row_id);
+        assert!(form_id.is_some());
+        assert!(sibling_id.is_some());
         output.drop_without_applying_deltas();
     }
 

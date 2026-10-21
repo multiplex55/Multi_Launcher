@@ -3097,6 +3097,22 @@ impl LauncherApp {
                 .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
     }
 
+    fn json_utility_native_ui_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+
+        let Some(layer) = NavigationDialogKind::JsonUtility.layer_id() else {
+            return false;
+        };
+        self.json_utility_dialog.open
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && !egui::Popup::is_any_open(ctx)
+            && visible_top_middle_layer(ctx) == Some(layer)
+    }
+
     fn snippet_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
 
@@ -5504,7 +5520,48 @@ impl LauncherApp {
             );
             self.clipboard_modify_dialog = cm_dlg;
         }
-        self.json_utility_dialog.show(&ctx);
+        let json_utility_owner =
+            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+        let json_utility_native_owner =
+            self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
+        let (json_utility_instance, json_utility_scope) = match json_utility_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::JsonUtility,
+                instance,
+            } if json_utility_native_owner => {
+                let scope = self
+                    .jump_mode_enabled()
+                    .then(|| {
+                        self.jump_mode_ui.scope_for_navigation_owner(
+                            crate::gui::jump_mode::SurfaceId::dialog("json-utility", instance),
+                            crate::gui::jump_mode::TargetGeneration(instance),
+                            "json-utility/form",
+                            ctx.viewport_id(),
+                            json_utility_owner,
+                            false,
+                        )
+                    })
+                    .flatten();
+                (Some(instance), scope)
+            }
+            _ => (None, None),
+        };
+        if !json_utility_native_owner
+            && let Some(focused) = ctx.memory(|memory| memory.focused())
+            && ctx.read_response(focused).is_some_and(|response| {
+                Some(response.layer_id)
+                    == crate::gui::jump_mode::ui::NavigationDialogKind::JsonUtility.layer_id()
+            })
+        {
+            ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        }
+        self.json_utility_dialog.show_with_jump_mode(
+            &ctx,
+            json_utility_scope.as_ref(),
+            json_utility_instance,
+            json_utility_native_owner,
+            first_ui_pass,
+        );
         self.hash_generator_dialog.show(&ctx);
         self.regex_tester_dialog.show(&ctx);
         self.xml_toolkit_dialog.show(&ctx);
@@ -34646,6 +34703,227 @@ mod tests {
             "sample_records": sample_records,
         });
         eprintln!("TRACK_C3A_READY_CATALOG_RESULT {record}");
+    }
+
+    fn json_utility_target(
+        app: &LauncherApp,
+        label: &str,
+    ) -> (crate::gui::jump_mode::TargetId, egui::Id) {
+        let target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .unwrap_or_else(|| panic!("no visible JSON Utility target labeled {label:?}"));
+        (target.id().clone(), target.response_id())
+    }
+
+    #[test]
+    fn jump_mode_json_source_focus_survives_unicode_edits_and_document_revisions() {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        use crate::gui::jump_mode::{SurfaceId, TargetKind};
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.json_utility_dialog
+            .test_open_with_source(r#"{"value":1}"#, false);
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        let instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::JsonUtility)
+            .expect("the visible JSON Utility window has a live instance");
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::JsonUtility,
+                instance,
+            }
+        );
+        let (source_target, source_response) = json_utility_target(&app, "JSON source");
+        assert_eq!(
+            source_target.surface(),
+            &SurfaceId::dialog("json-utility", instance)
+        );
+        assert_eq!(
+            source_target.semantic(),
+            &crate::gui::jump_mode::SemanticTargetId::Named(
+                "json-utility/form/11:form/source".into()
+            )
+        );
+        assert_eq!(source_response, egui::Id::new("json_utility_editor"));
+        assert_eq!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.id() == &source_target)
+                .unwrap()
+                .metadata()
+                .kind(),
+            TargetKind::TextEntry
+        );
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let hint = app
+            .jump_mode_ui
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(&source_target)
+            .expect("the source field has a current hint")
+            .as_str()
+            .to_owned();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(source_response));
+        assert_eq!(app.json_utility_dialog.test_source(), r#"{"value":1}"#);
+
+        let first_input = "λ\n".to_owned();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(first_input.clone())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.json_utility_dialog.test_source().contains(&first_input));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(source_response));
+
+        run_dialog_frame(&ctx, &mut app);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(source_response));
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text("Ω".to_owned())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.json_utility_dialog.test_source().contains('Ω'));
+        let (source_target_after_edit, source_response_after_edit) =
+            json_utility_target(&app, "JSON source");
+        assert_eq!(source_target_after_edit, source_target);
+        assert_eq!(source_response_after_edit, source_response);
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_json_tree_hint_selects_current_node_without_exposing_payload() {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        use crate::gui::jump_mode::{SemanticTargetId, TargetKind};
+
+        let private_marker = "private_json_value_marker";
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.json_utility_dialog.test_open_with_source(
+            &format!(r#"{{"safe_key":"{private_marker}","other":2}}"#),
+            true,
+        );
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        let instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::JsonUtility)
+            .expect("the visible JSON Utility window has a live instance");
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::JsonUtility,
+                instance,
+            }
+        );
+        let node_target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| target.metadata().label() == "JSON tree node")
+            .nth(1)
+            .expect("a visible child node is registered separately from the root");
+        let node_target_id = node_target.id().clone();
+        let row_response = node_target.response_id();
+        let target_index = match node_target_id.semantic() {
+            SemanticTargetId::Named(identity) => identity
+                .rsplit('/')
+                .next()
+                .expect("node identity has an index suffix")
+                .parse::<usize>()
+                .expect("node identity suffix is numeric"),
+            SemanticTargetId::RootResult(_) => panic!("JSON node identity is not a root row"),
+        };
+        assert_eq!(node_target.metadata().kind(), TargetKind::Action);
+        assert_eq!(node_target.metadata().label(), "JSON tree node");
+        let semantic_debug = format!("{:?}", node_target_id.semantic());
+        assert!(!semantic_debug.contains(private_marker));
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let hint = app
+            .jump_mode_ui
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(&node_target_id)
+            .expect("the visible JSON node has a current hint")
+            .as_str()
+            .to_owned();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(row_response));
+        assert_eq!(
+            app.json_utility_dialog.test_selected_node_index(),
+            Some(target_index)
+        );
+        assert!(app.json_utility_dialog.test_feedback_is_empty());
+        assert!(app.test_activation_trace.is_empty());
+
+        let old_identity = node_target_id.clone();
+        app.json_utility_dialog
+            .test_open_with_source(r#"{"replacement":true}"#, true);
+        run_dialog_frame(&ctx, &mut app);
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.id() == &old_identity),
+            "replacing the document removes the prior tree-node mapping"
+        );
+        drop(workspace);
     }
 
     #[test]
