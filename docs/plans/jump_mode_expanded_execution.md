@@ -19,8 +19,8 @@ Started 2026-10-20 from clean selected branch `jump`, base `0cb3dabf148dc720ed56
 | M8 Rename/Replace | verification_gap | Implementation and review complete; Rename Apply-target fixture remains stopped; actual-app foreign-foreground evidence is source-only. |
 | M9 Designers | verification_gap | Implementation and review complete; A/B five unique passes each, C eight, D three; B retains unrelated error-baseline fixture failure. |
 | M10 | complete | Exactly two curated selections passed 12/12 + 10/10; docs/evidence review clean; existing fixture-only run passed 7/7. |
-| M11-A | in_progress | Scoped formatting/default bin check passed; original full run failed (6588 passed, 20 failed, 48 skipped); targeted diagnosis/repairs in progress. |
-| M11-B | pending | Final result classification, cumulative diff and checkpoint/ledger commits. |
+| M11-A | verification_gap | Original full run failed (6588 passed, 20 failed, 48 skipped). All 12 task-related newly exposed cases now pass after focused correction; three exhausted gaps and five baseline findings remain. |
+| M11-B | in_progress | Final classification and source diff inspected; repair commit and handoff ledger being finalized. |
 | M11-C | pending | Clippy last, after normal source/docs/format/tests/commits. |
 
 A verification_gap is not a claim that the failed fixture passed, nor proof of a product defect. Exact limitations below remain part of the handoff.
@@ -101,7 +101,11 @@ Source-confirmed baseline findings, unchanged from starting HEAD:
 - Recovery test asks canonical_reset for HotFolderRules although no reset form exists; catalog/reset contract is inconsistent, and later non-resettable journals also lack forms. Do not conceal this by skipping eligible stores.
 
 Task-related repair triage is in progress. Confirmed test migrations: Clipboard's blanket no-copy label assertion predates its explicit safe Copy action; nested popups now win by exact depth while same-depth ambiguity remains blocked; old timed TreeSearch driver still supplies ROOT viewport input. Reviewer also found a real Properties ordering defect: explicit binding intents mutate a local draft after its earlier snapshot was persisted, losing Pin/Save/Set changes; preserve behavioral assertions and correct intent/state commit order at the owner boundary.
-M11-A first repair checkpoint: the four confirmed fixture migrations passed **4/4 default-feature lib cases**, run a6f7df0d-2e64-40da-8117-addc6ecf6215, 5984 filtered, exit 0. Nested depth precedence plus same-depth exclusion, both actual child-viewport TreeSearch undo cases, and explicit safe opaque Copy controls retain behavioral/privacy assertions. Scoped formatting/diff checks passed. Full log: target/productivity_expansion/m11_repair_known_fixtures.log. Properties production ordering and eight related interaction cases remain in progress; no second full run.
+M11-A first repair checkpoint: the four confirmed fixture migrations passed **4/4 default-feature lib cases**, run a6f7df0d-2e64-40da-8117-addc6ecf6215, 5984 filtered, exit 0. Nested depth precedence plus same-depth exclusion, both actual child-viewport TreeSearch undo cases, and explicit safe opaque Copy controls retain behavioral/privacy assertions. Scoped formatting/diff checks passed. Full log: target/productivity_expansion/m11_repair_known_fixtures.log. Properties production ordering and eight related interaction cases were handled by the subsequent checkpoint; no second full run.
+
+M11-A2: reviewer accepted the production ordering correction at the existing owner-authorized intent boundary. Pin/Save query/Set command now reduce the local Properties draft before its single visible-pass writeback; disabled shadow rollback and all binding/pending assertions remain. Retained helper observations use current actual child/parent ownership and geometry; Skins observes clicks inside the same timed 1000x1800 child input path with Jump off. Primary exact-eight default lib selection passed seven; exact Skins rerun **7740bdba-910f-452b-b957-ab4d0411463d passed 1/1 (5987 filtered)** after recollecting the actual enabled Menus control after Cancel. Eight unique cases pass, plus four prior fixture repairs = **12 corrected cases verified**. Scoped rustfmt/diff checks passed. Logs: target/productivity_expansion/m11_radial_repair.log and its exact-rerun output. Generated root clipboard_modifiers.json matched default IDs/schema and was absent initially; only that test artifact was removed. No production defaults or unrelated baseline fixtures were changed.
+
+The five baseline findings and three exhausted fixture gaps remain recorded; no full repaired rerun is needed to re-establish those known failures or reproduce the deterministic hang. The twelve directly affected corrected cases received focused verification; the original full run is not relabeled green.
 
 M11-C remains pending. Finish ordinary source/docs/format/tests/commits first, then `cargo clippy --workspace --all-targets -- -D warnings` on maintained default targets. Record actual failures, including known unchanged Pinboard never_loop baseline findings, rather than cleaning unrelated source or blanket allowing lints. After the last lint result, no more source/docs/format/tests; report late lint outcome directly in final handoff.
 
@@ -121,6 +125,6 @@ All listed commits were retained locally and successfully pushed normally to `or
 | M8 | `2df67bc9`, `6160e96f`, `fc4a287b`, `80b70a8f`, `69405cc6` |
 | M9 | `7b060b2c`, `c7cd3d52`, `09ed8de3`, `1d7c1010` |
 | M10 | `e643c0f0`, `04f272ad` |
-| M11 | pending |
+| M11-A fixture repair | `ab32aa62`; Properties repair pending commit |
 
 No universal coverage or all-green claim. Final checkpoint state must reflect the actual full-suite/lint outcome and the explicit limits above.

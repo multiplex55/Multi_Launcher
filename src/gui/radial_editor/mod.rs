@@ -5860,6 +5860,44 @@ impl RadialEditorState {
         if titlebar_close {
             popup_open = false;
         }
+        // Apply the editor's authorized output to the local draft before the
+        // single owner-visible writeback below. The navigation guard and an
+        // explicit Apply in this same pass must observe the exact assignment
+        // that Pin, Save query, or Use exact command just accepted.
+        for intent in binding_editor_intents {
+            match intent {
+                ActionBindingEditorIntent::Pin { binding } => {
+                    draft.action_binding = Some(binding.clone());
+                    draft
+                        .action_editor
+                        .accept_committed_assignment(binding, BindingAssignmentKind::Pinned);
+                }
+                ActionBindingEditorIntent::SaveQuery { binding }
+                | ActionBindingEditorIntent::SetCommand { binding } => {
+                    draft.action_binding = Some(binding.clone());
+                    draft
+                        .action_editor
+                        .accept_committed_assignment(binding, BindingAssignmentKind::Explicit);
+                }
+                ActionBindingEditorIntent::Search { identity, query } => {
+                    frame
+                        .intent_bridge
+                        .push(DesignerUiIntent::ActionSearch { identity, query });
+                }
+                ActionBindingEditorIntent::Test {
+                    identity,
+                    binding,
+                    history_query,
+                } => frame.intent_bridge.push(DesignerUiIntent::TestAction {
+                    identity,
+                    payload: Box::new(crate::gui::AuthoringProviderTestPayload {
+                        binding,
+                        invocation: invocation_context.clone(),
+                        history_query,
+                    }),
+                }),
+            }
+        }
         if popup_visible_commit {
             self.properties_draft = Some(draft.clone());
             self.properties_handoff_prompt = handoff_prompt;
@@ -5964,40 +6002,6 @@ impl RadialEditorState {
                 navigation_decision = None;
             } else if !guard_open {
                 navigation_decision = Some(PropertiesNavigationDecision::Cancel);
-            }
-        }
-        for intent in binding_editor_intents {
-            match intent {
-                ActionBindingEditorIntent::Pin { binding } => {
-                    draft.action_binding = Some(binding.clone());
-                    draft
-                        .action_editor
-                        .accept_committed_assignment(binding, BindingAssignmentKind::Pinned);
-                }
-                ActionBindingEditorIntent::SaveQuery { binding }
-                | ActionBindingEditorIntent::SetCommand { binding } => {
-                    draft.action_binding = Some(binding.clone());
-                    draft
-                        .action_editor
-                        .accept_committed_assignment(binding, BindingAssignmentKind::Explicit);
-                }
-                ActionBindingEditorIntent::Search { identity, query } => {
-                    frame
-                        .intent_bridge
-                        .push(DesignerUiIntent::ActionSearch { identity, query });
-                }
-                ActionBindingEditorIntent::Test {
-                    identity,
-                    binding,
-                    history_query,
-                } => frame.intent_bridge.push(DesignerUiIntent::TestAction {
-                    identity,
-                    payload: Box::new(crate::gui::AuthoringProviderTestPayload {
-                        binding,
-                        invocation: invocation_context.clone(),
-                        history_query,
-                    }),
-                }),
             }
         }
         match navigation_decision {
@@ -15543,10 +15547,11 @@ mod tests {
         driver
             .context
             .style_mut_of(driver.context.theme(), |style| style.animation_time = 0.0);
-        let mut time = 0.0;
-        let mut frame = |driver: &mut RetainedDesignerDriver, events| {
-            time += 1.0 / 60.0;
-            driver.frame_in_client(egui::vec2(1000.0, 1800.0), time, events)
+        let time = std::cell::Cell::new(0.0);
+        let frame = |driver: &mut RetainedDesignerDriver, events| {
+            let next_time = time.get() + 1.0 / 60.0;
+            time.set(next_time);
+            driver.frame_in_client(egui::vec2(1000.0, 1800.0), next_time, events)
         };
 
         let initial = frame(&mut driver, Vec::new());
@@ -15594,12 +15599,23 @@ mod tests {
             "retained edit row must stay under the press"
         );
         pressed.drop_without_applying_deltas();
-        frame(&mut driver, vec![pointer_button_event(point, false)]).drop_without_applying_deltas();
-        assert!(
-            driver
-                .context
-                .input(|input| input.pointer.primary_clicked())
+        let release_time = time.get() + 1.0 / 60.0;
+        time.set(release_time);
+        let mut skin_clicked_in_child = false;
+        let mut skin_release_used_child_viewport = false;
+        let released = driver.frame_in_client_with_observer(
+            egui::vec2(1000.0, 1800.0),
+            release_time,
+            vec![pointer_button_event(point, false)],
+            |ctx, _| {
+                skin_release_used_child_viewport =
+                    ctx.viewport_id() == radial_designer_viewport_id();
+                skin_clicked_in_child = ctx.input(|input| input.pointer.primary_clicked());
+            },
         );
+        released.drop_without_applying_deltas();
+        assert!(skin_release_used_child_viewport);
+        assert!(skin_clicked_in_child);
         assert!(
             driver.editor.pending_scope_change.is_some(),
             "Advanced row must queue its guarded scope change; bounds={skin:?}, selection={:?}, dirty={}",
@@ -15632,20 +15648,82 @@ mod tests {
                 .is_positive()
         );
 
-        let menus =
-            accesskit_named_bounds(&cancelled, "Menus", egui::accesskit::Role::Button).center();
         cancelled.drop_without_applying_deltas();
-        frame(&mut driver, vec![egui::Event::PointerMoved(menus)]).drop_without_applying_deltas();
-        frame(&mut driver, vec![pointer_button_event(menus, true)]).drop_without_applying_deltas();
+        let menus_ready = frame(&mut driver, Vec::new());
+        let menus_bounds =
+            accesskit_named_bounds_if_present(&menus_ready, "Menus", egui::accesskit::Role::Button);
+        menus_ready.drop_without_applying_deltas();
+        let menus = menus_bounds
+            .unwrap_or_else(|| panic!("current Menus button remains available after Cancel"));
+        assert!(menus.is_positive());
+        let menus = menus.center();
+
+        // Observe the real parent owner and hit-tested layer on the same
+        // retained child viewport before clicking the current native control.
+        let next_time = time.get() + 1.0 / 60.0;
+        time.set(next_time);
+        let application_input_allowed = driver.frame.application_input_allowed;
+        let has_pending_file_dialog = driver.frame.intent_bridge.has_pending_file_dialog();
+        let mut menus_viewport_is_child = false;
+        let mut menus_top_middle_layer = Some(egui::LayerId::background());
+        let mut menus_hit_layer = None;
+        let mut menus_native_owner_current = false;
+        let hovered = driver.frame_in_client_with_observer(
+            egui::vec2(1000.0, 1800.0),
+            next_time,
+            vec![egui::Event::PointerMoved(menus)],
+            |ctx, _| {
+                let parent_binding = NavigationViewportBinding {
+                    viewport: radial_designer_viewport_id(),
+                    owner: NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::RadialDesigner,
+                        instance: 1,
+                    },
+                    base_layer: egui::LayerId::background(),
+                };
+                menus_viewport_is_child = ctx.viewport_id() == radial_designer_viewport_id();
+                menus_top_middle_layer = visible_top_middle_layer(ctx);
+                menus_hit_layer = ctx.layer_id_at(menus);
+                menus_native_owner_current = application_input_allowed
+                    && !has_pending_file_dialog
+                    && parent_binding.base_is_current(ctx)
+                    && !egui::Popup::is_any_open(ctx)
+                    && parent_binding.focus_is_owned(ctx, None);
+            },
+        );
+        let hovered_control =
+            accesskit_named_control_if_present(&hovered, "Menus", egui::accesskit::Role::Button);
+        hovered.drop_without_applying_deltas();
+        assert!(menus_viewport_is_child);
+        assert_eq!(menus_top_middle_layer, None);
+        assert_eq!(menus_hit_layer, Some(egui::LayerId::background()));
+        assert!(menus_native_owner_current);
+        let (current_menus_bounds, menus_disabled) = hovered_control
+            .unwrap_or_else(|| panic!("current Menus response is present after Cancel"));
+        assert!(current_menus_bounds.is_positive());
+        assert!(!menus_disabled, "the actual Menus response is enabled");
+        assert_eq!(current_menus_bounds.center(), menus);
+        let pressed = frame(&mut driver, vec![pointer_button_event(menus, true)]);
+        let pressed_bounds =
+            accesskit_named_bounds_if_present(&pressed, "Menus", egui::accesskit::Role::Button);
+        pressed.drop_without_applying_deltas();
+        assert_eq!(pressed_bounds, Some(current_menus_bounds));
         let back_in_menus = frame(&mut driver, vec![pointer_button_event(menus, false)]);
+        let released_bounds = accesskit_named_bounds_if_present(
+            &back_in_menus,
+            "Menus",
+            egui::accesskit::Role::Button,
+        );
+        back_in_menus.drop_without_applying_deltas();
+        assert_eq!(released_bounds, Some(current_menus_bounds));
         assert!(!driver.editor.show_resources);
         assert!(driver.editor.inspector_action_editor.has_unassigned_text());
         assert_eq!(driver.editor.inspector_action_editor_scope, Some(scope));
-        assert!(
-            accesskit_named_bounds(&back_in_menus, "Apply", egui::accesskit::Role::Button)
-                .is_positive()
-        );
-        back_in_menus.drop_without_applying_deltas();
+        let in_menus = frame(&mut driver, Vec::new());
+        let apply_bounds =
+            accesskit_named_bounds_if_present(&in_menus, "Apply", egui::accesskit::Role::Button);
+        in_menus.drop_without_applying_deltas();
+        assert!(apply_bounds.is_some_and(|bounds| bounds.is_positive()));
     }
 
     #[test]
@@ -15744,6 +15822,7 @@ mod tests {
         let cancelled = click_retained_button(&mut driver, &guarded, "Cancel change");
         guarded.drop_without_applying_deltas();
         cancelled.drop_without_applying_deltas();
+        collect_retained_radial_parent_owner(&mut driver);
         assert!(driver.editor.pending_scope_change.is_none());
         assert_eq!(
             driver.editor.inspector_action_editor.query_for_test(),
@@ -15756,7 +15835,7 @@ mod tests {
         let discarded = click_retained_button(&mut driver, &guarded, "Discard and continue");
         guarded.drop_without_applying_deltas();
         discarded.drop_without_applying_deltas();
-        driver.frame(Vec::new()).drop_without_applying_deltas();
+        collect_retained_radial_child_owner(&mut driver, RadialDesignerChildKind::CellProperties);
         let after = driver.editor.acceptance_observation().unwrap();
         assert!(driver.editor.pending_scope_change.is_none());
         assert_eq!(driver.editor.properties_popup, Some(target));
@@ -17881,6 +17960,16 @@ mod tests {
             time: f64,
             events: Vec<egui::Event>,
         ) -> egui::FullOutput {
+            self.frame_in_client_with_observer(client_size, time, events, |_, _| {})
+        }
+
+        fn frame_in_client_with_observer(
+            &mut self,
+            client_size: egui::Vec2,
+            time: f64,
+            events: Vec<egui::Event>,
+            mut observe: impl FnMut(&egui::Context, &RadialEditorState),
+        ) -> egui::FullOutput {
             let client_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, client_size);
             let mut input = egui::RawInput {
                 screen_rect: Some(client_rect),
@@ -17909,6 +17998,7 @@ mod tests {
             let editor = &mut self.editor;
             self.context.run_ui(input, |ctx| {
                 editor.viewport_ui(ctx, frame, egui::ViewportClass::Deferred);
+                observe(ctx.ctx(), editor);
             })
         }
     }
@@ -18074,19 +18164,220 @@ mod tests {
         )
     }
 
+    fn accesskit_named_bounds_if_present(
+        output: &egui::FullOutput,
+        fragment: &str,
+        role: egui::accesskit::Role,
+    ) -> Option<egui::Rect> {
+        accesskit_named_control_if_present(output, fragment, role).map(|(bounds, _)| bounds)
+    }
+
+    fn accesskit_named_control_if_present(
+        output: &egui::FullOutput,
+        fragment: &str,
+        role: egui::accesskit::Role,
+    ) -> Option<(egui::Rect, bool)> {
+        let update = output.platform_output.accesskit_update.as_ref()?;
+        let (_, node) = update.nodes.iter().find(|(_, node)| {
+            node.role() == role && node.label().is_some_and(|name| name.contains(fragment))
+        })?;
+        let bounds = node.bounds()?;
+        Some((
+            egui::Rect::from_min_max(
+                egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+            ),
+            node.is_disabled(),
+        ))
+    }
+
     fn click_retained_button(
         driver: &mut RetainedDesignerDriver,
-        output: &egui::FullOutput,
+        _previous_output: &egui::FullOutput,
         name: &str,
     ) -> egui::FullOutput {
-        let point = accesskit_named_bounds(output, name, egui::accesskit::Role::Button).center();
-        driver
-            .frame(vec![egui::Event::PointerMoved(point)])
-            .drop_without_applying_deltas();
-        driver
-            .frame(vec![pointer_button_event(point, true)])
-            .drop_without_applying_deltas();
+        // The caller's output may describe a different retained owner or a
+        // pre-transition layout. Recollect the named response in the current
+        // deferred viewport before deriving a real pointer position.
+        let mut current = driver.frame(Vec::new());
+        if driver.frame.jump_mode_enabled
+            && matches!(
+                driver.editor.native_jump_mode.frame_navigation_owner(),
+                NavigationOwner::Blocked
+            )
+        {
+            // A single owner-transition frame is intentionally ineligible;
+            // recollect once under the candidate owner before hit-testing.
+            current.drop_without_applying_deltas();
+            current = driver.frame(Vec::new());
+        }
+        let bounds =
+            accesskit_named_bounds_if_present(&current, name, egui::accesskit::Role::Button);
+        let point = bounds.map(|bounds| bounds.center());
+        let (jump_owner, jump_target_is_current) = if driver.frame.jump_mode_enabled {
+            let owner = driver.editor.native_jump_mode.frame_navigation_owner();
+            let target_is_current = point.is_some_and(|point| {
+                driver
+                    .editor
+                    .native_jump_mode
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .any(|target| {
+                        owner.owns_surface(target.id().surface())
+                            && target.metadata().kind() == crate::gui::jump_mode::TargetKind::Button
+                            && target.eligible()
+                            && target.clipped_rect().contains(point)
+                    })
+            });
+            (Some(owner), target_is_current)
+        } else {
+            (None, true)
+        };
+        current.drop_without_applying_deltas();
+        let bounds = bounds.unwrap_or_else(|| panic!("missing current Button named {name:?}"));
+        let point = point.unwrap_or_else(|| panic!("missing current hit point for {name:?}"));
+        assert!(bounds.is_positive(), "current {name:?} response is clipped");
+        assert!(
+            jump_target_is_current,
+            "current {name:?} hit point must belong to an enabled response on exact Jump owner {:?}",
+            jump_owner
+        );
+
+        let mut hover_viewport_is_child = false;
+        let mut hovered_point = None;
+        let hovered = driver.frame_with_observer(
+            vec![egui::Event::PointerMoved(point)],
+            egui::Modifiers::default(),
+            |ctx, _| {
+                hover_viewport_is_child = ctx.viewport_id() == radial_designer_viewport_id();
+                hovered_point = ctx.input(|input| input.pointer.hover_pos());
+            },
+        );
+        let hovered_bounds =
+            accesskit_named_bounds_if_present(&hovered, name, egui::accesskit::Role::Button);
+        hovered.drop_without_applying_deltas();
+        assert!(hover_viewport_is_child);
+        assert_eq!(hovered_point, Some(point));
+        assert_eq!(
+            hovered_bounds,
+            Some(bounds),
+            "current {name:?} response remains under the pointer"
+        );
+
+        let mut press_viewport_is_child = false;
+        let mut pressed_point = None;
+        let mut primary_was_pressed = false;
+        let mut primary_is_down = false;
+        let pressed = driver.frame_with_observer(
+            vec![pointer_button_event(point, true)],
+            egui::Modifiers::default(),
+            |ctx, _| {
+                press_viewport_is_child = ctx.viewport_id() == radial_designer_viewport_id();
+                ctx.input(|input| {
+                    pressed_point = input.pointer.hover_pos();
+                    primary_was_pressed =
+                        input.pointer.button_pressed(egui::PointerButton::Primary);
+                    primary_is_down = input.pointer.primary_down();
+                });
+            },
+        );
+        let pressed_bounds =
+            accesskit_named_bounds_if_present(&pressed, name, egui::accesskit::Role::Button);
+        pressed.drop_without_applying_deltas();
+        assert!(press_viewport_is_child);
+        assert_eq!(pressed_point, Some(point));
+        assert!(primary_was_pressed && primary_is_down);
+        assert_eq!(
+            pressed_bounds,
+            Some(bounds),
+            "current {name:?} response remains under the press"
+        );
+
         driver.frame(vec![pointer_button_event(point, false)])
+    }
+
+    fn collect_retained_radial_child_owner(
+        driver: &mut RetainedDesignerDriver,
+        expected_kind: RadialDesignerChildKind,
+    ) {
+        // Opening a retained child first updates its layer, then the shared
+        // navigation owner transition blocks that frame. Collect one final
+        // visible frame under the exact child owner before reading its state.
+        driver.frame(Vec::new()).drop_without_applying_deltas();
+        driver.frame(Vec::new()).drop_without_applying_deltas();
+        let mut correct_viewport = false;
+        let mut child_is_active = false;
+        let mut visible_layer = None;
+        let owned =
+            driver.frame_with_observer(Vec::new(), egui::Modifiers::default(), |ctx, editor| {
+                correct_viewport = ctx.viewport_id() == radial_designer_viewport_id();
+                child_is_active = editor
+                    .active_radial_child_keys()
+                    .iter()
+                    .any(|key| key.kind == expected_kind);
+                visible_layer = visible_top_middle_layer(ctx);
+            });
+        owned.drop_without_applying_deltas();
+        assert!(correct_viewport);
+        assert!(child_is_active, "the expected radial child is still active");
+        let owner = driver
+            .editor
+            .active_radial_child_owners(1)
+            .into_iter()
+            .find(|owner| {
+                matches!(
+                    owner,
+                    NavigationOwner::RadialDesignerChild { kind, .. }
+                        if *kind == expected_kind
+                )
+            })
+            .expect("the expected radial child has its native owner");
+        let child_layer = RadialEditorState::radial_owner_layer(owner)
+            .expect("radial child has its exact native layer");
+        assert_eq!(visible_layer, Some(child_layer));
+        if driver.frame.jump_mode_enabled {
+            assert!(matches!(
+                driver.editor.native_jump_mode.frame_navigation_owner(),
+                NavigationOwner::RadialDesignerChild { kind, parent_instance: 1, .. }
+                    if kind == expected_kind
+            ));
+        }
+    }
+
+    fn collect_retained_radial_parent_owner(driver: &mut RetainedDesignerDriver) {
+        // Closing a child changes the owner candidate. The shared owner
+        // transition intentionally blocks that frame, so collect its
+        // transition frame before observing the stable parent owner.
+        driver.frame(Vec::new()).drop_without_applying_deltas();
+        let mut correct_viewport = false;
+        let mut parent_is_open = false;
+        let mut has_active_children = false;
+        let mut visible_layer = None;
+        let parent =
+            driver.frame_with_observer(Vec::new(), egui::Modifiers::default(), |ctx, editor| {
+                correct_viewport = ctx.viewport_id() == radial_designer_viewport_id();
+                parent_is_open = editor.open;
+                has_active_children = !editor.active_radial_child_keys().is_empty();
+                visible_layer = visible_top_middle_layer(ctx);
+            });
+        parent.drop_without_applying_deltas();
+        assert!(correct_viewport);
+        assert!(parent_is_open, "the radial parent viewport is open");
+        assert!(!has_active_children);
+        assert!(
+            visible_layer.is_none(),
+            "no child middle window owns the retained viewport"
+        );
+        if driver.frame.jump_mode_enabled {
+            assert_eq!(
+                driver.editor.native_jump_mode.frame_navigation_owner(),
+                NavigationOwner::Dialog {
+                    kind: NavigationDialogKind::RadialDesigner,
+                    instance: 1,
+                }
+            );
+        }
     }
 
     fn click_retained_named_control(
@@ -19050,7 +19341,7 @@ mod tests {
         let keep_editing = click_retained_button(&mut driver, &prompt, "Keep editing");
         prompt.drop_without_applying_deltas();
         keep_editing.drop_without_applying_deltas();
-        driver.frame(Vec::new()).drop_without_applying_deltas();
+        collect_retained_radial_parent_owner(&mut driver);
         assert!(driver.editor.open);
         assert!(!driver.editor.close_prompt);
         assert_eq!(
@@ -19103,7 +19394,7 @@ mod tests {
 
         driver.editor.open_test_snapshot();
         driver.editor.session.as_mut().unwrap().select(Some(target));
-        driver.frame(Vec::new()).drop_without_applying_deltas();
+        collect_retained_radial_parent_owner(&mut driver);
         let reopened = driver.editor.acceptance_observation().unwrap();
         assert!(reopened.open);
         assert!(!reopened.properties_dirty && !reopened.draft_dirty);
