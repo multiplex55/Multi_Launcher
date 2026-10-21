@@ -3339,6 +3339,20 @@ impl LauncherApp {
                 .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
     }
 
+    fn batch_rename_native_ui_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+
+        self.batch_rename_dialog.open
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && NavigationDialogKind::BatchRename
+                .layer_id()
+                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+    }
+
     fn mouse_gesture_settings_picker_native_ui_owner_current(
         &self,
         ctx: &egui::Context,
@@ -3658,6 +3672,15 @@ impl LauncherApp {
                         .mkmacro_dialog
                         .jump_mode_unsupported_nested_owner_open() =>
                 {
+                    (NavigationOwner::Blocked, combo_popup)
+                }
+                NavigationOwner::Dialog {
+                    kind: crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename,
+                    ..
+                } if !self.batch_rename_dialog.jump_mode_parent_targets_allowed() => {
+                    // An operation or existing confirmation owns input. Keep
+                    // the normal native UI path, but never leave planning
+                    // targets live behind that transient owner.
                     (NavigationOwner::Blocked, combo_popup)
                 }
                 _ => (owner, combo_popup),
@@ -5832,9 +5855,46 @@ impl LauncherApp {
             .preview_dialog
             .ui(&ctx, &self.file_search_dialog.settings);
         let batch_rename_runtime = self.batch_rename_runtime_snapshot();
-        let batch_rename_commands =
-            self.batch_rename_dialog
-                .ui(&ctx, first_ui_pass, &batch_rename_runtime);
+        let batch_rename_owner =
+            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+        let batch_rename_scope = match batch_rename_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename,
+                instance,
+            } if self.jump_mode_enabled()
+                && self.batch_rename_dialog.jump_mode_parent_targets_allowed() =>
+            {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("batch-rename", instance),
+                    crate::gui::jump_mode::TargetGeneration(
+                        self.batch_rename_dialog.jump_mode_target_generation(),
+                    ),
+                    "batch-rename/form",
+                    ctx.viewport_id(),
+                    batch_rename_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let batch_rename_native_owner =
+            self.batch_rename_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
+        if !batch_rename_native_owner
+            && let Some(focused) = ctx.memory(|memory| memory.focused())
+            && ctx.read_response(focused).is_some_and(|response| {
+                Some(response.layer_id)
+                    == crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename.layer_id()
+            })
+        {
+            ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        }
+        let batch_rename_commands = self.batch_rename_dialog.ui_with_jump_mode(
+            &ctx,
+            batch_rename_scope.as_ref(),
+            batch_rename_native_owner,
+            first_ui_pass,
+            &batch_rename_runtime,
+        );
         if first_ui_pass {
             for command in batch_rename_commands {
                 self.handle_batch_rename_ui_command(command);
@@ -33192,6 +33252,350 @@ mod tests {
             "focus inside a foreign window blocks even when Settings is foremost"
         );
         assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_batch_rename_form_focuses_and_reorders_stable_rule_controls() {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        fn frame(ctx: &egui::Context, app: &mut LauncherApp, events: Vec<egui::Event>) {
+            let output = app.run_root_frame_for_test(
+                ctx,
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1440.0, 1100.0),
+                    )),
+                    events,
+                    ..actual_query_input(true)
+                },
+                false,
+            );
+            output.0.drop_without_applying_deltas();
+        }
+
+        fn target_by_label(
+            app: &LauncherApp,
+            label: &str,
+        ) -> crate::gui::jump_mode::ui::RegisteredTarget {
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.metadata().label() == label)
+                .unwrap_or_else(|| panic!("missing current Batch Rename target: {label}"))
+                .clone()
+        }
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        app.batch_rename_dialog.open = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        for _ in 0..3 {
+            frame(&ctx, &mut app, Vec::new());
+        }
+        let instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::BatchRename)
+            .expect("the actual Batch Renamer has a live observed instance");
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::BatchRename,
+                instance,
+            }
+        );
+        let labels = app
+            .jump_mode_ui
+            .retained_registry()
+            .metadata()
+            .map(|metadata| metadata.label())
+            .collect::<HashSet<_>>();
+        for label in [
+            "Choose root folder",
+            "Include subfolders",
+            "Extension policy",
+            "New rule type",
+            "Add rule",
+            "Close Batch Renamer",
+        ] {
+            assert!(
+                labels.contains(label),
+                "missing enabled planning target {label}"
+            );
+        }
+        for label in [
+            "Rescan files",
+            "Preview rename plan",
+            "Select visible files",
+        ] {
+            assert!(
+                !labels.contains(label),
+                "disabled actions must not be offered as hints: {label}"
+            );
+        }
+
+        frame(
+            &ctx,
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        let add_rule = target_by_label(&app, "Add rule");
+        let hint = app
+            .jump_mode_ui
+            .active_session()
+            .expect("leader starts a Jump session")
+            .hint_map()
+            .hint_for(add_rule.id())
+            .expect("the live Add rule button is targetable")
+            .as_str()
+            .to_owned();
+        frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        frame(&ctx, &mut app, vec![egui::Event::Text(hint)]);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|metadata| metadata.label() == "Prefix text"),
+            "hint completion focuses Add rule but does not create a rule"
+        );
+        assert!(ctx.memory(|memory| memory.has_focus(add_rule.response_id())));
+        assert!(app.test_activation_trace.is_empty());
+
+        frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        let first_prefix = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| target.metadata().label() == "Prefix text")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(first_prefix.len(), 1, "a fresh Enter creates one rule");
+        frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        let mut before = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| target.metadata().label() == "Prefix text")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(before.len(), 2, "the second fresh Enter adds one more rule");
+        before.sort_by_key(|target| target.metadata().visual_order());
+        let before_ids = before
+            .iter()
+            .map(|target| (target.id().clone(), target.response_id()))
+            .collect::<HashMap<_, _>>();
+
+        let move_up = target_by_label(&app, "Move rule earlier");
+        let position = move_up.clipped_rect().center();
+        assert_eq!(
+            ctx.layer_id_at(position),
+            Some(NavigationDialogKind::BatchRename.layer_id().unwrap()),
+            "the enabled rule reorder response is visibly clickable"
+        );
+        frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        frame(&ctx, &mut app, Vec::new());
+        let mut after = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| target.metadata().label() == "Prefix text")
+            .cloned()
+            .collect::<Vec<_>>();
+        after.sort_by_key(|target| target.metadata().visual_order());
+        assert_eq!(
+            after[0].id(),
+            before[1].id(),
+            "the second stable rule moved first"
+        );
+        assert_eq!(
+            after[1].id(),
+            before[0].id(),
+            "the first stable rule moved second"
+        );
+        for target in &after {
+            assert_eq!(
+                target.response_id(),
+                before_ids[target.id()],
+                "native rule field identity follows RuleDraft.id through reorder"
+            );
+        }
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_batch_rename_form_uses_exact_extension_combo_popup_targets() {
+        use crate::gui::jump_mode::SurfaceId;
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        fn frame(ctx: &egui::Context, app: &mut LauncherApp, events: Vec<egui::Event>) {
+            let output = app.run_root_frame_for_test(
+                ctx,
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200.0, 900.0),
+                    )),
+                    events,
+                    ..actual_query_input(true)
+                },
+                false,
+            );
+            output.0.drop_without_applying_deltas();
+        }
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        app.batch_rename_dialog.open = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        for _ in 0..3 {
+            frame(&ctx, &mut app, Vec::new());
+        }
+        let instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::BatchRename)
+            .expect("the actual Batch Renamer has a live observed instance");
+        let anchor = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Extension policy")
+            .expect("extension policy anchor is rendered")
+            .clone();
+        frame(
+            &ctx,
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        let hint = app
+            .jump_mode_ui
+            .active_session()
+            .expect("leader starts a Jump session")
+            .hint_map()
+            .hint_for(anchor.id())
+            .expect("extension policy receives an anchor hint")
+            .as_str()
+            .to_owned();
+        frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        frame(&ctx, &mut app, vec![egui::Event::Text(hint)]);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(
+            !egui::Popup::is_any_open(&ctx),
+            "hint completion does not open the combo"
+        );
+        assert!(ctx.memory(|memory| memory.has_focus(anchor.response_id())));
+
+        frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(
+            egui::Popup::is_any_open(&ctx),
+            "fresh Enter opens the native combo"
+        );
+        frame(&ctx, &mut app, Vec::new());
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::BatchRename,
+                instance,
+            }
+        );
+        let targets = app.jump_mode_ui.retained_registry().targets();
+        assert!(
+            targets.iter().all(|target| matches!(
+                target.id().surface(),
+                SurfaceId::Popup { kind, owner, .. }
+                    if kind.starts_with("combo:")
+                        && matches!(owner.as_ref(), SurfaceId::Dialog { kind, instance: owner_instance }
+                            if kind == "batch-rename" && *owner_instance == instance)
+            )),
+            "only the exact Batch Rename combo popup owns targets"
+        );
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.metadata().label() == "Protect extension")
+        );
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.metadata().label() == "Edit full filename")
+        );
+        assert!(
+            targets
+                .iter()
+                .all(|target| target.metadata().label() != "Add rule")
+        );
         drop(workspace);
     }
 

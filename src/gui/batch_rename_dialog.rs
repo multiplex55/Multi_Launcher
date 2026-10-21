@@ -196,6 +196,18 @@ impl BatchRenameDialogState {
         self.open = true;
     }
 
+    pub(crate) fn jump_mode_target_generation(&self) -> u64 {
+        self.session_epoch
+    }
+
+    pub(crate) fn jump_mode_parent_targets_allowed(&self) -> bool {
+        self.open
+            && !self.operation_was_active
+            && self.pending_intent.is_none()
+            && !self.apply_confirmation_open
+            && self.undo_confirmation.is_none()
+    }
+
     pub(crate) fn end_session(&mut self) {
         let had_active_session = self.open || self.scan_ticket.is_some();
         self.open = false;
@@ -604,21 +616,30 @@ impl BatchRenameDialogState {
         self.apply_row_updates(&updates);
     }
 
+    #[cfg(test)]
     pub(crate) fn ui(
         &mut self,
         ctx: &egui::Context,
         allow_mutations: bool,
         runtime: &RenameRuntimeSnapshot,
     ) -> Vec<BatchRenameUiCommand> {
+        self.ui_with_jump_mode(ctx, None, true, allow_mutations, runtime)
+    }
+
+    pub(crate) fn ui_with_jump_mode(
+        &mut self,
+        ctx: &egui::Context,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        first_ui_pass: bool,
+        runtime: &RenameRuntimeSnapshot,
+    ) -> Vec<BatchRenameUiCommand> {
         let mut commands = Vec::new();
         if !self.open {
             return commands;
         }
-        let process_interactions = allow_mutations
-            && ctx.current_pass_index() == 0
-            && !runtime.operation_active
-            && !self.apply_confirmation_open
-            && self.undo_confirmation.is_none();
+        let native_window_pass = native_ui_owner && first_ui_pass && ctx.current_pass_index() == 0;
+        let mut visual_order = 0;
 
         let mut window_open = self.open;
         egui::Window::new("Batch Renamer")
@@ -629,33 +650,79 @@ impl BatchRenameDialogState {
             .min_size(egui::vec2(520.0, 360.0))
             .vscroll(true)
             .show(ctx, |ui| {
-                self.draw_header(ui, &mut commands, process_interactions);
-                ui.separator();
-                self.draw_rule_editor(ui, process_interactions);
-                ui.separator();
-                self.draw_preview(ui, &mut commands, process_interactions);
-                ui.separator();
-                self.draw_operation_footer(ui, runtime, &mut commands, process_interactions);
-                ui.horizontal(|ui| {
-                    if ui.button("Close").clicked() {
-                        commands.push(BatchRenameUiCommand::Closed);
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let preview_clicked = ui
-                            .add_enabled(
-                                process_interactions && self.snapshot.is_some(),
-                                egui::Button::new("Preview"),
-                            )
-                            .clicked();
-                        if preview_clicked {
-                            self.rebuild_preview();
+                ui.add_enabled_ui(native_ui_owner, |ui| {
+                    // Window sizing/invisible passes expose a disabled content
+                    // UI. Only the first visible pass may commit ordinary
+                    // planning edits; the Close path retains its pre-existing
+                    // availability while a worker is active.
+                    let native_visible = native_window_pass
+                        && ui.is_visible()
+                        && !ui.is_sizing_pass()
+                        && ui.is_enabled();
+                    let process_interactions = native_visible
+                        && !runtime.operation_active
+                        && !self.apply_confirmation_open
+                        && self.undo_confirmation.is_none();
+                    self.draw_header(
+                        ui,
+                        &mut commands,
+                        process_interactions,
+                        scope,
+                        &mut visual_order,
+                    );
+                    ui.separator();
+                    self.draw_rule_editor(ui, process_interactions, scope, &mut visual_order);
+                    ui.separator();
+                    self.draw_preview(
+                        ui,
+                        &mut commands,
+                        process_interactions,
+                        scope,
+                        &mut visual_order,
+                    );
+                    ui.separator();
+                    self.draw_operation_footer(
+                        ui,
+                        runtime,
+                        &mut commands,
+                        process_interactions,
+                        native_visible,
+                    );
+                    ui.horizontal(|ui| {
+                        let close = ui.button("Close");
+                        register_batch_target(
+                            scope,
+                            ui,
+                            &close,
+                            "close",
+                            "Close Batch Renamer",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut visual_order,
+                        );
+                        if close.clicked() && native_visible {
+                            commands.push(BatchRenameUiCommand::Closed);
                         }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let preview = ui
+                                .add_enabled(self.snapshot.is_some(), egui::Button::new("Preview"));
+                            register_batch_target(
+                                scope,
+                                ui,
+                                &preview,
+                                "preview",
+                                "Preview rename plan",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            );
+                            if preview.clicked() && process_interactions {
+                                self.rebuild_preview();
+                            }
+                        });
                     });
                 });
             });
 
-        if ctx.current_pass_index() == 0
-            && (!window_open || commands.contains(&BatchRenameUiCommand::Closed))
+        if native_window_pass && (!window_open || commands.contains(&BatchRenameUiCommand::Closed))
         {
             self.end_session();
             if !commands.contains(&BatchRenameUiCommand::Closed) {
@@ -664,7 +731,10 @@ impl BatchRenameDialogState {
             return commands;
         }
 
-        self.draw_confirmations(ctx, runtime, &mut commands, allow_mutations);
+        // These existing native confirmation windows remain the owner of
+        // their own interaction. The parent scope is withheld by the host
+        // while either confirmation is pending.
+        self.draw_confirmations(ctx, runtime, &mut commands, first_ui_pass);
         commands
     }
 
@@ -674,6 +744,7 @@ impl BatchRenameDialogState {
         runtime: &RenameRuntimeSnapshot,
         commands: &mut Vec<BatchRenameUiCommand>,
         process_interactions: bool,
+        native_visible: bool,
     ) {
         if !runtime.journal_ready {
             if let Some(error) = &runtime.journal_error {
@@ -696,7 +767,7 @@ impl BatchRenameDialogState {
                         "{:?}: {} ({}/{})",
                         progress.phase, progress.message, progress.completed, progress.total
                     ));
-                    if ui.button("Cancel safely").clicked() {
+                    if ui.button("Cancel safely").clicked() && native_visible {
                         // Cancellation is a worker-owned request handled between
                         // native atomic moves, never a frame-thread filesystem action.
                         commands.push(BatchRenameUiCommand::CancelOperation);
@@ -706,7 +777,7 @@ impl BatchRenameDialogState {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Rechecking the confirmed rename plan…");
-                    if ui.button("Cancel safely").clicked() {
+                    if ui.button("Cancel safely").clicked() && native_visible {
                         commands.push(BatchRenameUiCommand::CancelOperation);
                     }
                 });
@@ -906,6 +977,8 @@ impl BatchRenameDialogState {
         ui: &mut egui::Ui,
         commands: &mut Vec<BatchRenameUiCommand>,
         process_interactions: bool,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        visual_order: &mut u64,
     ) {
         ui.collapsing("Batch rename safety and recovery", |ui| {
             ui.label(
@@ -925,8 +998,17 @@ impl BatchRenameDialogState {
             );
         });
         ui.horizontal_wrapped(|ui| {
-            let choose_root = ui.button("Choose root folder…").clicked();
-            if process_interactions && choose_root {
+            let choose_root = ui.button("Choose root folder…");
+            register_batch_target(
+                scope,
+                ui,
+                &choose_root,
+                "choose-root",
+                "Choose root folder",
+                crate::gui::jump_mode::TargetKind::Button,
+                visual_order,
+            );
+            if process_interactions && choose_root.clicked() {
                 let mut picker = rfd::FileDialog::new();
                 if let Some(root) = self.root_path.as_deref() {
                     picker = picker.set_directory(root);
@@ -937,7 +1019,17 @@ impl BatchRenameDialogState {
                 }
             }
             let mut recursive = self.recursive;
-            let recursive_changed = ui.checkbox(&mut recursive, "Include subfolders").changed();
+            let recursive_response = ui.checkbox(&mut recursive, "Include subfolders");
+            register_batch_target(
+                scope,
+                ui,
+                &recursive_response,
+                "recursive",
+                "Include subfolders",
+                crate::gui::jump_mode::TargetKind::Checkbox,
+                visual_order,
+            );
+            let recursive_changed = recursive_response.changed();
             if process_interactions && recursive_changed {
                 self.recursive = recursive;
                 if self.root_path.is_some() {
@@ -945,13 +1037,20 @@ impl BatchRenameDialogState {
                     commands.push(BatchRenameUiCommand::RecursiveChanged);
                 }
             }
-            let rescan = ui
-                .add_enabled(
-                    self.root_path.is_some() && !self.has_pending_scan(),
-                    egui::Button::new("Rescan"),
-                )
-                .clicked();
-            if process_interactions && rescan {
+            let rescan = ui.add_enabled(
+                self.root_path.is_some() && !self.has_pending_scan(),
+                egui::Button::new("Rescan"),
+            );
+            register_batch_target(
+                scope,
+                ui,
+                &rescan,
+                "rescan",
+                "Rescan files",
+                crate::gui::jump_mode::TargetKind::Button,
+                visual_order,
+            );
+            if process_interactions && rescan.clicked() {
                 commands.push(BatchRenameUiCommand::Rescan);
             }
         });
@@ -1054,7 +1153,13 @@ impl BatchRenameDialogState {
         }
     }
 
-    fn draw_rule_editor(&mut self, ui: &mut egui::Ui, process_interactions: bool) {
+    fn draw_rule_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        process_interactions: bool,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        visual_order: &mut u64,
+    ) {
         ui.heading("Ordered filename rules");
         ui.label("Numbering follows the deterministic original path order, regardless of filtering or table sorting.");
         let mut rules = self.rules.clone();
@@ -1063,26 +1168,59 @@ impl BatchRenameDialogState {
         let mut rules_changed = false;
         ui.horizontal_wrapped(|ui| {
             let before = extension_policy;
-            egui::ComboBox::from_id_salt("batch_rename_extension_policy")
+            let extension_policy_identity = "extension-policy";
+            let extension_response = egui::ComboBox::from_id_salt("batch_rename_extension_policy")
                 .selected_text(match extension_policy {
                     ExtensionPolicy::Preserve => "Protect extension (default)",
                     ExtensionPolicy::Edit => "Edit full filename",
                 })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(
+                    let preserve = ui.selectable_value(
                         &mut extension_policy,
                         ExtensionPolicy::Preserve,
                         "Protect extension (default)",
                     );
-                    ui.selectable_value(
+                    register_batch_target(
+                        scope
+                            .map(|scope| scope.combo_popup_scope(extension_policy_identity))
+                            .as_ref(),
+                        ui,
+                        &preserve,
+                        "option/preserve",
+                        "Protect extension",
+                        crate::gui::jump_mode::TargetKind::Selectable,
+                        visual_order,
+                    );
+                    let edit = ui.selectable_value(
                         &mut extension_policy,
                         ExtensionPolicy::Edit,
                         "Edit full filename",
                     );
+                    register_batch_target(
+                        scope
+                            .map(|scope| scope.combo_popup_scope(extension_policy_identity))
+                            .as_ref(),
+                        ui,
+                        &edit,
+                        "option/edit",
+                        "Edit full filename",
+                        crate::gui::jump_mode::TargetKind::Selectable,
+                        visual_order,
+                    );
                 });
+            register_batch_target(
+                scope,
+                ui,
+                &extension_response.response,
+                extension_policy_identity,
+                "Extension policy",
+                crate::gui::jump_mode::TargetKind::ComboBox,
+                visual_order,
+            );
             rules_changed |= before != extension_policy;
 
-            egui::ComboBox::from_id_salt("batch_rename_new_rule")
+            let new_rule_kind_identity = "new-rule-kind";
+            let new_rule_response = egui::ComboBox::from_id_salt("batch_rename_new_rule")
                 .selected_text(new_rule_label(new_rule_kind))
                 .show_ui(ui, |ui| {
                     for kind in [
@@ -1094,10 +1232,41 @@ impl BatchRenameDialogState {
                         NewRuleKind::Lowercase,
                         NewRuleKind::Uppercase,
                     ] {
-                        ui.selectable_value(&mut new_rule_kind, kind, new_rule_label(kind));
+                        let option =
+                            ui.selectable_value(&mut new_rule_kind, kind, new_rule_label(kind));
+                        register_batch_target(
+                            scope
+                                .map(|scope| scope.combo_popup_scope(new_rule_kind_identity))
+                                .as_ref(),
+                            ui,
+                            &option,
+                            new_rule_option_identity(kind),
+                            new_rule_label(kind),
+                            crate::gui::jump_mode::TargetKind::Selectable,
+                            visual_order,
+                        );
                     }
                 });
-            if ui.button("Add rule").clicked() && process_interactions {
+            register_batch_target(
+                scope,
+                ui,
+                &new_rule_response.response,
+                new_rule_kind_identity,
+                "New rule type",
+                crate::gui::jump_mode::TargetKind::ComboBox,
+                visual_order,
+            );
+            let add_rule = ui.button("Add rule");
+            register_batch_target(
+                scope,
+                ui,
+                &add_rule,
+                "add-rule",
+                "Add rule",
+                crate::gui::jump_mode::TargetKind::Button,
+                visual_order,
+            );
+            if add_rule.clicked() && process_interactions {
                 let id = self.next_rule_id;
                 self.next_rule_id = self.next_rule_id.wrapping_add(1);
                 rules.push(RuleDraft {
@@ -1113,8 +1282,17 @@ impl BatchRenameDialogState {
         for index in 0..rule_count {
             let action = {
                 let draft = &mut rules[index];
-                ui.push_id(("batch_rename_rule", draft.id), |ui| {
-                    draw_rule_row(ui, draft.id, &mut draft.rule, index, rule_count)
+                let rule_ui_id = egui::Id::new(("batch_rename_rule", self.session_epoch, draft.id));
+                ui.scope_builder(egui::UiBuilder::new().id(rule_ui_id), |ui| {
+                    draw_rule_row(
+                        ui,
+                        draft.id,
+                        &mut draft.rule,
+                        index,
+                        rule_count,
+                        scope,
+                        visual_order,
+                    )
                 })
                 .inner
             };
@@ -1172,6 +1350,8 @@ impl BatchRenameDialogState {
         ui: &mut egui::Ui,
         commands: &mut Vec<BatchRenameUiCommand>,
         process_interactions: bool,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        visual_order: &mut u64,
     ) {
         self.draw_folder_tree(ui, commands, process_interactions);
         if let Some(root) = commands.iter().find_map(|command| match command {
@@ -1189,6 +1369,15 @@ impl BatchRenameDialogState {
                     .desired_width(240.0)
                     .hint_text("Name, path, or extension"),
             );
+            register_batch_target(
+                scope,
+                ui,
+                &response,
+                "filter",
+                "Filter preview files",
+                crate::gui::jump_mode::TargetKind::TextEntry,
+                visual_order,
+            );
             #[cfg(test)]
             {
                 self.filter_widget_id = Some(response.id);
@@ -1197,22 +1386,36 @@ impl BatchRenameDialogState {
                 self.filter = filter;
                 self.rebuild_visible_rows();
             }
-            let select_visible = ui
-                .add_enabled(
-                    !self.visible_rows.is_empty(),
-                    egui::Button::new("Select visible"),
-                )
-                .clicked();
-            if process_interactions && select_visible {
+            let select_visible = ui.add_enabled(
+                !self.visible_rows.is_empty(),
+                egui::Button::new("Select visible"),
+            );
+            register_batch_target(
+                scope,
+                ui,
+                &select_visible,
+                "select-visible",
+                "Select visible files",
+                crate::gui::jump_mode::TargetKind::Button,
+                visual_order,
+            );
+            if process_interactions && select_visible.clicked() {
                 self.select_visible(true);
             }
-            let clear_visible = ui
-                .add_enabled(
-                    !self.visible_rows.is_empty(),
-                    egui::Button::new("Clear visible"),
-                )
-                .clicked();
-            if process_interactions && clear_visible {
+            let clear_visible = ui.add_enabled(
+                !self.visible_rows.is_empty(),
+                egui::Button::new("Clear visible"),
+            );
+            register_batch_target(
+                scope,
+                ui,
+                &clear_visible,
+                "clear-visible",
+                "Clear visible selection",
+                crate::gui::jump_mode::TargetKind::Button,
+                visual_order,
+            );
+            if process_interactions && clear_visible.clicked() {
                 self.select_visible(false);
             }
         });
@@ -1531,40 +1734,85 @@ fn draw_rule_row(
     rule: &mut RenameRule,
     index: usize,
     total: usize,
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    visual_order: &mut u64,
 ) -> (bool, RuleRowAction) {
     let mut changed = false;
     let mut action = RuleRowAction::None;
+    let rule_identity = format!("rule/{id}");
     ui.horizontal_wrapped(|ui| {
         ui.label(format!("{}.", index + 1));
-        if ui
+        let move_up = ui
             .add_enabled(index > 0, egui::Button::new("↑").small())
-            .on_hover_text("Move rule earlier")
-            .clicked()
-        {
+            .on_hover_text("Move rule earlier");
+        register_batch_target(
+            scope,
+            ui,
+            &move_up,
+            format!("{rule_identity}/move-up"),
+            "Move rule earlier",
+            crate::gui::jump_mode::TargetKind::Button,
+            visual_order,
+        );
+        if move_up.clicked() {
             action = RuleRowAction::MoveUp;
         }
-        if ui
+        let move_down = ui
             .add_enabled(index + 1 < total, egui::Button::new("↓").small())
-            .on_hover_text("Move rule later")
-            .clicked()
-        {
+            .on_hover_text("Move rule later");
+        register_batch_target(
+            scope,
+            ui,
+            &move_down,
+            format!("{rule_identity}/move-down"),
+            "Move rule later",
+            crate::gui::jump_mode::TargetKind::Button,
+            visual_order,
+        );
+        if move_down.clicked() {
             action = RuleRowAction::MoveDown;
         }
-        if ui.button("×").on_hover_text("Remove rule").clicked() {
+        let remove = ui.button("×").on_hover_text("Remove rule");
+        register_batch_target(
+            scope,
+            ui,
+            &remove,
+            format!("{rule_identity}/remove"),
+            "Remove rule",
+            crate::gui::jump_mode::TargetKind::Button,
+            visual_order,
+        );
+        if remove.clicked() {
             action = RuleRowAction::Remove;
         }
         match rule {
             RenameRule::Prefix(value) => {
                 ui.label("Prefix");
-                changed |= ui
-                    .add(egui::TextEdit::singleline(value).desired_width(180.0))
-                    .changed();
+                let response = ui.add(egui::TextEdit::singleline(value).desired_width(180.0));
+                register_batch_target(
+                    scope,
+                    ui,
+                    &response,
+                    format!("{rule_identity}/prefix"),
+                    "Prefix text",
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                    visual_order,
+                );
+                changed |= response.changed();
             }
             RenameRule::Suffix(value) => {
                 ui.label("Suffix");
-                changed |= ui
-                    .add(egui::TextEdit::singleline(value).desired_width(180.0))
-                    .changed();
+                let response = ui.add(egui::TextEdit::singleline(value).desired_width(180.0));
+                register_batch_target(
+                    scope,
+                    ui,
+                    &response,
+                    format!("{rule_identity}/suffix"),
+                    "Suffix text",
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                    visual_order,
+                );
+                changed |= response.changed();
             }
             RenameRule::Number {
                 start,
@@ -1573,70 +1821,193 @@ fn draw_rule_row(
             } => {
                 ui.label("Number");
                 ui.label("Start");
-                changed |= ui.add(egui::DragValue::new(start)).changed();
+                let response = ui.add(egui::DragValue::new(start));
+                register_batch_target(
+                    scope,
+                    ui,
+                    &response,
+                    format!("{rule_identity}/number-start"),
+                    "Number start",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                    visual_order,
+                );
+                changed |= response.changed();
                 ui.label("Step");
-                changed |= ui.add(egui::DragValue::new(step)).changed();
+                let response = ui.add(egui::DragValue::new(step));
+                register_batch_target(
+                    scope,
+                    ui,
+                    &response,
+                    format!("{rule_identity}/number-step"),
+                    "Number step",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                    visual_order,
+                );
+                changed |= response.changed();
                 ui.label("Padding");
-                changed |= ui
-                    .add(egui::DragValue::new(padding).range(0..=32))
-                    .changed();
+                let response = ui.add(egui::DragValue::new(padding).range(0..=32));
+                register_batch_target(
+                    scope,
+                    ui,
+                    &response,
+                    format!("{rule_identity}/number-padding"),
+                    "Number padding",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                    visual_order,
+                );
+                changed |= response.changed();
             }
             RenameRule::LiteralReplace { find, replace_with } => {
                 ui.label("Literal replace");
-                changed |= ui
-                    .add(
-                        egui::TextEdit::singleline(find)
-                            .desired_width(130.0)
-                            .hint_text("Find"),
-                    )
-                    .changed();
+                let response = ui.add(
+                    egui::TextEdit::singleline(find)
+                        .desired_width(130.0)
+                        .hint_text("Find"),
+                );
+                register_batch_target(
+                    scope,
+                    ui,
+                    &response,
+                    format!("{rule_identity}/literal-find"),
+                    "Find text",
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                    visual_order,
+                );
+                changed |= response.changed();
                 ui.label("with");
-                changed |= ui
-                    .add(
-                        egui::TextEdit::singleline(replace_with)
-                            .desired_width(130.0)
-                            .hint_text("Replace with"),
-                    )
-                    .changed();
+                let response = ui.add(
+                    egui::TextEdit::singleline(replace_with)
+                        .desired_width(130.0)
+                        .hint_text("Replace with"),
+                );
+                register_batch_target(
+                    scope,
+                    ui,
+                    &response,
+                    format!("{rule_identity}/literal-replacement"),
+                    "Replacement text",
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                    visual_order,
+                );
+                changed |= response.changed();
             }
             RenameRule::RegexReplace {
                 pattern,
                 replace_with,
             } => {
                 ui.label("Regex replace");
-                changed |= ui
-                    .add(
-                        egui::TextEdit::singleline(pattern)
-                            .desired_width(130.0)
-                            .hint_text("Pattern"),
-                    )
-                    .changed();
+                let response = ui.add(
+                    egui::TextEdit::singleline(pattern)
+                        .desired_width(130.0)
+                        .hint_text("Pattern"),
+                );
+                register_batch_target(
+                    scope,
+                    ui,
+                    &response,
+                    format!("{rule_identity}/regex-pattern"),
+                    "Regex pattern",
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                    visual_order,
+                );
+                changed |= response.changed();
                 ui.label("with");
-                changed |= ui
-                    .add(
-                        egui::TextEdit::singleline(replace_with)
-                            .desired_width(130.0)
-                            .hint_text("Replacement, e.g. $1"),
-                    )
-                    .changed();
+                let response = ui.add(
+                    egui::TextEdit::singleline(replace_with)
+                        .desired_width(130.0)
+                        .hint_text("Replacement, e.g. $1"),
+                );
+                register_batch_target(
+                    scope,
+                    ui,
+                    &response,
+                    format!("{rule_identity}/regex-replacement"),
+                    "Regex replacement",
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                    visual_order,
+                );
+                changed |= response.changed();
             }
             RenameRule::Case(case) => {
                 ui.label("Case");
                 let before = *case;
-                egui::ComboBox::from_id_salt(("batch_rename_case", id))
+                let case_identity = format!("{rule_identity}/case");
+                let popup_scope = scope.map(|scope| scope.combo_popup_scope(&case_identity));
+                let combo = egui::ComboBox::from_id_salt(("batch_rename_case", id))
                     .selected_text(match case {
                         CaseConversion::Lowercase => "Lowercase",
                         CaseConversion::Uppercase => "Uppercase",
                     })
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(case, CaseConversion::Lowercase, "Lowercase");
-                        ui.selectable_value(case, CaseConversion::Uppercase, "Uppercase");
+                        let lowercase =
+                            ui.selectable_value(case, CaseConversion::Lowercase, "Lowercase");
+                        register_batch_target(
+                            popup_scope.as_ref(),
+                            ui,
+                            &lowercase,
+                            "option/lowercase",
+                            "Lowercase",
+                            crate::gui::jump_mode::TargetKind::Selectable,
+                            visual_order,
+                        );
+                        let uppercase =
+                            ui.selectable_value(case, CaseConversion::Uppercase, "Uppercase");
+                        register_batch_target(
+                            popup_scope.as_ref(),
+                            ui,
+                            &uppercase,
+                            "option/uppercase",
+                            "Uppercase",
+                            crate::gui::jump_mode::TargetKind::Selectable,
+                            visual_order,
+                        );
                     });
+                register_batch_target(
+                    scope,
+                    ui,
+                    &combo.response,
+                    &case_identity,
+                    "Case conversion",
+                    crate::gui::jump_mode::TargetKind::ComboBox,
+                    visual_order,
+                );
                 changed |= before != *case;
             }
         }
     });
     (changed, action)
+}
+
+fn register_batch_target(
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    local_identity: impl AsRef<str>,
+    label: impl Into<String>,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: &mut u64,
+) {
+    let _ = crate::gui::jump_mode::ui::register_and_apply_target(
+        scope,
+        ui,
+        response,
+        local_identity,
+        label,
+        kind,
+        visual_order,
+    );
+}
+
+fn new_rule_option_identity(kind: NewRuleKind) -> &'static str {
+    match kind {
+        NewRuleKind::Prefix => "option/prefix",
+        NewRuleKind::Suffix => "option/suffix",
+        NewRuleKind::Number => "option/number",
+        NewRuleKind::LiteralReplace => "option/literal-replace",
+        NewRuleKind::RegexReplace => "option/regex-replace",
+        NewRuleKind::Lowercase => "option/lowercase",
+        NewRuleKind::Uppercase => "option/uppercase",
+    }
 }
 
 fn default_rule(kind: NewRuleKind) -> RenameRule {
@@ -1895,6 +2266,30 @@ mod tests {
             events,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn jump_mode_batch_rename_form_withholds_parent_scope_for_transient_owners() {
+        let mut state = BatchRenameDialogState::default();
+        state.open();
+        let initial_generation = state.jump_mode_target_generation();
+        assert!(state.jump_mode_parent_targets_allowed());
+
+        state.apply_confirmation_open = true;
+        assert!(!state.jump_mode_parent_targets_allowed());
+        state.apply_confirmation_open = false;
+        state.undo_confirmation = Some("fixture-transaction".to_owned());
+        assert!(!state.jump_mode_parent_targets_allowed());
+        state.undo_confirmation = None;
+        state.operation_was_active = true;
+        assert!(!state.jump_mode_parent_targets_allowed());
+        state.observe_runtime(&RenameRuntimeSnapshot::default());
+
+        state.end_session();
+        assert!(!state.jump_mode_parent_targets_allowed());
+        state.open();
+        assert!(state.jump_mode_parent_targets_allowed());
+        assert!(state.jump_mode_target_generation() > initial_generation);
     }
 
     #[cfg(windows)]
