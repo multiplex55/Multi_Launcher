@@ -3296,6 +3296,43 @@ impl LauncherApp {
         }
     }
 
+    fn search_replace_native_ui_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+
+        if !self.search_replace_dialog.native_parent_ui_allowed()
+            || !self.native_ui_host_input_allowed(ctx, root_visible)
+            || NavigationDialogKind::SearchReplace
+                .layer_id()
+                .is_none_or(|layer| visible_top_middle_layer(ctx) != Some(layer))
+        {
+            return false;
+        }
+
+        !egui::Popup::is_any_open(ctx)
+            || self
+                .search_replace_dialog
+                .current_owned_native_popup_layer(ctx)
+                .is_some()
+    }
+
+    fn search_replace_confirmation_native_ui_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        self.search_replace_dialog
+            .native_confirmation_layer_id()
+            .is_some_and(|layer| {
+                self.search_replace_dialog.open
+                    && self.native_ui_host_input_allowed(ctx, root_visible)
+                    && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+            })
+    }
+
     fn clipboard_history_native_ui_owner_current(
         &self,
         ctx: &egui::Context,
@@ -3711,6 +3748,18 @@ impl LauncherApp {
                     // An operation or existing confirmation owns input. Keep
                     // the normal native UI path, but never leave planning
                     // targets live behind that transient owner.
+                    (NavigationOwner::Blocked, combo_popup)
+                }
+                NavigationOwner::Dialog {
+                    kind: crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace,
+                    ..
+                } if !self
+                    .search_replace_dialog
+                    .jump_mode_parent_targets_allowed(self.replace_worker_snapshot.active) =>
+                {
+                    // Search/Replace keeps its native Cancel Search path, but
+                    // planning/navigation targets are absent while a frozen
+                    // replacement or recovery child owns the dialog.
                     (NavigationOwner::Blocked, combo_popup)
                 }
                 _ => (owner, combo_popup),
@@ -6017,13 +6066,67 @@ impl LauncherApp {
                 self.handle_batch_rename_ui_command(command);
             }
         }
-        let search_replace_commands =
-            self.search_replace_dialog
-                .ui(&ctx, first_ui_pass, &self.replace_worker_snapshot);
-        if first_ui_pass {
+        // Batch Rename may have changed the visible foreground earlier this pass,
+        // so Search & Replace must resolve its owner immediately before drawing.
+        let search_replace_owner =
+            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+        let search_replace_scope = match search_replace_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace,
+                instance,
+            } if self.jump_mode_enabled()
+                && self
+                    .search_replace_dialog
+                    .jump_mode_parent_targets_allowed(self.replace_worker_snapshot.active) =>
+            {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("search-replace", instance),
+                    crate::gui::jump_mode::TargetGeneration(instance),
+                    "search-replace/form",
+                    ctx.viewport_id(),
+                    search_replace_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let search_replace_native_owner =
+            self.search_replace_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
+        let search_replace_confirmation_native_owner = self
+            .search_replace_confirmation_native_ui_owner_current(
+                &ctx,
+                frame_logic.should_be_visible,
+            );
+        if !search_replace_native_owner
+            && let Some(focused) = ctx.memory(|memory| memory.focused())
+            && ctx.read_response(focused).is_some_and(|response| {
+                Some(response.layer_id)
+                    == crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace.layer_id()
+            })
+        {
+            ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        }
+        let search_replace_instance = self
+            .jump_mode_ui
+            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace)
+            .unwrap_or_default();
+        let search_replace_commands = self.search_replace_dialog.ui_with_jump_mode(
+            &ctx,
+            search_replace_scope.as_ref(),
+            search_replace_native_owner,
+            first_ui_pass,
+            search_replace_confirmation_native_owner,
+            search_replace_instance,
+            &self.replace_worker_snapshot,
+        );
+        if first_ui_pass
+            && (search_replace_native_owner || search_replace_confirmation_native_owner)
+        {
             for command in search_replace_commands {
                 self.handle_search_replace_ui_command(command);
             }
+        }
+        if first_ui_pass {
             self.submit_ready_search_replace_confirmation();
         }
         self.diff_dialog.ui(&ctx);
@@ -34128,6 +34231,298 @@ mod tests {
                 .iter()
                 .all(|target| target.metadata().label() != "Add rule")
         );
+        drop(workspace);
+    }
+
+    fn search_replace_test_frame(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        events: Vec<egui::Event>,
+    ) {
+        let output = app.run_root_frame_for_test(
+            ctx,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1440.0, 1100.0),
+                )),
+                focused: true,
+                events,
+                ..Default::default()
+            },
+            false,
+        );
+        output.0.drop_without_applying_deltas();
+    }
+
+    fn start_search_replace_hints(ctx: &egui::Context, app: &mut LauncherApp) {
+        search_replace_test_frame(
+            ctx,
+            app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        assert!(app.jump_mode_ui.active_session().is_some());
+        search_replace_test_frame(
+            ctx,
+            app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+    }
+
+    fn complete_search_replace_hint(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        target: &crate::gui::jump_mode::ui::RegisteredTarget,
+    ) {
+        let hint = app
+            .jump_mode_ui
+            .active_session()
+            .expect("the current Jump session remains active")
+            .hint_map()
+            .hint_for(target.id())
+            .expect("the current target receives a hint")
+            .as_str()
+            .to_owned();
+        search_replace_test_frame(ctx, app, vec![egui::Event::Text(hint)]);
+    }
+
+    fn search_replace_target_by_label(
+        app: &LauncherApp,
+        label: &str,
+    ) -> crate::gui::jump_mode::ui::RegisteredTarget {
+        app.jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .unwrap_or_else(|| panic!("missing current Search & Replace target: {label}"))
+            .clone()
+    }
+
+    #[test]
+    fn jump_mode_replace_form_files_focuses_and_inspects_without_approval_or_writes() {
+        use crate::gui::jump_mode::{
+            SurfaceId, TargetKind,
+            ui::{NavigationDialogKind, NavigationOwner},
+        };
+
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let repository_root = std::env::current_dir().expect("read repository root");
+        let scan_parent = repository_root.join("target/productivity_expansion");
+        std::fs::create_dir_all(&scan_parent).expect("create native search fixture parent");
+        let root_guard = tempfile::Builder::new()
+            .prefix("search_replace_jump_")
+            .tempdir_in(&scan_parent)
+            .expect("create disposable search root");
+        let root = root_guard.path().to_path_buf();
+        let source_path = root.join("fixture.txt");
+        let original = "before needle猫 after\n".as_bytes().to_vec();
+        std::fs::write(&source_path, &original).expect("write harmless generated source");
+
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        let original_root_query = app.query.clone();
+        app.search_replace_dialog.open();
+        app.handle_search_replace_ui_command(crate::gui::SearchReplaceUiCommand::SelectRoot(
+            root.clone(),
+        ));
+        for _ in 0..3 {
+            search_replace_test_frame(&ctx, &mut app, Vec::new());
+        }
+
+        let instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::SearchReplace)
+            .expect("the actual Search & Replace Window has a live instance");
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::SearchReplace,
+                instance,
+            }
+        );
+        let pattern_mode = search_replace_target_by_label(&app, "Search pattern mode");
+        assert_eq!(pattern_mode.metadata().kind(), TargetKind::ComboBox);
+        start_search_replace_hints(&ctx, &mut app);
+        complete_search_replace_hint(&ctx, &mut app, &pattern_mode);
+        assert!(
+            !egui::Popup::is_any_open(&ctx),
+            "hint focus does not open the combo"
+        );
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(
+            egui::Popup::is_any_open(&ctx),
+            "fresh Enter opens native options"
+        );
+        search_replace_test_frame(&ctx, &mut app, Vec::new());
+        let popup_targets = app.jump_mode_ui.retained_registry().targets();
+        assert!(!popup_targets.is_empty());
+        assert!(popup_targets.iter().all(|target| matches!(
+            target.id().surface(),
+            SurfaceId::Popup { kind, owner, .. }
+                if kind.starts_with("combo:")
+                    && matches!(owner.as_ref(), SurfaceId::Dialog { kind, instance: owner_instance }
+                        if kind == "search-replace" && *owner_instance == instance)
+        )), "only the exact Search & Replace combo options own popup targets");
+        assert!(
+            popup_targets
+                .iter()
+                .any(|target| target.metadata().label() == "Rust regex")
+        );
+        assert!(
+            popup_targets
+                .iter()
+                .all(|target| target.metadata().label() != "Search")
+        );
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!egui::Popup::is_any_open(&ctx));
+        search_replace_test_frame(&ctx, &mut app, Vec::new());
+
+        let pattern = search_replace_target_by_label(&app, "Search pattern");
+        assert_eq!(pattern.metadata().kind(), TargetKind::TextEntry);
+        assert_eq!(
+            pattern.id().surface(),
+            &SurfaceId::dialog("search-replace", instance)
+        );
+
+        start_search_replace_hints(&ctx, &mut app);
+        complete_search_replace_hint(&ctx, &mut app, &pattern);
+        assert_eq!(app.search_replace_dialog.test_pattern(), "");
+        assert_eq!(app.query, original_root_query);
+        assert!(!app.search_replace_dialog.test_search_ticket_active());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(pattern.response_id()),
+            "hint completion focuses the actual pattern editor"
+        );
+
+        search_replace_test_frame(&ctx, &mut app, vec![egui::Event::Text("needle猫".into())]);
+        assert_eq!(app.search_replace_dialog.test_pattern(), "needle猫");
+        assert_eq!(
+            app.query, original_root_query,
+            "form typing stays out of Root"
+        );
+        assert!(!app.search_replace_dialog.test_search_ticket_active());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(pattern.response_id()),
+            "Unicode typing retains native caret ownership"
+        );
+        search_replace_test_frame(&ctx, &mut app, Vec::new());
+
+        let search = search_replace_target_by_label(&app, "Search");
+        assert_eq!(search.metadata().kind(), TargetKind::Button);
+        start_search_replace_hints(&ctx, &mut app);
+        complete_search_replace_hint(&ctx, &mut app, &search);
+        assert!(!app.search_replace_dialog.test_search_ticket_active());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(search.response_id()),
+            "hint completion focuses Search without starting work"
+        );
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(app.search_replace_dialog.test_search_ticket_active());
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let result_counts = loop {
+            app.poll_search_replace_runtime(&ctx);
+            if let Some(counts) = app.search_replace_dialog.test_result_counts() {
+                break counts;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the generated read-only search should be accepted by the current generation"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(result_counts.1, 1, "the fixture has one matching file");
+        assert_eq!(result_counts.2, 1, "the fixture has one matching span");
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+
+        let settings = search_replace_target_by_label(&app, "Search and Replace settings");
+        start_search_replace_hints(&ctx, &mut app);
+        complete_search_replace_hint(&ctx, &mut app, &settings);
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        search_replace_test_frame(&ctx, &mut app, Vec::new());
+
+        let file_target = search_replace_target_by_label(&app, "Inspect file result");
+        assert_eq!(file_target.metadata().kind(), TargetKind::Action);
+        assert!(file_target.enabled());
+        assert!(file_target.clipped_rect().width() > 0.0);
+        let semantic_id = format!("{:?}", file_target.id());
+        assert!(!semantic_id.contains("fixture.txt"));
+        assert!(!semantic_id.contains(root.to_string_lossy().as_ref()));
+        start_search_replace_hints(&ctx, &mut app);
+        complete_search_replace_hint(&ctx, &mut app, &file_target);
+        assert_eq!(
+            app.search_replace_dialog
+                .test_selected_file()
+                .map(std::fs::canonicalize)
+                .transpose()
+                .unwrap(),
+            Some(std::fs::canonicalize(&source_path).unwrap())
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(file_target.response_id()),
+            "Select focuses the exact current file inspection response"
+        );
+        assert_eq!(app.search_replace_dialog.test_approved_match_count(), 0);
+        assert_eq!(std::fs::read(&source_path).unwrap(), original);
+        search_replace_test_frame(&ctx, &mut app, Vec::new());
+
+        let match_target = search_replace_target_by_label(&app, "Inspect match");
+        assert_eq!(match_target.metadata().kind(), TargetKind::Action);
+        assert_eq!(match_target.id().surface(), file_target.id().surface());
+        start_search_replace_hints(&ctx, &mut app);
+        complete_search_replace_hint(&ctx, &mut app, &match_target);
+        assert!(app.search_replace_dialog.test_inspected_match().is_some());
+        assert_eq!(app.search_replace_dialog.test_approved_match_count(), 0);
+        assert_eq!(std::fs::read(&source_path).unwrap(), original);
+        assert!(app.test_activation_trace.is_empty());
+
+        app.shutdown_search_replace_runtime();
+        drop(root_guard);
         drop(workspace);
     }
 

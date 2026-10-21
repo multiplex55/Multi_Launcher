@@ -1,5 +1,5 @@
 use crate::batch_rename::ExplicitDirectoryRoot;
-use crate::file_operations::ScanCancellation;
+use crate::file_operations::{NativeFileIdentity, ScanCancellation};
 use crate::replace_executor::{
     ConfirmedReplacementRequest, REPLACE_RECOVERY_DIRECTORY, ReplaceExecutor,
     ReplaceExecutorWorker, ReplaceOperationResult, ReplaceProgress, ReplaceRecoveryReceipt,
@@ -7,9 +7,9 @@ use crate::replace_executor::{
 };
 use crate::search_replace::{
     MatchId, ReplacementCandidate, ReplacementCandidateReadiness, ReplacementMode,
-    ReplacementRevision, ReplacementSpec, SearchFilterSpec, SearchGeneration, SearchLimits,
-    SearchPattern, SearchPatternMode, SearchProgress, SearchProgressPhase, SearchRevision,
-    SearchStatus, TextSearchRequest, TextSearchResult,
+    ReplacementRevision, ReplacementSpec, SearchFileSnapshot, SearchFilterSpec, SearchGeneration,
+    SearchLimits, SearchPattern, SearchPatternMode, SearchProgress, SearchProgressPhase,
+    SearchRevision, SearchStatus, TextSearchRequest, TextSearchResult,
 };
 use eframe::egui::{self, Align, Layout};
 use std::collections::{HashMap, HashSet};
@@ -147,6 +147,104 @@ pub(crate) enum SearchReplaceUiCommand {
 enum FileSort {
     Path,
     MatchCount,
+}
+
+#[derive(Clone, Copy)]
+struct SearchReplaceNativePopupAnchor {
+    response_id: egui::Id,
+    popup_id: egui::Id,
+    layer_id: egui::LayerId,
+}
+
+struct SearchReplaceFormDraft {
+    recursive: bool,
+    include_extensions: String,
+    include_globs: String,
+    exclude_paths: String,
+    exclude_globs: String,
+    pattern: String,
+    pattern_mode: SearchPatternMode,
+    case_sensitive: bool,
+    replacement: String,
+    replacement_mode: ReplacementMode,
+    file_filter: String,
+    file_sort: FileSort,
+}
+
+fn take_target_order(order: &mut u64) -> u64 {
+    let current = *order;
+    *order = order.saturating_add(1);
+    current
+}
+
+fn register_search_replace_target_at_order(
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    local_identity: impl AsRef<str>,
+    label: impl Into<String>,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: u64,
+) -> Option<crate::gui::jump_mode::ui::FocusDirective> {
+    let mut next_order = visual_order;
+    crate::gui::jump_mode::ui::register_and_apply_target(
+        scope,
+        ui,
+        response,
+        local_identity,
+        label,
+        kind,
+        &mut next_order,
+    )
+}
+
+fn register_search_replace_target(
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    local_identity: impl AsRef<str>,
+    label: impl Into<String>,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: &mut u64,
+) -> Option<crate::gui::jump_mode::ui::FocusDirective> {
+    let order = take_target_order(visual_order);
+    register_search_replace_target_at_order(scope, ui, response, local_identity, label, kind, order)
+}
+
+fn opaque_file_identity(
+    generation: SearchGeneration,
+    root_identity: NativeFileIdentity,
+    file_identity: NativeFileIdentity,
+    relative_path: &Path,
+) -> u64 {
+    egui::Id::new((
+        "search-replace-file",
+        generation,
+        root_identity,
+        file_identity,
+        relative_path,
+    ))
+    .value()
+}
+
+fn search_file_local_identity(file: &SearchFileSnapshot, generation: SearchGeneration) -> String {
+    format!(
+        "file/{:016x}",
+        opaque_file_identity(
+            generation,
+            file.root_identity(),
+            file.file_identity(),
+            file.relative_path(),
+        )
+    )
+}
+
+fn search_match_local_identity(file_key: u64, id: &MatchId) -> String {
+    format!(
+        "match/{:016x}/{:016x}",
+        file_key,
+        egui::Id::new(("search-replace-match", id)).value()
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -457,6 +555,8 @@ pub(crate) struct SearchReplaceDialogState {
     file_filter: String,
     file_sort: FileSort,
     visible_file_indices: Vec<usize>,
+    file_view_revision: u64,
+    native_popup_anchors: Vec<SearchReplaceNativePopupAnchor>,
     preview_revision: u64,
     preview_dirty: bool,
     preview_pending: bool,
@@ -508,6 +608,8 @@ impl Default for SearchReplaceDialogState {
             file_filter: String::new(),
             file_sort: FileSort::Path,
             visible_file_indices: Vec::new(),
+            file_view_revision: 0,
+            native_popup_anchors: Vec::new(),
             preview_revision: 0,
             preview_dirty: false,
             preview_pending: false,
@@ -537,7 +639,124 @@ impl Default for SearchReplaceDialogState {
 
 impl SearchReplaceDialogState {
     pub(crate) fn open(&mut self) {
+        self.native_popup_anchors.clear();
         self.open = true;
+    }
+
+    pub(crate) fn jump_mode_parent_targets_allowed(&self, operation_active: bool) -> bool {
+        self.open
+            && !operation_active
+            && !self.apply_confirmation_open
+            && !self.apply_confirmation_pending
+            && self.pending_confirmed_request.is_none()
+            && self.recovery_review.is_none()
+    }
+
+    pub(crate) fn native_parent_ui_allowed(&self) -> bool {
+        self.open
+            && !self.apply_confirmation_open
+            && !self.apply_confirmation_pending
+            && self.pending_confirmed_request.is_none()
+            && self.recovery_review.is_none()
+    }
+
+    pub(crate) fn native_confirmation_layer_id(&self) -> Option<egui::LayerId> {
+        if self.apply_confirmation_open {
+            Some(egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::new("replace_apply_confirmation"),
+            ))
+        } else if self.recovery_review.is_some() {
+            Some(egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::new("replace_recovery_confirmation"),
+            ))
+        } else {
+            None
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_search_ticket_active(&self) -> bool {
+        self.search_ticket.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_result_counts(&self) -> Option<(SearchGeneration, usize, usize)> {
+        self.search_result.as_ref().map(|search| {
+            (
+                search.generation(),
+                search.matched_files().len(),
+                search
+                    .matched_files()
+                    .iter()
+                    .map(|file| file.matches().len())
+                    .sum(),
+            )
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_selected_file(&self) -> Option<&Path> {
+        self.selected_file.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_approved_match_count(&self) -> usize {
+        self.selected_matches.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_inspected_match(&self) -> Option<&MatchId> {
+        self.inspected_match.as_ref()
+    }
+
+    pub(crate) fn current_owned_native_popup_layer(
+        &self,
+        ctx: &egui::Context,
+    ) -> Option<egui::LayerId> {
+        if !self.open || !egui::Popup::is_any_open(ctx) {
+            return None;
+        }
+
+        self.native_popup_anchors.iter().find_map(|anchor| {
+            let response = ctx.read_response(anchor.response_id)?;
+            if !response.enabled()
+                || response.layer_id != anchor.layer_id
+                || !egui::Popup::is_id_open(ctx, anchor.popup_id)
+            {
+                return None;
+            }
+            let popup_rect = ctx.memory(|memory| memory.area_rect(anchor.popup_id))?;
+            let popup_layer = egui::LayerId::new(egui::Order::Foreground, anchor.popup_id);
+            let popup_is_interactive = ctx.layer_id_at(popup_rect.center()) == Some(popup_layer);
+            let popup_is_sizing = egui::containers::AreaState::load(ctx, anchor.popup_id)
+                .is_some_and(|state| !state.interactable);
+            (popup_rect.is_positive() && (popup_is_interactive || popup_is_sizing))
+                .then_some(popup_layer)
+        })
+    }
+
+    fn record_native_popup_anchor(&mut self, ui: &egui::Ui, response: &egui::Response) {
+        if !response.enabled() || !response.rect.intersect(ui.clip_rect()).is_positive() {
+            return;
+        }
+        let popup_id = egui::Popup::default_response_id(response);
+        let anchor = SearchReplaceNativePopupAnchor {
+            response_id: response.id,
+            popup_id,
+            layer_id: response.layer_id,
+        };
+        if !self.native_popup_anchors.iter().any(|existing| {
+            existing.response_id == anchor.response_id && existing.popup_id == anchor.popup_id
+        }) {
+            self.native_popup_anchors.push(anchor);
+        }
     }
 
     pub(crate) fn explicit_root(&self) -> Option<&Path> {
@@ -723,6 +942,7 @@ impl SearchReplaceDialogState {
     }
 
     pub(crate) fn set_root(&mut self, root: PathBuf) {
+        self.native_popup_anchors.clear();
         self.invalidate_search("Root changed. Run Search to capture a new snapshot.".into());
         self.root = Some(root);
     }
@@ -733,6 +953,7 @@ impl SearchReplaceDialogState {
         replace_worker: Option<&ReplaceExecutorWorker>,
     ) {
         self.open = false;
+        self.native_popup_anchors.clear();
         self.reveal_receipts = false;
         self.cancel_current_search(coordinator);
         self.invalidate_search("The dialog was closed; Refresh before applying again.".into());
@@ -1007,6 +1228,7 @@ impl SearchReplaceDialogState {
         self.apply_review = None;
         self.recovery_review = None;
         self.preview_revision = self.preview_revision.saturating_add(1);
+        self.file_view_revision = self.file_view_revision.saturating_add(1);
         self.status_message = Some(message);
     }
 
@@ -1084,6 +1306,7 @@ impl SearchReplaceDialogState {
     }
 
     fn rebuild_visible_files(&mut self) {
+        self.file_view_revision = self.file_view_revision.saturating_add(1);
         let Some(search) = self.search_result.as_ref() else {
             self.visible_file_indices.clear();
             return;
@@ -1279,14 +1502,37 @@ impl SearchReplaceDialogState {
         allow_mutations: bool,
         runtime: &ReplaceWorkerSnapshot,
     ) -> Vec<SearchReplaceUiCommand> {
+        self.ui_with_jump_mode(
+            ctx,
+            None,
+            allow_mutations,
+            allow_mutations,
+            allow_mutations,
+            0,
+            runtime,
+        )
+    }
+
+    pub(crate) fn ui_with_jump_mode(
+        &mut self,
+        ctx: &egui::Context,
+        jump_mode_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        first_ui_pass: bool,
+        native_confirmation_owner: bool,
+        dialog_instance: u64,
+        runtime: &ReplaceWorkerSnapshot,
+    ) -> Vec<SearchReplaceUiCommand> {
         let mut commands = Vec::new();
         if !self.open {
+            self.native_popup_anchors.clear();
             return commands;
         }
-        let process_interactions = allow_mutations
-            && ctx.current_pass_index() == 0
-            && !self.apply_confirmation_open
-            && self.recovery_review.is_none();
+        self.native_popup_anchors.clear();
+        let jump_mode_scope = jump_mode_scope.filter(|_| native_ui_owner);
+        let mut process_interactions = false;
+        let mut discarded_form_draft = None;
+        let mut visual_order = 0;
         let mut window_open = self.open;
         let window = egui::Window::new("Search and Replace")
             .id(egui::Id::new(WINDOW_ID))
@@ -1295,8 +1541,28 @@ impl SearchReplaceDialogState {
             .default_size(egui::vec2(1120.0, 820.0))
             .min_size(egui::vec2(560.0, 360.0))
             .show(ctx, |ui| {
+                let native_visible_pass = native_ui_owner
+                    && ui.is_enabled()
+                    && ui.is_visible()
+                    && !ui.is_sizing_pass();
+                process_interactions = native_visible_pass
+                    && first_ui_pass
+                    && ctx.current_pass_index() == 0
+                    && !self.apply_confirmation_open
+                    && !self.apply_confirmation_pending
+                    && self.recovery_review.is_none();
+                if !process_interactions {
+                    discarded_form_draft = Some(self.form_draft_snapshot());
+                }
                 let header_start = ui.cursor().min;
-                self.draw_header(ui, &mut commands, process_interactions);
+                self.draw_header(
+                    ui,
+                    &mut commands,
+                    jump_mode_scope,
+                    native_visible_pass,
+                    process_interactions,
+                    &mut visual_order,
+                );
                 ui.separator();
                 let header = egui::Rect::from_min_max(header_start, ui.cursor().min + egui::vec2(ui.available_width(), 0.0));
                 let row = ui.spacing().interact_size.y.max(ui.text_style_height(&egui::TextStyle::Body));
@@ -1313,10 +1579,30 @@ impl SearchReplaceDialogState {
                     .show(ui, |ui| {
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                         ui.weak("Choose a folder explicitly. Opening this dialog does not search; direct children are included by default.");
-                        self.draw_search_fields(ui, &mut commands, process_interactions);
+                        self.draw_search_fields(
+                            ui,
+                            &mut commands,
+                            jump_mode_scope,
+                            native_visible_pass,
+                            process_interactions,
+                            &mut visual_order,
+                        );
                         ui.separator();
-                        self.draw_search_status(ui, &mut commands, process_interactions);
-                        self.draw_results(ui, &mut commands, process_interactions);
+                        self.draw_search_status(
+                            ui,
+                            &mut commands,
+                            jump_mode_scope,
+                            &mut visual_order,
+                        );
+                        self.draw_results(
+                            ui,
+                            &mut commands,
+                            jump_mode_scope,
+                            native_visible_pass,
+                            process_interactions,
+                            dialog_instance,
+                            &mut visual_order,
+                        );
                         ui.separator();
                         let receipts = ui.scope(|ui| self.draw_receipts(ui, &mut commands, process_interactions));
                         if self.reveal_receipts {
@@ -1330,9 +1616,27 @@ impl SearchReplaceDialogState {
                 #[cfg(test)]
                 let footer_start = ui.cursor().min;
                 ui.separator();
-                self.draw_operation_status(ui, runtime, &mut commands, process_interactions);
+                    self.draw_operation_status(
+                    ui,
+                    runtime,
+                    &mut commands,
+                    jump_mode_scope,
+                    native_visible_pass,
+                    process_interactions,
+                    &mut visual_order,
+                );
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(process_interactions, egui::Button::new("Close")).clicked() {
+                    let close = ui.add_enabled(native_visible_pass, egui::Button::new("Close"));
+                    register_search_replace_target(
+                        jump_mode_scope,
+                        ui,
+                        &close,
+                        "footer/close",
+                        "Close",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut visual_order,
+                    );
+                    if process_interactions && close.clicked() {
                         commands.push(SearchReplaceUiCommand::Closed);
                     }
                     if ui.add_enabled(process_interactions, egui::Button::new("Restore / Recovery")).clicked() {
@@ -1370,7 +1674,12 @@ impl SearchReplaceDialogState {
         #[cfg(not(test))]
         let _ = window;
 
-        if allow_mutations
+        if let Some(draft) = discarded_form_draft {
+            self.restore_form_draft(draft);
+        }
+
+        if native_ui_owner
+            && first_ui_pass
             && ctx.current_pass_index() == 0
             && (!window_open || commands.contains(&SearchReplaceUiCommand::Closed))
         {
@@ -1381,24 +1690,71 @@ impl SearchReplaceDialogState {
             return commands;
         }
 
-        self.draw_confirmations(ctx, runtime, &mut commands, allow_mutations);
+        self.draw_confirmations(
+            ctx,
+            runtime,
+            &mut commands,
+            first_ui_pass && native_confirmation_owner,
+        );
         commands
+    }
+
+    fn form_draft_snapshot(&self) -> SearchReplaceFormDraft {
+        SearchReplaceFormDraft {
+            recursive: self.recursive,
+            include_extensions: self.include_extensions.clone(),
+            include_globs: self.include_globs.clone(),
+            exclude_paths: self.exclude_paths.clone(),
+            exclude_globs: self.exclude_globs.clone(),
+            pattern: self.pattern.clone(),
+            pattern_mode: self.pattern_mode,
+            case_sensitive: self.case_sensitive,
+            replacement: self.replacement.clone(),
+            replacement_mode: self.replacement_mode,
+            file_filter: self.file_filter.clone(),
+            file_sort: self.file_sort,
+        }
+    }
+
+    fn restore_form_draft(&mut self, draft: SearchReplaceFormDraft) {
+        self.recursive = draft.recursive;
+        self.include_extensions = draft.include_extensions;
+        self.include_globs = draft.include_globs;
+        self.exclude_paths = draft.exclude_paths;
+        self.exclude_globs = draft.exclude_globs;
+        self.pattern = draft.pattern;
+        self.pattern_mode = draft.pattern_mode;
+        self.case_sensitive = draft.case_sensitive;
+        self.replacement = draft.replacement;
+        self.replacement_mode = draft.replacement_mode;
+        self.file_filter = draft.file_filter;
+        self.file_sort = draft.file_sort;
     }
 
     fn draw_header(
         &mut self,
         ui: &mut egui::Ui,
         commands: &mut Vec<SearchReplaceUiCommand>,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
         process_interactions: bool,
+        visual_order: &mut u64,
     ) {
         ui.horizontal(|ui| {
-            let clicked = ui
-                .add_enabled(
-                    process_interactions,
-                    egui::Button::new("Choose root folder\u{2026}"),
-                )
-                .clicked();
-            if process_interactions && clicked {
+            let choose = ui.add_enabled(
+                native_ui_owner,
+                egui::Button::new("Choose root folder\u{2026}"),
+            );
+            register_search_replace_target(
+                scope,
+                ui,
+                &choose,
+                "form/choose-root",
+                "Choose root folder",
+                crate::gui::jump_mode::TargetKind::Button,
+                visual_order,
+            );
+            if process_interactions && choose.clicked() {
                 let mut choose = rfd::FileDialog::new();
                 if let Some(root) = &self.root {
                     choose = choose.set_directory(root);
@@ -1407,13 +1763,21 @@ impl SearchReplaceDialogState {
                     commands.push(SearchReplaceUiCommand::SelectRoot(root));
                 }
             }
-            if ui
-                .add_enabled(
-                    process_interactions && self.root.is_some() && !self.pattern.is_empty(),
-                    egui::Button::new("Search / Refresh"),
-                )
-                .clicked()
-            {
+            let search_enabled = self.root.is_some() && !self.pattern.is_empty();
+            let search = ui.add_enabled(
+                native_ui_owner && search_enabled,
+                egui::Button::new("Search / Refresh"),
+            );
+            register_search_replace_target(
+                scope,
+                ui,
+                &search,
+                "form/search",
+                "Search",
+                crate::gui::jump_mode::TargetKind::Button,
+                visual_order,
+            );
+            if process_interactions && search.clicked() {
                 commands.push(SearchReplaceUiCommand::Search);
             }
             let root = self.root.as_ref().map_or_else(
@@ -1425,8 +1789,17 @@ impl SearchReplaceDialogState {
         });
         let mut recursive = self.recursive;
         let response = ui.add_enabled(
-            process_interactions,
+            native_ui_owner,
             egui::Checkbox::new(&mut recursive, "Include subfolders"),
+        );
+        register_search_replace_target(
+            scope,
+            ui,
+            &response,
+            "form/recursive",
+            "Include subfolders",
+            crate::gui::jump_mode::TargetKind::Checkbox,
+            visual_order,
         );
         if process_interactions && response.changed() {
             self.recursive = recursive;
@@ -1438,7 +1811,10 @@ impl SearchReplaceDialogState {
         &mut self,
         ui: &mut egui::Ui,
         _commands: &mut Vec<SearchReplaceUiCommand>,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
         process_interactions: bool,
+        visual_order: &mut u64,
     ) {
         let mut search_changed = false;
         let mut replacement_changed = false;
@@ -1451,48 +1827,132 @@ impl SearchReplaceDialogState {
         .iter()
         .filter(|value| !value.trim().is_empty())
         .count();
+        let settings_order = take_target_order(visual_order);
         let settings = egui::CollapsingHeader::new(format!("Search and Replace settings ({active} filters active)"))
             .id_salt("replace_search_settings")
             .default_open(true)
             .show(ui, |ui| {
-                ui.add_enabled_ui(process_interactions, |ui| {
+                ui.add_enabled_ui(native_ui_owner, |ui| {
                     ui.label("Search for");
                     let width = ui.available_width().min(520.0);
                     let pattern = ui.add(egui::TextEdit::singleline(&mut self.pattern)
-                        .interactive(process_interactions)
+                        .interactive(native_ui_owner)
                         .id(egui::Id::new("replace_search_pattern")).desired_width(width));
+                    register_search_replace_target(
+                        scope,
+                        ui,
+                        &pattern,
+                        "form/pattern",
+                        "Search pattern",
+                        crate::gui::jump_mode::TargetKind::TextEntry,
+                        visual_order,
+                    );
                     search_changed |= pattern.changed();
                     #[cfg(test)] { self.geometry.pattern_editor = pattern.rect; }
                     ui.horizontal_wrapped(|ui| {
-                        egui::ComboBox::from_id_salt("replace_pattern_mode")
+                        let anchor = "form/pattern-mode";
+                        let anchor_order = take_target_order(visual_order);
+                        let options_scope = scope.map(|scope| scope.combo_popup_scope(anchor));
+                        let combo = egui::ComboBox::from_id_salt("replace_pattern_mode")
                             .selected_text(match self.pattern_mode { SearchPatternMode::Literal => "Literal", SearchPatternMode::RustRegex => "Rust regex" })
                             .show_ui(ui, |ui| {
-                                search_changed |= ui.selectable_value(&mut self.pattern_mode, SearchPatternMode::Literal, "Literal").changed();
-                                search_changed |= ui.selectable_value(&mut self.pattern_mode, SearchPatternMode::RustRegex, "Rust regex").changed();
+                                for (identity, mode, label) in [
+                                    ("option/literal", SearchPatternMode::Literal, "Literal"),
+                                    ("option/rust-regex", SearchPatternMode::RustRegex, "Rust regex"),
+                                ] {
+                                    let option = ui.selectable_value(&mut self.pattern_mode, mode, label);
+                                    register_search_replace_target(
+                                        options_scope.as_ref(),
+                                        ui,
+                                        &option,
+                                        identity,
+                                        label,
+                                        crate::gui::jump_mode::TargetKind::Selectable,
+                                        visual_order,
+                                    );
+                                    search_changed |= option.changed();
+                                }
                             });
-                        search_changed |= ui.checkbox(&mut self.case_sensitive, "Case sensitive").changed();
+                        self.record_native_popup_anchor(ui, &combo.response);
+                        register_search_replace_target_at_order(
+                            scope,
+                            ui,
+                            &combo.response,
+                            anchor,
+                            "Search pattern mode",
+                            crate::gui::jump_mode::TargetKind::ComboBox,
+                            anchor_order,
+                        );
+                        let case_sensitive = ui.checkbox(&mut self.case_sensitive, "Case sensitive");
+                        register_search_replace_target(
+                            scope,
+                            ui,
+                            &case_sensitive,
+                            "form/case-sensitive",
+                            "Case sensitive",
+                            crate::gui::jump_mode::TargetKind::Checkbox,
+                            visual_order,
+                        );
+                        search_changed |= case_sensitive.changed();
                     });
                     ui.label("Replace with");
                     let replacement = ui.add(egui::TextEdit::singleline(&mut self.replacement)
-                        .interactive(process_interactions)
+                        .interactive(native_ui_owner)
                         .id(egui::Id::new("replace_replacement_text")).desired_width(width));
+                    register_search_replace_target(
+                        scope,
+                        ui,
+                        &replacement,
+                        "form/replacement",
+                        "Replacement text",
+                        crate::gui::jump_mode::TargetKind::TextEntry,
+                        visual_order,
+                    );
                     replacement_changed |= replacement.changed();
                     #[cfg(test)] { self.geometry.replacement_editor = replacement.rect; }
                     ui.horizontal_wrapped(|ui| {
-                        egui::ComboBox::from_id_salt("replace_replacement_mode")
+                        let anchor = "form/replacement-mode";
+                        let anchor_order = take_target_order(visual_order);
+                        let options_scope = scope.map(|scope| scope.combo_popup_scope(anchor));
+                        let combo = egui::ComboBox::from_id_salt("replace_replacement_mode")
                             .selected_text(match self.replacement_mode { ReplacementMode::Literal => "Literal replacement", ReplacementMode::RustRegexCaptures => "Rust capture substitution" })
                             .show_ui(ui, |ui| {
-                                replacement_changed |= ui.selectable_value(&mut self.replacement_mode, ReplacementMode::Literal, "Literal replacement").changed();
-                                replacement_changed |= ui.selectable_value(&mut self.replacement_mode, ReplacementMode::RustRegexCaptures, "Rust capture substitution").changed();
+                                for (identity, mode, label) in [
+                                    ("option/literal", ReplacementMode::Literal, "Literal replacement"),
+                                    ("option/rust-captures", ReplacementMode::RustRegexCaptures, "Rust capture substitution"),
+                                ] {
+                                    let option = ui.selectable_value(&mut self.replacement_mode, mode, label);
+                                    register_search_replace_target(
+                                        options_scope.as_ref(),
+                                        ui,
+                                        &option,
+                                        identity,
+                                        label,
+                                        crate::gui::jump_mode::TargetKind::Selectable,
+                                        visual_order,
+                                    );
+                                    replacement_changed |= option.changed();
+                                }
                             });
+                        self.record_native_popup_anchor(ui, &combo.response);
+                        register_search_replace_target_at_order(
+                            scope,
+                            ui,
+                            &combo.response,
+                            anchor,
+                            "Replacement mode",
+                            crate::gui::jump_mode::TargetKind::ComboBox,
+                            anchor_order,
+                        );
                     });
                     ui.label("Capture substitutions use Rust regex syntax such as $1, ${name}, and $$; invalid references are shown before Apply.");
                 });
+                let advanced_order = take_target_order(visual_order);
                 let advanced = egui::CollapsingHeader::new(format!("Advanced Filters ({active} active)"))
                     .id_salt("replace_advanced_filters")
                     .default_open(false)
                     .show(ui, |ui| {
-                        ui.add_enabled_ui(process_interactions, |ui| {
+                        ui.add_enabled_ui(native_ui_owner, |ui| {
                             for (label, id, value, hint) in [
                                 ("Extensions", "replace_extensions", &mut self.include_extensions, "Comma separated; empty means all supported text extensions"),
                                 ("Include globs", "replace_include_globs", &mut self.include_globs, "One root-relative path glob per line"),
@@ -1501,27 +1961,55 @@ impl SearchReplaceDialogState {
                             ] {
                                 ui.label(label);
                                 let width = ui.available_width().min(520.0);
-                                search_changed |= ui.add(egui::TextEdit::singleline(value)
-                                    .interactive(process_interactions)
-                                    .id(egui::Id::new(id)).desired_width(width)).changed();
+                                let response = ui.add(egui::TextEdit::singleline(value)
+                                    .interactive(native_ui_owner)
+                                    .id(egui::Id::new(id)).desired_width(width));
+                                register_search_replace_target(
+                                    scope,
+                                    ui,
+                                    &response,
+                                    format!("form/advanced/{id}"),
+                                    label,
+                                    crate::gui::jump_mode::TargetKind::TextEntry,
+                                    visual_order,
+                                );
+                                search_changed |= response.changed();
                                 ui.weak(hint);
                             }
                         });
                     });
+                register_search_replace_target_at_order(
+                    scope,
+                    ui,
+                    &advanced.header_response,
+                    "form/advanced-filters",
+                    "Advanced filters",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    advanced_order,
+                );
                 #[cfg(test)] { self.geometry.advanced_open = advanced.body_response.is_some(); }
                 #[cfg(not(test))] let _ = advanced;
             });
+        register_search_replace_target_at_order(
+            scope,
+            ui,
+            &settings.header_response,
+            "form/settings",
+            "Search and Replace settings",
+            crate::gui::jump_mode::TargetKind::Button,
+            settings_order,
+        );
         #[cfg(test)]
         {
             self.geometry.settings_open = settings.body_response.is_some();
         }
         #[cfg(not(test))]
         let _ = settings;
-        if search_changed {
+        if process_interactions && search_changed {
             self.invalidate_search(
                 "Search inputs changed. Run Search to capture a new result set.".into(),
             );
-        } else if replacement_changed {
+        } else if process_interactions && replacement_changed {
             self.queue_candidate_recompute();
         }
     }
@@ -1530,7 +2018,8 @@ impl SearchReplaceDialogState {
         &mut self,
         ui: &mut egui::Ui,
         _commands: &mut Vec<SearchReplaceUiCommand>,
-        _process_interactions: bool,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        visual_order: &mut u64,
     ) {
         ui.weak("Search uses the bounded A defaults for files, bytes, matches, and previews. Limit-triggered skips appear below, mark the result partial, and prevent Apply.");
         if let Some(message) = &self.status_message {
@@ -1583,7 +2072,8 @@ impl SearchReplaceDialogState {
             );
             ui.label(label);
             if !summary.issues().is_empty() || summary.issues_truncated() {
-                ui.collapsing(
+                let issue_order = take_target_order(visual_order);
+                let issues = ui.collapsing(
                     format!(
                         "Skipped files and scan issues · {} recorded{}",
                         summary.issue_count(),
@@ -1618,6 +2108,15 @@ impl SearchReplaceDialogState {
                             });
                     },
                 );
+                register_search_replace_target_at_order(
+                    scope,
+                    ui,
+                    &issues.header_response,
+                    "search/issues",
+                    "Search issues",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    issue_order,
+                );
             }
         }
         if let Some(error) = &self.candidate_error {
@@ -1629,7 +2128,11 @@ impl SearchReplaceDialogState {
         &mut self,
         ui: &mut egui::Ui,
         _commands: &mut Vec<SearchReplaceUiCommand>,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
         process_interactions: bool,
+        dialog_instance: u64,
+        visual_order: &mut u64,
     ) {
         #[cfg(test)]
         {
@@ -1663,6 +2166,7 @@ impl SearchReplaceDialogState {
             self.visible_file_indices.len(),
             self.selected_matches.len()
         );
+        let files_section_order = take_target_order(visual_order);
         let file_section = egui::CollapsingHeader::new(title)
             .id_salt("replace_files_section")
             .default_open(true)
@@ -1671,49 +2175,71 @@ impl SearchReplaceDialogState {
                 let mut sort_changed = false;
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Filter files");
-                    path_filter_changed |= ui
-                        .add_enabled(
-                            process_interactions,
-                            egui::TextEdit::singleline(&mut self.file_filter)
-                                .interactive(process_interactions)
-                                .id(egui::Id::new("replace_file_filter"))
-                                .desired_width(250.0),
-                        )
-                        .changed();
+                    let file_filter = ui.add_enabled(
+                        native_ui_owner,
+                        egui::TextEdit::singleline(&mut self.file_filter)
+                            .interactive(native_ui_owner)
+                            .id(egui::Id::new("replace_file_filter"))
+                            .desired_width(250.0),
+                    );
+                    register_search_replace_target(
+                        scope,
+                        ui,
+                        &file_filter,
+                        "results/filter",
+                        "Filter files",
+                        crate::gui::jump_mode::TargetKind::TextEntry,
+                        visual_order,
+                    );
+                    path_filter_changed |= file_filter.changed();
                     let mut sort = self.file_sort;
-                    ui.add_enabled_ui(process_interactions, |ui| {
+                    let sort_anchor = "results/sort";
+                    let sort_anchor_order = take_target_order(visual_order);
+                    let sort_options_scope =
+                        scope.map(|scope| scope.combo_popup_scope(sort_anchor));
+                    let combo = ui.add_enabled_ui(native_ui_owner, |ui| {
                         egui::ComboBox::from_id_salt("replace_file_sort")
                             .selected_text(match sort {
                                 FileSort::Path => "Path order",
                                 FileSort::MatchCount => "Match count",
                             })
                             .show_ui(ui, |ui| {
-                                sort_changed |= ui
-                                    .selectable_value(&mut sort, FileSort::Path, "Path order")
-                                    .changed();
-                                sort_changed |= ui
-                                    .selectable_value(
-                                        &mut sort,
-                                        FileSort::MatchCount,
-                                        "Match count",
-                                    )
-                                    .changed();
-                            });
+                                for (identity, value, label) in [
+                                    ("option/path", FileSort::Path, "Path order"),
+                                    ("option/match-count", FileSort::MatchCount, "Match count"),
+                                ] {
+                                    let option = ui.selectable_value(&mut sort, value, label);
+                                    register_search_replace_target(
+                                        sort_options_scope.as_ref(),
+                                        ui,
+                                        &option,
+                                        identity,
+                                        label,
+                                        crate::gui::jump_mode::TargetKind::Selectable,
+                                        visual_order,
+                                    );
+                                    sort_changed |= option.changed();
+                                }
+                            })
                     });
+                    self.record_native_popup_anchor(ui, &combo.inner.response);
+                    register_search_replace_target_at_order(
+                        scope,
+                        ui,
+                        &combo.inner.response,
+                        sort_anchor,
+                        "Sort files",
+                        crate::gui::jump_mode::TargetKind::ComboBox,
+                        sort_anchor_order,
+                    );
                     if process_interactions && sort_changed {
                         self.file_sort = sort;
                     }
                     let select = ui
-                        .add_enabled(
-                            process_interactions,
-                            egui::Button::new("Select visible matches"),
-                        )
+                        .add_enabled(native_ui_owner, egui::Button::new("Select visible matches"))
                         .clicked();
                     let clear = ui
-                        .add_enabled(
-                            process_interactions,
-                            egui::Button::new("Clear visible matches"),
-                        )
+                        .add_enabled(native_ui_owner, egui::Button::new("Clear visible matches"))
                         .clicked();
                     if process_interactions && select {
                         self.set_visible_files_selected(true);
@@ -1722,11 +2248,19 @@ impl SearchReplaceDialogState {
                         self.set_visible_files_selected(false);
                     }
                 });
-                if path_filter_changed || sort_changed {
+                if process_interactions && (path_filter_changed || sort_changed) {
                     self.rebuild_visible_files();
                 }
 
                 let visible_count = self.visible_file_indices.len();
+                let results_scope = scope.map(|scope| {
+                    scope.child_namespace(format!(
+                        "results/{}/{}/{}",
+                        search.generation().0,
+                        self.preview_revision,
+                        self.file_view_revision,
+                    ))
+                });
                 ui.horizontal(|ui| {
                     ui.label(format!(
                         "Files with matches: {visible_count} shown of {file_count}"
@@ -1766,13 +2300,11 @@ impl SearchReplaceDialogState {
                             let some_selected = selected > 0 && selected < total;
                             ui.horizontal(|ui| {
                                 let mut checked = all_selected;
-                                if ui
-                                    .add_enabled(
-                                        process_interactions,
-                                        egui::Checkbox::new(&mut checked, ""),
-                                    )
-                                    .clicked()
-                                {
+                                let checkbox = ui.add_enabled(
+                                    native_ui_owner,
+                                    egui::Checkbox::new(&mut checked, ""),
+                                );
+                                if process_interactions && checkbox.clicked() {
                                     self.set_file_selected(file_index, !all_selected);
                                 }
                                 if some_selected {
@@ -1788,17 +2320,74 @@ impl SearchReplaceDialogState {
                                     total
                                 );
                                 let label = bounded_single_line(&label, 220);
-                                if ui
-                                    .add_enabled(
-                                        process_interactions,
-                                        egui::Button::selectable(active, label)
-                                            .wrap_mode(egui::TextWrapMode::Truncate),
-                                    )
-                                    .clicked()
-                                {
-                                    self.selected_file = Some(file.path().to_path_buf());
-                                    self.inspected_match = None;
-                                }
+                                let row_ui_id = egui::Id::new((
+                                    "replace-file-result-row",
+                                    dialog_instance,
+                                    search.generation().0,
+                                    file.root_identity(),
+                                    file.file_identity(),
+                                    file.relative_path(),
+                                ));
+                                let _ = ui.scope_builder(
+                                    egui::UiBuilder::new().id(row_ui_id),
+                                    |row_ui| {
+                                        let response = row_ui.add_enabled(
+                                            native_ui_owner,
+                                            egui::Button::selectable(active, label)
+                                                .wrap_mode(egui::TextWrapMode::Truncate),
+                                        );
+                                        let target_identity =
+                                            search_file_local_identity(file, search.generation());
+                                        let target_id = results_scope
+                                            .as_ref()
+                                            .map(|scope| scope.target_id(&target_identity));
+                                        let directive = register_search_replace_target(
+                                            results_scope.as_ref(),
+                                            row_ui,
+                                            &response,
+                                            &target_identity,
+                                            "Inspect file result",
+                                            crate::gui::jump_mode::TargetKind::Action,
+                                            visual_order,
+                                        );
+                                        let focused_by_hint = directive
+                                            == Some(
+                                                crate::gui::jump_mode::ui::FocusDirective::Select,
+                                            );
+                                        if process_interactions
+                                            && (response.clicked() || focused_by_hint)
+                                            && self.search_result.as_ref().is_some_and(|current| {
+                                                current.generation() == search.generation()
+                                                    && current
+                                                        .matched_files()
+                                                        .get(file_index)
+                                                        .is_some_and(|current_file| {
+                                                            current_file.file_identity()
+                                                                == file.file_identity()
+                                                                && current_file.path()
+                                                                    == file.path()
+                                                        })
+                                                    && self
+                                                        .visible_file_indices
+                                                        .contains(&file_index)
+                                            })
+                                        {
+                                            self.selected_file = Some(file.path().to_path_buf());
+                                            self.inspected_match = None;
+                                            if focused_by_hint {
+                                                response.request_focus();
+                                                if let (Some(scope), Some(target_id)) =
+                                                    (results_scope.as_ref(), target_id.as_ref())
+                                                {
+                                                    scope.record_select_focus_owner(
+                                                        target_id,
+                                                        response.id,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    },
+                                );
                             });
                         }
                     });
@@ -1811,6 +2400,15 @@ impl SearchReplaceDialogState {
                 #[cfg(not(test))]
                 let _ = files;
             });
+        register_search_replace_target_at_order(
+            scope,
+            ui,
+            &file_section.header_response,
+            "results/files",
+            "Files with matches",
+            crate::gui::jump_mode::TargetKind::Button,
+            files_section_order,
+        );
         #[cfg(test)]
         {
             self.geometry.files_open = file_section.body_response.is_some();
@@ -1818,6 +2416,14 @@ impl SearchReplaceDialogState {
         #[cfg(not(test))]
         let _ = file_section;
 
+        let results_scope = scope.map(|scope| {
+            scope.child_namespace(format!(
+                "results/{}/{}/{}",
+                search.generation().0,
+                self.preview_revision,
+                self.file_view_revision,
+            ))
+        });
         let selected_file_index = self.selected_file.as_ref().and_then(|path| {
             search
                 .matched_files()
@@ -1830,11 +2436,20 @@ impl SearchReplaceDialogState {
             return;
         };
         let file = &search.matched_files()[file_index];
+        let selected_file_key = opaque_file_identity(
+            search.generation(),
+            file.root_identity(),
+            file.file_identity(),
+            file.relative_path(),
+        );
+        let file_detail_scope = results_scope
+            .map(|scope| scope.child_namespace(format!("file-detail/{selected_file_key:016x}")));
         let selected = file
             .matches()
             .iter()
             .filter(|span| self.selected_matches.contains(span.id()))
             .count();
+        let approvals_order = take_target_order(visual_order);
         let approvals_section = egui::CollapsingHeader::new(format!("File Approvals ({selected} of {} approved)", file.matches().len()))
             .id_salt("replace_approvals_section")
             .default_open(true)
@@ -1864,13 +2479,22 @@ impl SearchReplaceDialogState {
                     };
                     let id = span.id();
                     let mut checked = self.selected_matches.contains(id);
-                    ui.push_id(id, |ui| {
+                    let row_id = egui::Id::new((
+                        "replace-match-result-row",
+                        dialog_instance,
+                        search.generation().0,
+                        file.root_identity(),
+                        file.file_identity(),
+                        file.relative_path(),
+                        id,
+                    ));
+                    let _ = ui.scope_builder(egui::UiBuilder::new().id(row_id), |ui| {
                         ui.horizontal(|ui| {
-                            let response = ui.add_enabled(
-                                process_interactions,
+                            let checkbox = ui.add_enabled(
+                                native_ui_owner,
                                 egui::Checkbox::new(&mut checked, ""),
                             );
-                            if response.clicked() {
+                            if process_interactions && checkbox.clicked() {
                                 self.set_match_selected(id, checked);
                             }
                             ui.vertical(|ui| {
@@ -1896,15 +2520,50 @@ impl SearchReplaceDialogState {
                                 );
                                 let text = bounded_single_line(&text, 320);
                                 let response = ui.add_enabled(
-                                    process_interactions,
+                                    native_ui_owner,
                                     egui::Button::selectable(
                                         self.inspected_match.as_ref() == Some(id),
                                         egui::RichText::new(text).monospace(),
                                     )
                                     .wrap_mode(egui::TextWrapMode::Truncate),
                                 );
-                                if process_interactions && response.clicked() {
+                                let target_identity = search_match_local_identity(
+                                    selected_file_key,
+                                    id,
+                                );
+                                let target_id = file_detail_scope
+                                    .as_ref()
+                                    .map(|scope| scope.target_id(&target_identity));
+                                let directive = register_search_replace_target(
+                                    file_detail_scope.as_ref(),
+                                    ui,
+                                    &response,
+                                    &target_identity,
+                                    "Inspect match",
+                                    crate::gui::jump_mode::TargetKind::Action,
+                                    visual_order,
+                                );
+                                let focused_by_hint = directive
+                                    == Some(crate::gui::jump_mode::ui::FocusDirective::Select);
+                                let current_match = self.search_result.as_ref().is_some_and(|current| {
+                                    current.generation() == search.generation()
+                                        && current.matched_files().get(file_index).is_some_and(|current_file| {
+                                            current_file.file_identity() == file.file_identity()
+                                                && current_file.path() == file.path()
+                                                && current_file.matches().iter().any(|candidate| candidate.id() == id)
+                                        })
+                                        && self.selected_file.as_deref() == Some(file.path())
+                                });
+                                if process_interactions && current_match && (response.clicked() || focused_by_hint) {
                                     self.inspected_match = Some(id.clone());
+                                    if focused_by_hint {
+                                        response.request_focus();
+                                        if let (Some(scope), Some(target_id)) =
+                                            (file_detail_scope.as_ref(), target_id.as_ref())
+                                        {
+                                            scope.record_select_focus_owner(target_id, response.id);
+                                        }
+                                    }
                                 }
                             });
                         });
@@ -1920,12 +2579,22 @@ impl SearchReplaceDialogState {
         #[cfg(not(test))]
         let _ = approvals;
             });
+        register_search_replace_target_at_order(
+            file_detail_scope.as_ref(),
+            ui,
+            &approvals_section.header_response,
+            "results/file-approvals",
+            "File approvals",
+            crate::gui::jump_mode::TargetKind::Button,
+            approvals_order,
+        );
         #[cfg(test)]
         {
             self.geometry.approvals_open = approvals_section.body_response.is_some();
         }
         #[cfg(not(test))]
         let _ = approvals_section;
+        let preview_order = take_target_order(visual_order);
         let preview = egui::CollapsingHeader::new("Original vs. Proposed Preview")
             .id_salt(("replace_preview_section", file.path()))
             .default_open(true)
@@ -1943,6 +2612,15 @@ impl SearchReplaceDialogState {
         }
         #[cfg(not(test))]
         let _ = preview;
+        register_search_replace_target_at_order(
+            file_detail_scope.as_ref(),
+            ui,
+            &preview.header_response,
+            "results/original-proposed-preview",
+            "Original and proposed preview",
+            crate::gui::jump_mode::TargetKind::Button,
+            preview_order,
+        );
         self.draw_candidate_summary(ui);
     }
 
@@ -2063,27 +2741,36 @@ impl SearchReplaceDialogState {
         ui: &mut egui::Ui,
         runtime: &ReplaceWorkerSnapshot,
         commands: &mut Vec<SearchReplaceUiCommand>,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
         process_interactions: bool,
+        visual_order: &mut u64,
     ) {
         ui.horizontal(|ui| {
             if runtime.active {
                 if ui
-                    .add_enabled(
-                        process_interactions,
-                        egui::Button::new("Cancel between files"),
-                    )
+                    .add_enabled(native_ui_owner, egui::Button::new("Cancel between files"))
                     .clicked()
+                    && process_interactions
                 {
                     commands.push(SearchReplaceUiCommand::CancelOperation);
                 }
                 ui.spinner();
             }
-            if self.search_ticket.is_some()
-                && ui
-                    .add_enabled(process_interactions, egui::Button::new("Cancel search"))
-                    .clicked()
-            {
-                commands.push(SearchReplaceUiCommand::CancelSearch);
+            if self.search_ticket.is_some() {
+                let cancel = ui.add_enabled(native_ui_owner, egui::Button::new("Cancel search"));
+                register_search_replace_target(
+                    scope,
+                    ui,
+                    &cancel,
+                    "footer/cancel-search",
+                    "Cancel search",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    visual_order,
+                );
+                if process_interactions && cancel.clicked() {
+                    commands.push(SearchReplaceUiCommand::CancelSearch);
+                }
             }
             let message = if runtime.active {
                 runtime.progress.as_ref().map_or_else(
