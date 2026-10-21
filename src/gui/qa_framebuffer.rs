@@ -2482,6 +2482,13 @@ fn qa_navigation_owner(owner: super::jump_mode::ui::NavigationOwner) -> QaNaviga
             confirmation_instance,
             ..
         } => ("clipboard_removal", Some(confirmation_instance)),
+        Owner::MouseGestureBinding {
+            binding_instance, ..
+        } => ("mouse_gesture_binding", Some(binding_instance)),
+        Owner::MouseGestureDelete {
+            confirmation_instance,
+            ..
+        } => ("mouse_gesture_delete", Some(confirmation_instance)),
         Owner::XmlOverwriteConfirmation {
             confirmation_instance,
             ..
@@ -2548,6 +2555,13 @@ fn qa_dialog_state(
             confirmation_instance,
             ..
         } => ("clipboard-removal", confirmation_instance),
+        Owner::MouseGestureBinding {
+            binding_instance, ..
+        } => ("mouse-gesture-binding", binding_instance),
+        Owner::MouseGestureDelete {
+            confirmation_instance,
+            ..
+        } => ("mouse-gesture-delete", confirmation_instance),
         Owner::XmlOverwriteConfirmation {
             confirmation_instance,
             ..
@@ -2649,6 +2663,8 @@ fn qa_dialog_state(
         Owner::Dialog { .. }
         | Owner::SnippetRemoval { .. }
         | Owner::ClipboardRemoval { .. }
+        | Owner::MouseGestureBinding { .. }
+        | Owner::MouseGestureDelete { .. }
         | Owner::XmlOverwriteConfirmation { .. }
         | Owner::SnippetPrompt { .. } => {}
         Owner::Root | Owner::Blocked => unreachable!("handled above"),

@@ -168,6 +168,16 @@ pub(crate) enum NavigationOwner {
         parent_instance: u64,
         confirmation_instance: u64,
     },
+    /// The exact per-open Bind Action child inside Mouse Gestures.
+    MouseGestureBinding {
+        parent_instance: u64,
+        binding_instance: u64,
+    },
+    /// The exact per-request gesture deletion confirmation.
+    MouseGestureDelete {
+        parent_instance: u64,
+        confirmation_instance: u64,
+    },
     /// Exact XML overwrite confirmation for one frozen save request. The
     /// parent dialog and save request together own its transient layer.
     XmlOverwriteConfirmation {
@@ -335,6 +345,32 @@ impl NavigationOwner {
                                 if kind == "clipboard-history" && *instance == parent_instance
                         )
                 }
+                Self::MouseGestureBinding {
+                    parent_instance,
+                    binding_instance,
+                } => {
+                    (kind == "mouse-gesture-binding"
+                        && *instance == binding_instance
+                        && matches!(
+                            owner.as_ref(),
+                            SurfaceId::Dialog { kind, instance }
+                                if kind == "mouse-gestures" && *instance == parent_instance
+                        ))
+                        || (kind.starts_with("combo:") && self.owns_surface(owner))
+                }
+                Self::MouseGestureDelete {
+                    parent_instance,
+                    confirmation_instance,
+                } => {
+                    (kind == "mouse-gesture-delete"
+                        && *instance == confirmation_instance
+                        && matches!(
+                            owner.as_ref(),
+                            SurfaceId::Dialog { kind, instance }
+                                if kind == "mouse-gestures" && *instance == parent_instance
+                        ))
+                        || (kind.starts_with("combo:") && self.owns_surface(owner))
+                }
                 Self::XmlOverwriteConfirmation {
                     parent_instance,
                     confirmation_instance,
@@ -402,6 +438,87 @@ pub(crate) fn xml_overwrite_confirmation_layer_id(
             confirmation_instance,
         )),
     )
+}
+
+pub(crate) fn mouse_gesture_binding_layer_id(
+    parent_instance: u64,
+    binding_instance: u64,
+) -> egui::LayerId {
+    egui::LayerId::new(
+        egui::Order::Middle,
+        egui::Id::new((
+            "mouse_gesture_binding_window",
+            parent_instance,
+            binding_instance,
+        )),
+    )
+}
+
+pub(crate) fn mouse_gesture_delete_layer_id(
+    parent_instance: u64,
+    confirmation_instance: u64,
+) -> egui::LayerId {
+    egui::LayerId::new(
+        egui::Order::Middle,
+        egui::Id::new((
+            "mouse_gesture_delete_confirmation",
+            parent_instance,
+            confirmation_instance,
+        )),
+    )
+}
+
+/// Resolve one transient Mouse Gestures child only while its real root Window
+/// is the foreground owner. Retained focus may still belong to its exact
+/// parent during the child handoff, but a different Middle window always
+/// blocks the child.
+pub(crate) fn resolve_mouse_gesture_child_navigation_owner(
+    ctx: &egui::Context,
+    owner: NavigationOwner,
+    combo_popup: Option<&ComboPopupOwner>,
+) -> NavigationOwner {
+    let child_layer = match owner {
+        NavigationOwner::MouseGestureBinding {
+            parent_instance,
+            binding_instance,
+        } => mouse_gesture_binding_layer_id(parent_instance, binding_instance),
+        NavigationOwner::MouseGestureDelete {
+            parent_instance,
+            confirmation_instance,
+        } => mouse_gesture_delete_layer_id(parent_instance, confirmation_instance),
+        _ => return NavigationOwner::Blocked,
+    };
+    let Some(parent_layer) = NavigationDialogKind::MouseGestures.layer_id() else {
+        return NavigationOwner::Blocked;
+    };
+    let focused_layer = focused_response_layer(ctx);
+    let base_is_current = ctx.viewport_id() == egui::ViewportId::ROOT
+        && ctx.input(|input| input.focused)
+        && ctx.memory(|memory| memory.top_modal_layer().is_none())
+        && visible_top_middle_layer(ctx) == Some(child_layer)
+        && focused_layer.is_none_or(|focused| {
+            focused == child_layer
+                || focused == parent_layer
+                || focused.order != egui::Order::Middle
+        });
+    if !base_is_current {
+        return NavigationOwner::Blocked;
+    }
+
+    if egui::Popup::is_any_open(ctx) {
+        if combo_popup.is_some_and(|popup| {
+            popup.parent_owner == owner
+                && (popup.is_current(ctx, owner) || popup.is_sizing_pass(ctx, owner))
+        }) {
+            owner
+        } else {
+            NavigationOwner::Blocked
+        }
+    } else if combo_popup.is_some() {
+        NavigationOwner::Blocked
+    } else {
+        owner
+    }
 }
 
 /// Resolve the exact transient XML save confirmation while it is the live
@@ -868,9 +985,10 @@ impl TargetRegistry {
         };
 
         // Dashboard and launcher results share the root owner, so both may be
-        // collected in one frame. Other owners at the same priority are not
-        // safely orderable here (for example, two open dialogs or nested
-        // popups). Fail closed instead of letting both surfaces compete.
+        // collected in one frame. Other unrelated owners at the same depth are
+        // not safely orderable here. A nested popup is deeper than its parent,
+        // so its exact child controls can take precedence while sibling
+        // popups still fail closed.
         let active_non_root_surfaces: HashSet<_> = self
             .targets
             .iter()
@@ -2131,6 +2249,8 @@ impl JumpModeUi {
             | NavigationOwner::Dialog { .. }
             | NavigationOwner::SnippetRemoval { .. }
             | NavigationOwner::ClipboardRemoval { .. }
+            | NavigationOwner::MouseGestureBinding { .. }
+            | NavigationOwner::MouseGestureDelete { .. }
             | NavigationOwner::XmlOverwriteConfirmation { .. }
             | NavigationOwner::SnippetPrompt { .. } => true,
             NavigationOwner::Blocked => false,
@@ -2748,7 +2868,7 @@ fn is_popup_surface(surface: &SurfaceId) -> bool {
 
 fn surface_priority(surface: &SurfaceId) -> u8 {
     match surface {
-        SurfaceId::Popup { .. } => 3,
+        SurfaceId::Popup { owner, .. } => surface_priority(owner).saturating_add(1).max(3),
         SurfaceId::Dialog { .. } | SurfaceId::Settings { .. } => 2,
         SurfaceId::Dashboard | SurfaceId::LauncherResults => 1,
     }

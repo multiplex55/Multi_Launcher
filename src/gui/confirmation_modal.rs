@@ -402,12 +402,53 @@ impl ConfirmationModal {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context) -> ConfirmationResult {
+        self.ui_inner(ctx, None, None, true, true)
+    }
+
+    /// Render this confirmation on a caller-owned transient layer and collect
+    /// only the current Confirm/Cancel responses through its optional scope.
+    pub(crate) fn ui_with_jump_mode(
+        &mut self,
+        ctx: &egui::Context,
+        window_id: egui::Id,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        authorized_owner_pass: bool,
+    ) -> ConfirmationResult {
+        self.ui_inner(
+            ctx,
+            Some(window_id),
+            scope,
+            native_ui_owner,
+            authorized_owner_pass,
+        )
+    }
+
+    fn ui_inner(
+        &mut self,
+        ctx: &egui::Context,
+        window_id: Option<egui::Id>,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        authorized_owner_pass: bool,
+    ) -> ConfirmationResult {
         if !self.open {
             return ConfirmationResult::None;
         }
         let mut result = ConfirmationResult::None;
         let mut open = true;
-        egui::Window::new(self.title.clone())
+        let mut visual_order = 0;
+        let mut window = egui::Window::new(self.title.clone());
+        if let Some(window_id) = window_id {
+            window = window.id(window_id);
+        }
+        let mut content = egui::ScrollArea::vertical();
+        content = if let Some(window_id) = window_id {
+            content.id_salt(("destructive_confirmation_content", window_id))
+        } else {
+            content.id_salt("destructive_confirmation_content")
+        };
+        window
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -417,8 +458,7 @@ impl ConfirmationModal {
                     ui,
                     &[&self.confirm_label, &self.cancel_label],
                 );
-                egui::ScrollArea::vertical()
-                    .id_salt("destructive_confirmation_content")
+                content
                     .min_scrolled_height(0.0)
                     .max_height((ui.available_height() - footer_height).max(0.0))
                     .show(ui, |ui| {
@@ -431,24 +471,46 @@ impl ConfirmationModal {
                         widgets::semantic_status(ui, StatusTone::Warning, &self.warning, None);
                     });
                 ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    let confirm = ui.button(&self.confirm_label);
-                    let confirm =
-                        widgets::with_button_emphasis(ui, confirm, ButtonEmphasis::Destructive);
-                    if confirm.clicked() {
-                        result = ConfirmationResult::Confirmed;
-                    }
-                    if ui.button(&self.cancel_label).clicked() {
-                        result = ConfirmationResult::Cancelled;
-                    }
+                ui.add_enabled_ui(native_ui_owner, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        let confirm = ui.button(&self.confirm_label);
+                        let confirm =
+                            widgets::with_button_emphasis(ui, confirm, ButtonEmphasis::Destructive);
+                        let _ = crate::gui::jump_mode::ui::register_and_apply_target(
+                            scope,
+                            ui,
+                            &confirm,
+                            "confirmation/confirm",
+                            "Confirm",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut visual_order,
+                        );
+                        if confirm.clicked() {
+                            result = ConfirmationResult::Confirmed;
+                        }
+                        let cancel = ui.button(&self.cancel_label);
+                        let _ = crate::gui::jump_mode::ui::register_and_apply_target(
+                            scope,
+                            ui,
+                            &cancel,
+                            "confirmation/cancel",
+                            "Cancel",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut visual_order,
+                        );
+                        if cancel.clicked() {
+                            result = ConfirmationResult::Cancelled;
+                        }
+                    });
                 });
             });
-        if result != ConfirmationResult::None {
-            self.open = false;
+
+        if !authorized_owner_pass {
+            return ConfirmationResult::None;
         }
-        if !open {
+        if result != ConfirmationResult::None || !open {
             self.open = false;
-            if result == ConfirmationResult::None {
+            if !open && result == ConfirmationResult::None {
                 result = ConfirmationResult::Cancelled;
             }
         }

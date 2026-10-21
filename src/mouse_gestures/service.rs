@@ -2714,6 +2714,20 @@ fn hook_dispatch() -> &'static HookDispatch {
     })
 }
 
+/// Read-only indication that the global gesture hook currently owns the
+/// pointer sequence. UI keyboard navigation must not compete with an active
+/// gesture; this accessor does not start or reconfigure the hook.
+pub(crate) fn gesture_capture_active() -> bool {
+    #[cfg(windows)]
+    {
+        hook_dispatch().is_active()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 #[cfg(windows)]
 unsafe extern "system" fn mouse_hook_proc(
     n_code: i32,

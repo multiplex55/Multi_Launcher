@@ -3001,7 +3001,7 @@ impl LauncherApp {
             instance,
             application_input_allowed,
             root_native_owner_current,
-            self.jump_mode_enabled(),
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
         );
     }
 
@@ -3054,12 +3054,14 @@ impl LauncherApp {
             owner,
             application_input_allowed,
             root_native_owner_current,
-            self.jump_mode_enabled(),
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
         );
     }
 
     fn jump_mode_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
-        self.jump_mode_enabled() && self.native_ui_host_input_allowed(ctx, root_visible)
+        self.jump_mode_enabled()
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && !self.mouse_gestures_dialog.recorder_canvas_active()
     }
 
     fn native_ui_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
@@ -3102,6 +3104,17 @@ impl LauncherApp {
         _ctx: &egui::Context,
         exact_prompt_owner: bool,
     ) -> bool {
+        self.native_ui_application_input_allowed_with_gesture_capture(
+            exact_prompt_owner,
+            crate::mouse_gestures::service::gesture_capture_active(),
+        )
+    }
+
+    fn native_ui_application_input_allowed_with_gesture_capture(
+        &self,
+        exact_prompt_owner: bool,
+        gesture_capture_active: bool,
+    ) -> bool {
         let screen_draw_owns_input = !matches!(
             self.screen_draw_controller.state(),
             crate::screen_draw::ScreenDrawState::NoSession
@@ -3116,6 +3129,90 @@ impl LauncherApp {
                 .is_some_and(|logic| logic.snippet_prompt_owns_input && !exact_prompt_owner)
             && !screen_draw_owns_input
             && !self.screen_draw_controller.toolbar_open()
+            && !self.coordinate_tool.capture_pending()
+            && !gesture_capture_active
+    }
+
+    fn mouse_gestures_native_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        owner: crate::gui::jump_mode::ui::NavigationOwner,
+    ) -> bool {
+        use crate::gui::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, mouse_gesture_binding_layer_id,
+            mouse_gesture_delete_layer_id,
+        };
+
+        if !self.mouse_gestures_dialog.open || !self.native_ui_host_input_allowed(ctx, root_visible)
+        {
+            return false;
+        }
+        let Some(parent_instance) = self
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::MouseGestures)
+        else {
+            return false;
+        };
+        let parent_layer = NavigationDialogKind::MouseGestures.layer_id();
+        match owner {
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::MouseGestures,
+                instance,
+            } if instance == parent_instance
+                && self
+                    .mouse_gestures_dialog
+                    .jump_mode_child_owner(parent_instance)
+                    .is_none() =>
+            {
+                crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == parent_layer
+                    && (!egui::Popup::is_any_open(ctx)
+                        || self.mouse_gestures_dialog.jump_mode_main_popup_is_open(ctx))
+            }
+            NavigationOwner::MouseGestureBinding {
+                parent_instance: current_parent,
+                binding_instance,
+            } if current_parent == parent_instance
+                && self
+                    .mouse_gestures_dialog
+                    .jump_mode_child_owner(parent_instance)
+                    == Some(owner) =>
+            {
+                let child_layer = mouse_gesture_binding_layer_id(parent_instance, binding_instance);
+                crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(child_layer)
+                    && ctx.memory(|memory| memory.top_modal_layer().is_none())
+                    && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                        layer == child_layer
+                            || parent_layer == Some(layer)
+                            || layer.order != egui::Order::Middle
+                    })
+                    && (!egui::Popup::is_any_open(ctx)
+                        || self
+                            .mouse_gestures_dialog
+                            .jump_mode_binding_popup_is_open(ctx))
+            }
+            NavigationOwner::MouseGestureDelete {
+                parent_instance: current_parent,
+                confirmation_instance,
+            } if current_parent == parent_instance
+                && self
+                    .mouse_gestures_dialog
+                    .jump_mode_child_owner(parent_instance)
+                    == Some(owner) =>
+            {
+                let child_layer =
+                    mouse_gesture_delete_layer_id(parent_instance, confirmation_instance);
+                crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(child_layer)
+                    && ctx.memory(|memory| memory.top_modal_layer().is_none())
+                    && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                        layer == child_layer
+                            || parent_layer == Some(layer)
+                            || layer.order != egui::Order::Middle
+                    })
+                    && !egui::Popup::is_any_open(ctx)
+            }
+            _ => false,
+        }
     }
 
     fn snippet_prompt_native_ui_owner_current(
@@ -3406,7 +3503,7 @@ impl LauncherApp {
             .snippet_prompt_dialog
             .session()
             .map(|session| session.generation);
-        let (candidate, combo_popup) = if prompt_is_open {
+        let (mut candidate, mut combo_popup) = if prompt_is_open {
             match (prompt_native_owner, prompt_generation) {
                 (true, Some(generation))
                     if self.jump_mode_enabled()
@@ -3532,6 +3629,24 @@ impl LauncherApp {
         } else {
             (NavigationOwner::Blocked, None)
         };
+        if !prompt_is_open
+            && self.jump_mode_host_input_allowed(ctx, root_visible)
+            && let Some(parent_instance) = self
+                .jump_mode_ui
+                .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestures)
+            && let Some(child_owner) = self
+                .mouse_gestures_dialog
+                .jump_mode_child_owner(parent_instance)
+        {
+            combo_popup = self
+                .jump_mode_ui
+                .resolve_combo_popup_owner(ctx, child_owner);
+            candidate = crate::gui::jump_mode::ui::resolve_mouse_gesture_child_navigation_owner(
+                ctx,
+                child_owner,
+                combo_popup.as_ref(),
+            );
+        }
         (candidate, supported_dialog_visibility_changed, combo_popup)
     }
 
@@ -5070,6 +5185,8 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
             };
             let mut ed = std::mem::take(&mut self.settings_editor);
@@ -5198,6 +5315,8 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut timer_dlg = std::mem::take(&mut self.timer_dialog);
@@ -5267,6 +5386,8 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
             };
             let snippet_native_owner =
@@ -5328,6 +5449,8 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut paste_sequence_dlg = std::mem::take(&mut self.paste_sequence_dialog);
@@ -5363,6 +5486,8 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         self.mkmacro_dialog
@@ -5399,8 +5524,114 @@ impl LauncherApp {
             }
         }
         self.crop_dialog.show(&ctx);
+        let mouse_gesture_parent_instance = self
+            .jump_mode_ui
+            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestures);
+        let mouse_gesture_owner = self.jump_mode_ui.frame_navigation_owner();
+        let mouse_gesture_scope = match (mouse_gesture_parent_instance, mouse_gesture_owner) {
+            (
+                Some(instance),
+                crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                    kind: crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestures,
+                    instance: owner_instance,
+                },
+            ) if instance == owner_instance && self.jump_mode_enabled() => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("mouse-gestures", instance),
+                    self.mouse_gestures_dialog.jump_mode_target_generation(),
+                    "mouse-gestures/form",
+                    ctx.viewport_id(),
+                    mouse_gesture_owner,
+                    false,
+                )
+            }
+            (
+                Some(parent_instance),
+                crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding {
+                    parent_instance: owner_parent,
+                    binding_instance,
+                },
+            ) if parent_instance == owner_parent && self.jump_mode_enabled() => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::popup(
+                        "mouse-gesture-binding",
+                        binding_instance,
+                        crate::gui::jump_mode::SurfaceId::dialog("mouse-gestures", parent_instance),
+                    ),
+                    self.mouse_gestures_dialog.jump_mode_target_generation(),
+                    "mouse-gestures/binding",
+                    ctx.viewport_id(),
+                    mouse_gesture_owner,
+                    false,
+                )
+            }
+            (
+                Some(parent_instance),
+                crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete {
+                    parent_instance: owner_parent,
+                    confirmation_instance,
+                },
+            ) if parent_instance == owner_parent && self.jump_mode_enabled() => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::popup(
+                        "mouse-gesture-delete",
+                        confirmation_instance,
+                        crate::gui::jump_mode::SurfaceId::dialog("mouse-gestures", parent_instance),
+                    ),
+                    self.mouse_gestures_dialog.jump_mode_target_generation(),
+                    "mouse-gestures/delete",
+                    ctx.viewport_id(),
+                    mouse_gesture_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let mouse_gesture_native_parent_owner = mouse_gesture_parent_instance
+            .map(|instance| {
+                self.mouse_gestures_native_owner_current(
+                    &ctx,
+                    frame_logic.should_be_visible,
+                    crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                        kind: crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestures,
+                        instance,
+                    },
+                )
+            })
+            .unwrap_or(false);
+        let mouse_gesture_child_owner = mouse_gesture_parent_instance
+            .and_then(|instance| self.mouse_gestures_dialog.jump_mode_child_owner(instance));
+        let mouse_gesture_native_binding_owner = mouse_gesture_child_owner.is_some_and(|owner| {
+            matches!(
+                owner,
+                crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
+            ) && self.mouse_gestures_native_owner_current(
+                &ctx,
+                frame_logic.should_be_visible,
+                owner,
+            )
+        });
+        let mouse_gesture_native_delete_owner = mouse_gesture_child_owner.is_some_and(|owner| {
+            matches!(
+                owner,
+                crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
+            ) && self.mouse_gestures_native_owner_current(
+                &ctx,
+                frame_logic.should_be_visible,
+                owner,
+            )
+        });
         let mut mg_dlg = std::mem::take(&mut self.mouse_gestures_dialog);
-        mg_dlg.ui(&ctx, self);
+        mg_dlg.ui_with_jump_mode(
+            &ctx,
+            self,
+            mouse_gesture_parent_instance.unwrap_or(0),
+            mouse_gesture_scope.as_ref(),
+            mouse_gesture_native_parent_owner,
+            mouse_gesture_native_binding_owner,
+            mouse_gesture_native_delete_owner,
+            first_ui_pass,
+        );
         self.mouse_gestures_dialog = mg_dlg;
         let mut mg_settings_dlg = std::mem::take(&mut self.mouse_gesture_settings_dialog);
         mg_settings_dlg.ui(&ctx, self);
@@ -5536,6 +5767,8 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
@@ -5616,6 +5849,8 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut todo_dlg = std::mem::take(&mut self.todo_dialog);
@@ -5683,6 +5918,8 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         if !clipboard_native_owner
@@ -24820,6 +25057,415 @@ mod tests {
             });
             run_mouse_settings_frame(ctx, app, events);
         }
+    }
+
+    fn mouse_gesture_fixture(label: &str, tokens: &str) -> crate::mouse_gestures::db::GestureEntry {
+        crate::mouse_gestures::db::GestureEntry {
+            label: label.into(),
+            tokens: tokens.into(),
+            dir_mode: crate::mouse_gestures::engine::DirMode::Four,
+            stroke: Vec::new(),
+            enabled: true,
+            bindings: Vec::new(),
+        }
+    }
+
+    fn prepare_actual_mouse_gestures_dialog(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        gestures: Vec<crate::mouse_gestures::db::GestureEntry>,
+    ) {
+        let db = crate::mouse_gestures::db::GestureDb {
+            schema_version: crate::mouse_gestures::db::SCHEMA_VERSION,
+            gestures,
+        };
+        crate::common::persistence::save_json_atomic(crate::mouse_gestures::db::GESTURES_FILE, &db)
+            .expect("the generated gesture database is isolated and writable");
+
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(ctx, app);
+        app.mouse_gestures_dialog.open();
+        // The first pass observes the real Window; the next paints and collects
+        // its current owner-scoped controls.
+        run_mouse_settings_frame(ctx, app, Vec::new());
+        run_mouse_settings_frame(ctx, app, Vec::new());
+
+        let kind = crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestures;
+        let instance = app
+            .jump_mode_ui
+            .dialog_instance(kind)
+            .expect("the actual Mouse Gestures Window was observed");
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog { kind, instance }
+        );
+        assert_eq!(
+            crate::gui::jump_mode::ui::visible_top_middle_layer(ctx),
+            kind.layer_id(),
+            "the fixture leaves the actual Mouse Gestures Window in front"
+        );
+        let scroll_id = app
+            .mouse_gestures_dialog
+            .test_right_panel_scroll_area_id()
+            .expect("the actual Mouse Gestures right-panel ScrollArea was rendered");
+        let max_offset_y = app
+            .mouse_gestures_dialog
+            .test_right_panel_scroll_max_offset_y();
+        let mut scroll_state = egui::scroll_area::State::load(ctx, scroll_id).unwrap_or_default();
+        scroll_state.offset.y = max_offset_y;
+        scroll_state.store(ctx, scroll_id);
+        run_mouse_settings_frame(ctx, app, Vec::new());
+        assert!(mouse_gesture_target(app, "Add binding").eligible());
+    }
+
+    fn mouse_gesture_target(
+        app: &LauncherApp,
+        label: &str,
+    ) -> crate::gui::jump_mode::ui::RegisteredTarget {
+        app.jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.eligible() && target.metadata().label() == label)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no eligible current Mouse Gestures target labeled {label:?}; targets={:?}",
+                    app.jump_mode_ui
+                        .retained_registry()
+                        .targets()
+                        .iter()
+                        .map(|target| (
+                            target.metadata().label(),
+                            target.metadata().kind(),
+                            target.eligible(),
+                            target.id(),
+                        ))
+                        .collect::<Vec<_>>()
+                )
+            })
+            .clone()
+    }
+
+    fn start_mouse_gesture_jump_mode(ctx: &egui::Context, app: &mut LauncherApp) {
+        run_mouse_settings_frame(
+            ctx,
+            app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        assert!(app.jump_mode_ui.active_session().is_some());
+        run_mouse_settings_frame(
+            ctx,
+            app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+    }
+
+    fn complete_mouse_gesture_hint(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        target: &crate::gui::jump_mode::TargetId,
+    ) {
+        complete_mouse_settings_hint(ctx, app, target);
+    }
+
+    fn gesture_fixture_bytes() -> Vec<u8> {
+        std::fs::read(crate::mouse_gestures::db::GESTURES_FILE)
+            .expect("the generated gesture file remains readable")
+    }
+
+    #[test]
+    fn jump_mode_mouse_gestures_binding_child_and_category_popup_are_exact() {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        use crate::gui::jump_mode::{SurfaceId, TargetKind};
+
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.actions = Arc::new(vec![Action {
+            label: "Safe binding fixture".into(),
+            desc: "Inert generated action".into(),
+            action: "test:mouse-gesture-binding".into(),
+            args: Some("generated".into()),
+        }]);
+        prepare_actual_mouse_gestures_dialog(
+            &ctx,
+            &mut app,
+            vec![mouse_gesture_fixture("Swipe", "R")],
+        );
+        let initial_file = gesture_fixture_bytes();
+        let parent_instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::MouseGestures)
+            .unwrap();
+
+        start_mouse_gesture_jump_mode(&ctx, &mut app);
+        let add = mouse_gesture_target(&app, "Add binding");
+        assert_eq!(add.metadata().kind(), TargetKind::Button);
+        complete_mouse_gesture_hint(&ctx, &mut app, add.id());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(add.response_id())
+        );
+        assert!(
+            app.mouse_gestures_dialog
+                .jump_mode_child_owner(parent_instance)
+                .is_none()
+        );
+        assert_eq!(gesture_fixture_bytes(), initial_file);
+
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        let binding_owner = app
+            .mouse_gestures_dialog
+            .jump_mode_child_owner(parent_instance)
+            .expect("fresh Enter opens the existing binding child");
+        assert!(matches!(
+            binding_owner,
+            NavigationOwner::MouseGestureBinding {
+                parent_instance: current_parent,
+                ..
+            } if current_parent == parent_instance
+        ));
+        assert_eq!(gesture_fixture_bytes(), initial_file);
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+        assert_eq!(app.jump_mode_ui.frame_navigation_owner(), binding_owner);
+        let category = mouse_gesture_target(&app, "Action category");
+        assert_eq!(category.metadata().kind(), TargetKind::ComboBox);
+        click_mouse_settings_target(&ctx, &mut app, &category);
+        run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+        assert!(
+            app.mouse_gestures_dialog
+                .jump_mode_binding_popup_is_open(&ctx)
+        );
+        let popup_targets = app.jump_mode_ui.retained_registry().targets();
+        assert!(
+            popup_targets
+                .iter()
+                .any(|target| target.metadata().label() == "Category option")
+        );
+        assert!(popup_targets.iter().all(|target| matches!(
+            target.id().surface(),
+            SurfaceId::Popup { kind, .. } if kind.starts_with("combo:")
+        )));
+
+        start_mouse_gesture_jump_mode(&ctx, &mut app);
+        let option = mouse_gesture_target(&app, "Category option");
+        assert_eq!(option.metadata().kind(), TargetKind::Selectable);
+        complete_mouse_gesture_hint(&ctx, &mut app, option.id());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(option.response_id())
+        );
+        assert!(
+            app.mouse_gestures_dialog
+                .jump_mode_binding_popup_is_open(&ctx)
+        );
+        assert_eq!(gesture_fixture_bytes(), initial_file);
+
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(
+            app.mouse_gestures_dialog.test_binding_category(),
+            Some("app"),
+            "the fresh native Enter selects the fixture's only category"
+        );
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+        if app
+            .mouse_gestures_dialog
+            .jump_mode_binding_popup_is_open(&ctx)
+        {
+            // egui may leave a ComboBox open after its native keyboard
+            // activation. Close that actual child popup before checking the
+            // parent editor's action list; this does not auto-close in app UI.
+            run_mouse_settings_frame(
+                &ctx,
+                &mut app,
+                vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+            run_mouse_settings_frame(
+                &ctx,
+                &mut app,
+                vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+            run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+            assert!(
+                !app.mouse_gestures_dialog
+                    .jump_mode_binding_popup_is_open(&ctx)
+            );
+        }
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.metadata().label() == "Action option")
+        );
+        assert_eq!(gesture_fixture_bytes(), initial_file);
+    }
+
+    #[test]
+    fn jump_mode_mouse_gestures_delete_confirmation_requires_fresh_activation() {
+        use crate::gui::jump_mode::SurfaceId;
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_mouse_gestures_dialog(
+            &ctx,
+            &mut app,
+            vec![
+                mouse_gesture_fixture("Alpha", "R"),
+                mouse_gesture_fixture("Beta", "L"),
+            ],
+        );
+        let initial_file = gesture_fixture_bytes();
+        let parent_instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::MouseGestures)
+            .unwrap();
+
+        start_mouse_gesture_jump_mode(&ctx, &mut app);
+        let delete = mouse_gesture_target(&app, "Delete gesture");
+        complete_mouse_gesture_hint(&ctx, &mut app, delete.id());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(delete.response_id())
+        );
+        assert!(
+            app.mouse_gestures_dialog
+                .jump_mode_child_owner(parent_instance)
+                .is_none()
+        );
+        assert_eq!(gesture_fixture_bytes(), initial_file);
+
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(matches!(
+            app.mouse_gestures_dialog.jump_mode_child_owner(parent_instance),
+            Some(NavigationOwner::MouseGestureDelete {
+                parent_instance: current_parent,
+                ..
+            }) if current_parent == parent_instance
+        ));
+        run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+        assert_eq!(gesture_fixture_bytes(), initial_file);
+
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+        assert!(matches!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::MouseGestureDelete { .. }
+        ));
+        let confirmation_targets = app.jump_mode_ui.retained_registry().targets();
+        assert_eq!(confirmation_targets.len(), 2);
+        assert!(confirmation_targets.iter().all(|target| matches!(
+            target.id().surface(),
+            SurfaceId::Popup { kind, .. } if kind == "mouse-gesture-delete"
+        )));
+        start_mouse_gesture_jump_mode(&ctx, &mut app);
+        let confirm = mouse_gesture_target(&app, "Confirm");
+        complete_mouse_gesture_hint(&ctx, &mut app, confirm.id());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(confirm.response_id())
+        );
+        assert_eq!(gesture_fixture_bytes(), initial_file);
+
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        let persisted: crate::mouse_gestures::db::GestureDb =
+            serde_json::from_slice(&gesture_fixture_bytes()).unwrap();
+        assert_eq!(persisted.gestures.len(), 1);
+        assert_eq!(persisted.gestures[0].label, "Beta");
+    }
+
+    #[test]
+    fn jump_mode_mouse_gestures_binding_native_ids_follow_reorder() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let mut gesture = mouse_gesture_fixture("Swipe", "R");
+        gesture.bindings = ["First binding", "Second binding"]
+            .into_iter()
+            .map(|label| crate::mouse_gestures::db::BindingEntry {
+                label: label.into(),
+                kind: crate::mouse_gestures::db::BindingKind::Execute,
+                action: "test:inert-binding".into(),
+                args: None,
+                enabled: true,
+            })
+            .collect();
+        prepare_actual_mouse_gestures_dialog(&ctx, &mut app, vec![gesture]);
+
+        let before_rows = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| target.metadata().label() == "Binding enabled")
+            .map(|target| (target.response_id(), target.clipped_rect().center().y))
+            .collect::<Vec<_>>();
+        assert_eq!(before_rows.len(), 2);
+        let mut before_rows_sorted = before_rows.clone();
+        before_rows_sorted.sort_by(|left, right| left.1.total_cmp(&right.1));
+        let move_down = mouse_gesture_target(&app, "Move binding down");
+        click_mouse_settings_target(&ctx, &mut app, &move_down);
+        run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+
+        let after_rows = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| target.metadata().label() == "Binding enabled")
+            .map(|target| (target.response_id(), target.clipped_rect().center().y))
+            .collect::<Vec<_>>();
+        assert_eq!(after_rows.len(), 2);
+        for (id, _) in &before_rows_sorted {
+            assert!(after_rows.iter().any(|(after_id, _)| after_id == id));
+        }
+        let after_top = after_rows
+            .iter()
+            .min_by(|left, right| left.1.total_cmp(&right.1))
+            .unwrap();
+        let after_bottom = after_rows
+            .iter()
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .unwrap();
+        assert_eq!(after_top.0, before_rows_sorted[1].0);
+        assert_eq!(after_bottom.0, before_rows_sorted[0].0);
+    }
+
+    #[test]
+    fn jump_mode_mouse_gestures_global_capture_blocks_shared_input_admission() {
+        let ctx = egui::Context::default();
+        let (_workspace, app) = root_list_test_app(&ctx, Vec::new());
+
+        assert!(app.native_ui_application_input_allowed_with_gesture_capture(false, false));
+        assert!(!app.native_ui_application_input_allowed_with_gesture_capture(false, true));
+        assert!(!app.native_ui_application_input_allowed_with_gesture_capture(true, true));
     }
 
     fn prepare_actual_clipboard_history_dialog(
