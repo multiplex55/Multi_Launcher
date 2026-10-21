@@ -247,6 +247,19 @@ fn search_match_local_identity(file_key: u64, id: &MatchId) -> String {
     )
 }
 
+fn confirmation_action_widget_id(
+    confirmation_instance: u64,
+    subject_identity: u64,
+    action: &'static str,
+) -> egui::Id {
+    egui::Id::new((
+        "search-replace-confirmation-action",
+        confirmation_instance,
+        subject_identity,
+        action,
+    ))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecoveryAction {
     Restore,
@@ -278,6 +291,13 @@ struct ApplyReview {
 struct RecoveryReview {
     transaction_id: String,
     action: RecoveryAction,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SearchReplaceConfirmationIdentity {
+    pub(crate) confirmation_instance: u64,
+    pub(crate) kind: crate::gui::jump_mode::ui::SearchReplaceConfirmationKind,
+    pub(crate) subject: crate::gui::jump_mode::ui::SearchReplaceConfirmationSubject,
 }
 
 /// Bounded, coalescing background worker for candidate construction and the
@@ -568,7 +588,10 @@ pub(crate) struct SearchReplaceDialogState {
     apply_confirmation_open: bool,
     apply_confirmation_pending: bool,
     apply_review: Option<ApplyReview>,
+    next_confirmation_instance: u64,
+    apply_confirmation_instance: Option<u64>,
     recovery_review: Option<RecoveryReview>,
+    recovery_confirmation_instance: Option<u64>,
     receipts: Vec<ReplaceRecoveryReceipt>,
     recovery_directory: Option<PathBuf>,
     receipt_loader: Option<RecoveryReceiptLoader>,
@@ -621,7 +644,10 @@ impl Default for SearchReplaceDialogState {
             apply_confirmation_open: false,
             apply_confirmation_pending: false,
             apply_review: None,
+            next_confirmation_instance: 1,
+            apply_confirmation_instance: None,
             recovery_review: None,
+            recovery_confirmation_instance: None,
             receipts: Vec::new(),
             recovery_directory: None,
             receipt_loader: None,
@@ -676,6 +702,67 @@ impl SearchReplaceDialogState {
         }
     }
 
+    pub(crate) fn jump_mode_confirmation_identity(
+        &self,
+    ) -> Option<SearchReplaceConfirmationIdentity> {
+        if self.apply_confirmation_open {
+            let review = self.apply_review.as_ref()?;
+            if self.current_generation != Some(review.search_generation)
+                || self.preview_revision != review.replacement_revision.0
+            {
+                return None;
+            }
+            return Some(SearchReplaceConfirmationIdentity {
+                confirmation_instance: self.apply_confirmation_instance?,
+                kind: crate::gui::jump_mode::ui::SearchReplaceConfirmationKind::Apply,
+                subject: crate::gui::jump_mode::ui::SearchReplaceConfirmationSubject::Apply {
+                    search_generation: review.search_generation.0,
+                    replacement_revision: review.replacement_revision.0,
+                },
+            });
+        }
+
+        let review = self.recovery_review.as_ref()?;
+        let receipt = self
+            .receipts
+            .iter()
+            .find(|receipt| receipt.id() == review.transaction_id)?;
+        let kind = match review.action {
+            RecoveryAction::Restore
+                if matches!(
+                    receipt.status(),
+                    ReplaceTransactionStatus::Applied | ReplaceTransactionStatus::Partial
+                ) =>
+            {
+                crate::gui::jump_mode::ui::SearchReplaceConfirmationKind::Restore
+            }
+            RecoveryAction::Recover
+                if receipt.status() == ReplaceTransactionStatus::RecoveryRequired =>
+            {
+                crate::gui::jump_mode::ui::SearchReplaceConfirmationKind::Recover
+            }
+            _ => return None,
+        };
+        Some(SearchReplaceConfirmationIdentity {
+            confirmation_instance: self.recovery_confirmation_instance?,
+            kind,
+            subject: crate::gui::jump_mode::ui::SearchReplaceConfirmationSubject::Receipt {
+                receipt_identity: egui::Id::new((
+                    "search-replace-receipt-subject",
+                    receipt.id(),
+                    kind,
+                ))
+                .value(),
+            },
+        })
+    }
+
+    fn allocate_confirmation_instance(&mut self) -> u64 {
+        let instance = self.next_confirmation_instance;
+        self.next_confirmation_instance = self.next_confirmation_instance.wrapping_add(1).max(1);
+        instance
+    }
+
     #[cfg(test)]
     pub(crate) fn test_pattern(&self) -> &str {
         &self.pattern
@@ -714,6 +801,33 @@ impl SearchReplaceDialogState {
     #[cfg(test)]
     pub(crate) fn test_inspected_match(&self) -> Option<&MatchId> {
         self.inspected_match.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_push_receipt(&mut self, receipt: ReplaceRecoveryReceipt) {
+        self.receipts.push(receipt);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_mark_apply_confirmation_pending(&mut self) {
+        if self.apply_confirmation_open {
+            self.apply_confirmation_pending = true;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_apply_confirmation_open(&self) -> bool {
+        self.apply_confirmation_open
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_apply_confirmation_pending(&self) -> bool {
+        self.apply_confirmation_pending
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_reveal_receipts(&self) -> bool {
+        self.reveal_receipts
     }
 
     pub(crate) fn current_owned_native_popup_layer(
@@ -961,8 +1075,10 @@ impl SearchReplaceDialogState {
             worker.cancel_active();
         }
         self.recovery_review = None;
+        self.recovery_confirmation_instance = None;
         self.apply_confirmation_open = false;
         self.apply_confirmation_pending = false;
+        self.apply_confirmation_instance = None;
         self.apply_review = None;
         self.pending_confirmed_request = None;
     }
@@ -1024,6 +1140,7 @@ impl SearchReplaceDialogState {
     pub(crate) fn confirm_request_submitted(&mut self) {
         self.apply_confirmation_open = false;
         self.apply_confirmation_pending = false;
+        self.apply_confirmation_instance = None;
         self.apply_review = None;
         self.search_result = None;
         self.selected_matches.clear();
@@ -1042,6 +1159,7 @@ impl SearchReplaceDialogState {
     pub(crate) fn confirm_request_failed(&mut self, message: String) {
         self.apply_confirmation_pending = false;
         self.apply_confirmation_open = false;
+        self.apply_confirmation_instance = None;
         self.apply_review = None;
         self.preview_pending = false;
         self.candidate_unified_diffs.clear();
@@ -1055,6 +1173,7 @@ impl SearchReplaceDialogState {
 
     pub(crate) fn take_recovery_intent(&mut self) -> Option<(String, RecoveryAction)> {
         let review = self.recovery_review.take()?;
+        self.recovery_confirmation_instance = None;
         Some((review.transaction_id, review.action))
     }
 
@@ -1086,6 +1205,7 @@ impl SearchReplaceDialogState {
             transaction_id,
             action,
         });
+        self.recovery_confirmation_instance = Some(self.allocate_confirmation_instance());
     }
 
     pub(crate) fn take_receipt_loader(&mut self) -> Option<RecoveryReceiptLoader> {
@@ -1094,18 +1214,21 @@ impl SearchReplaceDialogState {
 
     pub(crate) fn complete_recovery_submission(&mut self) {
         self.recovery_review = None;
+        self.recovery_confirmation_instance = None;
         self.status_message = Some("The confirmed recovery operation was submitted.".into());
     }
 
     pub(crate) fn cancel_confirmation(&mut self) {
         self.apply_confirmation_open = false;
         self.apply_confirmation_pending = false;
+        self.apply_confirmation_instance = None;
         self.apply_review = None;
         self.pending_confirmed_request = None;
         if self.search_result.is_some() {
             self.queue_candidate_recompute();
         }
         self.recovery_review = None;
+        self.recovery_confirmation_instance = None;
     }
 
     fn accept_search_result(&mut self, result: TextSearchResult) {
@@ -1178,8 +1301,10 @@ impl SearchReplaceDialogState {
         self.status_message = Some(result.message);
         self.apply_confirmation_open = false;
         self.apply_confirmation_pending = false;
+        self.apply_confirmation_instance = None;
         self.apply_review = None;
         self.recovery_review = None;
+        self.recovery_confirmation_instance = None;
     }
 
     fn merge_loaded_receipts(&mut self, receipts: Vec<ReplaceRecoveryReceipt>) {
@@ -1225,8 +1350,10 @@ impl SearchReplaceDialogState {
         self.pending_confirmed_request = None;
         self.apply_confirmation_open = false;
         self.apply_confirmation_pending = false;
+        self.apply_confirmation_instance = None;
         self.apply_review = None;
         self.recovery_review = None;
+        self.recovery_confirmation_instance = None;
         self.preview_revision = self.preview_revision.saturating_add(1);
         self.file_view_revision = self.file_view_revision.saturating_add(1);
         self.status_message = Some(message);
@@ -1242,6 +1369,7 @@ impl SearchReplaceDialogState {
         self.pending_confirmed_request = None;
         self.apply_confirmation_open = false;
         self.apply_confirmation_pending = false;
+        self.apply_confirmation_instance = None;
         self.apply_review = None;
     }
 
@@ -1505,6 +1633,7 @@ impl SearchReplaceDialogState {
         self.ui_with_jump_mode(
             ctx,
             None,
+            None,
             allow_mutations,
             allow_mutations,
             allow_mutations,
@@ -1517,6 +1646,7 @@ impl SearchReplaceDialogState {
         &mut self,
         ctx: &egui::Context,
         jump_mode_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        confirmation_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         native_ui_owner: bool,
         first_ui_pass: bool,
         native_confirmation_owner: bool,
@@ -1530,6 +1660,7 @@ impl SearchReplaceDialogState {
         }
         self.native_popup_anchors.clear();
         let jump_mode_scope = jump_mode_scope.filter(|_| native_ui_owner);
+        let confirmation_scope = confirmation_scope.filter(|_| native_confirmation_owner);
         let mut process_interactions = false;
         let mut discarded_form_draft = None;
         let mut visual_order = 0;
@@ -1604,8 +1735,18 @@ impl SearchReplaceDialogState {
                             &mut visual_order,
                         );
                         ui.separator();
-                        let receipts = ui.scope(|ui| self.draw_receipts(ui, &mut commands, process_interactions));
-                        if self.reveal_receipts {
+                        let receipts = ui.scope(|ui| {
+                            self.draw_receipts(
+                                ui,
+                                &mut commands,
+                                jump_mode_scope,
+                                native_visible_pass,
+                                process_interactions,
+                                dialog_instance,
+                                &mut visual_order,
+                            )
+                        });
+                    if process_interactions && self.reveal_receipts {
                             receipts.response.scroll_to_me_animation(
                                 Some(Align::Min),
                                 egui::style::ScrollAnimation::none(),
@@ -1639,19 +1780,55 @@ impl SearchReplaceDialogState {
                     if process_interactions && close.clicked() {
                         commands.push(SearchReplaceUiCommand::Closed);
                     }
-                    if ui.add_enabled(process_interactions, egui::Button::new("Restore / Recovery")).clicked() {
+                    let reveal_receipts = ui.add_enabled(
+                        native_visible_pass,
+                        egui::Button::new("Restore / Recovery"),
+                    );
+                    register_search_replace_target(
+                        jump_mode_scope,
+                        ui,
+                        &reveal_receipts,
+                        "footer/reveal-receipts",
+                        "Reveal recovery receipts",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut visual_order,
+                    );
+                    if process_interactions && reveal_receipts.clicked() {
                         self.reveal_receipts = true;
                         ctx.request_repaint();
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let can_preview = process_interactions
+                        let can_preview = native_visible_pass
                             && self.search_result.is_some()
                             && !self.preview_pending
                             && self.candidate.is_some();
-                        if ui.add_enabled(can_preview, egui::Button::new("Review Apply\u{2026}")).clicked() {
+                        let apply = ui.add_enabled(can_preview, egui::Button::new("Review Apply\u{2026}"));
+                        let apply_identity = self.search_result.as_ref().map(|search| {
+                            format!(
+                                "footer/review-apply/{}/{}",
+                                search.generation().0,
+                                self.preview_revision
+                            )
+                        });
+                        if let Some(identity) = apply_identity {
+                            register_search_replace_target(
+                                jump_mode_scope,
+                                ui,
+                                &apply,
+                                identity,
+                                "Review Apply",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            );
+                        }
+                        if process_interactions && apply.clicked() {
                             if self.apply_review.is_none() { self.apply_review = self.build_apply_review(); }
                             if self.apply_review.is_some() {
                                 self.apply_confirmation_open = true;
+                                self.apply_confirmation_instance = Some(self.allocate_confirmation_instance());
+                                if let Some(scope) = jump_mode_scope {
+                                    scope.discard_registered_targets();
+                                }
                                 commands.push(SearchReplaceUiCommand::ReviewApply);
                             }
                         }
@@ -1694,7 +1871,9 @@ impl SearchReplaceDialogState {
             ctx,
             runtime,
             &mut commands,
-            first_ui_pass && native_confirmation_owner,
+            confirmation_scope,
+            native_confirmation_owner,
+            first_ui_pass,
         );
         commands
     }
@@ -2235,16 +2414,53 @@ impl SearchReplaceDialogState {
                     if process_interactions && sort_changed {
                         self.file_sort = sort;
                     }
-                    let select = ui
-                        .add_enabled(native_ui_owner, egui::Button::new("Select visible matches"))
-                        .clicked();
-                    let clear = ui
-                        .add_enabled(native_ui_owner, egui::Button::new("Clear visible matches"))
-                        .clicked();
-                    if process_interactions && select {
+                    let can_select_visible = !self.visible_file_indices.is_empty();
+                    let can_clear_visible = self
+                        .visible_file_indices
+                        .iter()
+                        .filter_map(|index| search.matched_files().get(*index))
+                        .flat_map(|file| file.matches())
+                        .any(|span| self.selected_matches.contains(span.id()));
+                    let select = ui.add_enabled(
+                        native_ui_owner && can_select_visible,
+                        egui::Button::new("Select visible matches"),
+                    );
+                    let select_identity = format!(
+                        "approvals/select-visible/{}/{}",
+                        search.generation().0,
+                        self.file_view_revision
+                    );
+                    register_search_replace_target(
+                        scope,
+                        ui,
+                        &select,
+                        select_identity,
+                        "Select visible matches",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        visual_order,
+                    );
+                    let clear = ui.add_enabled(
+                        native_ui_owner && can_clear_visible,
+                        egui::Button::new("Clear visible matches"),
+                    );
+                    let clear_identity = format!(
+                        "approvals/clear-visible/{}/{}",
+                        search.generation().0,
+                        self.file_view_revision
+                    );
+                    register_search_replace_target(
+                        scope,
+                        ui,
+                        &clear,
+                        clear_identity,
+                        "Clear visible matches",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        visual_order,
+                    );
+                    if process_interactions && select.clicked() {
                         self.set_visible_files_selected(true);
                     }
-                    if process_interactions && clear {
+                    if process_interactions && clear.clicked() {
                         self.set_visible_files_selected(false);
                     }
                 });
@@ -2300,10 +2516,37 @@ impl SearchReplaceDialogState {
                             let some_selected = selected > 0 && selected < total;
                             ui.horizontal(|ui| {
                                 let mut checked = all_selected;
-                                let checkbox = ui.add_enabled(
-                                    native_ui_owner,
-                                    egui::Checkbox::new(&mut checked, ""),
-                                );
+                                let file_approval_identity =
+                                    search_file_local_identity(file, search.generation());
+                                let checkbox_scope = egui::Id::new((
+                                    "replace-file-approval",
+                                    dialog_instance,
+                                    search.generation().0,
+                                    file.root_identity(),
+                                    file.file_identity(),
+                                    file.relative_path(),
+                                ));
+                                let checkbox = ui
+                                    .scope_builder(
+                                        egui::UiBuilder::new().id(checkbox_scope),
+                                        |checkbox_ui| {
+                                            let checkbox = checkbox_ui.add_enabled(
+                                                native_ui_owner,
+                                                egui::Checkbox::new(&mut checked, ""),
+                                            );
+                                            register_search_replace_target(
+                                                results_scope.as_ref(),
+                                                checkbox_ui,
+                                                &checkbox,
+                                                format!("approval/file/{file_approval_identity}"),
+                                                "Approve file matches",
+                                                crate::gui::jump_mode::TargetKind::Checkbox,
+                                                visual_order,
+                                            );
+                                            checkbox
+                                        },
+                                    )
+                                    .inner;
                                 if process_interactions && checkbox.clicked() {
                                     self.set_file_selected(file_index, !all_selected);
                                 }
@@ -2493,6 +2736,25 @@ impl SearchReplaceDialogState {
                             let checkbox = ui.add_enabled(
                                 native_ui_owner,
                                 egui::Checkbox::new(&mut checked, ""),
+                            );
+                            let approval_identity = search_match_local_identity(
+                                selected_file_key,
+                                id,
+                            );
+                            let approval_identity = format!(
+                                "approval/{}/{}/{}",
+                                search.generation().0,
+                                self.preview_revision,
+                                approval_identity
+                            );
+                            register_search_replace_target(
+                                file_detail_scope.as_ref(),
+                                ui,
+                                &checkbox,
+                                approval_identity,
+                                "Approve match",
+                                crate::gui::jump_mode::TargetKind::Checkbox,
+                                visual_order,
                             );
                             if process_interactions && checkbox.clicked() {
                                 self.set_match_selected(id, checked);
@@ -2802,7 +3064,11 @@ impl SearchReplaceDialogState {
         &mut self,
         ui: &mut egui::Ui,
         commands: &mut Vec<SearchReplaceUiCommand>,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
         process_interactions: bool,
+        dialog_instance: u64,
+        visual_order: &mut u64,
     ) {
         if self.receipt_load_pending {
             ui.horizontal(|ui| {
@@ -2814,80 +3080,127 @@ impl SearchReplaceDialogState {
             ui.weak("No saved replacement receipts are available.");
             return;
         }
-        egui::CollapsingHeader::new("Replacement receipts, Restore, and Recovery")
+        let section_order = take_target_order(visual_order);
+        let section = egui::CollapsingHeader::new("Replacement receipts, Restore, and Recovery")
             .id_salt("replace_receipts")
             .open(self.reveal_receipts.then_some(true))
             .show(ui, |ui| {
                 for receipt in self.receipts.iter().rev() {
-                    ui.collapsing(
-                        format!(
-                            "{} · {:?} · {} file entries",
-                            receipt.id(),
-                            receipt.status(),
-                            receipt.entries().len()
-                        ),
-                        |ui| {
-                            ui.label(receipt.message());
-                            let roots = receipt
-                                .entries()
-                                .iter()
-                                .map(|entry| {
-                                    entry
-                                        .path()
-                                        .parent()
-                                        .unwrap_or(Path::new("."))
-                                        .to_path_buf()
-                                })
-                                .collect::<HashSet<_>>();
-                            ui.label(format!("Recorded parent folders: {}", roots.len()));
-                            let can_restore = matches!(
+                    let receipt_identity =
+                        egui::Id::new(("search-replace-receipt", receipt.id())).value();
+                    let receipt_id = receipt.id().to_owned();
+                    let receipt_order = take_target_order(visual_order);
+                    let native_id =
+                        egui::Id::new(("replace-receipt-row", dialog_instance, receipt_identity));
+                    let _ = ui.scope_builder(egui::UiBuilder::new().id(native_id), |row_ui| {
+                        let row = row_ui.collapsing(
+                            format!(
+                                "{} · {:?} · {} file entries",
+                                receipt.id(),
                                 receipt.status(),
-                                ReplaceTransactionStatus::Applied
-                                    | ReplaceTransactionStatus::Partial
-                            );
-                            let can_recover =
-                                receipt.status() == ReplaceTransactionStatus::RecoveryRequired;
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .add_enabled(
-                                        process_interactions && can_restore,
+                                receipt.entries().len()
+                            ),
+                            |ui| {
+                                ui.label(receipt.message());
+                                let roots = receipt
+                                    .entries()
+                                    .iter()
+                                    .map(|entry| {
+                                        entry
+                                            .path()
+                                            .parent()
+                                            .unwrap_or(Path::new("."))
+                                            .to_path_buf()
+                                    })
+                                    .collect::<HashSet<_>>();
+                                ui.label(format!("Recorded parent folders: {}", roots.len()));
+                                let can_restore = matches!(
+                                    receipt.status(),
+                                    ReplaceTransactionStatus::Applied
+                                        | ReplaceTransactionStatus::Partial
+                                );
+                                let can_recover =
+                                    receipt.status() == ReplaceTransactionStatus::RecoveryRequired;
+                                ui.horizontal(|ui| {
+                                    let restore = ui.add_enabled(
+                                        native_ui_owner && can_restore,
                                         egui::Button::new("Restore…"),
-                                    )
-                                    .clicked()
-                                {
-                                    commands.push(SearchReplaceUiCommand::ReviewRestore(
-                                        receipt.id().to_owned(),
-                                    ));
-                                }
-                                if ui
-                                    .add_enabled(
-                                        process_interactions && can_recover,
+                                    );
+                                    register_search_replace_target(
+                                        scope,
+                                        ui,
+                                        &restore,
+                                        format!("receipt/{receipt_identity:016x}/restore"),
+                                        "Restore receipt",
+                                        crate::gui::jump_mode::TargetKind::Button,
+                                        visual_order,
+                                    );
+                                    if process_interactions && restore.clicked() {
+                                        if let Some(scope) = scope {
+                                            scope.discard_registered_targets();
+                                        }
+                                        commands.push(SearchReplaceUiCommand::ReviewRestore(
+                                            receipt_id.clone(),
+                                        ));
+                                    }
+                                    let recover = ui.add_enabled(
+                                        native_ui_owner && can_recover,
                                         egui::Button::new("Recover interrupted operation…"),
-                                    )
-                                    .clicked()
-                                {
-                                    commands.push(SearchReplaceUiCommand::ReviewRecovery(
-                                        receipt.id().to_owned(),
-                                    ));
-                                }
-                            });
-                            egui::ScrollArea::vertical()
-                                .id_salt(("replace_receipt_entries", receipt.id()))
-                                .min_scrolled_height(self.panel_height(210.0))
-                                .max_height(self.panel_height(210.0))
-                                .show(ui, |ui| {
-                                    for entry in receipt.entries() {
-                                        ui.label(format!(
-                                            "{} · {:?}",
-                                            entry.path().display(),
-                                            entry.outcome()
+                                    );
+                                    register_search_replace_target(
+                                        scope,
+                                        ui,
+                                        &recover,
+                                        format!("receipt/{receipt_identity:016x}/recover"),
+                                        "Recover receipt",
+                                        crate::gui::jump_mode::TargetKind::Button,
+                                        visual_order,
+                                    );
+                                    if process_interactions && recover.clicked() {
+                                        if let Some(scope) = scope {
+                                            scope.discard_registered_targets();
+                                        }
+                                        commands.push(SearchReplaceUiCommand::ReviewRecovery(
+                                            receipt_id.clone(),
                                         ));
                                     }
                                 });
-                        },
-                    );
+                                egui::ScrollArea::vertical()
+                                    .id_salt(("replace_receipt_entries", receipt.id()))
+                                    .min_scrolled_height(self.panel_height(210.0))
+                                    .max_height(self.panel_height(210.0))
+                                    .show(ui, |ui| {
+                                        for entry in receipt.entries() {
+                                            ui.label(format!(
+                                                "{} · {:?}",
+                                                entry.path().display(),
+                                                entry.outcome()
+                                            ));
+                                        }
+                                    });
+                            },
+                        );
+                        register_search_replace_target_at_order(
+                            scope,
+                            row_ui,
+                            &row.header_response,
+                            format!("receipt/{receipt_identity:016x}/details"),
+                            "Receipt details",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            receipt_order,
+                        );
+                    });
                 }
             });
+        register_search_replace_target_at_order(
+            scope,
+            ui,
+            &section.header_response,
+            "receipts/section",
+            "Replacement receipts, Restore, and Recovery",
+            crate::gui::jump_mode::TargetKind::Button,
+            section_order,
+        );
         if let Some(directory) = &self.recovery_directory {
             ui.weak(format!(
                 "Durable backups and the receipt journal are retained under {}.",
@@ -2905,9 +3218,10 @@ impl SearchReplaceDialogState {
         ctx: &egui::Context,
         runtime: &ReplaceWorkerSnapshot,
         commands: &mut Vec<SearchReplaceUiCommand>,
-        allow_mutations: bool,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_confirmation_owner: bool,
+        first_ui_pass: bool,
     ) {
-        let process_interactions = allow_mutations && ctx.current_pass_index() == 0;
         #[cfg(test)]
         {
             self.geometry.apply_modal = None;
@@ -2915,14 +3229,25 @@ impl SearchReplaceDialogState {
         }
         if self.apply_confirmation_open {
             let Some(review) = self.apply_review.as_ref() else {
-                if process_interactions {
+                if native_confirmation_owner && first_ui_pass && ctx.current_pass_index() == 0 {
                     self.apply_confirmation_open = false;
+                    self.apply_confirmation_instance = None;
                 }
                 return;
             };
             let mut open = true;
             let mut confirm = false;
             let mut cancel = false;
+            let mut visible_pass = false;
+            let mut commit_pass = false;
+            let mut visual_order = 0;
+            let confirmation_instance = self.apply_confirmation_instance.unwrap_or_default();
+            let subject_identity = egui::Id::new((
+                "search-replace-apply-subject",
+                review.search_generation.0,
+                review.replacement_revision.0,
+            ))
+            .value();
             let window = egui::Window::new("Confirm Search and Replace")
                 .id(egui::Id::new("replace_apply_confirmation"))
                 .collapsible(false)
@@ -2931,6 +3256,13 @@ impl SearchReplaceDialogState {
                 .min_size(egui::vec2(480.0, 320.0))
                 .open(&mut open)
                 .show(ctx, |ui| {
+                    visible_pass = native_confirmation_owner
+                        && ui.is_enabled()
+                        && ui.is_visible()
+                        && !ui.is_sizing_pass();
+                    commit_pass = visible_pass
+                        && first_ui_pass
+                        && ctx.current_pass_index() == 0;
                     let row = ui.spacing().interact_size.y.max(ui.text_style_height(&egui::TextStyle::Body));
                     let body_height = (ui.available_height() - row - ui.spacing().item_spacing.y * 4.0).max(0.0);
                     let body = egui::ScrollArea::vertical()
@@ -2984,25 +3316,90 @@ impl SearchReplaceDialogState {
                     ui.separator();
                     if self.apply_confirmation_pending {
                         ui.horizontal(|ui| {
-                            cancel = ui.add_enabled(process_interactions, egui::Button::new("Cancel before submission")).clicked();
+                            let cancel_response = ui
+                                .scope_builder(
+                                    egui::UiBuilder::new().id(confirmation_action_widget_id(
+                                        confirmation_instance,
+                                        subject_identity,
+                                        "cancel-before-submission",
+                                    )),
+                                    |button_ui| {
+                                        button_ui.add_enabled(
+                                            visible_pass,
+                                            egui::Button::new("Cancel before submission"),
+                                        )
+                                    },
+                                )
+                                .inner;
+                            register_search_replace_target(
+                                scope,
+                                ui,
+                                &cancel_response,
+                                "confirmation/pending-cancel",
+                                "Cancel before submission",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            );
+                            cancel = cancel_response.clicked();
                             ui.spinner();
                             let message = "Freezing the reviewed candidate on a worker before submitting it to the guarded executor…";
                             ui.add(egui::Label::new(message).truncate()).on_hover_text(message);
                         });
                     } else {
                         ui.horizontal(|ui| {
-                            confirm = ui
-                                .add_enabled(
-                                    process_interactions
-                                        && !runtime.active
-                                        && self.candidate.is_some()
-                                        && !self.preview_pending,
-                                    egui::Button::new("Confirm and Apply"),
+                            let confirm_response = ui
+                                .scope_builder(
+                                    egui::UiBuilder::new().id(confirmation_action_widget_id(
+                                        confirmation_instance,
+                                        subject_identity,
+                                        "confirm-apply",
+                                    )),
+                                    |button_ui| {
+                                        button_ui.add_enabled(
+                                            visible_pass
+                                                && !runtime.active
+                                                && self.candidate.is_some()
+                                                && !self.preview_pending,
+                                            egui::Button::new("Confirm and Apply"),
+                                        )
+                                    },
                                 )
-                                .clicked();
-                            cancel = ui
-                                .add_enabled(process_interactions, egui::Button::new("Cancel"))
-                                .clicked();
+                                .inner;
+                            register_search_replace_target(
+                                scope,
+                                ui,
+                                &confirm_response,
+                                "confirmation/confirm",
+                                "Confirm and Apply",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            );
+                            confirm = confirm_response.clicked();
+                            let cancel_response = ui
+                                .scope_builder(
+                                    egui::UiBuilder::new().id(confirmation_action_widget_id(
+                                        confirmation_instance,
+                                        subject_identity,
+                                        "cancel-apply",
+                                    )),
+                                    |button_ui| {
+                                        button_ui.add_enabled(
+                                            visible_pass,
+                                            egui::Button::new("Cancel"),
+                                        )
+                                    },
+                                )
+                                .inner;
+                            register_search_replace_target(
+                                scope,
+                                ui,
+                                &cancel_response,
+                                "confirmation/cancel",
+                                "Cancel",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            );
+                            cancel = cancel_response.clicked();
                         });
                     }
                     #[cfg(test)] {
@@ -3022,10 +3419,17 @@ impl SearchReplaceDialogState {
             }
             #[cfg(not(test))]
             let _ = window;
-            if confirm {
+            let close_committed = native_confirmation_owner
+                && first_ui_pass
+                && ctx.current_pass_index() == 0
+                && !open;
+            if commit_pass && confirm {
                 commands.push(SearchReplaceUiCommand::ConfirmApply);
-            } else if process_interactions && (cancel || !open) {
+            } else if (commit_pass && cancel) || close_committed {
                 self.cancel_confirmation();
+                if let Some(scope) = scope {
+                    scope.discard_registered_targets();
+                }
                 commands.push(SearchReplaceUiCommand::CancelApply);
             }
         }
@@ -3033,6 +3437,16 @@ impl SearchReplaceDialogState {
             let mut open = true;
             let mut confirm = false;
             let mut cancel = false;
+            let mut visible_pass = false;
+            let mut commit_pass = false;
+            let mut visual_order = 0;
+            let confirmation_instance = self.recovery_confirmation_instance.unwrap_or_default();
+            let subject_identity = egui::Id::new((
+                "search-replace-receipt-subject",
+                review.transaction_id.as_str(),
+                review.action as u8,
+            ))
+            .value();
             let title = match review.action {
                 RecoveryAction::Restore => "Confirm replacement Restore",
                 RecoveryAction::Recover => "Confirm replacement Recovery",
@@ -3045,6 +3459,13 @@ impl SearchReplaceDialogState {
                 .min_size(egui::vec2(440.0, 260.0))
                 .open(&mut open)
                 .show(ctx, |ui| {
+                    visible_pass = native_confirmation_owner
+                        && ui.is_enabled()
+                        && ui.is_visible()
+                        && !ui.is_sizing_pass();
+                    commit_pass = visible_pass
+                        && first_ui_pass
+                        && ctx.current_pass_index() == 0;
                     let row = ui.spacing().interact_size.y.max(ui.text_style_height(&egui::TextStyle::Body));
                     let body_height = (ui.available_height() - row - ui.spacing().item_spacing.y * 4.0).max(0.0);
                     let body = egui::ScrollArea::vertical()
@@ -3069,18 +3490,53 @@ impl SearchReplaceDialogState {
                     let footer_start = ui.cursor().min;
                     ui.separator();
                     ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(process_interactions && !runtime.active, egui::Button::new(match review.action {
-                            RecoveryAction::Restore => "Confirm Restore",
-                            RecoveryAction::Recover => "Confirm Recovery",
-                        }))
-                        .clicked()
-                    {
-                        confirm = true;
-                    }
-                    cancel = ui
-                        .add_enabled(process_interactions, egui::Button::new("Cancel"))
-                        .clicked();
+                    let confirm_label = match review.action {
+                        RecoveryAction::Restore => "Confirm Restore",
+                        RecoveryAction::Recover => "Confirm Recovery",
+                    };
+                    let confirm_response = ui.scope_builder(
+                        egui::UiBuilder::new().id(confirmation_action_widget_id(
+                            confirmation_instance,
+                            subject_identity,
+                            "confirm-receipt",
+                        )),
+                        |button_ui| {
+                            button_ui.add_enabled(
+                                visible_pass && !runtime.active,
+                                egui::Button::new(confirm_label),
+                            )
+                        },
+                    ).inner;
+                    register_search_replace_target(
+                        scope,
+                        ui,
+                        &confirm_response,
+                        "confirmation/confirm",
+                        confirm_label,
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut visual_order,
+                    );
+                    confirm = confirm_response.clicked();
+                    let cancel_response = ui.scope_builder(
+                        egui::UiBuilder::new().id(confirmation_action_widget_id(
+                            confirmation_instance,
+                            subject_identity,
+                            "cancel-receipt",
+                        )),
+                        |button_ui| {
+                            button_ui.add_enabled(visible_pass, egui::Button::new("Cancel"))
+                        },
+                    ).inner;
+                    register_search_replace_target(
+                        scope,
+                        ui,
+                        &cancel_response,
+                        "confirmation/cancel",
+                        "Cancel",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut visual_order,
+                    );
+                    cancel = cancel_response.clicked();
                     });
                     #[cfg(test)] {
                         self.geometry.recovery_modal = Some(ConfirmationGeometry {
@@ -3099,13 +3555,25 @@ impl SearchReplaceDialogState {
             }
             #[cfg(not(test))]
             let _ = window;
-            if confirm {
+            if commit_pass && confirm {
+                if let Some(scope) = scope {
+                    scope.discard_registered_targets();
+                }
                 commands.push(match review.action {
                     RecoveryAction::Restore => SearchReplaceUiCommand::ConfirmRestore,
                     RecoveryAction::Recover => SearchReplaceUiCommand::ConfirmRecovery,
                 });
-            } else if process_interactions && (cancel || !open) {
+            } else if (commit_pass && cancel)
+                || (native_confirmation_owner
+                    && first_ui_pass
+                    && ctx.current_pass_index() == 0
+                    && !open)
+            {
                 self.recovery_review = None;
+                self.recovery_confirmation_instance = None;
+                if let Some(scope) = scope {
+                    scope.discard_registered_targets();
+                }
                 commands.push(SearchReplaceUiCommand::CancelRecoveryAction);
             }
         }

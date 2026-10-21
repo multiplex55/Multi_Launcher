@@ -2498,6 +2498,11 @@ fn qa_navigation_owner(owner: super::jump_mode::ui::NavigationOwner) -> QaNaviga
             kind,
             ..
         } => (kind.surface_kind(), Some(confirmation_instance)),
+        Owner::SearchReplaceConfirmation {
+            confirmation_instance,
+            kind,
+            ..
+        } => (kind.surface_kind(), Some(confirmation_instance)),
         Owner::SnippetPrompt { generation } => ("snippet_prompt", Some(generation)),
         Owner::Blocked => ("blocked", None),
     };
@@ -2572,6 +2577,11 @@ fn qa_dialog_state(
             ..
         } => ("xml-overwrite-confirmation", confirmation_instance),
         Owner::BatchRenameConfirmation {
+            confirmation_instance,
+            kind,
+            ..
+        } => (kind.surface_kind(), confirmation_instance),
+        Owner::SearchReplaceConfirmation {
             confirmation_instance,
             kind,
             ..
@@ -2677,6 +2687,7 @@ fn qa_dialog_state(
         | Owner::MouseGestureDelete { .. }
         | Owner::XmlOverwriteConfirmation { .. }
         | Owner::BatchRenameConfirmation { .. }
+        | Owner::SearchReplaceConfirmation { .. }
         | Owner::SnippetPrompt { .. } => {}
         Owner::Root | Owner::Blocked => unreachable!("handled above"),
     }

@@ -196,6 +196,14 @@ pub(crate) enum NavigationOwner {
         confirmation_instance: u64,
         kind: BatchRenameConfirmationKind,
     },
+    /// One exact Search & Replace Apply or receipt-specific confirmation.
+    /// `subject` is a payload-free identity for the frozen candidate or receipt.
+    SearchReplaceConfirmation {
+        parent_instance: u64,
+        confirmation_instance: u64,
+        kind: SearchReplaceConfirmationKind,
+        subject: SearchReplaceConfirmationSubject,
+    },
     /// One exact, transient snippet prompt window. Its generation is also
     /// part of the window's egui layer ID.
     SnippetPrompt {
@@ -208,6 +216,42 @@ pub(crate) enum NavigationOwner {
 pub(crate) enum BatchRenameConfirmationKind {
     Apply,
     Undo,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum SearchReplaceConfirmationKind {
+    Apply,
+    Restore,
+    Recover,
+}
+
+impl SearchReplaceConfirmationKind {
+    pub(crate) fn surface_kind(self) -> &'static str {
+        match self {
+            Self::Apply => "search-replace-apply-confirmation",
+            Self::Restore => "search-replace-restore-confirmation",
+            Self::Recover => "search-replace-recovery-confirmation",
+        }
+    }
+
+    pub(crate) fn layer_id(self) -> egui::LayerId {
+        let id = match self {
+            Self::Apply => "replace_apply_confirmation",
+            Self::Restore | Self::Recover => "replace_recovery_confirmation",
+        };
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new(id))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum SearchReplaceConfirmationSubject {
+    Apply {
+        search_generation: u64,
+        replacement_revision: u64,
+    },
+    Receipt {
+        receipt_identity: u64,
+    },
 }
 
 impl BatchRenameConfirmationKind {
@@ -423,6 +467,20 @@ impl NavigationOwner {
                                 if kind == "batch-rename" && *instance == parent_instance
                         )
                 }
+                Self::SearchReplaceConfirmation {
+                    parent_instance,
+                    confirmation_instance,
+                    kind: owner_kind,
+                    ..
+                } => {
+                    kind == owner_kind.surface_kind()
+                        && *instance == confirmation_instance
+                        && matches!(
+                            owner.as_ref(),
+                            SurfaceId::Dialog { kind, instance }
+                                if kind == "search-replace" && *instance == parent_instance
+                        )
+                }
                 _ => self.owns_surface(owner),
             },
         }
@@ -513,6 +571,41 @@ pub(crate) fn resolve_batch_rename_confirmation_owner(
     let child_layer =
         batch_rename_confirmation_layer_id(parent_instance, confirmation_instance, kind);
     let parent_layer = NavigationDialogKind::BatchRename.layer_id();
+    if ctx.viewport_id() == egui::ViewportId::ROOT
+        && ctx.input(|input| input.focused)
+        && ctx.memory(|memory| memory.top_modal_layer().is_none())
+        && !egui::Popup::is_any_open(ctx)
+        && visible_top_middle_layer(ctx) == Some(child_layer)
+        && focused_response_layer(ctx).is_none_or(|focused| {
+            focused == child_layer
+                || Some(focused) == parent_layer
+                || focused.order != egui::Order::Middle
+        })
+    {
+        owner
+    } else {
+        NavigationOwner::Blocked
+    }
+}
+
+/// Resolve a Search & Replace child only while its exact current confirmation
+/// layer owns the focused ROOT frame. A retained response may still belong to
+/// its parent during the handoff; other Middle windows and popups fail closed.
+pub(crate) fn resolve_search_replace_confirmation_owner(
+    ctx: &egui::Context,
+    parent_instance: u64,
+    confirmation_instance: u64,
+    kind: SearchReplaceConfirmationKind,
+    subject: SearchReplaceConfirmationSubject,
+) -> NavigationOwner {
+    let owner = NavigationOwner::SearchReplaceConfirmation {
+        parent_instance,
+        confirmation_instance,
+        kind,
+        subject,
+    };
+    let child_layer = kind.layer_id();
+    let parent_layer = NavigationDialogKind::SearchReplace.layer_id();
     if ctx.viewport_id() == egui::ViewportId::ROOT
         && ctx.input(|input| input.focused)
         && ctx.memory(|memory| memory.top_modal_layer().is_none())
@@ -2343,6 +2436,7 @@ impl JumpModeUi {
             | NavigationOwner::MouseGestureDelete { .. }
             | NavigationOwner::XmlOverwriteConfirmation { .. }
             | NavigationOwner::BatchRenameConfirmation { .. }
+            | NavigationOwner::SearchReplaceConfirmation { .. }
             | NavigationOwner::SnippetPrompt { .. } => true,
             NavigationOwner::Blocked => false,
         };

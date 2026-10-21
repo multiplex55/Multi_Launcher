@@ -3324,13 +3324,14 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
     ) -> bool {
-        self.search_replace_dialog
-            .native_confirmation_layer_id()
-            .is_some_and(|layer| {
-                self.search_replace_dialog.open
-                    && self.native_ui_host_input_allowed(ctx, root_visible)
-                    && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
-            })
+        let Some(layer) = self.search_replace_dialog.native_confirmation_layer_id() else {
+            return false;
+        };
+        self.search_replace_dialog.open
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && !egui::Popup::is_any_open(ctx)
+            && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
     }
 
     fn clipboard_history_native_ui_owner_current(
@@ -3857,6 +3858,42 @@ impl LauncherApp {
                 }
                 // Preserve another recognized foreground owner's candidate.
                 // Unknown layers already resolve to Blocked above.
+                _ => {}
+            }
+        }
+        if !prompt_is_open
+            && self.jump_mode_host_input_allowed(ctx, root_visible)
+            && let Some(parent_instance) = self
+                .jump_mode_ui
+                .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace)
+            && let Some(identity) = self.search_replace_dialog.jump_mode_confirmation_identity()
+        {
+            use crate::gui::jump_mode::ui::{
+                NavigationDialogKind, NavigationOwner, resolve_search_replace_confirmation_owner,
+                visible_top_middle_layer,
+            };
+
+            let child_layer = identity.kind.layer_id();
+            let parent_layer = NavigationDialogKind::SearchReplace.layer_id();
+            match visible_top_middle_layer(ctx) {
+                Some(layer) if layer == child_layer => {
+                    combo_popup = None;
+                    candidate = resolve_search_replace_confirmation_owner(
+                        ctx,
+                        parent_instance,
+                        identity.confirmation_instance,
+                        identity.kind,
+                        identity.subject,
+                    );
+                }
+                Some(layer) if Some(layer) == parent_layer => {
+                    // A pending confirmation blocks the parent immediately,
+                    // including the frame before the child becomes visible.
+                    candidate = NavigationOwner::Blocked;
+                    combo_popup = None;
+                }
+                // Preserve a different recognized foreground window. The
+                // ordinary resolver already blocks unknown windows.
                 _ => {}
             }
         }
@@ -5398,6 +5435,9 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation {
+                    ..
+                }
                 | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
@@ -5529,6 +5569,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
@@ -5602,6 +5643,9 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation {
+                    ..
+                }
                 | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
@@ -5665,6 +5709,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
@@ -5703,6 +5748,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
@@ -6070,7 +6116,7 @@ impl LauncherApp {
         // so Search & Replace must resolve its owner immediately before drawing.
         let search_replace_owner =
             self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let search_replace_scope = match search_replace_owner {
+        let (search_replace_scope, search_replace_confirmation_scope) = match search_replace_owner {
             crate::gui::jump_mode::ui::NavigationOwner::Dialog {
                 kind: crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace,
                 instance,
@@ -6079,16 +6125,53 @@ impl LauncherApp {
                     .search_replace_dialog
                     .jump_mode_parent_targets_allowed(self.replace_worker_snapshot.active) =>
             {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("search-replace", instance),
-                    crate::gui::jump_mode::TargetGeneration(instance),
-                    "search-replace/form",
+                (
+                    self.jump_mode_ui.scope_for_navigation_owner(
+                        crate::gui::jump_mode::SurfaceId::dialog("search-replace", instance),
+                        crate::gui::jump_mode::TargetGeneration(instance),
+                        "search-replace/form",
+                        ctx.viewport_id(),
+                        search_replace_owner,
+                        false,
+                    ),
+                    None,
+                )
+            }
+            crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation {
+                parent_instance,
+                confirmation_instance,
+                kind,
+                subject,
+            } if self.jump_mode_enabled()
+                && self
+                    .search_replace_dialog
+                    .jump_mode_confirmation_identity()
+                    .is_some_and(|identity| {
+                        identity.confirmation_instance == confirmation_instance
+                            && identity.kind == kind
+                            && identity.subject == subject
+                    }) =>
+            {
+                let subject_identity =
+                    egui::Id::new(("search-replace-confirmation-subject", subject)).value();
+                let scope = self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::popup(
+                        kind.surface_kind(),
+                        confirmation_instance,
+                        crate::gui::jump_mode::SurfaceId::dialog("search-replace", parent_instance),
+                    ),
+                    crate::gui::jump_mode::TargetGeneration(confirmation_instance),
+                    format!(
+                        "search-replace/confirmation/{}/{subject_identity:016x}",
+                        kind.surface_kind()
+                    ),
                     ctx.viewport_id(),
                     search_replace_owner,
                     false,
-                )
+                );
+                (None, scope)
             }
-            _ => None,
+            _ => (None, None),
         };
         let search_replace_native_owner =
             self.search_replace_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
@@ -6113,6 +6196,7 @@ impl LauncherApp {
         let search_replace_commands = self.search_replace_dialog.ui_with_jump_mode(
             &ctx,
             search_replace_scope.as_ref(),
+            search_replace_confirmation_scope.as_ref(),
             search_replace_native_owner,
             first_ui_pass,
             search_replace_confirmation_native_owner,
@@ -6154,6 +6238,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
@@ -6237,6 +6322,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
@@ -6307,6 +6393,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
@@ -34303,7 +34390,7 @@ mod tests {
     }
 
     #[test]
-    fn jump_mode_replace_form_files_focuses_and_inspects_without_approval_or_writes() {
+    fn jump_mode_replace_approvals_focus_only_then_open_an_exclusive_cancel_child() {
         use crate::gui::jump_mode::{
             SurfaceId, TargetKind,
             ui::{NavigationDialogKind, NavigationOwner},
@@ -34469,8 +34556,20 @@ mod tests {
             &mut app,
             vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
         );
+        // Accepting the asynchronous search result changes the dependent
+        // target set. Collect one stable frame before starting a new hint
+        // session against that current view.
+        search_replace_test_frame(&ctx, &mut app, Vec::new());
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::SearchReplace,
+                instance,
+            }
+        );
 
         let settings = search_replace_target_by_label(&app, "Search and Replace settings");
+        assert!(settings.enabled() && settings.clipped_rect().is_positive());
         start_search_replace_hints(&ctx, &mut app);
         complete_search_replace_hint(&ctx, &mut app, &settings);
         search_replace_test_frame(
@@ -34521,8 +34620,392 @@ mod tests {
         assert_eq!(std::fs::read(&source_path).unwrap(), original);
         assert!(app.test_activation_trace.is_empty());
 
+        let approval = search_replace_target_by_label(&app, "Approve match");
+        assert_eq!(approval.metadata().kind(), TargetKind::Checkbox);
+        assert!(approval.enabled());
+        let approval_semantic = format!("{:?}", approval.id());
+        assert!(!approval_semantic.contains("fixture.txt"));
+        assert!(!approval_semantic.contains(root.to_string_lossy().as_ref()));
+        start_search_replace_hints(&ctx, &mut app);
+        complete_search_replace_hint(&ctx, &mut app, &approval);
+        assert_eq!(
+            app.search_replace_dialog.test_approved_match_count(),
+            0,
+            "hint completion focuses the checkbox without approving its match"
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(approval.response_id())
+        );
+        assert_eq!(std::fs::read(&source_path).unwrap(), original);
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Space, egui::Modifiers::NONE)],
+        );
+        assert_eq!(app.search_replace_dialog.test_approved_match_count(), 1);
+        assert_eq!(std::fs::read(&source_path).unwrap(), original);
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::NONE)],
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let review_apply = loop {
+            app.poll_search_replace_runtime(&ctx);
+            search_replace_test_frame(&ctx, &mut app, Vec::new());
+            if let Some(target) = app
+                .jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| {
+                    target.metadata().label() == "Review Apply"
+                        && target.enabled()
+                        && target.clipped_rect().is_positive()
+                })
+                .cloned()
+            {
+                break target;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the one approved generated match should publish a current Review Apply target"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        let original_generation = app
+            .search_replace_dialog
+            .test_result_counts()
+            .expect("the generated search result remains current")
+            .0;
+        start_search_replace_hints(&ctx, &mut app);
+        complete_search_replace_hint(&ctx, &mut app, &review_apply);
+        assert!(!app.search_replace_dialog.test_apply_confirmation_open());
+        assert_eq!(
+            std::fs::read(&source_path).unwrap(),
+            original,
+            "Review Apply hint completion does not open confirmation or write"
+        );
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(app.search_replace_dialog.test_apply_confirmation_open());
+        assert_eq!(std::fs::read(&source_path).unwrap(), original);
+        assert!(
+            app.jump_mode_ui.retained_registry().targets().is_empty(),
+            "opening the child retires already collected parent actions"
+        );
+        assert!(!app.search_replace_dialog.test_apply_confirmation_pending());
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(app.search_replace_dialog.test_apply_confirmation_open());
+        assert!(!app.search_replace_dialog.test_apply_confirmation_pending());
+        assert_eq!(std::fs::read(&source_path).unwrap(), original);
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        search_replace_test_frame(&ctx, &mut app, Vec::new());
+
+        let (confirmation_instance, confirmation_kind, _) = app
+            .search_replace_dialog
+            .jump_mode_confirmation_identity()
+            .map(|identity| {
+                (
+                    identity.confirmation_instance,
+                    identity.kind,
+                    identity.subject,
+                )
+            })
+            .expect("the exact frozen Apply confirmation is current");
+        assert_eq!(
+            confirmation_kind,
+            crate::gui::jump_mode::ui::SearchReplaceConfirmationKind::Apply
+        );
+        let child_cancel = search_replace_target_by_label(&app, "Cancel");
+        let child_surface = SurfaceId::popup(
+            confirmation_kind.surface_kind(),
+            confirmation_instance,
+            SurfaceId::dialog("search-replace", instance),
+        );
+        assert_eq!(child_cancel.id().surface(), &child_surface);
+        let normal_cancel_id = child_cancel.id().clone();
+        let normal_cancel_response = child_cancel.response_id();
+        let confirm_target = search_replace_target_by_label(&app, "Confirm and Apply");
+        assert_eq!(confirm_target.metadata().kind(), TargetKind::Button);
+        let confirm_response = confirm_target.response_id();
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .all(|target| { target.id().surface() == &child_surface }),
+            "the child confirmation owns targets exclusively"
+        );
+        assert_eq!(
+            app.search_replace_dialog.test_result_counts().unwrap().0,
+            original_generation
+        );
+
+        app.search_replace_dialog
+            .test_mark_apply_confirmation_pending();
+        search_replace_test_frame(&ctx, &mut app, Vec::new());
+        let pending_cancel = search_replace_target_by_label(&app, "Cancel before submission");
+        assert_eq!(pending_cancel.id().surface(), &child_surface);
+        assert_ne!(
+            pending_cancel.id(),
+            &normal_cancel_id,
+            "pending Cancel has distinct semantic authority from the normal child Cancel"
+        );
+        assert_ne!(
+            pending_cancel.response_id(),
+            normal_cancel_response,
+            "the pending phase cannot inherit a focused native response ID"
+        );
+        assert_ne!(
+            pending_cancel.response_id(),
+            confirm_response,
+            "pending Cancel cannot inherit the normal Confirm response ID"
+        );
+        start_search_replace_hints(&ctx, &mut app);
+        complete_search_replace_hint(&ctx, &mut app, &pending_cancel);
+        assert!(app.search_replace_dialog.test_apply_confirmation_pending());
+        assert_eq!(std::fs::read(&source_path).unwrap(), original);
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(!app.search_replace_dialog.test_apply_confirmation_open());
+        assert!(!app.search_replace_dialog.test_apply_confirmation_pending());
+        assert_eq!(std::fs::read(&source_path).unwrap(), original);
+
         app.shutdown_search_replace_runtime();
         drop(root_guard);
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_replace_approvals_recovery_receipt_headers_are_real_nested_targets() {
+        use crate::gui::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, SearchReplaceConfirmationKind,
+        };
+        use crate::gui::jump_mode::{SurfaceId, TargetKind};
+
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.search_replace_dialog.open();
+        for (id, status) in [
+            ("generated-recovery", "recovery_required"),
+            ("generated-applied", "applied"),
+        ] {
+            let receipt = serde_json::from_value(serde_json::json!({
+                "id": id,
+                "search_revision": 1,
+                "search_generation": 1,
+                "replacement_revision": 1,
+                "status": status,
+                "entries": [],
+                "message": "Generated fixture receipt"
+            }))
+            .expect("the fixture receipt uses the durable receipt schema");
+            app.search_replace_dialog.test_push_receipt(receipt);
+        }
+        for _ in 0..3 {
+            search_replace_test_frame(&ctx, &mut app, Vec::new());
+        }
+        let instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::SearchReplace)
+            .expect("the Search & Replace owner is live");
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::SearchReplace,
+                instance,
+            }
+        );
+        let outer =
+            search_replace_target_by_label(&app, "Replacement receipts, Restore, and Recovery");
+        assert_eq!(outer.metadata().kind(), TargetKind::Button);
+        assert_eq!(
+            outer.id().surface(),
+            &SurfaceId::dialog("search-replace", instance)
+        );
+        start_search_replace_hints(&ctx, &mut app);
+        complete_search_replace_hint(&ctx, &mut app, &outer);
+        assert!(!app.search_replace_dialog.test_reveal_receipts());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(outer.response_id())
+        );
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        search_replace_test_frame(&ctx, &mut app, Vec::new());
+
+        let receipt_headers = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| target.metadata().label() == "Receipt details")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(receipt_headers.len(), 2);
+        assert!(
+            receipt_headers
+                .iter()
+                .all(|target| target.id().surface()
+                    == &SurfaceId::dialog("search-replace", instance))
+        );
+        assert_ne!(receipt_headers[0].id(), receipt_headers[1].id());
+        for target in &receipt_headers {
+            let crate::gui::jump_mode::SemanticTargetId::Named(identity) = target.id().semantic()
+            else {
+                panic!("receipt header identities use an opaque named target");
+            };
+            assert!(!identity.contains("generated-applied"));
+            assert!(!identity.contains("generated-recovery"));
+        }
+        // Receipt rows render newest first, and the applied receipt was
+        // inserted last. Choose by real visual order; receipt payloads stay
+        // opaque to Jump metadata and test routing alike.
+        let applied_header = receipt_headers
+            .iter()
+            .min_by_key(|target| target.metadata().visual_order())
+            .expect("the newest generated receipt header is visible")
+            .clone();
+        assert_eq!(applied_header.metadata().label(), "Receipt details");
+
+        start_search_replace_hints(&ctx, &mut app);
+        complete_search_replace_hint(&ctx, &mut app, &applied_header);
+        assert!(
+            app.search_replace_dialog
+                .jump_mode_confirmation_identity()
+                .is_none(),
+            "selecting a receipt header never opens a Restore confirmation"
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(applied_header.response_id())
+        );
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        search_replace_test_frame(&ctx, &mut app, Vec::new());
+
+        let restore = search_replace_target_by_label(&app, "Restore receipt");
+        assert_eq!(restore.metadata().kind(), TargetKind::Button);
+        assert_eq!(
+            restore.id().surface(),
+            &SurfaceId::dialog("search-replace", instance)
+        );
+        start_search_replace_hints(&ctx, &mut app);
+        complete_search_replace_hint(&ctx, &mut app, &restore);
+        assert!(
+            app.search_replace_dialog
+                .jump_mode_confirmation_identity()
+                .is_none(),
+            "selecting Restore only focuses the receipt action"
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(restore.response_id())
+        );
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(
+            app.search_replace_dialog
+                .jump_mode_confirmation_identity()
+                .map(|identity| identity.kind),
+            Some(SearchReplaceConfirmationKind::Restore),
+            "only a distinct later Enter opens the exact Restore child"
+        );
+        assert!(
+            app.jump_mode_ui.retained_registry().targets().is_empty(),
+            "opening Restore immediately retires parent receipt actions"
+        );
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        search_replace_test_frame(&ctx, &mut app, Vec::new());
+
+        let identity = app
+            .search_replace_dialog
+            .jump_mode_confirmation_identity()
+            .expect("the exact Restore confirmation remains current");
+        assert_eq!(identity.kind, SearchReplaceConfirmationKind::Restore);
+        let child_surface = SurfaceId::popup(
+            SearchReplaceConfirmationKind::Restore.surface_kind(),
+            identity.confirmation_instance,
+            SurfaceId::dialog("search-replace", instance),
+        );
+        let child_cancel = search_replace_target_by_label(&app, "Cancel");
+        assert_eq!(child_cancel.id().surface(), &child_surface);
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .all(|target| { target.id().surface() == &child_surface }),
+            "the exact Restore child owns its Cancel control exclusively"
+        );
+        start_search_replace_hints(&ctx, &mut app);
+        complete_search_replace_hint(&ctx, &mut app, &child_cancel);
+        assert!(
+            app.search_replace_dialog
+                .jump_mode_confirmation_identity()
+                .is_some()
+        );
+        search_replace_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(
+            app.search_replace_dialog
+                .jump_mode_confirmation_identity()
+                .is_none()
+        );
+
+        app.shutdown_search_replace_runtime();
         drop(workspace);
     }
 
