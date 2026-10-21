@@ -862,7 +862,7 @@ impl MouseGestureSettingsDialog {
         let pinned = app
             .pinned_panels
             .contains(&crate::gui::Panel::MouseGestureSettingsDialog);
-        if authorized_main_pass {
+        if native_ui_owner && first_ui_pass {
             self.open = (open && !close_requested) || pinned;
         }
         if authorized_picker_pass {
