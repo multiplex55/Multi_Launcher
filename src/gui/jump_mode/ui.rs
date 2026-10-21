@@ -483,7 +483,12 @@ impl ComboPopupOwner {
             && parent_owner.owns_surface(self.anchor_id.surface())
             && egui::ComboBox::is_open(ctx, self.response_id)
             && egui::Popup::is_any_open(ctx)
-            && visible_top_middle_layer(ctx) == Some(self.anchor_layer)
+            && combo_anchor_layer_is_current(
+                ctx,
+                parent_owner,
+                self.anchor_id.surface(),
+                self.anchor_layer,
+            )
             && focused_response_layer(ctx)
                 .is_none_or(|layer| layer == self.anchor_layer || layer == self.popup_layer)
     }
@@ -538,6 +543,24 @@ fn combo_popup_surface(anchor_id: &TargetId) -> SurfaceId {
         instance,
         anchor_id.surface().clone(),
     )
+}
+
+fn combo_anchor_layer_is_current(
+    ctx: &egui::Context,
+    parent_owner: NavigationOwner,
+    anchor_surface: &SurfaceId,
+    anchor_layer: egui::LayerId,
+) -> bool {
+    match parent_owner {
+        NavigationOwner::Root => {
+            matches!(
+                anchor_surface,
+                SurfaceId::Dashboard | SurfaceId::LauncherResults
+            ) && anchor_layer.order == egui::Order::Background
+                && visible_top_middle_layer(ctx).is_none()
+        }
+        _ => visible_top_middle_layer(ctx) == Some(anchor_layer),
+    }
 }
 
 impl FocusDirective {
@@ -794,7 +817,7 @@ impl TargetRegistry {
             popup_layer: egui::LayerId::new(egui::Order::Foreground, popup_id),
             popup_surface: combo_popup_surface(anchor.id()),
         };
-        if visible_top_middle_layer(ctx) != Some(anchor.layer_id)
+        if !combo_anchor_layer_is_current(ctx, parent_owner, anchor.id().surface(), anchor.layer_id)
             || !(owner.is_current(ctx, parent_owner) || owner.is_sizing_pass(ctx, parent_owner))
         {
             return Err(());
@@ -1869,6 +1892,14 @@ impl JumpModeUi {
         root_owner_allowed
             && self.frame_navigation_owner == NavigationOwner::Root
             && !self.root_input_frame.owner_blocked
+    }
+
+    pub(crate) fn root_combo_popup_is_current(&self, ctx: &egui::Context) -> bool {
+        self.frame_navigation_owner == NavigationOwner::Root
+            && self
+                .active_combo_popup
+                .as_ref()
+                .is_some_and(|popup| popup.is_current(ctx, NavigationOwner::Root))
     }
 
     fn process_root_input_events(&mut self, ctx: &egui::Context) {

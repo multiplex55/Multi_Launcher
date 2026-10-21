@@ -1,7 +1,8 @@
 use super::{
     BackgroundLoader, RefreshMode, Widget, WidgetAction, WidgetSettingsContext,
     WidgetSettingsUiResult, default_refresh_throttle_secs, edit_typed_settings,
-    jump_response_clicked, refresh_schedule, refresh_settings_ui, run_refresh_schedule,
+    jump_response_clicked, refresh_schedule, refresh_settings_ui, register_jump_response,
+    run_refresh_schedule,
 };
 use crate::common::persistence::{LoadState, load_json, save_json_atomic};
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -370,13 +371,28 @@ impl Widget for ScratchpadWidget {
         }
 
         let text_id = self.text_edit_id(ui);
+        let mut discarded_content = None;
+        let content = if ctx.jump_mode_activation_allowed {
+            &mut self.content
+        } else {
+            discarded_content.insert(self.content.clone())
+        };
         let resp = ui.add(
-            egui::TextEdit::multiline(&mut self.content)
+            egui::TextEdit::multiline(content)
                 .id_salt(text_id)
                 .desired_rows(8)
                 .desired_width(f32::INFINITY),
         );
-        if resp.changed() {
+        register_jump_response(
+            ui,
+            ctx,
+            &resp,
+            || "scratchpad:text".to_owned(),
+            || "Scratchpad text".to_owned(),
+            crate::gui::jump_mode::TargetKind::TextEntry,
+            2,
+        );
+        if resp.changed() && ctx.jump_mode_activation_allowed {
             self.schedule_save();
         }
 
@@ -479,8 +495,89 @@ fn insert_at_char_index(text: &mut String, insert: &str, char_index: usize) -> u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actions::ActionIdLookup;
+    use crate::dashboard::data_cache::DashboardDataCache;
+    use crate::gui::jump_mode::ui::JumpModeUi;
+    use crate::gui::jump_mode::{SurfaceId, TargetGeneration};
     use chrono::NaiveDate;
+    use once_cell::sync::Lazy;
+    use std::collections::HashMap;
     use std::sync::mpsc::channel;
+
+    fn dashboard_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 500.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn dashboard_scope(jump: &JumpModeUi) -> crate::gui::JumpModeScope {
+        jump.scope(
+            SurfaceId::Dashboard,
+            TargetGeneration(7),
+            "dashboard-test",
+            egui::ViewportId::ROOT,
+            true,
+        )
+        .expect("enabled Jump Mode creates a dashboard scope")
+        .child_namespace("slot-id:scratchpad")
+        .child_namespace("body")
+    }
+
+    fn dashboard_context<'a>(
+        plugins: &'a crate::plugin::PluginManager,
+        data_cache: &'a DashboardDataCache,
+        jump_mode_scope: Option<crate::gui::JumpModeScope>,
+        jump_mode_activation_allowed: bool,
+    ) -> DashboardContext<'a> {
+        static EMPTY_USAGE: Lazy<HashMap<String, u32>> = Lazy::new(HashMap::new);
+        static EMPTY_LOOKUP: Lazy<ActionIdLookup> = Lazy::new(ActionIdLookup::default);
+        DashboardContext {
+            actions: &[],
+            actions_by_id: &EMPTY_LOOKUP,
+            usage: &EMPTY_USAGE,
+            plugins,
+            enabled_plugins: None,
+            default_location: None,
+            data_cache,
+            actions_version: 0,
+            fav_version: 0,
+            notes_version: 0,
+            todo_version: 0,
+            calendar_version: 0,
+            clipboard_version: 0,
+            snippets_version: 0,
+            dashboard_visible: true,
+            dashboard_focused: true,
+            reduce_dashboard_work_when_unfocused: false,
+            diagnostics: None,
+            show_diagnostics_widget: false,
+            jump_mode_scope,
+            jump_mode_activation_allowed,
+        }
+    }
+
+    fn render_with_input(
+        widget: &mut ScratchpadWidget,
+        ctx: &DashboardContext<'_>,
+        egui_ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) {
+        egui_ctx
+            .run_ui(dashboard_input(events), |ui| {
+                ui.push_id("slot-id:scratchpad", |ui| {
+                    ui.push_id("body", |ui| {
+                        widget.render(ui, ctx, WidgetActivation::Click);
+                    });
+                });
+            })
+            .drop_without_applying_deltas();
+    }
 
     #[test]
     fn format_timestamp_uses_expected_pattern() {
@@ -526,6 +623,113 @@ mod tests {
         std::fs::write(&malformed, original).unwrap();
         assert!(save_storage(&malformed, "replacement").is_err());
         assert_eq!(std::fs::read(&malformed).unwrap(), original);
+    }
+
+    #[test]
+    fn jump_mode_dashboard_simple_controls_scratchpad_focus_and_discarded_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("scratchpad.json");
+        let initial_content = "秘密の本文\nline two".to_owned();
+        let original_bytes = serde_json::to_vec(&ScratchpadStorage {
+            content: initial_content.clone(),
+        })
+        .unwrap();
+        std::fs::write(&path, &original_bytes).unwrap();
+        let mut widget = ScratchpadWidget::new(ScratchpadConfig {
+            refresh_mode: RefreshMode::Manual,
+            manual_refresh_only: true,
+            storage_path: Some(path.display().to_string()),
+            ..ScratchpadConfig::default()
+        });
+        widget.content = initial_content.clone();
+
+        let plugins = crate::plugin::PluginManager::new_inert_for_test();
+        let data_cache = DashboardDataCache::new();
+        let egui_ctx = egui::Context::default();
+        let mut jump = JumpModeUi::new(true);
+
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let scope = dashboard_scope(&jump);
+        let context = dashboard_context(&plugins, &data_cache, Some(scope.clone()), true);
+        render_with_input(&mut widget, &context, &egui_ctx, Vec::new());
+        jump.finish_ui_pass();
+        let registry = jump.pass_registry().unwrap();
+        assert_eq!(registry.len(), 3);
+        assert!(
+            registry
+                .metadata()
+                .any(|metadata| metadata.label() == "Copy")
+        );
+        assert!(
+            registry
+                .metadata()
+                .any(|metadata| metadata.label() == "Append timestamp")
+        );
+        let target = scope.target_id("scratchpad:text");
+        let registered = registry.get(&target).unwrap();
+        assert_eq!(registered.metadata().label(), "Scratchpad text");
+        assert_eq!(
+            registered.metadata().kind(),
+            crate::gui::jump_mode::TargetKind::TextEntry
+        );
+        let semantic = format!("{:?}", target.semantic());
+        assert!(!semantic.contains("秘密の本文"));
+        assert!(!semantic.contains("line two"));
+        jump.complete_frame(&egui_ctx, true, true);
+
+        jump.begin_frame();
+        assert!(jump.queue_focus_intent(
+            target.clone(),
+            egui::ViewportId::ROOT,
+            jump.navigation_epoch(),
+        ));
+        jump.begin_ui_pass();
+        let scope = dashboard_scope(&jump);
+        let context = dashboard_context(&plugins, &data_cache, Some(scope), true);
+        render_with_input(&mut widget, &context, &egui_ctx, Vec::new());
+        jump.finish_ui_pass();
+        let focused_id = jump
+            .pass_registry()
+            .unwrap()
+            .get(&target)
+            .unwrap()
+            .response_id();
+        assert_eq!(egui_ctx.memory(|memory| memory.focused()), Some(focused_id));
+        assert_eq!(widget.content, initial_content);
+        jump.complete_frame(&egui_ctx, true, true);
+
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let scope = dashboard_scope(&jump);
+        let context = dashboard_context(&plugins, &data_cache, Some(scope), false);
+        render_with_input(
+            &mut widget,
+            &context,
+            &egui_ctx,
+            vec![egui::Event::Text("discard Ω\n".into())],
+        );
+        jump.finish_ui_pass();
+        jump.complete_frame(&egui_ctx, true, true);
+        assert_eq!(widget.content, initial_content);
+        assert!(!widget.dirty);
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let scope = dashboard_scope(&jump);
+        let context = dashboard_context(&plugins, &data_cache, Some(scope), true);
+        render_with_input(
+            &mut widget,
+            &context,
+            &egui_ctx,
+            vec![egui::Event::Text("typed Ω\n".into())],
+        );
+        jump.finish_ui_pass();
+        jump.complete_frame(&egui_ctx, true, true);
+        assert_eq!(widget.content, format!("{initial_content}typed Ω\n"));
+        assert!(widget.dirty);
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
     }
 
     #[test]

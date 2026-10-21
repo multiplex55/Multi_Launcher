@@ -3132,7 +3132,8 @@ impl LauncherApp {
 
     fn jump_mode_root_targets_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         self.jump_mode_host_input_allowed(ctx, root_visible)
-            && !egui::Popup::is_any_open(ctx)
+            && (!egui::Popup::is_any_open(ctx)
+                || self.jump_mode_ui.root_combo_popup_is_current(ctx))
             && !self.jump_mode_unsupported_panel_open()
     }
 
@@ -29327,6 +29328,290 @@ mod tests {
             .expect("read both isolated Todos after the feature-off fallback");
         assert_eq!(persisted.len(), 2);
         assert_eq!(persisted[1].text, "off-mode button focus draft");
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_dashboard_simple_controls_root_todo_combo_options_are_exact_popup_owned_targets() {
+        use crate::dashboard::config::{DashboardConfig, SlotConfig};
+        use crate::gui::jump_mode::ui::NavigationOwner;
+        use crate::gui::jump_mode::{SurfaceId, TargetKind};
+
+        let ctx = egui::Context::default();
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let mut dashboard_config = DashboardConfig::default();
+        let mut todo_slot = SlotConfig::with_widget("todo", 0, 0);
+        todo_slot.id = Some("root-combo-todo".to_owned());
+        todo_slot.row_span = 3;
+        todo_slot.col_span = 3;
+        dashboard_config.slots = vec![todo_slot];
+        std::fs::write(
+            workspace.root().join("dashboard.json"),
+            serde_json::to_vec(&dashboard_config).expect("serialize isolated dashboard fixture"),
+        )
+        .expect("write isolated dashboard fixture");
+
+        let mut app = root_list_app_at(&ctx, Vec::new(), workspace.root());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        app.dashboard_enabled = true;
+        app.dashboard_show_when_empty = true;
+        app.query.clear();
+        app.last_search_query.clear();
+        app.results.clear();
+        app.last_results_valid = true;
+        app.pending_query = None;
+        app.background_query_refresh_pending = false;
+
+        let mut snapshot = crate::dashboard::data_cache::DashboardDataSnapshot::default();
+        snapshot.todos = Arc::new(vec![
+            crate::plugins::todo::TodoEntry {
+                id: "open-fixture-row".into(),
+                text: "safe open row".into(),
+                done: false,
+                priority: 0,
+                tags: Vec::new(),
+                entity_refs: Vec::new(),
+            },
+            crate::plugins::todo::TodoEntry {
+                id: "done-fixture-row".into(),
+                text: "safe completed row".into(),
+                done: true,
+                priority: 0,
+                tags: Vec::new(),
+                entity_refs: Vec::new(),
+            },
+        ]);
+        app.dashboard_data_cache.set_snapshot_for_test(snapshot);
+        prepare_actual_query_frame(&ctx, &mut app);
+
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Root
+        );
+        let initial_registry = app.jump_mode_ui.retained_registry();
+        let status_anchor = initial_registry
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Todo status filter")
+            .expect("the actual Todo status ComboBox is in the Dashboard");
+        assert_eq!(status_anchor.metadata().kind(), TargetKind::ComboBox);
+        assert_eq!(status_anchor.id().surface(), &SurfaceId::Dashboard);
+        assert_eq!(
+            initial_registry
+                .metadata()
+                .filter(|metadata| metadata.label() == "Mark todo done"
+                    || metadata.label() == "Mark todo open")
+                .count(),
+            1,
+            "the default Open filter shows only the open fixture row"
+        );
+        let status_anchor_id = status_anchor.id().clone();
+        let status_response_id = status_anchor.response_id();
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let status_hint = dialog_hint_for_label(&app, "Todo status filter");
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(status_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(status_response_id)
+        );
+        assert!(!egui::Popup::is_any_open(&ctx));
+        assert_eq!(
+            app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .filter(|metadata| metadata.label() == "Mark todo done"
+                    || metadata.label() == "Mark todo open")
+                .count(),
+            1,
+            "hint completion focuses the anchor without changing the filter"
+        );
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert!(app.jump_mode_ui.active_session().is_none());
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        // One popup-owner transition and one stable collection pass mirror the
+        // normal native ComboBox lifecycle; neither pass starts a hint session.
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Root
+        );
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(
+            ctx.read_response(status_response_id)
+                .is_some_and(|response| response.enabled()),
+            "the real Dashboard ComboBox anchor remains available under its popup"
+        );
+        let popup_registry = app.jump_mode_ui.retained_registry();
+        assert_eq!(popup_registry.targets().len(), 3);
+        assert!(
+            popup_registry.targets().iter().all(|target| {
+                target.metadata().label() == "Todo status option"
+                    && target.metadata().kind() == TargetKind::Selectable
+                    && matches!(
+                        target.id().surface(),
+                        SurfaceId::Popup { kind, owner, .. }
+                            if kind.starts_with("combo:") && owner.as_ref() == &SurfaceId::Dashboard
+                    )
+            }),
+            "open Dashboard menus expose only their exact child options"
+        );
+        assert!(
+            popup_registry.targets().iter().all(|target| {
+                !matches!(
+                    target.id().surface(),
+                    SurfaceId::Dashboard | SurfaceId::LauncherResults
+                )
+            }),
+            "the parent query/header/body and launcher result targets are excluded"
+        );
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let all_option = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label() == "Todo status option"
+                    && target.metadata().visual_order() == 0
+            })
+            .expect("All is the first real status option");
+        let all_option_id = all_option.id().clone();
+        let all_option_response_id = all_option.response_id();
+        let all_hint = app
+            .jump_mode_ui
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(&all_option_id)
+            .unwrap()
+            .as_str()
+            .to_owned();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(all_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(all_option_response_id)
+        );
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert_eq!(
+            app.jump_mode_ui.retained_registry().targets().len(),
+            3,
+            "focusing All does not select or close the popup"
+        );
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        if egui::Popup::is_any_open(&ctx) {
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+        }
+        let selected_all_registry = app.jump_mode_ui.retained_registry();
+        assert_eq!(
+            selected_all_registry
+                .metadata()
+                .filter(|metadata| metadata.label() == "Mark todo done"
+                    || metadata.label() == "Mark todo open")
+                .count(),
+            2,
+            "fresh Enter selects All even if egui updates popup state on a following pass; open={}, focused={:?}",
+            egui::Popup::is_any_open(&ctx),
+            ctx.memory(|memory| memory.focused())
+        );
+        assert!(!egui::Popup::is_any_open(&ctx));
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Root
+        );
+        assert!(app.test_activation_trace.is_empty());
+        assert!(!egui::Popup::is_any_open(&ctx));
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .get(&status_anchor_id)
+                .is_some()
+        );
         drop(workspace);
     }
 

@@ -1,6 +1,7 @@
 use super::{
     Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
-    jump_response_clicked, next_jump_duplicate_occurrence, query_suggestions,
+    jump_response_clicked, opaque_dashboard_action_identity, query_suggestions,
+    register_jump_response,
 };
 use crate::actions::Action;
 use crate::dashboard::DashboardRefreshRequest;
@@ -8,6 +9,44 @@ use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use crate::plugins::todo::{TODO_FILE, TodoEntry, mark_done};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
+
+const TODO_STATUS_FILTER_IDENTITY: &str = "todo:filter-status";
+const TODO_TAG_FILTER_IDENTITY: &str = "todo:filter-tags";
+
+fn register_todo_scoped_response(
+    ui: &egui::Ui,
+    ctx: &DashboardContext<'_>,
+    scope: Option<&crate::gui::JumpModeScope>,
+    response: &egui::Response,
+    identity: impl AsRef<str>,
+    label: impl Into<String>,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: u64,
+) {
+    if let Some(scope) = scope {
+        let mut scoped_context = ctx.clone();
+        scoped_context.jump_mode_scope = Some(scope.clone());
+        register_jump_response(
+            ui,
+            &scoped_context,
+            response,
+            || identity.as_ref().to_owned(),
+            || label.into(),
+            kind,
+            visual_order,
+        );
+    }
+}
+
+fn todo_entry_identity(entry: &TodoEntry, index: usize, snapshot_version: u64) -> String {
+    if entry.id.is_empty() {
+        let text = opaque_dashboard_action_identity(&format!("legacy-todo-text/{}", entry.text));
+        format!("todo-legacy:{text}:index:{index}:snapshot:{snapshot_version}")
+    } else {
+        let id = opaque_dashboard_action_identity(&format!("todo-id/{}", entry.id));
+        format!("todo-entry:{id}:index:{index}:snapshot:{snapshot_version}")
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -286,60 +325,141 @@ impl TodoWidget {
         let done = filtered.iter().filter(|t| t.done).count();
         let total = filtered.len();
         let remaining = total.saturating_sub(done);
+        let show_progress = self.cfg.show_progress;
         let mut action = None;
+        let mut discarded_cfg = None;
+        let cfg = if ctx.jump_mode_activation_allowed {
+            &mut self.cfg
+        } else {
+            // Keep controls interactive for response collection/native focus,
+            // while discarding edits from a pass that cannot commit them.
+            discarded_cfg.insert(self.cfg.clone())
+        };
+        let status_popup_scope = ctx
+            .jump_mode_scope
+            .as_ref()
+            .map(|scope| scope.combo_popup_scope(TODO_STATUS_FILTER_IDENTITY));
+        let tags_popup_scope = ctx
+            .jump_mode_scope
+            .as_ref()
+            .map(|scope| scope.combo_popup_scope(TODO_TAG_FILTER_IDENTITY));
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt(ui.id().with("todo_filter_status"))
-                    .selected_text(match self.cfg.status {
+                let status_combo = egui::ComboBox::from_id_salt(ui.id().with("todo_filter_status"))
+                    .selected_text(match cfg.status {
                         TodoStatusFilter::All => "All",
                         TodoStatusFilter::Open => "Open",
                         TodoStatusFilter::Done => "Done",
                     })
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.cfg.status, TodoStatusFilter::All, "All");
-                        ui.selectable_value(&mut self.cfg.status, TodoStatusFilter::Open, "Open");
-                        ui.selectable_value(&mut self.cfg.status, TodoStatusFilter::Done, "Done");
+                        for (order, (status, identity, label)) in [
+                            (TodoStatusFilter::All, "all", "All"),
+                            (TodoStatusFilter::Open, "open", "Open"),
+                            (TodoStatusFilter::Done, "done", "Done"),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            let response = ui.selectable_value(&mut cfg.status, status, label);
+                            register_todo_scoped_response(
+                                ui,
+                                ctx,
+                                status_popup_scope.as_ref(),
+                                &response,
+                                format!("option/{identity}"),
+                                "Todo status option",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                order as u64,
+                            );
+                        }
                     });
-                ui.add(
-                    egui::DragValue::new(&mut self.cfg.min_priority)
+                register_jump_response(
+                    ui,
+                    ctx,
+                    &status_combo.response,
+                    || TODO_STATUS_FILTER_IDENTITY.to_owned(),
+                    || "Todo status filter".to_owned(),
+                    crate::gui::jump_mode::TargetKind::ComboBox,
+                    0,
+                );
+                let priority_response = ui.add(
+                    egui::DragValue::new(&mut cfg.min_priority)
                         .range(0..=255)
                         .prefix("p≥"),
                 );
+                register_jump_response(
+                    ui,
+                    ctx,
+                    &priority_response,
+                    || "todo:filter-min-priority".to_owned(),
+                    || "Todo minimum priority".to_owned(),
+                    crate::gui::jump_mode::TargetKind::Slider,
+                    1,
+                );
                 let available_tags = Self::available_tags(todos);
-                let selected = if self.cfg.filter_tags.is_empty() {
+                let selected = if cfg.filter_tags.is_empty() {
                     "Tag: any".to_string()
                 } else {
-                    format!("Tags: {}", self.cfg.filter_tags.join(","))
+                    format!("Tags: {}", cfg.filter_tags.join(","))
                 };
-                egui::ComboBox::from_id_salt(ui.id().with("todo_filter_tags"))
+                let tags_combo = egui::ComboBox::from_id_salt(ui.id().with("todo_filter_tags"))
                     .selected_text(selected)
                     .show_ui(ui, |ui| {
-                        if ui.button("Clear tags").clicked() {
-                            self.cfg.filter_tags.clear();
+                        let clear_response = ui.button("Clear tags");
+                        register_todo_scoped_response(
+                            ui,
+                            ctx,
+                            tags_popup_scope.as_ref(),
+                            &clear_response,
+                            "clear",
+                            "Clear todo tag filter",
+                            crate::gui::jump_mode::TargetKind::Button,
+                            0,
+                        );
+                        if clear_response.clicked() && ctx.jump_mode_activation_allowed {
+                            cfg.filter_tags.clear();
                         }
-                        for tag in available_tags {
-                            let mut enabled = self
-                                .cfg
+                        for (order, tag) in available_tags.into_iter().enumerate() {
+                            let mut enabled = cfg
                                 .filter_tags
                                 .iter()
                                 .any(|selected| selected.eq_ignore_ascii_case(&tag));
-                            if ui.checkbox(&mut enabled, &tag).changed() {
+                            let response = ui.checkbox(&mut enabled, &tag);
+                            if let Some(scope) = tags_popup_scope.as_ref() {
+                                let tag_identity =
+                                    opaque_dashboard_action_identity(&format!("todo-tag/{}", tag));
+                                register_todo_scoped_response(
+                                    ui,
+                                    ctx,
+                                    Some(scope),
+                                    &response,
+                                    format!("option/{tag_identity}"),
+                                    "Todo tag option",
+                                    crate::gui::jump_mode::TargetKind::Checkbox,
+                                    order as u64 + 1,
+                                );
+                            }
+                            if response.changed() {
                                 if enabled {
-                                    self.cfg.filter_tags.push(tag.clone());
+                                    cfg.filter_tags.push(tag.clone());
                                 } else {
-                                    self.cfg
-                                        .filter_tags
+                                    cfg.filter_tags
                                         .retain(|selected| !selected.eq_ignore_ascii_case(&tag));
                                 }
-                                self.cfg
-                                    .filter_tags
-                                    .sort_by_key(|value| value.to_lowercase());
-                                self.cfg
-                                    .filter_tags
-                                    .dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+                                cfg.filter_tags.sort_by_key(|value| value.to_lowercase());
+                                cfg.filter_tags.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
                             }
                         }
                     });
+                register_jump_response(
+                    ui,
+                    ctx,
+                    &tags_combo.response,
+                    || TODO_TAG_FILTER_IDENTITY.to_owned(),
+                    || "Todo tag filter".to_owned(),
+                    crate::gui::jump_mode::TargetKind::ComboBox,
+                    2,
+                );
             });
             ui.horizontal(|ui| {
                 ui.label(format!("Todos: {done}/{total} done"));
@@ -359,11 +479,11 @@ impl TodoWidget {
                             action: "todo:dialog".into(),
                             args: None,
                         },
-                        query_override: self.cfg.query.clone().or_else(|| Some("todo".into())),
+                        query_override: cfg.query.clone().or_else(|| Some("todo".into())),
                     });
                 }
             });
-            if self.cfg.show_progress {
+            if show_progress {
                 ui.label(format!("Remaining: {remaining}"));
                 if total > 0 {
                     let pct = done as f32 / total as f32;
@@ -391,7 +511,6 @@ impl TodoWidget {
         }
 
         let mut clicked = None;
-        let mut entry_occurrences = std::collections::HashMap::new();
         let row_height =
             ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y + 8.0;
         let scroll_id = ui.id().with("todo_list_scroll");
@@ -404,14 +523,35 @@ impl TodoWidget {
                     let mut entry_done = entry.done;
                     let native_row_id = if entry.id.is_empty() {
                         ui.id()
-                            .with(("todo-entry-fallback", entry.text.as_str(), idx))
+                            .with(("todo-entry-row-legacy", entry.text.as_str(), idx))
                     } else {
-                        ui.id().with(("todo-entry", entry.id.as_str()))
+                        ui.id().with(("todo-entry-row", entry.id.as_str()))
                     };
-                    ui.push_id(native_row_id, |ui| {
+                    ui.scope_builder(egui::UiBuilder::new().id(native_row_id), |ui| {
                         ui.horizontal(|ui| {
                             ui.set_min_width(min_row_width);
-                            if ui.checkbox(&mut entry_done, "").changed() {
+                            let done_response = ui.checkbox(&mut entry_done, "");
+                            register_jump_response(
+                                ui,
+                                ctx,
+                                &done_response,
+                                || {
+                                    format!(
+                                        "{}/done",
+                                        todo_entry_identity(&entry, idx, ctx.todo_version)
+                                    )
+                                },
+                                || {
+                                    if entry.done {
+                                        "Mark todo open".to_owned()
+                                    } else {
+                                        "Mark todo done".to_owned()
+                                    }
+                                },
+                                crate::gui::jump_mode::TargetKind::Checkbox,
+                                idx as u64,
+                            );
+                            if done_response.changed() && ctx.jump_mode_activation_allowed {
                                 if let Err(err) = mark_done(TODO_FILE, idx) {
                                     tracing::error!("Failed to toggle todo #{idx}: {err}");
                                 } else {
@@ -444,16 +584,10 @@ impl TodoWidget {
                                 ctx,
                                 &response,
                                 || {
-                                    let base = if entry.id.is_empty() {
-                                        format!("todo-entry-fallback:{}:{idx}", entry.text)
-                                    } else {
-                                        format!("todo-entry:{}", entry.id)
-                                    };
-                                    let occurrence = next_jump_duplicate_occurrence(
-                                        &mut entry_occurrences,
-                                        base.clone(),
-                                    );
-                                    format!("{base}/open:{occurrence}")
+                                    format!(
+                                        "{}/open",
+                                        todo_entry_identity(&entry, idx, ctx.todo_version)
+                                    )
                                 },
                                 || "Open".into(),
                                 idx as u64,
@@ -521,8 +655,103 @@ impl Widget for TodoWidget {
 
 #[cfg(test)]
 mod tests {
-    use super::{TodoSort, TodoStatusFilter, TodoWidget, TodoWidgetConfig};
-    use crate::plugins::todo::TodoEntry;
+    use super::*;
+    use crate::actions::ActionIdLookup;
+    use crate::dashboard::data_cache::{DashboardDataCache, DashboardDataSnapshot};
+    use crate::gui::jump_mode::ui::JumpModeUi;
+    use crate::gui::jump_mode::{SurfaceId, TargetGeneration};
+    use once_cell::sync::Lazy;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn dashboard_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 650.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn dashboard_scope(jump: &JumpModeUi) -> crate::gui::JumpModeScope {
+        jump.scope(
+            SurfaceId::Dashboard,
+            TargetGeneration(7),
+            "dashboard-test",
+            egui::ViewportId::ROOT,
+            true,
+        )
+        .expect("enabled Jump Mode creates a dashboard scope")
+        .child_namespace("slot-id:todo")
+        .child_namespace("body")
+    }
+
+    fn dashboard_context<'a>(
+        plugins: &'a crate::plugin::PluginManager,
+        data_cache: &'a DashboardDataCache,
+        todo_version: u64,
+        jump_mode_scope: Option<crate::gui::JumpModeScope>,
+        jump_mode_activation_allowed: bool,
+    ) -> DashboardContext<'a> {
+        static EMPTY_USAGE: Lazy<HashMap<String, u32>> = Lazy::new(HashMap::new);
+        static EMPTY_LOOKUP: Lazy<ActionIdLookup> = Lazy::new(ActionIdLookup::default);
+        DashboardContext {
+            actions: &[],
+            actions_by_id: &EMPTY_LOOKUP,
+            usage: &EMPTY_USAGE,
+            plugins,
+            enabled_plugins: None,
+            default_location: None,
+            data_cache,
+            actions_version: 0,
+            fav_version: 0,
+            notes_version: 0,
+            todo_version,
+            calendar_version: 0,
+            clipboard_version: 0,
+            snippets_version: 0,
+            dashboard_visible: true,
+            dashboard_focused: true,
+            reduce_dashboard_work_when_unfocused: false,
+            diagnostics: None,
+            show_diagnostics_widget: false,
+            jump_mode_scope,
+            jump_mode_activation_allowed,
+        }
+    }
+
+    fn render_with_input(
+        widget: &mut TodoWidget,
+        ctx: &DashboardContext<'_>,
+        egui_ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> Option<WidgetAction> {
+        let mut action = None;
+        egui_ctx
+            .run_ui(dashboard_input(events), |ui| {
+                ui.push_id("slot-id:todo", |ui| {
+                    ui.push_id("body", |ui| {
+                        action = widget.render(ui, ctx, WidgetActivation::Click);
+                    });
+                });
+            })
+            .drop_without_applying_deltas();
+        action
+    }
+
+    fn fixture_todo(id: &str) -> TodoEntry {
+        TodoEntry {
+            id: id.into(),
+            text: "private todo body Ω".into(),
+            done: false,
+            priority: 5,
+            tags: vec!["private todo tag".into()],
+            entity_refs: Vec::new(),
+        }
+    }
 
     fn sample_entries() -> Vec<TodoEntry> {
         vec![
@@ -588,5 +817,144 @@ mod tests {
         assert_eq!(restored.status, TodoStatusFilter::Done);
         assert_eq!(restored.min_priority, 2);
         assert_eq!(restored.filter_tags, vec!["urgent", "home"]);
+    }
+
+    #[test]
+    fn jump_mode_dashboard_simple_controls_todo_filters_and_done_action() {
+        use crate::gui::jump_mode::TargetKind;
+
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let todo = fixture_todo("fixture-todo-id");
+        std::fs::write(
+            workspace.root().join(crate::plugins::todo::TODO_FILE),
+            serde_json::to_vec(std::slice::from_ref(&todo)).unwrap(),
+        )
+        .unwrap();
+
+        let data_cache = DashboardDataCache::new();
+        let mut snapshot = DashboardDataSnapshot::default();
+        snapshot.todos = Arc::new(vec![todo.clone()]);
+        data_cache.set_snapshot_for_test(snapshot);
+        let plugins = crate::plugin::PluginManager::new_inert_for_test();
+        let mut widget = TodoWidget::new(TodoWidgetConfig::default());
+        let todo_version = crate::plugins::todo::todo_version();
+        let egui_ctx = egui::Context::default();
+        let mut jump = JumpModeUi::new(true);
+
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let scope = dashboard_scope(&jump);
+        let context = dashboard_context(
+            &plugins,
+            &data_cache,
+            todo_version,
+            Some(scope.clone()),
+            true,
+        );
+        assert!(render_with_input(&mut widget, &context, &egui_ctx, Vec::new()).is_none());
+        jump.finish_ui_pass();
+        let registry = jump.pass_registry().unwrap();
+        let expected_labels = [
+            "Todo status filter",
+            "Todo minimum priority",
+            "Todo tag filter",
+            "Mark todo done",
+            "Open",
+        ];
+        for label in expected_labels {
+            assert!(
+                registry
+                    .metadata()
+                    .any(|metadata| metadata.label() == label),
+                "missing real todo target {label:?}"
+            );
+        }
+        let done_identity = format!("{}/done", todo_entry_identity(&todo, 0, todo_version));
+        let done_target = scope.target_id(done_identity);
+        let done_response = registry.get(&done_target).unwrap();
+        assert_eq!(done_response.metadata().kind(), TargetKind::Checkbox);
+        let combo_targets = registry
+            .targets()
+            .iter()
+            .filter(|target| target.metadata().kind() == TargetKind::ComboBox)
+            .count();
+        assert_eq!(
+            combo_targets, 2,
+            "status and tags use actual ComboBox anchors"
+        );
+        assert!(registry.metadata().all(|metadata| {
+            matches!(
+                metadata.label(),
+                "Todo status filter"
+                    | "Todo minimum priority"
+                    | "Todo tag filter"
+                    | "Open todos"
+                    | "Mark todo done"
+                    | "Open"
+            )
+        }));
+        for target in registry.targets() {
+            let semantic = format!("{:?}", target.id().semantic());
+            assert!(!semantic.contains("private todo body"));
+            assert!(!semantic.contains("private todo tag"));
+        }
+        let original =
+            std::fs::read(workspace.root().join(crate::plugins::todo::TODO_FILE)).unwrap();
+        jump.complete_frame(&egui_ctx, true, true);
+
+        jump.begin_frame();
+        assert!(jump.queue_focus_intent(
+            done_target.clone(),
+            egui::ViewportId::ROOT,
+            jump.navigation_epoch(),
+        ));
+        jump.begin_ui_pass();
+        let scope = dashboard_scope(&jump);
+        let context = dashboard_context(&plugins, &data_cache, todo_version, Some(scope), true);
+        assert!(render_with_input(&mut widget, &context, &egui_ctx, Vec::new()).is_none());
+        jump.finish_ui_pass();
+        let focused = jump.pass_registry().unwrap().get(&done_target).unwrap();
+        assert_eq!(
+            egui_ctx.memory(|memory| memory.focused()),
+            Some(focused.response_id())
+        );
+        assert_eq!(
+            std::fs::read(workspace.root().join(crate::plugins::todo::TODO_FILE)).unwrap(),
+            original
+        );
+        jump.complete_frame(&egui_ctx, true, true);
+
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let scope = dashboard_scope(&jump);
+        let context = dashboard_context(&plugins, &data_cache, todo_version, Some(scope), true);
+        assert!(
+            render_with_input(
+                &mut widget,
+                &context,
+                &egui_ctx,
+                vec![egui::Event::Key {
+                    key: egui::Key::Space,
+                    physical_key: Some(egui::Key::Space),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            )
+            .is_none()
+        );
+        jump.finish_ui_pass();
+        jump.complete_frame(&egui_ctx, true, true);
+        let persisted: Vec<TodoEntry> = serde_json::from_slice(
+            &std::fs::read(workspace.root().join(crate::plugins::todo::TODO_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert!(
+            persisted[0].done,
+            "a distinct native Space toggles exactly the focused row"
+        );
+        assert_eq!(persisted[0].text, todo.text);
+        assert_eq!(persisted[0].tags, todo.tags);
     }
 }
