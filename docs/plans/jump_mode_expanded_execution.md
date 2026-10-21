@@ -20,8 +20,8 @@ Started 2026-10-20 from clean selected branch `jump`, base `0cb3dabf148dc720ed56
 | M9 Designers | verification_gap | Implementation and review complete; A/B five unique passes each, C eight, D three; B retains unrelated error-baseline fixture failure. |
 | M10 | complete | Exactly two curated selections passed 12/12 + 10/10; docs/evidence review clean; existing fixture-only run passed 7/7. |
 | M11-A | verification_gap | Original full run failed (6588 passed, 20 failed, 48 skipped). All 12 task-related newly exposed cases now pass after focused correction; three exhausted gaps and five baseline findings remain. |
-| M11-B | in_progress | Final classification and source diff inspected; repair commit and handoff ledger being finalized. |
-| M11-C | pending | Clippy last, after normal source/docs/format/tests/commits. |
+| M11-B | complete | Coverage, all failure classifications, source ownership/diff, clean tree and upstream inspected; ordinary source/docs/format/tests finished before final lint. |
+| M11-C | pending_final_lint | Exact default maintained-workspace command prepared; late result belongs in final response without post-lint ledger edits. |
 
 A verification_gap is not a claim that the failed fixture passed, nor proof of a product defect. Exact limitations below remain part of the handoff.
 
@@ -125,6 +125,41 @@ All listed commits were retained locally and successfully pushed normally to `or
 | M8 | `2df67bc9`, `6160e96f`, `fc4a287b`, `80b70a8f`, `69405cc6` |
 | M9 | `7b060b2c`, `c7cd3d52`, `09ed8de3`, `1d7c1010` |
 | M10 | `e643c0f0`, `04f272ad` |
-| M11-A fixture repair | `ab32aa62`; Properties repair pending commit |
+| M11-A repairs | `ab32aa62`, `3afbf969` |
 
 No universal coverage or all-green claim. Final checkpoint state must reflect the actual full-suite/lint outcome and the explicit limits above.
+
+## Final handoff state before lint
+
+M11-A correctness outcome remains verification_gap, not all-green. The original full suite is preserved as 6588 passed/20 failed/48 skipped, including one deliberately terminated baseline deadlock. Four fixture corrections plus eight Radial cases now pass focused verification; no second full run was performed. The three exhausted fixture gaps and five unrelated baseline findings remain separately classified above. All other M0-M10 implementation work is committed and pushed.
+
+Exact failed names from the original full summary (the final Hotfolder case was ABORT):
+
+```text
+paste_sequence_acceptance_prompted_three_steps_across_apps_and_fourth_normal_paste
+ambiguous_same_priority_dialogs_and_nested_popups_fail_closed
+actual_tree_search_settled_starter_checkpoint_restores_starter_on_ctrl_z
+actual_tree_search_rapid_edits_coalesce_to_the_seeded_empty_checkpoint
+jump_mode_radial_tree_foreign_foreground_focus_blocks_native_shortcuts
+properties_action_text_is_discarded_only_by_explicit_discard
+properties_pin_control_stages_exact_binding_then_apply_continues_navigation
+properties_command_must_be_set_before_navigation_apply_and_continue
+properties_query_must_be_saved_before_navigation_apply_and_continue
+retained_dirty_inspector_properties_handoff_requires_explicit_discard
+retained_inspector_keep_editing_preserves_buffers_and_discard_tears_down_owner
+saving_query_after_selecting_result_clears_candidate_before_navigation_apply
+skins_tab_preserves_inspector_text_and_skin_navigation_can_be_cancelled
+jump_mode_batch_rename_confirmation_apply_hint_requires_fresh_cancel
+jump_mode_clipboard_browse_hint_selects_duplicate_without_exposing_contents_or_actions
+jump_mode_mouse_settings_native_click_remains_available_when_jump_is_disabled
+capability_marks_filesystem_risk_and_macro_staleness_without_dispatch
+every_reset_candidate_passes_its_domain_probe
+secure_msxml_gate_proves_parse_xpath_xsd_and_local_resource_policy
+settled_observation_leases_transfer_without_success_and_recheck_evidence
+```
+
+Changed-source inventory: shared Jump ownership/response adapters and GUI orchestration; the eight dialog/designer families and their direct helper modules; Dashboard composition and actual property renderers; checked Clipboard persistence; gesture capture coordination; QA/fixture generator/runner and user help/docs. No new production dependencies, serialized schema, production shortcut defaults, unrelated baseline source, protected formatting files, vendored code, AGENTS or role definitions changed. Current checkout and all owned fixtures/evidence were inspected; no leftover generated root config remains. Historical withdrawn native-focus investigation is reference-only, not applied source.
+
+Final Clippy phase command: `cargo clippy --workspace --all-targets -- -D warnings`, default maintained package targets (single package; feature-gated developer/performance binaries remain off). Vendor path dependencies are not workspace members or explicit targets. If unchanged Pinboard never_loop findings block this command, report them as blocked_existing_baseline; additionally use the narrowest maintained library scope that the toolchain permits to assess Jump additions. A specific compiler --force-warn for the known baseline lint may keep it visible while denying every other warning; it is not an allow annotation or a project-wide green claim. Any newly introduced diagnostics must be corrected in bounded passes, with needed format/focused verification and commit before the LAST lint invocation. After the final successful maintained scope or bounded documented lint block, perform no further code/docs/format/tests: actual final command results and HEAD go directly in the final response.
+
+The parent will commit this ordinary handoff before Clippy. The final handoff commit's own hash and actual lint result necessarily appear in the response rather than a self-referential or post-lint ledger edit.
