@@ -3347,10 +3347,40 @@ impl LauncherApp {
         use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
 
         self.batch_rename_dialog.open
+            && !self
+                .batch_rename_dialog
+                .jump_mode_has_pending_confirmation()
             && self.native_ui_host_input_allowed(ctx, root_visible)
             && NavigationDialogKind::BatchRename
                 .layer_id()
                 .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+    }
+
+    fn batch_rename_confirmation_native_ui_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> crate::gui::jump_mode::ui::NavigationOwner {
+        use crate::gui::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, resolve_batch_rename_confirmation_owner,
+        };
+
+        if !self.batch_rename_dialog.open || !self.native_ui_host_input_allowed(ctx, root_visible) {
+            return NavigationOwner::Blocked;
+        }
+        let Some(parent_instance) = self
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::BatchRename)
+        else {
+            return NavigationOwner::Blocked;
+        };
+        let Some((confirmation_instance, kind)) = self
+            .batch_rename_dialog
+            .jump_mode_pending_confirmation_identity()
+        else {
+            return NavigationOwner::Blocked;
+        };
+        resolve_batch_rename_confirmation_owner(ctx, parent_instance, confirmation_instance, kind)
     }
 
     fn mouse_gesture_settings_picker_native_ui_owner_current(
@@ -3740,6 +3770,44 @@ impl LauncherApp {
                 }
                 // A different recognized foreground dialog remains the owner;
                 // unknown foreground layers were already resolved as Blocked.
+                _ => {}
+            }
+        }
+        if !prompt_is_open
+            && self.jump_mode_host_input_allowed(ctx, root_visible)
+            && let Some(parent_instance) = self
+                .jump_mode_ui
+                .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename)
+            && let Some((confirmation_instance, kind)) = self
+                .batch_rename_dialog
+                .jump_mode_pending_confirmation_identity()
+        {
+            use crate::gui::jump_mode::ui::{
+                NavigationDialogKind, NavigationOwner, batch_rename_confirmation_layer_id,
+                resolve_batch_rename_confirmation_owner, visible_top_middle_layer,
+            };
+
+            let child_layer =
+                batch_rename_confirmation_layer_id(parent_instance, confirmation_instance, kind);
+            let parent_layer = NavigationDialogKind::BatchRename.layer_id();
+            match visible_top_middle_layer(ctx) {
+                Some(layer) if layer == child_layer => {
+                    combo_popup = None;
+                    candidate = resolve_batch_rename_confirmation_owner(
+                        ctx,
+                        parent_instance,
+                        confirmation_instance,
+                        kind,
+                    );
+                }
+                Some(layer) if Some(layer) == parent_layer => {
+                    // A pending child owns the transition immediately; the
+                    // parent cannot keep targets live during its first paint.
+                    candidate = NavigationOwner::Blocked;
+                    combo_popup = None;
+                }
+                // Preserve another recognized foreground owner's candidate.
+                // Unknown layers already resolve to Blocked above.
                 _ => {}
             }
         }
@@ -5280,6 +5348,7 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
@@ -5410,6 +5479,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
@@ -5482,6 +5552,7 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
@@ -5544,6 +5615,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
@@ -5581,6 +5653,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
@@ -5877,8 +5950,48 @@ impl LauncherApp {
             }
             _ => None,
         };
+        let batch_rename_parent_instance = self
+            .jump_mode_ui
+            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename);
+        let batch_rename_confirmation_scope = match (
+            batch_rename_owner,
+            batch_rename_parent_instance,
+            self.batch_rename_dialog
+                .jump_mode_pending_confirmation_identity(),
+        ) {
+            (
+                crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation {
+                    parent_instance,
+                    confirmation_instance,
+                    kind,
+                },
+                Some(current_parent_instance),
+                Some((current_confirmation_instance, current_kind)),
+            ) if self.jump_mode_enabled()
+                && parent_instance == current_parent_instance
+                && confirmation_instance == current_confirmation_instance
+                && kind == current_kind =>
+            {
+                let owner = batch_rename_owner;
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::popup(
+                        kind.surface_kind(),
+                        confirmation_instance,
+                        crate::gui::jump_mode::SurfaceId::dialog("batch-rename", parent_instance),
+                    ),
+                    crate::gui::jump_mode::TargetGeneration(confirmation_instance),
+                    "batch-rename/confirmation",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
         let batch_rename_native_owner =
             self.batch_rename_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
+        let batch_rename_confirmation_native_owner = self
+            .batch_rename_confirmation_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
         if !batch_rename_native_owner
             && let Some(focused) = ctx.memory(|memory| memory.focused())
             && ctx.read_response(focused).is_some_and(|response| {
@@ -5891,8 +6004,12 @@ impl LauncherApp {
         let batch_rename_commands = self.batch_rename_dialog.ui_with_jump_mode(
             &ctx,
             batch_rename_scope.as_ref(),
+            batch_rename_confirmation_scope.as_ref(),
+            batch_rename_owner,
             batch_rename_native_owner,
+            batch_rename_confirmation_native_owner,
             first_ui_pass,
+            batch_rename_parent_instance,
             &batch_rename_runtime,
         );
         if first_ui_pass {
@@ -5933,6 +6050,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
@@ -6015,6 +6133,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
@@ -6084,6 +6203,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
@@ -33252,6 +33372,418 @@ mod tests {
             "focus inside a foreign window blocks even when Settings is foremost"
         );
         assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    fn batch_rename_test_frame(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        events: Vec<egui::Event>,
+    ) {
+        let output = app.run_root_frame_for_test(
+            ctx,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1440.0, 1100.0),
+                )),
+                events,
+                ..actual_query_input(true)
+            },
+            false,
+        );
+        output.0.drop_without_applying_deltas();
+    }
+
+    fn prepare_batch_rename_generated_fixture(
+        ctx: &egui::Context,
+    ) -> (
+        crate::performance::workloads::IsolatedWorkspace,
+        LauncherApp,
+        std::path::PathBuf,
+        tempfile::TempDir,
+    ) {
+        let repository_root =
+            std::env::current_dir().expect("read repository root before isolation");
+        let (workspace, mut app) = root_list_test_app(ctx, Vec::new());
+        let scan_parent = repository_root.join("target/productivity_expansion");
+        std::fs::create_dir_all(&scan_parent).expect("create repository-local scan fixture parent");
+        let root_guard = tempfile::Builder::new()
+            .prefix("batch_rename_jump_")
+            .tempdir_in(&scan_parent)
+            .expect("create disposable native scan root");
+        let root = root_guard.path().to_path_buf();
+        std::fs::write(root.join("alpha.txt"), b"alpha fixture").unwrap();
+        std::fs::write(root.join("beta.txt"), b"beta fixture").unwrap();
+
+        app.set_jump_mode_enabled(true);
+        app.batch_rename_dialog.open = true;
+        prepare_actual_query_frame(ctx, &mut app);
+        app.handle_batch_rename_ui_command(crate::gui::BatchRenameUiCommand::SelectRoot(
+            root.clone(),
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            app.poll_batch_rename_runtime(ctx);
+            let runtime = app.batch_rename_runtime_snapshot();
+            if !app.batch_rename_dialog.has_pending_scan() && runtime.journal_ready {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the generated read-only scan and recovery journal should settle"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            app.batch_rename_dialog.test_scan_status(),
+            Some(crate::file_operations::RenameScanStatus::Complete),
+            "the generated root must produce a complete scan before testing visible rows: {}",
+            app.batch_rename_dialog.test_scan_diagnostic()
+        );
+        assert!(
+            app.batch_rename_dialog.has_accepted_snapshot(),
+            "a complete scan must be accepted by the current session: {}",
+            app.batch_rename_dialog.test_scan_diagnostic()
+        );
+        for _ in 0..2 {
+            batch_rename_test_frame(ctx, &mut app, Vec::new());
+        }
+        (workspace, app, root, root_guard)
+    }
+
+    fn batch_rename_target_by_label(
+        app: &LauncherApp,
+        label: &str,
+    ) -> crate::gui::jump_mode::ui::RegisteredTarget {
+        app.jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .unwrap_or_else(|| panic!("missing current Batch Rename target: {label}"))
+            .clone()
+    }
+
+    fn batch_rename_select_target_for_ref(
+        app: &LauncherApp,
+        entry_ref: crate::batch_rename::SnapshotEntryRef,
+    ) -> crate::gui::jump_mode::ui::RegisteredTarget {
+        use crate::gui::jump_mode::SemanticTargetId;
+
+        let local_identity = format!("entry/{}/select", entry_ref.0);
+        let suffix = format!("{}:{local_identity}", local_identity.len());
+        app.jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label() == "Select file"
+                    && matches!(
+                        target.id().semantic(),
+                        SemanticTargetId::Named(identity) if identity.ends_with(&suffix)
+                    )
+            })
+            .unwrap_or_else(|| panic!("missing Select target for opaque row {}", entry_ref.0))
+            .clone()
+    }
+
+    fn batch_rename_start_hints(ctx: &egui::Context, app: &mut LauncherApp) {
+        batch_rename_test_frame(
+            ctx,
+            app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+    }
+
+    fn batch_rename_complete_hint(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        target: &crate::gui::jump_mode::ui::RegisteredTarget,
+    ) {
+        let hint = app
+            .jump_mode_ui
+            .active_session()
+            .expect("leader starts a Jump session")
+            .hint_map()
+            .hint_for(target.id())
+            .expect("the current target receives a hint")
+            .as_str()
+            .to_owned();
+        batch_rename_test_frame(
+            ctx,
+            app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        batch_rename_test_frame(ctx, app, vec![egui::Event::Text(hint)]);
+    }
+
+    #[test]
+    fn jump_mode_batch_rename_rows_focus_only_and_native_ids_follow_sort() {
+        use crate::gui::jump_mode::TargetKind;
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app, root, root_guard) = prepare_batch_rename_generated_fixture(&ctx);
+        let original_bytes = ["alpha.txt", "beta.txt"]
+            .into_iter()
+            .map(|name| std::fs::read(root.join(name)).unwrap())
+            .collect::<Vec<_>>();
+        let refs = app.batch_rename_dialog.test_visible_file_entry_refs();
+        assert_eq!(refs.len(), 2);
+        let first = batch_rename_select_target_for_ref(&app, refs[0]);
+        assert_eq!(first.metadata().kind(), TargetKind::Checkbox);
+        assert!(first.enabled());
+        assert!(first.clipped_rect().width() > 0.0 && first.clipped_rect().height() > 0.0);
+        let id_before = refs
+            .iter()
+            .map(|entry_ref| {
+                (
+                    entry_ref.0,
+                    batch_rename_select_target_for_ref(&app, *entry_ref).response_id(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        for target in app.jump_mode_ui.retained_registry().targets() {
+            if matches!(target.metadata().label(), "Include file" | "Select file") {
+                let crate::gui::jump_mode::SemanticTargetId::Named(identity) =
+                    target.id().semantic()
+                else {
+                    panic!("row metadata is represented by an opaque identity")
+                };
+                assert!(!identity.contains("alpha.txt"));
+                assert!(!identity.contains("beta.txt"));
+            }
+        }
+
+        batch_rename_start_hints(&ctx, &mut app);
+        batch_rename_complete_hint(&ctx, &mut app, &first);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(ctx.memory(|memory| memory.has_focus(first.response_id())));
+        assert!(!app.batch_rename_dialog.test_is_selected(refs[0]));
+        assert_eq!(
+            ["alpha.txt", "beta.txt"]
+                .into_iter()
+                .map(|name| std::fs::read(root.join(name)).unwrap())
+                .collect::<Vec<_>>(),
+            original_bytes,
+            "focusing a row does not change selection or files"
+        );
+
+        batch_rename_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Space, egui::Modifiers::NONE)],
+        );
+        assert!(app.batch_rename_dialog.test_is_selected(refs[0]));
+        batch_rename_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::NONE)],
+        );
+        batch_rename_test_frame(&ctx, &mut app, Vec::new());
+        let before_sort = refs
+            .iter()
+            .map(|entry_ref| {
+                let target = batch_rename_select_target_for_ref(&app, *entry_ref);
+                (entry_ref.0, (target.id().clone(), target.response_id()))
+            })
+            .collect::<HashMap<_, _>>();
+
+        app.batch_rename_dialog.test_reverse_filename_order();
+        batch_rename_test_frame(&ctx, &mut app, Vec::new());
+        assert_eq!(
+            app.batch_rename_dialog.test_visible_file_entry_refs(),
+            refs.iter().rev().copied().collect::<Vec<_>>(),
+            "the fixture changed the displayed sort order"
+        );
+        for entry_ref in &refs {
+            let target = batch_rename_select_target_for_ref(&app, *entry_ref);
+            let (old_target_id, old_response_id) = &before_sort[&entry_ref.0];
+            assert_eq!(
+                target.response_id(),
+                *old_response_id,
+                "the actual checkbox response ID follows its entry through sorting"
+            );
+            assert_ne!(target.id(), old_target_id, "sort renews target authority");
+            assert!(
+                app.jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .all(|current| current.id() != old_target_id),
+                "the pre-sort target is absent from the renewed registry"
+            );
+        }
+        assert_eq!(
+            batch_rename_select_target_for_ref(&app, refs[0]).response_id(),
+            id_before[&refs[0].0],
+            "a row's native checkbox identity is stable from first paint and after sorting"
+        );
+        assert_eq!(
+            ["alpha.txt", "beta.txt"]
+                .into_iter()
+                .map(|name| std::fs::read(root.join(name)).unwrap())
+                .collect::<Vec<_>>(),
+            original_bytes
+        );
+        app.shutdown_batch_rename_scanner();
+        drop(root_guard);
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_batch_rename_confirmation_apply_hint_requires_fresh_cancel() {
+        use crate::gui::jump_mode::{SurfaceId, ui::NavigationOwner};
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app, root, root_guard) = prepare_batch_rename_generated_fixture(&ctx);
+        let original = std::fs::read(root.join("alpha.txt")).unwrap();
+        let entry_ref = app
+            .batch_rename_dialog
+            .test_prepare_ready_apply_preview()
+            .expect("the generated fixture creates one ready, selected preview action");
+        assert!(app.batch_rename_dialog.test_is_selected(entry_ref));
+        app.batch_rename_dialog.test_reveal_apply_target();
+        // The actual response requests scrolling during this frame; collect
+        // its newly visible geometry on the next real render pass.
+        batch_rename_test_frame(&ctx, &mut app, Vec::new());
+        batch_rename_test_frame(&ctx, &mut app, Vec::new());
+        let apply = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Apply selected renames")
+            .cloned();
+        assert!(
+            apply.is_some(),
+            "Apply should be a current visible target; owner={:?}, top_layer={:?}, native_owner={}, runtime=(journal_ready={}, operation_active={}, receipt_statuses={:?}), scan={}, targets={:?}",
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
+            app.batch_rename_native_ui_owner_current(&ctx, true),
+            app.batch_rename_runtime_snapshot().journal_ready,
+            app.batch_rename_runtime_snapshot().operation_active,
+            app.batch_rename_runtime_snapshot()
+                .receipts
+                .iter()
+                .map(|receipt| receipt.status())
+                .collect::<Vec<_>>(),
+            app.batch_rename_dialog.test_scan_diagnostic(),
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .map(|target| target.metadata().label())
+                .collect::<Vec<_>>()
+        );
+        let apply = apply.expect("asserted current Apply target");
+        assert!(apply.enabled());
+        batch_rename_start_hints(&ctx, &mut app);
+        batch_rename_complete_hint(&ctx, &mut app, &apply);
+        assert!(!app.batch_rename_dialog.jump_mode_has_pending_confirmation());
+        assert!(app.batch_rename_dialog.pending_intent().is_none());
+        assert_eq!(std::fs::read(root.join("alpha.txt")).unwrap(), original);
+
+        batch_rename_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(app.batch_rename_dialog.jump_mode_has_pending_confirmation());
+        assert!(app.batch_rename_dialog.pending_intent().is_some());
+        assert_eq!(std::fs::read(root.join("alpha.txt")).unwrap(), original);
+        batch_rename_test_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(app.batch_rename_dialog.jump_mode_has_pending_confirmation());
+        assert!(app.batch_rename_dialog.pending_intent().is_some());
+        assert!(!app.batch_rename_runtime_snapshot().operation_active);
+        assert!(app.test_activation_trace.is_empty());
+        assert_eq!(std::fs::read(root.join("alpha.txt")).unwrap(), original);
+        let pending_targets = app.jump_mode_ui.retained_registry().targets();
+        assert!(pending_targets.iter().all(|target| {
+            matches!(
+                target.id().surface(),
+                SurfaceId::Popup { kind, .. } if kind == "batch-rename-apply-confirmation"
+            )
+        }));
+        batch_rename_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        batch_rename_test_frame(&ctx, &mut app, Vec::new());
+
+        let (confirmation_instance, kind) = app
+            .batch_rename_dialog
+            .jump_mode_pending_confirmation_identity()
+            .expect("the Apply child has a live per-open identity");
+        assert_eq!(
+            kind,
+            crate::gui::jump_mode::ui::BatchRenameConfirmationKind::Apply
+        );
+        let parent_instance = app
+            .jump_mode_ui
+            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename)
+            .unwrap();
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::BatchRenameConfirmation {
+                parent_instance,
+                confirmation_instance,
+                kind,
+            }
+        );
+        let expected_surface = SurfaceId::popup(
+            kind.surface_kind(),
+            confirmation_instance,
+            SurfaceId::dialog("batch-rename", parent_instance),
+        );
+        let targets = app.jump_mode_ui.retained_registry().targets();
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.metadata().label() == "Cancel batch rename")
+        );
+        assert!(
+            targets
+                .iter()
+                .all(|target| target.id().surface() == &expected_surface)
+        );
+        assert!(targets.iter().all(|target| {
+            !target.metadata().label().contains("alpha.txt")
+                && !target.metadata().label().contains("fixture-")
+        }));
+        assert!(app.test_activation_trace.is_empty());
+
+        let cancel = batch_rename_target_by_label(&app, "Cancel batch rename");
+        batch_rename_start_hints(&ctx, &mut app);
+        batch_rename_complete_hint(&ctx, &mut app, &cancel);
+        assert!(app.batch_rename_dialog.jump_mode_has_pending_confirmation());
+        assert!(ctx.memory(|memory| memory.has_focus(cancel.response_id())));
+        assert_eq!(std::fs::read(root.join("alpha.txt")).unwrap(), original);
+        batch_rename_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(!app.batch_rename_dialog.jump_mode_has_pending_confirmation());
+        assert!(app.batch_rename_dialog.pending_intent().is_none());
+        assert_eq!(std::fs::read(root.join("alpha.txt")).unwrap(), original);
+        assert!(!app.batch_rename_runtime_snapshot().operation_active);
+        app.shutdown_batch_rename_scanner();
+        drop(root_guard);
         drop(workspace);
     }
 

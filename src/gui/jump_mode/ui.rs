@@ -189,12 +189,34 @@ pub(crate) enum NavigationOwner {
         parent_instance: u64,
         confirmation_instance: u64,
     },
+    /// One exact Batch Rename confirmation for a frozen Apply plan or a
+    /// receipt-specific Undo request.
+    BatchRenameConfirmation {
+        parent_instance: u64,
+        confirmation_instance: u64,
+        kind: BatchRenameConfirmationKind,
+    },
     /// One exact, transient snippet prompt window. Its generation is also
     /// part of the window's egui layer ID.
     SnippetPrompt {
         generation: u64,
     },
     Blocked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum BatchRenameConfirmationKind {
+    Apply,
+    Undo,
+}
+
+impl BatchRenameConfirmationKind {
+    pub(crate) fn surface_kind(self) -> &'static str {
+        match self {
+            Self::Apply => "batch-rename-apply-confirmation",
+            Self::Undo => "batch-rename-undo-confirmation",
+        }
+    }
 }
 
 /// Exact non-root viewport authority for a surface whose base UI is not a
@@ -388,6 +410,19 @@ impl NavigationOwner {
                                 if kind == "xml-toolkit" && *instance == parent_instance
                         )
                 }
+                Self::BatchRenameConfirmation {
+                    parent_instance,
+                    confirmation_instance,
+                    kind: owner_kind,
+                } => {
+                    kind == owner_kind.surface_kind()
+                        && *instance == confirmation_instance
+                        && matches!(
+                            owner.as_ref(),
+                            SurfaceId::Dialog { kind, instance }
+                                if kind == "batch-rename" && *instance == parent_instance
+                        )
+                }
                 _ => self.owns_surface(owner),
             },
         }
@@ -443,6 +478,56 @@ pub(crate) fn xml_overwrite_confirmation_layer_id(
             confirmation_instance,
         )),
     )
+}
+
+pub(crate) fn batch_rename_confirmation_layer_id(
+    parent_instance: u64,
+    confirmation_instance: u64,
+    kind: BatchRenameConfirmationKind,
+) -> egui::LayerId {
+    egui::LayerId::new(
+        egui::Order::Middle,
+        egui::Id::new((
+            "batch_rename_confirmation_window",
+            parent_instance,
+            confirmation_instance,
+            kind,
+        )),
+    )
+}
+
+/// Resolve one transient Batch Rename confirmation only while its exact
+/// child layer owns the focused ROOT frame. The parent may retain focus during
+/// the handoff; another Middle window, popup, or modal blocks the child.
+pub(crate) fn resolve_batch_rename_confirmation_owner(
+    ctx: &egui::Context,
+    parent_instance: u64,
+    confirmation_instance: u64,
+    kind: BatchRenameConfirmationKind,
+) -> NavigationOwner {
+    let owner = NavigationOwner::BatchRenameConfirmation {
+        parent_instance,
+        confirmation_instance,
+        kind,
+    };
+    let child_layer =
+        batch_rename_confirmation_layer_id(parent_instance, confirmation_instance, kind);
+    let parent_layer = NavigationDialogKind::BatchRename.layer_id();
+    if ctx.viewport_id() == egui::ViewportId::ROOT
+        && ctx.input(|input| input.focused)
+        && ctx.memory(|memory| memory.top_modal_layer().is_none())
+        && !egui::Popup::is_any_open(ctx)
+        && visible_top_middle_layer(ctx) == Some(child_layer)
+        && focused_response_layer(ctx).is_none_or(|focused| {
+            focused == child_layer
+                || Some(focused) == parent_layer
+                || focused.order != egui::Order::Middle
+        })
+    {
+        owner
+    } else {
+        NavigationOwner::Blocked
+    }
 }
 
 pub(crate) fn mouse_gesture_binding_layer_id(
@@ -2257,6 +2342,7 @@ impl JumpModeUi {
             | NavigationOwner::MouseGestureBinding { .. }
             | NavigationOwner::MouseGestureDelete { .. }
             | NavigationOwner::XmlOverwriteConfirmation { .. }
+            | NavigationOwner::BatchRenameConfirmation { .. }
             | NavigationOwner::SnippetPrompt { .. } => true,
             NavigationOwner::Blocked => false,
         };

@@ -124,6 +124,9 @@ pub(crate) struct BatchRenameDialogState {
     pending_intent: Option<VerifiedRenamePlan>,
     apply_confirmation_open: bool,
     undo_confirmation: Option<String>,
+    next_confirmation_instance: u64,
+    apply_confirmation_instance: Option<u64>,
+    undo_confirmation_instance: Option<u64>,
     operation_was_active: bool,
     rules: Vec<RuleDraft>,
     next_rule_id: u64,
@@ -137,6 +140,7 @@ pub(crate) struct BatchRenameDialogState {
     visible_rows: Vec<usize>,
     filter: String,
     visual_sort: VisualSort,
+    row_view_revision: u64,
     status_message: Option<String>,
     #[cfg(test)]
     preview_recomputation_count: usize,
@@ -144,6 +148,8 @@ pub(crate) struct BatchRenameDialogState {
     last_table_scroll_metrics: Option<(egui::Id, f32, f32, f32, f32)>,
     #[cfg(test)]
     last_table_rendered_rows: usize,
+    #[cfg(test)]
+    test_scroll_apply_into_view: bool,
     #[cfg(test)]
     filter_widget_id: Option<egui::Id>,
 }
@@ -165,6 +171,9 @@ impl Default for BatchRenameDialogState {
             pending_intent: None,
             apply_confirmation_open: false,
             undo_confirmation: None,
+            next_confirmation_instance: 1,
+            apply_confirmation_instance: None,
+            undo_confirmation_instance: None,
             operation_was_active: false,
             rules: Vec::new(),
             next_rule_id: 1,
@@ -178,6 +187,7 @@ impl Default for BatchRenameDialogState {
             visible_rows: Vec::new(),
             filter: String::new(),
             visual_sort: VisualSort::default(),
+            row_view_revision: 0,
             status_message: None,
             #[cfg(test)]
             preview_recomputation_count: 0,
@@ -185,6 +195,8 @@ impl Default for BatchRenameDialogState {
             last_table_scroll_metrics: None,
             #[cfg(test)]
             last_table_rendered_rows: 0,
+            #[cfg(test)]
+            test_scroll_apply_into_view: false,
             #[cfg(test)]
             filter_widget_id: None,
         }
@@ -208,6 +220,38 @@ impl BatchRenameDialogState {
             && self.undo_confirmation.is_none()
     }
 
+    pub(crate) fn jump_mode_has_pending_confirmation(&self) -> bool {
+        self.pending_intent.is_some()
+            || self.apply_confirmation_open
+            || self.undo_confirmation.is_some()
+    }
+
+    pub(crate) fn jump_mode_pending_confirmation_identity(
+        &self,
+    ) -> Option<(u64, crate::gui::jump_mode::ui::BatchRenameConfirmationKind)> {
+        use crate::gui::jump_mode::ui::BatchRenameConfirmationKind as Kind;
+
+        if self.apply_confirmation_open && self.pending_intent.is_some() {
+            return self
+                .apply_confirmation_instance
+                .map(|instance| (instance, Kind::Apply));
+        }
+        if self.undo_confirmation.is_some() {
+            return self
+                .undo_confirmation_instance
+                .map(|instance| (instance, Kind::Undo));
+        }
+        None
+    }
+
+    fn jump_mode_preview_target_identity(&self) -> String {
+        let generation = self.scan_generation.map_or(0, |generation| generation.0);
+        format!(
+            "preview/{}/{generation}/{}",
+            self.session_epoch, self.rules_revision
+        )
+    }
+
     pub(crate) fn end_session(&mut self) {
         let had_active_session = self.open || self.scan_ticket.is_some();
         self.open = false;
@@ -222,6 +266,8 @@ impl BatchRenameDialogState {
         }
         self.clear_snapshot_state();
         self.undo_confirmation = None;
+        self.undo_confirmation_instance = None;
+        self.apply_confirmation_instance = None;
         self.status_message = None;
     }
 
@@ -373,6 +419,17 @@ impl BatchRenameDialogState {
         self.pending_intent.as_ref()
     }
 
+    fn allocate_confirmation_instance(&mut self) -> u64 {
+        let instance = self.next_confirmation_instance;
+        self.next_confirmation_instance = self.next_confirmation_instance.wrapping_add(1).max(1);
+        instance
+    }
+
+    fn cancel_undo_confirmation(&mut self) {
+        self.undo_confirmation = None;
+        self.undo_confirmation_instance = None;
+    }
+
     pub(crate) fn pending_intent(&self) -> Option<&VerifiedRenamePlan> {
         self.pending_intent.as_ref()
     }
@@ -397,6 +454,97 @@ impl BatchRenameDialogState {
     #[cfg(test)]
     pub(crate) fn has_displayed_scan_result(&self) -> bool {
         self.scan_result.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_scan_status(&self) -> Option<crate::file_operations::RenameScanStatus> {
+        self.scan_result.as_ref().map(RenameScanResult::status)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_scan_diagnostic(&self) -> String {
+        let issue_kinds = self.scan_result.as_ref().map(|result| {
+            result
+                .summary()
+                .issues()
+                .iter()
+                .map(|issue| issue.kind())
+                .collect::<Vec<_>>()
+        });
+        format!(
+            "open={}, pending={}, displayed={}, accepted={}, banner={:?}, generation={:?}, ticket_session_epoch={}, session_epoch={}, status={:?}, issue_kinds={:?}",
+            self.open,
+            self.scan_ticket.is_some(),
+            self.scan_result.is_some(),
+            self.snapshot.is_some(),
+            self.scan_banner,
+            self.scan_generation,
+            self.ticket_session_epoch,
+            self.session_epoch,
+            self.test_scan_status(),
+            issue_kinds
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_file_entry_refs(&self) -> Vec<SnapshotEntryRef> {
+        self.scan_result
+            .as_ref()
+            .into_iter()
+            .flat_map(|result| result.rows())
+            .filter(|row| row.kind() == SnapshotEntryKind::File)
+            .map(|row| row.entry_ref())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_visible_file_entry_refs(&self) -> Vec<SnapshotEntryRef> {
+        self.visible_rows
+            .iter()
+            .filter_map(|index| self.display_rows.get(*index))
+            .map(|row| row.entry_ref)
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_is_selected(&self, entry_ref: SnapshotEntryRef) -> bool {
+        self.selected_by_ref
+            .get(&entry_ref)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_reverse_filename_order(&mut self) {
+        self.visual_sort = VisualSort {
+            column: VisualSortColumn::OriginalName,
+            descending: true,
+        };
+        self.rebuild_visible_rows();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_prepare_ready_apply_preview(&mut self) -> Option<SnapshotEntryRef> {
+        let entry_ref = self.test_file_entry_refs().into_iter().next()?;
+        if !self.set_selected(entry_ref, true) {
+            return None;
+        }
+        self.rules.push(RuleDraft {
+            id: self.next_rule_id,
+            rule: RenameRule::Prefix("fixture-".to_owned()),
+        });
+        self.next_rule_id = self.next_rule_id.wrapping_add(1).max(1);
+        self.rules_revision = self.rules_revision.wrapping_add(1);
+        self.rebuild_preview();
+        self.verified_preview
+            .as_ref()
+            .filter(|preview| preview.preview().readiness() == PreviewReadiness::Ready)
+            .map(|_| entry_ref)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_reveal_apply_target(&mut self) {
+        self.test_scroll_apply_into_view = true;
     }
 
     pub(crate) fn set_selected(&mut self, entry_ref: SnapshotEntryRef, selected: bool) -> bool {
@@ -426,6 +574,10 @@ impl BatchRenameDialogState {
         self.verified_preview = None;
         self.pending_intent = None;
         self.apply_confirmation_open = false;
+        self.apply_confirmation_instance = None;
+        self.undo_confirmation = None;
+        self.undo_confirmation_instance = None;
+        self.row_view_revision = self.row_view_revision.wrapping_add(1);
         self.selected_by_ref.clear();
         self.included_by_ref.clear();
         self.folder_tree.clear();
@@ -442,6 +594,7 @@ impl BatchRenameDialogState {
     }
 
     fn rebuild_preview(&mut self) {
+        self.row_view_revision = self.row_view_revision.wrapping_add(1);
         self.pending_intent = None;
         self.display_rows.clear();
         let Some(snapshot) = &self.snapshot else {
@@ -484,6 +637,7 @@ impl BatchRenameDialogState {
     }
 
     fn rebuild_visible_rows(&mut self) {
+        self.row_view_revision = self.row_view_revision.wrapping_add(1);
         let needle = self.filter.trim().to_lowercase();
         self.visible_rows = self
             .display_rows
@@ -623,21 +777,48 @@ impl BatchRenameDialogState {
         allow_mutations: bool,
         runtime: &RenameRuntimeSnapshot,
     ) -> Vec<BatchRenameUiCommand> {
-        self.ui_with_jump_mode(ctx, None, true, allow_mutations, runtime)
+        let parent_instance = self.session_epoch;
+        let pending_confirmation = self.jump_mode_has_pending_confirmation();
+        let native_confirmation_owner = self
+            .jump_mode_pending_confirmation_identity()
+            .map(|(confirmation_instance, kind)| {
+                crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation {
+                    parent_instance,
+                    confirmation_instance,
+                    kind,
+                }
+            })
+            .unwrap_or(crate::gui::jump_mode::ui::NavigationOwner::Blocked);
+        self.ui_with_jump_mode(
+            ctx,
+            None,
+            None,
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked,
+            !pending_confirmation,
+            native_confirmation_owner,
+            allow_mutations,
+            Some(parent_instance),
+            runtime,
+        )
     }
 
     pub(crate) fn ui_with_jump_mode(
         &mut self,
         ctx: &egui::Context,
-        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        parent_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        child_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        jump_owner: crate::gui::jump_mode::ui::NavigationOwner,
         native_ui_owner: bool,
+        native_confirmation_owner: crate::gui::jump_mode::ui::NavigationOwner,
         first_ui_pass: bool,
+        parent_instance: Option<u64>,
         runtime: &RenameRuntimeSnapshot,
     ) -> Vec<BatchRenameUiCommand> {
         let mut commands = Vec::new();
         if !self.open {
             return commands;
         }
+        let native_parent_instance = parent_instance.unwrap_or(self.session_epoch);
         let native_window_pass = native_ui_owner && first_ui_pass && ctx.current_pass_index() == 0;
         let mut visual_order = 0;
 
@@ -667,17 +848,22 @@ impl BatchRenameDialogState {
                         ui,
                         &mut commands,
                         process_interactions,
-                        scope,
+                        parent_scope,
                         &mut visual_order,
                     );
                     ui.separator();
-                    self.draw_rule_editor(ui, process_interactions, scope, &mut visual_order);
+                    self.draw_rule_editor(
+                        ui,
+                        process_interactions,
+                        parent_scope,
+                        &mut visual_order,
+                    );
                     ui.separator();
                     self.draw_preview(
                         ui,
                         &mut commands,
                         process_interactions,
-                        scope,
+                        parent_scope,
                         &mut visual_order,
                     );
                     ui.separator();
@@ -687,11 +873,15 @@ impl BatchRenameDialogState {
                         &mut commands,
                         process_interactions,
                         native_visible,
+                        parent_scope,
+                        native_parent_instance,
+                        self.session_epoch,
+                        &mut visual_order,
                     );
                     ui.horizontal(|ui| {
                         let close = ui.button("Close");
                         register_batch_target(
-                            scope,
+                            parent_scope,
                             ui,
                             &close,
                             "close",
@@ -706,7 +896,7 @@ impl BatchRenameDialogState {
                             let preview = ui
                                 .add_enabled(self.snapshot.is_some(), egui::Button::new("Preview"));
                             register_batch_target(
-                                scope,
+                                parent_scope,
                                 ui,
                                 &preview,
                                 "preview",
@@ -731,10 +921,24 @@ impl BatchRenameDialogState {
             return commands;
         }
 
-        // These existing native confirmation windows remain the owner of
-        // their own interaction. The parent scope is withheld by the host
-        // while either confirmation is pending.
-        self.draw_confirmations(ctx, runtime, &mut commands, first_ui_pass);
+        let child_commit_pass = first_ui_pass && ctx.current_pass_index() == 0;
+        self.draw_confirmations(
+            ctx,
+            runtime,
+            &mut commands,
+            parent_instance.unwrap_or(self.session_epoch),
+            child_scope,
+            jump_owner,
+            native_confirmation_owner,
+            child_commit_pass,
+        );
+        if self.jump_mode_has_pending_confirmation()
+            && let Some(scope) = parent_scope
+        {
+            // A parent target may have completed in the same pass that opened
+            // a child. Remove it before the retained registry is reconciled.
+            scope.discard_registered_targets();
+        }
         commands
     }
 
@@ -745,6 +949,10 @@ impl BatchRenameDialogState {
         commands: &mut Vec<BatchRenameUiCommand>,
         process_interactions: bool,
         native_visible: bool,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        parent_instance: u64,
+        session_epoch: u64,
+        visual_order: &mut u64,
     ) {
         if !runtime.journal_ready {
             if let Some(error) = &runtime.journal_error {
@@ -788,8 +996,7 @@ impl BatchRenameDialogState {
             ui.label(message);
         }
 
-        let can_apply = process_interactions
-            && runtime.journal_ready
+        let can_apply = runtime.journal_ready
             && !runtime
                 .receipts
                 .iter()
@@ -801,12 +1008,27 @@ impl BatchRenameDialogState {
                         .plan()
                         .is_some_and(|plan| !plan.actions().is_empty())
             });
-        if ui
-            .add_enabled(can_apply, egui::Button::new("Apply selected renames…"))
-            .clicked()
-            && self.freeze_confirmed_plan().is_some()
-        {
+        let apply = ui.add_enabled(can_apply, egui::Button::new("Apply selected renames…"));
+        #[cfg(test)]
+        if process_interactions && std::mem::take(&mut self.test_scroll_apply_into_view) {
+            // This is consumed by the actual footer response so tests can
+            // reveal the clipped control through its owning ScrollArea on a
+            // visible, non-sizing render pass.
+            apply.scroll_to_me(Some(egui::Align::Center));
+        }
+        let apply_identity = format!("apply/{}", self.jump_mode_preview_target_identity());
+        register_batch_target(
+            scope,
+            ui,
+            &apply,
+            apply_identity,
+            "Apply selected renames",
+            crate::gui::jump_mode::TargetKind::Button,
+            visual_order,
+        );
+        if apply.clicked() && process_interactions && self.freeze_confirmed_plan().is_some() {
             self.apply_confirmation_open = true;
+            self.apply_confirmation_instance = Some(self.allocate_confirmation_instance());
         }
 
         if runtime.receipts.is_empty() {
@@ -814,31 +1036,53 @@ impl BatchRenameDialogState {
         }
         ui.collapsing("Rename recovery and Undo", |ui| {
             for receipt in runtime.receipts.iter().rev() {
-                ui.group(|ui| {
-                    ui.label(format!("{} · {:?}", receipt.id(), receipt.status()));
-                    ui.label(receipt.root_path().display().to_string());
-                    ui.label(receipt.message());
-                    let remaining = receipt.remaining_undo_count();
-                    ui.horizontal(|ui| {
-                        ui.label(format!("Undo entries: {remaining}"));
-                        let enabled =
-                            process_interactions && receipt.status().can_undo() && remaining > 0;
-                        if ui
-                            .add_enabled(enabled, egui::Button::new("Undo…"))
-                            .clicked()
-                        {
-                            self.undo_confirmation = Some(receipt.id().to_owned());
-                        }
-                    });
-                    for entry in receipt.entries() {
-                        ui.label(format!(
-                            "{} → {} ({:?})",
-                            entry.current_path().unwrap_or(entry.final_path()).display(),
-                            entry.original_path().display(),
-                            entry.outcome()
-                        ));
-                    }
-                });
+                let opaque_receipt = egui::Id::new(("batch_rename_receipt", receipt.id())).value();
+                ui.scope_builder(
+                    egui::UiBuilder::new().id(egui::Id::new((
+                        "batch_rename_receipt_row",
+                        parent_instance,
+                        session_epoch,
+                        opaque_receipt,
+                    ))),
+                    |ui| {
+                        ui.group(|ui| {
+                            ui.label(format!("{} · {:?}", receipt.id(), receipt.status()));
+                            ui.label(receipt.root_path().display().to_string());
+                            ui.label(receipt.message());
+                            let remaining = receipt.remaining_undo_count();
+                            ui.horizontal(|ui| {
+                                ui.label(format!("Undo entries: {remaining}"));
+                                let enabled = receipt.status().can_undo() && remaining > 0;
+                                let undo = ui.add_enabled(enabled, egui::Button::new("Undo…"));
+                                let receipt_identity = format!(
+                                    "undo/{parent_instance}/{session_epoch}/{opaque_receipt:016x}"
+                                );
+                                register_batch_target(
+                                    scope,
+                                    ui,
+                                    &undo,
+                                    receipt_identity,
+                                    "Undo rename",
+                                    crate::gui::jump_mode::TargetKind::Button,
+                                    visual_order,
+                                );
+                                if undo.clicked() && process_interactions {
+                                    self.undo_confirmation = Some(receipt.id().to_owned());
+                                    self.undo_confirmation_instance =
+                                        Some(self.allocate_confirmation_instance());
+                                }
+                            });
+                            for entry in receipt.entries() {
+                                ui.label(format!(
+                                    "{} → {} ({:?})",
+                                    entry.current_path().unwrap_or(entry.final_path()).display(),
+                                    entry.original_path().display(),
+                                    entry.outcome()
+                                ));
+                            }
+                        })
+                    },
+                );
             }
         });
     }
@@ -848,121 +1092,243 @@ impl BatchRenameDialogState {
         ctx: &egui::Context,
         runtime: &RenameRuntimeSnapshot,
         commands: &mut Vec<BatchRenameUiCommand>,
-        allow_mutations: bool,
+        parent_instance: u64,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        jump_owner: crate::gui::jump_mode::ui::NavigationOwner,
+        native_owner: crate::gui::jump_mode::ui::NavigationOwner,
+        commit_pass: bool,
     ) {
-        let process_interactions = allow_mutations && ctx.current_pass_index() == 0;
+        use crate::gui::jump_mode::TargetKind;
+        use crate::gui::jump_mode::ui::{
+            BatchRenameConfirmationKind, NavigationOwner, batch_rename_confirmation_layer_id,
+        };
+
+        let mut visual_order = 0;
         if self.apply_confirmation_open {
-            let Some(plan) = self.pending_intent.as_ref() else {
+            if self.pending_intent.is_none() {
                 self.apply_confirmation_open = false;
+                self.apply_confirmation_instance = None;
+                if let Some(scope) = scope {
+                    scope.discard_registered_targets();
+                }
                 return;
+            }
+            let confirmation_instance = self.apply_confirmation_instance.unwrap_or_else(|| {
+                let instance = self.allocate_confirmation_instance();
+                self.apply_confirmation_instance = Some(instance);
+                instance
+            });
+            let Some(plan) = self.pending_intent.as_ref() else {
+                return;
+            };
+            let expected_owner = NavigationOwner::BatchRenameConfirmation {
+                parent_instance,
+                confirmation_instance,
+                kind: BatchRenameConfirmationKind::Apply,
             };
             let mut confirmation_open = true;
             let mut confirm_clicked = false;
             let mut cancel_clicked = false;
+            let mut visible_commit_pass = false;
             egui::Window::new("Confirm batch rename")
+                .id(
+                    batch_rename_confirmation_layer_id(
+                        parent_instance,
+                        confirmation_instance,
+                        BatchRenameConfirmationKind::Apply,
+                    )
+                    .id,
+                )
                 .collapsible(false)
                 .resizable(true)
                 .default_size(egui::vec2(680.0, 480.0))
                 .open(&mut confirmation_open)
                 .show(ctx, |ui| {
-                    ui.label(format!("Root: {}", plan.canonical_root().display()));
-                    ui.label(format!(
-                        "Scope: {} · files: {} · scan generation: {} · rules revision: {}",
-                        if plan.recursive_scope() { "recursive" } else { "direct children" },
-                        plan.plan().actions().len(),
-                        plan.generation().0,
-                        plan.plan().rules_revision().0
-                    ));
-                    ui.label("These exact source and target names are frozen for this transaction.");
-                    ui.label("Each file is staged in its own folder; existing names are never replaced. If a safe rollback is blocked, recovery paths remain in the receipt.");
-                    ui.label("Undo checks the recorded file identity, bytes, size, and last-modified time. Content verification allows up to 1 GiB per file and 4 GiB per batch.");
-                    egui::ScrollArea::vertical().max_height(330.0).show(ui, |ui| {
-                        for action in plan.plan().actions() {
-                            ui.label(format!(
-                                "{} → {}",
-                                action.source_path().display(),
-                                action.target_path().display()
-                            ));
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        let confirm = ui
-                            .add_enabled(
-                                process_interactions
-                                    && runtime.journal_ready
-                                    && !runtime.operation_active,
+                    visible_commit_pass = commit_pass
+                        && native_owner == expected_owner
+                        && ui.is_visible()
+                        && !ui.is_sizing_pass()
+                        && ui.is_enabled();
+                    let target_scope = (jump_owner == expected_owner).then_some(scope).flatten();
+                    ui.add_enabled_ui(native_owner == expected_owner, |ui| {
+                        ui.label(format!("Root: {}", plan.canonical_root().display()));
+                        ui.label(format!(
+                            "Scope: {} · files: {} · scan generation: {} · rules revision: {}",
+                            if plan.recursive_scope() {
+                                "recursive"
+                            } else {
+                                "direct children"
+                            },
+                            plan.plan().actions().len(),
+                            plan.generation().0,
+                            plan.plan().rules_revision().0
+                        ));
+                        ui.label("These exact source and target names are frozen for this transaction.");
+                        ui.label("Each file is staged in its own folder; existing names are never replaced. If a safe rollback is blocked, recovery paths remain in the receipt.");
+                        ui.label("Undo checks the recorded file identity, bytes, size, and last-modified time. Content verification allows up to 1 GiB per file and 4 GiB per batch.");
+                        egui::ScrollArea::vertical().max_height(330.0).show(ui, |ui| {
+                            for action in plan.plan().actions() {
+                                ui.label(format!(
+                                    "{} → {}",
+                                    action.source_path().display(),
+                                    action.target_path().display()
+                                ));
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            let confirm = ui.add_enabled(
+                                runtime.journal_ready && !runtime.operation_active,
                                 egui::Button::new("Confirm and apply"),
-                            )
-                            .clicked();
-                        confirm_clicked = confirm;
-                        cancel_clicked = ui.button("Cancel").clicked();
+                            );
+                            register_batch_target(
+                                target_scope,
+                                ui,
+                                &confirm,
+                                "confirm",
+                                "Confirm batch rename",
+                                TargetKind::Button,
+                                &mut visual_order,
+                            );
+                            confirm_clicked = confirm.clicked();
+                            let cancel = ui.button("Cancel");
+                            register_batch_target(
+                                target_scope,
+                                ui,
+                                &cancel,
+                                "cancel",
+                                "Cancel batch rename",
+                                TargetKind::Button,
+                                &mut visual_order,
+                            );
+                            cancel_clicked = cancel.clicked();
+                        });
                     });
                 });
-            if confirm_clicked {
+            if visible_commit_pass && confirm_clicked {
                 commands.push(BatchRenameUiCommand::ApplyConfirmed);
                 self.apply_confirmation_open = false;
-            } else if cancel_clicked || !confirmation_open {
+                self.apply_confirmation_instance = None;
+                if let Some(scope) = scope {
+                    scope.discard_registered_targets();
+                }
+            } else if (visible_commit_pass && cancel_clicked)
+                || (commit_pass && native_owner == expected_owner && !confirmation_open)
+            {
                 self.cancel_apply_confirmation();
+                if let Some(scope) = scope {
+                    scope.discard_registered_targets();
+                }
             }
         }
         if let Some(transaction_id) = self.undo_confirmation.clone() {
+            let confirmation_instance = self.undo_confirmation_instance.unwrap_or_else(|| {
+                let instance = self.allocate_confirmation_instance();
+                self.undo_confirmation_instance = Some(instance);
+                instance
+            });
+            let expected_owner = NavigationOwner::BatchRenameConfirmation {
+                parent_instance,
+                confirmation_instance,
+                kind: BatchRenameConfirmationKind::Undo,
+            };
             if let Some(receipt) = runtime
                 .receipts
                 .iter()
                 .find(|receipt| receipt.id() == transaction_id)
+                .filter(|receipt| receipt.status().can_undo() && receipt.remaining_undo_count() > 0)
             {
                 let mut confirmation_open = true;
+                let mut visible_commit_pass = false;
+                let mut confirm_clicked = false;
+                let mut cancel_clicked = false;
                 egui::Window::new("Confirm Undo")
+                    .id(batch_rename_confirmation_layer_id(
+                        parent_instance,
+                        confirmation_instance,
+                        BatchRenameConfirmationKind::Undo,
+                    )
+                    .id)
                     .collapsible(false)
                     .resizable(true)
                     .default_size(egui::vec2(680.0, 420.0))
                     .open(&mut confirmation_open)
                     .show(ctx, |ui| {
-                        ui.label(format!("Root: {}", receipt.root_path().display()));
-                        ui.label(format!(
-                            "Restore {} recorded file(s) to their original names and bytes.",
-                            receipt.remaining_undo_count()
-                        ));
-                        egui::ScrollArea::vertical()
-                            .max_height(300.0)
-                            .show(ui, |ui| {
-                                for entry in receipt.entries() {
-                                    if let Some(current) = entry.current_path()
-                                        && current != entry.original_path()
-                                    {
-                                        ui.label(format!(
-                                            "{} → {}",
-                                            current.display(),
-                                            entry.original_path().display()
-                                        ));
+                        visible_commit_pass = commit_pass
+                            && native_owner == expected_owner
+                            && ui.is_visible()
+                            && !ui.is_sizing_pass()
+                            && ui.is_enabled();
+                        let target_scope =
+                            (jump_owner == expected_owner).then_some(scope).flatten();
+                        ui.add_enabled_ui(native_owner == expected_owner, |ui| {
+                            ui.label(format!("Root: {}", receipt.root_path().display()));
+                            ui.label(format!(
+                                "Restore {} recorded file(s) to their original names and bytes.",
+                                receipt.remaining_undo_count()
+                            ));
+                            egui::ScrollArea::vertical()
+                                .max_height(300.0)
+                                .show(ui, |ui| {
+                                    for entry in receipt.entries() {
+                                        if let Some(current) = entry.current_path()
+                                            && current != entry.original_path()
+                                        {
+                                            ui.label(format!(
+                                                "{} → {}",
+                                                current.display(),
+                                                entry.original_path().display()
+                                            ));
+                                        }
                                     }
-                                }
-                            });
-                        ui.horizontal(|ui| {
-                            let confirm = ui
-                                .add_enabled(
-                                    process_interactions
-                                        && runtime.journal_ready
-                                        && !runtime.operation_active,
+                                });
+                            ui.horizontal(|ui| {
+                                let confirm = ui.add_enabled(
+                                    runtime.journal_ready && !runtime.operation_active,
                                     egui::Button::new("Confirm Undo"),
-                                )
-                                .clicked();
-                            if confirm {
-                                commands.push(BatchRenameUiCommand::UndoConfirmed(
-                                    transaction_id.clone(),
-                                ));
-                                self.undo_confirmation = None;
-                            }
-                            if ui.button("Cancel").clicked() {
-                                self.undo_confirmation = None;
-                            }
+                                );
+                                register_batch_target(
+                                    target_scope,
+                                    ui,
+                                    &confirm,
+                                    "confirm",
+                                    "Confirm Undo",
+                                    TargetKind::Button,
+                                    &mut visual_order,
+                                );
+                                confirm_clicked = confirm.clicked();
+                                let cancel = ui.button("Cancel");
+                                register_batch_target(
+                                    target_scope,
+                                    ui,
+                                    &cancel,
+                                    "cancel",
+                                    "Cancel Undo",
+                                    TargetKind::Button,
+                                    &mut visual_order,
+                                );
+                                cancel_clicked = cancel.clicked();
+                            });
                         });
                     });
-                if !confirmation_open {
-                    self.undo_confirmation = None;
+                if visible_commit_pass && confirm_clicked {
+                    commands.push(BatchRenameUiCommand::UndoConfirmed(transaction_id.clone()));
+                    self.cancel_undo_confirmation();
+                    if let Some(scope) = scope {
+                        scope.discard_registered_targets();
+                    }
+                } else if (visible_commit_pass && cancel_clicked)
+                    || (commit_pass && native_owner == expected_owner && !confirmation_open)
+                {
+                    self.cancel_undo_confirmation();
+                    if let Some(scope) = scope {
+                        scope.discard_registered_targets();
+                    }
                 }
             } else {
-                self.undo_confirmation = None;
+                self.cancel_undo_confirmation();
+                if let Some(scope) = scope {
+                    scope.discard_registered_targets();
+                }
             }
         }
     }
@@ -970,6 +1336,7 @@ impl BatchRenameDialogState {
     fn cancel_apply_confirmation(&mut self) {
         self.apply_confirmation_open = false;
         self.pending_intent = None;
+        self.apply_confirmation_instance = None;
     }
 
     fn draw_header(
@@ -1429,7 +1796,7 @@ impl BatchRenameDialogState {
             ui.label("No regular files were found in this scope.");
             return;
         }
-        self.draw_file_table(ui, process_interactions);
+        self.draw_file_table(ui, process_interactions, scope, visual_order);
     }
 
     fn draw_folder_tree(
@@ -1504,7 +1871,13 @@ impl BatchRenameDialogState {
         }
     }
 
-    fn draw_file_table(&mut self, ui: &mut egui::Ui, process_interactions: bool) {
+    fn draw_file_table(
+        &mut self,
+        ui: &mut egui::Ui,
+        process_interactions: bool,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        visual_order: &mut u64,
+    ) {
         let mut requested_sort = None;
         let mut selection_updates = Vec::new();
         let mut inclusion_updates = Vec::new();
@@ -1514,6 +1887,14 @@ impl BatchRenameDialogState {
         let visible_rows = &self.visible_rows;
         let selected_by_ref = &self.selected_by_ref;
         let included_by_ref = &self.included_by_ref;
+        let session_epoch = self.session_epoch;
+        let row_view_revision = self.row_view_revision;
+        let row_scope = scope.map(|scope| {
+            scope.child_namespace(format!(
+                "rows/{session_epoch}/{}/{row_view_revision}",
+                generation.0
+            ))
+        });
 
         #[cfg(test)]
         let mut status_column_width = 0.0;
@@ -1607,34 +1988,69 @@ impl BatchRenameDialogState {
                                 return;
                             };
                             let entry_ref = display.entry_ref;
-                            let row_id =
-                                egui::Id::new(("batch_rename_entry", generation.0, entry_ref.0));
                             let included = included_by_ref.get(&entry_ref).copied().unwrap_or(true);
                             let selected =
                                 selected_by_ref.get(&entry_ref).copied().unwrap_or(false);
                             let mut included_value = included;
                             let mut selected_value = selected;
                             row.col(|ui| {
-                                ui.push_id((row_id, "include"), |ui| {
-                                    if ui
-                                        .checkbox(&mut included_value, "")
-                                        .on_hover_text("Include this file in preview analysis")
-                                        .changed()
-                                    {
-                                        inclusion_updates.push((entry_ref, included_value));
-                                    }
-                                });
+                                let response = ui
+                                    .scope_builder(
+                                        egui::UiBuilder::new().id(egui::Id::new((
+                                            "batch_rename_entry",
+                                            session_epoch,
+                                            generation.0,
+                                            entry_ref.0,
+                                            "include",
+                                        ))),
+                                        |ui| {
+                                            ui.checkbox(&mut included_value, "").on_hover_text(
+                                                "Include this file in preview analysis",
+                                            )
+                                        },
+                                    )
+                                    .inner;
+                                register_batch_target(
+                                    row_scope.as_ref(),
+                                    ui,
+                                    &response,
+                                    format!("entry/{}/include", entry_ref.0),
+                                    "Include file",
+                                    crate::gui::jump_mode::TargetKind::Checkbox,
+                                    visual_order,
+                                );
+                                if response.changed() {
+                                    inclusion_updates.push((entry_ref, included_value));
+                                }
                             });
                             row.col(|ui| {
-                                ui.push_id((row_id, "select"), |ui| {
-                                    if ui
-                                        .checkbox(&mut selected_value, "")
-                                        .on_hover_text("Select this file for the preview")
-                                        .changed()
-                                    {
-                                        selection_updates.push((entry_ref, selected_value));
-                                    }
-                                });
+                                let response = ui
+                                    .scope_builder(
+                                        egui::UiBuilder::new().id(egui::Id::new((
+                                            "batch_rename_entry",
+                                            session_epoch,
+                                            generation.0,
+                                            entry_ref.0,
+                                            "select",
+                                        ))),
+                                        |ui| {
+                                            ui.checkbox(&mut selected_value, "")
+                                                .on_hover_text("Select this file for the preview")
+                                        },
+                                    )
+                                    .inner;
+                                register_batch_target(
+                                    row_scope.as_ref(),
+                                    ui,
+                                    &response,
+                                    format!("entry/{}/select", entry_ref.0),
+                                    "Select file",
+                                    crate::gui::jump_mode::TargetKind::Checkbox,
+                                    visual_order,
+                                );
+                                if response.changed() {
+                                    selection_updates.push((entry_ref, selected_value));
+                                }
                             });
                             row.col(|ui| {
                                 let text = display.source_name.to_string_lossy().into_owned();
@@ -1697,6 +2113,7 @@ impl BatchRenameDialogState {
             self.last_table_rendered_rows = rendered_rows;
         }
 
+        let mut row_authority_changed = false;
         if process_interactions && let Some(column) = requested_sort {
             if self.visual_sort.column == column {
                 self.visual_sort.descending = !self.visual_sort.descending;
@@ -1707,6 +2124,7 @@ impl BatchRenameDialogState {
                 };
             }
             self.rebuild_visible_rows();
+            row_authority_changed = true;
         }
 
         if process_interactions && (!selection_updates.is_empty() || !inclusion_updates.is_empty())
@@ -1723,7 +2141,10 @@ impl BatchRenameDialogState {
                 .into_iter()
                 .map(|(entry_ref, (selected, included))| (entry_ref, selected, included))
                 .collect();
-            self.apply_row_updates(&updates);
+            row_authority_changed |= self.apply_row_updates(&updates);
+        }
+        if row_authority_changed && let Some(row_scope) = &row_scope {
+            row_scope.discard_registered_targets();
         }
     }
 }
@@ -2497,7 +2918,8 @@ mod tests {
         let input = screen_input(size, Vec::new());
         let output = context.run_ui(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                state.draw_file_table(ui, false);
+                let mut visual_order = 0;
+                state.draw_file_table(ui, false, None, &mut visual_order);
             });
         });
         output.drop_without_applying_deltas();
@@ -2512,7 +2934,8 @@ mod tests {
         scroll.store(&context, scroll_id);
         let output = context.run_ui(screen_input(size, Vec::new()), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                state.draw_file_table(ui, false);
+                let mut visual_order = 0;
+                state.draw_file_table(ui, false, None, &mut visual_order);
             });
         });
         output.drop_without_applying_deltas();
