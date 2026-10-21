@@ -49,6 +49,9 @@ impl XmlToolkitSchemaViewState {
         let mut clear_clicked = false;
         let mut validate_clicked = false;
         let action_revision = format!("{:?}/{:?}", snapshot.revision, snapshot.schema.revision);
+        let choose_identity = format!("validation/{action_revision}/choose-schema");
+        let clear_identity = format!("validation/{action_revision}/clear-schema");
+        let validate_identity = format!("validation/{action_revision}/validate");
 
         ui.heading("XSD validation");
         ui.push_id((snapshot.revision, snapshot.schema.revision), |ui| {
@@ -58,23 +61,13 @@ impl XmlToolkitSchemaViewState {
                 {
                     self.choose_button_rect = Some(choose.rect);
                 }
-                targets.button(
-                    ui,
-                    &choose,
-                    format!("validation/{action_revision}/choose-schema"),
-                    "Choose local XML schema",
-                );
+                targets.button(ui, &choose, &choose_identity, "Choose local XML schema");
                 choose_clicked = choose.clicked();
                 let clear = ui.add_enabled(
                     snapshot.schema.selected_path.is_some(),
                     egui::Button::new("Clear XSD"),
                 );
-                targets.button(
-                    ui,
-                    &clear,
-                    format!("validation/{action_revision}/clear-schema"),
-                    "Clear selected XML schema",
-                );
+                targets.button(ui, &clear, &clear_identity, "Clear selected XML schema");
                 clear_clicked = clear.clicked();
                 let can_validate = snapshot.schema.selected_path.is_some()
                     && snapshot.parse == XmlParseStatus::Ready
@@ -84,7 +77,7 @@ impl XmlToolkitSchemaViewState {
                 targets.button(
                     ui,
                     &validate,
-                    format!("validation/{action_revision}/validate"),
+                    &validate_identity,
                     "Validate XML against schema",
                 );
                 validate_clicked = validate.clicked();
@@ -417,5 +410,159 @@ mod tests {
             Some(XmlToolkitSchemaIntent::ChooseSchema)
         );
         assert_eq!(view.take_intent(), None);
+    }
+
+    #[test]
+    fn jump_mode_tool_viewports_xml_schema_actions_follow_schema_revision() {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        use crate::gui::jump_mode::{SurfaceId, TargetGeneration};
+
+        let context = egui::Context::default();
+        let mut jump = crate::gui::jump_mode::ui::JumpModeUi::new(true);
+        let mut view = XmlToolkitSchemaViewState::default();
+        let mut current = snapshot();
+        let visibility_changed =
+            jump.observe_dialog_visibility([(NavigationDialogKind::XmlToolkit, true)]);
+        let instance = jump
+            .dialog_instance(NavigationDialogKind::XmlToolkit)
+            .expect("the XML Toolkit window has a per-open instance");
+        let labels = [
+            "Choose local XML schema",
+            "Clear selected XML schema",
+            "Validate XML against schema",
+        ];
+
+        let warm = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 700.0),
+                )),
+                focused: true,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::Window::new("XML Toolkit")
+                    .id(egui::Id::new("xml_toolkit_embedded_window"))
+                    .show(ctx, |_| {});
+            },
+        );
+        warm.drop_without_applying_deltas();
+
+        let mut render = |snapshot: &XmlSessionSnapshot, owner_transition: bool| {
+            jump.begin_frame();
+            let owner = NavigationOwner::Dialog {
+                kind: NavigationDialogKind::XmlToolkit,
+                instance,
+            };
+            let mut frame_owner = NavigationOwner::Blocked;
+            let output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200.0, 700.0),
+                    )),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| {
+                    jump.handle_root_input(ctx, false, true);
+                    frame_owner = jump.update_navigation_owner(ctx, owner, owner_transition);
+                    jump.begin_ui_pass();
+                    let scope = (frame_owner == owner)
+                        .then(|| {
+                            jump.scope_for_navigation_owner(
+                                SurfaceId::dialog("xml-toolkit", instance),
+                                TargetGeneration(instance),
+                                "xml-toolkit/form",
+                                egui::ViewportId::ROOT,
+                                owner,
+                                true,
+                            )
+                        })
+                        .flatten();
+                    egui::Window::new("XML Toolkit")
+                        .id(egui::Id::new("xml_toolkit_embedded_window"))
+                        .default_size(egui::vec2(1000.0, 420.0))
+                        .show(ctx, |ui| {
+                            view.show_scoped(
+                                ui,
+                                snapshot,
+                                &mut XmlJumpTargets::new(scope.as_ref()),
+                                true,
+                            );
+                        });
+                },
+            );
+            output.drop_without_applying_deltas();
+            jump.finish_ui_pass();
+            jump.prepare_pass_for_navigation_owner(&context, frame_owner, true, true);
+            jump.complete_frame_for_navigation_owner(&context, frame_owner, true, true);
+            let targets = (frame_owner == owner).then(|| {
+                labels.map(|label| {
+                    jump.retained_registry()
+                        .targets()
+                        .iter()
+                        .find(|target| target.metadata().label() == label)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "schema action {label:?} missing; collected labels: {:?}",
+                                jump.retained_registry()
+                                    .metadata()
+                                    .map(|metadata| metadata.label())
+                                    .collect::<Vec<_>>()
+                            )
+                        })
+                        .clone()
+                })
+            });
+            (frame_owner, targets)
+        };
+
+        let (opening_owner, _) = render(&current, visibility_changed);
+        assert_eq!(
+            opening_owner,
+            NavigationOwner::Blocked,
+            "the opening owner-transition frame is not collected"
+        );
+        let (owner, first_targets) = render(&current, false);
+        assert_eq!(
+            owner,
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::XmlToolkit,
+                instance,
+            }
+        );
+        let first_targets = first_targets.expect("the current owner collected schema actions");
+        current.schema.revision = XmlSchemaRevision::for_test(2);
+        let (second_owner, second_targets) = render(&current, false);
+        assert_eq!(second_owner, owner);
+        let second_targets = second_targets.expect("all schema actions remain enabled and visible");
+
+        assert!(
+            first_targets
+                .iter()
+                .zip(second_targets.iter())
+                .all(|(first, second)| first.id() != second.id())
+        );
+        assert!(
+            first_targets
+                .iter()
+                .zip(second_targets.iter())
+                .all(|(first, second)| first.response_id() != second.response_id()),
+            "the actual native action responses are scoped to source/schema revision"
+        );
+        assert!(
+            first_targets
+                .iter()
+                .chain(second_targets.iter())
+                .all(|target| match target.id().semantic() {
+                    crate::gui::jump_mode::SemanticTargetId::Named(identity) => {
+                        !identity.contains("schema.xsd")
+                    }
+                    _ => true,
+                }),
+            "schema paths never enter semantic target identity"
+        );
     }
 }

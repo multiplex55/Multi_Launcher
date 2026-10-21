@@ -523,9 +523,10 @@ impl XmlToolkitDialogState {
                     let mut open = self.open;
                     let current_top_layer =
                         crate::gui::jump_mode::ui::visible_top_middle_layer(&child_ctx);
-                    let root_parent_current = root_native_application_allowed
-                        && current_top_layer == Some(xml_toolkit_embedded_layer_id());
                     let confirmation_identity = self.jump_mode_pending_overwrite_identity();
+                    let root_parent_current = root_native_application_allowed
+                        && confirmation_identity.is_none()
+                        && current_top_layer == Some(xml_toolkit_embedded_layer_id());
                     let root_confirmation_current = root_native_application_allowed
                         && confirmation_identity.is_some_and(|confirmation| {
                             current_top_layer
@@ -1009,19 +1010,13 @@ impl XmlToolkitDialogState {
                     .id_salt("xml_toolkit_source_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        let mut source_draft = self.source.clone();
-                        let response = ui.add_sized(
-                            size,
-                            egui::TextEdit::multiline(&mut source_draft)
-                                .id(egui::Id::new("xml_toolkit_source_editor"))
-                                .font(egui::TextStyle::Monospace)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(14)
-                                .hint_text("Paste or type XML here"),
-                        );
+                        let response = if process_actions {
+                            source_editor(ui, &mut self.source, size)
+                        } else {
+                            source_editor(ui, &mut self.source.clone(), size)
+                        };
                         targets.text_entry(ui, &response, "source/editor", "XML source text");
-                        if process_actions && response.changed() {
-                            self.source = source_draft;
+                        if response.changed() && process_actions {
                             intents.edit_source = true;
                         }
                     });
@@ -1030,11 +1025,11 @@ impl XmlToolkitDialogState {
                 ));
             }
             XmlToolkitTab::Tree => {
+                let tree_intents =
+                    self.tree
+                        .show_scoped(ui, &snapshot, &mut targets, process_actions);
                 if process_actions {
-                    intents.tree = self.tree.show_scoped(ui, &snapshot, &mut targets, true);
-                } else {
-                    let mut tree = self.tree.clone();
-                    let _ = tree.show_scoped(ui, &snapshot, &mut targets, false);
+                    intents.tree = tree_intents;
                 }
             }
             XmlToolkitTab::XPath => {
@@ -1044,8 +1039,7 @@ impl XmlToolkitDialogState {
                             .show_scoped(ui, &snapshot, &mut self.tree, &mut targets, true);
                 } else {
                     let mut xpath = self.xpath.clone();
-                    let mut tree = self.tree.clone();
-                    let _ = xpath.show_scoped(ui, &snapshot, &mut tree, &mut targets, false);
+                    let _ = xpath.show_scoped(ui, &snapshot, &mut self.tree, &mut targets, false);
                 }
             }
             XmlToolkitTab::Validation => {
@@ -1947,6 +1941,33 @@ impl XmlToolkitDialogState {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_pending_overwrite_signature(
+        &self,
+    ) -> Option<(u64, u64, PathBuf, Arc<str>, bool)> {
+        self.pending_save.as_ref().map(|pending| {
+            (
+                pending.id,
+                pending.dialog_generation,
+                pending.path.clone(),
+                pending.payload.clone(),
+                pending.needs_confirmation,
+            )
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_native_jump_targets(
+        &self,
+    ) -> Vec<crate::gui::jump_mode::ui::RegisteredTarget> {
+        self.native_jump_mode.retained_registry().targets().to_vec()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_native_jump_active(&self) -> bool {
+        self.native_jump_mode.active_session().is_some()
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_active_session_for_test(&mut self, session: XmlEngineSession) {
         self.session = SessionLifecycle::Active(session);
         self.open = true;
@@ -1969,6 +1990,18 @@ fn viewport_builder() -> egui::ViewportBuilder {
         .with_inner_size([1120.0, 760.0])
         .with_min_inner_size([480.0, 340.0])
         .with_resizable(true)
+}
+
+fn source_editor(ui: &mut egui::Ui, source: &mut String, size: egui::Vec2) -> egui::Response {
+    ui.add_sized(
+        size,
+        egui::TextEdit::multiline(source)
+            .id(egui::Id::new("xml_toolkit_source_editor"))
+            .font(egui::TextStyle::Monospace)
+            .desired_width(f32::INFINITY)
+            .desired_rows(14)
+            .hint_text("Paste or type XML here"),
+    )
 }
 
 fn current_output(snapshot: &SessionSnapshot) -> Option<&XmlFormatOutput> {

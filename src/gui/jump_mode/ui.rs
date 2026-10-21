@@ -2216,7 +2216,11 @@ impl JumpModeUi {
             return;
         }
         let viewport_is_current = match viewport_binding {
-            Some(binding) => binding.owner == navigation_owner && binding.base_is_current(ctx),
+            Some(binding) => {
+                binding.base_is_current(ctx)
+                    && (navigation_owner == NavigationOwner::Blocked
+                        || binding.owner == navigation_owner)
+            }
             None => ctx.viewport_id() == egui::ViewportId::ROOT,
         };
         if !self.enabled || !root_visible || !viewport_is_current {

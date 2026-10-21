@@ -431,7 +431,7 @@ impl XmlToolkitTreeViewState {
             .min(available_height);
         let tree_height =
             (available_height - details_height - ui.spacing().item_spacing.y).max(0.0);
-        let scroll_target = if first_pass {
+        let scroll_target = if first_pass && authorized_pass {
             self.pending_scroll_to.take()
         } else {
             None

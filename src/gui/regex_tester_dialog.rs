@@ -685,6 +685,34 @@ impl RegexTesterDialogState {
         false
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_native_jump_targets(
+        &self,
+    ) -> Vec<crate::gui::jump_mode::ui::RegisteredTarget> {
+        self.native_jump_mode.retained_registry().targets().to_vec()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_native_jump_active(&self) -> bool {
+        self.native_jump_mode.active_session().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_native_jump_hint(
+        &self,
+        target: &crate::gui::jump_mode::TargetId,
+    ) -> Option<String> {
+        self.native_jump_mode
+            .active_session()
+            .and_then(|session| session.hint_map().hint_for(target))
+            .map(|hint| hint.as_str().to_owned())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_select_clipboard_section(&mut self) {
+        self.information_section = InformationSection::Clipboard;
+    }
+
     fn body(&mut self, ui: &mut egui::Ui) -> CoreLayout {
         self.body_in_viewport(ui, false, true)
     }
@@ -3030,6 +3058,8 @@ mod tests {
         static REGEX_IMMEDIATE_RENDERER_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         static REGEX_VIEWPORT_EVENTS: std::cell::RefCell<Vec<egui::Event>> = const { std::cell::RefCell::new(Vec::new()) };
         static REGEX_VIEWPORT_FOCUSED_ID: std::cell::RefCell<Option<egui::Id>> = const { std::cell::RefCell::new(None) };
+        static REGEX_VIEWPORT_POPUP_ID: std::cell::Cell<Option<egui::Id>> = const { std::cell::Cell::new(None) };
+        static REGEX_VIEWPORT_POPUP_OPEN: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     }
 
     fn install_regex_immediate_viewport_renderer() {
@@ -3076,6 +3106,13 @@ mod tests {
                     REGEX_VIEWPORT_FOCUSED_ID.with(|focused| {
                         *focused.borrow_mut() = ui.ctx().memory(|memory| memory.focused());
                     });
+                    REGEX_VIEWPORT_POPUP_OPEN.with(|open| {
+                        open.set(
+                            REGEX_VIEWPORT_POPUP_ID
+                                .with(|id| id.get())
+                                .map(|id| egui::ComboBox::is_open(ui.ctx(), id)),
+                        );
+                    });
                 },
             );
             output.drop_without_applying_deltas();
@@ -3089,6 +3126,7 @@ mod tests {
         events: Vec<egui::Event>,
     ) {
         REGEX_VIEWPORT_EVENTS.with(|pending| *pending.borrow_mut() = events);
+        REGEX_VIEWPORT_POPUP_OPEN.with(|open| open.set(None));
         let output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -3238,6 +3276,152 @@ mod tests {
         );
         assert_eq!(backend.attempts.load(Ordering::Relaxed), 1);
         assert_eq!(*backend.writes.lock().unwrap(), ["safe"]);
+    }
+
+    #[test]
+    fn jump_mode_tool_viewports_regex_capture_combo_uses_exact_popup_scope() {
+        use crate::gui::jump_mode::{SurfaceId, TargetKind};
+
+        install_regex_immediate_viewport_renderer();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let backend = Arc::new(FakeClipboard::default());
+        let mut dialog = RegexTesterDialogState::with_clipboard(backend.clone());
+        dialog.open = true;
+        dialog.session.draft.pattern = r"(?P<word>safe)(🦀)".into();
+        dialog.session.draft.test_text = "safe🦀safe🦀".into();
+        let now = Instant::now();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        let revision = dialog.session.revision();
+        let second_match_index = dialog
+            .session
+            .matches()
+            .get(1)
+            .expect("the generated input produces two matches")
+            .id
+            .index();
+        let result_identity = format!("match-result/{revision}/{second_match_index}");
+        let second_match = regex_native_target(&dialog, "Match result", Some(&result_identity));
+        assert_eq!(second_match.metadata().kind(), TargetKind::Action);
+        assert_eq!(
+            second_match.id().surface(),
+            &SurfaceId::dialog(
+                "regex-tester",
+                dialog
+                    .observed_viewport
+                    .expect("the Immediate presentation is observed")
+                    .0,
+            )
+        );
+        complete_regex_native_hint(&ctx, &mut dialog, &second_match);
+        assert_eq!(
+            dialog.session.selected_index(),
+            Some(1),
+            "the current typed match ID selects the exact result row"
+        );
+        assert!(backend.writes.lock().unwrap().is_empty());
+
+        dialog.information_section = InformationSection::MatchDetails;
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        let matched = dialog
+            .session
+            .matches()
+            .get(1)
+            .expect("the selected match remains current in its detail view");
+        let matched_index = matched.id.index();
+        assert_eq!(dialog.session.revision(), revision);
+        let capture_picker_identity =
+            format!("match-details/{revision}/{matched_index}/capture-picker");
+        let anchor = regex_native_target(&dialog, "Capture group", Some(&capture_picker_identity));
+        assert_eq!(anchor.metadata().kind(), TargetKind::ComboBox);
+        assert_eq!(
+            anchor.id().surface(),
+            &SurfaceId::dialog(
+                "regex-tester",
+                dialog
+                    .observed_viewport
+                    .expect("the Immediate presentation is observed")
+                    .0,
+            )
+        );
+
+        complete_regex_native_hint(&ctx, &mut dialog, &anchor);
+        assert_eq!(dialog.selected_capture, 0);
+        assert!(backend.writes.lock().unwrap().is_empty());
+
+        REGEX_VIEWPORT_POPUP_ID.with(|id| id.set(Some(anchor.response_id())));
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            vec![keyboard_event(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        let child_popup_open = REGEX_VIEWPORT_POPUP_OPEN.with(|open| open.get());
+        assert!(
+            child_popup_open == Some(true),
+            "the focused Regex ComboBox should open on a later Enter in its own viewport; child_focused={:?}, anchor={:?}, child_popup_open={child_popup_open:?}, owner={:?}",
+            REGEX_VIEWPORT_FOCUSED_ID.with(|focused| *focused.borrow()),
+            anchor.response_id(),
+            dialog.native_jump_mode.frame_navigation_owner(),
+        );
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            vec![keyboard_event_state(
+                egui::Key::Enter,
+                false,
+                egui::Modifiers::NONE,
+            )],
+        );
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+
+        let parent_surface = anchor.id().surface().clone();
+        let popup_registry = dialog.native_jump_mode.retained_registry();
+        assert!(
+            !popup_registry.targets().is_empty(),
+            "the real opened ComboBox exposes its current options"
+        );
+        assert!(popup_registry.targets().iter().all(|target| {
+            matches!(target.id().surface(), SurfaceId::Popup { owner, .. } if owner.as_ref() == &parent_surface)
+        }));
+        assert!(popup_registry.targets().iter().all(|target| {
+            target.metadata().label() == "Capture group"
+                && target.metadata().kind() == TargetKind::Selectable
+        }));
+        assert!(
+            popup_registry
+                .targets()
+                .iter()
+                .all(|target| target.id().surface() != &parent_surface),
+            "the popup registry does not retain parent controls while options own input"
+        );
+        let option_identity = format!("match-details/{revision}/{matched_index}/capture/1");
+        let crab_capture = regex_native_target(&dialog, "Capture group", Some(&option_identity));
+
+        complete_regex_native_hint(&ctx, &mut dialog, &crab_capture);
+        assert_eq!(
+            dialog.selected_capture, 0,
+            "hint completion only focuses the option"
+        );
+        assert!(backend.writes.lock().unwrap().is_empty());
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            vec![keyboard_event(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(
+            dialog.selected_capture, 1,
+            "a later Enter chooses the exact capture"
+        );
+        REGEX_VIEWPORT_POPUP_ID.with(|id| id.set(None));
+        assert!(backend.writes.lock().unwrap().is_empty());
+        assert_eq!(backend.attempts.load(Ordering::Relaxed), 0);
     }
 
     #[test]

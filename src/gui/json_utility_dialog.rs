@@ -1159,6 +1159,17 @@ impl JsonUtilityDialogState {
                 tree_target_generation,
             )
         });
+        let tree_navigation_scope = form_scope.zip(dialog_instance).map(|(scope, instance)| {
+            scope
+                .child_namespace(format!(
+                    "tree/navigation/{}/{}",
+                    self.editor.generation, self.editor.tree.search.revision
+                ))
+                .with_surface(
+                    crate::gui::jump_mode::SurfaceId::dialog("json-utility", instance),
+                    crate::gui::jump_mode::TargetGeneration(instance),
+                )
+        });
         let document_action_scope = form_scope
             .map(|scope| scope.child_namespace(format!("document/{}", self.editor.generation)));
         let mut window_open = self.open;
@@ -1361,6 +1372,7 @@ impl JsonUtilityDialogState {
                             ui,
                             form_scope,
                             tree_scope.as_ref(),
+                            tree_navigation_scope.as_ref(),
                             clipboard,
                             committing_ui,
                             &mut form_visual_order,
@@ -1428,6 +1440,7 @@ impl JsonUtilityDialogState {
         ui: &mut egui::Ui,
         form_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         tree_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        tree_navigation_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         clipboard: &impl ClipboardBackend,
         committing_ui: bool,
         form_visual_order: &mut u64,
@@ -1448,7 +1461,6 @@ impl JsonUtilityDialogState {
         let mut clear_search = false;
         let original_fields = self.editor.tree.search.fields;
         let mut fields_after_input = original_fields;
-        let search_revision = self.editor.tree.search.revision;
         ui.horizontal_wrapped(|ui| {
             ui.label("Search");
             let response = if committing_ui {
@@ -1532,10 +1544,10 @@ impl JsonUtilityDialogState {
                 egui::Button::new("Previous"),
             );
             let _ = register_json_utility_target(
-                tree_action_scope.as_ref(),
+                tree_navigation_scope,
                 ui,
                 &previous_response,
-                format!("search/previous/{search_revision}"),
+                "search/previous",
                 "Previous search match",
                 crate::gui::jump_mode::TargetKind::Button,
                 tree_visual_order,
@@ -1544,10 +1556,10 @@ impl JsonUtilityDialogState {
             let next_response =
                 ui.add_enabled(ready && has_matches && !pending, egui::Button::new("Next"));
             let _ = register_json_utility_target(
-                tree_action_scope.as_ref(),
+                tree_navigation_scope,
                 ui,
                 &next_response,
-                format!("search/next/{search_revision}"),
+                "search/next",
                 "Next search match",
                 crate::gui::jump_mode::TargetKind::Button,
                 tree_visual_order,
@@ -2312,6 +2324,168 @@ mod tests {
             *clipboard.writes.lock().unwrap(),
             vec![r#"{"value":1}"#.to_owned()]
         );
+    }
+
+    #[test]
+    fn jump_mode_tool_viewports_json_search_navigation_keeps_focus_across_reveal() {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        let ctx = egui::Context::default();
+        let clipboard = FakeClipboard::new("");
+        let mut dialog = JsonUtilityDialogState::default();
+        dialog.test_open_with_source(r#"{"first":"needle","outer":{"deep":"needle"}}"#, true);
+        dialog.editor.tree.search.query = "needle".to_owned();
+        dialog.editor.tree.search.fields = JsonSearchFields::Both;
+        dialog.editor.tree.search.invalidate_results();
+        dialog.editor.complete_search_for_test();
+        assert_eq!(dialog.editor.tree.search.matches.len(), 2);
+        assert_eq!(dialog.editor.tree.search.active_match, Some(0));
+        assert_eq!(
+            dialog.editor.tree.expanded.len(),
+            1,
+            "only the root is open"
+        );
+
+        let mut jump = crate::gui::jump_mode::ui::JumpModeUi::new(true);
+        jump.observe_dialog_visibility([(NavigationDialogKind::JsonUtility, true)]);
+        assert_eq!(
+            run_jump_dialog_frame(&ctx, &mut jump, &mut dialog, &clipboard, Vec::new(), true),
+            NavigationOwner::Blocked
+        );
+        let owner = NavigationOwner::Dialog {
+            kind: NavigationDialogKind::JsonUtility,
+            instance: jump
+                .dialog_instance(NavigationDialogKind::JsonUtility)
+                .expect("the utility has its observed instance"),
+        };
+        assert_eq!(
+            run_jump_dialog_frame(&ctx, &mut jump, &mut dialog, &clipboard, Vec::new(), true),
+            owner
+        );
+        let next_target = jump
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Next search match")
+            .expect("the real search navigation button is registered")
+            .clone();
+
+        run_jump_dialog_frame(
+            &ctx,
+            &mut jump,
+            &mut dialog,
+            &clipboard,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::Space,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::SHIFT,
+                },
+                egui::Event::Text(" ".to_owned()),
+            ],
+            true,
+        );
+        assert!(jump.active_session().is_some());
+        run_jump_dialog_frame(
+            &ctx,
+            &mut jump,
+            &mut dialog,
+            &clipboard,
+            vec![egui::Event::Key {
+                key: egui::Key::Space,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::SHIFT,
+            }],
+            true,
+        );
+        let hint = jump
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(next_target.id())
+            .expect("the current Next button has a hint")
+            .as_str()
+            .to_owned();
+        run_jump_dialog_frame(
+            &ctx,
+            &mut jump,
+            &mut dialog,
+            &clipboard,
+            vec![egui::Event::Text(hint)],
+            true,
+        );
+        assert!(jump.active_session().is_none());
+        assert_eq!(dialog.editor.tree.search.active_match, Some(0));
+        assert_eq!(dialog.editor.tree.expanded.len(), 1);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(next_target.response_id()),
+            "hint completion focuses Next without advancing the current match"
+        );
+
+        run_jump_dialog_frame(
+            &ctx,
+            &mut jump,
+            &mut dialog,
+            &clipboard,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            true,
+        );
+        assert_eq!(dialog.editor.tree.search.active_match, Some(1));
+        assert!(dialog.editor.tree.expanded.len() > 1);
+        let next_after_reveal = jump
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Next search match")
+            .expect("Next remains registered after revealing the nested match");
+        assert_eq!(next_after_reveal.id(), next_target.id());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(next_target.response_id()),
+            "expansion does not surrender focus from the relative navigation control"
+        );
+
+        run_jump_dialog_frame(
+            &ctx,
+            &mut jump,
+            &mut dialog,
+            &clipboard,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            true,
+        );
+        run_jump_dialog_frame(
+            &ctx,
+            &mut jump,
+            &mut dialog,
+            &clipboard,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            true,
+        );
+        assert_eq!(dialog.editor.tree.search.active_match, Some(0));
+        assert!(clipboard.writes.lock().unwrap().is_empty());
     }
 
     #[test]

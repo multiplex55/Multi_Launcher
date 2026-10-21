@@ -6352,6 +6352,9 @@ impl LauncherApp {
 #[cfg(test)]
 thread_local! {
     static IMMEDIATE_VIEWPORT_RENDERER_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static IMMEDIATE_VIEWPORT_FOCUS_OVERRIDE: std::cell::Cell<Option<(egui::ViewportId, bool)>> = const { std::cell::Cell::new(None) };
+    static IMMEDIATE_VIEWPORT_TEST_EVENTS: std::cell::RefCell<Vec<egui::Event>> = const { std::cell::RefCell::new(Vec::new()) };
+    static IMMEDIATE_VIEWPORT_TEST_FOCUSED_ID: std::cell::RefCell<Option<(egui::ViewportId, Option<egui::Id>)>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -6380,6 +6383,11 @@ fn with_immediate_viewport_renderer<R>(ctx: &egui::Context, run: impl FnOnce() -
         egui::Context::set_immediate_viewport_renderer(|ctx, mut viewport| {
             let viewport_id = viewport.ids.this;
             let parent_id = viewport.ids.parent;
+            let focused = IMMEDIATE_VIEWPORT_FOCUS_OVERRIDE.with(|desired| {
+                desired
+                    .get()
+                    .map(|(id, is_focused)| id == viewport_id && is_focused)
+            });
             let screen_rect = egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
                 viewport
@@ -6394,19 +6402,28 @@ fn with_immediate_viewport_renderer<R>(ctx: &egui::Context, run: impl FnOnce() -
                     parent: Some(parent_id),
                     title: viewport.builder.title.clone(),
                     inner_rect: Some(screen_rect),
+                    focused,
                     ..Default::default()
                 },
             );
+            let events = IMMEDIATE_VIEWPORT_TEST_EVENTS
+                .with(|events| std::mem::take(&mut *events.borrow_mut()));
             let input = egui::RawInput {
                 viewport_id,
                 viewports,
                 screen_rect: Some(screen_rect),
+                focused: focused.unwrap_or(true),
+                events,
                 ..Default::default()
             };
             let output = ctx.run_ui(input, |ui| {
                 assert_eq!(ui.ctx().viewport_id(), viewport_id);
                 assert_eq!(ui.ctx().parent_viewport_id(), parent_id);
                 (viewport.viewport_ui_cb)(ui);
+                IMMEDIATE_VIEWPORT_TEST_FOCUSED_ID.with(|focused| {
+                    *focused.borrow_mut() =
+                        Some((viewport_id, ui.ctx().memory(|memory| memory.focused())));
+                });
             });
             output.drop_without_applying_deltas();
             assert_eq!(ctx.viewport_id(), parent_id);
@@ -6421,6 +6438,43 @@ fn with_immediate_viewport_renderer<R>(ctx: &egui::Context, run: impl FnOnce() -
     let result = run();
     drop(guard);
     result
+}
+
+#[cfg(test)]
+fn run_root_frame_with_focused_immediate_viewport_for_test(
+    ctx: &egui::Context,
+    app: &mut LauncherApp,
+    root_focused: bool,
+    focused_viewport: egui::ViewportId,
+    child_focused: bool,
+    viewport_events: Vec<egui::Event>,
+) -> Option<(egui::ViewportId, Option<egui::Id>)> {
+    let previous_focus = IMMEDIATE_VIEWPORT_FOCUS_OVERRIDE
+        .with(|desired| desired.replace(Some((focused_viewport, child_focused))));
+    let previous_events = IMMEDIATE_VIEWPORT_TEST_EVENTS
+        .with(|events| std::mem::replace(&mut *events.borrow_mut(), viewport_events));
+    let previous_observation =
+        IMMEDIATE_VIEWPORT_TEST_FOCUSED_ID.with(|focused| focused.replace(None));
+    let output = app
+        .run_root_frame_for_test(
+            ctx,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 650.0),
+                )),
+                focused: root_focused,
+                ..Default::default()
+            },
+            false,
+        )
+        .0;
+    let observed = IMMEDIATE_VIEWPORT_TEST_FOCUSED_ID.with(|focused| focused.replace(None));
+    IMMEDIATE_VIEWPORT_FOCUS_OVERRIDE.with(|desired| desired.set(previous_focus));
+    IMMEDIATE_VIEWPORT_TEST_EVENTS.with(|events| *events.borrow_mut() = previous_events);
+    IMMEDIATE_VIEWPORT_TEST_FOCUSED_ID.with(|focused| *focused.borrow_mut() = previous_observation);
+    output.drop_without_applying_deltas();
+    observed
 }
 
 impl LauncherApp {
@@ -9845,6 +9899,326 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jump_mode_tool_viewports_root_json_regex_xml_return_isolate_child_state() {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        use crate::gui::jump_mode::{SurfaceId, TargetKind};
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let original_root_query = app.query.clone();
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        let run_root_input = |app: &mut LauncherApp, events: Vec<egui::Event>| {
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events,
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+        };
+        let run_native_input = |app: &mut LauncherApp,
+                                viewport: egui::ViewportId,
+                                focused: bool,
+                                events: Vec<egui::Event>| {
+            super::run_root_frame_with_focused_immediate_viewport_for_test(
+                &ctx, app, false, viewport, focused, events,
+            )
+        };
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Root
+        );
+        start_actual_root_jump_mode(&ctx, &mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+
+        app.json_utility_dialog.test_open_with_source("", false);
+        run_dialog_frame(&ctx, &mut app);
+        let json_instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::JsonUtility)
+            .expect("the opened JSON Utility has a current root instance");
+        run_dialog_frame(&ctx, &mut app);
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::JsonUtility,
+                instance: json_instance,
+            }
+        );
+        assert!(
+            app.jump_mode_ui.active_session().is_none(),
+            "opening JSON cancels the preceding Root hint session"
+        );
+        let json_source = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "JSON source")
+            .cloned()
+            .expect("the actual JSON multiline editor is registered");
+        assert_eq!(json_source.metadata().kind(), TargetKind::TextEntry);
+        assert_eq!(
+            json_source.id().surface(),
+            &SurfaceId::dialog("json-utility", json_instance)
+        );
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let json_hint = dialog_hint_for_label(&app, "JSON source");
+        run_root_input(&mut app, vec![egui::Event::Text(json_hint)]);
+        assert_eq!(app.json_utility_dialog.test_source(), "");
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(json_source.response_id())
+        );
+        for text in ["λ\n", "🦀"] {
+            run_root_input(&mut app, vec![egui::Event::Text(text.into())]);
+        }
+        assert_eq!(app.json_utility_dialog.test_source(), "λ\n🦀");
+        assert_eq!(
+            app.query, original_root_query,
+            "JSON edits stay in the dialog"
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(json_source.response_id())
+        );
+        app.json_utility_dialog.close();
+        run_dialog_frame(&ctx, &mut app);
+        run_dialog_frame(&ctx, &mut app);
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Root,
+            "closing JSON returns routing to the actual Root owner"
+        );
+
+        let regex_viewport = egui::ViewportId::from_hash_of("regex_tester_viewport");
+        let regex_clipboard =
+            Arc::new(crate::clipboard_modify::clipboard::fake::FakeClipboardBackend::default());
+        app.regex_tester_dialog =
+            crate::gui::regex_tester_dialog::RegexTesterDialogState::with_clipboard(
+                regex_clipboard.clone(),
+            );
+        app.regex_tester_dialog.session.draft.pattern = "safe".into();
+        app.regex_tester_dialog.session.draft.test_text = "safe input".into();
+        let regex_changed_at = std::time::Instant::now();
+        app.regex_tester_dialog
+            .session
+            .mark_changed(regex_changed_at);
+        app.regex_tester_dialog
+            .session
+            .tick(regex_changed_at + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        app.regex_tester_dialog.test_select_clipboard_section();
+        app.regex_tester_dialog.open();
+        let observed = run_native_input(&mut app, regex_viewport, true, Vec::new());
+        assert_eq!(observed.map(|(viewport, _)| viewport), Some(regex_viewport));
+        let _ = run_native_input(
+            &mut app,
+            regex_viewport,
+            true,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let regex_copy = app
+            .regex_tester_dialog
+            .test_native_jump_targets()
+            .into_iter()
+            .find(|target| target.metadata().label() == "Copy pattern")
+            .expect("the Immediate Regex viewport registers its current Copy action");
+        assert!(matches!(
+            regex_copy.id().surface(),
+            SurfaceId::Dialog { kind, .. } if kind == "regex-tester"
+        ));
+        assert_eq!(regex_copy.viewport(), regex_viewport);
+        assert_eq!(regex_copy.metadata().kind(), TargetKind::Button);
+
+        let _ = run_native_input(
+            &mut app,
+            regex_viewport,
+            true,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        assert!(app.regex_tester_dialog.test_native_jump_active());
+        let retained_regex_ids = app
+            .regex_tester_dialog
+            .test_native_jump_targets()
+            .into_iter()
+            .map(|target| target.id().clone())
+            .collect::<Vec<_>>();
+        let _ = run_native_input(
+            &mut app,
+            regex_viewport,
+            true,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        assert!(
+            app.regex_tester_dialog.test_native_jump_active(),
+            "the Root frame receipt does not complete or reset the native child session"
+        );
+        assert_eq!(
+            app.regex_tester_dialog
+                .test_native_jump_targets()
+                .into_iter()
+                .map(|target| target.id().clone())
+                .collect::<Vec<_>>(),
+            retained_regex_ids,
+            "Root collection leaves the focused child's registry intact"
+        );
+        let copy_hint = app
+            .regex_tester_dialog
+            .test_native_jump_hint(regex_copy.id())
+            .expect("the native Copy action has a current hint");
+        let observed = run_native_input(
+            &mut app,
+            regex_viewport,
+            true,
+            vec![egui::Event::Text(copy_hint)],
+        );
+        assert!(!app.regex_tester_dialog.test_native_jump_active());
+        assert!(regex_clipboard.writes().is_empty());
+        assert_eq!(
+            observed,
+            Some((regex_viewport, Some(regex_copy.response_id()))),
+            "the native hint completion focuses the exact child response"
+        );
+        let _ = run_native_input(
+            &mut app,
+            regex_viewport,
+            true,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(regex_clipboard.writes(), ["safe"]);
+
+        let _ = run_native_input(
+            &mut app,
+            regex_viewport,
+            true,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        let _ = run_native_input(
+            &mut app,
+            regex_viewport,
+            true,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        assert!(app.regex_tester_dialog.test_native_jump_active());
+        let old_regex_target = regex_copy.id().clone();
+        let unfocused = run_native_input(&mut app, regex_viewport, false, Vec::new());
+        assert_eq!(
+            unfocused.map(|(viewport, _)| viewport),
+            Some(regex_viewport)
+        );
+        assert!(!app.regex_tester_dialog.test_native_jump_active());
+        assert!(
+            app.regex_tester_dialog
+                .test_native_jump_targets()
+                .is_empty(),
+            "unfocusing the Immediate viewport clears its prior target map"
+        );
+
+        let _ = run_native_input(
+            &mut app,
+            regex_viewport,
+            true,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let _ = run_native_input(&mut app, regex_viewport, true, Vec::new());
+        assert!(
+            app.regex_tester_dialog
+                .test_native_jump_targets()
+                .iter()
+                .any(|target| target.metadata().label() == "Copy pattern"),
+            "the refocused Immediate viewport has collected current controls"
+        );
+        let _ = run_native_input(
+            &mut app,
+            regex_viewport,
+            true,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        assert!(app.regex_tester_dialog.test_native_jump_active());
+
+        let xml_viewport = egui::ViewportId::from_hash_of("xml_toolkit_viewport");
+        let xml_clipboard =
+            Arc::new(crate::clipboard_modify::clipboard::fake::FakeClipboardBackend::default());
+        app.xml_toolkit_dialog =
+            crate::gui::xml_toolkit_dialog::XmlToolkitDialogState::with_clipboard(
+                xml_clipboard.clone(),
+            );
+        app.xml_toolkit_dialog.open();
+        app.xml_toolkit_dialog.test_set_source("<root>safe</root>");
+        app.xml_toolkit_dialog.set_active_session_for_test(
+            crate::xml_toolkit_session::XmlEngineSession::start()
+                .expect("start isolated XML child session"),
+        );
+        app.regex_tester_dialog.open = false;
+        let observed = run_native_input(&mut app, xml_viewport, true, Vec::new());
+        assert_eq!(observed.map(|(viewport, _)| viewport), Some(xml_viewport));
+        assert!(!app.regex_tester_dialog.test_native_jump_active());
+        assert!(
+            app.regex_tester_dialog
+                .test_native_jump_targets()
+                .is_empty()
+        );
+        let _ = run_native_input(&mut app, xml_viewport, true, Vec::new());
+        let xml_source = app
+            .xml_toolkit_dialog
+            .test_native_jump_targets()
+            .into_iter()
+            .find(|target| target.metadata().label() == "XML source text")
+            .expect("the exact native XML owner registers its source field");
+        assert_eq!(xml_source.viewport(), xml_viewport);
+        assert_eq!(xml_source.metadata().kind(), TargetKind::TextEntry);
+        assert!(xml_clipboard.writes().is_empty());
+
+        app.xml_toolkit_dialog.end_session();
+        focus_launcher_query(&ctx, &mut app);
+        run_dialog_frame(&ctx, &mut app);
+        run_dialog_frame(&ctx, &mut app);
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Root,
+            "closing XML returns to the visible Root owner"
+        );
+        assert!(!app.xml_toolkit_dialog.test_native_jump_active());
+        assert!(app.xml_toolkit_dialog.test_native_jump_targets().is_empty());
+
+        app.regex_tester_dialog.open();
+        let _ = run_native_input(&mut app, regex_viewport, true, Vec::new());
+        let _ = run_native_input(&mut app, regex_viewport, true, Vec::new());
+        let reopened_regex_target = app
+            .regex_tester_dialog
+            .test_native_jump_targets()
+            .into_iter()
+            .find(|target| target.metadata().label() == "Copy pattern")
+            .expect("the reopened Regex owner registers a current action");
+        assert_ne!(
+            reopened_regex_target.id(),
+            &old_regex_target,
+            "close/reopen creates new dialog-instance target identities"
+        );
+        app.regex_tester_dialog.open = false;
+        focus_launcher_query(&ctx, &mut app);
+        run_dialog_frame(&ctx, &mut app);
+        app.xml_toolkit_dialog.shutdown();
+        drop(app);
+        drop(workspace);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jump_mode_xml_embedded_source_and_overwrite_hints_require_fresh_activation() {
         use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
         use crate::gui::jump_mode::{SemanticTargetId, SurfaceId, TargetKind};
@@ -10032,6 +10406,71 @@ mod tests {
             47,
             path.clone(),
             "<replacement/>",
+        );
+        let pending_overwrite = app
+            .xml_toolkit_dialog
+            .test_pending_overwrite_signature()
+            .expect("the overwrite request captures one pending save");
+        let parent_copy_target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Copy XML source")
+            .expect("the parent Copy Source button was rendered before confirmation")
+            .clone();
+        assert_eq!(
+            ctx.read_response(parent_copy_target.response_id())
+                .expect("the actual parent button response is current")
+                .layer_id,
+            NavigationDialogKind::XmlToolkit
+                .layer_id()
+                .expect("XML has a ROOT layer")
+        );
+        ctx.memory_mut(|memory| memory.request_focus(parent_copy_target.response_id()));
+        run_embedded_root_dialog_frame(
+            &ctx,
+            &mut app,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+        );
+        assert_eq!(
+            app.xml_toolkit_dialog.test_pending_overwrite_signature(),
+            Some(pending_overwrite.clone()),
+            "the opening confirmation pass must not route Enter to its parent"
+        );
+        assert!(clipboard.writes().is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original fixture bytes");
+        run_embedded_root_dialog_frame(
+            &ctx,
+            &mut app,
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: true,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..actual_query_input(true)
+            },
+        );
+        assert_eq!(
+            app.xml_toolkit_dialog.test_pending_overwrite_signature(),
+            Some(pending_overwrite),
+            "a carried Enter repeat must leave the captured overwrite intact"
+        );
+        assert!(clipboard.writes().is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original fixture bytes");
+        run_embedded_root_dialog_frame(
+            &ctx,
+            &mut app,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
         );
         run_embedded_root_dialog_frame(&ctx, &mut app, actual_query_input(true));
         run_embedded_root_dialog_frame(&ctx, &mut app, actual_query_input(true));
