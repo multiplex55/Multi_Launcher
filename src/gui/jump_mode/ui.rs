@@ -204,6 +204,13 @@ pub(crate) enum NavigationOwner {
         kind: SearchReplaceConfirmationKind,
         subject: SearchReplaceConfirmationSubject,
     },
+    /// One exact Dashboard Editor confirmation for removing a slot or
+    /// resetting the selected widget's settings.
+    DashboardEditorConfirmation {
+        parent_instance: u64,
+        confirmation_instance: u64,
+        kind: DashboardEditorConfirmationKind,
+    },
     /// One exact, transient snippet prompt window. Its generation is also
     /// part of the window's egui layer ID.
     SnippetPrompt {
@@ -252,6 +259,70 @@ pub(crate) enum SearchReplaceConfirmationSubject {
     Receipt {
         receipt_identity: u64,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum DashboardEditorConfirmationKind {
+    RemoveSlot,
+    ResetWidgetSettings,
+}
+
+impl DashboardEditorConfirmationKind {
+    pub(crate) fn surface_kind(self) -> &'static str {
+        match self {
+            Self::RemoveSlot => "dashboard-editor-remove-confirmation",
+            Self::ResetWidgetSettings => "dashboard-editor-reset-confirmation",
+        }
+    }
+
+    pub(crate) fn window_id(self) -> &'static str {
+        match self {
+            Self::RemoveSlot => "dashboard_editor_remove_confirmation",
+            Self::ResetWidgetSettings => "dashboard_editor_reset_confirmation",
+        }
+    }
+}
+
+pub(crate) fn dashboard_editor_confirmation_layer_id(
+    parent_instance: u64,
+    confirmation_instance: u64,
+    kind: DashboardEditorConfirmationKind,
+) -> egui::LayerId {
+    egui::LayerId::new(
+        egui::Order::Middle,
+        egui::Id::new((kind.window_id(), parent_instance, confirmation_instance)),
+    )
+}
+
+pub(crate) fn resolve_dashboard_editor_confirmation_owner(
+    ctx: &egui::Context,
+    parent_instance: u64,
+    confirmation_instance: u64,
+    kind: DashboardEditorConfirmationKind,
+) -> NavigationOwner {
+    let owner = NavigationOwner::DashboardEditorConfirmation {
+        parent_instance,
+        confirmation_instance,
+        kind,
+    };
+    let child_layer =
+        dashboard_editor_confirmation_layer_id(parent_instance, confirmation_instance, kind);
+    let parent_layer = NavigationDialogKind::DashboardEditor.layer_id();
+    if ctx.viewport_id() == egui::ViewportId::ROOT
+        && ctx.input(|input| input.focused)
+        && ctx.memory(|memory| memory.top_modal_layer().is_none())
+        && !egui::Popup::is_any_open(ctx)
+        && visible_top_middle_layer(ctx) == Some(child_layer)
+        && focused_response_layer(ctx).is_none_or(|focused| {
+            focused == child_layer
+                || Some(focused) == parent_layer
+                || focused.order != egui::Order::Middle
+        })
+    {
+        owner
+    } else {
+        NavigationOwner::Blocked
+    }
 }
 
 impl BatchRenameConfirmationKind {
@@ -479,6 +550,19 @@ impl NavigationOwner {
                             owner.as_ref(),
                             SurfaceId::Dialog { kind, instance }
                                 if kind == "search-replace" && *instance == parent_instance
+                        )
+                }
+                Self::DashboardEditorConfirmation {
+                    parent_instance,
+                    confirmation_instance,
+                    kind: owner_kind,
+                } => {
+                    kind == owner_kind.surface_kind()
+                        && *instance == confirmation_instance
+                        && matches!(
+                            owner.as_ref(),
+                            SurfaceId::Dialog { kind, instance }
+                                if kind == "dashboard-editor" && *instance == parent_instance
                         )
                 }
                 _ => self.owns_surface(owner),
@@ -2437,6 +2521,7 @@ impl JumpModeUi {
             | NavigationOwner::XmlOverwriteConfirmation { .. }
             | NavigationOwner::BatchRenameConfirmation { .. }
             | NavigationOwner::SearchReplaceConfirmation { .. }
+            | NavigationOwner::DashboardEditorConfirmation { .. }
             | NavigationOwner::SnippetPrompt { .. } => true,
             NavigationOwner::Blocked => false,
         };

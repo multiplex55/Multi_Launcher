@@ -430,6 +430,8 @@ pub(crate) fn run_refresh_schedule(
 
 pub(crate) fn refresh_settings_ui(
     ui: &mut egui::Ui,
+    settings_ctx: &WidgetSettingsContext<'_>,
+    identity_prefix: &'static str,
     seconds: &mut f32,
     refresh_mode: &mut RefreshMode,
     throttle_secs: &mut f32,
@@ -442,36 +444,65 @@ pub(crate) fn refresh_settings_ui(
         let resp = ui
             .add(egui::DragValue::new(seconds).range(1.0..=300.0).speed(0.5))
             .on_hover_text(tooltip);
+        settings_ctx.register_jump_mode_target(
+            ui,
+            &resp,
+            format!("{identity_prefix}/refresh-interval"),
+            "Refresh interval",
+            crate::gui::jump_mode::TargetKind::Slider,
+        );
         changed |= resp.changed();
         ui.label("seconds");
     });
     ui.horizontal(|ui| {
         ui.label("Refresh mode");
         let selected = refresh_mode.to_string();
-        egui::ComboBox::from_id_salt(ui.id().with("refresh_mode"))
+        let anchor_identity = format!("{identity_prefix}/refresh-mode");
+        let popup_scope = settings_ctx.combo_popup_scope(&anchor_identity);
+        let combo = egui::ComboBox::from_id_salt(ui.id().with("refresh_mode"))
             .selected_text(selected)
             .show_ui(ui, |ui| {
-                changed |= ui
-                    .selectable_value(refresh_mode, RefreshMode::Auto, "Auto")
-                    .changed();
-                changed |= ui
-                    .selectable_value(refresh_mode, RefreshMode::Manual, "Manual")
-                    .changed();
-                changed |= ui
-                    .selectable_value(refresh_mode, RefreshMode::Throttled, "Throttled")
-                    .changed();
+                for (mode, value, label) in [
+                    ("auto", RefreshMode::Auto, "Auto"),
+                    ("manual", RefreshMode::Manual, "Manual"),
+                    ("throttled", RefreshMode::Throttled, "Throttled"),
+                ] {
+                    let response = ui.selectable_value(refresh_mode, value, label);
+                    settings_ctx.register_jump_mode_target_in_scope(
+                        popup_scope.as_ref(),
+                        ui,
+                        &response,
+                        format!("{identity_prefix}/refresh-mode-option/{mode}"),
+                        "Refresh mode option",
+                        crate::gui::jump_mode::TargetKind::Selectable,
+                    );
+                    changed |= response.changed();
+                }
             });
+        settings_ctx.register_jump_mode_target(
+            ui,
+            &combo.response,
+            anchor_identity,
+            "Refresh mode",
+            crate::gui::jump_mode::TargetKind::ComboBox,
+        );
     });
     if *refresh_mode == RefreshMode::Throttled {
         ui.horizontal(|ui| {
             ui.label("Minimum interval");
-            changed |= ui
-                .add(
-                    egui::DragValue::new(throttle_secs)
-                        .range(1.0..=300.0)
-                        .speed(0.5),
-                )
-                .changed();
+            let response = ui.add(
+                egui::DragValue::new(throttle_secs)
+                    .range(1.0..=300.0)
+                    .speed(0.5),
+            );
+            settings_ctx.register_jump_mode_target(
+                ui,
+                &response,
+                format!("{identity_prefix}/refresh-throttle"),
+                "Refresh throttle",
+                crate::gui::jump_mode::TargetKind::Slider,
+            );
+            changed |= response.changed();
             ui.label("seconds");
         });
     }

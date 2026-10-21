@@ -51,10 +51,22 @@ impl NowPlayingWidget {
         edit_typed_settings(ui, value, ctx, |ui, cfg: &mut NowPlayingConfig, _ctx| {
             let mut changed = false;
             ui.label("Show controls");
-            changed |= ui.checkbox(&mut cfg.show_play, "Play").changed();
-            changed |= ui.checkbox(&mut cfg.show_pause, "Pause").changed();
-            changed |= ui.checkbox(&mut cfg.show_prev, "Previous").changed();
-            changed |= ui.checkbox(&mut cfg.show_next, "Next").changed();
+            for (identity, label, value) in [
+                ("show-play", "Show play", &mut cfg.show_play),
+                ("show-pause", "Show pause", &mut cfg.show_pause),
+                ("show-previous", "Show previous", &mut cfg.show_prev),
+                ("show-next", "Show next", &mut cfg.show_next),
+            ] {
+                let response = ui.checkbox(value, label);
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    identity,
+                    label,
+                    crate::gui::jump_mode::TargetKind::Checkbox,
+                );
+                changed |= response.changed();
+            }
             changed
         })
     }

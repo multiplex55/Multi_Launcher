@@ -3,7 +3,10 @@ use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use crate::plugin::PluginManager;
 use eframe::egui;
 use serde_json::Value;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 
 mod active_timers;
 mod browser_tabs;
@@ -102,6 +105,14 @@ pub struct WidgetSettingsUiResult {
     pub error: Option<String>,
 }
 
+/// The real response that owns a native ComboBox popup in a dashboard
+/// property editor. This is ephemeral UI provenance, never widget metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WidgetNativeComboAnchor {
+    pub(crate) response_id: egui::Id,
+    pub(crate) layer_id: egui::LayerId,
+}
+
 #[derive(Clone, Copy)]
 pub struct WidgetSettingsContext<'a> {
     pub plugins: Option<&'a PluginManager>,
@@ -112,6 +123,72 @@ pub struct WidgetSettingsContext<'a> {
     pub usage: Option<&'a std::collections::HashMap<String, u32>>,
     pub default_location: Option<&'a str>,
     pub enabled_plugins: Option<&'a HashSet<String>>,
+    pub(crate) jump_mode_scope: Option<&'a crate::gui::jump_mode::ui::JumpModeScope>,
+    pub(crate) jump_mode_visual_order: Option<&'a std::cell::Cell<u64>>,
+    pub(crate) property_identity_store: Option<&'a WidgetPropertyIdentityStore>,
+    pub(crate) native_combo_anchors: Option<&'a RefCell<Vec<WidgetNativeComboAnchor>>>,
+    pub(crate) property_slot_token: Option<u64>,
+    pub(crate) property_mutations_allowed: bool,
+}
+
+/// Ephemeral identities for editable rows rendered by dashboard property forms.
+/// Tokens follow row operations and are never persisted with widget settings.
+#[derive(Default)]
+pub(crate) struct WidgetPropertyIdentityStore {
+    rows: RefCell<HashMap<(u64, &'static str), Vec<u64>>>,
+    next: Cell<u64>,
+}
+
+impl WidgetPropertyIdentityStore {
+    pub(crate) fn row_token(&self, slot_token: u64, group: &'static str, index: usize) -> u64 {
+        let mut rows = self.rows.borrow_mut();
+        let tokens = rows.entry((slot_token, group)).or_default();
+        while tokens.len() <= index {
+            let token = self.next.get().wrapping_add(1).max(1);
+            self.next.set(token);
+            tokens.push(token);
+        }
+        tokens[index]
+    }
+
+    pub(crate) fn remove_row(&self, slot_token: u64, group: &'static str, index: usize) {
+        if let Some(tokens) = self.rows.borrow_mut().get_mut(&(slot_token, group))
+            && index < tokens.len()
+        {
+            tokens.remove(index);
+        }
+    }
+
+    pub(crate) fn swap_rows(
+        &self,
+        slot_token: u64,
+        group: &'static str,
+        first: usize,
+        second: usize,
+    ) {
+        if let Some(tokens) = self.rows.borrow_mut().get_mut(&(slot_token, group))
+            && first < tokens.len()
+            && second < tokens.len()
+        {
+            tokens.swap(first, second);
+        }
+    }
+
+    pub(crate) fn clear(&self) {
+        self.rows.borrow_mut().clear();
+    }
+
+    pub(crate) fn clear_slot(&self, slot_token: u64) {
+        self.rows
+            .borrow_mut()
+            .retain(|(token, _), _| *token != slot_token);
+    }
+}
+
+pub(crate) fn opaque_settings_key(value: impl Hash) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("key-{:016x}", hasher.finish())
 }
 
 impl<'a> WidgetSettingsContext<'a> {
@@ -125,6 +202,161 @@ impl<'a> WidgetSettingsContext<'a> {
             usage: None,
             default_location: None,
             enabled_plugins: None,
+            jump_mode_scope: None,
+            jump_mode_visual_order: None,
+            property_identity_store: None,
+            native_combo_anchors: None,
+            property_slot_token: None,
+            property_mutations_allowed: false,
+        }
+    }
+
+    pub(crate) fn register_jump_mode_target(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: impl AsRef<str>,
+        label: &'static str,
+        kind: crate::gui::jump_mode::TargetKind,
+    ) -> Option<crate::gui::jump_mode::ui::FocusDirective> {
+        self.register_jump_mode_target_in_scope(
+            self.jump_mode_scope,
+            ui,
+            response,
+            identity,
+            label,
+            kind,
+        )
+    }
+
+    pub(crate) fn register_jump_mode_target_in_scope(
+        &self,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: impl AsRef<str>,
+        label: &'static str,
+        kind: crate::gui::jump_mode::TargetKind,
+    ) -> Option<crate::gui::jump_mode::ui::FocusDirective> {
+        if kind == crate::gui::jump_mode::TargetKind::ComboBox {
+            self.record_native_combo_anchor(ui, response);
+        }
+        let mut visual_order = self.jump_mode_visual_order.map_or(0, std::cell::Cell::get);
+        let directive = crate::gui::jump_mode::ui::register_and_apply_target(
+            scope,
+            ui,
+            response,
+            identity,
+            label,
+            kind,
+            &mut visual_order,
+        );
+        if let Some(order) = self.jump_mode_visual_order {
+            order.set(visual_order);
+        }
+        directive
+    }
+
+    pub(crate) fn record_native_combo_anchor(&self, ui: &egui::Ui, response: &egui::Response) {
+        if !ui.is_enabled()
+            || !response.enabled()
+            || !response.rect.intersect(ui.clip_rect()).is_positive()
+        {
+            return;
+        }
+        let Some(anchors) = self.native_combo_anchors else {
+            return;
+        };
+        let anchor = WidgetNativeComboAnchor {
+            response_id: response.id,
+            layer_id: response.layer_id,
+        };
+        let mut anchors = anchors.borrow_mut();
+        if !anchors.contains(&anchor) {
+            anchors.push(anchor);
+        }
+    }
+
+    pub(crate) fn begin_native_combo_anchor_pass(&self) {
+        if let Some(anchors) = self.native_combo_anchors {
+            anchors.borrow_mut().clear();
+        }
+    }
+
+    pub(crate) fn combo_popup_scope(
+        &self,
+        anchor_identity: impl AsRef<str>,
+    ) -> Option<crate::gui::jump_mode::ui::JumpModeScope> {
+        self.jump_mode_scope
+            .map(|scope| scope.combo_popup_scope(anchor_identity))
+    }
+
+    pub(crate) fn with_slot_scope<'b>(
+        &self,
+        scope: Option<&'b crate::gui::jump_mode::ui::JumpModeScope>,
+        slot_token: u64,
+        mutations_allowed: bool,
+    ) -> WidgetSettingsContext<'b>
+    where
+        'a: 'b,
+    {
+        let mut scoped = self.with_jump_mode_scope(scope);
+        scoped.property_slot_token = Some(slot_token);
+        scoped.property_mutations_allowed = mutations_allowed;
+        scoped
+    }
+
+    pub(crate) fn property_row_token(&self, group: &'static str, index: usize) -> Option<u64> {
+        self.property_identity_store
+            .zip(self.property_slot_token)
+            .map(|(store, slot_token)| store.row_token(slot_token, group, index))
+    }
+
+    pub(crate) fn remove_property_row_token(&self, group: &'static str, index: usize) {
+        if self.property_mutations_allowed
+            && let Some((store, slot_token)) =
+                self.property_identity_store.zip(self.property_slot_token)
+        {
+            store.remove_row(slot_token, group, index);
+        }
+    }
+
+    pub(crate) fn swap_property_row_tokens(
+        &self,
+        group: &'static str,
+        first: usize,
+        second: usize,
+    ) {
+        if self.property_mutations_allowed
+            && let Some((store, slot_token)) =
+                self.property_identity_store.zip(self.property_slot_token)
+        {
+            store.swap_rows(slot_token, group, first, second);
+        }
+    }
+
+    pub(crate) fn with_jump_mode_scope<'b>(
+        &self,
+        scope: Option<&'b crate::gui::jump_mode::ui::JumpModeScope>,
+    ) -> WidgetSettingsContext<'b>
+    where
+        'a: 'b,
+    {
+        WidgetSettingsContext {
+            plugins: self.plugins,
+            plugin_infos: self.plugin_infos,
+            plugin_commands: self.plugin_commands,
+            actions: self.actions,
+            favorites: self.favorites,
+            usage: self.usage,
+            default_location: self.default_location,
+            enabled_plugins: self.enabled_plugins,
+            jump_mode_scope: scope,
+            jump_mode_visual_order: self.jump_mode_visual_order,
+            property_identity_store: self.property_identity_store,
+            native_combo_anchors: self.native_combo_anchors,
+            property_slot_token: self.property_slot_token,
+            property_mutations_allowed: self.property_mutations_allowed,
         }
     }
 }
@@ -735,5 +967,161 @@ mod jump_mode_tests {
             );
             assert_eq!(before, after);
         });
+    }
+
+    #[test]
+    fn jump_mode_widget_properties_all_settings_renderers_register_real_controls() {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        fn render_settings_window(
+            ctx: &egui::Context,
+            registry: &WidgetRegistry,
+            name: &str,
+            settings: &mut Value,
+            settings_context: &WidgetSettingsContext<'_>,
+            slot_token: u64,
+        ) -> egui::FullOutput {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_500.0, 1_100.0),
+                    )),
+                    focused: true,
+                    ..Default::default()
+                },
+                |root_ui| {
+                    egui::Window::new("Dashboard Editor")
+                        .default_size(egui::vec2(1_300.0, 900.0))
+                        .show(root_ui.ctx(), |ui| {
+                            ui.scope_builder(
+                                egui::UiBuilder::new().id(ui.id().with((
+                                    "dashboard-editor-widget-properties",
+                                    slot_token,
+                                    name,
+                                ))),
+                                |ui| {
+                                    assert!(
+                                        registry
+                                            .render_settings_ui(
+                                                name,
+                                                ui,
+                                                settings,
+                                                settings_context,
+                                            )
+                                            .is_some()
+                                    );
+                                },
+                            );
+                        });
+                },
+            )
+        }
+
+        let registry = WidgetRegistry::with_defaults();
+        let names = registry
+            .metadata()
+            .into_iter()
+            .filter(|metadata| metadata.has_settings_ui)
+            .map(|metadata| metadata.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names.len(), 36, "the registered property-form inventory");
+
+        let plugins = PluginManager::new_inert_for_test();
+        let actions = vec![Action {
+            label: "Inert dashboard property fixture".into(),
+            desc: "No command is activated by settings rendering".into(),
+            action: "help:show".into(),
+            args: None,
+        }];
+        let plugin_infos = Vec::<(String, String, Vec<String>)>::new();
+        let favorites = vec![crate::plugins::fav::FavEntry {
+            label: "Fixture favorite".into(),
+            action: "help:show".into(),
+            args: None,
+        }];
+        let usage = HashMap::<String, u32>::new();
+        let enabled_plugins = HashSet::<String>::new();
+
+        for (index, name) in names.iter().enumerate() {
+            let ctx = egui::Context::default();
+            ctx.all_styles_mut(|style| style.animation_time = 0.0);
+            let owner = NavigationOwner::Dialog {
+                kind: NavigationDialogKind::DashboardEditor,
+                instance: 1,
+            };
+            let visual_order = Cell::new(0_u64);
+            let identities = WidgetPropertyIdentityStore::default();
+            let combo_anchors = RefCell::new(Vec::new());
+            let mut settings = registry
+                .default_settings(name)
+                .expect("every renderer has a registered descriptor");
+            let settings_context = WidgetSettingsContext {
+                plugins: Some(&plugins),
+                plugin_infos: Some(&plugin_infos),
+                plugin_commands: Some(&actions),
+                actions: Some(&actions),
+                favorites: Some(&favorites),
+                usage: Some(&usage),
+                default_location: Some("Generated dashboard fixture"),
+                enabled_plugins: Some(&enabled_plugins),
+                jump_mode_scope: None,
+                jump_mode_visual_order: Some(&visual_order),
+                property_identity_store: Some(&identities),
+                native_combo_anchors: Some(&combo_anchors),
+                property_slot_token: Some(index as u64 + 1),
+                property_mutations_allowed: false,
+            };
+            let warm_context = settings_context.with_slot_scope(None, index as u64 + 1, false);
+            render_settings_window(
+                &ctx,
+                &registry,
+                name,
+                &mut settings,
+                &warm_context,
+                index as u64 + 1,
+            )
+            .drop_without_applying_deltas();
+
+            let mut jump = JumpModeUi::new(true);
+            jump.begin_frame();
+            jump.begin_ui_pass();
+            let scope = jump
+                .scope_for_navigation_owner(
+                    SurfaceId::dialog("dashboard-editor", 1),
+                    TargetGeneration(1),
+                    "dashboard-editor",
+                    egui::ViewportId::ROOT,
+                    owner,
+                    true,
+                )
+                .expect("an enabled collector creates the property-form scope");
+            let property_scope =
+                scope.child_namespace(format!("slot/{}/widget/{name}", index as u64 + 1));
+            combo_anchors.borrow_mut().clear();
+            let property_context =
+                settings_context.with_slot_scope(Some(&property_scope), index as u64 + 1, true);
+            let output = render_settings_window(
+                &ctx,
+                &registry,
+                name,
+                &mut settings,
+                &property_context,
+                index as u64 + 1,
+            );
+            jump.finish_ui_pass();
+            output.drop_without_applying_deltas();
+            let targets = jump
+                .pass_registry()
+                .expect("the actual egui pass was collected")
+                .targets();
+            assert!(
+                !targets.is_empty(),
+                "{name} rendered no actual visible, enabled property response"
+            );
+            assert!(targets.iter().all(|target| {
+                target.id().surface() == &SurfaceId::dialog("dashboard-editor", 1)
+            }));
+        }
     }
 }

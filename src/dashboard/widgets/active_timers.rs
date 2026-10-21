@@ -49,14 +49,26 @@ impl ActiveTimersWidget {
             let mut changed = false;
             ui.horizontal(|ui| {
                 ui.label("Show up to");
-                changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.count).range(1..=20))
-                    .changed();
+                let response = ui.add(egui::DragValue::new(&mut cfg.count).range(1..=20));
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "count",
+                    "Timer count",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                );
+                changed |= response.changed();
                 ui.label("timers");
             });
-            changed |= ui
-                .checkbox(&mut cfg.show_completed_recently, "Show recent completions")
-                .changed();
+            let response = ui.checkbox(&mut cfg.show_completed_recently, "Show recent completions");
+            ctx.register_jump_mode_target(
+                ui,
+                &response,
+                "show-completed-recently",
+                "Show recent completions",
+                crate::gui::jump_mode::TargetKind::Checkbox,
+            );
+            changed |= response.changed();
             changed
         })
     }

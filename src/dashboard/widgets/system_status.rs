@@ -83,6 +83,8 @@ impl SystemStatusWidget {
             let mut changed = false;
             changed |= refresh_settings_ui(
                 ui,
+                ctx,
+                "system_status",
                 &mut cfg.refresh_interval_secs,
                 &mut cfg.refresh_mode,
                 &mut cfg.refresh_throttle_secs,
@@ -91,16 +93,28 @@ impl SystemStatusWidget {
             );
             ui.separator();
             ui.label("Show");
-            changed |= ui.checkbox(&mut cfg.show_cpu, "CPU usage").changed();
-            changed |= ui.checkbox(&mut cfg.show_memory, "Memory usage").changed();
-            changed |= ui.checkbox(&mut cfg.show_disk, "Disk usage").changed();
-            changed |= ui
-                .checkbox(&mut cfg.show_network, "Network throughput")
-                .changed();
-            changed |= ui.checkbox(&mut cfg.show_volume, "Volume level").changed();
-            changed |= ui
-                .checkbox(&mut cfg.show_brightness, "Brightness level")
-                .changed();
+            for (identity, label, value) in [
+                ("show-cpu", "CPU usage", &mut cfg.show_cpu),
+                ("show-memory", "Memory usage", &mut cfg.show_memory),
+                ("show-disk", "Disk usage", &mut cfg.show_disk),
+                ("show-network", "Network throughput", &mut cfg.show_network),
+                ("show-volume", "Volume level", &mut cfg.show_volume),
+                (
+                    "show-brightness",
+                    "Brightness level",
+                    &mut cfg.show_brightness,
+                ),
+            ] {
+                let response = ui.checkbox(value, label);
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    identity,
+                    label,
+                    crate::gui::jump_mode::TargetKind::Checkbox,
+                );
+                changed |= response.changed();
+            }
             changed
         })
     }

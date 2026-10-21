@@ -107,38 +107,102 @@ impl QuickToolsWidget {
         value: &mut serde_json::Value,
         ctx: &WidgetSettingsContext<'_>,
     ) -> WidgetSettingsUiResult {
-        edit_typed_settings(ui, value, ctx, |ui, cfg: &mut QuickToolsConfig, _ctx| {
+        edit_typed_settings(ui, value, ctx, |ui, cfg: &mut QuickToolsConfig, ctx| {
             let mut changed = false;
             let mut row_action = None;
             let query_count = cfg.queries.len();
             for (idx, entry) in cfg.queries.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(format!("Tool {}", idx + 1));
-                    changed |= ui.text_edit_singleline(&mut entry.query).changed();
-                    changed |= ui.checkbox(&mut entry.auto_submit, "Auto submit").changed();
-                    if ui
-                        .add_enabled(idx > 0, egui::Button::new("↑").small())
-                        .on_hover_text("Move up")
-                        .clicked()
-                    {
-                        row_action = Some(QuickToolRowAction::MoveUp(idx));
-                    }
-                    if ui
-                        .add_enabled(idx + 1 < query_count, egui::Button::new("↓").small())
-                        .on_hover_text("Move down")
-                        .clicked()
-                    {
-                        row_action = Some(QuickToolRowAction::MoveDown(idx));
-                    }
-                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
-                        row_action = Some(QuickToolRowAction::Remove(idx));
-                    }
-                });
+                let token = ctx
+                    .property_row_token("quick-tools", idx)
+                    .unwrap_or(idx as u64);
+                ui.scope_builder(
+                    egui::UiBuilder::new().id(ui.id().with(("quick-tool-row", token))),
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Tool {}", idx + 1));
+                            let query = ui.text_edit_singleline(&mut entry.query);
+                            ctx.register_jump_mode_target(
+                                ui,
+                                &query,
+                                format!("row/{token}/query"),
+                                "Tool query",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                            );
+                            changed |= query.changed();
+                            let auto_submit = ui.checkbox(&mut entry.auto_submit, "Auto submit");
+                            ctx.register_jump_mode_target(
+                                ui,
+                                &auto_submit,
+                                format!("row/{token}/auto-submit"),
+                                "Auto submit",
+                                crate::gui::jump_mode::TargetKind::Checkbox,
+                            );
+                            changed |= auto_submit.changed();
+                            let move_up = ui
+                                .add_enabled(idx > 0, egui::Button::new("↑").small())
+                                .on_hover_text("Move up");
+                            ctx.register_jump_mode_target(
+                                ui,
+                                &move_up,
+                                format!("row/{token}/move-up"),
+                                "Move tool up",
+                                crate::gui::jump_mode::TargetKind::Button,
+                            );
+                            if move_up.clicked() {
+                                row_action = Some(QuickToolRowAction::MoveUp(idx));
+                            }
+                            let move_down = ui
+                                .add_enabled(idx + 1 < query_count, egui::Button::new("↓").small())
+                                .on_hover_text("Move down");
+                            ctx.register_jump_mode_target(
+                                ui,
+                                &move_down,
+                                format!("row/{token}/move-down"),
+                                "Move tool down",
+                                crate::gui::jump_mode::TargetKind::Button,
+                            );
+                            if move_down.clicked() {
+                                row_action = Some(QuickToolRowAction::MoveDown(idx));
+                            }
+                            let remove = ui.small_button("✕").on_hover_text("Remove");
+                            ctx.register_jump_mode_target(
+                                ui,
+                                &remove,
+                                format!("row/{token}/remove"),
+                                "Remove tool",
+                                crate::gui::jump_mode::TargetKind::Button,
+                            );
+                            if remove.clicked() {
+                                row_action = Some(QuickToolRowAction::Remove(idx));
+                            }
+                        })
+                    },
+                );
             }
             if let Some(action) = row_action {
+                match action {
+                    QuickToolRowAction::MoveUp(idx) if idx > 0 => {
+                        ctx.swap_property_row_tokens("quick-tools", idx, idx - 1)
+                    }
+                    QuickToolRowAction::MoveDown(idx) if idx + 1 < query_count => {
+                        ctx.swap_property_row_tokens("quick-tools", idx, idx + 1)
+                    }
+                    QuickToolRowAction::Remove(idx) => {
+                        ctx.remove_property_row_token("quick-tools", idx)
+                    }
+                    _ => {}
+                }
                 changed |= apply_row_action(cfg, action);
             }
-            if ui.button("Add tool").clicked() {
+            let add = ui.button("Add tool");
+            ctx.register_jump_mode_target(
+                ui,
+                &add,
+                "tools/add",
+                "Add tool",
+                crate::gui::jump_mode::TargetKind::Button,
+            );
+            if add.clicked() {
                 cfg.queries.push(QuickToolEntry::manual(""));
                 changed = true;
             }

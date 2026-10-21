@@ -63,6 +63,8 @@ impl SystemWidget {
         edit_typed_settings(ui, value, ctx, |ui, cfg: &mut SystemConfig, _ctx| {
             refresh_settings_ui(
                 ui,
+                ctx,
+                "system_actions",
                 &mut cfg.refresh_interval_secs,
                 &mut cfg.refresh_mode,
                 &mut cfg.refresh_throttle_secs,

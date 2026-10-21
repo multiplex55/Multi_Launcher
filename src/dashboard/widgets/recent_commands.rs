@@ -47,9 +47,15 @@ impl RecentCommandsWidget {
                 let mut changed = false;
                 ui.horizontal(|ui| {
                     ui.label("Count");
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut cfg.count).range(1..=50))
-                        .changed();
+                    let response = ui.add(egui::DragValue::new(&mut cfg.count).range(1..=50));
+                    ctx.register_jump_mode_target(
+                        ui,
+                        &response,
+                        "recent-commands/count",
+                        "Recent command count",
+                        crate::gui::jump_mode::TargetKind::Slider,
+                    );
+                    changed |= response.changed();
                 });
                 changed
             },

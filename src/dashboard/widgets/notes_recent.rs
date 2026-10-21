@@ -68,13 +68,35 @@ impl NotesRecentWidget {
             let mut changed = false;
             ui.horizontal(|ui| {
                 ui.label("Show");
-                changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.count).range(1..=50))
-                    .changed();
+                let response = ui.add(egui::DragValue::new(&mut cfg.count).range(1..=50));
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "count",
+                    "Recent note count",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                );
+                changed |= response.changed();
                 ui.label("notes");
             });
-            changed |= ui.checkbox(&mut cfg.show_snippet, "Show snippet").changed();
-            changed |= ui.checkbox(&mut cfg.show_tags, "Show tags").changed();
+            let response = ui.checkbox(&mut cfg.show_snippet, "Show snippet");
+            ctx.register_jump_mode_target(
+                ui,
+                &response,
+                "show-snippet",
+                "Show note snippets",
+                crate::gui::jump_mode::TargetKind::Checkbox,
+            );
+            changed |= response.changed();
+            let response = ui.checkbox(&mut cfg.show_tags, "Show tags");
+            ctx.register_jump_mode_target(
+                ui,
+                &response,
+                "show-tags",
+                "Show note tags",
+                crate::gui::jump_mode::TargetKind::Checkbox,
+            );
+            changed |= response.changed();
             changed
         })
     }

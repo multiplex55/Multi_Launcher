@@ -61,6 +61,8 @@ impl RecycleBinWidget {
         edit_typed_settings(ui, value, ctx, |ui, cfg: &mut RecycleBinConfig, _ctx| {
             refresh_settings_ui(
                 ui,
+                ctx,
+                "recycle_bin",
                 &mut cfg.refresh_interval_secs,
                 &mut cfg.refresh_mode,
                 &mut cfg.refresh_throttle_secs,

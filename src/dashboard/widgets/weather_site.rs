@@ -45,7 +45,15 @@ impl WeatherSiteWidget {
             ui.horizontal(|ui| {
                 ui.label("Location");
                 let mut text = cfg.location.clone().unwrap_or_default();
-                if ui.text_edit_singleline(&mut text).changed() {
+                let response = ui.text_edit_singleline(&mut text);
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "weather-site/location",
+                    "Weather location",
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                );
+                if response.changed() {
                     cfg.location = if text.trim().is_empty() {
                         None
                     } else {
@@ -58,7 +66,15 @@ impl WeatherSiteWidget {
                 ui.horizontal(|ui| {
                     ui.label("Dashboard default");
                     ui.monospace(&loc);
-                    if ui.button("Use default").clicked() {
+                    let response = ui.button("Use default");
+                    ctx.register_jump_mode_target(
+                        ui,
+                        &response,
+                        "weather-site/use-default",
+                        "Use dashboard default location",
+                        crate::gui::jump_mode::TargetKind::Button,
+                    );
+                    if response.clicked() {
                         cfg.location = Some(loc);
                         changed = true;
                     }
@@ -67,7 +83,15 @@ impl WeatherSiteWidget {
             ui.horizontal(|ui| {
                 ui.label("URL template");
                 let mut url = cfg.url.clone().unwrap_or_default();
-                if ui.text_edit_singleline(&mut url).changed() {
+                let response = ui.text_edit_singleline(&mut url);
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "weather-site/url-template",
+                    "Weather URL template",
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                );
+                if response.changed() {
                     cfg.url = if url.trim().is_empty() {
                         None
                     } else {

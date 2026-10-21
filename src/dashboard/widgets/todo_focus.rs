@@ -62,33 +62,63 @@ impl TodoFocusWidget {
     ) -> WidgetSettingsUiResult {
         edit_typed_settings(ui, value, ctx, |ui, cfg: &mut TodoFocusConfig, _ctx| {
             let mut changed = false;
-            egui::ComboBox::from_label("Status")
+            let status_anchor = "todo-focus/status";
+            let status_popup = ctx.combo_popup_scope(status_anchor);
+            let status_combo = egui::ComboBox::from_id_salt(ui.id().with("todo-focus-status"))
                 .selected_text(match cfg.status {
                     TodoFocusStatusFilter::All => "All",
                     TodoFocusStatusFilter::Open => "Open",
                     TodoFocusStatusFilter::Done => "Done",
                 })
                 .show_ui(ui, |ui| {
-                    changed |= ui
-                        .selectable_value(&mut cfg.status, TodoFocusStatusFilter::All, "All")
-                        .changed();
-                    changed |= ui
-                        .selectable_value(&mut cfg.status, TodoFocusStatusFilter::Open, "Open")
-                        .changed();
-                    changed |= ui
-                        .selectable_value(&mut cfg.status, TodoFocusStatusFilter::Done, "Done")
-                        .changed();
+                    for (id, status, label) in [
+                        ("all", TodoFocusStatusFilter::All, "All"),
+                        ("open", TodoFocusStatusFilter::Open, "Open"),
+                        ("done", TodoFocusStatusFilter::Done, "Done"),
+                    ] {
+                        let response = ui.selectable_value(&mut cfg.status, status, label);
+                        ctx.register_jump_mode_target_in_scope(
+                            status_popup.as_ref(),
+                            ui,
+                            &response,
+                            format!("todo-focus/status/{id}"),
+                            "Todo status option",
+                            crate::gui::jump_mode::TargetKind::Selectable,
+                        );
+                        changed |= response.changed();
+                    }
                 });
+            ctx.register_jump_mode_target(
+                ui,
+                &status_combo.response,
+                status_anchor,
+                "Todo status",
+                crate::gui::jump_mode::TargetKind::ComboBox,
+            );
             ui.horizontal(|ui| {
                 ui.label("Min priority");
-                changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.min_priority).range(0..=255))
-                    .changed();
+                let response = ui.add(egui::DragValue::new(&mut cfg.min_priority).range(0..=255));
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "todo-focus/min-priority",
+                    "Minimum priority",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                );
+                changed |= response.changed();
             });
             ui.horizontal(|ui| {
                 ui.label("Filter tags");
                 let mut tags = cfg.filter_tags.join(", ");
-                if ui.text_edit_singleline(&mut tags).changed() {
+                let response = ui.text_edit_singleline(&mut tags);
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "todo-focus/filter-tags",
+                    "Todo filter tags",
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                );
+                if response.changed() {
                     cfg.filter_tags = parse_tags(&tags);
                     changed = true;
                 }
@@ -96,7 +126,15 @@ impl TodoFocusWidget {
             ui.horizontal(|ui| {
                 ui.label("Query override");
                 let mut query = cfg.query.clone().unwrap_or_default();
-                if ui.text_edit_singleline(&mut query).changed() {
+                let response = ui.text_edit_singleline(&mut query);
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "todo-focus/query-override",
+                    "Todo query override",
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                );
+                if response.changed() {
                     cfg.query = if query.trim().is_empty() {
                         None
                     } else {

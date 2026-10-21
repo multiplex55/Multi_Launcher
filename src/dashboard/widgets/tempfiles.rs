@@ -82,13 +82,21 @@ impl TempfilesWidget {
             let mut changed = false;
             ui.horizontal(|ui| {
                 ui.label("Show up to");
-                changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.limit).range(1..=50))
-                    .changed();
+                let response = ui.add(egui::DragValue::new(&mut cfg.limit).range(1..=50));
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "limit",
+                    "Temporary file limit",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                );
+                changed |= response.changed();
                 ui.label("files");
             });
             changed |= refresh_settings_ui(
                 ui,
+                ctx,
+                "tempfiles",
                 &mut cfg.refresh_interval_secs,
                 &mut cfg.refresh_mode,
                 &mut cfg.refresh_throttle_secs,

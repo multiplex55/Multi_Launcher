@@ -193,18 +193,32 @@ impl LayoutsWidget {
             let mut changed = false;
             changed |= refresh_settings_ui(
                 ui,
+                ctx,
+                "layouts",
                 &mut cfg.refresh_interval_secs,
                 &mut cfg.refresh_mode,
                 &mut cfg.refresh_throttle_secs,
                 None,
                 "Layouts are cached between refreshes.",
             );
-            changed |= ui
-                .checkbox(&mut cfg.show_health_indicator, "Show health indicator")
-                .changed();
-            changed |= ui
-                .checkbox(&mut cfg.autosave_on_change, "Autosave on change")
-                .changed();
+            let response = ui.checkbox(&mut cfg.show_health_indicator, "Show health indicator");
+            ctx.register_jump_mode_target(
+                ui,
+                &response,
+                "layouts/show-health",
+                "Show health indicator",
+                crate::gui::jump_mode::TargetKind::Checkbox,
+            );
+            changed |= response.changed();
+            let response = ui.checkbox(&mut cfg.autosave_on_change, "Autosave on change");
+            ctx.register_jump_mode_target(
+                ui,
+                &response,
+                "layouts/autosave",
+                "Autosave on change",
+                crate::gui::jump_mode::TargetKind::Checkbox,
+            );
+            changed |= response.changed();
             changed
         })
     }

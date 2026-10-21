@@ -99,27 +99,51 @@ impl CalendarWidget {
             |ui, cfg: &mut CalendarWidgetConfig, _ctx| {
                 let mut changed = false;
                 ui.heading("View");
-                egui::ComboBox::from_label("Mode")
+                let mode_anchor = "calendar/mode";
+                let mode_popup = ctx.combo_popup_scope(mode_anchor);
+                let mode_combo = egui::ComboBox::from_id_salt(ui.id().with("calendar-mode"))
                     .selected_text(match cfg.mode {
                         CalendarWidgetMode::Day => "Day",
                         CalendarWidgetMode::Week => "Week",
                         CalendarWidgetMode::Month => "Month",
                     })
                     .show_ui(ui, |ui| {
-                        changed |= ui
-                            .selectable_value(&mut cfg.mode, CalendarWidgetMode::Day, "Day")
-                            .changed();
-                        changed |= ui
-                            .selectable_value(&mut cfg.mode, CalendarWidgetMode::Week, "Week")
-                            .changed();
-                        changed |= ui
-                            .selectable_value(&mut cfg.mode, CalendarWidgetMode::Month, "Month")
-                            .changed();
+                        for (id, mode, label) in [
+                            ("day", CalendarWidgetMode::Day, "Day"),
+                            ("week", CalendarWidgetMode::Week, "Week"),
+                            ("month", CalendarWidgetMode::Month, "Month"),
+                        ] {
+                            let response = ui.selectable_value(&mut cfg.mode, mode, label);
+                            ctx.register_jump_mode_target_in_scope(
+                                mode_popup.as_ref(),
+                                ui,
+                                &response,
+                                format!("mode/{id}"),
+                                "Calendar mode option",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                            );
+                            changed |= response.changed();
+                        }
                     });
+                ctx.register_jump_mode_target(
+                    ui,
+                    &mode_combo.response,
+                    mode_anchor,
+                    "Calendar mode",
+                    crate::gui::jump_mode::TargetKind::ComboBox,
+                );
                 ui.horizontal(|ui| {
                     ui.label("Default date");
                     let mut default_date = cfg.default_date.clone().unwrap_or_default();
-                    if ui.text_edit_singleline(&mut default_date).changed() {
+                    let response = ui.text_edit_singleline(&mut default_date);
+                    ctx.register_jump_mode_target(
+                        ui,
+                        &response,
+                        "calendar/default-date",
+                        "Default date",
+                        crate::gui::jump_mode::TargetKind::TextEntry,
+                    );
+                    if response.changed() {
                         cfg.default_date = if default_date.trim().is_empty() {
                             None
                         } else {
@@ -133,23 +157,57 @@ impl CalendarWidget {
                 ui.heading("List limits");
                 ui.horizontal(|ui| {
                     ui.label("Range days");
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut cfg.range_days).range(1..=30))
-                        .changed();
+                    let response = ui.add(egui::DragValue::new(&mut cfg.range_days).range(1..=30));
+                    ctx.register_jump_mode_target(
+                        ui,
+                        &response,
+                        "calendar/range-days",
+                        "Calendar range",
+                        crate::gui::jump_mode::TargetKind::Slider,
+                    );
+                    changed |= response.changed();
                 });
                 ui.horizontal(|ui| {
                     ui.label("Max items");
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut cfg.max_items).range(1..=50))
-                        .changed();
+                    let response = ui.add(egui::DragValue::new(&mut cfg.max_items).range(1..=50));
+                    ctx.register_jump_mode_target(
+                        ui,
+                        &response,
+                        "calendar/max-items",
+                        "Calendar item limit",
+                        crate::gui::jump_mode::TargetKind::Slider,
+                    );
+                    changed |= response.changed();
                 });
-                changed |= ui
-                    .checkbox(&mut cfg.show_completed, "Include completed/past")
-                    .changed();
+                let response = ui.checkbox(&mut cfg.show_completed, "Include completed/past");
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "calendar/include-completed",
+                    "Include completed events",
+                    crate::gui::jump_mode::TargetKind::Checkbox,
+                );
+                changed |= response.changed();
                 ui.separator();
                 ui.heading("Display");
-                changed |= ui.checkbox(&mut cfg.show_tags, "Show tags").changed();
-                changed |= ui.checkbox(&mut cfg.compact, "Compact layout").changed();
+                let response = ui.checkbox(&mut cfg.show_tags, "Show tags");
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "calendar/show-tags",
+                    "Show tags",
+                    crate::gui::jump_mode::TargetKind::Checkbox,
+                );
+                changed |= response.changed();
+                let response = ui.checkbox(&mut cfg.compact, "Compact layout");
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "calendar/compact",
+                    "Compact layout",
+                    crate::gui::jump_mode::TargetKind::Checkbox,
+                );
+                changed |= response.changed();
                 changed
             },
         )

@@ -1,11 +1,16 @@
 use crate::dashboard::config::{DashboardConfig, OverflowMode, SlotConfig};
-use crate::dashboard::widgets::{WidgetRegistry, WidgetSettingsContext};
+use crate::dashboard::widgets::{
+    WidgetPropertyIdentityStore, WidgetRegistry, WidgetSettingsContext,
+};
 use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
+use crate::gui::jump_mode::ui::DashboardEditorConfirmationKind;
 use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use eframe::egui;
 use eframe::egui::collapsing_header::CollapsingState;
 use serde_json::Value;
+use std::cell::Cell;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 #[derive(Default)]
 struct SlotCoverage {
@@ -23,6 +28,110 @@ struct OccupancyMap {
 enum SplitDirection {
     Horizontal,
     Vertical,
+}
+
+struct DashboardEditorDraftSnapshot {
+    config: DashboardConfig,
+    error: Option<String>,
+    pending_save: bool,
+    selected_slot: Option<usize>,
+    show_preview: bool,
+    blocked_warning: Option<String>,
+    drag_anchor: Option<(usize, usize)>,
+    swap_anchor: Option<usize>,
+    slot_expand_all: bool,
+    slot_collapse_all: bool,
+    snap_on_edit: bool,
+    show_swap_buttons: bool,
+    show_remove_buttons: bool,
+    confirm_remove_slot: Option<usize>,
+    confirm_modal: ConfirmationModal,
+    pending_reset: Option<(usize, Value)>,
+    pending_confirmation: Option<PendingDashboardEditorConfirmation>,
+}
+
+impl DashboardEditorDraftSnapshot {
+    fn capture(dialog: &DashboardEditorDialog) -> Self {
+        Self {
+            config: dialog.config.clone(),
+            error: dialog.error.clone(),
+            pending_save: dialog.pending_save,
+            selected_slot: dialog.selected_slot,
+            show_preview: dialog.show_preview,
+            blocked_warning: dialog.blocked_warning.clone(),
+            drag_anchor: dialog.drag_anchor,
+            swap_anchor: dialog.swap_anchor,
+            slot_expand_all: dialog.slot_expand_all,
+            slot_collapse_all: dialog.slot_collapse_all,
+            snap_on_edit: dialog.snap_on_edit,
+            show_swap_buttons: dialog.show_swap_buttons,
+            show_remove_buttons: dialog.show_remove_buttons,
+            confirm_remove_slot: dialog.confirm_remove_slot,
+            confirm_modal: dialog.confirm_modal.clone(),
+            pending_reset: dialog.pending_reset.clone(),
+            pending_confirmation: dialog.pending_confirmation,
+        }
+    }
+
+    fn restore(self, dialog: &mut DashboardEditorDialog) {
+        dialog.config = self.config;
+        dialog.error = self.error;
+        dialog.pending_save = self.pending_save;
+        dialog.selected_slot = self.selected_slot;
+        dialog.show_preview = self.show_preview;
+        dialog.blocked_warning = self.blocked_warning;
+        dialog.drag_anchor = self.drag_anchor;
+        dialog.swap_anchor = self.swap_anchor;
+        dialog.slot_expand_all = self.slot_expand_all;
+        dialog.slot_collapse_all = self.slot_collapse_all;
+        dialog.snap_on_edit = self.snap_on_edit;
+        dialog.show_swap_buttons = self.show_swap_buttons;
+        dialog.show_remove_buttons = self.show_remove_buttons;
+        dialog.confirm_remove_slot = self.confirm_remove_slot;
+        dialog.confirm_modal = self.confirm_modal;
+        dialog.pending_reset = self.pending_reset;
+        dialog.pending_confirmation = self.pending_confirmation;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PendingDashboardEditorConfirmation {
+    kind: DashboardEditorConfirmationKind,
+    instance: u64,
+    slot_token: u64,
+}
+
+fn register_editor_target(
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    identity: impl AsRef<str>,
+    label: &'static str,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: &mut u64,
+) -> Option<crate::gui::jump_mode::ui::FocusDirective> {
+    crate::gui::jump_mode::ui::register_and_apply_target(
+        scope,
+        ui,
+        response,
+        identity,
+        label,
+        kind,
+        visual_order,
+    )
+}
+
+fn register_editor_target_at_order(
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    identity: impl AsRef<str>,
+    label: &'static str,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: u64,
+) -> Option<crate::gui::jump_mode::ui::FocusDirective> {
+    let mut next_order = visual_order;
+    register_editor_target(scope, ui, response, identity, label, kind, &mut next_order)
 }
 
 pub struct DashboardEditorDialog {
@@ -44,6 +153,15 @@ pub struct DashboardEditorDialog {
     confirm_remove_slot: Option<usize>,
     confirm_modal: ConfirmationModal,
     pending_reset: Option<(usize, Value)>,
+    pending_confirmation: Option<PendingDashboardEditorConfirmation>,
+    next_confirmation_instance: u64,
+    slot_tokens: Vec<u64>,
+    next_slot_token: u64,
+    target_generation: u64,
+    pub(crate) property_identity_store: Rc<WidgetPropertyIdentityStore>,
+    pub(crate) native_combo_anchors: Vec<crate::dashboard::widgets::WidgetNativeComboAnchor>,
+    #[cfg(test)]
+    test_scroll_metrics: Option<(egui::Id, f32)>,
 }
 
 impl Default for DashboardEditorDialog {
@@ -67,6 +185,15 @@ impl Default for DashboardEditorDialog {
             confirm_remove_slot: None,
             confirm_modal: ConfirmationModal::default(),
             pending_reset: None,
+            pending_confirmation: None,
+            next_confirmation_instance: 1,
+            slot_tokens: Vec::new(),
+            next_slot_token: 1,
+            target_generation: 0,
+            property_identity_store: Rc::new(WidgetPropertyIdentityStore::default()),
+            native_combo_anchors: Vec::new(),
+            #[cfg(test)]
+            test_scroll_metrics: None,
         }
     }
 }
@@ -78,11 +205,150 @@ impl DashboardEditorDialog {
         self.open = true;
     }
 
+    pub(crate) fn target_generation(&self) -> u64 {
+        self.target_generation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_scroll_area_max_offset(&self) -> Option<(egui::Id, f32)> {
+        self.test_scroll_metrics
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_slot_token(&self, index: usize) -> Option<u64> {
+        self.slot_tokens.get(index).copied()
+    }
+
+    pub(crate) fn native_combo_popup_is_current(
+        &self,
+        ctx: &egui::Context,
+        parent_layer: egui::LayerId,
+    ) -> bool {
+        if !egui::Popup::is_any_open(ctx) {
+            return false;
+        }
+
+        self.native_combo_anchors.iter().any(|anchor| {
+            if anchor.layer_id != parent_layer {
+                return false;
+            }
+            let Some(response) = ctx.read_response(anchor.response_id) else {
+                return false;
+            };
+            if !response.enabled() || response.layer_id != anchor.layer_id {
+                return false;
+            }
+            let popup_id = egui::Popup::default_response_id(&response);
+            if !egui::ComboBox::is_open(ctx, response.id) || !egui::Popup::is_id_open(ctx, popup_id)
+            {
+                return false;
+            }
+            let Some(popup_rect) = ctx.memory(|memory| memory.area_rect(popup_id)) else {
+                return false;
+            };
+            if !popup_rect.is_positive() {
+                return false;
+            }
+            let popup_layer = egui::LayerId::new(egui::Order::Foreground, popup_id);
+            let popup_is_current = ctx.layer_id_at(popup_rect.center()) == Some(popup_layer);
+            let popup_is_sizing = egui::containers::AreaState::load(ctx, popup_id)
+                .is_some_and(|state| !state.interactable);
+            let focus_is_owned =
+                crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                    layer == anchor.layer_id
+                        || layer == popup_layer
+                        || layer.order != egui::Order::Middle
+                });
+            (popup_is_current || popup_is_sizing) && focus_is_owned
+        })
+    }
+
+    pub(crate) fn jump_mode_pending_confirmation_identity(
+        &self,
+    ) -> Option<(u64, DashboardEditorConfirmationKind)> {
+        let pending = self.pending_confirmation?;
+        let current_slot = self
+            .slot_tokens
+            .iter()
+            .position(|token| *token == pending.slot_token)?;
+        let is_current = match pending.kind {
+            DashboardEditorConfirmationKind::RemoveSlot => {
+                self.confirm_remove_slot == Some(current_slot)
+            }
+            DashboardEditorConfirmationKind::ResetWidgetSettings => {
+                self.pending_reset
+                    .as_ref()
+                    .is_some_and(|(index, _)| *index == current_slot)
+                    && self.confirm_modal.is_open()
+            }
+        };
+        is_current.then_some((pending.instance, pending.kind))
+    }
+
+    fn begin_confirmation(&mut self, kind: DashboardEditorConfirmationKind, slot_index: usize) {
+        let Some(slot_token) = self.slot_tokens.get(slot_index).copied() else {
+            return;
+        };
+        let instance = self.next_confirmation_instance;
+        self.next_confirmation_instance = self.next_confirmation_instance.wrapping_add(1).max(1);
+        self.pending_confirmation = Some(PendingDashboardEditorConfirmation {
+            kind,
+            instance,
+            slot_token,
+        });
+    }
+
+    fn finish_confirmation(&mut self) {
+        self.pending_confirmation = None;
+        self.confirm_remove_slot = None;
+        self.pending_reset = None;
+        self.confirm_modal.close();
+    }
+
+    fn next_slot_token(&mut self) -> u64 {
+        let token = self.next_slot_token;
+        self.next_slot_token = self.next_slot_token.wrapping_add(1).max(1);
+        token
+    }
+
+    fn renew_slot_tokens(&mut self) {
+        self.target_generation = self.target_generation.wrapping_add(1).max(1);
+        self.property_identity_store.clear();
+        self.native_combo_anchors.clear();
+        self.finish_confirmation();
+        self.slot_tokens.clear();
+        for _ in 0..self.config.slots.len() {
+            let token = self.next_slot_token();
+            self.slot_tokens.push(token);
+        }
+    }
+
+    fn ensure_slot_tokens(&mut self) {
+        if self.slot_tokens.len() != self.config.slots.len() {
+            self.renew_slot_tokens();
+        }
+    }
+
+    fn add_slot(&mut self, slot: SlotConfig) {
+        let token = self.next_slot_token();
+        self.config.slots.push(slot);
+        self.slot_tokens.push(token);
+    }
+
     fn reload(&mut self, registry: &WidgetRegistry) {
+        self.target_generation = self.target_generation.wrapping_add(1).max(1);
+        self.property_identity_store.clear();
+        self.native_combo_anchors.clear();
+        self.finish_confirmation();
         match DashboardConfig::load(&self.path, registry) {
             Ok(cfg) => {
                 self.config = cfg;
                 self.error = None;
+                self.slot_tokens.clear();
+                for _ in 0..self.config.slots.len() {
+                    let token = self.next_slot_token();
+                    self.slot_tokens.push(token);
+                }
                 self.ensure_selected_slot();
             }
             Err(e) => {
@@ -95,6 +361,7 @@ impl DashboardEditorDialog {
         match DashboardConfig::replace(&self.path, registry, self.config.clone()) {
             Ok(committed) => {
                 self.config = committed;
+                self.renew_slot_tokens();
                 self.error = None;
                 self.pending_save = true;
             }
@@ -111,16 +378,59 @@ impl DashboardEditorDialog {
         settings_ctx: WidgetSettingsContext<'_>,
         require_confirm_destructive: bool,
     ) -> bool {
+        self.ui_with_jump_mode(
+            ctx,
+            registry,
+            settings_ctx,
+            require_confirm_destructive,
+            None,
+            None,
+            None,
+            true,
+            true,
+            true,
+        )
+    }
+
+    pub(crate) fn ui_with_jump_mode(
+        &mut self,
+        ctx: &egui::Context,
+        registry: &WidgetRegistry,
+        settings_ctx: WidgetSettingsContext<'_>,
+        require_confirm_destructive: bool,
+        parent_instance: Option<u64>,
+        jump_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        confirmation_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        native_confirmation_owner: bool,
+        first_ui_pass: bool,
+    ) -> bool {
         if !self.open {
             return false;
         }
+        settings_ctx.begin_native_combo_anchor_pass();
+        self.ensure_slot_tokens();
         let mut should_reload = false;
         let mut open = self.open;
+        let mut authorized_visible_pass = false;
+        let mut draft_snapshot = None;
+        let mut visual_order = 0_u64;
+        let mut child_remove_confirmed = None;
+        let mut child_cancelled = false;
+        let mut reset_result = ConfirmationResult::None;
+        let mut confirmation_opened_this_pass = false;
         egui::Window::new("Dashboard Editor")
             .open(&mut open)
             .resizable(true)
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                authorized_visible_pass = native_ui_owner
+                    && first_ui_pass
+                    && ui.is_visible()
+                    && !ui.is_sizing_pass();
+                if !authorized_visible_pass {
+                    draft_snapshot = Some(DashboardEditorDraftSnapshot::capture(self));
+                }
+                let _scroll_output = egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.set_max_width(ui.available_width().min(900.0));
                     if let Some(err) = &self.error {
                         widgets::semantic_status(ui, StatusTone::Error, err, None);
@@ -128,17 +438,19 @@ impl DashboardEditorDialog {
 
                     ui.horizontal(|ui| {
                         ui.label("Rows");
-                        if ui
-                            .add(egui::DragValue::new(&mut self.config.grid.rows).range(1..=12))
-                            .changed()
-                        {
+                        let response = ui.add(
+                            egui::DragValue::new(&mut self.config.grid.rows).range(1..=12),
+                        );
+                        register_editor_target(jump_scope, ui, &response, "grid/rows", "Grid rows", crate::gui::jump_mode::TargetKind::Slider, &mut visual_order);
+                        if response.changed() {
                             self.clamp_all_slots();
                         }
                         ui.label("Cols");
-                        if ui
-                            .add(egui::DragValue::new(&mut self.config.grid.cols).range(1..=12))
-                            .changed()
-                        {
+                        let response = ui.add(
+                            egui::DragValue::new(&mut self.config.grid.cols).range(1..=12),
+                        );
+                        register_editor_target(jump_scope, ui, &response, "grid/columns", "Grid columns", crate::gui::jump_mode::TargetKind::Slider, &mut visual_order);
+                        if response.changed() {
                             self.clamp_all_slots();
                         }
                     });
@@ -146,17 +458,26 @@ impl DashboardEditorDialog {
                     ui.separator();
                     widgets::compact_section_heading(ui, "Preview", None);
                     ui.horizontal_wrapped(|ui| {
-                        ui.checkbox(&mut self.show_preview, "Show preview");
-                        ui.checkbox(&mut self.snap_on_edit, "Snap to free space on edit");
-                        ui.checkbox(&mut self.show_swap_buttons, "Show swap");
-                        ui.checkbox(&mut self.show_remove_buttons, "Show remove");
-                        if ui.button("Auto-place nearest").clicked()
+                        for (identity, label, value) in [
+                            ("show-preview", "Show preview", &mut self.show_preview),
+                            ("snap-on-edit", "Snap to free space on edit", &mut self.snap_on_edit),
+                            ("show-swap", "Show swap", &mut self.show_swap_buttons),
+                            ("show-remove", "Show remove", &mut self.show_remove_buttons),
+                        ] {
+                            let response = ui.checkbox(value, label);
+                            register_editor_target(jump_scope, ui, &response, identity, label, crate::gui::jump_mode::TargetKind::Checkbox, &mut visual_order);
+                        }
+                        let response = ui.button("Auto-place nearest");
+                        register_editor_target(jump_scope, ui, &response, "auto-place-nearest", "Auto-place nearest", crate::gui::jump_mode::TargetKind::Button, &mut visual_order);
+                        if response.clicked() && authorized_visible_pass
                             && let Some(idx) = self.selected_slot
                             && let Err(err) = self.auto_place(idx, registry)
                         {
                             self.blocked_warning = Some(err);
                         }
-                        if ui.button("Compact layout").clicked()
+                        let response = ui.button("Compact layout");
+                        register_editor_target(jump_scope, ui, &response, "compact-layout", "Compact layout", crate::gui::jump_mode::TargetKind::Button, &mut visual_order);
+                        if response.clicked() && authorized_visible_pass
                             && let Err(err) = self.compact_layout(registry)
                         {
                             self.blocked_warning = Some(err);
@@ -173,11 +494,14 @@ impl DashboardEditorDialog {
                         for warn in warnings {
                             widgets::semantic_status(ui, StatusTone::Warning, &warn, None);
                         }
-                        if let Some(idx) = self.selected_slot
-                            && ui.button("Auto-place nearest free slot").clicked()
+                        if let Some(idx) = self.selected_slot {
+                            let response = ui.button("Auto-place nearest free slot");
+                            register_editor_target(jump_scope, ui, &response, "auto-place-free-slot", "Auto-place free slot", crate::gui::jump_mode::TargetKind::Button, &mut visual_order);
+                            if response.clicked() && authorized_visible_pass
                             && let Err(err) = self.auto_place(idx, registry)
-                        {
-                            self.blocked_warning = Some(err);
+                            {
+                                self.blocked_warning = Some(err);
+                            }
                         }
                     }
                     let rows = self.config.grid.rows.max(1) as usize;
@@ -198,12 +522,14 @@ impl DashboardEditorDialog {
 
                     ui.separator();
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button("Add slot").clicked() {
-                            self.config
-                                .slots
-                                .push(SlotConfig::with_widget("weather_site", 0, 0));
+                        let response = ui.button("Add slot");
+                        register_editor_target(jump_scope, ui, &response, "slot/add", "Add slot", crate::gui::jump_mode::TargetKind::Button, &mut visual_order);
+                        if response.clicked() && authorized_visible_pass {
+                            self.add_slot(SlotConfig::with_widget("weather_site", 0, 0));
                         }
-                        if ui.button("Reload from disk").clicked() {
+                        let response = ui.button("Reload from disk");
+                        register_editor_target(jump_scope, ui, &response, "reload", "Reload dashboard", crate::gui::jump_mode::TargetKind::Button, &mut visual_order);
+                        if response.clicked() && authorized_visible_pass {
                             self.reload(registry);
                         }
                         ui.add_enabled_ui(!has_conflicts, |ui| {
@@ -213,7 +539,8 @@ impl DashboardEditorDialog {
                                 response,
                                 ButtonEmphasis::Primary,
                             );
-                            if response.clicked() {
+                            register_editor_target(jump_scope, ui, &response, "save", "Save dashboard", crate::gui::jump_mode::TargetKind::Button, &mut visual_order);
+                            if response.clicked() && authorized_visible_pass {
                                 self.save(registry);
                             }
                         });
@@ -225,21 +552,29 @@ impl DashboardEditorDialog {
                                 None,
                             );
                         }
-                        if ui.button("Expand all").clicked() {
+                        let response = ui.button("Expand all");
+                        register_editor_target(jump_scope, ui, &response, "slots/expand-all", "Expand all slots", crate::gui::jump_mode::TargetKind::Button, &mut visual_order);
+                        if response.clicked() && authorized_visible_pass {
                             self.slot_expand_all = true;
                             self.slot_collapse_all = false;
                         }
-                        if ui.button("Collapse all").clicked() {
+                        let response = ui.button("Collapse all");
+                        register_editor_target(jump_scope, ui, &response, "slots/collapse-all", "Collapse all slots", crate::gui::jump_mode::TargetKind::Button, &mut visual_order);
+                        if response.clicked() && authorized_visible_pass {
                             self.slot_collapse_all = true;
                             self.slot_expand_all = false;
                         }
-                        if ui.button("Split H").clicked()
+                        let response = ui.button("Split H");
+                        register_editor_target(jump_scope, ui, &response, "slot/split-horizontal", "Split slot horizontally", crate::gui::jump_mode::TargetKind::Button, &mut visual_order);
+                        if response.clicked() && authorized_visible_pass
                             && let Err(err) =
                                 self.split_selected_slot(registry, SplitDirection::Horizontal)
                         {
                             self.blocked_warning = Some(err);
                         }
-                        if ui.button("Split V").clicked()
+                        let response = ui.button("Split V");
+                        register_editor_target(jump_scope, ui, &response, "slot/split-vertical", "Split slot vertically", crate::gui::jump_mode::TargetKind::Button, &mut visual_order);
+                        if response.clicked() && authorized_visible_pass
                             && let Err(err) =
                                 self.split_selected_slot(registry, SplitDirection::Vertical)
                         {
@@ -248,48 +583,79 @@ impl DashboardEditorDialog {
                     });
 
                     ui.separator();
-                    let mut confirm_remove = None;
-                    let mut removed_once = false;
-                    if let Some(idx) = self.confirm_remove_slot {
-                        if let Some(slot) = self.config.slots.get(idx) {
-                            let label = Self::slot_label(slot);
-                            let mut open = true;
-                            let mut should_close = false;
-                            egui::Window::new("Confirm remove")
-                                .collapsible(false)
-                                .resizable(false)
-                                .open(&mut open)
-                                .show(ctx, |ui| {
-                                    ui.label(format!("Remove slot '{label}'?"));
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Remove").clicked() {
-                                            confirm_remove = Some(idx);
-                                            should_close = true;
-                                        }
-                                        if ui.button("Cancel").clicked() {
-                                            should_close = true;
-                                        }
-                                    });
+                    if let Some((confirmation_instance, DashboardEditorConfirmationKind::RemoveSlot)) =
+                        self.jump_mode_pending_confirmation_identity()
+                        && let Some(idx) = self.confirm_remove_slot
+                        && let (Some(slot), Some(slot_token)) =
+                            (self.config.slots.get(idx), self.slot_tokens.get(idx).copied())
+                    {
+                        let label = Self::slot_label(slot);
+                        let mut open = true;
+                        let child_layer = crate::gui::jump_mode::ui::dashboard_editor_confirmation_layer_id(
+                            parent_instance.unwrap_or_default(),
+                            confirmation_instance,
+                            DashboardEditorConfirmationKind::RemoveSlot,
+                        );
+                        let mut child_visible_pass = false;
+                        egui::Window::new(format!("Remove slot '{label}'?"))
+                            .id(child_layer.id)
+                            .collapsible(false)
+                            .resizable(false)
+                            .open(&mut open)
+                            .show(ctx, |ui| {
+                                child_visible_pass = native_confirmation_owner
+                                    && first_ui_pass
+                                    && !confirmation_opened_this_pass
+                                    && ui.is_visible()
+                                    && !ui.is_sizing_pass();
+                                ui.label("Remove this slot from the dashboard?");
+                                ui.horizontal(|ui| {
+                                    let confirm = ui.button("Remove");
+                                    register_editor_target(
+                                        confirmation_scope,
+                                        ui,
+                                        &confirm,
+                                        "confirmation/confirm",
+                                        "Confirm remove slot",
+                                        crate::gui::jump_mode::TargetKind::Button,
+                                        &mut visual_order,
+                                    );
+                                    if confirm.clicked() && child_visible_pass {
+                                        child_remove_confirmed = Some(slot_token);
+                                    }
+                                    let cancel = ui.button("Cancel");
+                                    register_editor_target(
+                                        confirmation_scope,
+                                        ui,
+                                        &cancel,
+                                        "confirmation/cancel",
+                                        "Cancel remove slot",
+                                        crate::gui::jump_mode::TargetKind::Button,
+                                        &mut visual_order,
+                                    );
+                                    if cancel.clicked() && child_visible_pass {
+                                        child_cancelled = true;
+                                    }
                                 });
-                            if should_close {
-                                open = false;
-                            }
-                            if !open {
-                                self.confirm_remove_slot = None;
-                            }
-                        } else {
-                            self.confirm_remove_slot = None;
+                            });
+                        if !open && child_visible_pass {
+                            child_cancelled = true;
                         }
                     }
                     let mut idx = 0;
                     while idx < self.config.slots.len() {
                         let original_slot = self.config.slots[idx].clone();
+                        let slot_token = self.slot_tokens[idx];
                         let mut slot = original_slot.clone();
-                        let removed = !removed_once && confirm_remove == Some(idx);
                         let mut edited = false;
                         let mut swapped = false;
-                        ui.push_id(idx, |ui| {
-                            let collapsing_id = ui.id().with(("slot-collapse", idx));
+                        let mut section_response = None;
+                        let mut section_order = visual_order;
+                        ui.scope_builder(
+                            egui::UiBuilder::new()
+                                .id(ui.id().with(("dashboard-editor-slot", slot_token))),
+                            |ui| {
+                            let collapsing_id = ui.id().with(("slot-collapse", slot_token));
                             let mut state = CollapsingState::load_with_default_open(
                                 ui.ctx(),
                                 collapsing_id,
@@ -307,23 +673,36 @@ impl DashboardEditorDialog {
                                     ui.label(format!("Slot {idx}"));
                                     ui.label("Label");
                                     let id = slot.id.get_or_insert_with(|| format!("slot-{idx}"));
-                                    edited |= ui.text_edit_singleline(id).changed();
+                                    let id_response = ui.text_edit_singleline(id);
+                                    register_editor_target(jump_scope, ui, &id_response, format!("slot/{slot_token}/id"), "Slot identifier", crate::gui::jump_mode::TargetKind::TextEntry, &mut visual_order);
+                                    edited |= id_response.changed();
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            if self.show_remove_buttons
-                                                && ui.button("Remove").clicked()
-                                            {
-                                                self.confirm_remove_slot = Some(idx);
+                                            if self.show_remove_buttons {
+                                                let response = ui.button("Remove");
+                                                register_editor_target(jump_scope, ui, &response, format!("slot/{slot_token}/remove"), "Remove slot", crate::gui::jump_mode::TargetKind::Button, &mut visual_order);
+                                                if response.clicked() && authorized_visible_pass {
+                                                    self.confirm_remove_slot = Some(idx);
+                                                    self.begin_confirmation(
+                                                        DashboardEditorConfirmationKind::RemoveSlot,
+                                                        idx,
+                                                    );
+                                                    confirmation_opened_this_pass = true;
+                                                }
                                             }
-                                            if ui.button("Select").clicked() {
+                                            let response = ui.button("Select");
+                                            register_editor_target(jump_scope, ui, &response, format!("slot/{slot_token}/select"), "Select slot", crate::gui::jump_mode::TargetKind::Button, &mut visual_order);
+                                            if response.clicked() && authorized_visible_pass {
                                                 self.selected_slot = Some(idx);
                                             }
                                             if self.show_swap_buttons {
                                                 if let Some(selected_idx) = self.selected_slot
                                                     && selected_idx != idx
-                                                    && ui.button("Swap with selected").clicked()
                                                 {
+                                                    let response = ui.button("Swap with selected");
+                                                    register_editor_target(jump_scope, ui, &response, format!("slot/{slot_token}/swap-with-selected"), "Swap with selected", crate::gui::jump_mode::TargetKind::Button, &mut visual_order);
+                                                    if response.clicked() && authorized_visible_pass {
                                                     if let Err(err) =
                                                         self.swap_slots(selected_idx, idx, registry)
                                                     {
@@ -331,6 +710,7 @@ impl DashboardEditorDialog {
                                                     }
                                                     self.swap_anchor = None;
                                                     swapped = true;
+                                                    }
                                                 }
                                                 let is_swap_source = self.swap_anchor == Some(idx);
                                                 let swap_label = if is_swap_source {
@@ -338,10 +718,9 @@ impl DashboardEditorDialog {
                                                 } else {
                                                     "Swap"
                                                 };
-                                                if ui
-                                                    .selectable_label(is_swap_source, swap_label)
-                                                    .clicked()
-                                                {
+                                                let response = ui.selectable_label(is_swap_source, swap_label);
+                                                register_editor_target(jump_scope, ui, &response, format!("slot/{slot_token}/swap"), "Swap slot", crate::gui::jump_mode::TargetKind::Selectable, &mut visual_order);
+                                                if response.clicked() && authorized_visible_pass {
                                                     if is_swap_source {
                                                         self.swap_anchor = None;
                                                     } else if let Some(anchor) = self.swap_anchor {
@@ -361,34 +740,40 @@ impl DashboardEditorDialog {
                                     );
                                 });
                             });
-                            let (_, _, body) = header_response.body_unindented(|ui| {
-                                egui::ComboBox::from_label("Widget type")
+                            section_order = visual_order;
+                            visual_order = visual_order.saturating_add(1);
+                            let (response, _, body) = header_response.body_unindented(|ui| {
+                                let widget_anchor = format!("slot/{slot_token}/widget-type");
+                                let widget_popup = jump_scope.map(|scope| scope.combo_popup_scope(&widget_anchor));
+                                let widget_combo = egui::ComboBox::from_id_salt(
+                                    ui.id().with(("dashboard-editor-widget-type", slot_token)),
+                                )
                                     .selected_text(slot.widget.clone())
                                     .show_ui(ui, |ui| {
                                         for name in registry.names() {
-                                            if ui
-                                                .selectable_value(
-                                                    &mut slot.widget,
-                                                    name.clone(),
-                                                    name,
-                                                )
-                                                .changed()
-                                            {
+                                            let response = ui.selectable_value(
+                                                &mut slot.widget,
+                                                name.to_string(),
+                                                name.as_str(),
+                                            );
+                                            let choice_id = crate::dashboard::widgets::opaque_settings_key(name);
+                                            if let Some(popup_scope) = widget_popup.as_ref() {
+                                                register_editor_target(Some(popup_scope), ui, &response, format!("widget/{choice_id}"), "Widget type option", crate::gui::jump_mode::TargetKind::Selectable, &mut visual_order);
+                                            }
+                                            if response.changed() {
                                                 edited = true;
                                             }
                                         }
                                     });
+                                settings_ctx.record_native_combo_anchor(ui, &widget_combo.response);
+                                register_editor_target(jump_scope, ui, &widget_combo.response, widget_anchor, "Widget type", crate::gui::jump_mode::TargetKind::ComboBox, &mut visual_order);
                                 ui.horizontal(|ui| {
                                     ui.label("Row");
                                     let rows = self.config.grid.rows.max(1) as i32;
                                     let cols = self.config.grid.cols.max(1) as i32;
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut slot.row)
-                                                .range(0..=rows.saturating_sub(1)),
-                                        )
-                                        .changed()
-                                    {
+                                    let response = ui.add(egui::DragValue::new(&mut slot.row).range(0..=rows.saturating_sub(1)));
+                                    register_editor_target(jump_scope, ui, &response, format!("slot/{slot_token}/row"), "Slot row", crate::gui::jump_mode::TargetKind::Slider, &mut visual_order);
+                                    if response.changed() {
                                         Self::clamp_position_only(&mut slot, rows, cols);
                                         slot.row_span =
                                             slot.row_span.min(self.max_row_span_for(&slot));
@@ -397,13 +782,9 @@ impl DashboardEditorDialog {
                                         edited = true;
                                     }
                                     ui.label("Col");
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut slot.col)
-                                                .range(0..=cols.saturating_sub(1)),
-                                        )
-                                        .changed()
-                                    {
+                                    let response = ui.add(egui::DragValue::new(&mut slot.col).range(0..=cols.saturating_sub(1)));
+                                    register_editor_target(jump_scope, ui, &response, format!("slot/{slot_token}/column"), "Slot column", crate::gui::jump_mode::TargetKind::Slider, &mut visual_order);
+                                    if response.changed() {
                                         Self::clamp_position_only(&mut slot, rows, cols);
                                         slot.row_span =
                                             slot.row_span.min(self.max_row_span_for(&slot));
@@ -415,77 +796,67 @@ impl DashboardEditorDialog {
                                 ui.horizontal(|ui| {
                                     ui.label("Row span");
                                     let max_row_span = self.max_row_span_for(&slot);
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut slot.row_span)
-                                                .range(1..=max_row_span),
-                                        )
-                                        .changed()
-                                    {
+                                    let response = ui.add(egui::DragValue::new(&mut slot.row_span).range(1..=max_row_span));
+                                    register_editor_target(jump_scope, ui, &response, format!("slot/{slot_token}/row-span"), "Slot row span", crate::gui::jump_mode::TargetKind::Slider, &mut visual_order);
+                                    if response.changed() {
                                         slot.row_span = slot.row_span.min(max_row_span);
                                         edited = true;
                                     }
                                     ui.label("Col span");
                                     let max_col_span = self.max_col_span_for(&slot);
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut slot.col_span)
-                                                .range(1..=max_col_span),
-                                        )
-                                        .changed()
-                                    {
+                                    let response = ui.add(egui::DragValue::new(&mut slot.col_span).range(1..=max_col_span));
+                                    register_editor_target(jump_scope, ui, &response, format!("slot/{slot_token}/column-span"), "Slot column span", crate::gui::jump_mode::TargetKind::Slider, &mut visual_order);
+                                    if response.changed() {
                                         slot.col_span = slot.col_span.min(max_col_span);
                                         edited = true;
                                     }
                                 });
-                                egui::ComboBox::from_label("Overflow")
+                                let overflow_anchor = format!("slot/{slot_token}/overflow");
+                                let overflow_popup = jump_scope.map(|scope| scope.combo_popup_scope(&overflow_anchor));
+                                let overflow_combo = egui::ComboBox::from_id_salt(
+                                    ui.id().with(("dashboard-editor-overflow", slot_token)),
+                                )
                                     .selected_text(slot.overflow.as_str())
                                     .show_ui(ui, |ui| {
-                                        for mode in [
-                                            OverflowMode::Scroll,
-                                            OverflowMode::Clip,
-                                            OverflowMode::Auto,
+                                        for (option_id, mode) in [
+                                            ("scroll", OverflowMode::Scroll),
+                                            ("clip", OverflowMode::Clip),
+                                            ("auto", OverflowMode::Auto),
                                         ] {
-                                            ui.selectable_value(
+                                            let response = ui.selectable_value(
                                                 &mut slot.overflow,
                                                 mode,
                                                 mode.as_str(),
                                             );
+                                            if let Some(popup_scope) = overflow_popup.as_ref() {
+                                                register_editor_target(Some(popup_scope), ui, &response, format!("option/{option_id}"), "Overflow option", crate::gui::jump_mode::TargetKind::Selectable, &mut visual_order);
+                                            }
                                         }
                                     });
+                                settings_ctx.record_native_combo_anchor(ui, &overflow_combo.response);
+                                register_editor_target(jump_scope, ui, &overflow_combo.response, overflow_anchor, "Overflow policy", crate::gui::jump_mode::TargetKind::ComboBox, &mut visual_order);
                                 ui.separator();
                             });
+                            section_response = Some(response);
                             if body.is_none() {
                                 // Ensure state is stored even when collapsed
                             }
-                        });
-                        if removed {
-                            self.config.slots.remove(idx);
-                            removed_once = true;
-                            self.confirm_remove_slot = None;
-                            confirm_remove = None;
-                            if let Some(sel) = self.selected_slot {
-                                if sel >= idx && !self.config.slots.is_empty() {
-                                    let next =
-                                        sel.saturating_sub(1).min(self.config.slots.len() - 1);
-                                    self.selected_slot = Some(next);
-                                } else if self.config.slots.is_empty() {
-                                    self.selected_slot = None;
-                                }
-                            }
-                            if let Some(anchor) = self.swap_anchor {
-                                if anchor == idx {
-                                    self.swap_anchor = None;
-                                } else if anchor > idx {
-                                    self.swap_anchor = Some(anchor - 1);
-                                }
-                            }
-                            self.ensure_selected_slot();
-                            self.ensure_swap_anchor();
+                            },
+                        );
+                        let section_response = section_response
+                            .expect("the slot section has a real header response");
+                        register_editor_target_at_order(
+                            jump_scope,
+                            ui,
+                            &section_response,
+                            format!("slot/{slot_token}/section"),
+                            "Slot section",
+                            crate::gui::jump_mode::TargetKind::Selectable,
+                            section_order,
+                        );
+                        if swapped {
                             idx += 1;
-                        } else if swapped {
-                            idx += 1;
-                        } else if edited && slot != original_slot {
+                        } else if authorized_visible_pass && edited && slot != original_slot {
                             if let Err(err) = self.commit_slot(idx, slot, registry)
                                 && self.blocked_warning.is_none()
                             {
@@ -502,14 +873,71 @@ impl DashboardEditorDialog {
                         registry,
                         &settings_ctx,
                         require_confirm_destructive,
+                        jump_scope,
+                        confirmation_scope,
+                        parent_instance,
+                        authorized_visible_pass,
+                        native_confirmation_owner,
+                        first_ui_pass,
+                        &mut confirmation_opened_this_pass,
+                        &mut visual_order,
+                        &mut reset_result,
                     );
                     // Reset batch flags after applying once
                     self.slot_expand_all = false;
                     self.slot_collapse_all = false;
                 });
+                #[cfg(test)]
+                {
+                    self.test_scroll_metrics = Some((
+                        _scroll_output.id,
+                        (_scroll_output.content_size.y - _scroll_output.inner_rect.height())
+                            .max(0.0),
+                    ));
+                }
             });
-        self.open = open;
-        if self.pending_save {
+        if let Some(snapshot) = draft_snapshot {
+            snapshot.restore(self);
+        }
+        if let Some(slot_token) = child_remove_confirmed
+            && self
+                .jump_mode_pending_confirmation_identity()
+                .is_some_and(|(_, kind)| kind == DashboardEditorConfirmationKind::RemoveSlot)
+            && let Some(idx) = self
+                .slot_tokens
+                .iter()
+                .position(|token| *token == slot_token)
+        {
+            self.remove_slot_at(idx);
+            self.finish_confirmation();
+        } else if child_cancelled || reset_result != ConfirmationResult::None {
+            match reset_result {
+                ConfirmationResult::Confirmed => {
+                    if let Some((idx, settings)) = self.pending_reset.take()
+                        && self.slot_tokens.get(idx).copied().is_some_and(|token| {
+                            self.pending_confirmation
+                                .is_some_and(|pending| pending.slot_token == token)
+                        })
+                    {
+                        if let Some(slot_token) = self.slot_tokens.get(idx).copied() {
+                            self.property_identity_store.clear_slot(slot_token);
+                        }
+                        if let Some(slot) = self.config.slots.get_mut(idx) {
+                            slot.settings = settings;
+                            self.blocked_warning = None;
+                        }
+                    }
+                    self.finish_confirmation();
+                }
+                ConfirmationResult::Cancelled => self.finish_confirmation(),
+                ConfirmationResult::None if child_cancelled => self.finish_confirmation(),
+                ConfirmationResult::None => {}
+            }
+        }
+        if native_ui_owner && first_ui_pass {
+            self.open = open;
+        }
+        if authorized_visible_pass && self.pending_save {
             self.pending_save = false;
             should_reload = true;
         }
@@ -570,12 +998,47 @@ impl DashboardEditorDialog {
         }
     }
 
+    fn remove_slot_at(&mut self, idx: usize) {
+        if idx >= self.config.slots.len() {
+            return;
+        }
+        let token = self.slot_tokens.remove(idx);
+        self.config.slots.remove(idx);
+        self.property_identity_store.clear_slot(token);
+        if let Some(selected) = self.selected_slot {
+            if selected >= idx && !self.config.slots.is_empty() {
+                self.selected_slot =
+                    Some(selected.saturating_sub(1).min(self.config.slots.len() - 1));
+            } else if self.config.slots.is_empty() {
+                self.selected_slot = None;
+            }
+        }
+        if let Some(anchor) = self.swap_anchor {
+            if anchor == idx {
+                self.swap_anchor = None;
+            } else if anchor > idx {
+                self.swap_anchor = Some(anchor - 1);
+            }
+        }
+        self.ensure_selected_slot();
+        self.ensure_swap_anchor();
+    }
+
     fn render_selected_settings(
         &mut self,
         ui: &mut egui::Ui,
         registry: &WidgetRegistry,
         settings_ctx: &WidgetSettingsContext<'_>,
         require_confirm_destructive: bool,
+        jump_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        confirmation_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        parent_instance: Option<u64>,
+        authorized_visible_pass: bool,
+        native_confirmation_owner: bool,
+        first_ui_pass: bool,
+        confirmation_opened_this_pass: &mut bool,
+        visual_order: &mut u64,
+        reset_result: &mut ConfirmationResult,
     ) {
         widgets::compact_section_heading(ui, "Settings", None);
         if self.config.slots.is_empty() {
@@ -596,12 +1059,22 @@ impl DashboardEditorDialog {
             return;
         }
 
+        let slot_token = self.slot_tokens[selected_idx];
         let slot = &mut self.config.slots[selected_idx];
         let widget_name = slot.widget.clone();
+        let property_scope = jump_scope
+            .map(|scope| scope.child_namespace(format!("slot/{slot_token}/widget/{widget_name}")));
+        let scoped_settings_ctx = settings_ctx.with_slot_scope(
+            property_scope.as_ref(),
+            slot_token,
+            authorized_visible_pass,
+        );
         let default_settings = registry
             .default_settings(&widget_name)
             .unwrap_or_else(|| Value::Object(Default::default()));
         let mut settings_changed = Self::ensure_slot_settings_defaults(slot, &default_settings, ui);
+        let mut request_reset_confirmation = false;
+        let mut reset_immediately = false;
 
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("Widget: {widget_name}"));
@@ -612,21 +1085,46 @@ impl DashboardEditorDialog {
                     widgets::secondary_help(ui, "No custom settings UI");
                 }
             }
-            if ui.button("Reset to defaults").clicked() {
+            let reset_response = ui.button("Reset to defaults");
+            register_editor_target(
+                jump_scope,
+                ui,
+                &reset_response,
+                format!("slot/{slot_token}/reset-settings"),
+                "Reset widget settings",
+                crate::gui::jump_mode::TargetKind::Button,
+                visual_order,
+            );
+            if reset_response.clicked() && authorized_visible_pass {
                 if require_confirm_destructive {
-                    self.pending_reset = Some((selected_idx, default_settings.clone()));
-                    self.confirm_modal
-                        .open_for(DestructiveAction::ResetWidgetSettings);
+                    request_reset_confirmation = true;
+                    *confirmation_opened_this_pass = true;
                 } else {
                     slot.settings = default_settings.clone();
                     settings_changed = true;
+                    reset_immediately = true;
                 }
             }
         });
 
-        if let Some(result) =
-            registry.render_settings_ui(&widget_name, ui, &mut slot.settings, settings_ctx)
-        {
+        let settings_result = ui
+            .scope_builder(
+                egui::UiBuilder::new().id(ui.id().with((
+                    "dashboard-editor-widget-properties",
+                    slot_token,
+                    widget_name.as_str(),
+                ))),
+                |ui| {
+                    registry.render_settings_ui(
+                        &widget_name,
+                        ui,
+                        &mut slot.settings,
+                        &scoped_settings_ctx,
+                    )
+                },
+            )
+            .inner;
+        if let Some(result) = settings_result {
             if result.changed {
                 settings_changed = true;
             }
@@ -641,18 +1139,45 @@ impl DashboardEditorDialog {
         } else {
             widgets::secondary_help(ui, "No settings available for this widget.");
         }
+        if reset_immediately {
+            self.property_identity_store.clear_slot(slot_token);
+        }
+        if request_reset_confirmation {
+            self.pending_reset = Some((selected_idx, default_settings.clone()));
+            self.confirm_modal
+                .open_for(DestructiveAction::ResetWidgetSettings);
+            self.begin_confirmation(
+                DashboardEditorConfirmationKind::ResetWidgetSettings,
+                selected_idx,
+            );
+        }
 
-        match self.confirm_modal.ui(ui.ctx()) {
+        let confirmation_result = if let (Some(parent_instance), Some((instance, kind))) = (
+            parent_instance,
+            self.jump_mode_pending_confirmation_identity(),
+        ) {
+            let window_id = crate::gui::jump_mode::ui::dashboard_editor_confirmation_layer_id(
+                parent_instance,
+                instance,
+                kind,
+            )
+            .id;
+            self.confirm_modal.ui_with_jump_mode(
+                ui.ctx(),
+                window_id,
+                confirmation_scope,
+                native_confirmation_owner,
+                first_ui_pass && !*confirmation_opened_this_pass,
+            )
+        } else {
+            self.confirm_modal.ui(ui.ctx())
+        };
+        match confirmation_result {
             ConfirmationResult::Confirmed => {
-                if let Some((idx, settings)) = self.pending_reset.take()
-                    && let Some(slot) = self.config.slots.get_mut(idx)
-                {
-                    slot.settings = settings;
-                    settings_changed = true;
-                }
+                *reset_result = ConfirmationResult::Confirmed;
             }
             ConfirmationResult::Cancelled => {
-                self.pending_reset = None;
+                *reset_result = ConfirmationResult::Cancelled;
             }
             ConfirmationResult::None => {}
         }
@@ -705,6 +1230,7 @@ impl DashboardEditorDialog {
             (Ok(first_slot), Ok(second_slot)) => {
                 self.config.slots[first] = first_slot;
                 self.config.slots[second] = second_slot;
+                self.slot_tokens.swap(first, second);
                 self.blocked_warning = None;
                 Ok(())
             }
@@ -761,6 +1287,10 @@ impl DashboardEditorDialog {
         match self.validate_slot(idx, slot.clone(), rows, cols, registry, &occupancy) {
             Ok(clamped) => {
                 self.blocked_warning = None;
+                if self.config.slots[idx].widget != clamped.widget {
+                    self.property_identity_store
+                        .clear_slot(self.slot_tokens[idx]);
+                }
                 self.config.slots[idx] = clamped;
                 Ok(())
             }
@@ -1469,6 +1999,8 @@ impl DashboardEditorDialog {
             (Ok(updated_slot), Ok(new_slot)) => {
                 self.config.slots[selected_idx] = updated_slot;
                 self.config.slots[new_idx] = new_slot;
+                let token = self.next_slot_token();
+                self.slot_tokens.push(token);
                 self.blocked_warning = None;
                 Ok(())
             }
@@ -1500,5 +2032,95 @@ mod persistence_tests {
         assert!(!dialog.pending_save);
         assert!(dialog.error.as_deref().unwrap().contains("Failed to save"));
         assert_eq!(std::fs::read(temporary.path()).unwrap(), original);
+    }
+
+    #[test]
+    fn jump_mode_dashboard_editor_native_popup_requires_its_current_combo_anchor() {
+        let ctx = egui::Context::default();
+        let mut dialog = DashboardEditorDialog {
+            open: true,
+            ..DashboardEditorDialog::default()
+        };
+        let combo_id = egui::Id::new("dashboard-editor-native-popup-test-combo");
+        let expected_layer = crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor
+            .layer_id()
+            .expect("the Dashboard Editor has an exact native window layer");
+        let mut selected = 0_u8;
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+
+        let mut draw = |events: Vec<egui::Event>| -> (egui::Rect, egui::Id) {
+            let anchors = std::cell::RefCell::new(Vec::new());
+            let mut settings_context = WidgetSettingsContext::empty();
+            settings_context.native_combo_anchors = Some(&anchors);
+            let mut combo_geometry = None;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_000.0, 700.0),
+                    )),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |root_ui| {
+                    egui::Window::new("Dashboard Editor").show(root_ui.ctx(), |ui| {
+                        let combo = egui::ComboBox::from_id_salt(combo_id)
+                            .selected_text(format!("Option {selected}"))
+                            .show_ui(ui, |ui| {
+                                for option in 0..2 {
+                                    ui.selectable_value(
+                                        &mut selected,
+                                        option,
+                                        format!("Option {option}"),
+                                    );
+                                }
+                            });
+                        assert_eq!(combo.response.layer_id, expected_layer);
+                        settings_context.record_native_combo_anchor(ui, &combo.response);
+                        combo_geometry = Some((combo.response.rect, combo.response.id));
+                    });
+                },
+            );
+            dialog.native_combo_anchors = anchors.into_inner();
+            output.drop_without_applying_deltas();
+            combo_geometry.expect("the actual ComboBox response was rendered")
+        };
+
+        let _ = draw(Vec::new()); // establish actual Window geometry before interaction
+        let (combo_rect, _) = draw(Vec::new());
+        let center = combo_rect.center();
+        let (_, combo_response_id) = draw(vec![
+            egui::Event::PointerMoved(center),
+            egui::Event::PointerButton {
+                pos: center,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: center,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        drop(draw);
+        let combo_response = ctx
+            .read_response(combo_response_id)
+            .expect("the actual ComboBox response remains current");
+        let popup_id = egui::Popup::default_response_id(&combo_response);
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert!(egui::ComboBox::is_open(&ctx, combo_response_id));
+        assert!(dialog.native_combo_popup_is_current(&ctx, expected_layer));
+
+        let unrelated_popup = egui::Id::new("dashboard-editor-unowned-popup");
+        egui::Popup::open_id(&ctx, unrelated_popup);
+        assert!(!egui::Popup::is_id_open(&ctx, popup_id));
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert!(
+            !dialog.native_combo_popup_is_current(&ctx, expected_layer),
+            "an unrelated foreground popup cannot borrow the Dashboard Editor's combo anchor"
+        );
     }
 }

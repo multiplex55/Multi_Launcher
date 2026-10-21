@@ -67,26 +67,72 @@ impl PinnedCommandsWidget {
 
             let mut remove_idx = None;
             for (idx, action_id) in cfg.action_ids.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(format!("Action {}", idx + 1));
-                    egui::ComboBox::from_id_salt(format!("pin-choice-{idx}"))
-                        .selected_text(label_for(action_id, &options))
-                        .show_ui(ui, |ui| {
-                            for (id, label) in &options {
-                                changed |=
-                                    ui.selectable_value(action_id, id.clone(), label).changed();
+                let token = ctx
+                    .property_row_token("pinned-commands", idx)
+                    .unwrap_or(idx as u64);
+                ui.scope_builder(
+                    egui::UiBuilder::new().id(ui.id().with(("pinned-command-row", token))),
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Action {}", idx + 1));
+                            let anchor = format!("pinned-commands/row/{token}/choice");
+                            let popup_scope = ctx.combo_popup_scope(&anchor);
+                            let combo =
+                                egui::ComboBox::from_id_salt(ui.id().with(("pin-choice", token)))
+                                    .selected_text(label_for(action_id, &options))
+                                    .show_ui(ui, |ui| {
+                                        for (id, label) in &options {
+                                            let response =
+                                                ui.selectable_value(action_id, id.clone(), label);
+                                            let option =
+                                                crate::dashboard::widgets::opaque_settings_key(id);
+                                            ctx.register_jump_mode_target_in_scope(
+                                                popup_scope.as_ref(),
+                                                ui,
+                                                &response,
+                                                format!("pinned-commands/choice/{option}"),
+                                                "Pinned action option",
+                                                crate::gui::jump_mode::TargetKind::Selectable,
+                                            );
+                                            changed |= response.changed();
+                                        }
+                                    });
+                            ctx.register_jump_mode_target(
+                                ui,
+                                &combo.response,
+                                anchor,
+                                "Pinned action",
+                                crate::gui::jump_mode::TargetKind::ComboBox,
+                            );
+                            let remove = ui.small_button("✕");
+                            ctx.register_jump_mode_target(
+                                ui,
+                                &remove,
+                                format!("pinned-commands/row/{token}/remove"),
+                                "Remove pinned action",
+                                crate::gui::jump_mode::TargetKind::Button,
+                            );
+                            if remove.clicked() {
+                                remove_idx = Some(idx);
                             }
-                        });
-                    if ui.small_button("✕").clicked() {
-                        remove_idx = Some(idx);
-                    }
-                });
+                        })
+                    },
+                );
             }
             if let Some(idx) = remove_idx {
+                ctx.remove_property_row_token("pinned-commands", idx);
                 cfg.action_ids.remove(idx);
                 changed = true;
             }
-            if ui.button("Add action").clicked() {
+            let add_response = ui.button("Add action");
+            ctx.register_jump_mode_target(
+                ui,
+                &add_response,
+                "pinned-commands/add",
+                "Add pinned action",
+                crate::gui::jump_mode::TargetKind::Button,
+            );
+            if add_response.clicked() {
                 cfg.action_ids.push(
                     options
                         .first()
@@ -96,19 +142,37 @@ impl PinnedCommandsWidget {
                 changed = true;
             }
 
-            egui::ComboBox::from_label("Layout")
+            let layout_anchor = "pinned-commands/layout";
+            let layout_popup = ctx.combo_popup_scope(layout_anchor);
+            let layout_combo = egui::ComboBox::from_id_salt(ui.id().with("pinned-commands-layout"))
                 .selected_text(match cfg.layout {
                     PinnedLayout::Grid => "Grid",
                     PinnedLayout::List => "List",
                 })
                 .show_ui(ui, |ui| {
-                    changed |= ui
-                        .selectable_value(&mut cfg.layout, PinnedLayout::Grid, "Grid")
-                        .changed();
-                    changed |= ui
-                        .selectable_value(&mut cfg.layout, PinnedLayout::List, "List")
-                        .changed();
+                    for (id, layout, label) in [
+                        ("grid", PinnedLayout::Grid, "Grid"),
+                        ("list", PinnedLayout::List, "List"),
+                    ] {
+                        let response = ui.selectable_value(&mut cfg.layout, layout, label);
+                        ctx.register_jump_mode_target_in_scope(
+                            layout_popup.as_ref(),
+                            ui,
+                            &response,
+                            format!("pinned-commands/layout/{id}"),
+                            "Pinned layout option",
+                            crate::gui::jump_mode::TargetKind::Selectable,
+                        );
+                        changed |= response.changed();
+                    }
                 });
+            ctx.register_jump_mode_target(
+                ui,
+                &layout_combo.response,
+                layout_anchor,
+                "Pinned layout",
+                crate::gui::jump_mode::TargetKind::ComboBox,
+            );
             changed
         })
     }

@@ -270,7 +270,9 @@ impl PluginHomeWidget {
                 cfg.plugin = plugin_names.first().cloned();
                 changed = true;
             }
-            egui::ComboBox::from_label("Plugin")
+            let plugin_anchor = "plugin-home/plugin";
+            let plugin_popup = ctx.combo_popup_scope(plugin_anchor);
+            let plugin_combo = egui::ComboBox::from_id_salt(ui.id().with("plugin-home-plugin"))
                 .selected_text(cfg.plugin.as_deref().unwrap_or_else(|| {
                     plugin_names
                         .first()
@@ -279,26 +281,58 @@ impl PluginHomeWidget {
                 }))
                 .show_ui(ui, |ui| {
                     for name in plugin_names {
-                        changed |= ui
-                            .selectable_value(&mut cfg.plugin, Some(name.clone()), name)
-                            .changed();
+                        let response =
+                            ui.selectable_value(&mut cfg.plugin, Some(name.clone()), name.as_str());
+                        let option = crate::dashboard::widgets::opaque_settings_key(&name);
+                        ctx.register_jump_mode_target_in_scope(
+                            plugin_popup.as_ref(),
+                            ui,
+                            &response,
+                            format!("plugin-home/plugin/{option}"),
+                            "Plugin option",
+                            crate::gui::jump_mode::TargetKind::Selectable,
+                        );
+                        changed |= response.changed();
                     }
                 });
+            ctx.register_jump_mode_target(
+                ui,
+                &plugin_combo.response,
+                plugin_anchor,
+                "Plugin",
+                crate::gui::jump_mode::TargetKind::ComboBox,
+            );
 
             ui.horizontal(|ui| {
                 ui.label("Mode");
-                changed |= ui
-                    .selectable_value(&mut cfg.mode, PluginHomeMode::Commands, "Commands")
-                    .changed();
-                changed |= ui
-                    .selectable_value(&mut cfg.mode, PluginHomeMode::Search, "Search")
-                    .changed();
+                for (id, mode, label) in [
+                    ("commands", PluginHomeMode::Commands, "Commands"),
+                    ("search", PluginHomeMode::Search, "Search"),
+                ] {
+                    let response = ui.selectable_value(&mut cfg.mode, mode, label);
+                    ctx.register_jump_mode_target(
+                        ui,
+                        &response,
+                        format!("plugin-home/mode/{id}"),
+                        label,
+                        crate::gui::jump_mode::TargetKind::Selectable,
+                    );
+                    changed |= response.changed();
+                }
             });
 
             ui.horizontal(|ui| {
                 ui.label("Query seed");
                 let mut text = cfg.query_seed.clone().unwrap_or_default();
-                if ui.text_edit_singleline(&mut text).changed() {
+                let response = ui.text_edit_singleline(&mut text);
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "plugin-home/query-seed",
+                    "Plugin query seed",
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                );
+                if response.changed() {
                     cfg.query_seed = if text.trim().is_empty() {
                         None
                     } else {
@@ -310,9 +344,15 @@ impl PluginHomeWidget {
 
             ui.horizontal(|ui| {
                 ui.label("Limit");
-                changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.limit).range(1..=25))
-                    .changed();
+                let response = ui.add(egui::DragValue::new(&mut cfg.limit).range(1..=25));
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "plugin-home/limit",
+                    "Plugin result limit",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                );
+                changed |= response.changed();
             });
 
             changed

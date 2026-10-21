@@ -117,19 +117,39 @@ impl ClipboardSnippetsWidget {
                 let mut changed = false;
                 ui.horizontal(|ui| {
                     ui.label("Clipboard items");
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut cfg.clipboard_count).range(1..=50))
-                        .changed();
+                    let response =
+                        ui.add(egui::DragValue::new(&mut cfg.clipboard_count).range(1..=50));
+                    ctx.register_jump_mode_target(
+                        ui,
+                        &response,
+                        "clipboard-count",
+                        "Clipboard item count",
+                        crate::gui::jump_mode::TargetKind::Slider,
+                    );
+                    changed |= response.changed();
                 });
                 ui.horizontal(|ui| {
                     ui.label("Snippets");
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut cfg.snippet_count).range(0..=50))
-                        .changed();
+                    let response =
+                        ui.add(egui::DragValue::new(&mut cfg.snippet_count).range(0..=50));
+                    ctx.register_jump_mode_target(
+                        ui,
+                        &response,
+                        "snippet-count",
+                        "Snippet count",
+                        crate::gui::jump_mode::TargetKind::Slider,
+                    );
+                    changed |= response.changed();
                 });
-                changed |= ui
-                    .checkbox(&mut cfg.show_system, "Show system snapshot")
-                    .changed();
+                let response = ui.checkbox(&mut cfg.show_system, "Show system snapshot");
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "show-system",
+                    "Show system snapshot",
+                    crate::gui::jump_mode::TargetKind::Checkbox,
+                );
+                changed |= response.changed();
                 changed
             },
         )

@@ -197,6 +197,8 @@ impl ScratchpadWidget {
             let mut changed = false;
             changed |= refresh_settings_ui(
                 ui,
+                ctx,
+                "scratchpad",
                 &mut cfg.refresh_interval_secs,
                 &mut cfg.refresh_mode,
                 &mut cfg.refresh_throttle_secs,
@@ -205,18 +207,32 @@ impl ScratchpadWidget {
             );
             ui.horizontal(|ui| {
                 ui.label("Save debounce (secs)");
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut cfg.debounce_secs)
-                            .range(0.1..=5.0)
-                            .speed(0.1),
-                    )
-                    .changed();
+                let response = ui.add(
+                    egui::DragValue::new(&mut cfg.debounce_secs)
+                        .range(0.1..=5.0)
+                        .speed(0.1),
+                );
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "scratchpad/debounce",
+                    "Save debounce",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                );
+                changed |= response.changed();
             });
             ui.horizontal(|ui| {
                 ui.label("Storage file");
                 let mut path = cfg.storage_path.clone().unwrap_or_default();
-                if ui.text_edit_singleline(&mut path).changed() {
+                let response = ui.text_edit_singleline(&mut path);
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "scratchpad/storage-path",
+                    "Scratchpad storage file",
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                );
+                if response.changed() {
                     cfg.storage_path = if path.trim().is_empty() {
                         None
                     } else {

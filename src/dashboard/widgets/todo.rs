@@ -133,54 +133,104 @@ impl TodoWidget {
             ui.heading("List");
             ui.horizontal(|ui| {
                 ui.label("Show");
-                changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.count).range(1..=50))
-                    .changed();
+                let response = ui.add(egui::DragValue::new(&mut cfg.count).range(1..=50));
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "todo/count",
+                    "Todo item limit",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                );
+                changed |= response.changed();
                 ui.label("todos");
             });
-            changed |= ui
-                .checkbox(&mut cfg.show_progress, "Show progress bar")
-                .changed();
-            egui::ComboBox::from_label("Status")
+            let response = ui.checkbox(&mut cfg.show_progress, "Show progress bar");
+            ctx.register_jump_mode_target(
+                ui,
+                &response,
+                "todo/show-progress",
+                "Show progress bar",
+                crate::gui::jump_mode::TargetKind::Checkbox,
+            );
+            changed |= response.changed();
+            let status_anchor = "todo/status";
+            let status_popup = ctx.combo_popup_scope(status_anchor);
+            let status_combo = egui::ComboBox::from_id_salt(ui.id().with("todo-status"))
                 .selected_text(match cfg.status {
                     TodoStatusFilter::All => "All",
                     TodoStatusFilter::Open => "Open",
                     TodoStatusFilter::Done => "Done",
                 })
                 .show_ui(ui, |ui| {
-                    changed |= ui
-                        .selectable_value(&mut cfg.status, TodoStatusFilter::All, "All")
-                        .changed();
-                    changed |= ui
-                        .selectable_value(&mut cfg.status, TodoStatusFilter::Open, "Open")
-                        .changed();
-                    changed |= ui
-                        .selectable_value(&mut cfg.status, TodoStatusFilter::Done, "Done")
-                        .changed();
+                    for (id, status, label) in [
+                        ("all", TodoStatusFilter::All, "All"),
+                        ("open", TodoStatusFilter::Open, "Open"),
+                        ("done", TodoStatusFilter::Done, "Done"),
+                    ] {
+                        let response = ui.selectable_value(&mut cfg.status, status, label);
+                        ctx.register_jump_mode_target_in_scope(
+                            status_popup.as_ref(),
+                            ui,
+                            &response,
+                            format!("todo/status/{id}"),
+                            "Todo status option",
+                            crate::gui::jump_mode::TargetKind::Selectable,
+                        );
+                        changed |= response.changed();
+                    }
                 });
+            ctx.register_jump_mode_target(
+                ui,
+                &status_combo.response,
+                status_anchor,
+                "Todo status",
+                crate::gui::jump_mode::TargetKind::ComboBox,
+            );
             ui.horizontal(|ui| {
                 ui.label("Min priority");
-                changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.min_priority).range(0..=255))
-                    .changed();
+                let response = ui.add(egui::DragValue::new(&mut cfg.min_priority).range(0..=255));
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "todo/min-priority",
+                    "Minimum priority",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                );
+                changed |= response.changed();
             });
-            egui::ComboBox::from_label("Sort by")
+            let sort_anchor = "todo/sort";
+            let sort_popup = ctx.combo_popup_scope(sort_anchor);
+            let sort_combo = egui::ComboBox::from_id_salt(ui.id().with("todo-sort"))
                 .selected_text(match cfg.sort {
                     TodoSort::Priority => "Priority",
                     TodoSort::Created => "Created order",
                     TodoSort::Alphabetical => "Alphabetical",
                 })
                 .show_ui(ui, |ui| {
-                    changed |= ui
-                        .selectable_value(&mut cfg.sort, TodoSort::Priority, "Priority")
-                        .changed();
-                    changed |= ui
-                        .selectable_value(&mut cfg.sort, TodoSort::Created, "Created order")
-                        .changed();
-                    changed |= ui
-                        .selectable_value(&mut cfg.sort, TodoSort::Alphabetical, "Alphabetical")
-                        .changed();
+                    for (id, sort, label) in [
+                        ("priority", TodoSort::Priority, "Priority"),
+                        ("created", TodoSort::Created, "Created order"),
+                        ("alphabetical", TodoSort::Alphabetical, "Alphabetical"),
+                    ] {
+                        let response = ui.selectable_value(&mut cfg.sort, sort, label);
+                        ctx.register_jump_mode_target_in_scope(
+                            sort_popup.as_ref(),
+                            ui,
+                            &response,
+                            format!("todo/sort/{id}"),
+                            "Todo sort option",
+                            crate::gui::jump_mode::TargetKind::Selectable,
+                        );
+                        changed |= response.changed();
+                    }
                 });
+            ctx.register_jump_mode_target(
+                ui,
+                &sort_combo.response,
+                sort_anchor,
+                "Todo sort order",
+                crate::gui::jump_mode::TargetKind::ComboBox,
+            );
 
             ui.separator();
             ui.heading("Open action");
@@ -194,7 +244,15 @@ impl TodoWidget {
             ui.horizontal(|ui| {
                 ui.label("Query override");
                 let mut query = cfg.query.clone().unwrap_or_default();
-                if ui.text_edit_singleline(&mut query).changed() {
+                let response = ui.text_edit_singleline(&mut query);
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "todo/query-override",
+                    "Todo query override",
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                );
+                if response.changed() {
                     cfg.query = if query.trim().is_empty() {
                         None
                     } else {
@@ -204,23 +262,40 @@ impl TodoWidget {
                 }
             });
             if !suggestions.is_empty() {
-                egui::ComboBox::from_label("Suggestions")
+                let anchor = "todo/query-suggestions";
+                let popup_scope = ctx.combo_popup_scope(anchor);
+                let combo = egui::ComboBox::from_id_salt(ui.id().with("todo-query-suggestions"))
                     .selected_text(
                         cfg.query
                             .as_deref()
                             .unwrap_or("Pick a todo query from your plugins"),
                     )
                     .show_ui(ui, |ui| {
-                        for suggestion in &suggestions {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut cfg.query,
-                                    Some(suggestion.clone()),
-                                    suggestion,
-                                )
-                                .changed();
+                        for (index, suggestion) in suggestions.iter().enumerate() {
+                            let response = ui.selectable_value(
+                                &mut cfg.query,
+                                Some(suggestion.clone()),
+                                suggestion,
+                            );
+                            let option = crate::dashboard::widgets::opaque_settings_key(suggestion);
+                            ctx.register_jump_mode_target_in_scope(
+                                popup_scope.as_ref(),
+                                ui,
+                                &response,
+                                format!("todo/query-suggestion/{option}/{index}"),
+                                "Todo query suggestion",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                            );
+                            changed |= response.changed();
                         }
                     });
+                ctx.register_jump_mode_target(
+                    ui,
+                    &combo.response,
+                    anchor,
+                    "Todo query suggestions",
+                    crate::gui::jump_mode::TargetKind::ComboBox,
+                );
             }
 
             changed

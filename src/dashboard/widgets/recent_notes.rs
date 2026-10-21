@@ -81,15 +81,29 @@ impl RecentNotesWidget {
             let mut changed = false;
             ui.horizontal(|ui| {
                 ui.label("Show");
-                changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.count).range(1..=50))
-                    .changed();
+                let response = ui.add(egui::DragValue::new(&mut cfg.count).range(1..=50));
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "recent-notes/count",
+                    "Recent note count",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                );
+                changed |= response.changed();
                 ui.label("notes");
             });
             ui.horizontal(|ui| {
                 ui.label("Filter by tag");
                 let mut tag = cfg.filter_tag.clone().unwrap_or_default();
-                if ui.text_edit_singleline(&mut tag).changed() {
+                let response = ui.text_edit_singleline(&mut tag);
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "recent-notes/filter-tag",
+                    "Filter notes by tag",
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                );
+                if response.changed() {
                     cfg.filter_tag = if tag.trim().is_empty() {
                         None
                     } else {
@@ -98,36 +112,48 @@ impl RecentNotesWidget {
                     changed = true;
                 }
             });
-            changed |= ui.checkbox(&mut cfg.show_snippet, "Show snippet").changed();
-            egui::ComboBox::from_label("Open mode")
+            let response = ui.checkbox(&mut cfg.show_snippet, "Show snippet");
+            ctx.register_jump_mode_target(
+                ui,
+                &response,
+                "recent-notes/show-snippet",
+                "Show note snippets",
+                crate::gui::jump_mode::TargetKind::Checkbox,
+            );
+            changed |= response.changed();
+            let mode_anchor = "recent-notes/open-mode";
+            let mode_popup = ctx.combo_popup_scope(mode_anchor);
+            let mode_combo = egui::ComboBox::from_id_salt(ui.id().with("recent-notes-open-mode"))
                 .selected_text(match cfg.open_mode {
                     NoteOpenMode::Panel => "Open note panel",
                     NoteOpenMode::Dialog => "Open note dialog",
                     NoteOpenMode::Query => "Fill query only",
                 })
                 .show_ui(ui, |ui| {
-                    changed |= ui
-                        .selectable_value(
-                            &mut cfg.open_mode,
-                            NoteOpenMode::Panel,
-                            "Open note panel",
-                        )
-                        .changed();
-                    changed |= ui
-                        .selectable_value(
-                            &mut cfg.open_mode,
-                            NoteOpenMode::Dialog,
-                            "Open note dialog",
-                        )
-                        .changed();
-                    changed |= ui
-                        .selectable_value(
-                            &mut cfg.open_mode,
-                            NoteOpenMode::Query,
-                            "Fill query only",
-                        )
-                        .changed();
+                    for (id, mode, label) in [
+                        ("panel", NoteOpenMode::Panel, "Open note panel"),
+                        ("dialog", NoteOpenMode::Dialog, "Open note dialog"),
+                        ("query", NoteOpenMode::Query, "Fill query only"),
+                    ] {
+                        let response = ui.selectable_value(&mut cfg.open_mode, mode, label);
+                        ctx.register_jump_mode_target_in_scope(
+                            mode_popup.as_ref(),
+                            ui,
+                            &response,
+                            format!("recent-notes/open-mode/{id}"),
+                            "Note open mode option",
+                            crate::gui::jump_mode::TargetKind::Selectable,
+                        );
+                        changed |= response.changed();
+                    }
                 });
+            ctx.register_jump_mode_target(
+                ui,
+                &mode_combo.response,
+                mode_anchor,
+                "Note open mode",
+                crate::gui::jump_mode::TargetKind::ComboBox,
+            );
             changed
         })
     }

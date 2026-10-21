@@ -87,18 +87,34 @@ impl QueryListWidget {
             let mut changed = false;
             ui.horizontal(|ui| {
                 ui.label("Query");
-                changed |= ui.text_edit_singleline(&mut cfg.query).changed();
+                let response = ui.text_edit_singleline(&mut cfg.query);
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "query-list/query",
+                    "Search query",
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                );
+                changed |= response.changed();
             });
             ui.horizontal(|ui| {
                 ui.label("Show up to");
-                changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.count).range(1..=25))
-                    .changed();
+                let response = ui.add(egui::DragValue::new(&mut cfg.count).range(1..=25));
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "query-list/count",
+                    "Search result count",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                );
+                changed |= response.changed();
                 ui.label("results");
             });
             let mut refresh_secs = cfg.refresh_ms as f32 / 1000.0;
             changed |= refresh_settings_ui(
                 ui,
+                ctx,
+                "query_list",
                 &mut refresh_secs,
                 &mut cfg.refresh_mode,
                 &mut cfg.refresh_throttle_secs,
@@ -106,9 +122,15 @@ impl QueryListWidget {
                 "Results are cached between refreshes.",
             );
             cfg.refresh_ms = (refresh_secs * 1000.0) as u64;
-            changed |= ui
-                .checkbox(&mut cfg.show_desc, "Show descriptions")
-                .changed();
+            let response = ui.checkbox(&mut cfg.show_desc, "Show descriptions");
+            ctx.register_jump_mode_target(
+                ui,
+                &response,
+                "query-list/show-descriptions",
+                "Show descriptions",
+                crate::gui::jump_mode::TargetKind::Checkbox,
+            );
+            changed |= response.changed();
             changed
         })
     }

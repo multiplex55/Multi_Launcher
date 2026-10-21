@@ -103,14 +103,34 @@ impl CommandHistoryWidget {
                 let mut changed = false;
                 ui.horizontal(|ui| {
                     ui.label("Count");
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut cfg.count).range(1..=50))
-                        .changed();
+                    let response = ui.add(egui::DragValue::new(&mut cfg.count).range(1..=50));
+                    ctx.register_jump_mode_target(
+                        ui,
+                        &response,
+                        "count",
+                        "History item count",
+                        crate::gui::jump_mode::TargetKind::Slider,
+                    );
+                    changed |= response.changed();
                 });
-                changed |= ui
-                    .checkbox(&mut cfg.show_pinned_only, "Show pinned only")
-                    .changed();
-                changed |= ui.checkbox(&mut cfg.show_filter, "Show filter").changed();
+                let response = ui.checkbox(&mut cfg.show_pinned_only, "Show pinned only");
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "show-pinned-only",
+                    "Show pinned only",
+                    crate::gui::jump_mode::TargetKind::Checkbox,
+                );
+                changed |= response.changed();
+                let response = ui.checkbox(&mut cfg.show_filter, "Show filter");
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "show-filter",
+                    "Show filter",
+                    crate::gui::jump_mode::TargetKind::Checkbox,
+                );
+                changed |= response.changed();
                 changed
             },
         )

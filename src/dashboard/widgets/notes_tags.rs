@@ -56,12 +56,26 @@ impl NotesTagsWidget {
             let mut changed = false;
             ui.horizontal(|ui| {
                 ui.label("Show up to");
-                changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.count).range(1..=50))
-                    .changed();
+                let response = ui.add(egui::DragValue::new(&mut cfg.count).range(1..=50));
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "count",
+                    "Tag count",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                );
+                changed |= response.changed();
                 ui.label("tags");
             });
-            changed |= ui.checkbox(&mut cfg.show_counts, "Show counts").changed();
+            let response = ui.checkbox(&mut cfg.show_counts, "Show counts");
+            ctx.register_jump_mode_target(
+                ui,
+                &response,
+                "show-counts",
+                "Show counts",
+                crate::gui::jump_mode::TargetKind::Checkbox,
+            );
+            changed |= response.changed();
             changed
         })
     }

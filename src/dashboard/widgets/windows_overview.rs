@@ -85,16 +85,30 @@ impl WindowsOverviewWidget {
                 let mut changed = false;
                 ui.horizontal(|ui| {
                     ui.label("Show up to");
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut cfg.limit).range(1..=25))
-                        .changed();
+                    let response = ui.add(egui::DragValue::new(&mut cfg.limit).range(1..=25));
+                    ctx.register_jump_mode_target(
+                        ui,
+                        &response,
+                        "limit",
+                        "Window limit",
+                        crate::gui::jump_mode::TargetKind::Slider,
+                    );
+                    changed |= response.changed();
                     ui.label("windows");
                 });
-                changed |= ui
-                    .checkbox(&mut cfg.show_close, "Show close buttons")
-                    .changed();
+                let response = ui.checkbox(&mut cfg.show_close, "Show close buttons");
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "show-close",
+                    "Show close buttons",
+                    crate::gui::jump_mode::TargetKind::Checkbox,
+                );
+                changed |= response.changed();
                 changed |= refresh_settings_ui(
                     ui,
+                    ctx,
+                    "windows_overview",
                     &mut cfg.refresh_interval_secs,
                     &mut cfg.refresh_mode,
                     &mut cfg.refresh_throttle_secs,

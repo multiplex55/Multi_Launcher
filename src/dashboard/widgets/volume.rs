@@ -69,6 +69,8 @@ impl VolumeWidget {
         edit_typed_settings(ui, value, ctx, |ui, cfg: &mut VolumeConfig, _ctx| {
             refresh_settings_ui(
                 ui,
+                ctx,
+                "volume",
                 &mut cfg.refresh_interval_secs,
                 &mut cfg.refresh_mode,
                 &mut cfg.refresh_throttle_secs,

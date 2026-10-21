@@ -158,15 +158,38 @@ impl PinnedQueryResultsWidget {
                 if engines.is_empty() {
                     ui.colored_label(egui::Color32::YELLOW, "No enabled engines available.");
                 } else {
-                    egui::ComboBox::from_label("Engine")
-                        .selected_text(&cfg.engine)
-                        .show_ui(ui, |ui| {
-                            for engine in &engines {
-                                changed |= ui
-                                    .selectable_value(&mut cfg.engine, engine.clone(), engine)
-                                    .changed();
-                            }
-                        });
+                    let anchor = "pinned-query-results/engine";
+                    let popup_scope = ctx.combo_popup_scope(anchor);
+                    let combo =
+                        egui::ComboBox::from_id_salt(ui.id().with("pinned-query-results-engine"))
+                            .selected_text(&cfg.engine)
+                            .show_ui(ui, |ui| {
+                                for engine in &engines {
+                                    let response = ui.selectable_value(
+                                        &mut cfg.engine,
+                                        engine.clone(),
+                                        engine,
+                                    );
+                                    let option =
+                                        crate::dashboard::widgets::opaque_settings_key(engine);
+                                    ctx.register_jump_mode_target_in_scope(
+                                        popup_scope.as_ref(),
+                                        ui,
+                                        &response,
+                                        format!("pinned-query-results/engine/{option}"),
+                                        "Search engine option",
+                                        crate::gui::jump_mode::TargetKind::Selectable,
+                                    );
+                                    changed |= response.changed();
+                                }
+                            });
+                    ctx.register_jump_mode_target(
+                        ui,
+                        &combo.response,
+                        anchor,
+                        "Search engine",
+                        crate::gui::jump_mode::TargetKind::ComboBox,
+                    );
                 }
 
                 if let Some(warn) = warning {
@@ -182,27 +205,51 @@ impl PinnedQueryResultsWidget {
 
                 ui.horizontal(|ui| {
                     ui.label("Query");
-                    changed |= ui.text_edit_singleline(&mut cfg.query).changed();
+                    let response = ui.text_edit_singleline(&mut cfg.query);
+                    ctx.register_jump_mode_target(
+                        ui,
+                        &response,
+                        "pinned-query-results/query",
+                        "Pinned query",
+                        crate::gui::jump_mode::TargetKind::TextEntry,
+                    );
+                    changed |= response.changed();
                 });
 
                 if !suggestions.is_empty() {
-                    egui::ComboBox::from_label("Suggestions")
-                        .selected_text(if cfg.query.trim().is_empty() {
-                            "Pick a query"
-                        } else {
-                            &cfg.query
-                        })
-                        .show_ui(ui, |ui| {
-                            for suggestion in &suggestions {
-                                changed |= ui
-                                    .selectable_value(
-                                        &mut cfg.query,
-                                        suggestion.clone(),
-                                        suggestion,
-                                    )
-                                    .changed();
-                            }
-                        });
+                    let anchor = "pinned-query-results/suggestions";
+                    let popup_scope = ctx.combo_popup_scope(anchor);
+                    let combo = egui::ComboBox::from_id_salt(
+                        ui.id().with("pinned-query-results-suggestions"),
+                    )
+                    .selected_text(if cfg.query.trim().is_empty() {
+                        "Pick a query"
+                    } else {
+                        &cfg.query
+                    })
+                    .show_ui(ui, |ui| {
+                        for suggestion in &suggestions {
+                            let response =
+                                ui.selectable_value(&mut cfg.query, suggestion.clone(), suggestion);
+                            let option = crate::dashboard::widgets::opaque_settings_key(suggestion);
+                            ctx.register_jump_mode_target_in_scope(
+                                popup_scope.as_ref(),
+                                ui,
+                                &response,
+                                format!("pinned-query-results/suggestion/{option}"),
+                                "Pinned query suggestion",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                            );
+                            changed |= response.changed();
+                        }
+                    });
+                    ctx.register_jump_mode_target(
+                        ui,
+                        &combo.response,
+                        anchor,
+                        "Pinned query suggestions",
+                        crate::gui::jump_mode::TargetKind::ComboBox,
+                    );
                 } else if cfg.query.trim().is_empty() {
                     cfg.query = default_query();
                     changed = true;
@@ -213,11 +260,20 @@ impl PinnedQueryResultsWidget {
                     let resp = ui
                         .add(egui::DragValue::new(&mut cfg.limit).range(1..=30))
                         .on_hover_text("Maximum number of actions to pin from the query results.");
+                    ctx.register_jump_mode_target(
+                        ui,
+                        &resp,
+                        "pinned-query-results/limit",
+                        "Pinned result limit",
+                        crate::gui::jump_mode::TargetKind::Slider,
+                    );
                     changed |= resp.changed();
                 });
 
                 changed |= refresh_settings_ui(
                     ui,
+                    ctx,
+                    "pinned_query_results",
                     &mut cfg.refresh_interval_secs,
                     &mut cfg.refresh_mode,
                     &mut cfg.refresh_throttle_secs,
@@ -225,27 +281,40 @@ impl PinnedQueryResultsWidget {
                     "Query results are cached. The widget refreshes after this many seconds unless you click Refresh.",
                 );
 
-                egui::ComboBox::from_label("Click behavior")
-                    .selected_text(match cfg.click_behavior {
-                        ClickBehavior::RunAction => "Run action",
-                        ClickBehavior::FillQuery => "Fill search box",
-                    })
-                    .show_ui(ui, |ui| {
-                        changed |= ui
-                            .selectable_value(
-                                &mut cfg.click_behavior,
-                                ClickBehavior::RunAction,
-                                "Run action",
-                            )
-                            .changed();
-                        changed |= ui
-                            .selectable_value(
-                                &mut cfg.click_behavior,
-                                ClickBehavior::FillQuery,
-                                "Fill search box",
-                            )
-                            .changed();
-                    });
+                let anchor = "pinned-query-results/click-behavior";
+                let popup_scope = ctx.combo_popup_scope(anchor);
+                let combo = egui::ComboBox::from_id_salt(
+                    ui.id().with("pinned-query-results-click-behavior"),
+                )
+                .selected_text(match cfg.click_behavior {
+                    ClickBehavior::RunAction => "Run action",
+                    ClickBehavior::FillQuery => "Fill search box",
+                })
+                .show_ui(ui, |ui| {
+                    for (id, behavior, label) in [
+                        ("run", ClickBehavior::RunAction, "Run action"),
+                        ("fill", ClickBehavior::FillQuery, "Fill search box"),
+                    ] {
+                        let response =
+                            ui.selectable_value(&mut cfg.click_behavior, behavior, label);
+                        ctx.register_jump_mode_target_in_scope(
+                            popup_scope.as_ref(),
+                            ui,
+                            &response,
+                            format!("pinned-query-results/click-behavior/{id}"),
+                            "Pinned click behavior option",
+                            crate::gui::jump_mode::TargetKind::Selectable,
+                        );
+                        changed |= response.changed();
+                    }
+                });
+                ctx.register_jump_mode_target(
+                    ui,
+                    &combo.response,
+                    anchor,
+                    "Pinned result click behavior",
+                    crate::gui::jump_mode::TargetKind::ComboBox,
+                );
 
                 changed
             },

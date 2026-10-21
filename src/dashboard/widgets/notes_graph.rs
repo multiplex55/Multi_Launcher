@@ -53,8 +53,15 @@ impl NotesGraphWidget {
         edit_typed_settings(ui, value, ctx, |ui, cfg: &mut NotesGraphConfig, _ctx| {
             ui.horizontal(|ui| {
                 ui.label("Max nodes");
-                ui.add(egui::DragValue::new(&mut cfg.max_nodes).range(4..=64))
-                    .changed()
+                let response = ui.add(egui::DragValue::new(&mut cfg.max_nodes).range(4..=64));
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "max-nodes",
+                    "Maximum nodes",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                );
+                response.changed()
             })
             .inner
         })
