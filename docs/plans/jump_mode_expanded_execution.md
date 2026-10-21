@@ -10,8 +10,8 @@ Started 2026-10-20 from clean branch `jump`, HEAD `0cb3dabf148dc720ed560626c32ef
 | M0-A | complete | Read active plan, repository instructions and configured roles; inspected Git, owner bridge, renderer, dashboard gaps and isolated runner. |
 | M1 | complete | M1-A `3c3b8e91` / M1-B `8648b2d0` / M1-C `a1181df6` pushed; 32 owner and 5 adapter tests passed, independent owner review clean; fixture-only PASS. |
 | M2 File Search | complete | M2-A `b91740f3`, M2-B `5ffdf9a5`, M2-C `251f27e5` pushed; fixture PASS and eight focused QA/lifecycle tests passed. Optional native proof `not_run_environment`: repeated process-inventory denial before UI workflow. |
-| M3 Snippets | complete | M3-A `f4ad295e`, M3-B `788cf705` pushed; M3-C lifecycle checks passed across one slice and exact repaired reruns; checkpoint commit below. |
-| M4 Clipboard History | pending | |
+| M3 Snippets | complete | M3-A `f4ad295e`, M3-B `788cf705` pushed; M3-C `c5b32aef` pushed; lifecycle checks passed across one slice and exact repaired reruns. |
+| M4 Clipboard History | in_progress | M4-A browse navigation verified; checked actions and lifecycle follow. |
 | M5 Dashboard gaps | pending | |
 | M6 JSON / Regex / XML | pending | |
 | M7 Mouse settings / gestures | pending | |
@@ -142,3 +142,8 @@ Test-only integrated lifecycle coverage now proves duplicate-row Edit/Cancel/reo
 `cargo nextest run --lib -E 'test(jump_mode_snippets_lifecycle) | test(prompted_editor_cancel_discards_alias_and_text_draft_without_writing) | test(tag_editor_normalizes_drafts_and_preserves_save_cancel_reopen_state) | test(confirm_removes_the_selected_duplicate_row_only) | test(preview_cannot_resolve_or_copy_and_cancel_returns_exact_draft)'`: initially **7 passed, 1 failed**. The failed duplicate lifecycle was repaired only in fixture staging: scroll the actual contents area to clipped controls, use real mouse responses without unnecessary leader toggles, and establish a current registry after the reopened owner-transition frame. Exact duplicate lifecycle rerun passed. The exact default-off Filter case also passed after adding a pre-click `layer_id_at` assertion proving the actual field remains exposed. Eight unique tests passed; no redundant union rerun. Scoped formatting and diff checks passed. Parent inspected the cumulative test diff.
 
 Native Snippets evidence remains `not_run_environment` under the previously exhausted process-inventory diagnostic/retry. No clipboard writes or production-data mutations occurred.
+### M4-A evidence
+
+Clipboard History now registers clipped-visible selection/Edit/Remove/Close responses with generic labels and opaque per-snapshot tokens, including distinct identical entries. Native row controls share token-based egui identity. Exact foreground/native eligibility stays independent of Jump enabled state; unowned responses disable and surrender only their own focus. Closed dialogs do not reload history on version notifications. Browse insertion/replacement renews mappings; updates during editing retain the draft and invalidate stale authority until safe refresh.
+
+`cargo nextest run --lib -E 'test(jump_mode_clipboard_browse) | test(ensure_open_loads_saved_history_once_and_preserves_edit_draft)'`: **4 passed**. The extended insertion/replacement/draft test then passed its exact rerun, **1/1**. Initial compile feedback was two direct test probes using the old editor signature; their normal-owner argument was corrected. Scoped rustfmt and diff checks passed. Parent inspected source, renderer and tests. No native session. Existing save-failure draft handling is deliberately addressed by M4-B checked persistence, alongside explicit Copy and removal confirmation; M4-A does not claim those actions complete.

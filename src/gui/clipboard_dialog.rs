@@ -1,9 +1,30 @@
 use crate::gui::LauncherApp;
+use crate::gui::jump_mode::TargetGeneration;
 use crate::gui::theme::widgets::{ButtonEmphasis, compact_section_heading, with_button_emphasis};
 use crate::gui::theme::{TextRole, text_style_for_role};
 use crate::plugins::clipboard::{CLIPBOARD_FILE, load_history, save_history};
 use eframe::egui;
 use std::collections::VecDeque;
+
+fn register_clipboard_target(
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    identity: impl AsRef<str>,
+    label: &'static str,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: &mut u64,
+) -> Option<crate::gui::jump_mode::ui::FocusDirective> {
+    crate::gui::jump_mode::ui::register_and_apply_target(
+        scope,
+        ui,
+        response,
+        identity,
+        label,
+        kind,
+        visual_order,
+    )
+}
 
 const CLIPBOARD_HISTORY_PREVIEW_CHAR_LIMIT: usize = 160;
 
@@ -42,13 +63,21 @@ struct ClipboardDialogEffects {
 pub struct ClipboardDialog {
     pub open: bool,
     entries: Vec<String>,
+    entry_tokens: Vec<u64>,
+    selected_entry_token: Option<u64>,
+    target_generation: u64,
+    next_entry_token: u64,
+    observed_clipboard_version: Option<u64>,
+    snapshot_current: bool,
     edit_idx: Option<usize>,
     text: String,
+    #[cfg(test)]
+    test_visible_entry_rows: Vec<(u64, egui::Id, egui::Rect)>,
 }
 
 impl ClipboardDialog {
     pub fn open(&mut self) {
-        self.entries = load_history(CLIPBOARD_FILE).unwrap_or_default().into();
+        self.replace_loaded_entries(load_history(CLIPBOARD_FILE).unwrap_or_default().into());
         self.open = true;
         self.edit_idx = None;
         self.text.clear();
@@ -61,7 +90,7 @@ impl ClipboardDialog {
     }
 
     pub fn open_edit(&mut self, idx: usize) {
-        self.entries = load_history(CLIPBOARD_FILE).unwrap_or_default().into();
+        self.replace_loaded_entries(load_history(CLIPBOARD_FILE).unwrap_or_default().into());
         if idx < self.entries.len() {
             self.text = self.entries[idx].clone();
         } else {
@@ -69,6 +98,77 @@ impl ClipboardDialog {
         }
         self.edit_idx = Some(idx);
         self.open = true;
+    }
+
+    pub(crate) fn jump_mode_target_generation(&self) -> TargetGeneration {
+        TargetGeneration(self.target_generation)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_selected_entry_index(&self) -> Option<usize> {
+        let token = self.selected_entry_token?;
+        self.entry_tokens
+            .iter()
+            .position(|current| *current == token)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_is_editing(&self) -> bool {
+        self.edit_idx.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_visible_entry_rows(&self) -> &[(u64, egui::Id, egui::Rect)] {
+        &self.test_visible_entry_rows
+    }
+
+    fn advance_target_generation(&mut self) {
+        self.target_generation = self.target_generation.wrapping_add(1).max(1);
+        self.selected_entry_token = None;
+    }
+
+    fn renew_entry_tokens(&mut self) {
+        self.entry_tokens = (0..self.entries.len())
+            .map(|_| {
+                self.next_entry_token = self.next_entry_token.wrapping_add(1).max(1);
+                self.next_entry_token
+            })
+            .collect();
+        self.advance_target_generation();
+    }
+
+    fn replace_loaded_entries(&mut self, entries: Vec<String>) {
+        self.entries = entries;
+        self.renew_entry_tokens();
+        self.snapshot_current = true;
+        self.observed_clipboard_version = Some(crate::plugins::clipboard::clipboard_version());
+    }
+
+    pub(crate) fn observe_clipboard_version(&mut self) {
+        if !self.open {
+            return;
+        }
+        let version = crate::plugins::clipboard::clipboard_version();
+        if self.observed_clipboard_version == Some(version) {
+            if !self.snapshot_current && self.edit_idx.is_none() {
+                self.reload_after_edit();
+            }
+            return;
+        }
+
+        self.observed_clipboard_version = Some(version);
+        if self.edit_idx.is_some() {
+            // Do not replace an active edit draft with an external clipboard
+            // update. Its old browse identities are no longer authoritative.
+            self.snapshot_current = false;
+            self.renew_entry_tokens();
+        } else {
+            self.reload_after_edit();
+        }
+    }
+
+    fn reload_after_edit(&mut self) {
+        self.replace_loaded_entries(load_history(CLIPBOARD_FILE).unwrap_or_default().into());
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
@@ -85,44 +185,89 @@ impl ClipboardDialog {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        self.observe_clipboard_version();
+        self.ui_with_jump_mode(ctx, app, None, true, true);
+    }
+
+    pub(crate) fn ui_with_jump_mode(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        first_ui_pass: bool,
+    ) {
         if !self.open {
             return;
         }
         let pinned = app.pinned_panels.contains(&super::Panel::ClipboardDialog);
         let mut window_open = self.open;
         let mut effects = ClipboardDialogEffects::default();
+        let authorized_owner_pass = native_ui_owner && first_ui_pass;
+        let scope = native_ui_owner.then_some(scope).flatten();
         egui::Window::new("Clipboard History")
             .open(&mut window_open)
             .resizable(true)
             .default_size((360.0, 240.0))
             .min_width(100.0)
             .min_height(100.0)
-            .show(ctx, |ui| effects = self.contents_ui(ui));
-        self.open = window_open || pinned;
+            .show(ctx, |ui| {
+                let authorized_owner_pass =
+                    authorized_owner_pass && ui.is_visible() && !ui.is_sizing_pass();
+                effects = ui
+                    .add_enabled_ui(native_ui_owner, |ui| {
+                        self.contents_ui(ui, scope, authorized_owner_pass)
+                    })
+                    .inner;
+            });
+        if authorized_owner_pass {
+            self.open = window_open || pinned;
+        }
 
-        if effects.save {
+        if authorized_owner_pass && effects.save {
             self.save(app);
+            self.snapshot_current = true;
+            self.observe_clipboard_version();
         }
-        if effects.close && !pinned {
+        if authorized_owner_pass && effects.close && !pinned {
             self.open = false;
+            self.advance_target_generation();
         }
-        if effects.invalid_text {
+        if authorized_owner_pass && effects.invalid_text {
             app.report_error_message("ui operation", "Text required");
         }
     }
 
-    fn contents_ui(&mut self, ui: &mut egui::Ui) -> ClipboardDialogEffects {
+    fn contents_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        authorized_owner_pass: bool,
+    ) -> ClipboardDialogEffects {
         if let Some(idx) = self.edit_idx {
-            self.edit_ui(ui, idx)
+            self.edit_ui(ui, idx, authorized_owner_pass)
         } else {
-            self.browse_ui(ui)
+            self.browse_ui_with_jump_mode(ui, scope, authorized_owner_pass)
         }
     }
 
-    fn edit_ui(&mut self, ui: &mut egui::Ui, idx: usize) -> ClipboardDialogEffects {
+    fn edit_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        idx: usize,
+        authorized_owner_pass: bool,
+    ) -> ClipboardDialogEffects {
         compact_section_heading(ui, "Text", None);
         let footer_height = clipboard_history_footer_reserved_height(ui, &["Save", "Cancel"]);
         let body_height = (ui.available_height() - footer_height).max(0.0);
+        let mut text_shadow;
+        let text = if authorized_owner_pass {
+            &mut self.text
+        } else {
+            text_shadow = self.text.clone();
+            &mut text_shadow
+        };
+        let can_save = self.snapshot_current;
         let edit_body_output = egui::ScrollArea::vertical()
             .id_salt("clipboard_history_edit_scroll")
             .auto_shrink([false, false])
@@ -130,7 +275,7 @@ impl ClipboardDialog {
             .max_height(body_height)
             .show(ui, |ui| {
                 ui.add(
-                    egui::TextEdit::multiline(&mut self.text)
+                    egui::TextEdit::multiline(text)
                         .id_salt("clipboard_history_edit_text")
                         .desired_rows(1)
                         .desired_width(f32::INFINITY),
@@ -151,23 +296,25 @@ impl ClipboardDialog {
                 {
                     edit_footer_clip = ui.clip_rect();
                 }
-                let save_button = ui.button("Save");
+                let save_button = ui.add_enabled(can_save, egui::Button::new("Save"));
                 let save = with_button_emphasis(ui, save_button, ButtonEmphasis::Primary);
-                if save.clicked() {
+                if save.clicked() && authorized_owner_pass {
                     if self.text.trim().is_empty() {
                         effects.invalid_text = true;
                     } else {
                         if idx < self.entries.len() {
                             self.entries[idx] = self.text.clone();
                         }
+                        self.renew_entry_tokens();
                         self.edit_idx = None;
                         self.text.clear();
                         effects.save = true;
                     }
                 }
                 let cancel_button = ui.button("Cancel");
-                if cancel_button.clicked() {
+                if cancel_button.clicked() && authorized_owner_pass {
                     self.edit_idx = None;
+                    self.advance_target_generation();
                 }
             },
         );
@@ -184,7 +331,20 @@ impl ClipboardDialog {
     }
 
     fn browse_ui(&mut self, ui: &mut egui::Ui) -> ClipboardDialogEffects {
+        self.browse_ui_with_jump_mode(ui, None, true)
+    }
+
+    fn browse_ui_with_jump_mode(
+        &mut self,
+        ui: &mut egui::Ui,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        authorized_owner_pass: bool,
+    ) -> ClipboardDialogEffects {
         let mut effects = ClipboardDialogEffects::default();
+        let mut visual_order = 0;
+        let row_scope = self.snapshot_current.then_some(scope).flatten();
+        #[cfg(test)]
+        self.test_visible_entry_rows.clear();
         let heading = ui.add(
             egui::Label::new(
                 egui::RichText::new("Clipboard entries")
@@ -211,49 +371,136 @@ impl ClipboardDialog {
                 }
                 for idx in 0..self.entries.len() {
                     let entry = self.entries[idx].clone();
+                    let Some(entry_token) = self.entry_tokens.get(idx).copied() else {
+                        continue;
+                    };
                     let preview = clipboard_history_entry_preview(&entry);
-                    let label = ui.add(egui::Label::new(preview).truncate());
+                    let selected = self.selected_entry_token == Some(entry_token);
+                    let label = ui
+                        .push_id(("clipboard-history-entry", entry_token), |ui| {
+                            ui.selectable_label(selected, preview)
+                        })
+                        .inner;
+                    #[cfg(test)]
+                    if label.rect.intersect(ui.clip_rect()).is_positive() {
+                        self.test_visible_entry_rows.push((
+                            entry_token,
+                            label.id,
+                            label.rect.intersect(ui.clip_rect()),
+                        ));
+                    }
+                    let select_identity = format!("entry/{entry_token}/select");
+                    let select_target_id = row_scope.map(|scope| scope.target_id(&select_identity));
+                    let directive = register_clipboard_target(
+                        row_scope,
+                        ui,
+                        &label,
+                        &select_identity,
+                        "Clipboard entry",
+                        crate::gui::jump_mode::TargetKind::Action,
+                        &mut visual_order,
+                    );
                     let idx_copy = idx;
                     label.clone().context_menu(|ui| {
-                        if ui.button("Edit Entry").clicked() {
+                        if ui.button("Edit Entry").clicked()
+                            && authorized_owner_pass
+                            && self.snapshot_current
+                        {
                             self.edit_idx = Some(idx_copy);
                             self.text = self.entries[idx_copy].clone();
+                            self.advance_target_generation();
                             ui.close();
                         }
                         let remove_response = ui.button("Remove Entry");
                         if with_button_emphasis(ui, remove_response, ButtonEmphasis::Destructive)
                             .clicked()
+                            && authorized_owner_pass
+                            && self.snapshot_current
                         {
                             remove = Some(idx_copy);
                             ui.close();
                         }
                     });
-                    ui.horizontal_wrapped(|ui| {
-                        let edit_button = ui.button("Edit");
-                        #[cfg(test)]
-                        if idx == 0 {
-                            effects.browse_edit_rect = Some(edit_button.rect);
-                        }
-                        if edit_button.clicked() {
-                            self.edit_idx = Some(idx);
-                            self.text = entry.clone();
-                        }
-                        let remove_response = ui.button("Remove");
-                        #[cfg(test)]
-                        if idx == 0 {
-                            effects.browse_remove_rect = Some(remove_response.rect);
-                        }
-                        if with_button_emphasis(ui, remove_response, ButtonEmphasis::Destructive)
-                            .clicked()
+                    if label.clicked() && authorized_owner_pass && self.snapshot_current {
+                        self.selected_entry_token = Some(entry_token);
+                        label.request_focus();
+                    }
+                    if directive == Some(crate::gui::jump_mode::ui::FocusDirective::Select)
+                        && authorized_owner_pass
+                        && self.snapshot_current
+                        && self.entry_tokens.get(idx) == Some(&entry_token)
+                    {
+                        self.selected_entry_token = Some(entry_token);
+                        label.request_focus();
+                        if let (Some(scope), Some(target_id)) =
+                            (row_scope, select_target_id.as_ref())
                         {
-                            remove = Some(idx);
+                            scope.record_select_focus_owner(target_id, label.id);
                         }
+                    }
+                    ui.push_id(("clipboard-history-row-controls", entry_token), |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            let edit_button = ui.button("Edit");
+                            let edit_identity = format!("entry/{entry_token}/edit");
+                            let edit_directive = register_clipboard_target(
+                                row_scope,
+                                ui,
+                                &edit_button,
+                                &edit_identity,
+                                "Edit clipboard entry",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            );
+                            #[cfg(test)]
+                            if idx == 0 {
+                                effects.browse_edit_rect = Some(edit_button.rect);
+                            }
+                            if edit_button.clicked()
+                                && edit_directive.is_none()
+                                && authorized_owner_pass
+                                && self.snapshot_current
+                            {
+                                self.edit_idx = Some(idx);
+                                self.text = entry.clone();
+                                self.advance_target_generation();
+                            }
+                            let remove_response = ui.button("Remove");
+                            let remove_identity = format!("entry/{entry_token}/remove");
+                            let remove_directive = register_clipboard_target(
+                                row_scope,
+                                ui,
+                                &remove_response,
+                                &remove_identity,
+                                "Remove clipboard entry",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            );
+                            #[cfg(test)]
+                            if idx == 0 {
+                                effects.browse_remove_rect = Some(remove_response.rect);
+                            }
+                            if with_button_emphasis(
+                                ui,
+                                remove_response,
+                                ButtonEmphasis::Destructive,
+                            )
+                            .clicked()
+                                && remove_directive.is_none()
+                                && authorized_owner_pass
+                                && self.snapshot_current
+                            {
+                                remove = Some(idx);
+                            }
+                        });
                     });
                 }
             });
 
-        if let Some(idx) = remove {
-            self.entries.remove(idx);
+        if let Some(idx) = remove.filter(|_| authorized_owner_pass && self.snapshot_current) {
+            if idx < self.entries.len() {
+                self.entries.remove(idx);
+                self.renew_entry_tokens();
+            }
             effects.save = true;
         }
         #[cfg(test)]
@@ -274,7 +521,16 @@ impl ClipboardDialog {
                     browse_footer_clip = ui.clip_rect();
                 }
                 let close_button = ui.button("Close");
-                if close_button.clicked() {
+                let close_directive = register_clipboard_target(
+                    scope,
+                    ui,
+                    &close_button,
+                    "close",
+                    "Close Clipboard History",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    &mut visual_order,
+                );
+                if close_button.clicked() && close_directive.is_none() && authorized_owner_pass {
                     effects.close = true;
                 }
             });
@@ -429,9 +685,7 @@ mod tests {
     #[test]
     fn ensure_open_loads_saved_history_once_and_preserves_edit_draft() {
         let _lock = crate::gui::TEST_MUTEX.lock().unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(directory.path()).unwrap();
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
 
         let saved_history = VecDeque::from([
             "first saved item".to_owned(),
@@ -442,8 +696,11 @@ mod tests {
         save_history(CLIPBOARD_FILE, &saved_history).unwrap();
 
         let ctx = egui::Context::default();
-        let actions_path = directory.path().join("actions.json");
-        let settings_path = directory.path().join("settings.json");
+        let actions_path = workspace.root().join("actions.json");
+        let settings_path = workspace.root().join("settings.json");
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         let mut app = LauncherApp::new(
             &ctx,
             Arc::new(Vec::new()),
@@ -451,7 +708,7 @@ mod tests {
             PluginManager::new(),
             actions_path.to_string_lossy().into_owned(),
             settings_path.to_string_lossy().into_owned(),
-            Settings::default(),
+            settings,
             None,
             None,
             None,
@@ -483,8 +740,65 @@ mod tests {
         assert_eq!(app.clipboard_dialog.entries[1], "second saved item");
         assert_eq!(app.clipboard_dialog.edit_idx, Some(1));
         assert_eq!(app.clipboard_dialog.text, "unsaved edit draft");
+    }
 
-        std::env::set_current_dir(original_dir).unwrap();
+    #[test]
+    fn jump_mode_clipboard_browse_version_change_invalidates_rows_and_preserves_edit_draft() {
+        let _lock = crate::gui::TEST_MUTEX.lock().unwrap();
+        let _workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let initial = VecDeque::from([
+            "duplicate secret λ".to_owned(),
+            "duplicate secret λ".to_owned(),
+        ]);
+        save_history(CLIPBOARD_FILE, &initial).unwrap();
+
+        let mut dialog = ClipboardDialog::default();
+        dialog.open();
+        let original_generation = dialog.target_generation;
+        let original_tokens = dialog.entry_tokens.clone();
+        let externally_inserted = VecDeque::from([
+            "new clipboard item".to_owned(),
+            "duplicate secret λ".to_owned(),
+            "duplicate secret λ".to_owned(),
+        ]);
+        save_history(CLIPBOARD_FILE, &externally_inserted).unwrap();
+        dialog.observe_clipboard_version();
+
+        assert!(dialog.snapshot_current);
+        assert_eq!(
+            dialog.entries,
+            externally_inserted.iter().cloned().collect::<Vec<_>>()
+        );
+        assert_ne!(dialog.target_generation, original_generation);
+        assert_ne!(dialog.entry_tokens, original_tokens);
+
+        let browse_generation = dialog.target_generation;
+        let browse_tokens = dialog.entry_tokens.clone();
+        dialog.edit_idx = Some(2);
+        dialog.text = "unsaved editor draft".to_owned();
+
+        save_history(
+            CLIPBOARD_FILE,
+            &VecDeque::from(["external clipboard update".to_owned()]),
+        )
+        .unwrap();
+        dialog.observe_clipboard_version();
+
+        assert!(!dialog.snapshot_current);
+        assert_ne!(dialog.target_generation, browse_generation);
+        assert_ne!(dialog.entry_tokens, browse_tokens);
+        assert_eq!(
+            dialog.entries,
+            externally_inserted.iter().cloned().collect::<Vec<_>>()
+        );
+        assert_eq!(dialog.text, "unsaved editor draft");
+        assert_eq!(dialog.edit_idx, Some(2));
+
+        dialog.edit_idx = None;
+        dialog.observe_clipboard_version();
+        assert!(dialog.snapshot_current);
+        assert_eq!(dialog.entries, ["external clipboard update"]);
+        assert_ne!(dialog.entry_tokens, browse_tokens);
     }
 
     #[test]
@@ -505,8 +819,15 @@ mod tests {
         let mut dialog = ClipboardDialog {
             open: true,
             entries: vec![long_entry.clone()],
+            entry_tokens: vec![1],
+            selected_entry_token: None,
+            target_generation: 1,
+            next_entry_token: 1,
+            observed_clipboard_version: Some(crate::plugins::clipboard::clipboard_version()),
+            snapshot_current: true,
             edit_idx: None,
             text: long_entry.clone(),
+            test_visible_entry_rows: Vec::new(),
         };
 
         let mut first_frame_sizing_pass = false;
@@ -684,7 +1005,7 @@ mod tests {
                 .show(ctx, |ui| {
                     edit_content_rect = ui.max_rect();
                     ui.style_mut().override_font_id = Some(egui::FontId::proportional(31.0));
-                    let effects = dialog.edit_ui(ui, 0);
+                    let effects = dialog.edit_ui(ui, 0, true);
                     assert!(!effects.save && !effects.close && !effects.invalid_text);
                     edit_footer_rect = effects
                         .edit_footer_rect
@@ -729,7 +1050,7 @@ mod tests {
                 .show(ctx, |ui| {
                     scrolled_edit_content_rect = ui.max_rect();
                     ui.style_mut().override_font_id = Some(egui::FontId::proportional(31.0));
-                    let effects = dialog.edit_ui(ui, 0);
+                    let effects = dialog.edit_ui(ui, 0, true);
                     assert!(!effects.save && !effects.close && !effects.invalid_text);
                     scrolled_edit_footer_rect = effects
                         .edit_footer_rect

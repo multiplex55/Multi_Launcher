@@ -3078,6 +3078,20 @@ impl LauncherApp {
         }
     }
 
+    fn clipboard_history_native_ui_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+
+        self.clipboard_dialog.open
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && NavigationDialogKind::ClipboardHistory
+                .layer_id()
+                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+    }
+
     fn snippet_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
 
@@ -5377,8 +5391,54 @@ impl LauncherApp {
         let mut todo_view = std::mem::take(&mut self.todo_view_dialog);
         todo_view.ui(&ctx, self);
         self.todo_view_dialog = todo_view;
+        self.clipboard_dialog.observe_clipboard_version();
+        let clipboard_owner =
+            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+        let clipboard_native_owner =
+            self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
+        let clipboard_scope = match clipboard_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory,
+                instance,
+            } if clipboard_native_owner && !egui::Popup::is_any_open(&ctx) => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("clipboard-history", instance),
+                    self.clipboard_dialog.jump_mode_target_generation(),
+                    "clipboard-history",
+                    ctx.viewport_id(),
+                    clipboard_owner,
+                    false,
+                )
+            }
+            crate::gui::jump_mode::ui::NavigationOwner::Root
+            | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
+        };
+        if !clipboard_native_owner
+            && let Some(focused) = ctx.memory(|memory| memory.focused())
+            && ctx.read_response(focused).is_some_and(|response| {
+                Some(response.layer_id)
+                    == crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory.layer_id()
+            })
+        {
+            ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        }
         let mut cb_dlg = std::mem::take(&mut self.clipboard_dialog);
-        cb_dlg.ui(&ctx, self);
+        cb_dlg.ui_with_jump_mode(
+            &ctx,
+            self,
+            clipboard_scope.as_ref(),
+            clipboard_native_owner,
+            first_ui_pass,
+        );
         self.clipboard_dialog = cb_dlg;
         if self.clipboard_modify_dialog.open {
             let mut cm_dlg = std::mem::take(&mut self.clipboard_modify_dialog);
@@ -23545,6 +23605,68 @@ mod tests {
             .to_owned()
     }
 
+    fn prepare_actual_clipboard_history_dialog(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        entries: &[&str],
+    ) {
+        let history = entries
+            .iter()
+            .map(|entry| (*entry).to_owned())
+            .collect::<std::collections::VecDeque<_>>();
+        crate::plugins::clipboard::save_history(
+            crate::plugins::clipboard::CLIPBOARD_FILE,
+            &history,
+        )
+        .expect("the generated clipboard history is writable");
+        app.clipboard_dialog.open();
+        for _ in 0..4 {
+            app.run_root_frame_for_test(ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        if app.jump_mode_enabled() {
+            let instance = app
+                .jump_mode_ui
+                .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory)
+                .expect("the current Clipboard History window has an observed instance");
+            assert_eq!(
+                app.jump_mode_ui.frame_navigation_owner(),
+                crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                    kind: crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory,
+                    instance,
+                },
+            );
+        }
+    }
+
+    fn clipboard_target_ids(
+        app: &LauncherApp,
+        label: &str,
+    ) -> Vec<crate::gui::jump_mode::TargetId> {
+        app.jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| target.metadata().label() == label)
+            .map(|target| target.id().clone())
+            .collect()
+    }
+
+    fn clipboard_hint_for_target(
+        app: &LauncherApp,
+        target: &crate::gui::jump_mode::TargetId,
+    ) -> String {
+        app.jump_mode_ui
+            .active_session()
+            .expect("Jump Mode session is active")
+            .hint_map()
+            .hint_for(target)
+            .expect("clipboard row has a current hint")
+            .as_str()
+            .to_owned()
+    }
+
     fn expand_file_search_header(ctx: &egui::Context, app: &LauncherApp, label: &str) {
         let response_id = app
             .jump_mode_ui
@@ -23958,6 +24080,177 @@ mod tests {
             "Select and explicit Edit do not save or start a preview"
         );
         assert!(!app.snippet_prompt_dialog.is_open());
+    }
+
+    #[test]
+    fn jump_mode_clipboard_browse_hint_selects_duplicate_without_exposing_contents_or_actions() {
+        let _lock = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        let private_entry = "private clipboard secret λ\nline two";
+        prepare_actual_clipboard_history_dialog(&ctx, &mut app, &[private_entry, private_entry]);
+        let original_bytes = std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap();
+
+        let row_targets = clipboard_target_ids(&app, "Clipboard entry");
+        assert_eq!(row_targets.len(), 2);
+        assert_ne!(row_targets[0], row_targets[1]);
+        let dialog_targets = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| {
+                target.id().surface()
+                    == &crate::gui::jump_mode::SurfaceId::dialog(
+                        "clipboard-history",
+                        app.jump_mode_ui
+                            .dialog_instance(
+                                crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory,
+                            )
+                            .unwrap(),
+                    )
+            })
+            .collect::<Vec<_>>();
+        for target in &dialog_targets {
+            assert!(!target.metadata().label().contains(private_entry));
+            let crate::gui::jump_mode::SemanticTargetId::Named(identity) = target.id().semantic()
+            else {
+                panic!("clipboard row identities use opaque named tokens");
+            };
+            assert!(!identity.contains("private clipboard"));
+            assert!(!identity.contains("line two"));
+        }
+        assert_eq!(clipboard_target_ids(&app, "Edit clipboard entry").len(), 2);
+        assert_eq!(
+            clipboard_target_ids(&app, "Remove clipboard entry").len(),
+            2
+        );
+        assert_eq!(
+            clipboard_target_ids(&app, "Close Clipboard History").len(),
+            1
+        );
+        assert!(
+            dialog_targets
+                .iter()
+                .all(|target| { !target.metadata().label().to_lowercase().contains("copy") })
+        );
+
+        let second_row = row_targets[1].clone();
+        let response_id = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.id() == &second_row)
+            .unwrap()
+            .response_id();
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let hint = clipboard_hint_for_target(&app, &second_row);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+
+        assert_eq!(app.clipboard_dialog.test_selected_entry_index(), Some(1));
+        assert!(!app.clipboard_dialog.test_is_editing());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(response_id));
+        assert_eq!(
+            std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap(),
+            original_bytes
+        );
+    }
+
+    #[test]
+    fn jump_mode_clipboard_browse_clips_rows_and_keeps_native_selection_when_disabled() {
+        let _lock = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        let entries = (0..40)
+            .map(|index| format!("private clipboard row {index} with a long preview"))
+            .collect::<Vec<_>>();
+        let entry_refs = entries.iter().map(String::as_str).collect::<Vec<_>>();
+        prepare_actual_clipboard_history_dialog(&ctx, &mut app, &entry_refs);
+        let original_bytes = std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap();
+
+        let registered_rows = clipboard_target_ids(&app, "Clipboard entry");
+        assert!(!registered_rows.is_empty());
+        assert!(registered_rows.len() < entries.len());
+        let layer = crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory
+            .layer_id()
+            .expect("Clipboard History uses a native Middle layer");
+        for target_id in &registered_rows {
+            let target = app
+                .jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.id() == target_id)
+                .unwrap();
+            assert!(target.clipped_rect().is_positive());
+            assert_eq!(target.layer_id(), layer);
+            assert_eq!(ctx.layer_id_at(target.clipped_rect().center()), Some(layer));
+        }
+
+        app.set_jump_mode_enabled(false);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+        let (first_token, first_response_id, first_visible_rect) = *app
+            .clipboard_dialog
+            .test_visible_entry_rows()
+            .first()
+            .expect("a real visible clipboard response remains with Jump Mode disabled");
+        assert_eq!(ctx.layer_id_at(first_visible_rect.center()), Some(layer));
+        assert!(
+            ctx.read_response(first_response_id)
+                .is_some_and(|response| response.enabled())
+        );
+
+        for pressed in [true, false] {
+            let mut events = if pressed {
+                vec![egui::Event::PointerMoved(first_visible_rect.center())]
+            } else {
+                Vec::new()
+            };
+            events.push(egui::Event::PointerButton {
+                pos: first_visible_rect.center(),
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            });
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events,
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(app.clipboard_dialog.test_selected_entry_index(), Some(0));
+        assert_eq!(
+            app.clipboard_dialog.test_visible_entry_rows()[0].0,
+            first_token
+        );
+        assert_eq!(
+            std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap(),
+            original_bytes
+        );
     }
 
     #[test]
