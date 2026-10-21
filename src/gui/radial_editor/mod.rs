@@ -11,6 +11,11 @@ mod skin_editor;
 mod work_area;
 
 use crate::gui::LauncherApp;
+use crate::gui::jump_mode::ui::{
+    FocusDirective, JumpModeScope, JumpModeUi, NavigationDialogKind, NavigationOwner,
+    NavigationViewportBinding, register_and_apply_target,
+};
+use crate::gui::jump_mode::{SurfaceId, TargetGeneration, TargetKind};
 use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, labeled_form_row, secondary_help,
     semantic_status, with_button_emphasis,
@@ -52,7 +57,7 @@ use preview::{EmbeddedPreview, PreviewPreset};
 use std::collections::VecDeque;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -1216,6 +1221,185 @@ struct DesignerFrameContext {
     require_confirm_destructive: bool,
     intent_bridge: Arc<DesignerIntentBridge>,
     root_window_bridge: crate::visibility::RootWindowBridge,
+    navigation_instance: Option<u64>,
+    jump_mode_enabled: bool,
+    application_input_allowed: bool,
+}
+
+#[derive(Clone)]
+struct RadialJumpPass {
+    scope: JumpModeScope,
+    visual_order: Arc<AtomicU64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RadialNativeComboAnchor {
+    response_id: egui::Id,
+    layer_id: egui::LayerId,
+    viewport: egui::ViewportId,
+}
+
+/// Explicit, callback-local navigation context for one Radial UI pass.
+///
+/// This is passed through the actual render call chain so neither viewport
+/// ownership nor combo provenance is hidden in egui's cross-viewport data.
+#[derive(Default)]
+struct RadialUiPass {
+    jump: Option<RadialJumpPass>,
+    combo_anchors: Vec<RadialNativeComboAnchor>,
+}
+
+impl RadialUiPass {
+    fn new(scope: Option<JumpModeScope>) -> Self {
+        Self {
+            jump: scope.map(RadialJumpPass::new),
+            combo_anchors: Vec::new(),
+        }
+    }
+
+    fn child_jump(&self, namespace: &str) -> Option<RadialJumpPass> {
+        self.jump.as_ref().map(|pass| pass.child(namespace))
+    }
+
+    fn record_combo(&mut self, response: &egui::Response) {
+        let clipped = response.interact_rect;
+        let viewport = response.ctx.viewport_id();
+        if response.enabled()
+            && clipped.is_positive()
+            && response.ctx.layer_id_at(clipped.center()) == Some(response.layer_id)
+        {
+            let anchor = RadialNativeComboAnchor {
+                response_id: response.id,
+                layer_id: response.layer_id,
+                viewport,
+            };
+            if !self.combo_anchors.contains(&anchor) {
+                self.combo_anchors.push(anchor);
+            }
+        }
+    }
+}
+
+fn register_radial_combo_anchor(
+    ui_pass: &mut RadialUiPass,
+    response: &egui::Response,
+    semantic_identity: &str,
+    _label: &'static str,
+) {
+    ui_pass.record_combo(response);
+    debug_assert!(semantic_identity.starts_with("combo/"));
+}
+
+fn register_radial_combo_option(
+    jump: Option<&RadialJumpPass>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    identity: &str,
+    label: &str,
+) {
+    if let Some(jump) = jump {
+        jump.register(ui, response, identity, label, TargetKind::Selectable);
+    }
+}
+
+fn radial_jump_target_generation(
+    viewport_instance: u64,
+    editor_session: crate::radial::authoring::AuthoringSessionId,
+    draft_generation: crate::radial::authoring::DraftGeneration,
+) -> TargetGeneration {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    viewport_instance.hash(&mut hasher);
+    editor_session.hash(&mut hasher);
+    draft_generation.hash(&mut hasher);
+    TargetGeneration(hasher.finish())
+}
+
+fn radial_jump_selection_identity(selection: &StableSelection) -> String {
+    format!("entity/{:016x}", radial_selection_digest(selection))
+}
+
+fn radial_selection_digest(selection: &StableSelection) -> u64 {
+    radial_value_digest(selection)
+}
+
+fn radial_value_digest(value: &impl Hash) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn radial_native_selection_id(
+    session: &RadialAuthoringSession,
+    selection: &StableSelection,
+    control: &'static str,
+) -> egui::Id {
+    egui::Id::new((
+        "radial-designer-authored-control",
+        session.editor_session.0,
+        control,
+        radial_selection_digest(selection),
+    ))
+}
+
+impl RadialJumpPass {
+    fn new(scope: JumpModeScope) -> Self {
+        Self {
+            scope,
+            visual_order: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn child(&self, namespace: &str) -> Self {
+        Self {
+            scope: self.scope.child_namespace(namespace),
+            visual_order: Arc::clone(&self.visual_order),
+        }
+    }
+
+    fn combo_popup(&self, anchor: &str) -> Self {
+        Self {
+            scope: self.scope.combo_popup_scope(anchor),
+            visual_order: Arc::clone(&self.visual_order),
+        }
+    }
+
+    fn register(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: &str,
+        label: &str,
+        kind: TargetKind,
+    ) -> Option<FocusDirective> {
+        let mut order = self.visual_order.fetch_add(1, Ordering::Relaxed);
+        register_and_apply_target(
+            Some(&self.scope),
+            ui,
+            response,
+            identity,
+            label,
+            kind,
+            &mut order,
+        )
+    }
+
+    fn register_select(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: &str,
+        label: &str,
+    ) -> bool {
+        let target = self.scope.target_id(identity);
+        if self.register(ui, response, identity, label, TargetKind::Action)
+            != Some(FocusDirective::Select)
+        {
+            return false;
+        }
+        response.request_focus();
+        self.scope.record_select_focus_owner(&target, response.id);
+        true
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1590,6 +1774,10 @@ pub(crate) struct RadialEditorState {
     viewport_close_pending: bool,
     viewport_restore_pending: bool,
     viewport_focus_pending: bool,
+    native_jump_mode: JumpModeUi,
+    native_jump_frame: Option<u64>,
+    native_combo_anchors: Vec<RadialNativeComboAnchor>,
+    native_combo_owner: Option<(u64, u64)>,
     session: Option<RadialAuthoringSession>,
     client: Option<AuthoringClient>,
     preview: EmbeddedPreview,
@@ -1677,6 +1865,10 @@ impl Default for RadialEditorState {
             viewport_close_pending: false,
             viewport_restore_pending: true,
             viewport_focus_pending: false,
+            native_jump_mode: JumpModeUi::default(),
+            native_jump_frame: None,
+            native_combo_anchors: Vec::new(),
+            native_combo_owner: None,
             session: None,
             client: None,
             preview: EmbeddedPreview::default(),
@@ -2591,7 +2783,14 @@ impl RadialEditorState {
     /// Register one stable deferred viewport.  The callback owns only the
     /// editor state and immutable service/catalog snapshots; it never borrows
     /// `LauncherApp` or the root egui frame.
-    pub(crate) fn show_deferred(shared: &Arc<Mutex<Self>>, ctx: &egui::Context, app: &LauncherApp) {
+    pub(crate) fn show_deferred(
+        shared: &Arc<Mutex<Self>>,
+        ctx: &egui::Context,
+        app: &LauncherApp,
+        navigation_instance: Option<u64>,
+        jump_mode_enabled: bool,
+        application_input_allowed: bool,
+    ) {
         let (
             open,
             viewport_restore_pending,
@@ -2649,6 +2848,9 @@ impl RadialEditorState {
             require_confirm_destructive: require_confirm,
             intent_bridge,
             root_window_bridge: app.root_window_bridge.clone(),
+            navigation_instance,
+            jump_mode_enabled,
+            application_input_allowed,
         };
         let saved_geometry = WindowGeometry {
             position: preferences
@@ -2691,6 +2893,8 @@ impl RadialEditorState {
                 }
             }
             if !editor.open {
+                editor.native_jump_mode.cancel_all();
+                editor.native_jump_frame = None;
                 frame.root_window_bridge.clear_designer_identity();
                 // The deferred viewport is removed when ROOT stops registering it.
                 // Sending Close here would only enqueue another close-request event
@@ -2699,6 +2903,8 @@ impl RadialEditorState {
                 return;
             }
             if class == egui::ViewportClass::EmbeddedWindow {
+                editor.native_jump_mode.cancel_all();
+                editor.native_jump_frame = None;
                 // Embedded callbacks are not an authoring surface.  Keep the
                 // state alive for the caller to close/reopen, but never render
                 // the authoritative editor into the root viewport.
@@ -2768,6 +2974,8 @@ impl RadialEditorState {
             return;
         }
         self.open = true;
+        self.native_jump_mode.cancel_all();
+        self.native_jump_frame = None;
         self.last_radial_add_reopen_pending = self.last_radial_add_trace.is_some();
         self.viewport_close_pending = false;
         self.viewport_restore_pending = true;
@@ -3044,6 +3252,8 @@ impl RadialEditorState {
         self.properties_popup = None;
         self.properties_draft = None;
         self.open = false;
+        self.native_jump_mode.cancel_all();
+        self.native_jump_frame = None;
         self.viewport_close_pending = true;
         self.session = None;
         self.trace_submission = None;
@@ -3112,6 +3322,8 @@ impl RadialEditorState {
         self.preview.dispose();
         self.release_authoring_resources();
         self.open = false;
+        self.native_jump_mode.cancel_all();
+        self.native_jump_frame = None;
         self.viewport_close_pending = true;
         self.viewport_restore_pending = true;
         self.viewport_focus_pending = false;
@@ -4097,6 +4309,47 @@ impl RadialEditorState {
         }
     }
 
+    fn current_native_combo_popup_layer(
+        &self,
+        ctx: &egui::Context,
+        binding: NavigationViewportBinding,
+    ) -> Option<egui::LayerId> {
+        if !egui::Popup::is_any_open(ctx) {
+            return None;
+        }
+
+        self.native_combo_anchors.iter().find_map(|anchor| {
+            if anchor.viewport != binding.viewport || anchor.layer_id != binding.base_layer {
+                return None;
+            }
+            let response = ctx.read_response(anchor.response_id)?;
+            if response.ctx.viewport_id() != binding.viewport
+                || !response.enabled()
+                || response.layer_id != anchor.layer_id
+                || !response.interact_rect.is_positive()
+                || ctx.layer_id_at(response.interact_rect.center()) != Some(anchor.layer_id)
+                || !egui::ComboBox::is_open(ctx, response.id)
+            {
+                return None;
+            }
+
+            let popup_id = egui::Popup::default_response_id(&response);
+            if !egui::Popup::is_id_open(ctx, popup_id) {
+                return None;
+            }
+            let popup_rect = ctx.memory(|memory| memory.area_rect(popup_id))?;
+            if !popup_rect.is_positive() {
+                return None;
+            }
+
+            let popup_layer = egui::LayerId::new(egui::Order::Foreground, popup_id);
+            let popup_is_current = ctx.layer_id_at(popup_rect.center()) == Some(popup_layer);
+            let popup_is_sizing = egui::containers::AreaState::load(ctx, popup_id)
+                .is_some_and(|state| !state.interactable);
+            (popup_is_current || popup_is_sizing).then_some(popup_layer)
+        })
+    }
+
     fn viewport_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -4104,9 +4357,96 @@ impl RadialEditorState {
         viewport_class: egui::ViewportClass,
     ) {
         if viewport_class == egui::ViewportClass::EmbeddedWindow {
+            self.native_jump_mode.cancel_all();
+            self.native_jump_frame = None;
             return;
         }
         let ctx = ui.ctx().clone();
+        let viewport = radial_designer_viewport_id();
+        let binding = frame
+            .navigation_instance
+            .map(|instance| NavigationViewportBinding {
+                viewport,
+                owner: NavigationOwner::Dialog {
+                    kind: NavigationDialogKind::RadialDesigner,
+                    instance,
+                },
+                base_layer: egui::LayerId::background(),
+            });
+        let combo_owner = binding.and_then(|binding| {
+            let NavigationOwner::Dialog { instance, .. } = binding.owner else {
+                return None;
+            };
+            self.session
+                .as_ref()
+                .map(|session| (instance, session.editor_session.0))
+        });
+        if self.native_combo_owner != combo_owner {
+            self.native_combo_anchors.clear();
+            self.native_combo_owner = combo_owner;
+        }
+        self.native_jump_mode.set_enabled(frame.jump_mode_enabled);
+        let frame_nr = ctx.cumulative_frame_nr();
+        if self.native_jump_frame != Some(frame_nr) {
+            self.native_jump_mode.begin_frame();
+            self.native_jump_frame = Some(frame_nr);
+        }
+        let owned_popup_layer =
+            binding.and_then(|binding| self.current_native_combo_popup_layer(&ctx, binding));
+        let native_popup_is_owned = !egui::Popup::is_any_open(&ctx) || owned_popup_layer.is_some();
+        let native_focus_is_owned = binding.is_some_and(|binding| {
+            crate::gui::jump_mode::ui::focused_response_layer(&ctx)
+                .is_none_or(|layer| layer == binding.base_layer || Some(layer) == owned_popup_layer)
+        });
+        let native_ui_owner_current = frame.application_input_allowed
+            && !frame.intent_bridge.has_pending_file_dialog()
+            && binding.is_some_and(|binding| binding.base_is_current(&ctx))
+            && native_popup_is_owned
+            && native_focus_is_owned;
+        let navigation_owner = binding.map_or(NavigationOwner::Blocked, |binding| {
+            self.native_jump_mode.update_navigation_owner_for_viewport(
+                &ctx,
+                binding,
+                frame.application_input_allowed && frame.jump_mode_enabled,
+            )
+        });
+        let jump_owner_current = binding.is_some_and(|binding| {
+            navigation_owner == binding.owner
+                && self.native_jump_mode.frame_navigation_owner() == binding.owner
+                && native_ui_owner_current
+        });
+        let first_ui_pass = ctx.current_pass_index() == 0;
+        self.native_jump_mode.handle_viewport_input(
+            &ctx,
+            jump_owner_current,
+            first_ui_pass,
+            viewport,
+        );
+        self.native_jump_mode.begin_ui_pass();
+        let target_scope = binding
+            .filter(|_| jump_owner_current && frame.jump_mode_enabled)
+            .and_then(|binding| {
+                let owner = binding.owner;
+                let NavigationOwner::Dialog { instance, .. } = owner else {
+                    return None;
+                };
+                let session = self.session.as_ref()?;
+                let target_generation = radial_jump_target_generation(
+                    instance,
+                    session.editor_session,
+                    session.generation,
+                );
+                self.native_jump_mode.scope_for_viewport_binding(
+                    SurfaceId::dialog(
+                        NavigationDialogKind::RadialDesigner.surface_kind(),
+                        instance,
+                    ),
+                    target_generation,
+                    "radial-designer",
+                    binding,
+                )
+            });
+        let mut radial_ui_pass = RadialUiPass::new(target_scope);
         // Eframe initializes native AccessKit on the root viewport only. The
         // deferred Designer still needs to publish its semantic widget tree.
         ctx.enable_accesskit();
@@ -4147,6 +4487,10 @@ impl RadialEditorState {
             self.sync_native_preview_generation();
         }
         if !self.open {
+            self.native_jump_mode.cancel_all();
+            self.native_jump_frame = None;
+            self.native_combo_anchors.clear();
+            self.native_combo_owner = None;
             return;
         }
         if let Some(document) = self.session.as_ref().map(|session| session.draft.clone()) {
@@ -4317,14 +4661,14 @@ impl RadialEditorState {
         }
 
         let expanded_sections_before = self.preferences.expanded_sections.clone();
-        let designer_body = |ui: &mut egui::Ui| {
-            self.toolbar(ui);
+        let mut designer_body = |ui: &mut egui::Ui, ui_pass: &mut RadialUiPass| {
+            self.toolbar(ui, ui_pass);
             ui.separator();
             if let Some(reason) = conflict_reason.as_deref() {
                 self.conflict_ui(ui, reason);
                 ui.separator();
             }
-            self.preview_controls(ui, show_expected_layout_diagnostics);
+            self.preview_controls(ui, show_expected_layout_diagnostics, ui_pass);
             ui.separator();
             if initial_snapshot_pending {
                 ui.horizontal_wrapped(|ui| {
@@ -4363,12 +4707,13 @@ impl RadialEditorState {
                     && conflict_reason.is_none()
                     && self.pending_scope_change.is_none(),
                 |ui| {
-                    self.designer_controls(ui, trace_viewport_class(viewport_class));
+                    self.designer_controls(ui, trace_viewport_class(viewport_class), ui_pass);
                     if !self.show_resources && self.designer_mode == DesignerMode::Design {
                         self.basic_authoring_toolbar(
                             ui,
                             &frame.feature_defaults,
                             trace_viewport_class(viewport_class),
+                            ui_pass,
                         );
                     }
                     self.pending_drop_ui(ui);
@@ -4393,7 +4738,11 @@ impl RadialEditorState {
                             trace_viewport_class(viewport_class),
                             trace_correlation(self.session.as_ref()),
                             |ui| {
-                                self.resources_ui(ui, trace_viewport_class(viewport_class));
+                                self.resources_ui(
+                                    ui,
+                                    trace_viewport_class(viewport_class),
+                                    ui_pass,
+                                );
                                 egui::CollapsingHeader::new("Current menu appearance preview")
                                     .default_open(true)
                                     .show(ui, |ui| {
@@ -4440,6 +4789,7 @@ impl RadialEditorState {
                                             ui,
                                             &frame.feature_defaults,
                                             trace_viewport_class(viewport_class),
+                                            ui_pass,
                                         );
                                     },
                                 );
@@ -4517,6 +4867,7 @@ impl RadialEditorState {
                                                     ui,
                                                     frame,
                                                     trace_viewport_class(viewport_class),
+                                                    ui_pass,
                                                 )
                                             },
                                         );
@@ -4531,14 +4882,19 @@ impl RadialEditorState {
         // `show_deferred` handles the embedded class with a bounded status
         // message before this body can be reached.  The authoritative editor
         // is therefore rendered only by the independent native viewport.
-        if viewport_class != egui::ViewportClass::EmbeddedWindow {
-            egui::CentralPanel::default().show(ui, designer_body);
-        }
+        egui::CentralPanel::default().show(ui, |ui| {
+            ui.add_enabled_ui(native_ui_owner_current, |ui| {
+                designer_body(ui, &mut radial_ui_pass)
+            });
+        });
         if self.preferences.expanded_sections != expanded_sections_before {
             self.mark_preferences_changed();
         }
-        self.properties_popup_ui(&ctx, frame);
-        self.radial_add_to_menu_ui(&ctx);
+        self.properties_popup_ui(&ctx, frame, &mut radial_ui_pass);
+        self.radial_add_to_menu_ui(&ctx, &mut radial_ui_pass);
+        if !ctx.will_discard() {
+            self.native_combo_anchors = std::mem::take(&mut radial_ui_pass.combo_anchors);
+        }
         if self.preferences.zoom != self.preview_zoom
             || self.preferences.pan != (self.canvas_pan.x, self.canvas_pan.y)
         {
@@ -4552,7 +4908,9 @@ impl RadialEditorState {
             self.apply_post_render();
         }
         self.prompts(&ctx);
-        self.keyboard_shortcuts(&ctx);
+        if native_ui_owner_current && !egui::Popup::is_any_open(&ctx) {
+            self.keyboard_shortcuts(&ctx);
+        }
         self.trace_designer_submission();
         if let Some(rect) = ctx.input(|input| input.viewport().inner_rect) {
             let size = (rect.width(), rect.height());
@@ -4612,6 +4970,34 @@ impl RadialEditorState {
         if self.preferences_dirty && !self.preferences_flush_requested {
             ctx.request_repaint_after(Duration::from_millis(300));
         }
+        self.native_jump_mode.finish_ui_pass();
+        let after_owner = binding.map_or(NavigationOwner::Blocked, |binding| {
+            self.native_jump_mode.update_navigation_owner_for_viewport(
+                &ctx,
+                binding,
+                frame.application_input_allowed && frame.jump_mode_enabled,
+            )
+        });
+        if let Some(binding) = binding {
+            if self.native_jump_mode.prepare_pass_for_viewport(
+                &ctx,
+                binding,
+                after_owner,
+                frame.application_input_allowed,
+            ) {
+                crate::gui::jump_mode::paint::paint(&ctx, &self.native_jump_mode);
+            }
+            if !ctx.will_discard() {
+                self.native_jump_mode.complete_frame_for_viewport(
+                    &ctx,
+                    binding,
+                    after_owner,
+                    frame.application_input_allowed,
+                );
+            }
+        } else {
+            self.native_jump_mode.cancel_all();
+        }
     }
 
     /// Record the bounded scalar edge at which the Designer submits a changed
@@ -4663,7 +5049,12 @@ impl RadialEditorState {
         });
     }
 
-    fn properties_popup_ui(&mut self, ctx: &egui::Context, frame: &DesignerFrameContext) {
+    fn properties_popup_ui(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &DesignerFrameContext,
+        ui_pass: &mut RadialUiPass,
+    ) {
         if self.pending_scope_change.is_some()
             && !self.properties_popup_dirty()
             && !self.inspector_action_editor.has_unassigned_text()
@@ -4817,6 +5208,7 @@ impl RadialEditorState {
                             }
                         }
                     });
+                ui_pass.record_combo(&type_combo.response);
                 trace_designer_authoring_control(
                     ui,
                     &type_combo.response,
@@ -4846,7 +5238,7 @@ impl RadialEditorState {
                             ("Launcher results", 9),
                             ("Launcher query", 10),
                         ],
-                    );
+                        ui_pass);
                 }
                 if draft.content_kind != 1 {
                     draft.action_editor.invalidate_visit();
@@ -4869,7 +5261,7 @@ impl RadialEditorState {
                     ));
                 }
                 if draft.content_kind == 2 {
-                    egui::ComboBox::from_label("Submenu")
+                    let submenu_combo = egui::ComboBox::from_label("Submenu")
                         .selected_text(
                             draft
                                 .submenu_target
@@ -4891,6 +5283,7 @@ impl RadialEditorState {
                                 );
                             }
                         });
+                    ui_pass.record_combo(&submenu_combo.response);
                 }
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Icon");
@@ -5291,30 +5684,53 @@ impl RadialEditorState {
         self.queue_editor_operation(DeferredEditorOperation::ResolveConflict(resolution));
     }
 
-    fn designer_controls(&mut self, ui: &mut egui::Ui, viewport: ViewportClass) {
+    fn designer_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        viewport: ViewportClass,
+        ui_pass: &RadialUiPass,
+    ) {
+        let jump = ui_pass.child_jump("designer-controls");
         ui.horizontal_wrapped(|ui| {
             ui.label("Mode:");
-            if ui
-                .selectable_label(self.designer_mode == DesignerMode::Design, "Design")
-                .clicked()
-            {
+            let design = ui.selectable_label(self.designer_mode == DesignerMode::Design, "Design");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &design,
+                    "mode/design",
+                    "Design mode",
+                    TargetKind::Button,
+                );
+            }
+            if design.clicked() {
                 self.designer_mode = DesignerMode::Design;
                 self.preview.cancel_tooltip();
                 self.mark_preferences_changed();
             }
-            if ui
-                .selectable_label(
-                    self.designer_mode == DesignerMode::PreviewTest,
-                    "Preview / Test",
-                )
-                .clicked()
-            {
+            let preview = ui.selectable_label(
+                self.designer_mode == DesignerMode::PreviewTest,
+                "Preview / Test",
+            );
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &preview,
+                    "mode/preview",
+                    "Preview and test mode",
+                    TargetKind::Button,
+                );
+            }
+            if preview.clicked() {
                 self.designer_mode = DesignerMode::PreviewTest;
                 self.preview.cancel_tooltip();
                 self.mark_preferences_changed();
             }
             ui.separator();
             let fit = ui.button("Fit");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(ui, &fit, "fit", "Fit preview", TargetKind::Button);
+            }
             trace_pointer_release_response(
                 ui,
                 &fit,
@@ -5330,6 +5746,9 @@ impl RadialEditorState {
                 self.mark_preferences_changed();
             }
             let menus = ui.selectable_label(!self.show_resources, "Menus");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(ui, &menus, "view/menus", "Menus view", TargetKind::Button);
+            }
             trace_designer_semantic_target(
                 ui,
                 &menus,
@@ -5351,6 +5770,9 @@ impl RadialEditorState {
                 self.mark_preferences_changed();
             }
             let skins = ui.selectable_label(self.show_resources, "Skins");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(ui, &skins, "view/skins", "Skins view", TargetKind::Button);
+            }
             trace_designer_semantic_target(
                 ui,
                 &skins,
@@ -5374,6 +5796,15 @@ impl RadialEditorState {
             let tree = ui
                 .selectable_label(self.tree_visible, "Tree")
                 .on_hover_text("Show or hide the menu tree");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &tree,
+                    "pane/tree",
+                    "Show or hide tree",
+                    TargetKind::Button,
+                );
+            }
             trace_designer_semantic_target(
                 ui,
                 &tree,
@@ -5397,6 +5828,15 @@ impl RadialEditorState {
             let inspector = ui
                 .selectable_label(self.inspector_visible, "Inspector")
                 .on_hover_text("Show or hide the inspector");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &inspector,
+                    "pane/inspector",
+                    "Show or hide inspector",
+                    TargetKind::Button,
+                );
+            }
             trace_designer_semantic_target(
                 ui,
                 &inspector,
@@ -5417,7 +5857,7 @@ impl RadialEditorState {
                 self.inspector_visible = !self.inspector_visible;
                 self.mark_preferences_changed();
             }
-            ui.menu_button("Layout", |ui| {
+            let layout = ui.menu_button("Layout", |ui| {
                 ui.label("Presentation only");
                 if self.tree_visible {
                     let response = ui.add(
@@ -5450,6 +5890,15 @@ impl RadialEditorState {
                     ui.close();
                 }
             });
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &layout.response,
+                    "layout-menu",
+                    "Layout options",
+                    TargetKind::Button,
+                );
+            }
             ui.small("Direct Design gestures edit the draft only");
         });
     }
@@ -5475,7 +5924,8 @@ impl RadialEditorState {
         });
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui) {
+    fn toolbar(&mut self, ui: &mut egui::Ui, ui_pass: &RadialUiPass) {
+        let jump = ui_pass.child_jump("toolbar");
         ui.horizontal_wrapped(|ui| {
             let pending = self
                 .session
@@ -5484,6 +5934,9 @@ impl RadialEditorState {
             let undo = ui
                 .add_enabled(!pending, egui::Button::new("Undo"))
                 .on_hover_text("Undo (Ctrl+Z)");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(ui, &undo, "undo", "Undo", TargetKind::Button);
+            }
             trace_designer_authoring_control(
                 ui,
                 &undo,
@@ -5501,6 +5954,9 @@ impl RadialEditorState {
             let redo = ui
                 .add_enabled(!pending, egui::Button::new("Redo"))
                 .on_hover_text("Redo (Ctrl+Shift+Z)");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(ui, &redo, "redo", "Redo", TargetKind::Button);
+            }
             trace_designer_authoring_control(
                 ui,
                 &redo,
@@ -5524,7 +5980,11 @@ impl RadialEditorState {
             let apply = ui
                 .add_enabled(!pending && valid, egui::Button::new("Apply"))
                 .on_disabled_hover_text("Resolve the inline validation diagnostics before Apply");
-            if with_button_emphasis(ui, apply, ButtonEmphasis::Primary).clicked() {
+            let apply = with_button_emphasis(ui, apply, ButtonEmphasis::Primary);
+            if let Some(jump) = jump.as_ref() {
+                jump.register(ui, &apply, "apply", "Apply draft", TargetKind::Button);
+            }
+            if apply.clicked() {
                 self.send_commit(CommitDisposition::Apply);
             }
             let save = ui
@@ -5532,6 +5992,9 @@ impl RadialEditorState {
                 .on_disabled_hover_text("Resolve the inline validation diagnostics before Save")
                 .on_hover_text("Save and close (Ctrl+S)");
             let save = with_button_emphasis(ui, save, ButtonEmphasis::Primary);
+            if let Some(jump) = jump.as_ref() {
+                jump.register(ui, &save, "save", "Save draft", TargetKind::Button);
+            }
             trace_designer_authoring_control(
                 ui,
                 &save,
@@ -5547,7 +6010,11 @@ impl RadialEditorState {
                 self.send_commit(CommitDisposition::Save);
                 self.trace_last_radial_add_operation(RadialInsertionControl::Save);
             }
-            if ui.button("Cancel").clicked() {
+            let cancel = ui.button("Cancel");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(ui, &cancel, "cancel", "Cancel editing", TargetKind::Button);
+            }
+            if cancel.clicked() {
                 self.cancel();
             }
         });
@@ -5568,7 +6035,7 @@ impl RadialEditorState {
             .as_ref()
             .and_then(|session| crate::radial::validation::validate(&session.draft).err())
         {
-            ui.collapsing(
+            let diagnostics = ui.collapsing(
                 format!("{} validation diagnostic(s)", errors.0.len()),
                 |ui| {
                     for issue in errors.0 {
@@ -5579,6 +6046,15 @@ impl RadialEditorState {
                     }
                 },
             );
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &diagnostics.header_response,
+                    "validation-diagnostics",
+                    "Validation diagnostics",
+                    TargetKind::Button,
+                );
+            }
         }
     }
 
@@ -5674,32 +6150,80 @@ impl RadialEditorState {
         }
     }
 
-    fn preview_controls(&mut self, ui: &mut egui::Ui, show_expected_layout_diagnostics: bool) {
+    fn preview_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        show_expected_layout_diagnostics: bool,
+        ui_pass: &mut RadialUiPass,
+    ) {
+        let jump = ui_pass.child_jump("preview-controls");
         ui.horizontal_wrapped(|ui| {
             compact_section_heading(ui, "Preview", None);
-            egui::ComboBox::from_id_salt("radial-preview-preset")
+            let combo_identity = format!(
+                "combo/{:016x}",
+                ui.make_persistent_id("radial-preview-preset").value()
+            );
+            let combo_jump = jump.as_ref().map(|jump| jump.combo_popup(&combo_identity));
+            let preset_combo = egui::ComboBox::from_id_salt("radial-preview-preset")
                 .selected_text(format!("{:?}", self.preview_preset))
                 .show_ui(ui, |ui| {
-                    for preset in [
+                    for (index, preset) in [
                         PreviewPreset::Current,
                         PreviewPreset::OneRing,
                         PreviewPreset::MultiRing,
                         PreviewPreset::Submenu,
                         PreviewPreset::LongLabels,
                         PreviewPreset::HighDpi,
-                    ] {
-                        ui.selectable_value(
-                            &mut self.preview_preset,
-                            preset,
-                            format!("{preset:?}"),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let option = ui
+                            .scope_builder(
+                                egui::UiBuilder::new()
+                                    .id(ui.id().with(("radial-preview-preset-option", index))),
+                                |ui| {
+                                    ui.selectable_value(
+                                        &mut self.preview_preset,
+                                        preset,
+                                        format!("{preset:?}"),
+                                    )
+                                },
+                            )
+                            .inner;
+                        register_radial_combo_option(
+                            combo_jump.as_ref(),
+                            ui,
+                            &option,
+                            &format!("{combo_identity}/option/{index}"),
+                            "Preview preset",
                         );
                     }
                 });
+            ui_pass.record_combo(&preset_combo.response);
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &preset_combo.response,
+                    &combo_identity,
+                    "Preview preset selector",
+                    TargetKind::ComboBox,
+                );
+            }
             let zoom_response = ui.add(
                 egui::Slider::new(&mut self.preview_zoom, 0.5..=2.0)
                     .text("Zoom")
                     .logarithmic(true),
             );
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &zoom_response,
+                    "zoom",
+                    "Preview zoom",
+                    TargetKind::Slider,
+                );
+            }
             let zoom_changed = zoom_response.changed();
             trace_pointer_release_response(
                 ui,
@@ -5711,16 +6235,33 @@ impl RadialEditorState {
             if zoom_changed {
                 self.mark_preferences_changed();
             }
-            if ui
-                .selectable_label(self.show_resources, "Skins, assets & packages")
-                .clicked()
-            {
+            let resources = ui.selectable_label(self.show_resources, "Skins, assets & packages");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &resources,
+                    "resources",
+                    "Skins and assets",
+                    TargetKind::Button,
+                );
+            }
+            if resources.clicked() {
                 self.show_resources = !self.show_resources;
                 self.mark_preferences_changed();
             }
             secondary_help(ui, "Preview controls are UI-only");
             ui.separator();
-            ui.checkbox(&mut self.sample_native_context, "Sample external context");
+            let sample_context =
+                ui.checkbox(&mut self.sample_native_context, "Sample external context");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &sample_context,
+                    "sample-context",
+                    "Sample external context",
+                    TargetKind::Button,
+                );
+            }
             let native_active = self
                 .session
                 .as_ref()
@@ -5729,6 +6270,15 @@ impl RadialEditorState {
             let correlation = trace_correlation(self.session.as_ref());
             if !native_active {
                 let response = ui.button("Open desktop preview");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &response,
+                        "open-desktop-preview",
+                        "Open desktop preview",
+                        TargetKind::Button,
+                    );
+                }
                 trace_designer_authoring_control(
                     ui,
                     &response,
@@ -5744,11 +6294,32 @@ impl RadialEditorState {
                     self.send_native_preview(false);
                 }
             }
-            if native_active && ui.button("Update desktop preview").clicked() {
-                self.send_native_preview(true);
+            if native_active {
+                let update = ui.button("Update desktop preview");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &update,
+                        "update-desktop-preview",
+                        "Update desktop preview",
+                        TargetKind::Button,
+                    );
+                }
+                if update.clicked() {
+                    self.send_native_preview(true);
+                }
             }
             if native_active {
                 let response = ui.button("Stop desktop preview");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &response,
+                        "stop-desktop-preview",
+                        "Stop desktop preview",
+                        TargetKind::Button,
+                    );
+                }
                 trace_designer_authoring_control(
                     ui,
                     &response,
@@ -5789,7 +6360,12 @@ impl RadialEditorState {
         });
     }
 
-    fn resources_ui(&mut self, ui: &mut egui::Ui, viewport: ViewportClass) {
+    fn resources_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        viewport: ViewportClass,
+        ui_pass: &mut RadialUiPass,
+    ) {
         if let Some(session) = self.session.as_mut() {
             if self.appearance.destination.is_none() {
                 self.appearance.destination = self.visited_path.current().cloned();
@@ -5953,6 +6529,7 @@ impl RadialEditorState {
                                                         Some(style_index),
                                                         trace_correlation(Some(session)),
                                                     )),
+                                                Some(ui_pass),
                                             ) && let Err(error) = skin_editor::set_override_edit(
                                                 session,
                                                 &scope,
@@ -6033,7 +6610,12 @@ impl RadialEditorState {
                 }
             }
         }
-        document_rule_controls(ui, session, &mut self.preferences.expanded_sections);
+        document_rule_controls(
+            ui,
+            session,
+            &mut self.preferences.expanded_sections,
+            ui_pass,
+        );
         ui.separator();
         compact_section_heading(ui, "Managed assets", None);
         ui.horizontal_wrapped(|ui| {
@@ -6271,7 +6853,9 @@ impl RadialEditorState {
         ui: &mut egui::Ui,
         defaults: &crate::radial::model::RadialFeatureSettings,
         viewport: ViewportClass,
+        ui_pass: &mut RadialUiPass,
     ) {
+        let jump = ui_pass.child_jump("basic-authoring");
         let mut create_menu = false;
         let mut propose_new_ring = false;
         let mut preview_resize = false;
@@ -6333,6 +6917,9 @@ impl RadialEditorState {
             compact_section_heading(ui, "Design actions", None);
             ui.horizontal_wrapped(|ui| {
                 let response = ui.button("New Menu");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(ui, &response, "new-menu", "Create menu", TargetKind::Button);
+                }
                 trace_designer_authoring_control(
                     ui,
                     &response,
@@ -6350,6 +6937,9 @@ impl RadialEditorState {
                     .add_enabled(selected_menu.is_some(), egui::Button::new("Add Ring"))
                     .on_disabled_hover_text("Select a menu first")
                     ;
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(ui, &response, "add-ring", "Add ring", TargetKind::Button);
+                }
                 trace_designer_authoring_control(
                     ui,
                     &response,
@@ -6366,7 +6956,15 @@ impl RadialEditorState {
                 if let (Some((menu_id, ring_id)), Some((rings, current_index))) =
                     (selected_ring.as_ref(), ring_options.as_ref())
                 {
-                    let combo = egui::ComboBox::from_label("Ring")
+                    let combo_salt = "Ring";
+                    let combo_identity = format!(
+                        "combo/{:016x}",
+                        ui.make_persistent_id(combo_salt).value()
+                    );
+                    let ring_popup = jump
+                        .as_ref()
+                        .map(|jump| jump.combo_popup(&combo_identity));
+                    let combo = egui::ComboBox::from_id_salt(combo_salt)
                         .selected_text(format!(
                             "{} · {} slots",
                             current_index + 1,
@@ -6377,6 +6975,18 @@ impl RadialEditorState {
                                 let response = ui.selectable_label(
                                     candidate_id == ring_id,
                                     format!("Ring {} · {} slots", index + 1, count),
+                                );
+                                let ring_selection = StableSelection::Ring {
+                                    menu_id: menu_id.clone(),
+                                    ring_id: candidate_id.clone(),
+                                };
+                                let ring_identity = radial_jump_selection_identity(&ring_selection);
+                                register_radial_combo_option(
+                                    ring_popup.as_ref(),
+                                    ui,
+                                    &response,
+                                    &format!("ring-option/{ring_identity}"),
+                                    "Ring option",
                                 );
                                 trace_designer_authoring_control(
                                     ui,
@@ -6390,13 +7000,25 @@ impl RadialEditorState {
                                     correlation,
                                 );
                                 if response.clicked() {
-                                    choose_ring = Some(StableSelection::Ring {
-                                        menu_id: menu_id.clone(),
-                                        ring_id: candidate_id.clone(),
-                                    });
+                                    choose_ring = Some(ring_selection);
                                 }
                             }
                         });
+                    register_radial_combo_anchor(
+                        ui_pass,
+                        &combo.response,
+                        &combo_identity,
+                        "Ring selector",
+                    );
+                    if let Some(jump) = jump.as_ref() {
+                        jump.register(
+                            ui,
+                            &combo.response,
+                            &combo_identity,
+                            "Ring selector",
+                            TargetKind::ComboBox,
+                        );
+                    }
                     trace_designer_authoring_control(
                         ui,
                         &combo.response,
@@ -6416,6 +7038,9 @@ impl RadialEditorState {
                                 .prefix("Slots ")
                                 .range(0..=crate::radial::model::limits::MAX_CELLS_PER_RING),
                         );
+                        if let Some(jump) = jump.as_ref() {
+                            jump.register(ui, &response, "ring-slots", "Ring slot count", TargetKind::Slider);
+                        }
                         trace_designer_authoring_control(
                             ui,
                             &response,
@@ -6428,6 +7053,9 @@ impl RadialEditorState {
                             correlation,
                         );
                         let response = ui.button("Preview proposal");
+                        if let Some(jump) = jump.as_ref() {
+                            jump.register(ui, &response, "preview-proposal", "Preview ring proposal", TargetKind::Button);
+                        }
                         trace_designer_authoring_control(
                             ui,
                             &response,
@@ -6488,6 +7116,15 @@ impl RadialEditorState {
                             "Apply is available only after this exact candidate is prepared and visible",
                         );
                     let response = with_button_emphasis(ui, button, ButtonEmphasis::Primary);
+                    if let Some(jump) = jump.as_ref() {
+                        jump.register(
+                            ui,
+                            &response,
+                            "apply-proposal",
+                            "Apply ring proposal",
+                            TargetKind::Button,
+                        );
+                    }
                     trace_designer_authoring_control(
                         ui,
                         &response,
@@ -6501,6 +7138,15 @@ impl RadialEditorState {
                     );
                     apply_proposal = response.clicked();
                     let response = ui.button("Cancel proposal");
+                    if let Some(jump) = jump.as_ref() {
+                        jump.register(
+                            ui,
+                            &response,
+                            "cancel-proposal",
+                            "Cancel ring proposal",
+                            TargetKind::Button,
+                        );
+                    }
                     trace_designer_authoring_control(
                         ui,
                         &response,
@@ -6893,7 +7539,9 @@ impl RadialEditorState {
         ui: &mut egui::Ui,
         _defaults: &crate::radial::model::RadialFeatureSettings,
         viewport: ViewportClass,
+        ui_pass: &RadialUiPass,
     ) {
+        let jump = ui_pass.child_jump("tree");
         compact_section_heading(ui, "Menus and rings", None);
         let pending_scope_change = &mut self.pending_scope_change;
         let filter = &mut self.tree_filter;
@@ -6913,6 +7561,15 @@ impl RadialEditorState {
                     .hint_text("Authored menus, labels, or IDs")
                     .desired_width(f32::INFINITY),
             );
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &response,
+                    "search",
+                    "Search menu tree",
+                    TargetKind::TextEntry,
+                );
+            }
             let undo_scope = acceptance_trace::enabled()
                 .then(|| designer_tree_search_undo_scope(ui.ctx(), response.id, filter))
                 .flatten();
@@ -6932,6 +7589,15 @@ impl RadialEditorState {
             );
             if !filter.is_empty() {
                 let clear = ui.small_button("Clear");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &clear,
+                        "clear-search",
+                        "Clear tree search",
+                        TargetKind::Button,
+                    );
+                }
                 trace_designer_authoring_control(
                     ui,
                     &clear,
@@ -6980,9 +7646,26 @@ impl RadialEditorState {
                                         && cells.members.iter().any(|member| member.menu_id == *target_menu && member.ring_id == *target_ring && member.cell_id == *target_cell)
                                 )
                             });
+                        let selection_identity = radial_jump_selection_identity(&hit.target);
                         let response = ui
-                            .selectable_label(selected, std::sync::Arc::clone(&galley))
+                            .scope_builder(
+                                egui::UiBuilder::new().id(radial_native_selection_id(
+                                    session,
+                                    &hit.target,
+                                    "search-result",
+                                )),
+                                |ui| ui.selectable_label(selected, std::sync::Arc::clone(&galley)),
+                            )
+                            .inner
                             .on_hover_text(format!("{} · {}", hit.label, hit.context));
+                        let selected_by_jump = jump.as_ref().is_some_and(|jump| {
+                            jump.register_select(
+                                ui,
+                                &response,
+                                &format!("search-result/{selection_identity}"),
+                                "Authored search result",
+                            )
+                        });
                         let search_scope = match &hit.target {
                             StableSelection::Cell { menu_id, ring_id, cell_id } => designer_rendered_text(ui, &response, &galley).map(|rendered_text|
                                 acceptance_trace::DesignerAuthoringControlScope::AuthoredSearchResult {
@@ -7019,7 +7702,7 @@ impl RadialEditorState {
                                 format!("{} · {}", hit.label, hit.context),
                             )
                         });
-                        if response.clicked() {
+                        if response.clicked() || selected_by_jump {
                             queue_scope_change(
                                 pending_scope_change,
                                 session,
@@ -7079,12 +7762,12 @@ impl RadialEditorState {
                                 ring_id: ring.id.clone(),
                             };
                             let ring_response = ui
-                                .push_id(
-                                    menu::widget_key(
-                                        "ring",
-                                        &format!("{}/{}", menu.id, ring.id),
-                                        "tree",
-                                    ),
+                                .scope_builder(
+                                    egui::UiBuilder::new().id(radial_native_selection_id(
+                                        session,
+                                        &ring_selection,
+                                        "tree-ring",
+                                    )),
                                     |ui| {
                                         ui.selectable_label(
                                             session.selection.as_ref() == Some(&ring_selection),
@@ -7093,6 +7776,15 @@ impl RadialEditorState {
                                     },
                                 )
                                 .inner;
+                            let ring_identity = radial_jump_selection_identity(&ring_selection);
+                            let selected_by_jump = jump.as_ref().is_some_and(|jump| {
+                                jump.register_select(
+                                    ui,
+                                    &ring_response,
+                                    &format!("ring/{ring_identity}"),
+                                    "Ring",
+                                )
+                            });
                             ring_response.clone().on_hover_text(format!(
                                 "Ring {} · {}",
                                 ring_index + 1,
@@ -7102,7 +7794,7 @@ impl RadialEditorState {
                                 ring_response.request_focus();
                                 *focus_restore = None;
                             }
-                            if ring_response.clicked() {
+                            if ring_response.clicked() || selected_by_jump {
                                 queue_scope_change(
                                     pending_scope_change,
                                     session,
@@ -7129,12 +7821,12 @@ impl RadialEditorState {
                                             cell_id: cell.id.clone(),
                                         };
                                         let response = ui
-                                            .push_id(
-                                                menu::widget_key(
-                                                    "cell",
-                                                    &format!("{}/{}/{}", menu.id, ring.id, cell.id),
-                                                    "tree",
-                                                ),
+                                            .scope_builder(
+                                                egui::UiBuilder::new().id(radial_native_selection_id(
+                                                    session,
+                                                    &selection,
+                                                    "tree-cell",
+                                                )),
                                                 |ui| {
                                                     let selected = session.selection.as_ref().is_some_and(|selection| {
                                                         selection.is_authored_cell_selected(
@@ -7166,6 +7858,16 @@ impl RadialEditorState {
                                                 },
                                             )
                                             .inner;
+                                        let cell_identity =
+                                            radial_jump_selection_identity(&selection);
+                                        let selected_by_jump = jump.as_ref().is_some_and(|jump| {
+                                            jump.register_select(
+                                                ui,
+                                                &response,
+                                                &format!("cell/{cell_identity}"),
+                                                "Cell",
+                                            )
+                                        });
                                         if focus_restore
                                             .as_ref()
                                             .and_then(StableSelection::primary_cell)
@@ -7175,7 +7877,7 @@ impl RadialEditorState {
                                             response.request_focus();
                                             *focus_restore = None;
                                         }
-                                        if response.clicked() {
+                                        if response.clicked() || selected_by_jump {
                                             let modifiers = ui.input(|input| input.modifiers);
                                             queue_scope_change(
                                                 pending_scope_change,
@@ -7265,7 +7967,18 @@ impl RadialEditorState {
                         header.header_response.request_focus();
                         *focus_restore = None;
                     }
+                    let menu_selection = StableSelection::Menu(menu.id.clone());
+                    let menu_identity = radial_jump_selection_identity(&menu_selection);
+                    let selected_by_jump = jump.as_ref().is_some_and(|jump| {
+                        jump.register_select(
+                            ui,
+                            &header.header_response,
+                            &format!("menu/{menu_identity}"),
+                            "Menu",
+                        )
+                    });
                     if header.header_response.clicked()
+                        || selected_by_jump
                         || menu_selected && session.selection.is_none()
                     {
                         queue_scope_change(
@@ -7294,6 +8007,7 @@ impl RadialEditorState {
         ui: &mut egui::Ui,
         frame: &DesignerFrameContext,
         viewport: ViewportClass,
+        ui_pass: &mut RadialUiPass,
     ) {
         let bulk_stage_scope = self.session.as_ref().and_then(|session| {
             matches!(
@@ -7326,6 +8040,13 @@ impl RadialEditorState {
             secondary_help(ui, "Select a menu, ring, or cell.");
             return;
         };
+        let selection_scope = ui_pass.jump.as_ref().map(|pass| {
+            pass.child(&format!(
+                "inspector/{}",
+                radial_jump_selection_identity(&selection)
+            ))
+        });
+        let parent_scope = std::mem::replace(&mut ui_pass.jump, selection_scope);
         match selection {
             StableSelection::Menu(menu_id) => {
                 self.inspector_action_editor.invalidate_visit();
@@ -7335,25 +8056,29 @@ impl RadialEditorState {
                     menu_id,
                     frame.feature_defaults.default_menu_id.as_ref(),
                     viewport,
+                    ui_pass,
                 )
             }
             StableSelection::Ring { menu_id, ring_id } => {
                 self.inspector_action_editor.invalidate_visit();
                 self.inspector_action_editor_scope = None;
-                self.ring_inspector(ui, menu_id, ring_id)
+                self.ring_inspector(ui, menu_id, ring_id, ui_pass)
             }
             StableSelection::Cell {
                 menu_id,
                 ring_id,
                 cell_id,
-            } => self.cell_inspector(ui, frame, menu_id, ring_id, cell_id),
-            StableSelection::CellSet(selection) => self.bulk_cells_inspector(ui, selection),
+            } => self.cell_inspector(ui, frame, menu_id, ring_id, cell_id, ui_pass),
+            StableSelection::CellSet(selection) => {
+                self.bulk_cells_inspector(ui, selection, ui_pass)
+            }
             _ => {
                 self.inspector_action_editor.invalidate_visit();
                 self.inspector_action_editor_scope = None;
                 ui.label("This entity is edited by a later milestone.");
             }
-        };
+        }
+        ui_pass.jump = parent_scope;
     }
 
     fn menu_inspector(
@@ -7362,7 +8087,9 @@ impl RadialEditorState {
         menu_id: MenuId,
         configured_default: Option<&MenuId>,
         viewport: ViewportClass,
+        ui_pass: &mut RadialUiPass,
     ) {
+        let jump = ui_pass.jump.clone();
         let Some(session) = self.session.as_mut() else {
             return;
         };
@@ -7378,6 +8105,18 @@ impl RadialEditorState {
                 ui.text_edit_singleline(&mut name)
             })
             .inner;
+        if let Some(jump) = jump.as_ref() {
+            jump.register(
+                ui,
+                &response,
+                &format!(
+                    "menu/{:016x}/name",
+                    radial_selection_digest(&StableSelection::Menu(menu_id.clone()))
+                ),
+                "Menu name",
+                TargetKind::TextEntry,
+            );
+        }
         trace_designer_semantic_target(
             ui,
             &response,
@@ -7421,17 +8160,58 @@ impl RadialEditorState {
             .find(|menu| menu.id == menu_id)
             .map(|menu| menu.skin_id.clone());
         if let Some(mut selected_skin) = current_skin {
-            let default_skin = egui::ComboBox::from_id_salt(menu::widget_key(
-                "menu",
-                menu_id.as_str(),
-                "default-skin",
-            ))
-            .selected_text(selected_skin.to_string())
-            .show_ui(ui, |ui| {
-                for skin in &session.draft.skins {
-                    ui.selectable_value(&mut selected_skin, skin.id.clone(), &skin.name);
-                }
-            });
+            let combo_salt = menu::widget_key("menu", menu_id.as_str(), "default-skin");
+            let combo_identity =
+                format!("combo/{:016x}", ui.make_persistent_id(&combo_salt).value());
+            let combo_jump = jump.as_ref().map(|jump| jump.combo_popup(&combo_identity));
+            let default_skin = egui::ComboBox::from_id_salt(combo_salt)
+                .selected_text(selected_skin.to_string())
+                .show_ui(ui, |ui| {
+                    for skin in &session.draft.skins {
+                        let option = ui
+                            .scope_builder(
+                                egui::UiBuilder::new().id(egui::Id::new((
+                                    "radial-skin-option",
+                                    session.editor_session.0,
+                                    radial_value_digest(&skin.id),
+                                ))),
+                                |ui| {
+                                    ui.selectable_value(
+                                        &mut selected_skin,
+                                        skin.id.clone(),
+                                        &skin.name,
+                                    )
+                                },
+                            )
+                            .inner;
+                        register_radial_combo_option(
+                            combo_jump.as_ref(),
+                            ui,
+                            &option,
+                            &format!(
+                                "{combo_identity}/option/{:016x}",
+                                radial_value_digest(&skin.id)
+                            ),
+                            "Skin option",
+                        );
+                    }
+                });
+            register_radial_combo_anchor(
+                ui_pass,
+                &default_skin.response,
+                &combo_identity,
+                "Menu skin selector",
+            );
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &default_skin.response,
+                    &combo_identity,
+                    "Menu skin selector",
+                    TargetKind::ComboBox,
+                );
+            }
+            ui_pass.record_combo(&default_skin.response);
             trace_designer_semantic_target(
                 ui,
                 &default_skin.response,
@@ -7468,6 +8248,7 @@ impl RadialEditorState {
                 &mut edited,
                 &mut self.preferences.expanded_sections,
                 trace_correlation(Some(session)),
+                ui_pass,
             );
             if edited != original || continuous.is_some() {
                 let mut document = (*session.draft).clone();
@@ -7488,23 +8269,53 @@ impl RadialEditorState {
             }
         }
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(menu_index > 0, egui::Button::new("Move up"))
-                .clicked()
+            let move_up = ui.add_enabled(menu_index > 0, egui::Button::new("Move up"));
+            if let Some(jump) = jump.as_ref() {
+                jump.register(ui, &move_up, "move-up", "Move menu up", TargetKind::Button);
+            }
+            if move_up.clicked()
                 && menu::move_menu(session, &menu_id, menu_index.saturating_sub(1)).is_ok()
             {
                 self.focus_restore = session.selection.clone();
             }
-            if ui.button("Move down").clicked()
-                && menu::move_menu(session, &menu_id, menu_index + 1).is_ok()
-            {
+            let move_down = ui.button("Move down");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &move_down,
+                    "move-down",
+                    "Move menu down",
+                    TargetKind::Button,
+                );
+            }
+            if move_down.clicked() && menu::move_menu(session, &menu_id, menu_index + 1).is_ok() {
                 self.focus_restore = session.selection.clone();
             }
         });
-        if ui.button("Duplicate (link submenus)").clicked() {
+        let duplicate_link = ui.button("Duplicate (link submenus)");
+        if let Some(jump) = jump.as_ref() {
+            jump.register(
+                ui,
+                &duplicate_link,
+                "duplicate-link-submenus",
+                "Duplicate menu with linked submenus",
+                TargetKind::Button,
+            );
+        }
+        if duplicate_link.clicked() {
             let _ = menu::duplicate_menu(session, &menu_id, SubmenuDuplication::LinkExisting);
         }
-        if ui.button("Duplicate subtree").clicked() {
+        let duplicate_subtree = ui.button("Duplicate subtree");
+        if let Some(jump) = jump.as_ref() {
+            jump.register(
+                ui,
+                &duplicate_subtree,
+                "duplicate-subtree",
+                "Duplicate menu subtree",
+                TargetKind::Button,
+            );
+        }
+        if duplicate_subtree.clicked() {
             let _ =
                 menu::duplicate_menu(session, &menu_id, SubmenuDuplication::CloneSubmenuClosure);
         }
@@ -7512,6 +8323,9 @@ impl RadialEditorState {
         let delete = ui
             .add_enabled(!configured_default, egui::Button::new("Delete menu"))
             .on_disabled_hover_text("This menu is selected as the default in Settings");
+        if let Some(jump) = jump.as_ref() {
+            jump.register(ui, &delete, "delete", "Delete menu", TargetKind::Button);
+        }
         if with_button_emphasis(ui, delete, ButtonEmphasis::Destructive).clicked()
             && let Err(error) = menu::delete_menu(session, &menu_id)
         {
@@ -7594,7 +8408,14 @@ impl RadialEditorState {
         });
     }
 
-    fn ring_inspector(&mut self, ui: &mut egui::Ui, menu_id: MenuId, ring_id: RingId) {
+    fn ring_inspector(
+        &mut self,
+        ui: &mut egui::Ui,
+        menu_id: MenuId,
+        ring_id: RingId,
+        ui_pass: &mut RadialUiPass,
+    ) {
+        let jump = ui_pass.jump.clone();
         let Some(session) = self.session.as_mut() else {
             return;
         };
@@ -7636,6 +8457,16 @@ impl RadialEditorState {
                     .prefix("Gap ")
                     .speed(0.5),
             );
+            if let Some(jump) = jump.as_ref() {
+                for (identity, label, response) in [
+                    ("radius", "Ring radius", &radius_response),
+                    ("cell-radius", "Cell radius", &cell_radius_response),
+                    ("rotation", "Ring rotation", &rotation_response),
+                    ("gap", "Ring gap", &gap_response),
+                ] {
+                    jump.register(ui, response, identity, label, TargetKind::Slider);
+                }
+            }
             let edit = [
                 ("radius", radius_response),
                 ("cell_radius", cell_radius_response),
@@ -7673,15 +8504,33 @@ impl RadialEditorState {
             .and_then(|menu| menu.rings.iter().position(|ring| ring.id == ring_id))
             .unwrap_or(0);
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(ring_index > 0, egui::Button::new("Move inward"))
-                .clicked()
+            let move_inward = ui.add_enabled(ring_index > 0, egui::Button::new("Move inward"));
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &move_inward,
+                    "move-inward",
+                    "Move ring inward",
+                    TargetKind::Button,
+                );
+            }
+            if move_inward.clicked()
                 && menu::move_ring(session, &menu_id, &ring_id, ring_index.saturating_sub(1))
                     .is_ok()
             {
                 self.focus_restore = session.selection.clone();
             }
-            if ui.button("Move outward").clicked()
+            let move_outward = ui.button("Move outward");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &move_outward,
+                    "move-outward",
+                    "Move ring outward",
+                    TargetKind::Button,
+                );
+            }
+            if move_outward.clicked()
                 && menu::move_ring(session, &menu_id, &ring_id, ring_index + 1).is_ok()
             {
                 self.focus_restore = session.selection.clone();
@@ -7692,6 +8541,9 @@ impl RadialEditorState {
             "Change authored slot count through the proposal controls above the board.",
         );
         let delete = ui.button("Delete ring");
+        if let Some(jump) = jump.as_ref() {
+            jump.register(ui, &delete, "delete", "Delete ring", TargetKind::Button);
+        }
         if with_button_emphasis(ui, delete, ButtonEmphasis::Destructive).clicked() {
             if count == 0 {
                 if let Err(error) = menu::delete_ring(session, &menu_id, &ring_id) {
@@ -7707,7 +8559,9 @@ impl RadialEditorState {
         &mut self,
         ui: &mut egui::Ui,
         selection: crate::radial::authoring::AuthoredCellSelection,
+        ui_pass: &mut RadialUiPass,
     ) {
+        let jump = ui_pass.jump.clone();
         let Some((document, correlation, editor_session, generation)) =
             self.session.as_ref().map(|session| {
                 (
@@ -7747,6 +8601,15 @@ impl RadialEditorState {
                 "Set label for every selected cell"
             });
             let label_response = ui.text_edit_singleline(&mut self.bulk_label_value);
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &label_response,
+                    "label",
+                    "Selected cell labels",
+                    TargetKind::TextEntry,
+                );
+            }
             trace_designer_authoring_control(
                 ui,
                 &label_response,
@@ -7759,6 +8622,15 @@ impl RadialEditorState {
                 correlation,
             );
             let apply_label = ui.button(format!("Set label on {} cells", targets.len()));
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &apply_label,
+                    "set-label",
+                    "Set labels on selected cells",
+                    TargetKind::Button,
+                );
+            }
             trace_designer_authoring_control(
                 ui,
                 &apply_label,
@@ -7806,19 +8678,57 @@ impl RadialEditorState {
             ui.separator();
             ui.label("One style field");
             let selected_field_key = self.bulk_style_field.clone();
-            egui::ComboBox::from_id_salt("radial-bulk-style-field")
+            let style_combo_identity = format!(
+                "combo/{:016x}",
+                ui.make_persistent_id("radial-bulk-style-field").value()
+            );
+            let style_combo_jump = jump
+                .as_ref()
+                .map(|jump| jump.combo_popup(&style_combo_identity));
+            let style_field_combo = egui::ComboBox::from_id_salt("radial-bulk-style-field")
                 .selected_text(&selected_field_key)
                 .show_ui(ui, |ui| {
                     for (section, field, _) in &fields {
                         let key = format!("{section}.{field}");
-                        if ui
-                            .selectable_value(&mut self.bulk_style_field, key.clone(), &key)
-                            .changed()
-                        {
+                        let option = ui
+                            .scope_builder(
+                                egui::UiBuilder::new().id(ui
+                                    .id()
+                                    .with(("radial-bulk-style-option", radial_value_digest(&key)))),
+                                |ui| {
+                                    ui.selectable_value(
+                                        &mut self.bulk_style_field,
+                                        key.clone(),
+                                        &key,
+                                    )
+                                },
+                            )
+                            .inner;
+                        register_radial_combo_option(
+                            style_combo_jump.as_ref(),
+                            ui,
+                            &option,
+                            &format!(
+                                "{style_combo_identity}/option/{:016x}",
+                                radial_value_digest(&key)
+                            ),
+                            "Style field option",
+                        );
+                        if option.changed() {
                             self.bulk_style_stage_key.clear();
                         }
                     }
                 });
+            ui_pass.record_combo(&style_field_combo.response);
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &style_field_combo.response,
+                    &style_combo_identity,
+                    "Bulk style field selector",
+                    TargetKind::ComboBox,
+                );
+            }
             let Some((section, field, style_field)) = fields
                 .iter()
                 .find(|(section, field, _)| self.bulk_style_field == format!("{section}.{field}"))
@@ -7886,6 +8796,7 @@ impl RadialEditorState {
                         ("Inherit", BulkStyleMode::Inherit),
                         ("Clear", BulkStyleMode::Clear),
                     ],
+                    ui_pass,
                 );
                 if self.bulk_style_mode != mode_before {
                     self.bulk_style_staged_value = match self.bulk_style_mode {
@@ -7978,6 +8889,7 @@ impl RadialEditorState {
                             &[],
                             &format!("{section}.{field}"),
                             None,
+                            Some(ui_pass),
                         ) {
                             self.bulk_style_staged_value = Some(value);
                         }
@@ -8046,12 +8958,14 @@ impl RadialEditorState {
                     ("Primary", BulkAfterActionSlot::Primary),
                     ("Secondary", BulkAfterActionSlot::Secondary),
                 ],
+                ui_pass,
             );
             enum_combo(
                 ui,
                 "New policy",
                 &mut self.bulk_after_action_policy,
                 &AFTER_ACTION_CHOICES,
+                ui_pass,
             );
         });
         ui.label(if policy_is_mixed {
@@ -8142,7 +9056,9 @@ impl RadialEditorState {
         menu_id: MenuId,
         ring_id: RingId,
         cell_id: CellId,
+        ui_pass: &mut RadialUiPass,
     ) {
+        let jump = ui_pass.jump.clone();
         let invocation_context = self
             .session
             .as_ref()
@@ -8214,6 +9130,15 @@ impl RadialEditorState {
                 |ui| ui.text_edit_singleline(&mut label),
             )
             .inner;
+        if let Some(jump) = jump.as_ref() {
+            jump.register(
+                ui,
+                &label_response,
+                "label",
+                "Cell label",
+                TargetKind::TextEntry,
+            );
+        }
         if label_response.changed() || label_response.lost_focus() || label_response.drag_stopped()
         {
             let _ = menu::set_cell_label(
@@ -8249,17 +9174,24 @@ impl RadialEditorState {
             .cloned()
         {
             let original = edited.clone();
-            after_action_combo(ui, "Primary after action", &mut edited.after_action);
+            after_action_combo(
+                ui,
+                "Primary after action",
+                &mut edited.after_action,
+                ui_pass,
+            );
             after_action_combo(
                 ui,
                 "Secondary after action",
                 &mut edited.secondary_after_action,
+                ui_pass,
             );
             let content_edit = cell_content_controls(
                 ui,
                 &session.draft,
                 &mut edited,
                 &mut self.preferences.expanded_sections,
+                ui_pass,
             );
             let media_edit = cell_media_controls(
                 ui,
@@ -8270,12 +9202,14 @@ impl RadialEditorState {
                 &menu_id,
                 &ring_id,
                 &cell_id,
+                ui_pass,
             );
             let trigger_edit = cell_trigger_controls(
                 ui,
                 session,
                 &mut edited,
                 &mut self.preferences.expanded_sections,
+                ui_pass,
             );
             let continuous = content_edit.or(media_edit).or(trigger_edit);
             if primary_content_replaced(&original.content, &edited.content) {
@@ -8386,7 +9320,7 @@ impl RadialEditorState {
             {
                 linked_menu = None;
             }
-            egui::ComboBox::from_label("Link existing submenu")
+            let submenu_combo = egui::ComboBox::from_label("Link existing submenu")
                 .selected_text(
                     linked_menu
                         .as_ref()
@@ -8404,6 +9338,7 @@ impl RadialEditorState {
                         }
                     }
                 });
+            ui_pass.record_combo(&submenu_combo.response);
             self.submenu_link_target = linked_menu.clone();
             if ui
                 .add_enabled(linked_menu.is_some(), egui::Button::new("Link existing"))
@@ -8745,7 +9680,7 @@ impl RadialEditorState {
         }
     }
 
-    fn radial_add_to_menu_ui(&mut self, ctx: &egui::Context) {
+    fn radial_add_to_menu_ui(&mut self, ctx: &egui::Context, ui_pass: &mut RadialUiPass) {
         let Some(request) = self.radial_add_request.clone() else {
             return;
         };
@@ -8962,6 +9897,7 @@ impl RadialEditorState {
                                 }
                             }
                         });
+                        ui_pass.record_combo(&combo.response);
                         ui.label("Menu");
                         combo.response
                     }).inner;
@@ -9040,6 +9976,7 @@ impl RadialEditorState {
                                 }
                             }
                         });
+                        ui_pass.record_combo(&combo.response);
                         ui.label("Ring");
                         combo.response
                     }).inner;
@@ -9125,6 +10062,7 @@ impl RadialEditorState {
                                 }
                             }
                         });
+                        ui_pass.record_combo(&combo.response);
                         ui.label("Cell");
                         combo.response
                     }).inner;
@@ -10101,6 +11039,7 @@ fn style_value_widget(
         Option<usize>,
         Correlation,
     )>,
+    mut ui_pass: Option<&mut RadialUiPass>,
 ) -> Option<(serde_json::Value, EditPhase)> {
     use skin_editor::StyleControlKind;
     let payload = skin_editor::override_payload(current)
@@ -10131,6 +11070,17 @@ fn style_value_widget(
                     correlation,
                 );
             }
+            if let Some(pass) = ui_pass.as_deref() {
+                if let Some(jump) = pass.jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &response,
+                        &format!("style/{:016x}", radial_value_digest(&accessible_name)),
+                        "Style control",
+                        TargetKind::Checkbox,
+                    );
+                }
+            }
             (response.changed() || response.lost_focus())
                 .then(|| (serde_json::json!(value), widget_edit_phase(&response)))
         }
@@ -10152,6 +11102,17 @@ fn style_value_widget(
                     )
                 }
             });
+            if let Some(pass) = ui_pass.as_deref() {
+                if let Some(jump) = pass.jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &response,
+                        &format!("style/{:016x}", radial_value_digest(&accessible_name)),
+                        "Style value",
+                        TargetKind::Slider,
+                    );
+                }
+            }
             (response.changed() || response.drag_stopped() || response.lost_focus())
                 .then(|| (serde_json::json!(value), widget_edit_phase(&response)))
         }
@@ -10190,6 +11151,17 @@ fn style_value_widget(
                     ),
                 )
             });
+            if let Some(pass) = ui_pass.as_deref() {
+                if let Some(jump) = pass.jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &response,
+                        &format!("style/{:016x}", radial_value_digest(&accessible_name)),
+                        "Style color",
+                        TargetKind::Button,
+                    );
+                }
+            }
             (response.changed() || response.drag_stopped() || response.lost_focus()).then(|| {
                 (
                     serde_json::json!({
@@ -10224,6 +11196,24 @@ fn style_value_widget(
                     format!("{accessible_name} y"),
                 )
             });
+            if let Some(pass) = ui_pass.as_deref() {
+                if let Some(jump) = pass.jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &x_response,
+                        &format!("style/{:016x}/x", radial_value_digest(&accessible_name)),
+                        "Style offset x",
+                        TargetKind::Slider,
+                    );
+                    jump.register(
+                        ui,
+                        &y_response,
+                        &format!("style/{:016x}/y", radial_value_digest(&accessible_name)),
+                        "Style offset y",
+                        TargetKind::Slider,
+                    );
+                }
+            }
             let response = if x_response.changed() || x_response.drag_stopped() {
                 x_response
             } else {
@@ -10252,7 +11242,14 @@ fn style_value_widget(
             };
             let mut value = payload.as_str().unwrap_or(choices[0].1).to_owned();
             let before = value.clone();
-            let combo = egui::ComboBox::from_id_salt(ui.next_auto_id())
+            let combo_id = ui.next_auto_id();
+            let combo_identity = format!("combo/{:016x}", ui.make_persistent_id(combo_id).value());
+            let combo_jump = ui_pass.as_deref().and_then(|pass| {
+                pass.jump
+                    .as_ref()
+                    .map(|jump| jump.child("combos").combo_popup(&combo_identity))
+            });
+            let combo = egui::ComboBox::from_id_salt(combo_id)
                 .selected_text(
                     choices
                         .iter()
@@ -10261,9 +11258,40 @@ fn style_value_widget(
                 )
                 .show_ui(ui, |ui| {
                     for (label, wire) in choices {
-                        ui.selectable_value(&mut value, (*wire).to_owned(), *label);
+                        let wire_identity = radial_value_digest(wire);
+                        let option = ui
+                            .scope_builder(
+                                egui::UiBuilder::new()
+                                    .id(ui.id().with(("radial-style-option", wire_identity))),
+                                |ui| ui.selectable_value(&mut value, (*wire).to_owned(), *label),
+                            )
+                            .inner;
+                        register_radial_combo_option(
+                            combo_jump.as_ref(),
+                            ui,
+                            &option,
+                            &format!("{combo_identity}/option/{wire_identity:016x}"),
+                            "Style option",
+                        );
                     }
                 });
+            if let Some(ui_pass) = ui_pass.as_deref_mut() {
+                register_radial_combo_anchor(
+                    ui_pass,
+                    &combo.response,
+                    &combo_identity,
+                    "Style selector",
+                );
+                if let Some(jump) = ui_pass.jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &combo.response,
+                        &combo_identity,
+                        "Style selector",
+                        TargetKind::ComboBox,
+                    );
+                }
+            }
             combo.response.widget_info(|| {
                 egui::WidgetInfo::labeled(
                     egui::WidgetType::ComboBox,
@@ -10278,18 +11306,70 @@ fn style_value_widget(
                 *text_input = payload.as_str().unwrap_or_default().to_owned();
             }
             let before = text_input.clone();
-            let combo = egui::ComboBox::from_id_salt(ui.next_auto_id())
+            let combo_id = ui.next_auto_id();
+            let combo_identity = format!("combo/{:016x}", ui.make_persistent_id(combo_id).value());
+            let combo_jump = ui_pass.as_deref().and_then(|pass| {
+                pass.jump
+                    .as_ref()
+                    .map(|jump| jump.child("combos").combo_popup(&combo_identity))
+            });
+            let combo = egui::ComboBox::from_id_salt(combo_id)
                 .selected_text(if text_input.is_empty() {
                     "System fallback"
                 } else {
                     text_input.as_str()
                 })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(text_input, String::new(), "System fallback");
+                    let fallback_id = radial_value_digest(&String::new());
+                    let fallback = ui
+                        .scope_builder(
+                            egui::UiBuilder::new()
+                                .id(ui.id().with(("radial-font-option", fallback_id))),
+                            |ui| ui.selectable_value(text_input, String::new(), "System fallback"),
+                        )
+                        .inner;
+                    register_radial_combo_option(
+                        combo_jump.as_ref(),
+                        ui,
+                        &fallback,
+                        &format!("{combo_identity}/option/{fallback_id:016x}"),
+                        "Font family option",
+                    );
                     for family in font_families {
-                        ui.selectable_value(text_input, family.clone(), family);
+                        let family_id = radial_value_digest(family);
+                        let option = ui
+                            .scope_builder(
+                                egui::UiBuilder::new()
+                                    .id(ui.id().with(("radial-font-option", family_id))),
+                                |ui| ui.selectable_value(text_input, family.clone(), family),
+                            )
+                            .inner;
+                        register_radial_combo_option(
+                            combo_jump.as_ref(),
+                            ui,
+                            &option,
+                            &format!("{combo_identity}/option/{family_id:016x}"),
+                            "Font family option",
+                        );
                     }
                 });
+            if let Some(ui_pass) = ui_pass.as_deref_mut() {
+                register_radial_combo_anchor(
+                    ui_pass,
+                    &combo.response,
+                    &combo_identity,
+                    "Font selector",
+                );
+                if let Some(jump) = ui_pass.jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &combo.response,
+                        &combo_identity,
+                        "Font selector",
+                        TargetKind::ComboBox,
+                    );
+                }
+            }
             combo.response.widget_info(|| {
                 egui::WidgetInfo::labeled(
                     egui::WidgetType::ComboBox,
@@ -10305,6 +11385,20 @@ fn style_value_widget(
                 info.label = Some(accessible_name.into());
                 info
             });
+            if let Some(pass) = ui_pass.as_deref() {
+                if let Some(jump) = pass.jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &response,
+                        &format!(
+                            "style/{:016x}/font-name",
+                            radial_value_digest(&accessible_name)
+                        ),
+                        "Font family",
+                        TargetKind::TextEntry,
+                    );
+                }
+            }
             if response.changed() || response.lost_focus() {
                 Some((
                     serde_json::json!(text_input.clone()),
@@ -10327,6 +11421,17 @@ fn style_value_widget(
                 info.label = Some(accessible_name.into());
                 info
             });
+            if let Some(pass) = ui_pass.as_deref() {
+                if let Some(jump) = pass.jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &response,
+                        &format!("style/{:016x}/text", radial_value_digest(&accessible_name)),
+                        "Style text",
+                        TargetKind::TextEntry,
+                    );
+                }
+            }
             (response.changed() || response.lost_focus()).then(|| {
                 (
                     serde_json::json!(text_input.clone()),
@@ -10352,6 +11457,20 @@ fn style_value_widget(
                 info.label = Some(accessible_name.into());
                 info
             });
+            if let Some(pass) = ui_pass.as_deref() {
+                if let Some(jump) = pass.jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &path_response,
+                        &format!(
+                            "style/{:016x}/resource",
+                            radial_value_digest(&accessible_name)
+                        ),
+                        "Style resource path",
+                        TargetKind::TextEntry,
+                    );
+                }
+            }
             let mut resource = payload.clone();
             if let Some(object) = resource.as_object_mut() {
                 if object.contains_key("path") {
@@ -10373,6 +11492,20 @@ fn style_value_widget(
                         format!("{accessible_name} resource index"),
                     )
                 });
+                if let Some(pass) = ui_pass.as_deref() {
+                    if let Some(jump) = pass.jump.as_ref() {
+                        jump.register(
+                            ui,
+                            &index_response,
+                            &format!(
+                                "style/{:016x}/resource-index",
+                                radial_value_digest(&accessible_name)
+                            ),
+                            "Style resource index",
+                            TargetKind::Slider,
+                        );
+                    }
+                }
                 if let Some(object) = resource.as_object_mut() {
                     object.insert("index".into(), serde_json::json!(index));
                 }
@@ -10392,6 +11525,7 @@ fn persisted_section(
     label: impl Into<egui::WidgetText>,
     key: &str,
     expanded_sections: &mut std::collections::BTreeMap<String, bool>,
+    jump: Option<RadialJumpPass>,
     body: impl FnOnce(&mut egui::Ui),
 ) -> bool {
     let open = expanded_sections.get(key).copied().unwrap_or(false);
@@ -10400,6 +11534,15 @@ fn persisted_section(
         .default_open(open)
         .open(Some(open))
         .show(ui, body);
+    if let Some(jump) = jump {
+        jump.register(
+            ui,
+            &response.header_response,
+            &format!("section/{:016x}", radial_value_digest(&key)),
+            "Inspector section",
+            TargetKind::Button,
+        );
+    }
     if response.header_response.changed() {
         expanded_sections.insert(key.to_owned(), !open);
         true
@@ -10413,7 +11556,9 @@ fn menu_behavior_controls(
     menu: &mut crate::radial::model::MenuDefinition,
     expanded_sections: &mut std::collections::BTreeMap<String, bool>,
     correlation: Correlation,
+    ui_pass: &mut RadialUiPass,
 ) -> Option<ContinuousWidgetEdit> {
+    let jump = ui_pass.child_jump("menu-behavior");
     let mut continuous = None;
     enum_combo(
         ui,
@@ -10423,6 +11568,7 @@ fn menu_behavior_controls(
             ("Circular cells", LayoutKind::CircularCells),
             ("Wedges", LayoutKind::Wedges),
         ],
+        ui_pass,
     );
     enum_combo(
         ui,
@@ -10433,9 +11579,20 @@ fn menu_behavior_controls(
             ("Release to select", InteractionMode::ReleaseToSelect),
             ("Hold and click", InteractionMode::HoldAndClick),
         ],
+        ui_pass,
     );
     let mut dwell_enabled = menu.hover_dwell_ms.is_some();
-    if ui.checkbox(&mut dwell_enabled, "Hover dwell").changed() {
+    let dwell = ui.checkbox(&mut dwell_enabled, "Hover dwell");
+    if let Some(jump) = jump.as_ref() {
+        jump.register(
+            ui,
+            &dwell,
+            "hover-dwell-enabled",
+            "Hover dwell",
+            TargetKind::Checkbox,
+        );
+    }
+    if dwell.changed() {
         menu.hover_dwell_ms = dwell_enabled.then_some(350);
     }
     if let Some(dwell) = menu.hover_dwell_ms.as_mut() {
@@ -10444,6 +11601,15 @@ fn menu_behavior_controls(
                 .prefix("Dwell ms ")
                 .range(1..=10_000),
         );
+        if let Some(jump) = jump.as_ref() {
+            jump.register(
+                ui,
+                &response,
+                "hover-dwell-ms",
+                "Hover dwell duration",
+                TargetKind::Slider,
+            );
+        }
         continuous = continuous_widget_edit(&response, "hover_dwell_ms");
     }
     enum_combo(
@@ -10454,54 +11620,103 @@ fn menu_behavior_controls(
             ("Cascade", SubmenuPresentation::Cascade),
             ("Same center", SubmenuPresentation::SameCenter),
         ],
+        ui_pass,
     );
-    traced_menu_after_action_combo(ui, &mut menu.after_action, correlation);
+    traced_menu_after_action_combo(ui, &mut menu.after_action, correlation, ui_pass);
     let center_response = ui.add(
         egui::DragValue::new(&mut menu.center_radius)
             .prefix("Center radius ")
             .speed(1.0),
     );
+    if let Some(jump) = jump.as_ref() {
+        jump.register(
+            ui,
+            &center_response,
+            "center-radius",
+            "Center radius",
+            TargetKind::Slider,
+        );
+    }
     set_first_edit(
         &mut continuous,
         continuous_widget_edit(&center_response, "center_radius"),
     );
-    ui.checkbox(
+    let mirror = ui.checkbox(
         &mut menu.mirror_primary_to_secondary,
         "Mirror primary to secondary",
     );
+    if let Some(jump) = jump.as_ref() {
+        jump.register(
+            ui,
+            &mirror,
+            "mirror-primary-secondary",
+            "Mirror primary action to secondary",
+            TargetKind::Checkbox,
+        );
+    }
     persisted_section(
         ui,
         "Center mappings",
         &format!("menu:{}:center-mappings", menu.id),
         expanded_sections,
+        ui_pass.child_jump("sections"),
         |ui| {
             let before = menu.center_control;
-            optional_control_combo(ui, "Primary control", &mut menu.center_control);
+            optional_control_combo(ui, "Primary control", &mut menu.center_control, ui_pass);
             if menu.center_control.is_some() && menu.center_control != before {
                 menu.center_action = None;
             }
-            if menu.center_action.is_some() && ui.button("Clear primary action").clicked() {
-                menu.center_action = None;
+            if menu.center_action.is_some() {
+                let clear = ui.button("Clear primary action");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &clear,
+                        "center-clear-primary",
+                        "Clear primary action",
+                        TargetKind::Button,
+                    );
+                }
+                if clear.clicked() {
+                    menu.center_action = None;
+                }
             }
             after_action_combo(
                 ui,
                 "Primary after action",
                 &mut menu.center_primary_after_action,
+                ui_pass,
             );
             let before = menu.center_secondary_control;
-            optional_control_combo(ui, "Secondary control", &mut menu.center_secondary_control);
+            optional_control_combo(
+                ui,
+                "Secondary control",
+                &mut menu.center_secondary_control,
+                ui_pass,
+            );
             if menu.center_secondary_control.is_some() && menu.center_secondary_control != before {
                 menu.center_secondary_action = None;
             }
-            if menu.center_secondary_action.is_some()
-                && ui.button("Clear secondary action").clicked()
-            {
-                menu.center_secondary_action = None;
+            if menu.center_secondary_action.is_some() {
+                let clear = ui.button("Clear secondary action");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &clear,
+                        "center-clear-secondary",
+                        "Clear secondary action",
+                        TargetKind::Button,
+                    );
+                }
+                if clear.clicked() {
+                    menu.center_secondary_action = None;
+                }
             }
             after_action_combo(
                 ui,
                 "Secondary after action",
                 &mut menu.center_secondary_after_action,
+                ui_pass,
             );
             ui.small(if menu.center_action.is_some() {
                 "Primary action assigned"
@@ -10520,40 +11735,66 @@ fn menu_behavior_controls(
         "Background mappings",
         &format!("menu:{}:background-mappings", menu.id),
         expanded_sections,
+        ui_pass.child_jump("sections"),
         |ui| {
             let before = menu.background_control;
-            optional_control_combo(ui, "Primary control", &mut menu.background_control);
+            optional_control_combo(ui, "Primary control", &mut menu.background_control, ui_pass);
             if menu.background_control.is_some() && menu.background_control != before {
                 menu.background_action = None;
             }
-            if menu.background_action.is_some() && ui.button("Clear primary action").clicked() {
-                menu.background_action = None;
+            if menu.background_action.is_some() {
+                let clear = ui.button("Clear primary action");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &clear,
+                        "background-clear-primary",
+                        "Clear primary action",
+                        TargetKind::Button,
+                    );
+                }
+                if clear.clicked() {
+                    menu.background_action = None;
+                }
             }
             after_action_combo(
                 ui,
                 "Primary after action",
                 &mut menu.background_primary_after_action,
+                ui_pass,
             );
             let before = menu.background_secondary_control;
             optional_control_combo(
                 ui,
                 "Secondary control",
                 &mut menu.background_secondary_control,
+                ui_pass,
             );
             if menu.background_secondary_control.is_some()
                 && menu.background_secondary_control != before
             {
                 menu.background_secondary_action = None;
             }
-            if menu.background_secondary_action.is_some()
-                && ui.button("Clear secondary action").clicked()
-            {
-                menu.background_secondary_action = None;
+            if menu.background_secondary_action.is_some() {
+                let clear = ui.button("Clear secondary action");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &clear,
+                        "background-clear-secondary",
+                        "Clear secondary action",
+                        TargetKind::Button,
+                    );
+                }
+                if clear.clicked() {
+                    menu.background_secondary_action = None;
+                }
             }
             after_action_combo(
                 ui,
                 "Secondary after action",
                 &mut menu.background_secondary_after_action,
+                ui_pass,
             );
             ui.small(if menu.background_action.is_some() {
                 "Primary action assigned"
@@ -10575,18 +11816,46 @@ fn enum_combo<T: Copy + PartialEq>(
     label: &str,
     value: &mut T,
     choices: &[(&str, T)],
+    ui_pass: &mut RadialUiPass,
 ) {
     let selected = choices
         .iter()
         .find(|(_, item)| item == value)
         .map_or("Unknown", |(label, _)| *label);
-    egui::ComboBox::from_label(label)
+    let combo_identity = format!("combo/{:016x}", ui.make_persistent_id(label).value());
+    let combo_jump = ui_pass
+        .jump
+        .as_ref()
+        .map(|pass| pass.child("combos").combo_popup(&combo_identity));
+    let combo = egui::ComboBox::from_label(label)
         .selected_text(selected)
         .show_ui(ui, |ui| {
-            for (label, choice) in choices {
-                ui.selectable_value(value, *choice, *label);
+            for (index, (label, choice)) in choices.iter().enumerate() {
+                let option = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(ui.id().with(("radial-enum-option", index))),
+                        |ui| ui.selectable_value(value, *choice, *label),
+                    )
+                    .inner;
+                register_radial_combo_option(
+                    combo_jump.as_ref(),
+                    ui,
+                    &option,
+                    &format!("{combo_identity}/option/{index}"),
+                    "Choice",
+                );
             }
         });
+    register_radial_combo_anchor(ui_pass, &combo.response, &combo_identity, "Choice selector");
+    if let Some(pass) = ui_pass.jump.as_ref().map(|pass| pass.child("combos")) {
+        pass.register(
+            ui,
+            &combo.response,
+            &combo_identity,
+            "Choice selector",
+            TargetKind::ComboBox,
+        );
+    }
 }
 
 const AFTER_ACTION_CHOICES: [(&str, AfterActionPolicy); 4] = [
@@ -10596,24 +11865,51 @@ const AFTER_ACTION_CHOICES: [(&str, AfterActionPolicy); 4] = [
     ("Close tree", AfterActionPolicy::CloseTree),
 ];
 
-fn after_action_combo(ui: &mut egui::Ui, label: &str, value: &mut AfterActionPolicy) {
-    enum_combo(ui, label, value, &AFTER_ACTION_CHOICES);
+fn after_action_combo(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut AfterActionPolicy,
+    ui_pass: &mut RadialUiPass,
+) {
+    enum_combo(ui, label, value, &AFTER_ACTION_CHOICES, ui_pass);
 }
 
 fn traced_menu_after_action_combo(
     ui: &mut egui::Ui,
     value: &mut AfterActionPolicy,
     correlation: Correlation,
+    ui_pass: &mut RadialUiPass,
 ) {
     let selected = AFTER_ACTION_CHOICES
         .iter()
         .find(|(_, choice)| choice == value)
         .map_or("Unknown", |(label, _)| *label);
+    let combo_identity = format!(
+        "combo/{:016x}",
+        ui.make_persistent_id("Menu after action").value()
+    );
+    let combo_jump = ui_pass
+        .jump
+        .as_ref()
+        .map(|pass| pass.child("combos").combo_popup(&combo_identity));
     let response = egui::ComboBox::from_label("Menu after action")
         .selected_text(selected)
         .show_ui(ui, |ui| {
             for (index, (label, choice)) in AFTER_ACTION_CHOICES.iter().copied().enumerate() {
-                let option = ui.selectable_value(value, choice, label);
+                let option = ui
+                    .scope_builder(
+                        egui::UiBuilder::new()
+                            .id(ui.id().with(("radial-after-action-option", index))),
+                        |ui| ui.selectable_value(value, choice, label),
+                    )
+                    .inner;
+                register_radial_combo_option(
+                    combo_jump.as_ref(),
+                    ui,
+                    &option,
+                    &format!("{combo_identity}/option/{index}"),
+                    "After action option",
+                );
                 trace_designer_authoring_control(
                     ui,
                     &option,
@@ -10627,6 +11923,21 @@ fn traced_menu_after_action_combo(
                 );
             }
         });
+    register_radial_combo_anchor(
+        ui_pass,
+        &response.response,
+        &combo_identity,
+        "After action selector",
+    );
+    if let Some(pass) = ui_pass.jump.as_ref().map(|pass| pass.child("combos")) {
+        pass.register(
+            ui,
+            &response.response,
+            &combo_identity,
+            "After action selector",
+            TargetKind::ComboBox,
+        );
+    }
     if !acceptance_trace::enabled() {
         return;
     }
@@ -10648,7 +11959,12 @@ fn traced_menu_after_action_combo(
     );
 }
 
-fn optional_control_combo(ui: &mut egui::Ui, label: &str, value: &mut Option<Control>) {
+fn optional_control_combo(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut Option<Control>,
+    ui_pass: &mut RadialUiPass,
+) {
     enum_combo(
         ui,
         label,
@@ -10661,6 +11977,7 @@ fn optional_control_combo(ui: &mut egui::Ui, label: &str, value: &mut Option<Con
             ("Previous page", Some(Control::PreviousPage)),
             ("Drag", Some(Control::Drag)),
         ],
+        ui_pass,
     );
 }
 
@@ -10669,20 +11986,51 @@ fn cell_content_controls(
     document: &RadialDocument,
     cell: &mut crate::radial::model::CellDefinition,
     expanded_sections: &mut std::collections::BTreeMap<String, bool>,
+    ui_pass: &mut RadialUiPass,
 ) -> Option<ContinuousWidgetEdit> {
+    let jump = ui_pass.jump.clone();
     let mut continuous = None;
-    if ui.button("Dynamic source").clicked() && !matches!(cell.content, CellContent::Dynamic { .. })
-    {
+    let dynamic_source = ui.button("Dynamic source");
+    if let Some(jump) = jump.as_ref() {
+        jump.register(
+            ui,
+            &dynamic_source,
+            "content/dynamic-source",
+            "Dynamic source",
+            TargetKind::Button,
+        );
+    }
+    if dynamic_source.clicked() && !matches!(cell.content, CellContent::Dynamic { .. }) {
         cell.content = CellContent::Dynamic {
             source: DynamicSource::Favorites,
         };
     }
-    if ui.button("Control").clicked() && !matches!(cell.content, CellContent::Control { .. }) {
+    let control = ui.button("Control");
+    if let Some(jump) = jump.as_ref() {
+        jump.register(
+            ui,
+            &control,
+            "content/control",
+            "Control content",
+            TargetKind::Button,
+        );
+    }
+    if control.clicked() && !matches!(cell.content, CellContent::Control { .. }) {
         cell.content = CellContent::Control {
             control: Control::Back,
         };
     }
-    if ui.button("Submenu").clicked()
+    let submenu = ui.button("Submenu");
+    if let Some(jump) = jump.as_ref() {
+        jump.register(
+            ui,
+            &submenu,
+            "content/submenu",
+            "Submenu content",
+            TargetKind::Button,
+        );
+    }
+    if submenu.clicked()
         && !matches!(cell.content, CellContent::Submenu { .. })
         && let Some(menu) = document.menus.first()
     {
@@ -10710,6 +12058,7 @@ fn cell_content_controls(
                     ("Launcher results", 9),
                     ("Launcher query", 10),
                 ],
+                ui_pass,
             );
             if key != dynamic_source_key(source) {
                 *source = dynamic_source_for_key(key);
@@ -10721,12 +12070,30 @@ fn cell_content_controls(
                             .prefix("Maximum ")
                             .range(1..=100),
                     );
+                    if let Some(jump) = jump.as_ref() {
+                        jump.register(
+                            ui,
+                            &response,
+                            "dynamic/max-items",
+                            "Maximum results",
+                            TargetKind::Slider,
+                        );
+                    }
                     continuous = continuous_widget_edit(&response, "dynamic.max_items");
                 }
                 DynamicSource::LauncherQuery { query, max_items } => {
                     let query_response = ui
                         .text_edit_singleline(query)
                         .on_hover_text("Read-only launcher query");
+                    if let Some(jump) = jump.as_ref() {
+                        jump.register(
+                            ui,
+                            &query_response,
+                            "dynamic/query",
+                            "Launcher query",
+                            TargetKind::TextEntry,
+                        );
+                    }
                     set_first_edit(
                         &mut continuous,
                         continuous_widget_edit(&query_response, "dynamic.query"),
@@ -10736,6 +12103,15 @@ fn cell_content_controls(
                             .prefix("Maximum ")
                             .range(1..=100),
                     );
+                    if let Some(jump) = jump.as_ref() {
+                        jump.register(
+                            ui,
+                            &maximum_response,
+                            "dynamic/max-items",
+                            "Maximum results",
+                            TargetKind::Slider,
+                        );
+                    }
                     set_first_edit(
                         &mut continuous,
                         continuous_widget_edit(&maximum_response, "dynamic.max_items"),
@@ -10756,9 +12132,18 @@ fn cell_content_controls(
                 ("Previous page", Control::PreviousPage),
                 ("Drag", Control::Drag),
             ],
+            ui_pass,
         ),
         CellContent::Submenu { menu_id } => {
-            egui::ComboBox::from_label("Link existing submenu")
+            let combo_identity = format!(
+                "combo/{:016x}",
+                ui.make_persistent_id("Link existing submenu").value()
+            );
+            let combo_jump = ui_pass
+                .jump
+                .as_ref()
+                .map(|pass| pass.child("combos").combo_popup(&combo_identity));
+            let submenu_combo = egui::ComboBox::from_label("Link existing submenu")
                 .selected_text(
                     document
                         .menus
@@ -10768,9 +12153,37 @@ fn cell_content_controls(
                 )
                 .show_ui(ui, |ui| {
                     for menu in &document.menus {
-                        ui.selectable_value(menu_id, menu.id.clone(), &menu.name);
+                        let option = ui
+                            .scope_builder(
+                                egui::UiBuilder::new().id(ui.id().with((
+                                    "radial-submenu-option",
+                                    radial_value_digest(&menu.id),
+                                ))),
+                                |ui| ui.selectable_value(menu_id, menu.id.clone(), &menu.name),
+                            )
+                            .inner;
+                        register_radial_combo_option(
+                            combo_jump.as_ref(),
+                            ui,
+                            &option,
+                            &format!(
+                                "{combo_identity}/option/{:016x}",
+                                radial_value_digest(&menu.id)
+                            ),
+                            "Submenu option",
+                        );
                     }
                 });
+            ui_pass.record_combo(&submenu_combo.response);
+            if let Some(jump) = ui_pass.jump.as_ref() {
+                jump.register(
+                    ui,
+                    &submenu_combo.response,
+                    &combo_identity,
+                    "Link existing submenu",
+                    TargetKind::ComboBox,
+                );
+            }
             ui.small("Use ‘Duplicate subtree’ on the linked menu to create an independent reusable submenu graph.");
         }
         CellContent::Action { .. } => {
@@ -10785,6 +12198,7 @@ fn cell_content_controls(
         "Alternate clicks and controls",
         &format!("cell:{}:alternate-controls", cell.id),
         expanded_sections,
+        ui_pass.child_jump("sections"),
         |ui| {
             let mut remove_click = None;
             for (index, binding) in cell.alternate_clicks.iter_mut().enumerate() {
@@ -10808,8 +12222,9 @@ fn cell_content_controls(
                             crate::radial::model::ClickGesture::AltPrimary,
                         ),
                     ],
+                    ui_pass,
                 );
-                after_action_combo(ui, "After action", &mut binding.after_action);
+                after_action_combo(ui, "After action", &mut binding.after_action, ui_pass);
                 if ui.button("Remove alternate action").clicked() {
                     remove_click = Some(index);
                 }
@@ -10830,6 +12245,7 @@ fn cell_content_controls(
                             crate::radial::model::ClickGesture::CtrlPrimary,
                         ),
                     ],
+                    ui_pass,
                 );
                 enum_combo(
                     ui,
@@ -10840,6 +12256,7 @@ fn cell_content_controls(
                         ("Close", Control::Close),
                         ("Drag", Control::Drag),
                     ],
+                    ui_pass,
                 );
                 if ui.button("Remove alternate control").clicked() {
                     remove_control = Some(index);
@@ -10930,28 +12347,64 @@ fn cell_media_controls(
     menu_id: &MenuId,
     ring_id: &RingId,
     cell_id: &CellId,
+    ui_pass: &mut RadialUiPass,
 ) -> Option<ContinuousWidgetEdit> {
     use crate::radial::model::{MediaKind, MediaReference, Override};
+    let jump = ui_pass.jump.clone();
     let mut continuous = None;
     persisted_section(
         ui,
         "Icon and tooltip",
         &format!("cell:{}:icon-tooltip", cell.id),
         expanded_sections,
+        ui_pass.child_jump("sections"),
         |ui| {
             ui.horizontal(|ui| {
                 ui.label("Tooltip");
-                if ui.button("Inherit").clicked() {
+                let inherit = ui.button("Inherit");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &inherit,
+                        "tooltip/inherit",
+                        "Inherit tooltip",
+                        TargetKind::Button,
+                    );
+                }
+                if inherit.clicked() {
                     cell.tooltip = Override::Inherit;
                 }
-                if ui.button("Clear").clicked() {
+                let clear = ui.button("Clear");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &clear,
+                        "tooltip/clear",
+                        "Clear tooltip",
+                        TargetKind::Button,
+                    );
+                }
+                if clear.clicked() {
                     cell.tooltip = Override::Clear;
                 }
-                if ui.button("Set").clicked() && !matches!(cell.tooltip, Override::Value(_)) {
+                let set = ui.button("Set");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(ui, &set, "tooltip/set", "Set tooltip", TargetKind::Button);
+                }
+                if set.clicked() && !matches!(cell.tooltip, Override::Value(_)) {
                     cell.tooltip = Override::Value(cell.label.clone());
                 }
                 if let Override::Value(value) = &mut cell.tooltip {
                     let response = ui.text_edit_singleline(value);
+                    if let Some(jump) = jump.as_ref() {
+                        jump.register(
+                            ui,
+                            &response,
+                            "tooltip/text",
+                            "Tooltip text",
+                            TargetKind::TextEntry,
+                        );
+                    }
                     set_first_edit(
                         &mut continuous,
                         continuous_widget_edit(&response, "tooltip"),
@@ -10960,13 +12413,37 @@ fn cell_media_controls(
             });
             ui.horizontal(|ui| {
                 ui.label("Icon");
-                if ui.button("Inherit").clicked() {
+                let inherit = ui.button("Inherit");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &inherit,
+                        "icon/inherit",
+                        "Inherit icon",
+                        TargetKind::Button,
+                    );
+                }
+                if inherit.clicked() {
                     cell.icon = Override::Inherit;
                 }
-                if ui.button("Clear").clicked() {
+                let clear = ui.button("Clear");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(ui, &clear, "icon/clear", "Clear icon", TargetKind::Button);
+                }
+                if clear.clicked() {
                     cell.icon = Override::Clear;
                 }
-                if ui.button("External file").clicked() {
+                let external = ui.button("External file");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &external,
+                        "icon/external-file",
+                        "Choose external icon",
+                        TargetKind::Button,
+                    );
+                }
+                if external.clicked() {
                     intent_bridge.enqueue_file_dialog(
                         DesignerFileDialogRequest::CellExternalIcon {
                             menu_id: menu_id.clone(),
@@ -10975,12 +12452,32 @@ fn cell_media_controls(
                         },
                     );
                 }
-                if ui.button("Search path").clicked() {
+                let search_path = ui.button("Search path");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &search_path,
+                        "icon/search-path",
+                        "Use icon search path",
+                        TargetKind::Button,
+                    );
+                }
+                if search_path.clicked() {
                     cell.icon = Override::Value(MediaReference::SearchPath {
                         file_name: "icon.png".into(),
                     });
                 }
-                if ui.button("Icon resource").clicked() {
+                let icon_resource = ui.button("Icon resource");
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &icon_resource,
+                        "icon/resource",
+                        "Use icon resource",
+                        TargetKind::Button,
+                    );
+                }
+                if icon_resource.clicked() {
                     cell.icon = Override::Value(MediaReference::IconResource {
                         path: "shell32.dll".into(),
                         index: 1,
@@ -10998,13 +12495,53 @@ fn cell_media_controls(
                     Override::Value(MediaReference::Managed { asset_id }) => Some(asset_id.clone()),
                     _ => None,
                 };
-                egui::ComboBox::from_label("Managed icon")
+                let combo_identity = format!(
+                    "combo/{:016x}",
+                    ui.make_persistent_id("Managed icon").value()
+                );
+                let combo_jump = ui_pass
+                    .jump
+                    .as_ref()
+                    .map(|pass| pass.child("combos").combo_popup(&combo_identity));
+                let managed_icon_combo = egui::ComboBox::from_label("Managed icon")
                     .selected_text(selected.as_ref().map_or("Choose asset", |id| id.as_str()))
                     .show_ui(ui, |ui| {
                         for id in managed {
-                            ui.selectable_value(&mut selected, Some(id.clone()), id.as_str());
+                            let choice = Some(id.clone());
+                            let choice_identity = radial_value_digest(&choice);
+                            let option = ui
+                                .scope_builder(
+                                    egui::UiBuilder::new().id(ui
+                                        .id()
+                                        .with(("radial-managed-icon-option", choice_identity))),
+                                    |ui| {
+                                        ui.selectable_value(
+                                            &mut selected,
+                                            choice.clone(),
+                                            id.as_str(),
+                                        )
+                                    },
+                                )
+                                .inner;
+                            register_radial_combo_option(
+                                combo_jump.as_ref(),
+                                ui,
+                                &option,
+                                &format!("{combo_identity}/option/{choice_identity:016x}"),
+                                "Managed icon option",
+                            );
                         }
                     });
+                ui_pass.record_combo(&managed_icon_combo.response);
+                if let Some(jump) = ui_pass.jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &managed_icon_combo.response,
+                        &combo_identity,
+                        "Managed icon selector",
+                        TargetKind::ComboBox,
+                    );
+                }
                 if let Some(asset_id) = selected {
                     cell.icon = Override::Value(MediaReference::Managed { asset_id });
                 }
@@ -11012,6 +12549,15 @@ fn cell_media_controls(
             match &mut cell.icon {
                 Override::Value(MediaReference::SearchPath { file_name }) => {
                     let response = ui.text_edit_singleline(file_name);
+                    if let Some(jump) = jump.as_ref() {
+                        jump.register(
+                            ui,
+                            &response,
+                            "icon/search-path-name",
+                            "Search path file name",
+                            TargetKind::TextEntry,
+                        );
+                    }
                     set_first_edit(
                         &mut continuous,
                         continuous_widget_edit(&response, "icon.search_path"),
@@ -11019,6 +12565,15 @@ fn cell_media_controls(
                 }
                 Override::Value(MediaReference::ExternalFile { path }) => {
                     let response = ui.text_edit_singleline(path);
+                    if let Some(jump) = jump.as_ref() {
+                        jump.register(
+                            ui,
+                            &response,
+                            "icon/external-path",
+                            "External icon path",
+                            TargetKind::TextEntry,
+                        );
+                    }
                     set_first_edit(
                         &mut continuous,
                         continuous_widget_edit(&response, "icon.external_path"),
@@ -11026,12 +12581,30 @@ fn cell_media_controls(
                 }
                 Override::Value(MediaReference::IconResource { path, index }) => {
                     let path_response = ui.text_edit_singleline(path);
+                    if let Some(jump) = jump.as_ref() {
+                        jump.register(
+                            ui,
+                            &path_response,
+                            "icon/resource-path",
+                            "Icon resource path",
+                            TargetKind::TextEntry,
+                        );
+                    }
                     set_first_edit(
                         &mut continuous,
                         continuous_widget_edit(&path_response, "icon.resource_path"),
                     );
                     let index_response =
                         ui.add(egui::DragValue::new(index).prefix("Resource index "));
+                    if let Some(jump) = jump.as_ref() {
+                        jump.register(
+                            ui,
+                            &index_response,
+                            "icon/resource-index",
+                            "Icon resource index",
+                            TargetKind::Slider,
+                        );
+                    }
                     set_first_edit(
                         &mut continuous,
                         continuous_widget_edit(&index_response, "icon.resource_index"),
@@ -11049,38 +12622,81 @@ fn cell_trigger_controls(
     session: &mut RadialAuthoringSession,
     cell: &mut crate::radial::model::CellDefinition,
     expanded_sections: &mut std::collections::BTreeMap<String, bool>,
+    ui_pass: &mut RadialUiPass,
 ) -> Option<ContinuousWidgetEdit> {
+    let jump = ui_pass.jump.clone();
     let mut continuous = None;
     persisted_section(
         ui,
         "Shortcuts and hotstrings",
         &format!("cell:{}:shortcuts-hotstrings", cell.id),
         expanded_sections,
+        ui_pass.child_jump("sections"),
         |ui| {
             let mut remove_shortcut = None;
             for (index, shortcut) in cell.shortcuts.iter_mut().enumerate() {
-                let response = ui.text_edit_singleline(&mut shortcut.chord);
-                set_first_edit(
-                    &mut continuous,
-                    continuous_widget_edit(&response, format!("shortcut:{}.chord", shortcut.id)),
+                let shortcut_identity = radial_value_digest(&shortcut.id);
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .id(ui.id().with(("radial-shortcut-row", shortcut_identity))),
+                    |ui| {
+                        let response = ui.text_edit_singleline(&mut shortcut.chord);
+                        if let Some(jump) = jump.as_ref() {
+                            jump.register(
+                                ui,
+                                &response,
+                                &format!("shortcut/{shortcut_identity:016x}/chord"),
+                                "Shortcut chord",
+                                TargetKind::TextEntry,
+                            );
+                        }
+                        set_first_edit(
+                            &mut continuous,
+                            continuous_widget_edit(
+                                &response,
+                                format!("shortcut:{}.chord", shortcut.id),
+                            ),
+                        );
+                        enum_combo(
+                            ui,
+                            "Scope",
+                            &mut shortcut.scope,
+                            &[
+                                ("Menu local", crate::radial::model::TriggerScope::MenuLocal),
+                                ("Global", crate::radial::model::TriggerScope::Global),
+                            ],
+                            ui_pass,
+                        );
+                        let remove = ui.button("Remove shortcut");
+                        if let Some(jump) = jump.as_ref() {
+                            jump.register(
+                                ui,
+                                &remove,
+                                &format!("shortcut/{shortcut_identity:016x}/remove"),
+                                "Remove shortcut",
+                                TargetKind::Button,
+                            );
+                        }
+                        if remove.clicked() {
+                            remove_shortcut = Some(index);
+                        }
+                    },
                 );
-                enum_combo(
-                    ui,
-                    "Scope",
-                    &mut shortcut.scope,
-                    &[
-                        ("Menu local", crate::radial::model::TriggerScope::MenuLocal),
-                        ("Global", crate::radial::model::TriggerScope::Global),
-                    ],
-                );
-                if ui.button("Remove shortcut").clicked() {
-                    remove_shortcut = Some(index);
-                }
             }
             if let Some(index) = remove_shortcut {
                 cell.shortcuts.remove(index);
             }
-            if ui.button("Add shortcut").clicked() {
+            let add_shortcut = ui.button("Add shortcut");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &add_shortcut,
+                    "shortcut/add",
+                    "Add shortcut",
+                    TargetKind::Button,
+                );
+            }
+            if add_shortcut.clicked() {
                 cell.shortcuts.push(crate::radial::model::ItemShortcut {
                     id: session.allocate_shortcut_id("shortcut"),
                     chord: "Ctrl+Alt+1".into(),
@@ -11090,29 +12706,79 @@ fn cell_trigger_controls(
             }
             let mut remove_hotstring = None;
             for (index, hotstring) in cell.hotstrings.iter_mut().enumerate() {
-                let response = ui.text_edit_singleline(&mut hotstring.text);
-                set_first_edit(
-                    &mut continuous,
-                    continuous_widget_edit(&response, format!("hotstring:{}.text", hotstring.id)),
+                let hotstring_identity = radial_value_digest(&hotstring.id);
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .id(ui.id().with(("radial-hotstring-row", hotstring_identity))),
+                    |ui| {
+                        let response = ui.text_edit_singleline(&mut hotstring.text);
+                        if let Some(jump) = jump.as_ref() {
+                            jump.register(
+                                ui,
+                                &response,
+                                &format!("hotstring/{hotstring_identity:016x}/text"),
+                                "Hotstring text",
+                                TargetKind::TextEntry,
+                            );
+                        }
+                        set_first_edit(
+                            &mut continuous,
+                            continuous_widget_edit(
+                                &response,
+                                format!("hotstring:{}.text", hotstring.id),
+                            ),
+                        );
+                        let case_sensitive =
+                            ui.checkbox(&mut hotstring.case_sensitive, "Case sensitive");
+                        if let Some(jump) = jump.as_ref() {
+                            jump.register(
+                                ui,
+                                &case_sensitive,
+                                &format!("hotstring/{hotstring_identity:016x}/case-sensitive"),
+                                "Hotstring case sensitivity",
+                                TargetKind::Checkbox,
+                            );
+                        }
+                        enum_combo(
+                            ui,
+                            "Scope",
+                            &mut hotstring.scope,
+                            &[
+                                ("Menu local", crate::radial::model::TriggerScope::MenuLocal),
+                                ("Global", crate::radial::model::TriggerScope::Global),
+                            ],
+                            ui_pass,
+                        );
+                        let remove = ui.button("Remove hotstring");
+                        if let Some(jump) = jump.as_ref() {
+                            jump.register(
+                                ui,
+                                &remove,
+                                &format!("hotstring/{hotstring_identity:016x}/remove"),
+                                "Remove hotstring",
+                                TargetKind::Button,
+                            );
+                        }
+                        if remove.clicked() {
+                            remove_hotstring = Some(index);
+                        }
+                    },
                 );
-                ui.checkbox(&mut hotstring.case_sensitive, "Case sensitive");
-                enum_combo(
-                    ui,
-                    "Scope",
-                    &mut hotstring.scope,
-                    &[
-                        ("Menu local", crate::radial::model::TriggerScope::MenuLocal),
-                        ("Global", crate::radial::model::TriggerScope::Global),
-                    ],
-                );
-                if ui.button("Remove hotstring").clicked() {
-                    remove_hotstring = Some(index);
-                }
             }
             if let Some(index) = remove_hotstring {
                 cell.hotstrings.remove(index);
             }
-            if ui.button("Add hotstring").clicked() {
+            let add_hotstring = ui.button("Add hotstring");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &add_hotstring,
+                    "hotstring/add",
+                    "Add hotstring",
+                    TargetKind::Button,
+                );
+            }
+            if add_hotstring.clicked() {
                 cell.hotstrings.push(crate::radial::model::ItemHotstring {
                     id: session.allocate_hotstring_id("hotstring"),
                     text: ";radial".into(),
@@ -11130,7 +12796,9 @@ fn document_rule_controls(
     ui: &mut egui::Ui,
     session: &mut RadialAuthoringSession,
     expanded_sections: &mut std::collections::BTreeMap<String, bool>,
+    ui_pass: &mut RadialUiPass,
 ) {
+    let jump = ui_pass.jump.clone();
     let mut document = (*session.draft).clone();
     let original = document.clone();
     let mut continuous: Option<(String, ContinuousWidgetEdit)> = None;
@@ -11144,65 +12812,174 @@ fn document_rule_controls(
         "Context rules",
         "document:context-rules",
         expanded_sections,
+        ui_pass.child_jump("sections"),
         |ui| {
             let mut remove = None;
             for (index, rule) in document.context_rules.iter_mut().enumerate() {
-                ui.group(|ui| {
-                    ui.checkbox(&mut rule.enabled, "Enabled");
-                    let priority_response =
-                        ui.add(egui::DragValue::new(&mut rule.priority).prefix("Priority "));
-                    set_first_edit(
-                        &mut continuous,
-                        continuous_widget_edit(&priority_response, "priority")
-                            .map(|edit| (format!("context-rule:{}", rule.id), edit)),
-                    );
-                    ui.label(format!("ID: {}", rule.id));
-                    let entity = format!("context-rule:{}", rule.id);
-                    let process_edit =
-                        optional_text(ui, "Process", &mut rule.process_name).map(|signals| {
-                            ContinuousWidgetEdit {
+                let rule_digest = radial_value_digest(&rule.id);
+                let rule_identity = format!("context-rule/{rule_digest:016x}");
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .id(ui.id().with(("radial-context-rule-row", rule_digest))),
+                    |ui| {
+                        ui.group(|ui| {
+                            let enabled = ui.checkbox(&mut rule.enabled, "Enabled");
+                            if let Some(jump) = jump.as_ref() {
+                                jump.register(
+                                    ui,
+                                    &enabled,
+                                    &format!("{rule_identity}/enabled"),
+                                    "Context rule enabled",
+                                    TargetKind::Checkbox,
+                                );
+                            }
+                            let priority_response = ui
+                                .add(egui::DragValue::new(&mut rule.priority).prefix("Priority "));
+                            if let Some(jump) = jump.as_ref() {
+                                jump.register(
+                                    ui,
+                                    &priority_response,
+                                    &format!("{rule_identity}/priority"),
+                                    "Context rule priority",
+                                    TargetKind::Slider,
+                                );
+                            }
+                            set_first_edit(
+                                &mut continuous,
+                                continuous_widget_edit(&priority_response, "priority")
+                                    .map(|edit| (rule_identity.clone(), edit)),
+                            );
+                            ui.label(format!("ID: {}", rule.id));
+                            let process_edit = optional_text(
+                                ui,
+                                "Process",
+                                &mut rule.process_name,
+                                jump.as_ref(),
+                                &rule_identity,
+                                "process",
+                            )
+                            .map(|signals| ContinuousWidgetEdit {
                                 field: "process_name".into(),
                                 signals,
-                            }
-                        });
-                    set_first_edit(
-                        &mut continuous,
-                        process_edit.map(|edit| (entity.clone(), edit)),
-                    );
-                    let title_edit =
-                        optional_text(ui, "Window title contains", &mut rule.window_title_contains)
+                            });
+                            set_first_edit(
+                                &mut continuous,
+                                process_edit.map(|edit| (rule_identity.clone(), edit)),
+                            );
+                            let title_edit = optional_text(
+                                ui,
+                                "Window title contains",
+                                &mut rule.window_title_contains,
+                                jump.as_ref(),
+                                &rule_identity,
+                                "window-title",
+                            )
                             .map(|signals| ContinuousWidgetEdit {
                                 field: "window_title_contains".into(),
                                 signals,
                             });
-                    set_first_edit(
-                        &mut continuous,
-                        title_edit.map(|edit| (entity.clone(), edit)),
-                    );
-                    let monitor_edit =
-                        optional_text(ui, "Monitor ID", &mut rule.monitor_id).map(|signals| {
-                            ContinuousWidgetEdit {
+                            set_first_edit(
+                                &mut continuous,
+                                title_edit.map(|edit| (rule_identity.clone(), edit)),
+                            );
+                            let monitor_edit = optional_text(
+                                ui,
+                                "Monitor ID",
+                                &mut rule.monitor_id,
+                                jump.as_ref(),
+                                &rule_identity,
+                                "monitor",
+                            )
+                            .map(|signals| ContinuousWidgetEdit {
                                 field: "monitor_id".into(),
                                 signals,
+                            });
+                            set_first_edit(
+                                &mut continuous,
+                                monitor_edit.map(|edit| (rule_identity.clone(), edit)),
+                            );
+                            let combo_salt = ui.id().with(("context-rule-menu", rule_digest));
+                            let combo_identity =
+                                format!("combo/{:016x}", ui.make_persistent_id(combo_salt).value());
+                            let combo_jump = jump
+                                .as_ref()
+                                .map(|pass| pass.child("combos").combo_popup(&combo_identity));
+                            ui.label("Menu");
+                            let menu_combo = egui::ComboBox::from_id_salt(combo_salt)
+                                .selected_text(rule.menu_id.to_string())
+                                .show_ui(ui, |ui| {
+                                    for (id, name) in &menu_choices {
+                                        let id_digest = radial_value_digest(id);
+                                        let option = ui
+                                            .scope_builder(
+                                                egui::UiBuilder::new().id(ui.id().with((
+                                                    "radial-context-rule-menu-option",
+                                                    id_digest,
+                                                ))),
+                                                |ui| {
+                                                    ui.selectable_value(
+                                                        &mut rule.menu_id,
+                                                        id.clone(),
+                                                        name,
+                                                    )
+                                                },
+                                            )
+                                            .inner;
+                                        register_radial_combo_option(
+                                            combo_jump.as_ref(),
+                                            ui,
+                                            &option,
+                                            &format!("{combo_identity}/option/{id_digest:016x}"),
+                                            "Menu option",
+                                        );
+                                    }
+                                });
+                            register_radial_combo_anchor(
+                                ui_pass,
+                                &menu_combo.response,
+                                &combo_identity,
+                                "Context rule menu",
+                            );
+                            if let Some(jump) = jump.as_ref() {
+                                jump.register(
+                                    ui,
+                                    &menu_combo.response,
+                                    &combo_identity,
+                                    "Context rule menu",
+                                    TargetKind::ComboBox,
+                                );
                             }
-                        });
-                    set_first_edit(&mut continuous, monitor_edit.map(|edit| (entity, edit)));
-                    egui::ComboBox::from_label("Menu")
-                        .selected_text(rule.menu_id.to_string())
-                        .show_ui(ui, |ui| {
-                            for (id, name) in &menu_choices {
-                                ui.selectable_value(&mut rule.menu_id, id.clone(), name);
+                            let remove_button = ui.button("Remove rule");
+                            if let Some(jump) = jump.as_ref() {
+                                jump.register(
+                                    ui,
+                                    &remove_button,
+                                    &format!("{rule_identity}/remove"),
+                                    "Remove context rule",
+                                    TargetKind::Button,
+                                );
                             }
-                        });
-                    if ui.button("Remove rule").clicked() {
-                        remove = Some(index);
-                    }
-                });
+                            if remove_button.clicked() {
+                                remove = Some(index);
+                            }
+                        })
+                    },
+                );
             }
             if let Some(index) = remove {
                 document.context_rules.remove(index);
             }
-            if ui.button("Add context rule").clicked()
+            let add_rule = ui.button("Add context rule");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &add_rule,
+                    "context-rule/add",
+                    "Add context rule",
+                    TargetKind::Button,
+                );
+            }
+            if add_rule.clicked()
                 && let Some(menu) = document.menus.first()
             {
                 let id = session.allocate_context_rule_id("context");
@@ -11226,42 +13003,125 @@ fn document_rule_controls(
         "Custom triggers",
         "document:custom-triggers",
         expanded_sections,
+        ui_pass.child_jump("sections"),
         |ui| {
             let mut remove = None;
             for (index, trigger) in document.custom_triggers.iter_mut().enumerate() {
-                ui.group(|ui| {
-                    ui.label(format!("ID: {}", trigger.id));
-                    let chord_response = ui.text_edit_singleline(&mut trigger.chord);
-                    set_first_edit(
-                        &mut continuous,
-                        continuous_widget_edit(&chord_response, "chord")
-                            .map(|edit| (format!("custom-trigger:{}", trigger.id), edit)),
-                    );
-                    enum_combo(
-                        ui,
-                        "Scope",
-                        &mut trigger.scope,
-                        &[
-                            ("Menu local", crate::radial::model::TriggerScope::MenuLocal),
-                            ("Global", crate::radial::model::TriggerScope::Global),
-                        ],
-                    );
-                    egui::ComboBox::from_label("Menu")
-                        .selected_text(trigger.menu_id.to_string())
-                        .show_ui(ui, |ui| {
-                            for (id, name) in &menu_choices {
-                                ui.selectable_value(&mut trigger.menu_id, id.clone(), name);
+                let trigger_digest = radial_value_digest(&trigger.id);
+                let trigger_identity = format!("custom-trigger/{trigger_digest:016x}");
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .id(ui.id().with(("radial-custom-trigger-row", trigger_digest))),
+                    |ui| {
+                        ui.group(|ui| {
+                            ui.label(format!("ID: {}", trigger.id));
+                            let chord_response = ui.text_edit_singleline(&mut trigger.chord);
+                            if let Some(jump) = jump.as_ref() {
+                                jump.register(
+                                    ui,
+                                    &chord_response,
+                                    &format!("{trigger_identity}/chord"),
+                                    "Custom trigger chord",
+                                    TargetKind::TextEntry,
+                                );
                             }
-                        });
-                    if ui.button("Remove trigger").clicked() {
-                        remove = Some(index);
-                    }
-                });
+                            set_first_edit(
+                                &mut continuous,
+                                continuous_widget_edit(&chord_response, "chord")
+                                    .map(|edit| (trigger_identity.clone(), edit)),
+                            );
+                            enum_combo(
+                                ui,
+                                "Scope",
+                                &mut trigger.scope,
+                                &[
+                                    ("Menu local", crate::radial::model::TriggerScope::MenuLocal),
+                                    ("Global", crate::radial::model::TriggerScope::Global),
+                                ],
+                                ui_pass,
+                            );
+                            let combo_salt = ui.id().with(("custom-trigger-menu", trigger_digest));
+                            let combo_identity =
+                                format!("combo/{:016x}", ui.make_persistent_id(combo_salt).value());
+                            let combo_jump = jump
+                                .as_ref()
+                                .map(|pass| pass.child("combos").combo_popup(&combo_identity));
+                            ui.label("Menu");
+                            let menu_combo = egui::ComboBox::from_id_salt(combo_salt)
+                                .selected_text(trigger.menu_id.to_string())
+                                .show_ui(ui, |ui| {
+                                    for (id, name) in &menu_choices {
+                                        let id_digest = radial_value_digest(id);
+                                        let option = ui
+                                            .scope_builder(
+                                                egui::UiBuilder::new().id(ui.id().with((
+                                                    "radial-custom-trigger-menu-option",
+                                                    id_digest,
+                                                ))),
+                                                |ui| {
+                                                    ui.selectable_value(
+                                                        &mut trigger.menu_id,
+                                                        id.clone(),
+                                                        name,
+                                                    )
+                                                },
+                                            )
+                                            .inner;
+                                        register_radial_combo_option(
+                                            combo_jump.as_ref(),
+                                            ui,
+                                            &option,
+                                            &format!("{combo_identity}/option/{id_digest:016x}"),
+                                            "Menu option",
+                                        );
+                                    }
+                                });
+                            register_radial_combo_anchor(
+                                ui_pass,
+                                &menu_combo.response,
+                                &combo_identity,
+                                "Custom trigger menu",
+                            );
+                            if let Some(jump) = jump.as_ref() {
+                                jump.register(
+                                    ui,
+                                    &menu_combo.response,
+                                    &combo_identity,
+                                    "Custom trigger menu",
+                                    TargetKind::ComboBox,
+                                );
+                            }
+                            let remove_button = ui.button("Remove trigger");
+                            if let Some(jump) = jump.as_ref() {
+                                jump.register(
+                                    ui,
+                                    &remove_button,
+                                    &format!("{trigger_identity}/remove"),
+                                    "Remove custom trigger",
+                                    TargetKind::Button,
+                                );
+                            }
+                            if remove_button.clicked() {
+                                remove = Some(index);
+                            }
+                        })
+                    },
+                );
             }
             if let Some(index) = remove {
                 document.custom_triggers.remove(index);
             }
-            if ui.button("Add custom trigger").clicked()
+            let add_trigger = ui.button("Add custom trigger");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &add_trigger,
+                    "custom-trigger/add",
+                    "Add custom trigger",
+                    TargetKind::Button,
+                );
+            }
+            if add_trigger.clicked()
                 && let Some(menu) = document.menus.first()
             {
                 let id = session.allocate_trigger_id("trigger");
@@ -11283,6 +13143,7 @@ fn document_rule_controls(
         "Media search paths",
         "document:media-search-paths",
         expanded_sections,
+        ui_pass.child_jump("sections"),
         |ui| {
             for (index, root) in document
                 .media_search_roots
@@ -11291,13 +13152,32 @@ fn document_rule_controls(
                 .enumerate()
             {
                 let response = ui.text_edit_singleline(root);
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &response,
+                        &format!("media-search/image-root/{index}"),
+                        "Image search root",
+                        TargetKind::TextEntry,
+                    );
+                }
                 set_first_edit(
                     &mut continuous,
                     continuous_widget_edit(&response, format!("image_directories[{index}]"))
                         .map(|edit| ("media-search-roots".into(), edit)),
                 );
             }
-            if ui.button("Add image search path").clicked() {
+            let add_image_root = ui.button("Add image search path");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &add_image_root,
+                    "media-search/image-root/add",
+                    "Add image search root",
+                    TargetKind::Button,
+                );
+            }
+            if add_image_root.clicked() {
                 document
                     .media_search_roots
                     .image_directories
@@ -11310,22 +13190,50 @@ fn document_rule_controls(
                 .enumerate()
             {
                 let response = ui.text_edit_singleline(root);
+                if let Some(jump) = jump.as_ref() {
+                    jump.register(
+                        ui,
+                        &response,
+                        &format!("media-search/sound-root/{index}"),
+                        "Sound search root",
+                        TargetKind::TextEntry,
+                    );
+                }
                 set_first_edit(
                     &mut continuous,
                     continuous_widget_edit(&response, format!("sound_directories[{index}]"))
                         .map(|edit| ("media-search-roots".into(), edit)),
                 );
             }
-            if ui.button("Add sound search path").clicked() {
+            let add_sound_root = ui.button("Add sound search path");
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &add_sound_root,
+                    "media-search/sound-root/add",
+                    "Add sound search root",
+                    TargetKind::Button,
+                );
+            }
+            if add_sound_root.clicked() {
                 document
                     .media_search_roots
                     .sound_directories
                     .push(String::new());
             }
-            ui.checkbox(
+            let search_windows = ui.checkbox(
                 &mut document.media_search_roots.search_windows_media_for_sounds,
                 "Search Windows media for sounds",
             );
+            if let Some(jump) = jump.as_ref() {
+                jump.register(
+                    ui,
+                    &search_windows,
+                    "media-search/windows-media",
+                    "Search Windows media",
+                    TargetKind::Checkbox,
+                );
+            }
         },
     );
     if document != original || continuous.is_some() {
@@ -11342,15 +13250,37 @@ fn optional_text(
     ui: &mut egui::Ui,
     label: &str,
     value: &mut Option<String>,
+    jump: Option<&RadialJumpPass>,
+    identity: &str,
+    field: &str,
 ) -> Option<WidgetEditSignals> {
     let mut enabled = value.is_some();
     let mut signals = None;
     ui.horizontal(|ui| {
-        if ui.checkbox(&mut enabled, label).changed() {
+        let enabled_response = ui.checkbox(&mut enabled, label);
+        if let Some(jump) = jump {
+            jump.register(
+                ui,
+                &enabled_response,
+                &format!("{identity}/{field}/enabled"),
+                label,
+                TargetKind::Checkbox,
+            );
+        }
+        if enabled_response.changed() {
             *value = enabled.then(String::new);
         }
         if let Some(value) = value.as_mut() {
             let response = ui.text_edit_singleline(value);
+            if let Some(jump) = jump {
+                jump.register(
+                    ui,
+                    &response,
+                    &format!("{identity}/{field}"),
+                    label,
+                    TargetKind::TextEntry,
+                );
+            }
             if response.changed() || response.lost_focus() || response.drag_stopped() {
                 signals = Some(WidgetEditSignals::from_response(&response));
             }
@@ -11663,6 +13593,38 @@ fn acceptance_staged_properties_digest(
 mod tests {
     use super::*;
 
+    fn radial_viewport_test_app(
+        ctx: &egui::Context,
+        root: &std::path::Path,
+    ) -> crate::gui::LauncherApp {
+        let mut settings = crate::settings::Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        settings.dashboard.enabled = false;
+
+        let mut app = crate::gui::LauncherApp::new(
+            ctx,
+            std::sync::Arc::new(Vec::new()),
+            0,
+            crate::plugin::PluginManager::new_inert_for_test(),
+            root.join("actions.json").to_string_lossy().into_owned(),
+            root.join("settings.json").to_string_lossy().into_owned(),
+            settings,
+            None,
+            None,
+            Some(std::collections::HashSet::new()),
+            Some(std::collections::HashMap::new()),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        app.dashboard_initial_refresh_queued = true;
+        app
+    }
+
     fn production_source(source: &str) -> String {
         let normalized = source.replace("\r\n", "\n");
         normalized
@@ -11962,7 +13924,12 @@ mod tests {
                                 .copied()
                                 .unwrap_or(false);
                             rendered_header_id.set(Some(header_id));
-                            editor.tree(ui, &defaults, ViewportClass::Deferred);
+                            editor.tree(
+                                ui,
+                                &defaults,
+                                ViewportClass::Deferred,
+                                &RadialUiPass::default(),
+                            );
                             is_open.set(
                                 egui::collapsing_header::CollapsingState::load_with_default_open(
                                     ui.ctx(),
@@ -13768,7 +15735,11 @@ mod tests {
                             .vertical_scroll_offset(offset)
                             .show(ui, |ui| {
                                 clip = designer_authoring_clip_bounds(ui, client_size);
-                                editor.resources_ui(ui, ViewportClass::Deferred);
+                                editor.resources_ui(
+                                    ui,
+                                    ViewportClass::Deferred,
+                                    &mut RadialUiPass::default(),
+                                );
                             });
                     });
                 },
@@ -13856,6 +15827,7 @@ mod tests {
                             ui,
                             &crate::radial::model::RadialFeatureSettings::default(),
                             ViewportClass::Deferred,
+                            &RadialUiPass::default(),
                         );
                     });
                 },
@@ -14806,7 +16778,9 @@ mod tests {
                     ..Default::default()
                 },
             );
-            context.run_ui(input, |ctx| editor.radial_add_to_menu_ui(ctx))
+            context.run_ui(input, |ctx| {
+                editor.radial_add_to_menu_ui(ctx, &mut RadialUiPass::default())
+            })
         }
 
         fn widget_bounds(
@@ -15048,6 +17022,9 @@ mod tests {
                 require_confirm_destructive: false,
                 intent_bridge: std::sync::Arc::clone(&editor.intent_bridge),
                 root_window_bridge: crate::visibility::RootWindowBridge::default(),
+                navigation_instance: Some(1),
+                jump_mode_enabled: false,
+                application_input_allowed: true,
             };
             Self {
                 context,
@@ -15065,21 +17042,89 @@ mod tests {
             events: Vec<egui::Event>,
             modifiers: egui::Modifiers,
         ) -> egui::FullOutput {
+            self.frame_with_observer(events, modifiers, |_, _| {})
+        }
+
+        fn frame_with_observer(
+            &mut self,
+            events: Vec<egui::Event>,
+            modifiers: egui::Modifiers,
+            mut observe: impl FnMut(&egui::Context, &RadialEditorState),
+        ) -> egui::FullOutput {
             let mut events = events;
             events.push(egui::Event::ModifiersChanged(modifiers));
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1000.0, 720.0),
-                )),
+            let screen_rect =
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 720.0));
+            let viewport_id = radial_designer_viewport_id();
+            let mut input = egui::RawInput {
+                viewport_id,
+                screen_rect: Some(screen_rect),
+                focused: true,
                 events,
                 ..Default::default()
             };
+            input
+                .viewports
+                .insert(egui::ViewportId::ROOT, egui::ViewportInfo::default());
+            input.viewports.insert(
+                viewport_id,
+                egui::ViewportInfo {
+                    parent: Some(egui::ViewportId::ROOT),
+                    focused: Some(true),
+                    inner_rect: Some(screen_rect),
+                    ..Default::default()
+                },
+            );
             let frame = &self.frame;
             let editor = &mut self.editor;
             self.context.run_ui(input, |ctx| {
                 editor.viewport_ui(ctx, frame, egui::ViewportClass::Deferred);
+                observe(ctx.ctx(), editor);
             })
+        }
+
+        fn frame_with_foreground_control(
+            &mut self,
+            mut events: Vec<egui::Event>,
+            modifiers: egui::Modifiers,
+        ) -> (egui::FullOutput, Option<egui::LayerId>) {
+            events.push(egui::Event::ModifiersChanged(modifiers));
+            let screen_rect =
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 720.0));
+            let viewport_id = radial_designer_viewport_id();
+            let mut input = egui::RawInput {
+                viewport_id,
+                screen_rect: Some(screen_rect),
+                focused: true,
+                events,
+                ..Default::default()
+            };
+            input
+                .viewports
+                .insert(egui::ViewportId::ROOT, egui::ViewportInfo::default());
+            input.viewports.insert(
+                viewport_id,
+                egui::ViewportInfo {
+                    parent: Some(egui::ViewportId::ROOT),
+                    focused: Some(true),
+                    inner_rect: Some(screen_rect),
+                    ..Default::default()
+                },
+            );
+            let frame = &self.frame;
+            let editor = &mut self.editor;
+            let mut focused_layer_before_editor = None;
+            let output = self.context.run_ui(input, |ui| {
+                egui::Area::new(egui::Id::new("radial-foreign-foreground-focus"))
+                    .order(egui::Order::Foreground)
+                    .show(ui.ctx(), |ui| {
+                        ui.button("Foreign foreground control").request_focus();
+                    });
+                focused_layer_before_editor =
+                    crate::gui::jump_mode::ui::focused_response_layer(ui.ctx());
+                editor.viewport_ui(ui, frame, egui::ViewportClass::Deferred);
+            });
+            (output, focused_layer_before_editor)
         }
 
         fn frame_in_client(
@@ -15092,12 +17137,26 @@ mod tests {
             let mut input = egui::RawInput {
                 screen_rect: Some(client_rect),
                 time: Some(time),
+                viewport_id: radial_designer_viewport_id(),
+                focused: true,
                 events,
                 ..Default::default()
             };
-            let viewport = input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
-            viewport.inner_rect = Some(client_rect.translate(egui::vec2(240.0, 120.0)));
-            viewport.native_pixels_per_point = Some(1.0);
+            let viewport_id = radial_designer_viewport_id();
+            let viewport_rect = client_rect.translate(egui::vec2(240.0, 120.0));
+            input
+                .viewports
+                .insert(egui::ViewportId::ROOT, egui::ViewportInfo::default());
+            input.viewports.insert(
+                viewport_id,
+                egui::ViewportInfo {
+                    parent: Some(egui::ViewportId::ROOT),
+                    focused: Some(true),
+                    inner_rect: Some(viewport_rect),
+                    native_pixels_per_point: Some(1.0),
+                    ..Default::default()
+                },
+            );
             let frame = &self.frame;
             let editor = &mut self.editor;
             self.context.run_ui(input, |ctx| {
@@ -16206,12 +18265,13 @@ mod tests {
 
         let ctx = egui::Context::default();
         ctx.set_embed_viewports(false);
-        let app = crate::gui::actions::tests::new_app(&ctx);
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let app = radial_viewport_test_app(&ctx, workspace.root());
         let shared = Arc::clone(&app.radial_editor);
         let viewport_id = radial_designer_viewport_id();
         let root_frame = || {
             ctx.run_ui(egui::RawInput::default(), |root| {
-                RadialEditorState::show_deferred(&shared, root, &app);
+                RadialEditorState::show_deferred(&shared, root, &app, None, false, true);
             })
         };
         let initial_builds = app.authoring_catalog_build_count.load(Ordering::SeqCst);
@@ -17149,6 +19209,7 @@ mod tests {
                     &[],
                     "text.color",
                     None,
+                    None,
                 );
                 let _ = style_value_widget(
                     ui,
@@ -17158,6 +19219,7 @@ mod tests {
                     &mut scratch,
                     &[],
                     "text.visible",
+                    None,
                     None,
                 );
             });
@@ -17389,6 +19451,304 @@ mod tests {
     }
 
     #[test]
+    fn jump_mode_radial_tree_selection_only_selects_and_focuses_the_authored_ring() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.tree_visible = true;
+        let menu_id = editor
+            .session
+            .as_ref()
+            .expect("authoring session")
+            .draft
+            .menus[0]
+            .id
+            .clone();
+        editor
+            .preferences
+            .expanded_sections
+            .insert(format!("menu:{menu_id}"), true);
+        let original =
+            std::sync::Arc::clone(&editor.session.as_ref().expect("authoring session").draft);
+        let mut driver = RetainedDesignerDriver::new(editor);
+        driver.frame.jump_mode_enabled = true;
+
+        driver.frame(Vec::new()).drop_without_applying_deltas();
+        let initial_owner = NavigationOwner::Dialog {
+            kind: NavigationDialogKind::RadialDesigner,
+            instance: 1,
+        };
+        assert_eq!(
+            driver.editor.native_jump_mode.frame_navigation_owner(),
+            NavigationOwner::Blocked,
+            "the first retained frame establishes the child viewport owner"
+        );
+        driver.frame(Vec::new()).drop_without_applying_deltas();
+        assert_eq!(
+            driver.editor.native_jump_mode.frame_navigation_owner(),
+            initial_owner,
+            "the following completed frame collects under the exact child owner"
+        );
+        let ring_target = driver
+            .editor
+            .native_jump_mode
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label() == "Ring"
+                    && target.metadata().kind() == crate::gui::jump_mode::TargetKind::Action
+            })
+            .cloned()
+            .expect("visible authored ring has a Select target");
+        assert!(ring_target.eligible());
+        assert!(ring_target.clipped_rect().is_positive());
+
+        let leader = egui::Modifiers::SHIFT;
+        driver
+            .frame_with_modifiers(
+                vec![
+                    key_event(egui::Key::Space, leader, true),
+                    egui::Event::Text(" ".into()),
+                ],
+                leader,
+            )
+            .drop_without_applying_deltas();
+        let hint = driver
+            .editor
+            .native_jump_mode
+            .active_session()
+            .expect("leader starts the viewport hint session")
+            .hint_map()
+            .hint_for(ring_target.id())
+            .expect("the visible ring is in the captured hint map")
+            .as_str()
+            .to_owned();
+        driver
+            .frame_with_modifiers(vec![key_event(egui::Key::Space, leader, false)], leader)
+            .drop_without_applying_deltas();
+        let mut focus_after_selection = None;
+        driver
+            .frame_with_observer(
+                vec![egui::Event::Text(hint)],
+                egui::Modifiers::default(),
+                |ctx, _| {
+                    assert_eq!(
+                        ctx.viewport_id(),
+                        radial_designer_viewport_id(),
+                        "focus is inspected while the retained child viewport is current"
+                    );
+                    focus_after_selection = ctx.memory(|memory| memory.focused());
+                },
+            )
+            .drop_without_applying_deltas();
+
+        let session = driver.editor.session.as_ref().expect("authoring session");
+        let ring = &session.draft.menus[0].rings[0];
+        assert_eq!(
+            session.selection,
+            Some(StableSelection::Ring {
+                menu_id: menu_id.clone(),
+                ring_id: ring.id.clone(),
+            }),
+            "hint completion selects only the authored ring"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&session.draft, &original),
+            "navigation does not replace or publish the document draft"
+        );
+        assert_eq!(session.pending_request, None);
+        assert!(!session.is_dirty());
+        assert_eq!(
+            focus_after_selection,
+            Some(ring_target.response_id()),
+            "Select completion focuses the real ring response in its viewport"
+        );
+        assert!(
+            driver.editor.native_jump_mode.active_session().is_none(),
+            "the completed hint session is retired"
+        );
+    }
+
+    #[test]
+    fn jump_mode_radial_tree_combo_choice_focus_does_not_select_the_option() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        let original_selection = {
+            let session = editor.session.as_mut().unwrap();
+            let menu_id = session.draft.default_menu_id.clone();
+            let first_ring_id = {
+                let document = std::sync::Arc::make_mut(&mut session.draft);
+                let menu = document
+                    .menus
+                    .iter_mut()
+                    .find(|menu| menu.id == menu_id)
+                    .unwrap();
+                let first_ring_id = menu.rings[0].id.clone();
+                menu.rings.push(crate::radial::model::RingDefinition {
+                    id: crate::radial::model::RingId::new("jump-mode-test-second-ring"),
+                    radius: 120.0,
+                    cell_radius: 24.0,
+                    rotation_degrees: 0.0,
+                    gap: 0.0,
+                    cells: Vec::new(),
+                    style: crate::radial::model::RingStyleLayer::default(),
+                });
+                first_ring_id
+            };
+            let selection = StableSelection::Ring {
+                menu_id,
+                ring_id: first_ring_id,
+            };
+            session.select(Some(selection.clone()));
+            selection
+        };
+        let original = std::sync::Arc::clone(&editor.session.as_ref().unwrap().draft);
+        let original_dirty = editor.session.as_ref().unwrap().is_dirty();
+        let mut driver = RetainedDesignerDriver::new(editor);
+        driver.frame.jump_mode_enabled = true;
+
+        driver.frame(Vec::new()).drop_without_applying_deltas();
+        driver.frame(Vec::new()).drop_without_applying_deltas();
+        let combo = driver
+            .editor
+            .native_jump_mode
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label() == "Ring selector"
+                    && target.metadata().kind() == crate::gui::jump_mode::TargetKind::ComboBox
+            })
+            .cloned()
+            .expect("the visible Ring combo is registered from its real response");
+        let combo_point = combo.clipped_rect().center();
+        driver
+            .frame(vec![egui::Event::PointerMoved(combo_point)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(combo_point, true)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(combo_point, false)])
+            .drop_without_applying_deltas();
+        let mut combo_open_in_child = false;
+        driver
+            .frame_with_observer(Vec::new(), egui::Modifiers::default(), |ctx, _| {
+                combo_open_in_child = egui::ComboBox::is_open(ctx, combo.response_id());
+            })
+            .drop_without_applying_deltas();
+        assert!(
+            combo_open_in_child,
+            "the child viewport retains the open combo"
+        );
+
+        let ring_options = driver
+            .editor
+            .native_jump_mode
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| {
+                target.metadata().label() == "Ring option"
+                    && target.metadata().kind() == crate::gui::jump_mode::TargetKind::Selectable
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(ring_options.len(), 2);
+        let option = ring_options
+            .into_iter()
+            .nth(1)
+            .expect("the second real Ring option is registered as focus-only");
+        assert!(option.eligible());
+        assert!(option.clipped_rect().is_positive());
+
+        let leader = egui::Modifiers::SHIFT;
+        driver
+            .frame_with_modifiers(
+                vec![
+                    key_event(egui::Key::Space, leader, true),
+                    egui::Event::Text(" ".into()),
+                ],
+                leader,
+            )
+            .drop_without_applying_deltas();
+        let hint = driver
+            .editor
+            .native_jump_mode
+            .active_session()
+            .expect("the current popup is owned by the child viewport")
+            .hint_map()
+            .hint_for(option.id())
+            .expect("the visible Ring option is in the hint map")
+            .as_str()
+            .to_owned();
+        driver
+            .frame_with_modifiers(vec![key_event(egui::Key::Space, leader, false)], leader)
+            .drop_without_applying_deltas();
+        let mut focused_after_option = None;
+        driver
+            .frame_with_observer(
+                vec![egui::Event::Text(hint)],
+                egui::Modifiers::default(),
+                |ctx, _| focused_after_option = ctx.memory(|memory| memory.focused()),
+            )
+            .drop_without_applying_deltas();
+
+        let session = driver.editor.session.as_ref().expect("authoring session");
+        assert_eq!(session.selection, Some(original_selection));
+        assert!(std::sync::Arc::ptr_eq(&session.draft, &original));
+        assert_eq!(session.pending_request, None);
+        assert_eq!(
+            session.is_dirty(),
+            original_dirty,
+            "focus-only option completion preserves the setup document's dirty state"
+        );
+        assert_eq!(
+            focused_after_option,
+            Some(option.response_id()),
+            "focus-only option completion focuses the actual popup response in its viewport"
+        );
+    }
+
+    #[test]
+    fn jump_mode_radial_tree_foreign_foreground_focus_blocks_native_shortcuts() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.make_dirty_for_test();
+        let mut driver = RetainedDesignerDriver::new(editor);
+        driver.frame.jump_mode_enabled = false;
+        let before = {
+            let session = driver.editor.session.as_ref().unwrap();
+            (
+                std::sync::Arc::clone(&session.draft),
+                session.generation,
+                session.last_error.clone(),
+            )
+        };
+
+        let modifiers = egui::Modifiers::CTRL;
+        let (focus_frame, _) =
+            driver.frame_with_foreground_control(Vec::new(), egui::Modifiers::default());
+        focus_frame.drop_without_applying_deltas();
+        let (output, focused_layer_at_shortcut) = driver.frame_with_foreground_control(
+            vec![key_event(egui::Key::S, modifiers, true)],
+            modifiers,
+        );
+        output.drop_without_applying_deltas();
+        assert_eq!(
+            focused_layer_at_shortcut.map(|layer| layer.order),
+            Some(egui::Order::Foreground),
+            "the foreign response already owns focus before the shortcut is dispatched"
+        );
+        let session = driver.editor.session.as_ref().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&session.draft, &before.0));
+        assert_eq!(session.generation, before.1);
+        assert!(session.is_dirty());
+        assert_eq!(session.last_error, before.2);
+        assert_eq!(session.pending_request, None);
+    }
+
+    #[test]
     fn headless_accesskit_tree_names_a_completely_blank_cell_by_stable_id() {
         let mut document = RadialDocument::starter();
         let cell = &mut document.menus[0].rings[0].cells[0];
@@ -17414,6 +19774,7 @@ mod tests {
                     ui,
                     &crate::radial::model::RadialFeatureSettings::default(),
                     ViewportClass::Deferred,
+                    &RadialUiPass::default(),
                 );
             });
         });

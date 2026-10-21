@@ -6099,7 +6099,14 @@ mod tests {
     ) -> (egui::FullOutput, Arc<egui::DeferredViewportUiCallback>) {
         ctx.set_embed_viewports(false);
         let output = ctx.run_ui(egui::RawInput::default(), |root| {
-            radial_editor::RadialEditorState::show_deferred(&app.radial_editor, root, app);
+            radial_editor::RadialEditorState::show_deferred(
+                &app.radial_editor,
+                root,
+                app,
+                None,
+                false,
+                true,
+            );
         });
         let callback = output
             .viewport_output

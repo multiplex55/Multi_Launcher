@@ -91,6 +91,9 @@ mod tests {
             require_confirm_destructive: false,
             intent_bridge: Arc::clone(&editor.intent_bridge),
             root_window_bridge: Default::default(),
+            navigation_instance: None,
+            jump_mode_enabled: false,
+            application_input_allowed: true,
         };
         let draw = |editor: &mut RadialEditorState| {
             context

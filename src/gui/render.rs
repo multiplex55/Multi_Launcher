@@ -5556,10 +5556,19 @@ impl LauncherApp {
             ed.ui(&ctx, self);
             self.plugin_editor = ed;
         }
+        let radial_navigation_instance = self
+            .jump_mode_ui
+            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::RadialDesigner);
+        let radial_jump_mode_enabled =
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active();
+        let radial_application_input_allowed = self.native_ui_application_input_allowed(&ctx);
         crate::gui::radial_editor::RadialEditorState::show_deferred(
             &self.radial_editor,
             &ctx,
             self,
+            radial_navigation_instance,
+            radial_jump_mode_enabled,
+            radial_application_input_allowed,
         );
         let file_dialog_pending = self
             .radial_editor
