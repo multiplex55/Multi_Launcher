@@ -1,5 +1,6 @@
 //! Explicit preset authoring; the domain store owns validation and atomic writes.
 
+use super::JumpTargets;
 use crate::regex_tester::{
     PresetContent, PresetId, PresetInput, PresetStore, RegexDraft, RegexTestCaseExpectation,
     RegexTestCases,
@@ -13,6 +14,8 @@ pub(super) struct PresetState {
     include_sample: bool,
     include_replacement: bool,
     delete_confirmation: Option<PresetId>,
+    delete_generation: u64,
+    target_generation: u64,
     feedback: Option<Result<&'static str, String>>,
 }
 
@@ -610,18 +613,30 @@ impl PresetState {
             include_sample: false,
             include_replacement: false,
             delete_confirmation: None,
+            delete_generation: 0,
+            target_generation: 0,
             feedback: None,
         }
     }
 
     fn select(&mut self, id: PresetId) {
         if self.selected != Some(id) {
-            self.delete_confirmation = None;
+            if self.delete_confirmation.take().is_some() {
+                self.delete_generation = self.delete_generation.wrapping_add(1);
+            }
             if let Some(preset) = self.store.get(id) {
                 self.selected = Some(id);
                 self.name.clone_from(&preset.name);
             }
         }
+    }
+
+    pub(super) fn target_generation(&self) -> u64 {
+        self.target_generation
+    }
+
+    pub(super) fn has_pending_delete_confirmation(&self) -> bool {
+        self.delete_confirmation.is_some()
     }
 
     fn input(&self, name: String, draft: &RegexDraft) -> PresetInput {
@@ -688,6 +703,7 @@ impl PresetState {
             PresetAction::RequestDelete(id) => {
                 if self.selected == Some(id) && self.store.get(id).is_some() {
                     self.delete_confirmation = Some(id);
+                    self.delete_generation = self.delete_generation.wrapping_add(1);
                 }
                 return false;
             }
@@ -699,6 +715,7 @@ impl PresetState {
                     return false;
                 }
                 self.delete_confirmation = None;
+                self.delete_generation = self.delete_generation.wrapping_add(1);
                 self.store.delete(id).map(|()| {
                     self.selected = None;
                     "Deleted preset"
@@ -706,10 +723,13 @@ impl PresetState {
             }
             PresetAction::CancelDelete => {
                 self.delete_confirmation = None;
+                self.delete_generation = self.delete_generation.wrapping_add(1);
                 return false;
             }
             PresetAction::Reload => {
-                self.delete_confirmation = None;
+                if self.delete_confirmation.take().is_some() {
+                    self.delete_generation = self.delete_generation.wrapping_add(1);
+                }
                 self.store.reload().map(|()| {
                     if self.selected.is_some_and(|id| self.store.get(id).is_none()) {
                         self.selected = None;
@@ -718,12 +738,27 @@ impl PresetState {
                 })
             }
         };
+        if result.is_ok() {
+            self.target_generation = self.target_generation.wrapping_add(1);
+        }
         self.feedback = Some(result.map_err(|error| error.to_string()));
         false
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<PresetAction> {
+        self.show_scoped(ui, &mut JumpTargets::new(None), true)
+    }
+
+    pub fn show_scoped(
+        &mut self,
+        ui: &mut egui::Ui,
+        targets: &mut JumpTargets<'_>,
+        committing: bool,
+    ) -> Option<PresetAction> {
         let mut action = None;
+        let confirmation = self.delete_confirmation;
+        let confirmation_scope = targets.child_popup_scope("regex-preset-confirmation");
+        let mut confirmation_targets = JumpTargets::new(confirmation_scope.as_ref());
         egui::ScrollArea::vertical()
             .id_salt("regex_presets_scroll")
             .auto_shrink([false, false])
@@ -743,24 +778,54 @@ impl PresetState {
                         Err(message) => { ui.colored_label(ui.visuals().error_fg_color, message); }
                     }
                 }
-                if ui.button("Reload presets").clicked() { action = Some(PresetAction::Reload); }
+                let reload = ui.button("Reload presets");
+                if confirmation.is_none() {
+                    targets.button(ui, &reload, "presets/reload", "Reload presets");
+                }
+                if reload.clicked() && committing { action = Some(PresetAction::Reload); }
                 let mut selected = None;
                 for preset in self.store.entries() {
                     ui.push_id(("regex_preset", preset.id.value()), |ui| {
-                        if ui.selectable_label(self.selected == Some(preset.id), &preset.name).clicked() {
+                        let response = ui.selectable_label(self.selected == Some(preset.id), &preset.name);
+                        let identity = format!("presets/select/{}", preset.id.value());
+                        let selected_by_hint = if confirmation.is_none() {
+                            targets.action_selected(ui, &response, identity, "Saved preset", committing)
+                        } else {
+                            false
+                        };
+                        if (response.clicked() && committing) || selected_by_hint {
                             selected = Some(preset.id);
                         }
                     });
                 }
-                if let Some(id) = selected { self.select(id); }
+                if committing && let Some(id) = selected { self.select(id); }
                 if self.store.entries().is_empty() { ui.weak("No saved presets."); }
                 ui.separator();
                 ui.label("Name for Save / Rename:");
-                ui.add(egui::TextEdit::singleline(&mut self.name).id_salt("regex_preset_name").desired_width(ui.available_width()));
-                ui.checkbox(&mut self.include_sample, "Include sample text");
-                ui.checkbox(&mut self.include_replacement, "Include replacement");
+                let mut name = self.name.clone();
+                let name_response = ui.add(egui::TextEdit::singleline(&mut name).id_salt("regex_preset_name").desired_width(ui.available_width()));
+                if confirmation.is_none() {
+                    targets.text_entry(ui, &name_response, "presets/name", "Preset name");
+                }
+                if committing && name_response.changed() { self.name.clone_from(&name); }
+                let mut include_sample = self.include_sample;
+                let sample_response = ui.checkbox(&mut include_sample, "Include sample text");
+                if confirmation.is_none() {
+                    targets.checkbox(ui, &sample_response, "presets/include-sample", "Include sample text");
+                }
+                if committing && sample_response.changed() { self.include_sample = include_sample; }
+                let mut include_replacement = self.include_replacement;
+                let replacement_response = ui.checkbox(&mut include_replacement, "Include replacement");
+                if confirmation.is_none() {
+                    targets.checkbox(ui, &replacement_response, "presets/include-replacement", "Include replacement");
+                }
+                if committing && replacement_response.changed() { self.include_replacement = include_replacement; }
                 ui.weak("Save and Update store the current pattern and flags. Only checked buffers are stored; unchecked buffers are omitted.");
-                if ui.add_enabled(self.store.is_writable(), egui::Button::new("Save new preset")).clicked() {
+                let save = ui.add_enabled(self.store.is_writable(), egui::Button::new("Save new preset"));
+                if confirmation.is_none() {
+                    targets.button(ui, &save, "presets/save", "Save preset");
+                }
+                if save.clicked() && committing {
                     action = Some(PresetAction::Save);
                 }
                 if let Some(id) = self.selected
@@ -772,18 +837,40 @@ impl PresetState {
                         ui.weak(format!("Flags {} · ID {}", preset.flags.suffix(), id.value()));
                         ui.weak("Load restores pattern and flags. Stored buffers replace current values, including empty values; omitted buffers preserve current values.");
                         ui.weak(format!("Sample text: {} · Replacement: {}", if preset.sample_text.is_some() { "stored" } else { "omitted" }, if preset.replacement.is_some() { "stored" } else { "omitted" }));
-                        if ui.button("Load selected preset").clicked() { action = Some(PresetAction::Load(id)); }
+                        let load = ui.button("Load selected preset");
+                        if confirmation.is_none() {
+                            targets.button(ui, &load, format!("presets/load/{}", id.value()), "Load preset");
+                        }
+                        if load.clicked() && committing { action = Some(PresetAction::Load(id)); }
                         ui.add_enabled_ui(self.store.is_writable(), |ui| {
-                            if ui.button("Rename selected preset").clicked() { action = Some(PresetAction::Rename(id)); }
+                            let rename = ui.button("Rename selected preset");
+                            if confirmation.is_none() {
+                                targets.button(ui, &rename, format!("presets/rename/{}", id.value()), "Rename preset");
+                            }
+                            if rename.clicked() && committing { action = Some(PresetAction::Rename(id)); }
                             ui.weak(format!("Update replaces {:?} with the current pattern/flags and checked buffers, keeping its saved name.", preset.name));
-                            if ui.button("Update selected preset").clicked() { action = Some(PresetAction::Update(id)); }
-                            if ui.button("Delete selected preset…").clicked() { action = Some(PresetAction::RequestDelete(id)); }
+                            let update = ui.button("Update selected preset");
+                            if confirmation.is_none() {
+                                targets.button(ui, &update, format!("presets/update/{}", id.value()), "Update preset");
+                            }
+                            if update.clicked() && committing { action = Some(PresetAction::Update(id)); }
+                            let delete = ui.button("Delete selected preset…");
+                            if confirmation.is_none() {
+                                targets.button(ui, &delete, format!("presets/delete/{}", id.value()), "Request preset removal");
+                            }
+                            if delete.clicked() && committing { action = Some(PresetAction::RequestDelete(id)); }
                         });
                         if self.delete_confirmation == Some(id) {
                             ui.colored_label(ui.visuals().error_fg_color, format!("Delete {:?} (ID {})?", preset.name, id.value()));
-                            ui.horizontal_wrapped(|ui| {
-                                if ui.add_enabled(self.store.is_writable(), egui::Button::new("Confirm delete")).clicked() { action = Some(PresetAction::ConfirmDelete(id)); }
-                                if ui.button("Cancel").clicked() { action = Some(PresetAction::CancelDelete); }
+                            ui.push_id(("regex_preset_confirmation", self.delete_generation, id.value()), |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    let confirm = ui.add_enabled(self.store.is_writable(), egui::Button::new("Confirm delete"));
+                                    confirmation_targets.button(ui, &confirm, format!("preset-confirmation/{}/{}/confirm", self.delete_generation, id.value()), "Confirm preset removal");
+                                    if confirm.clicked() && committing { action = Some(PresetAction::ConfirmDelete(id)); }
+                                    let cancel = ui.button("Cancel");
+                                    confirmation_targets.button(ui, &cancel, format!("preset-confirmation/{}/{}/cancel", self.delete_generation, id.value()), "Cancel preset removal");
+                                    if cancel.clicked() && committing { action = Some(PresetAction::CancelDelete); }
+                                });
                             });
                         }
                 }

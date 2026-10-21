@@ -1,4 +1,10 @@
 use crate::clipboard_modify::clipboard::{ArboardClipboardBackend, ClipboardBackend};
+use crate::gui::jump_mode::ui::{FocusDirective, register_and_apply_target};
+use crate::gui::jump_mode::ui::{
+    JumpModeScope, JumpModeUi, NavigationDialogKind, NavigationOwner, NavigationViewportBinding,
+};
+use crate::gui::jump_mode::{SurfaceId, TargetGeneration};
+use crate::gui::jump_mode::{TargetId, TargetKind};
 use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, secondary_help, semantic_status,
     with_button_emphasis,
@@ -229,6 +235,9 @@ pub struct RegexTesterDialogState {
     selected_capture: usize,
     clipboard: Arc<dyn ClipboardBackend>,
     copy_feedback: Option<Result<&'static str, String>>,
+    native_jump_mode: JumpModeUi,
+    native_jump_frame: Option<u64>,
+    observed_viewport: Option<(u64, RegexViewportPresentation)>,
     #[cfg(test)]
     last_pattern_geometry: Option<(egui::Rect, egui::FontId)>,
     #[cfg(test)]
@@ -239,6 +248,146 @@ pub struct RegexTesterDialogState {
     last_metadata_geometry: Option<(egui::Rect, f32, f32)>,
     #[cfg(test)]
     last_pattern_controls: Option<(Option<egui::Rect>, [egui::Rect; 5])>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RegexViewportPresentation {
+    Immediate,
+    Embedded,
+}
+
+pub(super) struct JumpTargets<'a> {
+    scope: Option<&'a JumpModeScope>,
+    visual_order: u64,
+    suspended: bool,
+}
+
+impl<'a> JumpTargets<'a> {
+    fn new(scope: Option<&'a JumpModeScope>) -> Self {
+        Self {
+            scope,
+            visual_order: 0,
+            suspended: false,
+        }
+    }
+
+    fn suspend(&mut self) {
+        self.suspended = true;
+    }
+
+    pub(super) fn register(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: impl AsRef<str>,
+        label: impl Into<String>,
+        kind: TargetKind,
+    ) -> Option<(TargetId, Option<FocusDirective>)> {
+        if self.suspended {
+            return None;
+        }
+        let identity = identity.as_ref().to_owned();
+        let id = self.scope.map(|scope| scope.target_id(&identity));
+        let directive = register_and_apply_target(
+            self.scope,
+            ui,
+            response,
+            identity,
+            label,
+            kind,
+            &mut self.visual_order,
+        );
+        id.map(|id| (id, directive))
+    }
+
+    pub(super) fn combo_options_scope(
+        &self,
+        anchor_identity: impl AsRef<str>,
+    ) -> Option<JumpModeScope> {
+        if self.suspended {
+            return None;
+        }
+        self.scope
+            .map(|scope| scope.combo_popup_scope(anchor_identity))
+    }
+
+    pub(super) fn child_popup_scope(&self, kind: impl Into<String>) -> Option<JumpModeScope> {
+        self.scope.map(|scope| scope.child_popup_scope(kind))
+    }
+
+    pub(super) fn button(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: impl AsRef<str>,
+        label: &'static str,
+    ) {
+        let _ = self.register(ui, response, identity, label, TargetKind::Button);
+    }
+
+    pub(super) fn text_entry(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: impl AsRef<str>,
+        label: &'static str,
+    ) {
+        let _ = self.register(ui, response, identity, label, TargetKind::TextEntry);
+    }
+
+    pub(super) fn checkbox(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: impl AsRef<str>,
+        label: &'static str,
+    ) {
+        let _ = self.register(ui, response, identity, label, TargetKind::Checkbox);
+    }
+
+    pub(super) fn combo_box(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: impl AsRef<str>,
+        label: &'static str,
+    ) {
+        let _ = self.register(ui, response, identity, label, TargetKind::ComboBox);
+    }
+
+    pub(super) fn selectable(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: impl AsRef<str>,
+        label: &'static str,
+    ) {
+        let _ = self.register(ui, response, identity, label, TargetKind::Selectable);
+    }
+
+    pub(super) fn action_selected(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: impl AsRef<str>,
+        label: &'static str,
+        committing: bool,
+    ) -> bool {
+        let Some((target_id, directive)) =
+            self.register(ui, response, identity, label, TargetKind::Action)
+        else {
+            return false;
+        };
+        if committing && directive == Some(FocusDirective::Select) {
+            response.request_focus();
+            if let Some(scope) = self.scope {
+                scope.record_select_focus_owner(&target_id, response.id);
+            }
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl Default for RegexTesterDialogState {
@@ -265,6 +414,9 @@ impl RegexTesterDialogState {
             selected_capture: 0,
             clipboard,
             copy_feedback: None,
+            native_jump_mode: JumpModeUi::default(),
+            native_jump_frame: None,
+            observed_viewport: None,
             #[cfg(test)]
             last_pattern_geometry: None,
             #[cfg(test)]
@@ -307,7 +459,29 @@ impl RegexTesterDialogState {
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {
+        self.show_with_jump_mode(ctx, None, None, true, true, false);
+    }
+
+    pub(crate) fn root_navigation_instance(&self, current: Option<u64>) -> Option<u64> {
+        current.filter(|instance| {
+            self.observed_viewport != Some((*instance, RegexViewportPresentation::Immediate))
+        })
+    }
+
+    pub(crate) fn show_with_jump_mode(
+        &mut self,
+        ctx: &egui::Context,
+        root_scope: Option<&JumpModeScope>,
+        instance: Option<u64>,
+        application_input_allowed: bool,
+        root_native_owner_current: bool,
+        jump_mode_enabled: bool,
+    ) {
         if !self.open {
+            if self.observed_viewport.take().is_some() {
+                self.native_jump_mode.cancel_all();
+            }
+            self.native_jump_frame = None;
             return;
         }
         ctx.show_viewport_immediate(
@@ -316,22 +490,50 @@ impl RegexTesterDialogState {
             |child, class| {
                 let process_case_actions = child.current_pass_index() == 0;
                 let independent = class == egui::ViewportClass::Immediate;
+                let presentation = if independent {
+                    RegexViewportPresentation::Immediate
+                } else {
+                    RegexViewportPresentation::Embedded
+                };
+                if let Some(instance) = instance {
+                    if self.observed_viewport != Some((instance, presentation)) {
+                        self.observed_viewport = Some((instance, presentation));
+                        self.native_jump_mode.cancel_all();
+                        self.native_jump_frame = None;
+                    }
+                } else {
+                    self.native_jump_mode.cancel_all();
+                    self.native_jump_frame = None;
+                }
                 if independent && self.focus_viewport {
                     child.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
                 self.focus_viewport = false;
-                let close = child.input_mut(|input| {
-                    input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
-                        || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
-                        || (independent && input.viewport().close_requested())
-                });
-                if close {
-                    self.open = false;
-                } else if independent {
-                    egui::CentralPanel::default().show(child, |ui| {
-                        self.body_in_viewport(ui, true, process_case_actions)
-                    });
+                if independent {
+                    let close = self.show_native_viewport(
+                        child,
+                        instance,
+                        application_input_allowed,
+                        jump_mode_enabled,
+                        process_case_actions,
+                    );
+                    if close {
+                        self.open = false;
+                        child.send_viewport_cmd(egui::ViewportCommand::Close);
+                        self.native_jump_mode.cancel_all();
+                        self.native_jump_frame = None;
+                    }
                 } else {
+                    let close = process_case_actions
+                        && root_native_owner_current
+                        && child.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                        });
+                    if close {
+                        self.open = false;
+                        return;
+                    }
                     // Standalone egui contexts embed viewports. Keep that fallback
                     // within its parent rather than changing root-window geometry.
                     let size = child.input(|input| input.content_rect().size());
@@ -346,15 +548,141 @@ impl RegexTesterDialogState {
                         .min_size(available.min(egui::vec2(360.0, 240.0)))
                         .max_size(available)
                         .show(child, |ui| {
-                            self.body_in_viewport(ui, false, process_case_actions)
+                            ui.add_enabled_ui(root_native_owner_current, |ui| {
+                                self.body_in_viewport_scoped(
+                                    ui,
+                                    false,
+                                    process_case_actions
+                                        && application_input_allowed
+                                        && root_native_owner_current,
+                                    root_scope,
+                                    root_native_owner_current,
+                                )
+                            })
                         });
                     self.open = open;
                 }
-                if independent && !self.open {
-                    child.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
             },
         );
+    }
+
+    fn show_native_viewport(
+        &mut self,
+        child: &mut egui::Ui,
+        instance: Option<u64>,
+        application_input_allowed: bool,
+        jump_mode_enabled: bool,
+        process_actions: bool,
+    ) -> bool {
+        let ctx = child.ctx().clone();
+        let viewport = egui::ViewportId::from_hash_of("regex_tester_viewport");
+        let owner = instance.map(|instance| NavigationOwner::Dialog {
+            kind: NavigationDialogKind::RegexTester,
+            instance,
+        });
+        let binding = owner.map(|owner| NavigationViewportBinding {
+            viewport,
+            owner,
+            base_layer: egui::LayerId::background(),
+        });
+
+        self.native_jump_mode.set_enabled(jump_mode_enabled);
+        let frame_nr = ctx.cumulative_frame_nr();
+        if self.native_jump_frame != Some(frame_nr) {
+            self.native_jump_mode.begin_frame();
+            self.native_jump_frame = Some(frame_nr);
+        }
+
+        let navigation_owner = binding.map_or(NavigationOwner::Blocked, |binding| {
+            self.native_jump_mode.update_navigation_owner_for_viewport(
+                &ctx,
+                binding,
+                application_input_allowed && jump_mode_enabled,
+            )
+        });
+        let jump_owner_current = binding.is_some_and(|binding| {
+            navigation_owner == binding.owner
+                && self.native_jump_mode.frame_navigation_owner() == binding.owner
+        });
+        self.native_jump_mode.handle_viewport_input(
+            &ctx,
+            jump_owner_current,
+            ctx.current_pass_index() == 0,
+            viewport,
+        );
+        let native_owner_current = application_input_allowed
+            && ctx.viewport_id() == viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(&ctx).is_none();
+        let popup_open = egui::Popup::is_any_open(&ctx);
+        let close = ctx.input_mut(|input| {
+            (process_actions
+                && native_owner_current
+                && !popup_open
+                && (input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                    || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)))
+                || (process_actions && input.viewport().close_requested())
+        });
+        if close {
+            self.native_jump_mode.cancel_all();
+            self.native_jump_frame = None;
+            return true;
+        }
+        self.native_jump_mode.begin_ui_pass();
+        let scope = binding.filter(|_| jump_owner_current).and_then(|binding| {
+            let NavigationOwner::Dialog { instance, .. } = binding.owner else {
+                return None;
+            };
+            self.native_jump_mode.scope_for_viewport_binding(
+                SurfaceId::dialog("regex-tester", instance),
+                TargetGeneration(instance),
+                "regex-tester/form",
+                binding,
+            )
+        });
+
+        egui::CentralPanel::default().show(child, |ui| {
+            ui.add_enabled_ui(native_owner_current, |ui| {
+                self.body_in_viewport_scoped(
+                    ui,
+                    true,
+                    process_actions && ctx.current_pass_index() == 0 && native_owner_current,
+                    scope.as_ref(),
+                    native_owner_current,
+                )
+            });
+        });
+
+        self.native_jump_mode.finish_ui_pass();
+        let after_owner = binding.map_or(NavigationOwner::Blocked, |binding| {
+            self.native_jump_mode.update_navigation_owner_for_viewport(
+                &ctx,
+                binding,
+                application_input_allowed && jump_mode_enabled,
+            )
+        });
+        if let Some(binding) = binding {
+            if self.native_jump_mode.prepare_pass_for_viewport(
+                &ctx,
+                binding,
+                after_owner,
+                application_input_allowed,
+            ) {
+                super::jump_mode::paint::paint(&ctx, &self.native_jump_mode);
+            }
+            if !ctx.will_discard() {
+                self.native_jump_mode.complete_frame_for_viewport(
+                    &ctx,
+                    binding,
+                    after_owner,
+                    application_input_allowed,
+                );
+            }
+        } else if !ctx.will_discard() {
+            self.native_jump_mode.cancel_all();
+        }
+        false
     }
 
     fn body(&mut self, ui: &mut egui::Ui) -> CoreLayout {
@@ -367,7 +695,39 @@ impl RegexTesterDialogState {
         independent: bool,
         process_case_actions: bool,
     ) -> CoreLayout {
-        if let Some(forward) = keyboard::navigation(ui.ctx(), ui.layer_id(), independent) {
+        self.body_in_viewport_scoped(ui, independent, process_case_actions, None, true)
+    }
+
+    fn body_in_viewport_scoped(
+        &mut self,
+        ui: &mut egui::Ui,
+        independent: bool,
+        process_case_actions: bool,
+        scope: Option<&JumpModeScope>,
+        native_owner_current: bool,
+    ) -> CoreLayout {
+        let preset_confirmation_open = self.information_section == InformationSection::Presets
+            && self
+                .presets
+                .as_ref()
+                .is_some_and(presets::PresetState::has_pending_delete_confirmation);
+        let mut form_targets = JumpTargets::new(scope);
+        let action_scope = scope.map(|scope| {
+            scope.child_namespace(format!(
+                "document/{}/cases/{}",
+                self.session.revision(),
+                self.session.test_case_revision()
+            ))
+        });
+        let mut action_targets = JumpTargets::new(action_scope.as_ref());
+        if preset_confirmation_open {
+            form_targets.suspend();
+            action_targets.suspend();
+        }
+        if process_case_actions
+            && native_owner_current
+            && let Some(forward) = keyboard::navigation(ui.ctx(), ui.layer_id(), independent)
+        {
             let changed = if forward {
                 self.session.next_match()
             } else {
@@ -392,7 +752,14 @@ impl RegexTesterDialogState {
                 .auto_shrink([true, false])
                 .max_width(header.width())
                 .max_height(ui.available_height())
-                .show(ui, |ui| self.pattern_area(ui));
+                .show(ui, |ui| {
+                    self.pattern_area(
+                        ui,
+                        &mut form_targets,
+                        &mut action_targets,
+                        process_case_actions,
+                    )
+                });
             #[cfg(test)]
             {
                 self.last_header_viewport = Some(_output.inner_rect);
@@ -401,7 +768,12 @@ impl RegexTesterDialogState {
         let layout =
             CoreLayout::with_header_height(bounds, self.information_open, had_error, header_height);
         bounded_area(ui, layout.editor, "regex_tester_editor_area", |ui| {
-            self.text_area(ui)
+            self.text_area(
+                ui,
+                &mut form_targets,
+                &mut action_targets,
+                process_case_actions,
+            )
         });
         if self.session.tick(now) {
             self.record_history();
@@ -421,11 +793,16 @@ impl RegexTesterDialogState {
         }
         if let Some(information) = layout.information {
             bounded_area(ui, information, "regex_tester_information_area", |ui| {
-                self.information_area(ui, process_case_actions)
+                self.information_area(
+                    ui,
+                    process_case_actions,
+                    &mut form_targets,
+                    &mut action_targets,
+                )
             });
         }
         bounded_area(ui, layout.status, "regex_tester_status", |ui| {
-            self.status_area(ui)
+            self.status_area(ui, &mut action_targets, process_case_actions)
         });
         if let Some(delay) = self.session.pending_delay(Instant::now()) {
             ui.ctx().request_repaint_after(delay);
@@ -433,7 +810,13 @@ impl RegexTesterDialogState {
         layout
     }
 
-    fn pattern_area(&mut self, ui: &mut egui::Ui) {
+    fn pattern_area(
+        &mut self,
+        ui: &mut egui::Ui,
+        form_targets: &mut JumpTargets<'_>,
+        action_targets: &mut JumpTargets<'_>,
+        committing: bool,
+    ) {
         let font = pattern_font(ui);
         let editor_height = pattern_editor_height(ui, &font);
         #[cfg(test)]
@@ -448,7 +831,13 @@ impl RegexTesterDialogState {
             let toggle = ui
                 .button(label)
                 .on_hover_text("Show or hide match information");
-            if with_button_emphasis(ui, toggle, ButtonEmphasis::Primary).clicked() {
+            form_targets.button(
+                ui,
+                &toggle,
+                "information-toggle",
+                "Toggle match information",
+            );
+            if with_button_emphasis(ui, toggle, ButtonEmphasis::Primary).clicked() && committing {
                 self.information_open = !self.information_open;
             }
         });
@@ -467,7 +856,7 @@ impl RegexTesterDialogState {
         ui.horizontal(|ui| {
             compact_section_heading(ui, "Pattern", None);
             if self.session.draft.pattern.len() > self.session.policy().pattern_bytes {
-                self.oversized_pattern_area(ui);
+                self.oversized_pattern_area(ui, action_targets, committing);
                 return;
             }
             if self.session.draft.pattern.len() > crate::regex_tester::policy::NORMAL_PATTERN_BYTES {
@@ -492,21 +881,26 @@ impl RegexTesterDialogState {
             let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32| {
                 editor_layout::plain(ui, text.as_str(), width, maximum_bytes, layouter_font.clone(), true)
             };
+            let mut pattern_value = self.session.draft.pattern.clone();
             let pattern = ui.add_sized(
                 [width, editor_height],
-                egui::TextEdit::singleline(&mut self.session.draft.pattern)
+                egui::TextEdit::singleline(&mut pattern_value)
                     .id(egui::Id::new("regex_tester_pattern"))
                     .font(font.clone())
                     .layouter(&mut layouter)
                     .hint_text("Regular expression"),
             );
-            if pattern.changed() {
+            form_targets.text_entry(ui, &pattern, "pattern", "Regular expression");
+            if pattern.changed() && committing {
+                self.session.draft.pattern = pattern_value;
                 self.mark_changed();
             }
             if self.focus_pattern {
                 pattern.request_focus();
                 pattern.scroll_to_me(Some(egui::Align::Center));
-                self.focus_pattern = false;
+                if committing {
+                    self.focus_pattern = false;
+                }
             }
             #[cfg(test)]
             {
@@ -518,50 +912,59 @@ impl RegexTesterDialogState {
                 suffix_rect = Some(_suffix.rect);
             }
         });
-        let _flags = ui.horizontal_wrapped(|ui| self.flags_area(ui)).inner;
+        let _flags = ui
+            .horizontal_wrapped(|ui| self.flags_area(ui, action_targets, committing))
+            .inner;
         #[cfg(test)]
         {
             self.last_pattern_controls = Some((suffix_rect, _flags.map(|response| response.rect)));
         }
     }
 
-    fn flags_area(&mut self, ui: &mut egui::Ui) -> [egui::Response; 5] {
+    fn flags_area(
+        &mut self,
+        ui: &mut egui::Ui,
+        targets: &mut JumpTargets<'_>,
+        committing: bool,
+    ) -> [egui::Response; 5] {
         compact_section_heading(ui, "Flags", None);
+        let mut flags = self.session.draft.flags;
         let responses = [
-            (
-                "i",
-                &mut self.session.draft.flags.case_insensitive,
-                "Case insensitive",
-            ),
+            ("i", &mut flags.case_insensitive, "Case insensitive"),
             (
                 "m",
-                &mut self.session.draft.flags.multi_line,
+                &mut flags.multi_line,
                 "Multiline: ^ and $ match line boundaries",
             ),
-            (
-                "s",
-                &mut self.session.draft.flags.dot_matches_new_line,
-                "Dot matches newline",
-            ),
+            ("s", &mut flags.dot_matches_new_line, "Dot matches newline"),
             (
                 "u",
-                &mut self.session.draft.flags.unicode,
+                &mut flags.unicode,
                 "Unicode character classes and matching",
             ),
             (
                 "x",
-                &mut self.session.draft.flags.ignore_whitespace,
+                &mut flags.ignore_whitespace,
                 "Ignore pattern whitespace and allow comments",
             ),
         ]
         .map(|(letter, enabled, hint)| ui.checkbox(enabled, letter).on_hover_text(hint));
-        if responses.iter().any(egui::Response::changed) {
+        for (index, response) in responses.iter().enumerate() {
+            targets.checkbox(ui, response, format!("flag/{index}"), "Regex flag");
+        }
+        if committing && responses.iter().any(egui::Response::changed) {
+            self.session.draft.flags = flags;
             self.mark_changed();
         }
         responses
     }
 
-    fn oversized_pattern_area(&mut self, ui: &mut egui::Ui) {
+    fn oversized_pattern_area(
+        &mut self,
+        ui: &mut egui::Ui,
+        targets: &mut JumpTargets<'_>,
+        committing: bool,
+    ) {
         let width = (ui.available_width() - 100.0).max(1.0);
         let font = oversized_pattern_font(ui);
         let editor_height = pattern_editor_height_at_baseline(ui, &font, 14.0);
@@ -580,17 +983,25 @@ impl RegexTesterDialogState {
         {
             self.last_oversized_preview_geometry = Some((_preview_response.rect, font));
         }
-        if ui.button("Clear pattern").clicked() {
+        let clear = ui.button("Clear pattern");
+        targets.button(ui, &clear, "clear-pattern", "Clear pattern");
+        if clear.clicked() && committing {
             self.session.draft.pattern.clear();
             self.mark_changed();
             self.focus_pattern = true;
         }
     }
 
-    fn text_area(&mut self, ui: &mut egui::Ui) {
+    fn text_area(
+        &mut self,
+        ui: &mut egui::Ui,
+        form_targets: &mut JumpTargets<'_>,
+        action_targets: &mut JumpTargets<'_>,
+        committing: bool,
+    ) {
         ui.label("Input / test text");
         if self.session.draft.test_text.len() > self.session.policy().text_bytes {
-            self.oversized_text_area(ui);
+            self.oversized_text_area(ui, action_targets, committing);
             return;
         }
         if self.session.draft.test_text.len() > crate::regex_tester::policy::NORMAL_TEXT_BYTES {
@@ -606,7 +1017,7 @@ impl RegexTesterDialogState {
             .auto_shrink([false, false])
             .max_height(editor_size.y)
             .show(ui, |ui| {
-                let changed = {
+                let changed = if committing {
                     let (text, view) = self.session.text_edit_parts();
                     let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32| {
                         ui.ctx().fonts_mut(|fonts| {
@@ -627,6 +1038,12 @@ impl RegexTesterDialogState {
                         .layouter(&mut layouter)
                         .hint_text("Type or paste text to test")
                         .show(ui);
+                    form_targets.text_entry(
+                        ui,
+                        &output.response,
+                        "test-text",
+                        "Input and test text",
+                    );
                     highlighting::paint_markers(ui, &output, text, &view);
                     if std::mem::take(&mut self.scroll_to_selected)
                         && let Some(caret) = highlighting::active_caret(&output, text, &view)
@@ -634,8 +1051,25 @@ impl RegexTesterDialogState {
                         ui.scroll_to_rect(caret.expand(4.0), Some(egui::Align::Center));
                     }
                     output.response.changed()
+                } else {
+                    let mut text = self.session.draft.test_text.clone();
+                    let output = egui::TextEdit::multiline(&mut text)
+                        .id(egui::Id::new("regex_tester_test_text"))
+                        .font(egui::TextStyle::Monospace)
+                        .desired_rows(1)
+                        .desired_width(editor_size.x)
+                        .min_size(editor_size)
+                        .hint_text("Type or paste text to test")
+                        .show(ui);
+                    form_targets.text_entry(
+                        ui,
+                        &output.response,
+                        "test-text",
+                        "Input and test text",
+                    );
+                    false
                 };
-                if changed {
+                if changed && committing {
                     self.mark_changed();
                 }
             });
@@ -652,10 +1086,19 @@ impl RegexTesterDialogState {
         ui.ctx().request_repaint();
     }
 
-    fn information_area(&mut self, ui: &mut egui::Ui, process_case_actions: bool) {
-        egui::ComboBox::from_id_salt("regex_information_section")
+    fn information_area(
+        &mut self,
+        ui: &mut egui::Ui,
+        process_case_actions: bool,
+        form_targets: &mut JumpTargets<'_>,
+        targets: &mut JumpTargets<'_>,
+    ) {
+        let popup_scope = form_targets.combo_options_scope("information-section");
+        let mut popup_targets = JumpTargets::new(popup_scope.as_ref());
+        let mut section = self.information_section;
+        let section_response = egui::ComboBox::from_id_salt("regex_information_section")
             .width(ui.available_width().min(220.0))
-            .selected_text(match self.information_section {
+            .selected_text(match section {
                 InformationSection::Matches => "Matches",
                 InformationSection::MatchDetails => "Selected match",
                 InformationSection::Explanation => "Explanation",
@@ -668,60 +1111,68 @@ impl RegexTesterDialogState {
                 InformationSection::TestCases => "Test Cases",
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut self.information_section,
-                    InformationSection::Matches,
-                    "Matches",
-                );
-                ui.selectable_value(
-                    &mut self.information_section,
+                let response =
+                    ui.selectable_value(&mut section, InformationSection::Matches, "Matches");
+                popup_targets.selectable(ui, &response, "section/matches", "Matches section");
+                let response = ui.selectable_value(
+                    &mut section,
                     InformationSection::MatchDetails,
                     "Selected match",
                 );
-                ui.selectable_value(
-                    &mut self.information_section,
+                popup_targets.selectable(ui, &response, "section/details", "Match details section");
+                let response = ui.selectable_value(
+                    &mut section,
                     InformationSection::Explanation,
                     "Explanation",
                 );
-                ui.selectable_value(
-                    &mut self.information_section,
-                    InformationSection::Reference,
-                    "Reference",
+                popup_targets.selectable(
+                    ui,
+                    &response,
+                    "section/explanation",
+                    "Explanation section",
                 );
-                ui.selectable_value(
-                    &mut self.information_section,
-                    InformationSection::Examples,
-                    "Examples",
-                );
-                ui.selectable_value(
-                    &mut self.information_section,
-                    InformationSection::History,
-                    "History",
-                );
-                ui.selectable_value(
-                    &mut self.information_section,
-                    InformationSection::Presets,
-                    "Presets",
-                );
-                ui.selectable_value(
-                    &mut self.information_section,
+                let response =
+                    ui.selectable_value(&mut section, InformationSection::Reference, "Reference");
+                popup_targets.selectable(ui, &response, "section/reference", "Reference section");
+                let response =
+                    ui.selectable_value(&mut section, InformationSection::Examples, "Examples");
+                popup_targets.selectable(ui, &response, "section/examples", "Examples section");
+                let response =
+                    ui.selectable_value(&mut section, InformationSection::History, "History");
+                popup_targets.selectable(ui, &response, "section/history", "History section");
+                let response =
+                    ui.selectable_value(&mut section, InformationSection::Presets, "Presets");
+                popup_targets.selectable(ui, &response, "section/presets", "Presets section");
+                let response = ui.selectable_value(
+                    &mut section,
                     InformationSection::Substitution,
                     "Substitution",
                 );
-                ui.selectable_value(
-                    &mut self.information_section,
-                    InformationSection::Clipboard,
-                    "Clipboard",
+                popup_targets.selectable(
+                    ui,
+                    &response,
+                    "section/substitution",
+                    "Substitution section",
                 );
-                ui.selectable_value(
-                    &mut self.information_section,
-                    InformationSection::TestCases,
-                    "Test Cases",
-                );
-            })
-            .response
-            .on_hover_text("Choose what to inspect or edit");
-        if self.information_section != InformationSection::TestCases
+                let response =
+                    ui.selectable_value(&mut section, InformationSection::Clipboard, "Clipboard");
+                popup_targets.selectable(ui, &response, "section/clipboard", "Clipboard section");
+                let response =
+                    ui.selectable_value(&mut section, InformationSection::TestCases, "Test Cases");
+                popup_targets.selectable(ui, &response, "section/test-cases", "Test case section");
+            });
+        form_targets.combo_box(
+            ui,
+            &section_response
+                .response
+                .on_hover_text("Choose what to inspect or edit"),
+            "information-section",
+            "Information section",
+        );
+        if process_case_actions {
+            self.information_section = section;
+        }
+        if section != InformationSection::TestCases
             && let Some(feedback) = &self.copy_feedback
         {
             match feedback {
@@ -733,11 +1184,11 @@ impl RegexTesterDialogState {
                 }
             }
         }
-        if self.information_section == InformationSection::MatchDetails {
-            self.match_details_area(ui);
+        if section == InformationSection::MatchDetails {
+            self.match_details_area(ui, targets, process_case_actions);
             return;
         }
-        if self.information_section == InformationSection::Explanation {
+        if section == InformationSection::Explanation {
             if let Some(result) = self.session.explanation() {
                 explanation::show(ui, result);
             } else {
@@ -747,25 +1198,30 @@ impl RegexTesterDialogState {
             }
             return;
         }
-        if self.information_section == InformationSection::Reference {
-            if let Some(action) = self.reference.show(ui) {
+        if section == InformationSection::Reference {
+            let action = self
+                .reference
+                .show_scoped(ui, targets, process_case_actions);
+            if process_case_actions && let Some(action) = action {
                 self.reference_action(action);
             }
             return;
         }
-        if self.information_section == InformationSection::Examples {
-            if let Some(example) = self.examples.show(ui) {
+        if section == InformationSection::Examples {
+            let example = self.examples.show_scoped(ui, targets, process_case_actions);
+            if process_case_actions && let Some(example) = example {
                 self.load_example(example);
             }
             return;
         }
-        if self.information_section == InformationSection::History {
+        if section == InformationSection::History {
             if let Some(history) = &mut self.history {
                 let retryable = matches!(
                     self.session.result(),
                     Some(EvaluationResult::Success { .. })
                 ) && !self.session.draft.pattern.is_empty();
-                if let Some(action) = history.show(ui, retryable) {
+                let action = history.show_scoped(ui, retryable, targets);
+                if process_case_actions && let Some(action) = action {
                     self.history_action(action);
                 }
             } else {
@@ -773,9 +1229,17 @@ impl RegexTesterDialogState {
             }
             return;
         }
-        if self.information_section == InformationSection::Presets {
+        if section == InformationSection::Presets {
             if let Some(presets) = &mut self.presets {
-                if let Some(action) = presets.show(ui) {
+                let preset_scope = targets.scope.map(|scope| {
+                    scope.child_namespace(format!("preset-store/{}", presets.target_generation()))
+                });
+                let mut preset_targets = JumpTargets::new(preset_scope.as_ref());
+                if targets.suspended {
+                    preset_targets.suspend();
+                }
+                let action = presets.show_scoped(ui, &mut preset_targets, process_case_actions);
+                if process_case_actions && let Some(action) = action {
                     self.preset_action(action);
                 }
             } else {
@@ -783,26 +1247,29 @@ impl RegexTesterDialogState {
             }
             return;
         }
-        if self.information_section == InformationSection::Substitution {
-            if substitution::show(ui, &mut self.session) {
+        if section == InformationSection::Substitution {
+            if substitution::show_scoped(ui, &mut self.session, targets, process_case_actions) {
                 self.copy_feedback = None;
             }
             return;
         }
-        if self.information_section == InformationSection::Clipboard {
-            if let Some(action) = clipboard::show(ui, &self.session, self.selected_capture) {
+        if section == InformationSection::Clipboard {
+            let action = clipboard::show_scoped(ui, &self.session, self.selected_capture, targets);
+            if process_case_actions && let Some(action) = action {
                 self.clipboard_action(action);
             }
             return;
         }
-        if self.information_section == InformationSection::TestCases {
-            test_cases::show(
+        if section == InformationSection::TestCases {
+            test_cases::show_scoped(
                 ui,
                 &mut self.session,
                 &mut self.test_cases_expanded,
                 self.clipboard.as_ref(),
                 &mut self.copy_feedback,
                 process_case_actions,
+                form_targets,
+                targets,
             );
             return;
         }
@@ -814,6 +1281,7 @@ impl RegexTesterDialogState {
         }
         let mut selected = None;
         let row_height = ui.spacing().interact_size.y;
+        let revision = self.session.revision();
         egui::ScrollArea::vertical()
             .id_salt("regex_tester_information_scroll")
             .auto_shrink([false, false])
@@ -822,6 +1290,7 @@ impl RegexTesterDialogState {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 for index in rows {
                     let matched = &self.session.matches()[index];
+                    let matched_id = matched.id.index();
                     let preview = utf8_prefix(&matched.text, 80)
                         .replace('\r', "␍")
                         .replace('\n', "↵");
@@ -836,10 +1305,20 @@ impl RegexTesterDialogState {
                             &preview
                         }
                     );
-                    if ui
-                        .selectable_label(self.session.selected_index() == Some(index), label)
-                        .clicked()
-                    {
+                    let response = ui
+                        .push_id(("regex_match_result_row", revision, matched_id), |ui| {
+                            ui.selectable_label(self.session.selected_index() == Some(index), label)
+                        })
+                        .inner;
+                    let identity = format!("match-result/{revision}/{matched_id}");
+                    let selected_by_hint = targets.action_selected(
+                        ui,
+                        &response,
+                        identity,
+                        "Match result",
+                        process_case_actions,
+                    );
+                    if (response.clicked() && process_case_actions) || selected_by_hint {
                         selected = Some(index);
                     }
                 }
@@ -850,23 +1329,36 @@ impl RegexTesterDialogState {
         }
     }
 
-    fn match_details_area(&mut self, ui: &mut egui::Ui) {
+    fn match_details_area(
+        &mut self,
+        ui: &mut egui::Ui,
+        targets: &mut JumpTargets<'_>,
+        committing: bool,
+    ) {
         let Some(index) = self.session.selected_index() else {
             ui.weak(self.summary());
             return;
         };
         let mut copy = None;
+        let matched = &self.session.matches()[index];
+        let revision = self.session.revision();
+        let matched_id = matched.id.index();
         egui::ScrollArea::vertical()
             .id_salt("regex_match_details_scroll")
             .auto_shrink([false, false])
             .max_height(ui.available_height().max(1.0))
             .show(ui, |ui| {
-                ui.set_max_width(ui.available_width());
-                copy = inspection::show(
-                    ui,
-                    &self.session.matches()[index],
-                    &mut self.selected_capture,
-                );
+                ui.push_id(("regex_match_details", revision, matched_id), |ui| {
+                    ui.set_max_width(ui.available_width());
+                    copy = inspection::show_scoped(
+                        ui,
+                        matched,
+                        &mut self.selected_capture,
+                        targets,
+                        revision,
+                        committing,
+                    );
+                });
             });
         if let Some(target) = copy {
             self.copy_selected(target);
@@ -1001,7 +1493,7 @@ impl RegexTesterDialogState {
                 }
             }
             history::HistoryAction::Reload => {
-                let _ = history.store.reload();
+                let _ = history.reload();
             }
             history::HistoryAction::Retry => {
                 history.retry(&self.session);
@@ -1044,7 +1536,12 @@ impl RegexTesterDialogState {
             });
     }
 
-    fn oversized_text_area(&mut self, ui: &mut egui::Ui) {
+    fn oversized_text_area(
+        &mut self,
+        ui: &mut egui::Ui,
+        targets: &mut JumpTargets<'_>,
+        committing: bool,
+    ) {
         egui::ScrollArea::vertical()
             .id_salt("regex_tester_oversized_preview_scroll")
             .auto_shrink([false, false])
@@ -1054,7 +1551,9 @@ impl RegexTesterDialogState {
                     "Text is {} bytes; live editing and evaluation pause above {} bytes. Original text is retained.",
                     self.session.draft.test_text.len(), self.session.policy().text_bytes
                 ));
-                if ui.button("Clear text to resume editing").clicked() {
+                let clear = ui.button("Clear text to resume editing");
+                targets.button(ui, &clear, "clear-oversized-text", "Clear text");
+                if clear.clicked() && committing {
                     self.session.draft.test_text.clear();
                     self.mark_changed();
                     return;
@@ -1108,23 +1607,21 @@ impl RegexTesterDialogState {
         )
     }
 
-    fn status_area(&mut self, ui: &mut egui::Ui) {
+    fn status_area(&mut self, ui: &mut egui::Ui, targets: &mut JumpTargets<'_>, committing: bool) {
         ui.horizontal(|ui| {
             let enabled = !self.session.matches().is_empty();
-            if ui
+            let previous = ui
                 .add_enabled(enabled, egui::Button::new("Previous"))
-                .on_hover_text("Previous match (Shift+F3)")
-                .clicked()
-                && self.session.previous_match()
-            {
+                .on_hover_text("Previous match (Shift+F3)");
+            targets.button(ui, &previous, "previous-match", "Previous match");
+            if committing && previous.clicked() && self.session.previous_match() {
                 self.request_match_scroll(ui);
             }
-            if ui
+            let next = ui
                 .add_enabled(enabled, egui::Button::new("Next"))
-                .on_hover_text("Next match (F3)")
-                .clicked()
-                && self.session.next_match()
-            {
+                .on_hover_text("Next match (F3)");
+            targets.button(ui, &next, "next-match", "Next match");
+            if committing && next.clicked() && self.session.next_match() {
                 self.request_match_scroll(ui);
             }
             ui.add(
@@ -2529,6 +3026,449 @@ mod tests {
         }
     }
 
+    thread_local! {
+        static REGEX_IMMEDIATE_RENDERER_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static REGEX_VIEWPORT_EVENTS: std::cell::RefCell<Vec<egui::Event>> = const { std::cell::RefCell::new(Vec::new()) };
+        static REGEX_VIEWPORT_FOCUSED_ID: std::cell::RefCell<Option<egui::Id>> = const { std::cell::RefCell::new(None) };
+    }
+
+    fn install_regex_immediate_viewport_renderer() {
+        REGEX_IMMEDIATE_RENDERER_INSTALLED.with(|installed| {
+            assert!(
+                !installed.replace(true),
+                "the test installs its immediate renderer once"
+            );
+        });
+        egui::Context::set_immediate_viewport_renderer(|parent_ctx, mut viewport| {
+            let viewport_id = viewport.ids.this;
+            let parent_id = viewport.ids.parent;
+            let size = viewport
+                .builder
+                .inner_size
+                .unwrap_or_else(|| parent_ctx.content_rect().size());
+            let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            let mut viewports = parent_ctx.input(|input| input.raw.viewports.clone());
+            viewports.insert(
+                viewport_id,
+                egui::ViewportInfo {
+                    parent: Some(parent_id),
+                    focused: Some(true),
+                    inner_rect: Some(screen_rect),
+                    title: viewport.builder.title.clone(),
+                    ..Default::default()
+                },
+            );
+            let events =
+                REGEX_VIEWPORT_EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()));
+            let output = parent_ctx.run_ui(
+                egui::RawInput {
+                    viewport_id,
+                    viewports,
+                    screen_rect: Some(screen_rect),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    assert_eq!(ui.ctx().viewport_id(), viewport_id);
+                    assert_eq!(ui.ctx().parent_viewport_id(), parent_id);
+                    (viewport.viewport_ui_cb)(ui);
+                    REGEX_VIEWPORT_FOCUSED_ID.with(|focused| {
+                        *focused.borrow_mut() = ui.ctx().memory(|memory| memory.focused());
+                    });
+                },
+            );
+            output.drop_without_applying_deltas();
+            assert_eq!(parent_ctx.viewport_id(), parent_id);
+        });
+    }
+
+    fn render_regex_immediate_frame(
+        ctx: &egui::Context,
+        dialog: &mut RegexTesterDialogState,
+        events: Vec<egui::Event>,
+    ) {
+        REGEX_VIEWPORT_EVENTS.with(|pending| *pending.borrow_mut() = events);
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 680.0),
+                )),
+                focused: true,
+                ..Default::default()
+            },
+            |ctx| {
+                dialog.show_with_jump_mode(ctx, None, Some(1), true, false, true);
+            },
+        );
+        output.drop_without_applying_deltas();
+    }
+
+    fn regex_native_target(
+        dialog: &RegexTesterDialogState,
+        label: &str,
+        local_identity: Option<&str>,
+    ) -> crate::gui::jump_mode::ui::RegisteredTarget {
+        dialog
+            .native_jump_mode
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label() == label
+                    && local_identity.is_none_or(|identity| {
+                        matches!(
+                            target.id().semantic(),
+                            crate::gui::jump_mode::SemanticTargetId::Named(semantic)
+                                if semantic.ends_with(&format!("{}:{identity}", identity.len()))
+                        )
+                    })
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("visible Regex target is registered: {label}"))
+    }
+
+    fn complete_regex_native_hint(
+        ctx: &egui::Context,
+        dialog: &mut RegexTesterDialogState,
+        target: &crate::gui::jump_mode::ui::RegisteredTarget,
+    ) {
+        // Release prior native activations and the preceding hint leader before
+        // beginning another independent hint session.
+        render_regex_immediate_frame(
+            ctx,
+            dialog,
+            vec![
+                keyboard_event_state(egui::Key::Space, false, egui::Modifiers::NONE),
+                keyboard_event_state(egui::Key::Enter, false, egui::Modifiers::NONE),
+            ],
+        );
+        render_regex_immediate_frame(
+            ctx,
+            dialog,
+            vec![keyboard_event(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = dialog
+            .native_jump_mode
+            .active_session()
+            .and_then(|session| session.hint_map().hint_for(target.id()))
+            .expect("the current native Regex target receives a hint")
+            .as_str()
+            .to_owned();
+        render_regex_immediate_frame(ctx, dialog, vec![egui::Event::Text(hint)]);
+        assert!(dialog.native_jump_mode.active_session().is_none());
+        assert_eq!(
+            REGEX_VIEWPORT_FOCUSED_ID.with(|focused| *focused.borrow()),
+            Some(target.response_id()),
+            "hint completion focuses the exact current native response"
+        );
+    }
+
+    fn keyboard_event_state(
+        key: egui::Key,
+        pressed: bool,
+        modifiers: egui::Modifiers,
+    ) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn jump_mode_regex_native_viewport_copy_hint_focus_then_fresh_enter_copies_once() {
+        install_regex_immediate_viewport_renderer();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let backend = Arc::new(FakeClipboard::default());
+        let mut dialog = RegexTesterDialogState::with_clipboard(backend.clone());
+        dialog.open = true;
+        dialog.information_section = InformationSection::Clipboard;
+        dialog.session.draft.pattern = "safe".into();
+        dialog.session.draft.test_text = "safe input".into();
+        let now = Instant::now();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+
+        // The first callback observes the exact owner transition; the next
+        // one collects the stable native viewport's actual responses.
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        let copy_target = dialog
+            .native_jump_mode
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Copy pattern")
+            .cloned()
+            .expect("the visible clipboard action is registered in the native viewport");
+
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            vec![keyboard_event(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+        let hint = dialog
+            .native_jump_mode
+            .active_session()
+            .and_then(|session| session.hint_map().hint_for(copy_target.id()))
+            .expect("the real Copy pattern target receives a hint")
+            .as_str()
+            .to_owned();
+        render_regex_immediate_frame(&ctx, &mut dialog, vec![egui::Event::Text(hint)]);
+
+        assert!(dialog.native_jump_mode.active_session().is_none());
+        assert_eq!(backend.attempts.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            REGEX_VIEWPORT_FOCUSED_ID.with(|focused| *focused.borrow()),
+            Some(copy_target.response_id()),
+            "the native Immediate viewport, not its parent context, owns the focus handoff"
+        );
+
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            vec![keyboard_event(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(backend.attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(*backend.writes.lock().unwrap(), ["safe"]);
+    }
+
+    #[test]
+    fn jump_mode_regex_native_viewport_edits_cases_navigates_and_cancels_preset_removal() {
+        install_regex_immediate_viewport_renderer();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let directory = tempfile::tempdir().unwrap();
+        let history_path = directory.path().join("history.json");
+        let preset_path = directory.path().join("presets.json");
+        let mut dialog = RegexTesterDialogState::with_storage_paths(&history_path, &preset_path);
+        dialog.open = true;
+        dialog.information_section = InformationSection::TestCases;
+        dialog.session.draft.pattern.clear();
+        dialog.session.draft.test_text = "abcd".into();
+        let first_case = dialog
+            .session
+            .draft
+            .test_cases
+            .add(
+                Some("first row".into()),
+                "a".into(),
+                crate::regex_tester::RegexTestCaseExpectation::Match,
+            )
+            .unwrap();
+        let second_case = dialog
+            .session
+            .draft
+            .test_cases
+            .add(
+                Some("second row".into()),
+                "b".into(),
+                crate::regex_tester::RegexTestCaseExpectation::Match,
+            )
+            .unwrap();
+        let now = Instant::now();
+        dialog.session.mark_changed(now);
+        dialog.session.mark_test_cases_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+
+        // Observe the exact owner transition, then collect its real visible
+        // form, case, and navigation responses in the stable native viewport.
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+
+        let pattern = regex_native_target(&dialog, "Regular expression", None);
+        complete_regex_native_hint(&ctx, &mut dialog, &pattern);
+        assert!(dialog.session.draft.pattern.is_empty());
+        render_regex_immediate_frame(&ctx, &mut dialog, vec![egui::Event::Text(".".into())]);
+        assert_eq!(dialog.session.draft.pattern, ".");
+        assert_eq!(
+            REGEX_VIEWPORT_FOCUSED_ID.with(|focused| *focused.borrow()),
+            Some(pattern.response_id()),
+            "native pattern focus stays stable after a committed edit"
+        );
+        render_regex_immediate_frame(&ctx, &mut dialog, vec![egui::Event::Text("?".into())]);
+        assert_eq!(dialog.session.draft.pattern, ".?");
+        assert_eq!(
+            REGEX_VIEWPORT_FOCUSED_ID.with(|focused| *focused.borrow()),
+            Some(pattern.response_id()),
+            "a second input after frame completion remains in the same pattern field"
+        );
+        let reevaluate = Instant::now();
+        dialog
+            .session
+            .tick(reevaluate + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        assert!(dialog.session.matches().len() >= 2);
+        assert_eq!(dialog.session.selected_index(), Some(0));
+
+        let next = regex_native_target(&dialog, "Next match", None);
+        complete_regex_native_hint(&ctx, &mut dialog, &next);
+        assert_eq!(dialog.session.selected_index(), Some(0));
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            vec![keyboard_event(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(dialog.session.selected_index(), Some(1));
+
+        let previous = regex_native_target(&dialog, "Previous match", None);
+        complete_regex_native_hint(&ctx, &mut dialog, &previous);
+        assert_eq!(dialog.session.selected_index(), Some(1));
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            vec![keyboard_event(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(dialog.session.selected_index(), Some(0));
+
+        let second_move_up = format!("test-cases/{}/move-up", second_case.value());
+        let move_up = regex_native_target(&dialog, "Move test case up", Some(&second_move_up));
+        complete_regex_native_hint(&ctx, &mut dialog, &move_up);
+        assert_eq!(
+            dialog
+                .session
+                .draft
+                .test_cases
+                .as_slice()
+                .iter()
+                .map(|case| case.id)
+                .collect::<Vec<_>>(),
+            [first_case, second_case],
+            "focusing the second row does not reorder it"
+        );
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            vec![keyboard_event(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(
+            dialog
+                .session
+                .draft
+                .test_cases
+                .as_slice()
+                .iter()
+                .map(|case| case.id)
+                .collect::<Vec<_>>(),
+            [second_case, first_case],
+            "a distinct Enter reorders the exact typed case identity"
+        );
+
+        dialog.information_section = InformationSection::Presets;
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        let preset_name = regex_native_target(&dialog, "Preset name", None);
+        complete_regex_native_hint(&ctx, &mut dialog, &preset_name);
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            vec![egui::Event::Text("viewport preset".into())],
+        );
+        assert!(
+            crate::regex_tester::PresetStore::open(&preset_path)
+                .entries()
+                .is_empty()
+        );
+
+        let save = regex_native_target(&dialog, "Save preset", None);
+        complete_regex_native_hint(&ctx, &mut dialog, &save);
+        assert!(
+            crate::regex_tester::PresetStore::open(&preset_path)
+                .entries()
+                .is_empty()
+        );
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            vec![keyboard_event(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        let saved = crate::regex_tester::PresetStore::open(&preset_path);
+        assert_eq!(saved.entries().len(), 1);
+        assert_eq!(saved.entries()[0].name, "viewport preset");
+        assert_eq!(saved.entries()[0].pattern, ".?");
+        assert_eq!(
+            saved.entries()[0]
+                .test_cases
+                .as_slice()
+                .iter()
+                .map(|case| case.id)
+                .collect::<Vec<_>>(),
+            [second_case, first_case]
+        );
+        let saved_id = saved.entries()[0].id;
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+
+        let request_delete_identity = format!("presets/delete/{}", saved_id.value());
+        let request_delete = regex_native_target(
+            &dialog,
+            "Request preset removal",
+            Some(&request_delete_identity),
+        );
+        complete_regex_native_hint(&ctx, &mut dialog, &request_delete);
+        assert!(
+            !dialog
+                .presets
+                .as_ref()
+                .unwrap()
+                .has_pending_delete_confirmation()
+        );
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            vec![keyboard_event(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(
+            dialog
+                .presets
+                .as_ref()
+                .unwrap()
+                .has_pending_delete_confirmation()
+        );
+        assert_eq!(
+            crate::regex_tester::PresetStore::open(&preset_path)
+                .entries()
+                .len(),
+            1
+        );
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+
+        let cancel = regex_native_target(&dialog, "Cancel preset removal", None);
+        complete_regex_native_hint(&ctx, &mut dialog, &cancel);
+        assert!(
+            dialog
+                .presets
+                .as_ref()
+                .unwrap()
+                .has_pending_delete_confirmation()
+        );
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            vec![keyboard_event(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(
+            !dialog
+                .presets
+                .as_ref()
+                .unwrap()
+                .has_pending_delete_confirmation()
+        );
+        assert_eq!(
+            crate::regex_tester::PresetStore::open(&preset_path)
+                .entries()
+                .len(),
+            1
+        );
+    }
+
     #[test]
     fn regex_tester_explicit_match_capture_copy_handles_unicode_empty_unmatched_and_failure() {
         let backend = Arc::new(FakeClipboard::default());
@@ -3022,8 +3962,9 @@ mod tests {
         ctx.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    let mut targets = JumpTargets::new(None);
                     positions = dialog
-                        .flags_area(ui)
+                        .flags_area(ui, &mut targets, true)
                         .map(|response| response.rect.center())
                         .to_vec();
                 });
@@ -3051,7 +3992,10 @@ mod tests {
             };
             ctx.run_ui(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    ui.horizontal(|ui| dialog.flags_area(ui));
+                    ui.horizontal(|ui| {
+                        let mut targets = JumpTargets::new(None);
+                        dialog.flags_area(ui, &mut targets, true)
+                    });
                 });
             })
             .drop_without_applying_deltas();

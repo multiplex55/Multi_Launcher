@@ -1,3 +1,4 @@
+use super::JumpTargets;
 use crate::regex_tester::{CaptureGroup, CaptureValue, RegexMatch};
 use eframe::egui;
 
@@ -56,6 +57,24 @@ pub(super) fn show(
     matched: &RegexMatch,
     selected_capture: &mut usize,
 ) -> Option<CopyTarget> {
+    show_scoped(
+        ui,
+        matched,
+        selected_capture,
+        &mut JumpTargets::new(None),
+        0,
+        true,
+    )
+}
+
+pub(super) fn show_scoped(
+    ui: &mut egui::Ui,
+    matched: &RegexMatch,
+    selected_capture: &mut usize,
+    targets: &mut JumpTargets<'_>,
+    revision: u64,
+    committing: bool,
+) -> Option<CopyTarget> {
     let mut copy = None;
     ui.strong(format!("Match {}", matched.id.index() + 1));
     ui.label(format!(
@@ -66,27 +85,64 @@ pub(super) fn show(
     if matched.text.is_empty() {
         ui.weak("Zero-width match (empty text)");
     }
-    if ui.button("Copy match").clicked() {
+    let copy_match = ui.button("Copy match");
+    targets.button(
+        ui,
+        &copy_match,
+        format!("match-details/{revision}/{}/copy", matched.id.index()),
+        "Copy match",
+    );
+    if copy_match.clicked() && committing {
         copy = Some(CopyTarget::Match);
     }
-    egui::CollapsingHeader::new("Full match text")
+    let match_content = egui::CollapsingHeader::new("Full match text")
         .id_salt("regex_inspection_match_text")
         .show(ui, |ui| {
             value(ui, &matched.text, "regex_match_value_scroll")
         });
+    targets.button(
+        ui,
+        &match_content.header_response,
+        format!("match-details/{revision}/{}/full-text", matched.id.index()),
+        "Expand match text",
+    );
     if matched.captures.is_empty() {
         return copy;
     }
-    *selected_capture = (*selected_capture).min(matched.captures.len() - 1);
-    egui::ComboBox::from_id_salt("regex_inspection_capture")
+    let mut selected = (*selected_capture).min(matched.captures.len() - 1);
+    let capture_picker_identity = format!(
+        "match-details/{revision}/{}/capture-picker",
+        matched.id.index()
+    );
+    let popup_scope = targets.combo_options_scope(&capture_picker_identity);
+    let mut popup_targets = JumpTargets::new(popup_scope.as_ref());
+    let capture_combo = egui::ComboBox::from_id_salt("regex_inspection_capture")
         .width(ui.available_width().min(220.0))
-        .selected_text(capture_label(&matched.captures[*selected_capture]))
+        .selected_text(capture_label(&matched.captures[selected]))
         .show_ui(ui, |ui| {
             for (index, capture) in matched.captures.iter().enumerate() {
-                ui.selectable_value(selected_capture, index, capture_label(capture));
+                let response = ui.selectable_value(&mut selected, index, capture_label(capture));
+                popup_targets.selectable(
+                    ui,
+                    &response,
+                    format!(
+                        "match-details/{revision}/{}/capture/{index}",
+                        matched.id.index()
+                    ),
+                    "Capture group",
+                );
             }
         });
-    let capture = &matched.captures[*selected_capture];
+    targets.combo_box(
+        ui,
+        &capture_combo.response,
+        &capture_picker_identity,
+        "Capture group",
+    );
+    if committing {
+        *selected_capture = selected;
+    }
+    let capture = &matched.captures[selected];
     match &capture.value {
         CaptureValue::Unmatched => {
             ui.weak("Unmatched optional capture");
@@ -96,18 +152,48 @@ pub(super) fn show(
             if text.is_empty() {
                 ui.weak("Matched empty capture");
             }
-            egui::CollapsingHeader::new("Full capture text")
+            let capture_text = egui::CollapsingHeader::new("Full capture text")
                 .id_salt(("regex_inspection_capture_text", capture.group_index))
                 .show(ui, |ui| value(ui, text, "regex_capture_value_scroll"));
+            targets.button(
+                ui,
+                &capture_text.header_response,
+                format!(
+                    "match-details/{revision}/{}/capture/{}/full-text",
+                    matched.id.index(),
+                    capture.group_index
+                ),
+                "Expand capture text",
+            );
         }
     }
-    if ui
-        .add_enabled(
-            copy_text(matched, CopyTarget::Capture(*selected_capture)).is_some(),
-            egui::Button::new("Copy capture"),
+    let copy_capture = ui
+        .push_id(
+            (
+                "regex_inspection_copy_capture",
+                revision,
+                matched.id.index(),
+                selected,
+            ),
+            |ui| {
+                ui.add_enabled(
+                    copy_text(matched, CopyTarget::Capture(selected)).is_some(),
+                    egui::Button::new("Copy capture"),
+                )
+            },
         )
-        .clicked()
-    {
+        .inner;
+    targets.button(
+        ui,
+        &copy_capture,
+        format!(
+            "match-details/{revision}/{}/capture/{}/copy",
+            matched.id.index(),
+            selected
+        ),
+        "Copy capture",
+    );
+    if copy_capture.clicked() && committing {
         copy = Some(CopyTarget::Capture(*selected_capture));
     }
     copy

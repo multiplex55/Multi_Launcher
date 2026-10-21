@@ -1,5 +1,6 @@
 //! Browse bundled learning examples without changing the editable document.
 
+use super::JumpTargets;
 use crate::regex_tester::{BUILT_IN_EXAMPLES, RegexExample};
 use eframe::egui;
 
@@ -20,7 +21,17 @@ impl ExamplesState {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<&'static RegexExample> {
+        self.show_scoped(ui, &mut super::JumpTargets::new(None), true)
+    }
+
+    pub fn show_scoped(
+        &mut self,
+        ui: &mut egui::Ui,
+        targets: &mut JumpTargets<'_>,
+        committing: bool,
+    ) -> Option<&'static RegexExample> {
         let mut load = None;
+        let mut query = self.query.clone();
         egui::ScrollArea::vertical()
             .id_salt("regex_examples_scroll")
             .auto_shrink([false, false])
@@ -28,14 +39,24 @@ impl ExamplesState {
             .show(ui, |ui| {
                 ui.set_max_width(ui.available_width());
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.query)
+                let query_response = ui.add(
+                    egui::TextEdit::singleline(&mut query)
                         .id_salt("regex_examples_search")
                         .hint_text("Search examples")
                         .desired_width(ui.available_width()),
                 );
+                targets.text_entry(ui, &query_response, "examples-search", "Search examples");
+                if committing && query_response.changed() {
+                    self.query.clone_from(&query);
+                }
                 let mut found = false;
-                for example in self.entries() {
+                for example in BUILT_IN_EXAMPLES.iter().filter(|entry| {
+                    let query = query.trim().to_lowercase();
+                    query.is_empty()
+                        || [entry.name, entry.description, entry.pattern]
+                            .iter()
+                            .any(|field| field.to_lowercase().contains(&query))
+                }) {
                     found = true;
                     ui.push_id(example.id, |ui| {
                         ui.strong(example.name);
@@ -67,7 +88,14 @@ impl ExamplesState {
                                 );
                             }
                         }
-                        if ui.button("Load example").clicked() {
+                        let load_response = ui.button("Load example");
+                        targets.button(
+                            ui,
+                            &load_response,
+                            format!("example-load/{}", example.id),
+                            "Load example",
+                        );
+                        if load_response.clicked() && committing {
                             load = Some(example);
                         }
                         ui.separator();

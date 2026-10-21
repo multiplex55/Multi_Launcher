@@ -1,3 +1,4 @@
+use super::JumpTargets;
 use crate::clipboard_modify::clipboard::ClipboardBackend;
 use crate::gui::theme::widgets::{StatusTone, secondary_help, semantic_status};
 use crate::regex_tester::{
@@ -139,6 +140,28 @@ pub(super) fn show(
     copy_feedback: &mut Option<Result<&'static str, String>>,
     process_actions: bool,
 ) -> CaseToolbarGeometry {
+    show_scoped(
+        ui,
+        session,
+        expanded,
+        clipboard,
+        copy_feedback,
+        process_actions,
+        &mut JumpTargets::new(None),
+        &mut JumpTargets::new(None),
+    )
+}
+
+pub(super) fn show_scoped(
+    ui: &mut egui::Ui,
+    session: &mut RegexSession,
+    expanded: &mut bool,
+    clipboard: &dyn ClipboardBackend,
+    copy_feedback: &mut Option<Result<&'static str, String>>,
+    process_actions: bool,
+    form_targets: &mut JumpTargets<'_>,
+    targets: &mut JumpTargets<'_>,
+) -> CaseToolbarGeometry {
     let mut changed = false;
     let mut next_action = None;
     let mut copy_requested = false;
@@ -152,7 +175,14 @@ pub(super) fn show(
         } else {
             "▸ Test Cases"
         };
-        if ui.small_button(disclosure).clicked() && process_actions {
+        let disclosure_response = ui.small_button(disclosure);
+        targets.button(
+            ui,
+            &disclosure_response,
+            "test-cases/disclosure",
+            "Toggle test cases",
+        );
+        if disclosure_response.clicked() && process_actions {
             *expanded = !*expanded;
         }
         let at_limit = session.draft.test_cases.len() >= session.test_case_policy().maximum_cases;
@@ -167,6 +197,7 @@ pub(super) fn show(
                 "Add a new test case".to_owned()
             });
         add_rect = add.rect;
+        targets.button(ui, &add, "test-cases/add", "Add test case");
         if add.clicked() && process_actions {
             next_action = Some(CaseAction::Add);
         }
@@ -181,6 +212,7 @@ pub(super) fn show(
             .add_enabled(has_cases, egui::Button::new(run_label))
             .on_hover_text("Run all test cases with the current pattern and flags");
         run_rect = run.rect;
+        targets.button(ui, &run, "test-cases/run", "Run test cases");
         if run.clicked() && process_actions {
             changed = true;
         }
@@ -188,6 +220,7 @@ pub(super) fn show(
             .button("Copy summary")
             .on_hover_text("Copy counts only; case labels and inputs are not included");
         copy_rect = copy.rect;
+        targets.button(ui, &copy, "test-cases/copy-summary", "Copy test summary");
         if copy.clicked() && process_actions {
             copy_requested = true;
         }
@@ -255,45 +288,67 @@ pub(super) fn show(
                                         .desired_width(ui.available_width())
                                         .hint_text("Optional case label"),
                                 );
+                                form_targets.text_entry(
+                                    ui,
+                                    &label_response,
+                                    format!("test-cases/{}/label", case_id.value()),
+                                    "Test case label",
+                                );
                                 if label_response.changed() && process_actions {
                                     case.label = label_value(&label);
                                     changed = true;
                                 }
 
                                 ui.horizontal(|ui| {
-                                    if ui
+                                    let move_up = ui
                                         .add_enabled(index > 0, egui::Button::new("↑").small())
-                                        .on_hover_text("Move this case up")
-                                        .clicked()
-                                        && process_actions
-                                    {
+                                        .on_hover_text("Move this case up");
+                                    targets.button(
+                                        ui,
+                                        &move_up,
+                                        format!("test-cases/{}/move-up", case_id.value()),
+                                        "Move test case up",
+                                    );
+                                    if move_up.clicked() && process_actions {
                                         next_action = Some(CaseAction::Move(case_id, index - 1));
                                     }
-                                    if ui
+                                    let move_down = ui
                                         .add_enabled(
                                             index + 1 < case_count,
                                             egui::Button::new("↓").small(),
                                         )
-                                        .on_hover_text("Move this case down")
-                                        .clicked()
-                                        && process_actions
-                                    {
+                                        .on_hover_text("Move this case down");
+                                    targets.button(
+                                        ui,
+                                        &move_down,
+                                        format!("test-cases/{}/move-down", case_id.value()),
+                                        "Move test case down",
+                                    );
+                                    if move_down.clicked() && process_actions {
                                         next_action = Some(CaseAction::Move(case_id, index + 1));
                                     }
-                                    if ui
+                                    let duplicate = ui
                                         .small_button("Duplicate")
-                                        .on_hover_text("Duplicate this case with a new stable identity")
-                                        .clicked()
-                                        && process_actions
-                                    {
+                                        .on_hover_text("Duplicate this case with a new stable identity");
+                                    targets.button(
+                                        ui,
+                                        &duplicate,
+                                        format!("test-cases/{}/duplicate", case_id.value()),
+                                        "Duplicate test case",
+                                    );
+                                    if duplicate.clicked() && process_actions {
                                         next_action = Some(CaseAction::Duplicate(case_id));
                                     }
-                                    if ui
+                                    let remove = ui
                                         .small_button("Remove")
-                                        .on_hover_text("Remove this case")
-                                        .clicked()
-                                        && process_actions
-                                    {
+                                        .on_hover_text("Remove this case");
+                                    targets.button(
+                                        ui,
+                                        &remove,
+                                        format!("test-cases/{}/remove", case_id.value()),
+                                        "Remove test case",
+                                    );
+                                    if remove.clicked() && process_actions {
                                         next_action = Some(CaseAction::Remove(case_id));
                                     }
                                 });
@@ -301,20 +356,32 @@ pub(super) fn show(
                                 ui.horizontal(|ui| {
                                     ui.label("Expected:");
                                     let mut expected = case.expected;
-                                    let expectation_changed = ui
+                                    let match_response = ui
                                         .selectable_value(
                                             &mut expected,
                                             RegexTestCaseExpectation::Match,
                                             "Match",
                                         )
-                                        .changed()
-                                        || ui
-                                        .selectable_value(
+                                        ;
+                                    targets.selectable(
+                                        ui,
+                                        &match_response,
+                                        format!("test-cases/{}/expect-match", case_id.value()),
+                                        "Expect a match",
+                                    );
+                                    let no_match_response = ui.selectable_value(
                                             &mut expected,
                                             RegexTestCaseExpectation::NoMatch,
                                             "No match",
-                                        )
-                                        .changed();
+                                            );
+                                    targets.selectable(
+                                        ui,
+                                        &no_match_response,
+                                        format!("test-cases/{}/expect-no-match", case_id.value()),
+                                        "Expect no match",
+                                    );
+                                    let expectation_changed = match_response.changed()
+                                        || no_match_response.changed();
                                     if expectation_changed && process_actions {
                                         case.expected = expected;
                                         changed = true;
@@ -329,6 +396,12 @@ pub(super) fn show(
                                         .desired_rows(3)
                                         .desired_width(f32::INFINITY)
                                         .hint_text("Sample input; Enter adds a line"),
+                                );
+                                form_targets.text_entry(
+                                    ui,
+                                    &input,
+                                    format!("test-cases/{}/input", case_id.value()),
+                                    "Test case input",
                                 );
                                 if input.changed() && process_actions {
                                     case.input = input_value;

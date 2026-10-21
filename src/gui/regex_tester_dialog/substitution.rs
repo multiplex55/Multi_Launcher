@@ -1,5 +1,6 @@
 //! Bounded presentation of the session's complete local replacement result.
 
+use super::JumpTargets;
 use crate::regex_tester::{RegexSession, SubstitutionEvaluationResult};
 use eframe::egui;
 use std::time::Instant;
@@ -12,6 +13,15 @@ pub(super) fn preview(output: &str) -> &str {
 
 /// Returns true for actual replacement/mode changes, never for result rendering.
 pub(super) fn show(ui: &mut egui::Ui, session: &mut RegexSession) -> bool {
+    show_scoped(ui, session, &mut JumpTargets::new(None), true)
+}
+
+pub(super) fn show_scoped(
+    ui: &mut egui::Ui,
+    session: &mut RegexSession,
+    targets: &mut JumpTargets<'_>,
+    committing: bool,
+) -> bool {
     let mut changed = false;
     egui::ScrollArea::vertical()
         .id_salt("regex_substitution_scroll")
@@ -21,10 +31,14 @@ pub(super) fn show(ui: &mut egui::Ui, session: &mut RegexSession) -> bool {
             ui.set_max_width(ui.available_width());
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             let mut enabled = session.substitution_enabled();
-            if ui
-                .checkbox(&mut enabled, "Enable substitution preview")
-                .changed()
-            {
+            let response = ui.checkbox(&mut enabled, "Enable substitution preview");
+            targets.checkbox(
+                ui,
+                &response,
+                "substitution/enabled",
+                "Enable substitution preview",
+            );
+            if response.changed() && committing {
                 session.set_substitution_enabled(enabled, Instant::now());
                 changed = true;
             }
@@ -63,24 +77,34 @@ pub(super) fn show(ui: &mut egui::Ui, session: &mut RegexSession) -> bool {
                     egui::RichText::new(super::utf8_prefix(&session.draft.replacement, 128))
                         .monospace(),
                 );
-                if ui.button("Clear replacement").clicked() {
+                let clear = ui.button("Clear replacement");
+                targets.button(ui, &clear, "substitution/clear", "Clear replacement");
+                if clear.clicked() && committing {
                     session.draft.replacement.clear();
                     session.mark_replacement_changed(Instant::now());
                     changed = true;
                 }
-            } else if ui
-                .add(
-                    egui::TextEdit::multiline(&mut session.draft.replacement)
+            } else {
+                let mut shadow = (!committing).then(|| session.draft.replacement.clone());
+                let replacement = shadow.as_mut().unwrap_or(&mut session.draft.replacement);
+                let response = ui.add(
+                    egui::TextEdit::multiline(replacement)
                         .id(egui::Id::new("regex_substitution_replacement"))
                         .font(egui::TextStyle::Monospace)
                         .layouter(&mut layouter)
                         .desired_width(ui.available_width())
                         .desired_rows(3),
-                )
-                .changed()
-            {
-                session.mark_replacement_changed(Instant::now());
-                changed = true;
+                );
+                targets.text_entry(
+                    ui,
+                    &response,
+                    "substitution/replacement",
+                    "Replacement text",
+                );
+                if response.changed() && committing {
+                    session.mark_replacement_changed(Instant::now());
+                    changed = true;
+                }
             }
             ui.separator();
             ui.strong("Replacement result");

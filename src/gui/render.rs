@@ -2964,12 +2964,66 @@ impl LauncherApp {
         }
     }
 
+    fn show_regex_tester(&mut self, ctx: &egui::Context, root_visible: bool) {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        let instance = self
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::RegexTester);
+        let owner = self.jump_mode_ui.frame_navigation_owner();
+        let root_scope = match (root_visible, owner, instance) {
+            (
+                true,
+                NavigationOwner::Dialog {
+                    kind: NavigationDialogKind::RegexTester,
+                    instance,
+                },
+                Some(current_instance),
+            ) if instance == current_instance => self.jump_mode_ui.scope_for_navigation_owner(
+                crate::gui::jump_mode::SurfaceId::dialog("regex-tester", instance),
+                crate::gui::jump_mode::TargetGeneration(instance),
+                "regex-tester/form",
+                ctx.viewport_id(),
+                owner,
+                false,
+            ),
+            _ => None,
+        };
+        let application_input_allowed = self.native_ui_application_input_allowed(ctx);
+        let root_native_owner_current = root_visible
+            && instance.is_some()
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx)
+                == NavigationDialogKind::RegexTester.layer_id();
+        self.regex_tester_dialog.show_with_jump_mode(
+            ctx,
+            root_scope.as_ref(),
+            instance,
+            application_input_allowed,
+            root_native_owner_current,
+            self.jump_mode_enabled(),
+        );
+    }
+
     fn jump_mode_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         self.jump_mode_enabled() && self.native_ui_host_input_allowed(ctx, root_visible)
     }
 
     fn native_ui_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
-        self.native_ui_host_input_allowed_for_snippet_prompt(ctx, root_visible, false)
+        root_visible
+            && self.visible_flag.load(Ordering::Relaxed)
+            && !self.pin_list_open
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && self.native_ui_application_input_allowed_for_snippet_prompt(ctx, false)
+            && ctx.viewport_id() == egui::ViewportId::ROOT
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+    }
+
+    fn native_ui_application_input_allowed(&self, ctx: &egui::Context) -> bool {
+        self.native_ui_application_input_allowed_for_snippet_prompt(ctx, false)
     }
 
     fn native_ui_host_input_allowed_for_snippet_prompt(
@@ -2978,23 +3032,29 @@ impl LauncherApp {
         root_visible: bool,
         exact_prompt_owner: bool,
     ) -> bool {
+        root_visible
+            && self.visible_flag.load(Ordering::Relaxed)
+            && !self.pin_list_open
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && (exact_prompt_owner || !self.action_sheet.is_open())
+            && self.native_ui_application_input_allowed_for_snippet_prompt(ctx, exact_prompt_owner)
+            && ctx.viewport_id() == egui::ViewportId::ROOT
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+    }
+
+    fn native_ui_application_input_allowed_for_snippet_prompt(
+        &self,
+        _ctx: &egui::Context,
+        exact_prompt_owner: bool,
+    ) -> bool {
         let screen_draw_owns_input = !matches!(
             self.screen_draw_controller.state(),
             crate::screen_draw::ScreenDrawState::NoSession
                 | crate::screen_draw::ScreenDrawState::Failed { .. }
         );
-        root_visible
-            && self.visible_flag.load(Ordering::Relaxed)
-            && ctx.viewport_id() == egui::ViewportId::ROOT
-            && ctx.input(|input| input.focused)
-            && !self.pin_list_open
-            && !self.ocr_surface_visible()
-            && !self.confirm_modal.is_open()
-            // An exact foreground snippet prompt suspends the action sheet in
-            // render_root_ui; the still-open sheet is its launcher parent,
-            // not a competing foreground input owner.
-            && (exact_prompt_owner || !self.action_sheet.is_open())
-            && self.macro_prompt.pending.is_none()
+        self.macro_prompt.pending.is_none()
             && !self.macro_parameter_prompt.owns_input()
             && (exact_prompt_owner || !self.snippet_prompt_dialog.is_open())
             && !self
@@ -3003,7 +3063,6 @@ impl LauncherApp {
                 .is_some_and(|logic| logic.snippet_prompt_owns_input && !exact_prompt_owner)
             && !screen_draw_owns_input
             && !self.screen_draw_controller.toolbar_open()
-            && ctx.memory(|memory| memory.top_modal_layer().is_none())
     }
 
     fn snippet_prompt_native_ui_owner_current(
@@ -3313,8 +3372,14 @@ impl LauncherApp {
                     .mkmacro_dialog
                     .open
                     .then_some(self.jump_mode_ui.mkmacro_instance()),
-                dialogs: NavigationDialogKind::ALL
-                    .map(|kind| self.jump_mode_ui.dialog_instance(kind)),
+                dialogs: NavigationDialogKind::ALL.map(|kind| {
+                    let current = self.jump_mode_ui.dialog_instance(kind);
+                    if kind == NavigationDialogKind::RegexTester {
+                        self.regex_tester_dialog.root_navigation_instance(current)
+                    } else {
+                        current
+                    }
+                }),
             };
             let parent_owner = resolve_layer_navigation_owner_parent(ctx, windows);
             let combo_popup = (parent_owner != NavigationOwner::Blocked
@@ -3534,6 +3599,10 @@ impl LauncherApp {
             self.macro_parameter_prompt.show(&ctx, first_ui_pass);
             self.show_screen_draw_toolbar_with_actions(&ctx, first_ui_pass);
             self.xml_toolkit_dialog.show(&ctx);
+            // An Immediate Regex Tester owns its own viewport and remains
+            // usable while the launcher is hidden. Its ROOT scope and ROOT
+            // native-owner eligibility stay disabled in this branch.
+            self.show_regex_tester(&ctx, false);
             if first_ui_pass {
                 self.run_background_after_menu();
             }
@@ -5563,7 +5632,7 @@ impl LauncherApp {
             first_ui_pass,
         );
         self.hash_generator_dialog.show(&ctx);
-        self.regex_tester_dialog.show(&ctx);
+        self.show_regex_tester(&ctx, frame_logic.should_be_visible);
         self.xml_toolkit_dialog.show(&ctx);
         self.render_hotfolder_manager(&ctx, first_ui_pass);
         #[cfg(feature = "qa-framebuffer-capture")]

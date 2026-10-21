@@ -1,5 +1,6 @@
 //! Explicit clipboard workflow presentation and readable match formatting.
 
+use super::JumpTargets;
 use crate::clipboard_modify::clipboard::ClipboardError;
 use crate::regex_tester::{
     CaptureValue, EvaluationResult, MatchCompleteness, RegexMatch, RegexSession,
@@ -96,6 +97,15 @@ pub(super) fn show(
     session: &RegexSession,
     selected_capture: usize,
 ) -> Option<ClipboardAction> {
+    show_scoped(ui, session, selected_capture, &mut JumpTargets::new(None))
+}
+
+pub(super) fn show_scoped(
+    ui: &mut egui::Ui,
+    session: &RegexSession,
+    selected_capture: usize,
+    targets: &mut JumpTargets<'_>,
+) -> Option<ClipboardAction> {
     let mut action = None;
     egui::ScrollArea::vertical()
         .id_salt("regex_clipboard_controls_scroll")
@@ -105,20 +115,29 @@ pub(super) fn show(
             ui.set_max_width(ui.available_width());
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             ui.weak("Clipboard access happens only when you press an action.");
-            if ui.button("Use Clipboard Text").clicked() {
+            let import = ui.button("Use Clipboard Text");
+            targets.button(ui, &import, "clipboard/import", "Import clipboard text");
+            if import.clicked() {
                 action = Some(ClipboardAction::ImportText);
             }
             ui.weak("Replaces only input / test text; keeps pattern, flags and replacement.");
-            if ui.button("Copy Pattern").clicked() {
+            let copy_pattern = ui.button("Copy Pattern");
+            targets.button(ui, &copy_pattern, "clipboard/copy-pattern", "Copy pattern");
+            if copy_pattern.clicked() {
                 action = Some(ClipboardAction::CopyPattern);
             }
             let matched = session
                 .selected_index()
                 .and_then(|index| session.matches().get(index));
-            if ui
-                .add_enabled(matched.is_some(), egui::Button::new("Copy Selected Match"))
-                .clicked()
-            {
+            let copy_match =
+                ui.add_enabled(matched.is_some(), egui::Button::new("Copy Selected Match"));
+            targets.button(
+                ui,
+                &copy_match,
+                "clipboard/copy-match",
+                "Copy selected match",
+            );
+            if copy_match.clicked() {
                 action = Some(ClipboardAction::CopyMatch);
             }
             let capture_available = matched
@@ -129,13 +148,17 @@ pub(super) fn show(
                     )
                 })
                 .is_some();
-            if ui
-                .add_enabled(
-                    capture_available,
-                    egui::Button::new("Copy Selected Capture"),
-                )
-                .clicked()
-            {
+            let copy_capture = ui.add_enabled(
+                capture_available,
+                egui::Button::new("Copy Selected Capture"),
+            );
+            targets.button(
+                ui,
+                &copy_capture,
+                "clipboard/copy-capture",
+                "Copy selected capture",
+            );
+            if copy_capture.clicked() {
                 action = Some(ClipboardAction::CopyCapture(selected_capture));
             }
             ui.weak("Choose the capture in Selected match.");
@@ -147,10 +170,10 @@ pub(super) fn show(
                 })
             );
             let all_label = all_matches_label(session);
-            if ui
-                .add_enabled(!session.matches().is_empty(), egui::Button::new(all_label))
-                .clicked()
-            {
+            let copy_all =
+                ui.add_enabled(!session.matches().is_empty(), egui::Button::new(all_label));
+            targets.button(ui, &copy_all, "clipboard/copy-matches", "Copy matches");
+            if copy_all.clicked() {
                 action = Some(ClipboardAction::CopyAllMatches);
             }
             ui.weak(format!(
@@ -158,13 +181,17 @@ pub(super) fn show(
                 session.matches().len(),
                 if truncated { "displayed" } else { "current" }
             ));
-            if ui
-                .add_enabled(
-                    matched.is_some(),
-                    egui::Button::new("Copy Match Information"),
-                )
-                .clicked()
-            {
+            let copy_information = ui.add_enabled(
+                matched.is_some(),
+                egui::Button::new("Copy Match Information"),
+            );
+            targets.button(
+                ui,
+                &copy_information,
+                "clipboard/copy-match-information",
+                "Copy match information",
+            );
+            if copy_information.clicked() {
                 action = Some(ClipboardAction::CopyMatchInformation);
             }
             let result_available = session.substitution_enabled()
@@ -172,13 +199,17 @@ pub(super) fn show(
                     session.substitution_result(),
                     Some(SubstitutionEvaluationResult::Success(_))
                 );
-            if ui
-                .add_enabled(
-                    result_available,
-                    egui::Button::new("Copy Replacement Result"),
-                )
-                .clicked()
-            {
+            let copy_result = ui.add_enabled(
+                result_available,
+                egui::Button::new("Copy Replacement Result"),
+            );
+            targets.button(
+                ui,
+                &copy_result,
+                "clipboard/copy-result",
+                "Copy replacement result",
+            );
+            if copy_result.clicked() {
                 action = Some(ClipboardAction::CopyReplacementResult);
             }
             ui.weak("Copies the complete current output, including content beyond the preview.");

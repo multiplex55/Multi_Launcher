@@ -1,5 +1,6 @@
 //! Local catalog browsing; actions are explicit and handled by the dialog.
 
+use super::JumpTargets;
 use crate::regex_tester::{
     ReferenceCategory, ReferenceEntry, ReferenceSyntaxKind, search_reference,
 };
@@ -22,7 +23,18 @@ impl ReferenceState {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<ReferenceAction> {
+        self.show_scoped(ui, &mut super::JumpTargets::new(None), true)
+    }
+
+    pub fn show_scoped(
+        &mut self,
+        ui: &mut egui::Ui,
+        targets: &mut JumpTargets<'_>,
+        committing: bool,
+    ) -> Option<ReferenceAction> {
         let mut action = None;
+        let mut query = self.query.clone();
+        let mut category = self.category;
         egui::ScrollArea::vertical()
             .id_salt("regex_reference_scroll")
             .auto_shrink([false, false])
@@ -30,30 +42,45 @@ impl ReferenceState {
             .show(ui, |ui| {
                 ui.set_max_width(ui.available_width());
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.query)
+                let query_response = ui.add(
+                    egui::TextEdit::singleline(&mut query)
                         .id_salt("regex_reference_search")
                         .hint_text("Search reference")
                         .desired_width(ui.available_width()),
                 );
-                egui::ComboBox::from_id_salt("regex_reference_category")
+                targets.text_entry(ui, &query_response, "reference-search", "Search reference");
+                let popup_scope = targets.combo_options_scope("reference-category");
+                let mut popup_targets = JumpTargets::new(popup_scope.as_ref());
+                let category_response = egui::ComboBox::from_id_salt("regex_reference_category")
                     .width(ui.available_width().min(180.0))
-                    .selected_text(
-                        self.category
-                            .map_or("All categories", ReferenceCategory::title),
-                    )
+                    .selected_text(category.map_or("All categories", ReferenceCategory::title))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.category, None, "All categories");
-                        for category in ReferenceCategory::ALL {
-                            ui.selectable_value(
-                                &mut self.category,
-                                Some(category),
-                                category.title(),
+                        let response = ui.selectable_value(&mut category, None, "All categories");
+                        popup_targets.selectable(
+                            ui,
+                            &response,
+                            "category/all",
+                            "All reference categories",
+                        );
+                        for option in ReferenceCategory::ALL {
+                            let response =
+                                ui.selectable_value(&mut category, Some(option), option.title());
+                            popup_targets.selectable(
+                                ui,
+                                &response,
+                                format!("category/{}", category_index(option)),
+                                "Reference category",
                             );
                         }
                     });
+                targets.combo_box(
+                    ui,
+                    &category_response.response,
+                    "reference-category",
+                    "Reference category",
+                );
                 let mut found = false;
-                for entry in self.entries() {
+                for entry in search_reference(&query, category) {
                     found = true;
                     ui.push_id(entry.id, |ui| {
                         ui.strong(entry.title);
@@ -75,10 +102,24 @@ impl ReferenceState {
                             );
                         }
                         ui.horizontal_wrapped(|ui| {
-                            if ui.button("Append syntax").clicked() {
+                            let append = ui.button("Append syntax");
+                            targets.button(
+                                ui,
+                                &append,
+                                format!("reference/{}/append", entry.id),
+                                "Append reference syntax",
+                            );
+                            if append.clicked() && committing {
                                 action = Some(ReferenceAction::Append(entry));
                             }
-                            if ui.button("Copy syntax").clicked() {
+                            let copy = ui.button("Copy syntax");
+                            targets.button(
+                                ui,
+                                &copy,
+                                format!("reference/{}/copy", entry.id),
+                                "Copy reference syntax",
+                            );
+                            if copy.clicked() && committing {
                                 action = Some(ReferenceAction::Copy(entry));
                             }
                         });
@@ -89,6 +130,17 @@ impl ReferenceState {
                     ui.weak("No reference entries match these filters.");
                 }
             });
+        if committing {
+            self.query = query;
+            self.category = category;
+        }
         action
     }
+}
+
+fn category_index(category: ReferenceCategory) -> usize {
+    ReferenceCategory::ALL
+        .iter()
+        .position(|candidate| *candidate == category)
+        .unwrap_or(0)
 }

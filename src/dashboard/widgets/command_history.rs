@@ -9,9 +9,7 @@ use crate::history::{HISTORY_PINS_FILE, HistoryEntry, HistoryPin, toggle_pin};
 use chrono::TimeZone;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 fn default_count() -> usize {

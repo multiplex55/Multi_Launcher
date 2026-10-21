@@ -1,11 +1,13 @@
 //! History integration delegates persistence and corruption protection to the store.
 
+use super::JumpTargets;
 use crate::regex_tester::{EvaluationResult, HistoryEntry, HistoryStore, RegexSession};
 use eframe::egui;
 
 pub(super) struct HistoryState {
     pub store: HistoryStore,
     attempted: Option<HistoryEntry>,
+    view_generation: u64,
 }
 
 #[cfg(test)]
@@ -113,7 +115,12 @@ impl HistoryState {
         Self {
             store: HistoryStore::open(path),
             attempted: None,
+            view_generation: 0,
         }
+    }
+
+    pub fn view_generation(&self) -> u64 {
+        self.view_generation
     }
 
     pub fn record_success(&mut self, session: &RegexSession) {
@@ -137,7 +144,11 @@ impl HistoryState {
             pattern: draft.pattern.clone(),
             flags: draft.flags,
         });
+        let before = self.store.entries().to_vec();
         let _ = self.store.record(&draft.pattern, draft.flags);
+        if self.store.entries() != before {
+            self.view_generation = self.view_generation.wrapping_add(1);
+        }
     }
 
     pub fn retry(&mut self, session: &RegexSession) {
@@ -145,7 +156,22 @@ impl HistoryState {
         self.record_success(session);
     }
 
+    pub fn reload(&mut self) -> Result<(), crate::regex_tester::RegexStoreError> {
+        self.store.reload()?;
+        self.view_generation = self.view_generation.wrapping_add(1);
+        Ok(())
+    }
+
     pub fn show(&self, ui: &mut egui::Ui, retryable: bool) -> Option<HistoryAction> {
+        self.show_scoped(ui, retryable, &mut JumpTargets::new(None))
+    }
+
+    pub fn show_scoped(
+        &self,
+        ui: &mut egui::Ui,
+        retryable: bool,
+        targets: &mut JumpTargets<'_>,
+    ) -> Option<HistoryAction> {
         let mut action = None;
         egui::ScrollArea::vertical()
             .id_salt("regex_history_scroll")
@@ -161,18 +187,32 @@ impl HistoryState {
                     ui.weak("History writes are blocked. The existing file is preserved; repair it and reload to recover.");
                 }
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Reload history").clicked() { action = Some(HistoryAction::Reload); }
-                    if ui.add_enabled(retryable && self.store.is_writable(), egui::Button::new("Retry record")).clicked() {
+                    let reload = ui.button("Reload history");
+                    targets.button(ui, &reload, "history/reload", "Reload history");
+                    if reload.clicked() { action = Some(HistoryAction::Reload); }
+                    let retry = ui.add_enabled(retryable && self.store.is_writable(), egui::Button::new("Retry record"));
+                    targets.button(ui, &retry, "history/retry", "Retry history record");
+                    if retry.clicked() {
                         action = Some(HistoryAction::Retry);
                     }
                 });
                 if self.store.entries().is_empty() { ui.weak("No recent expressions."); }
                 for (index, entry) in self.store.entries().iter().enumerate() {
-                    ui.push_id(("regex_history_entry", index), |ui| {
+                    // Replacing the history snapshot must retire native focus
+                    // as well as the generation-bound Jump target. An index
+                    // alone could keep Enter attached to a different row.
+                    ui.push_id(("regex_history_entry", self.view_generation, index), |ui| {
                         ui.strong(format!("Recent #{} · flags {}", index + 1, entry.flags.suffix()));
                         ui.label(egui::RichText::new(super::utf8_prefix(&entry.pattern, 160)).monospace());
                         if entry.pattern.len() > 160 { ui.weak("Pattern preview; Load restores the complete expression."); }
-                        if ui.button("Load expression").clicked() { action = Some(HistoryAction::Load(index)); }
+                        let load = ui.button("Load expression");
+                        targets.button(
+                            ui,
+                            &load,
+                            format!("history/load/{}/{index}", self.view_generation),
+                            "Load history entry",
+                        );
+                        if load.clicked() { action = Some(HistoryAction::Load(index)); }
                         ui.separator();
                     });
                 }

@@ -176,6 +176,78 @@ pub(crate) enum NavigationOwner {
     Blocked,
 }
 
+/// Exact non-root viewport authority for a surface whose base UI is not a
+/// normal ROOT `Window`. The owner and base layer are copied values supplied
+/// by that viewport's real renderer callback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NavigationViewportBinding {
+    pub(crate) viewport: egui::ViewportId,
+    pub(crate) owner: NavigationOwner,
+    pub(crate) base_layer: egui::LayerId,
+}
+
+impl NavigationViewportBinding {
+    fn owner_is_admissible(self) -> bool {
+        matches!(
+            self.owner,
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::RegexTester
+                    | NavigationDialogKind::XmlToolkit
+                    | NavigationDialogKind::RadialDesigner,
+                ..
+            }
+        )
+    }
+
+    pub(crate) fn base_is_current(self, ctx: &egui::Context) -> bool {
+        self.owner_is_admissible()
+            && ctx.viewport_id() == self.viewport
+            && self.viewport != egui::ViewportId::ROOT
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && visible_top_middle_layer(ctx).is_none()
+    }
+
+    fn focus_is_owned(self, ctx: &egui::Context, popup_layer: Option<egui::LayerId>) -> bool {
+        focused_response_layer(ctx)
+            .is_none_or(|layer| layer == self.base_layer || Some(layer) == popup_layer)
+    }
+}
+
+/// Resolve the already-identified viewport owner only while its actual
+/// non-root base viewport remains focused and no foreign Middle/modal layer
+/// has taken over. An open popup requires the exact previously observed combo
+/// anchor; unknown foreground popups remain blocked.
+pub(crate) fn resolve_bound_viewport_navigation_owner(
+    ctx: &egui::Context,
+    binding: NavigationViewportBinding,
+    combo_popup: Option<&ComboPopupOwner>,
+) -> NavigationOwner {
+    if !binding.base_is_current(ctx) {
+        return NavigationOwner::Blocked;
+    }
+
+    if egui::Popup::is_any_open(ctx) {
+        let Some(popup) = combo_popup.filter(|popup| {
+            popup.parent_owner == binding.owner
+                && popup.viewport == binding.viewport
+                && popup.binding == Some(binding)
+                && (popup.is_current(ctx, binding.owner)
+                    || popup.is_sizing_pass(ctx, binding.owner))
+        }) else {
+            return NavigationOwner::Blocked;
+        };
+        if !binding.focus_is_owned(ctx, Some(popup.popup_layer)) {
+            return NavigationOwner::Blocked;
+        }
+        binding.owner
+    } else if combo_popup.is_some() || !binding.focus_is_owned(ctx, None) {
+        NavigationOwner::Blocked
+    } else {
+        binding.owner
+    }
+}
+
 impl NavigationOwner {
     fn is_supported(self) -> bool {
         !matches!(self, Self::Root | Self::Blocked)
@@ -467,6 +539,8 @@ pub(crate) fn resolve_layer_navigation_owner_with_combo_popup(
 pub(crate) struct ComboPopupOwner {
     parent_owner: NavigationOwner,
     anchor_id: TargetId,
+    viewport: egui::ViewportId,
+    binding: Option<NavigationViewportBinding>,
     response_id: egui::Id,
     anchor_layer: egui::LayerId,
     popup_layer: egui::LayerId,
@@ -479,16 +553,28 @@ impl ComboPopupOwner {
         ctx: &egui::Context,
         parent_owner: NavigationOwner,
     ) -> bool {
+        let anchor_is_current = match self.binding {
+            Some(binding) => {
+                binding.owner == parent_owner
+                    && binding.viewport == self.viewport
+                    && binding.base_is_current(ctx)
+                    && self.anchor_layer == binding.base_layer
+            }
+            None => {
+                self.viewport == egui::ViewportId::ROOT
+                    && combo_anchor_layer_is_current(
+                        ctx,
+                        parent_owner,
+                        self.anchor_id.surface(),
+                        self.anchor_layer,
+                    )
+            }
+        };
         self.parent_owner == parent_owner
             && parent_owner.owns_surface(self.anchor_id.surface())
             && egui::ComboBox::is_open(ctx, self.response_id)
             && egui::Popup::is_any_open(ctx)
-            && combo_anchor_layer_is_current(
-                ctx,
-                parent_owner,
-                self.anchor_id.surface(),
-                self.anchor_layer,
-            )
+            && anchor_is_current
             && focused_response_layer(ctx)
                 .is_none_or(|layer| layer == self.anchor_layer || layer == self.popup_layer)
     }
@@ -735,9 +821,19 @@ impl TargetRegistry {
         navigation_owner: NavigationOwner,
         root_targets_allowed: bool,
         active_combo_popup: Option<&ComboPopupOwner>,
+        viewport_binding: Option<NavigationViewportBinding>,
     ) {
-        let root_focused = ctx.input(|input| input.focused);
-        let root_viewport = ctx.viewport_id() == egui::ViewportId::ROOT;
+        let viewport_is_current = match viewport_binding {
+            Some(binding) => {
+                binding.base_is_current(ctx)
+                    && (navigation_owner == NavigationOwner::Blocked
+                        || binding.owner == navigation_owner)
+            }
+            None => ctx.input(|input| input.focused) && ctx.viewport_id() == egui::ViewportId::ROOT,
+        };
+        let expected_viewport = viewport_binding
+            .map(|binding| binding.viewport)
+            .unwrap_or(egui::ViewportId::ROOT);
         let popup_open = egui::Popup::is_any_open(ctx);
         self.targets.retain(|target| {
             let root_surface = is_root_surface(target.id().surface());
@@ -747,9 +843,8 @@ impl TargetRegistry {
             let popup_surface_owned = active_combo_popup
                 .as_ref()
                 .is_some_and(|popup| popup.popup_surface == *target.id().surface());
-            root_focused
-                && root_viewport
-                && target.viewport == egui::ViewportId::ROOT
+            viewport_is_current
+                && target.viewport == expected_viewport
                 && target.eligible
                 && target.enabled
                 && navigation_available
@@ -769,9 +864,8 @@ impl TargetRegistry {
                 }
         });
         self.combo_anchors.retain(|target| {
-            root_focused
-                && root_viewport
-                && target.viewport == egui::ViewportId::ROOT
+            viewport_is_current
+                && target.viewport == expected_viewport
                 && target.eligible
                 && target.enabled
                 && navigation_owner != NavigationOwner::Blocked
@@ -785,13 +879,28 @@ impl TargetRegistry {
         ctx: &egui::Context,
         parent_owner: NavigationOwner,
     ) -> Result<Option<ComboPopupOwner>, ()> {
+        self.open_combo_popup_for_binding(ctx, parent_owner, None)
+    }
+
+    fn open_combo_popup_for_binding(
+        &self,
+        ctx: &egui::Context,
+        parent_owner: NavigationOwner,
+        binding: Option<NavigationViewportBinding>,
+    ) -> Result<Option<ComboPopupOwner>, ()> {
         if !egui::Popup::is_any_open(ctx) {
             return Ok(None);
         }
 
+        if let Some(binding) = binding
+            && (!binding.base_is_current(ctx) || binding.owner != parent_owner)
+        {
+            return Err(());
+        }
+
         let mut open_anchor = None;
         for anchor in &self.combo_anchors {
-            if anchor.viewport != egui::ViewportId::ROOT
+            if anchor.viewport != binding.map_or(egui::ViewportId::ROOT, |binding| binding.viewport)
                 || !anchor.enabled
                 || !anchor.eligible
                 || !parent_owner.owns_surface(anchor.id().surface())
@@ -812,12 +921,23 @@ impl TargetRegistry {
         let owner = ComboPopupOwner {
             parent_owner,
             anchor_id: anchor.id().clone(),
+            viewport: anchor.viewport,
+            binding,
             response_id: anchor.response_id,
             anchor_layer: anchor.layer_id,
             popup_layer: egui::LayerId::new(egui::Order::Foreground, popup_id),
             popup_surface: combo_popup_surface(anchor.id()),
         };
-        if !combo_anchor_layer_is_current(ctx, parent_owner, anchor.id().surface(), anchor.layer_id)
+        let anchor_is_current = match binding {
+            Some(binding) => binding.base_is_current(ctx) && anchor.layer_id == binding.base_layer,
+            None => combo_anchor_layer_is_current(
+                ctx,
+                parent_owner,
+                anchor.id().surface(),
+                anchor.layer_id,
+            ),
+        };
+        if !anchor_is_current
             || !(owner.is_current(ctx, parent_owner) || owner.is_sizing_pass(ctx, parent_owner))
         {
             return Err(());
@@ -884,6 +1004,7 @@ struct PassCollector {
 
 #[derive(Default)]
 struct RootInputFrame {
+    viewport: egui::ViewportId,
     owner_blocked: bool,
     resolved: bool,
     capture_text_remainder: bool,
@@ -899,6 +1020,7 @@ pub struct JumpModeScope {
     generation: TargetGeneration,
     identity_namespace: String,
     viewport: egui::ViewportId,
+    viewport_binding: Option<NavigationViewportBinding>,
     epoch: NavigationEpoch,
     root_owner_allowed: bool,
     navigation_owner: Option<NavigationOwner>,
@@ -1041,7 +1163,15 @@ impl JumpModeScope {
         }
 
         let ctx = ui.ctx();
-        if self.viewport != egui::ViewportId::ROOT
+        let viewport_is_current = match self.viewport_binding {
+            Some(binding) => {
+                binding.viewport == self.viewport
+                    && self.navigation_owner == Some(binding.owner)
+                    && binding.base_is_current(ctx)
+            }
+            None => self.viewport == egui::ViewportId::ROOT,
+        };
+        if !viewport_is_current
             || ctx.viewport_id() != self.viewport
             || response.ctx.viewport_id() != self.viewport
         {
@@ -1447,12 +1577,49 @@ impl JumpModeUi {
         supported_dialog_visibility_changed: bool,
         combo_popup: Option<ComboPopupOwner>,
     ) -> NavigationOwner {
+        self.update_navigation_owner_with_combo_popup_internal(
+            ctx,
+            candidate,
+            supported_dialog_visibility_changed,
+            combo_popup,
+            true,
+        )
+    }
+
+    pub(crate) fn update_navigation_owner_for_viewport(
+        &mut self,
+        ctx: &egui::Context,
+        binding: NavigationViewportBinding,
+        application_input_allowed: bool,
+    ) -> NavigationOwner {
+        if ctx.viewport_id() != binding.viewport {
+            self.quarantine_mismatched_viewport();
+            return NavigationOwner::Blocked;
+        }
+        let popup = self.resolve_combo_popup_owner_for_viewport(ctx, binding);
+        let candidate = if application_input_allowed {
+            resolve_bound_viewport_navigation_owner(ctx, binding, popup.as_ref())
+        } else {
+            NavigationOwner::Blocked
+        };
+        self.update_navigation_owner_with_combo_popup_internal(ctx, candidate, false, popup, false)
+    }
+
+    fn update_navigation_owner_with_combo_popup_internal(
+        &mut self,
+        ctx: &egui::Context,
+        candidate: NavigationOwner,
+        supported_dialog_visibility_changed: bool,
+        combo_popup: Option<ComboPopupOwner>,
+        root_owner: bool,
+    ) -> NavigationOwner {
         let owner_changed =
             supported_dialog_visibility_changed || candidate != self.navigation_owner;
         let popup_changed = combo_popup != self.active_combo_popup;
         if owner_changed || popup_changed {
             if self.enabled {
-                if owner_changed
+                if root_owner
+                    && owner_changed
                     && (candidate.is_supported()
                         || (supported_dialog_visibility_changed
                             && (self.settings_open
@@ -1515,6 +1682,30 @@ impl JumpModeUi {
         registry.open_combo_popup(ctx, parent_owner).ok().flatten()
     }
 
+    pub(crate) fn resolve_combo_popup_owner_for_viewport(
+        &self,
+        ctx: &egui::Context,
+        binding: NavigationViewportBinding,
+    ) -> Option<ComboPopupOwner> {
+        if ctx.viewport_id() != binding.viewport {
+            return None;
+        }
+        if let Some(active) = self.active_combo_popup.as_ref()
+            && active.binding == Some(binding)
+            && (active.is_current(ctx, binding.owner) || active.is_sizing_pass(ctx, binding.owner))
+        {
+            return Some(active.clone());
+        }
+        let registry = self
+            .pass_registry
+            .as_ref()
+            .unwrap_or(&self.retained_registry);
+        registry
+            .open_combo_popup_for_binding(ctx, binding.owner, Some(binding))
+            .ok()
+            .flatten()
+    }
+
     pub(crate) fn frame_navigation_owner(&self) -> NavigationOwner {
         self.frame_navigation_owner
     }
@@ -1528,6 +1719,32 @@ impl JumpModeUi {
         navigation_input_allowed: bool,
         first_ui_pass: bool,
     ) {
+        self.handle_viewport_input(
+            ctx,
+            navigation_input_allowed,
+            first_ui_pass,
+            egui::ViewportId::ROOT,
+        );
+    }
+
+    pub(crate) fn handle_viewport_input(
+        &mut self,
+        ctx: &egui::Context,
+        navigation_input_allowed: bool,
+        first_ui_pass: bool,
+        viewport: egui::ViewportId,
+    ) {
+        if ctx.viewport_id() != viewport {
+            // A viewport coordinator is never allowed to inspect or consume a
+            // different viewport's event stream. Quarantine only its own
+            // stale navigation state; do not surrender focus through this
+            // mismatched context.
+            self.quarantine_mismatched_viewport();
+            return;
+        }
+        if first_ui_pass {
+            self.root_input_frame.viewport = viewport;
+        }
         if !navigation_input_allowed {
             self.root_input_frame.owner_blocked = true;
             if !ctx.input(|input| input.focused) && self.active_session.is_some() {
@@ -1594,6 +1811,7 @@ impl JumpModeUi {
             viewport,
             root_owner_allowed,
             None,
+            None,
         )
     }
 
@@ -1613,6 +1831,28 @@ impl JumpModeUi {
             viewport,
             root_targets_allowed,
             Some(navigation_owner),
+            None,
+        )
+    }
+
+    pub(crate) fn scope_for_viewport_binding(
+        &self,
+        surface: SurfaceId,
+        generation: TargetGeneration,
+        identity_namespace: impl Into<String>,
+        binding: NavigationViewportBinding,
+    ) -> Option<JumpModeScope> {
+        if !binding.owner_is_admissible() || binding.viewport == egui::ViewportId::ROOT {
+            return None;
+        }
+        self.make_scope(
+            surface,
+            generation,
+            identity_namespace,
+            binding.viewport,
+            false,
+            Some(binding.owner),
+            Some(binding),
         )
     }
 
@@ -1624,6 +1864,7 @@ impl JumpModeUi {
         viewport: egui::ViewportId,
         root_owner_allowed: bool,
         navigation_owner: Option<NavigationOwner>,
+        viewport_binding: Option<NavigationViewportBinding>,
     ) -> Option<JumpModeScope> {
         Some(JumpModeScope {
             collector: Arc::clone(self.collector.as_ref()?),
@@ -1631,6 +1872,7 @@ impl JumpModeUi {
             generation,
             identity_namespace: identity_namespace.into(),
             viewport,
+            viewport_binding,
             epoch: self.navigation_epoch,
             root_owner_allowed,
             navigation_owner,
@@ -1684,7 +1926,52 @@ impl JumpModeUi {
         root_targets_allowed: bool,
         root_visible: bool,
     ) -> bool {
-        if !self.enabled || !root_visible || ctx.viewport_id() != egui::ViewportId::ROOT {
+        self.prepare_pass_with_viewport_binding(
+            ctx,
+            navigation_owner,
+            root_targets_allowed,
+            root_visible,
+            None,
+        )
+    }
+
+    pub(crate) fn prepare_pass_for_viewport(
+        &mut self,
+        ctx: &egui::Context,
+        binding: NavigationViewportBinding,
+        navigation_owner: NavigationOwner,
+        root_visible: bool,
+    ) -> bool {
+        if ctx.viewport_id() != binding.viewport {
+            self.quarantine_mismatched_viewport();
+            return false;
+        }
+        self.prepare_pass_with_viewport_binding(
+            ctx,
+            navigation_owner,
+            false,
+            root_visible,
+            Some(binding),
+        )
+    }
+
+    fn prepare_pass_with_viewport_binding(
+        &mut self,
+        ctx: &egui::Context,
+        navigation_owner: NavigationOwner,
+        root_targets_allowed: bool,
+        root_visible: bool,
+        viewport_binding: Option<NavigationViewportBinding>,
+    ) -> bool {
+        let viewport_is_current = match viewport_binding {
+            Some(binding) => {
+                binding.base_is_current(ctx)
+                    && (navigation_owner == NavigationOwner::Blocked
+                        || binding.owner == navigation_owner)
+            }
+            None => ctx.viewport_id() == egui::ViewportId::ROOT,
+        };
+        if !self.enabled || !root_visible || !viewport_is_current {
             return false;
         }
         if navigation_owner == NavigationOwner::Blocked {
@@ -1704,6 +1991,7 @@ impl JumpModeUi {
             &mut completed,
             navigation_owner,
             root_targets_allowed,
+            viewport_binding,
         );
         self.pass_registry = Some(completed);
         true
@@ -1715,12 +2003,14 @@ impl JumpModeUi {
         registry: &mut TargetRegistry,
         navigation_owner: NavigationOwner,
         root_targets_allowed: bool,
+        viewport_binding: Option<NavigationViewportBinding>,
     ) {
         registry.revalidate(
             ctx,
             navigation_owner,
             root_targets_allowed,
             self.active_combo_popup.as_ref(),
+            viewport_binding,
         );
         let replacement_focus_target = self
             .last_completed_focus_handoff
@@ -1809,7 +2099,52 @@ impl JumpModeUi {
         root_targets_allowed: bool,
         root_visible: bool,
     ) {
-        if !self.enabled || !root_visible || ctx.viewport_id() != egui::ViewportId::ROOT {
+        self.complete_frame_with_viewport_binding(
+            ctx,
+            navigation_owner,
+            root_targets_allowed,
+            root_visible,
+            None,
+        );
+    }
+
+    pub(crate) fn complete_frame_for_viewport(
+        &mut self,
+        ctx: &egui::Context,
+        binding: NavigationViewportBinding,
+        navigation_owner: NavigationOwner,
+        root_visible: bool,
+    ) {
+        self.complete_frame_with_viewport_binding(
+            ctx,
+            navigation_owner,
+            false,
+            root_visible,
+            Some(binding),
+        );
+    }
+
+    fn complete_frame_with_viewport_binding(
+        &mut self,
+        ctx: &egui::Context,
+        navigation_owner: NavigationOwner,
+        root_targets_allowed: bool,
+        root_visible: bool,
+        viewport_binding: Option<NavigationViewportBinding>,
+    ) {
+        if viewport_binding.is_some_and(|binding| ctx.viewport_id() != binding.viewport) {
+            // A stale or misrouted callback must not surrender focus through a
+            // different viewport's Context. Retire only this coordinator's
+            // local intents and registry; correct-viewport owner loss below
+            // still uses the usual focus cleanup.
+            self.quarantine_mismatched_viewport();
+            return;
+        }
+        let viewport_is_current = match viewport_binding {
+            Some(binding) => binding.owner == navigation_owner && binding.base_is_current(ctx),
+            None => ctx.viewport_id() == egui::ViewportId::ROOT,
+        };
+        if !self.enabled || !root_visible || !viewport_is_current {
             if let Some(consumed) = self.frame_consumed_focus_intent.as_ref() {
                 ctx.memory_mut(|memory| memory.surrender_focus(consumed.focus_owner_id()));
             }
@@ -1829,6 +2164,7 @@ impl JumpModeUi {
             &mut completed,
             navigation_owner,
             root_targets_allowed,
+            viewport_binding,
         );
         let pending_intent = self.pending_focus_intent.take();
         let mut completed_focus_handoff = None;
@@ -1905,6 +2241,14 @@ impl JumpModeUi {
         self.frame_consumed_focus_intent = None;
         self.last_completed_focus_handoff = None;
         self.active_combo_popup = None;
+    }
+
+    fn quarantine_mismatched_viewport(&mut self) {
+        self.cancel_all();
+        self.navigation_owner = NavigationOwner::Blocked;
+        self.frame_navigation_owner = NavigationOwner::Blocked;
+        self.navigation_owner_transitioned = true;
+        self.root_input_frame.owner_blocked = true;
     }
 
     fn clear(&mut self) {
@@ -2168,7 +2512,7 @@ impl JumpModeUi {
             self.active_session = None;
             self.root_input_frame.resolved = true;
             let epoch = self.advance_navigation_epoch();
-            if !self.queue_focus_intent(target, egui::ViewportId::ROOT, epoch) {
+            if !self.queue_focus_intent(target, self.root_input_frame.viewport, epoch) {
                 self.last_outcome = Some(MatchOutcome::NoTarget);
             }
         }
@@ -4132,6 +4476,114 @@ mod tests {
     ) -> RegistrationResult {
         let response = ui.button(label);
         scope.register(ui, &response, local_id, label, kind, 0)
+    }
+
+    fn viewport_raw_input(viewport: egui::ViewportId) -> egui::RawInput {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let mut raw = egui::RawInput {
+            viewport_id: viewport,
+            focused: true,
+            screen_rect: Some(rect),
+            ..Default::default()
+        };
+        raw.viewports.insert(
+            viewport,
+            egui::ViewportInfo {
+                parent: Some(egui::ViewportId::ROOT),
+                focused: Some(true),
+                inner_rect: Some(rect),
+                ..Default::default()
+            },
+        );
+        raw
+    }
+
+    #[test]
+    fn jump_mode_owned_viewport_binding_is_exact_and_mismatched_context_cannot_steal_input() {
+        let viewport = egui::ViewportId::from_hash_of("regex owned viewport test");
+        let owner = NavigationOwner::Dialog {
+            kind: NavigationDialogKind::RegexTester,
+            instance: 7,
+        };
+        let binding = NavigationViewportBinding {
+            viewport,
+            owner,
+            base_layer: egui::LayerId::background(),
+        };
+        let ctx = egui::Context::default();
+
+        ctx.run_ui(viewport_raw_input(viewport), |ctx| {
+            assert_eq!(ctx.viewport_id(), viewport);
+            assert!(binding.base_is_current(ctx));
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ctx, binding, None),
+                owner
+            );
+            let wrong_owner = NavigationViewportBinding {
+                owner: NavigationOwner::Root,
+                ..binding
+            };
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ctx, wrong_owner, None),
+                NavigationOwner::Blocked
+            );
+        })
+        .drop_without_applying_deltas();
+
+        let root_focus = egui::Id::new("root-focus-must-survive-foreign-callback");
+        let target = named_scope_target(
+            SurfaceId::dialog("regex-tester", 7),
+            TargetGeneration(7),
+            "regex/form",
+            "pattern",
+        );
+        let mut jump = JumpModeUi::new(true);
+        let seed_focus_handoffs = |jump: &mut JumpModeUi| {
+            let intent = FocusIntent {
+                target: target.clone(),
+                viewport,
+                epoch: jump.navigation_epoch,
+            };
+            let consumed = ConsumedFocusIntent {
+                intent,
+                target_response_id: root_focus,
+                native_focus_owner_id: Some(root_focus),
+            };
+            jump.last_completed_focus_handoff = Some(consumed.clone());
+            jump.frame_consumed_focus_intent = Some(consumed);
+        };
+
+        let root_input = egui::RawInput {
+            events: vec![egui::Event::Text("R".into())],
+            ..Default::default()
+        };
+        ctx.run_ui(root_input, |ctx| {
+            assert_eq!(ctx.viewport_id(), egui::ViewportId::ROOT);
+            ctx.memory_mut(|memory| memory.request_focus(root_focus));
+            seed_focus_handoffs(&mut jump);
+            assert_eq!(
+                jump.update_navigation_owner_for_viewport(ctx, binding, true),
+                NavigationOwner::Blocked
+            );
+            assert!(ctx.memory(|memory| memory.has_focus(root_focus)));
+
+            seed_focus_handoffs(&mut jump);
+            jump.handle_viewport_input(ctx, true, true, viewport);
+            assert!(ctx.memory(|memory| memory.has_focus(root_focus)));
+            assert!(ctx.input(|input| input.events.iter().any(|event| matches!(
+                event,
+                egui::Event::Text(text) if text == "R"
+            ))));
+
+            seed_focus_handoffs(&mut jump);
+            assert!(!jump.prepare_pass_for_viewport(ctx, binding, owner, true));
+            assert!(ctx.memory(|memory| memory.has_focus(root_focus)));
+
+            seed_focus_handoffs(&mut jump);
+            jump.complete_frame_for_viewport(ctx, binding, owner, true);
+            assert!(ctx.memory(|memory| memory.has_focus(root_focus)));
+        })
+        .drop_without_applying_deltas();
     }
 
     #[test]
