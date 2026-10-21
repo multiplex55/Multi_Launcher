@@ -3005,6 +3005,59 @@ impl LauncherApp {
         );
     }
 
+    fn show_xml_toolkit(&mut self, ctx: &egui::Context, root_visible: bool) {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        let instance = self
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::XmlToolkit);
+        let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let root_native_owner_current = self.native_ui_host_input_allowed(ctx, root_visible);
+        let application_input_allowed = self.native_ui_application_input_allowed(ctx);
+        let scope = if root_native_owner_current && self.jump_mode_enabled() {
+            match owner {
+                NavigationOwner::Dialog {
+                    kind: NavigationDialogKind::XmlToolkit,
+                    instance,
+                } => self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("xml-toolkit", instance),
+                    crate::gui::jump_mode::TargetGeneration(instance),
+                    "xml-toolkit/form",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                ),
+                NavigationOwner::XmlOverwriteConfirmation {
+                    parent_instance,
+                    confirmation_instance,
+                } => self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::popup(
+                        "xml-overwrite-confirmation",
+                        confirmation_instance,
+                        crate::gui::jump_mode::SurfaceId::dialog("xml-toolkit", parent_instance),
+                    ),
+                    crate::gui::jump_mode::TargetGeneration(confirmation_instance),
+                    "xml-toolkit/overwrite",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                ),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        self.xml_toolkit_dialog.show_with_jump_mode(
+            ctx,
+            scope.as_ref(),
+            instance,
+            owner,
+            application_input_allowed,
+            root_native_owner_current,
+            self.jump_mode_enabled(),
+        );
+    }
+
     fn jump_mode_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         self.jump_mode_enabled() && self.native_ui_host_input_allowed(ctx, root_visible)
     }
@@ -3376,21 +3429,46 @@ impl LauncherApp {
                     let current = self.jump_mode_ui.dialog_instance(kind);
                     if kind == NavigationDialogKind::RegexTester {
                         self.regex_tester_dialog.root_navigation_instance(current)
+                    } else if kind == NavigationDialogKind::XmlToolkit {
+                        self.xml_toolkit_dialog.root_navigation_instance(current)
                     } else {
                         current
                     }
                 }),
             };
-            let parent_owner = resolve_layer_navigation_owner_parent(ctx, windows);
-            let combo_popup = (parent_owner != NavigationOwner::Blocked
-                && egui::Popup::is_any_open(ctx))
-            .then(|| {
-                self.jump_mode_ui
-                    .resolve_combo_popup_owner(ctx, parent_owner)
-            })
-            .flatten();
-            let owner =
-                resolve_layer_navigation_owner_with_combo_popup(ctx, windows, combo_popup.as_ref());
+            let xml_overwrite_owner = self
+                .jump_mode_ui
+                .dialog_instance(NavigationDialogKind::XmlToolkit)
+                .zip(
+                    self.xml_toolkit_dialog
+                        .jump_mode_pending_overwrite_identity(),
+                )
+                .map(|(parent_instance, confirmation_instance)| {
+                    crate::gui::jump_mode::ui::resolve_xml_overwrite_confirmation_owner(
+                        ctx,
+                        parent_instance,
+                        confirmation_instance,
+                    )
+                })
+                .filter(|owner| *owner != NavigationOwner::Blocked);
+            let (owner, combo_popup) = if let Some(owner) = xml_overwrite_owner {
+                (owner, None)
+            } else {
+                let parent_owner = resolve_layer_navigation_owner_parent(ctx, windows);
+                let combo_popup = (parent_owner != NavigationOwner::Blocked
+                    && egui::Popup::is_any_open(ctx))
+                .then(|| {
+                    self.jump_mode_ui
+                        .resolve_combo_popup_owner(ctx, parent_owner)
+                })
+                .flatten();
+                let owner = resolve_layer_navigation_owner_with_combo_popup(
+                    ctx,
+                    windows,
+                    combo_popup.as_ref(),
+                );
+                (owner, combo_popup)
+            };
             let owner = match owner {
                 NavigationOwner::Dialog {
                     kind: NavigationDialogKind::Snippets,
@@ -3598,7 +3676,7 @@ impl LauncherApp {
             self.show_macro_prompt(&ctx, first_ui_pass);
             self.macro_parameter_prompt.show(&ctx, first_ui_pass);
             self.show_screen_draw_toolbar_with_actions(&ctx, first_ui_pass);
-            self.xml_toolkit_dialog.show(&ctx);
+            self.show_xml_toolkit(&ctx, frame_logic.should_be_visible);
             // An Immediate Regex Tester owns its own viewport and remains
             // usable while the launcher is hidden. Its ROOT scope and ROOT
             // native-owner eligibility stay disabled in this branch.
@@ -4976,6 +5054,7 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
             };
@@ -5103,6 +5182,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
@@ -5172,6 +5252,7 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
             };
             let snippet_native_owner =
@@ -5231,6 +5312,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
@@ -5265,6 +5347,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
@@ -5413,6 +5496,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
@@ -5492,6 +5576,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
@@ -5558,6 +5643,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
@@ -5633,7 +5719,7 @@ impl LauncherApp {
         );
         self.hash_generator_dialog.show(&ctx);
         self.show_regex_tester(&ctx, frame_logic.should_be_visible);
-        self.xml_toolkit_dialog.show(&ctx);
+        self.show_xml_toolkit(&ctx, frame_logic.should_be_visible);
         self.render_hotfolder_manager(&ctx, first_ui_pass);
         #[cfg(feature = "qa-framebuffer-capture")]
         if self.qa_framebuffer_needs_qr_observation() {
@@ -9752,6 +9838,273 @@ mod tests {
         assert!(!app.needs_viewport_bootstrap());
         assert!(!app.visible_flag.load(Ordering::SeqCst));
         output.drop_without_applying_deltas();
+        app.xml_toolkit_dialog.shutdown();
+        drop(app);
+        drop(workspace);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jump_mode_xml_embedded_source_and_overwrite_hints_require_fresh_activation() {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        use crate::gui::jump_mode::{SemanticTargetId, SurfaceId, TargetKind};
+
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(true);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        let clipboard =
+            Arc::new(crate::clipboard_modify::clipboard::fake::FakeClipboardBackend::default());
+        app.xml_toolkit_dialog =
+            crate::gui::xml_toolkit_dialog::XmlToolkitDialogState::with_clipboard(
+                clipboard.clone(),
+            );
+        app.xml_toolkit_dialog.test_set_source(String::new());
+        app.xml_toolkit_dialog.open();
+        app.xml_toolkit_dialog.set_active_session_for_test(
+            crate::xml_toolkit_session::XmlEngineSession::start()
+                .expect("start isolated XML engine session"),
+        );
+        for _ in 0..3 {
+            run_embedded_root_dialog_frame(&ctx, &mut app, actual_query_input(true));
+        }
+
+        let parent_instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::XmlToolkit)
+            .expect("the embedded XML Toolkit has a live dialog instance");
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::XmlToolkit,
+                instance: parent_instance,
+            }
+        );
+        let source_target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "XML source text")
+            .expect("the real multiline source editor is registered")
+            .clone();
+        assert_eq!(
+            source_target.id().surface(),
+            &SurfaceId::dialog("xml-toolkit", parent_instance)
+        );
+        assert_eq!(source_target.metadata().kind(), TargetKind::TextEntry);
+        assert!(matches!(
+            source_target.id().semantic(),
+            SemanticTargetId::Named(identity) if !identity.contains("λ")
+        ));
+
+        start_embedded_root_jump_mode(&ctx, &mut app);
+        let source_hint = app
+            .jump_mode_ui
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(source_target.id())
+            .expect("the current source editor receives a hint")
+            .as_str()
+            .to_owned();
+        run_embedded_root_dialog_frame(
+            &ctx,
+            &mut app,
+            egui::RawInput {
+                events: vec![egui::Event::Text(source_hint)],
+                ..actual_query_input(true)
+            },
+        );
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(source_target.response_id()),
+            "completion focuses the exact embedded source widget"
+        );
+        assert!(app.xml_toolkit_dialog.test_source().is_empty());
+        assert!(clipboard.writes().is_empty());
+
+        let source = "<root><item>λ🦀</item></root>";
+        run_embedded_root_dialog_frame(
+            &ctx,
+            &mut app,
+            egui::RawInput {
+                events: vec![egui::Event::Text(source.into())],
+                ..actual_query_input(true)
+            },
+        );
+        assert_eq!(app.xml_toolkit_dialog.test_source(), source);
+
+        let started = std::time::Instant::now();
+        loop {
+            run_embedded_root_dialog_frame(&ctx, &mut app, actual_query_input(true));
+            let snapshot = app.xml_toolkit_dialog.test_current_snapshot();
+            if snapshot.parse == crate::xml_toolkit_session::XmlParseStatus::Ready
+                && matches!(
+                    snapshot.tree,
+                    crate::xml_toolkit_session::XmlTreeStatus::Ready(_)
+                )
+            {
+                break;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "the isolated XML source did not produce a tree"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.metadata().label() == "XML source text")
+                .unwrap()
+                .id(),
+            source_target.id(),
+            "document edits keep the source widget's identity stable"
+        );
+
+        app.xml_toolkit_dialog.test_select_tree_tab();
+        run_embedded_root_dialog_frame(&ctx, &mut app, actual_query_input(true));
+        let tree_target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "XML tree node")
+            .expect("a current visible tree row is registered")
+            .clone();
+        assert_eq!(tree_target.metadata().kind(), TargetKind::Action);
+        assert!(matches!(
+            tree_target.id().semantic(),
+            SemanticTargetId::Named(identity) if !identity.contains("λ")
+        ));
+        start_embedded_root_jump_mode(&ctx, &mut app);
+        let tree_hint = app
+            .jump_mode_ui
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(tree_target.id())
+            .expect("the current visible XML node receives a hint")
+            .as_str()
+            .to_owned();
+        run_embedded_root_dialog_frame(
+            &ctx,
+            &mut app,
+            egui::RawInput {
+                events: vec![egui::Event::Text(tree_hint)],
+                ..actual_query_input(true)
+            },
+        );
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(tree_target.response_id())
+        );
+        assert_eq!(
+            ctx.read_response(tree_target.response_id())
+                .expect("the selected tree response remains current")
+                .layer_id,
+            NavigationDialogKind::XmlToolkit
+                .layer_id()
+                .expect("XML has a ROOT layer"),
+            "the child confirmation may inherit focus from its exact XML parent"
+        );
+        let selected = app
+            .xml_toolkit_dialog
+            .test_selected_tree_node()
+            .expect("hint completion selects the exact current tree node");
+        let snapshot = app.xml_toolkit_dialog.test_current_snapshot();
+        assert!(matches!(
+            &snapshot.tree,
+            crate::xml_toolkit_session::XmlTreeStatus::Ready(projection)
+                if projection.node(selected.node).is_some()
+        ));
+        assert!(clipboard.writes().is_empty());
+
+        let path = workspace.root().join("xml-overwrite-fixture.xml");
+        std::fs::write(&path, b"original fixture bytes").expect("write isolated file");
+        app.xml_toolkit_dialog.test_request_overwrite_confirmation(
+            47,
+            path.clone(),
+            "<replacement/>",
+        );
+        run_embedded_root_dialog_frame(&ctx, &mut app, actual_query_input(true));
+        run_embedded_root_dialog_frame(&ctx, &mut app, actual_query_input(true));
+        let confirmation_instance = 47;
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::XmlOverwriteConfirmation {
+                parent_instance,
+                confirmation_instance,
+            }
+        );
+        let child_targets = app.jump_mode_ui.retained_registry().targets();
+        assert!(
+            child_targets
+                .iter()
+                .any(|target| { target.metadata().label() == "Cancel XML save" })
+        );
+        assert!(
+            child_targets
+                .iter()
+                .all(|target| { target.metadata().label() != "XML source text" })
+        );
+        let cancel_target = child_targets
+            .iter()
+            .find(|target| target.metadata().label() == "Cancel XML save")
+            .expect("the exact live confirmation has a Cancel response")
+            .clone();
+
+        start_embedded_root_jump_mode(&ctx, &mut app);
+        let cancel_hint = app
+            .jump_mode_ui
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(cancel_target.id())
+            .expect("the current child Cancel button receives a hint")
+            .as_str()
+            .to_owned();
+        run_embedded_root_dialog_frame(
+            &ctx,
+            &mut app,
+            egui::RawInput {
+                events: vec![egui::Event::Text(cancel_hint)],
+                ..actual_query_input(true)
+            },
+        );
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(app.xml_toolkit_dialog.test_has_pending_overwrite());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original fixture bytes");
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(cancel_target.response_id())
+        );
+
+        run_embedded_root_dialog_frame(
+            &ctx,
+            &mut app,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+        );
+        run_embedded_root_dialog_frame(
+            &ctx,
+            &mut app,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+        );
+        assert!(!app.xml_toolkit_dialog.test_has_pending_overwrite());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original fixture bytes");
+        assert!(clipboard.writes().is_empty());
         app.xml_toolkit_dialog.shutdown();
         drop(app);
         drop(workspace);
@@ -27463,6 +27816,47 @@ mod tests {
         app.run_root_frame_for_test(ctx, actual_query_input(true), false)
             .0
             .drop_without_applying_deltas();
+    }
+
+    fn run_embedded_root_dialog_frame(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        input: egui::RawInput,
+    ) {
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut passes = 0;
+        let output = ctx.run_ui(input, |ui| {
+            app.begin_root_frame_logic(ui.ctx(), &mut frame);
+            app.render_root_ui(ui);
+            passes += 1;
+        });
+        app.finish_ui_frame_receipt();
+        app.complete_jump_mode_frame(ctx);
+        assert!(passes > 0, "the embedded root fixture renders a pass");
+        output.drop_without_applying_deltas();
+    }
+
+    fn start_embedded_root_jump_mode(ctx: &egui::Context, app: &mut LauncherApp) {
+        run_embedded_root_dialog_frame(
+            ctx,
+            app,
+            egui::RawInput {
+                events: vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+                ..actual_query_input(true)
+            },
+        );
+        assert!(app.jump_mode_ui.active_session().is_some());
+        run_embedded_root_dialog_frame(
+            ctx,
+            app,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                ..actual_query_input(true)
+            },
+        );
     }
 
     fn wait_for_timer_sound_option_target(

@@ -4,6 +4,8 @@
 //! projection and routes explicit selection/detail intents back to the async
 //! XML session.
 
+use crate::gui::jump_mode::TargetKind;
+use crate::gui::xml_toolkit_dialog::XmlJumpTargets;
 use crate::xml_toolkit_engine::{
     MAX_XML_TREE_PREVIEW_CHARS, XmlNodeDetailKind, XmlNodeId, XmlTreeNodeKind, XmlTreeNodeSnapshot,
     XmlTreeProjection, XmlTreeProjectionLimit,
@@ -43,7 +45,7 @@ pub(crate) struct XmlToolkitTreeIntents {
 
 /// Cached view-only state. A source revision or parsed document change drops
 /// selection, expansion, visible rows, and pending copy authority together.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct XmlToolkitTreeViewState {
     revision: Option<XmlSourceRevision>,
     projection: Option<Arc<XmlTreeProjection>>,
@@ -382,6 +384,16 @@ impl XmlToolkitTreeViewState {
         ui: &mut egui::Ui,
         snapshot: &XmlSessionSnapshot,
     ) -> XmlToolkitTreeIntents {
+        self.show_scoped(ui, snapshot, &mut XmlJumpTargets::new(None), true)
+    }
+
+    pub(crate) fn show_scoped(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &XmlSessionSnapshot,
+        targets: &mut XmlJumpTargets<'_>,
+        authorized_pass: bool,
+    ) -> XmlToolkitTreeIntents {
         self.sync(snapshot);
         #[cfg(test)]
         {
@@ -411,6 +423,7 @@ impl XmlToolkitTreeViewState {
         let row_height = ui.spacing().interact_size.y.max(TREE_ROW_HEIGHT);
         let mut toggle = None;
         let mut selection = None;
+        let mut focus_selection = None;
         let mut copy_kind = None;
         let available_height = ui.available_height().max(0.0);
         let details_height = (available_height * 0.35)
@@ -478,21 +491,35 @@ impl XmlToolkitTreeViewState {
                             || node.has_more_children;
                         let expanded = self.expanded.contains(&node_id);
                         if can_expand {
-                            if ui.small_button(if expanded { "▾" } else { "▸" }).clicked() {
+                            let response = ui.small_button(if expanded { "▾" } else { "▸" });
+                            targets.button(
+                                ui,
+                                &response,
+                                format!("tree/{:?}/node/{node_id:?}/toggle", snapshot.revision),
+                                "Expand or collapse XML node",
+                            );
+                            if response.clicked() {
                                 toggle = Some(node_id);
                             }
                         } else {
                             ui.add_space(ui.spacing().interact_size.x);
                         }
                         let label = tree_node_label(node);
-                        if ui
-                            .selectable_label(
-                                self.selected
-                                    .is_some_and(|selected| selected.node == node_id),
-                                egui::RichText::new(label).monospace(),
-                            )
-                            .clicked()
-                        {
+                        let response = ui.selectable_label(
+                            self.selected
+                                .is_some_and(|selected| selected.node == node_id),
+                            egui::RichText::new(label).monospace(),
+                        );
+                        if targets.selectable(
+                            ui,
+                            &response,
+                            format!("tree/{:?}/node/{node_id:?}/select", snapshot.revision),
+                            "XML tree node",
+                            TargetKind::Action,
+                        ) {
+                            focus_selection = Some(node_id);
+                        }
+                        if response.clicked() {
                             selection = Some(node_id);
                         }
                     });
@@ -522,19 +549,26 @@ impl XmlToolkitTreeViewState {
             .min_scrolled_height(0.0)
             .max_height(details_height)
             .show(ui, |ui| {
-                self.show_selected_details(ui, snapshot, &projection, &mut copy_kind);
+                let selected_identity = self
+                    .selected
+                    .map(|selection| (selection.revision, selection.document, selection.node));
+                ui.push_id(("xml_tree_details", selected_identity), |ui| {
+                    self.show_selected_details(ui, snapshot, &projection, &mut copy_kind, targets);
+                });
             });
 
-        if first_pass {
+        if first_pass && authorized_pass {
             if let Some(node) = toggle {
                 self.toggle_expansion(node);
             }
-            if let Some(node) = selection
+            if let Some(node) = selection.or(focus_selection)
                 && let Some(selected) = self.select_node(node)
             {
                 intents.selection = Some(selected);
-                if let Some(kind) =
-                    default_detail_kind(projection.node(node).map(|snapshot| snapshot.kind))
+                self.pending_scroll_to = Some(node);
+                if focus_selection.is_none()
+                    && let Some(kind) =
+                        default_detail_kind(projection.node(node).map(|snapshot| snapshot.kind))
                 {
                     intents.detail = self.request_detail(kind, XmlDetailIntent::Inspect);
                 }
@@ -554,6 +588,7 @@ impl XmlToolkitTreeViewState {
         snapshot: &XmlSessionSnapshot,
         projection: &XmlTreeProjection,
         copy_kind: &mut Option<XmlNodeDetailKind>,
+        targets: &mut XmlJumpTargets<'_>,
     ) {
         let Some(selection) = self.selected else {
             ui.weak("Select a node to inspect it.");
@@ -598,16 +633,47 @@ impl XmlToolkitTreeViewState {
         match node.kind {
             XmlTreeNodeKind::Element => {
                 ui.horizontal(|ui| {
-                    if ui.small_button("Copy text content").clicked() {
+                    let copy_text = ui.small_button("Copy text content");
+                    targets.button(
+                        ui,
+                        &copy_text,
+                        format!(
+                            "tree/{:?}/node/{:?}/copy-text",
+                            snapshot.revision, selection.node
+                        ),
+                        "Copy XML text",
+                    );
+                    if copy_text.clicked() {
                         *copy_kind = Some(XmlNodeDetailKind::ElementText);
                     }
-                    if ui.small_button("Copy XML fragment").clicked() {
+                    let copy_xml = ui.small_button("Copy XML fragment");
+                    targets.button(
+                        ui,
+                        &copy_xml,
+                        format!(
+                            "tree/{:?}/node/{:?}/copy-xml",
+                            snapshot.revision, selection.node
+                        ),
+                        "Copy XML fragment",
+                    );
+                    if copy_xml.clicked() {
                         *copy_kind = Some(XmlNodeDetailKind::XmlFragment);
                     }
                 });
             }
-            kind if default_detail_kind(Some(kind)).is_some()
-                && ui.small_button("Copy complete value").clicked() =>
+            kind if default_detail_kind(Some(kind)).is_some() && {
+                let response = ui.small_button("Copy complete value");
+                targets.button(
+                    ui,
+                    &response,
+                    format!(
+                        "tree/{:?}/node/{:?}/copy-value",
+                        snapshot.revision, selection.node
+                    ),
+                    "Copy XML value",
+                );
+                response.clicked()
+            } =>
             {
                 *copy_kind = default_detail_kind(Some(kind));
             }

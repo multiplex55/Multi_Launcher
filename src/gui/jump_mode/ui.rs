@@ -168,6 +168,12 @@ pub(crate) enum NavigationOwner {
         parent_instance: u64,
         confirmation_instance: u64,
     },
+    /// Exact XML overwrite confirmation for one frozen save request. The
+    /// parent dialog and save request together own its transient layer.
+    XmlOverwriteConfirmation {
+        parent_instance: u64,
+        confirmation_instance: u64,
+    },
     /// One exact, transient snippet prompt window. Its generation is also
     /// part of the window's egui layer ID.
     SnippetPrompt {
@@ -195,17 +201,29 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::XmlToolkit
                     | NavigationDialogKind::RadialDesigner,
                 ..
-            }
+            } | NavigationOwner::XmlOverwriteConfirmation { .. }
         )
     }
 
     pub(crate) fn base_is_current(self, ctx: &egui::Context) -> bool {
+        let visible_layer = visible_top_middle_layer(ctx);
+        let layer_is_current = match self.owner {
+            NavigationOwner::XmlOverwriteConfirmation {
+                parent_instance,
+                confirmation_instance,
+            } => {
+                self.base_layer
+                    == xml_overwrite_confirmation_layer_id(parent_instance, confirmation_instance)
+                    && visible_layer == Some(self.base_layer)
+            }
+            _ => visible_layer.is_none(),
+        };
         self.owner_is_admissible()
             && ctx.viewport_id() == self.viewport
             && self.viewport != egui::ViewportId::ROOT
             && ctx.input(|input| input.focused)
             && ctx.memory(|memory| memory.top_modal_layer().is_none())
-            && visible_top_middle_layer(ctx).is_none()
+            && layer_is_current
     }
 
     fn focus_is_owned(self, ctx: &egui::Context, popup_layer: Option<egui::LayerId>) -> bool {
@@ -317,6 +335,18 @@ impl NavigationOwner {
                                 if kind == "clipboard-history" && *instance == parent_instance
                         )
                 }
+                Self::XmlOverwriteConfirmation {
+                    parent_instance,
+                    confirmation_instance,
+                } => {
+                    kind == "xml-overwrite-confirmation"
+                        && *instance == confirmation_instance
+                        && matches!(
+                            owner.as_ref(),
+                            SurfaceId::Dialog { kind, instance }
+                                if kind == "xml-toolkit" && *instance == parent_instance
+                        )
+                }
                 _ => self.owns_surface(owner),
             },
         }
@@ -358,6 +388,50 @@ pub(crate) fn snippet_prompt_layer_id(generation: u64) -> egui::LayerId {
         egui::Order::Middle,
         egui::Id::new(("snippet_prompt_window", generation)),
     )
+}
+
+pub(crate) fn xml_overwrite_confirmation_layer_id(
+    parent_instance: u64,
+    confirmation_instance: u64,
+) -> egui::LayerId {
+    egui::LayerId::new(
+        egui::Order::Middle,
+        egui::Id::new((
+            "xml_toolkit_overwrite_confirmation",
+            parent_instance,
+            confirmation_instance,
+        )),
+    )
+}
+
+/// Resolve the exact transient XML save confirmation while it is the live
+/// foreground ROOT window. Unknown windows remain blocked by the ordinary
+/// resolver.
+pub(crate) fn resolve_xml_overwrite_confirmation_owner(
+    ctx: &egui::Context,
+    parent_instance: u64,
+    confirmation_instance: u64,
+) -> NavigationOwner {
+    let owner = NavigationOwner::XmlOverwriteConfirmation {
+        parent_instance,
+        confirmation_instance,
+    };
+    let layer = xml_overwrite_confirmation_layer_id(parent_instance, confirmation_instance);
+    if ctx.viewport_id() == egui::ViewportId::ROOT
+        && ctx.input(|input| input.focused)
+        && ctx.memory(|memory| memory.top_modal_layer().is_none())
+        && !egui::Popup::is_any_open(ctx)
+        && visible_top_middle_layer(ctx) == Some(layer)
+        && focused_response_layer(ctx).is_none_or(|focused| {
+            focused == layer
+                || NavigationDialogKind::XmlToolkit.layer_id() == Some(focused)
+                || focused.order != egui::Order::Middle
+        })
+    {
+        owner
+    } else {
+        NavigationOwner::Blocked
+    }
 }
 
 /// A snippet prompt is a transient owner rather than a member of the stable
@@ -2057,6 +2131,7 @@ impl JumpModeUi {
             | NavigationOwner::Dialog { .. }
             | NavigationOwner::SnippetRemoval { .. }
             | NavigationOwner::ClipboardRemoval { .. }
+            | NavigationOwner::XmlOverwriteConfirmation { .. }
             | NavigationOwner::SnippetPrompt { .. } => true,
             NavigationOwner::Blocked => false,
         };

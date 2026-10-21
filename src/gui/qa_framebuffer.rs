@@ -2482,6 +2482,10 @@ fn qa_navigation_owner(owner: super::jump_mode::ui::NavigationOwner) -> QaNaviga
             confirmation_instance,
             ..
         } => ("clipboard_removal", Some(confirmation_instance)),
+        Owner::XmlOverwriteConfirmation {
+            confirmation_instance,
+            ..
+        } => ("xml_overwrite_confirmation", Some(confirmation_instance)),
         Owner::SnippetPrompt { generation } => ("snippet_prompt", Some(generation)),
         Owner::Blocked => ("blocked", None),
     };
@@ -2544,6 +2548,10 @@ fn qa_dialog_state(
             confirmation_instance,
             ..
         } => ("clipboard-removal", confirmation_instance),
+        Owner::XmlOverwriteConfirmation {
+            confirmation_instance,
+            ..
+        } => ("xml-overwrite-confirmation", confirmation_instance),
         Owner::SnippetPrompt { generation } => ("snippet-prompt", generation),
     };
     let mut state = QaDialogState {
@@ -2641,6 +2649,7 @@ fn qa_dialog_state(
         Owner::Dialog { .. }
         | Owner::SnippetRemoval { .. }
         | Owner::ClipboardRemoval { .. }
+        | Owner::XmlOverwriteConfirmation { .. }
         | Owner::SnippetPrompt { .. } => {}
         Owner::Root | Owner::Blocked => unreachable!("handled above"),
     }

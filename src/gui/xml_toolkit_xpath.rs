@@ -4,6 +4,8 @@
 //! session executes XPath on its existing XML worker; result navigation is
 //! routed through the stable node identities owned by the XML tree view.
 
+use crate::gui::jump_mode::TargetKind;
+use crate::gui::xml_toolkit_dialog::XmlJumpTargets;
 use crate::gui::xml_toolkit_tree::{XmlToolkitTreeIntents, XmlToolkitTreeViewState};
 use crate::xml_toolkit_engine::{
     MAX_XPATH_EXPRESSION_BYTES, MAX_XPATH_NAMESPACE_BYTES, XmlEngineError, XmlNodeDetailKind,
@@ -23,6 +25,7 @@ const XPATH_RESULT_ROW_HEIGHT: f32 = 22.0;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct NamespaceBindingEditorRow {
+    id: u64,
     prefix: String,
     uri: String,
 }
@@ -44,12 +47,14 @@ pub(crate) struct XmlToolkitXPathIntents {
     pub scalar_copy: Option<XmlXPathQueryRequest>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct XmlToolkitXPathViewState {
     expression: String,
     namespaces: Vec<NamespaceBindingEditorRow>,
     pending_namespace_action: Option<NamespaceRowAction>,
     namespace_context_revision: u64,
+    next_namespace_row: u64,
+    query_view_generation: u64,
     next_request: u64,
     revision: Option<XmlSourceRevision>,
     active_request: Option<XmlXPathQueryRequest>,
@@ -77,6 +82,7 @@ impl XmlToolkitXPathViewState {
     pub(crate) fn sync(&mut self, snapshot: &XmlSessionSnapshot) {
         if self.revision != snapshot.revision {
             self.revision = snapshot.revision;
+            self.query_view_generation = self.query_view_generation.wrapping_add(1);
             self.active_request = None;
             self.selected_result = None;
             self.pending_result_scroll_to = None;
@@ -154,6 +160,7 @@ impl XmlToolkitXPathViewState {
     }
 
     fn invalidate_local_query(&mut self, tree: &mut XmlToolkitTreeViewState) {
+        self.query_view_generation = self.query_view_generation.wrapping_add(1);
         self.active_request = None;
         self.selected_result = None;
         self.pending_result_scroll_to = None;
@@ -253,6 +260,17 @@ impl XmlToolkitXPathViewState {
         snapshot: &XmlSessionSnapshot,
         tree: &mut XmlToolkitTreeViewState,
     ) -> XmlToolkitXPathIntents {
+        self.show_scoped(ui, snapshot, tree, &mut XmlJumpTargets::new(None), true)
+    }
+
+    pub(crate) fn show_scoped(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &XmlSessionSnapshot,
+        tree: &mut XmlToolkitTreeViewState,
+        targets: &mut XmlJumpTargets<'_>,
+        authorized_pass: bool,
+    ) -> XmlToolkitXPathIntents {
         self.sync(snapshot);
         tree.sync(snapshot);
         #[cfg(test)]
@@ -269,20 +287,21 @@ impl XmlToolkitXPathViewState {
         let mut previous_clicked = false;
         let mut next_clicked = false;
         let mut selected_row = None;
+        let mut focus_selected_row = None;
         let mut scalar_copy_clicked = false;
         let mut node_copy_clicked = None;
 
         ui.heading("XPath 1.0");
         ui.horizontal(|ui| {
             ui.label("Expression");
-            expression_edited |= ui
-                .add(
-                    egui::TextEdit::singleline(&mut self.expression)
-                        .font(egui::TextStyle::Monospace)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("//item[@id='example']"),
-                )
-                .changed();
+            let expression = ui.add(
+                egui::TextEdit::singleline(&mut self.expression)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("//item[@id='example']"),
+            );
+            targets.text_entry(ui, &expression, "xpath/expression", "XPath expression");
+            expression_edited |= expression.changed();
         });
         if self.expression.len() > MAX_XPATH_EXPRESSION_BYTES {
             truncate_utf8(&mut self.expression, MAX_XPATH_EXPRESSION_BYTES);
@@ -300,7 +319,7 @@ impl XmlToolkitXPathViewState {
             );
         }
 
-        ui.collapsing("Namespace prefix mappings", |ui| {
+        let namespaces_header = ui.collapsing("Namespace prefix mappings", |ui| {
             ui.weak(
                 "XPath has no default element namespace. Add a prefix and URI, then use that prefix in the expression.",
             );
@@ -310,35 +329,59 @@ impl XmlToolkitXPathViewState {
                 .max_height(150.0)
                 .show(ui, |ui| {
                     for (index, binding) in self.namespaces.iter_mut().enumerate() {
-                        ui.horizontal(|ui| {
+                        ui.push_id(("xml_xpath_namespace", binding.id), |ui| ui.horizontal(|ui| {
                             ui.label("Prefix");
-                            namespaces_edited |= ui
-                                .add(
+                            let prefix = ui.add(
                                     egui::TextEdit::singleline(&mut binding.prefix)
                                         .font(egui::TextStyle::Monospace)
                                         .desired_width(96.0),
-                                )
-                                .changed();
+                                );
+                            targets.text_entry(
+                                ui,
+                                &prefix,
+                                format!("xpath/namespace/{}/prefix", binding.id),
+                                "Namespace prefix",
+                            );
+                            namespaces_edited |= prefix.changed();
                             ui.label("URI");
-                            namespaces_edited |= ui
-                                .add(
+                            let uri = ui.add(
                                     egui::TextEdit::singleline(&mut binding.uri)
                                         .font(egui::TextStyle::Monospace)
                                         .desired_width(240.0),
-                                )
-                                .changed();
-                            let remove_clicked = ui.small_button("Remove").clicked();
-                            if first_pass && remove_clicked {
+                                );
+                            targets.text_entry(
+                                ui,
+                                &uri,
+                                format!("xpath/namespace/{}/uri", binding.id),
+                                "Namespace URI",
+                            );
+                            namespaces_edited |= uri.changed();
+                            let remove = ui.small_button("Remove");
+                            targets.button(
+                                ui,
+                                &remove,
+                                format!("xpath/namespace/{}/remove", binding.id),
+                                "Remove namespace mapping",
+                            );
+                            let remove_clicked = remove.clicked();
+                            if first_pass && authorized_pass && remove_clicked {
                                 self.pending_namespace_action =
                                     Some(NamespaceRowAction::Remove(index));
                             }
-                        });
+                        }));
                     }
                 });
             ui.horizontal(|ui| {
                 if self.namespaces.len() < MAX_NAMESPACE_ROWS {
-                    let add_clicked = ui.small_button("Add prefix mapping").clicked();
-                    if first_pass && add_clicked {
+                    let add = ui.small_button("Add prefix mapping");
+                    targets.button(
+                        ui,
+                        &add,
+                        "xpath/namespace/add",
+                        "Add namespace mapping",
+                    );
+                    let add_clicked = add.clicked();
+                    if first_pass && authorized_pass && add_clicked {
                         self.pending_namespace_action = Some(NamespaceRowAction::Add);
                     }
                 } else {
@@ -346,11 +389,22 @@ impl XmlToolkitXPathViewState {
                 }
             });
         });
+        targets.button(
+            ui,
+            &namespaces_header.header_response,
+            "xpath/namespaces/toggle",
+            "XPath namespace mappings",
+        );
 
-        if first_pass {
+        if first_pass && authorized_pass {
             match self.pending_namespace_action.take() {
                 Some(NamespaceRowAction::Add) if self.namespaces.len() < MAX_NAMESPACE_ROWS => {
-                    self.namespaces.push(NamespaceBindingEditorRow::default());
+                    let id = self.next_namespace_row;
+                    self.next_namespace_row = self.next_namespace_row.wrapping_add(1);
+                    self.namespaces.push(NamespaceBindingEditorRow {
+                        id,
+                        ..NamespaceBindingEditorRow::default()
+                    });
                     namespaces_edited = true;
                     #[cfg(test)]
                     {
@@ -382,7 +436,7 @@ impl XmlToolkitXPathViewState {
             );
         }
 
-        if first_pass {
+        if first_pass && authorized_pass {
             if namespaces_edited {
                 self.namespace_context_revision = self.namespace_context_revision.saturating_add(1);
             }
@@ -408,26 +462,50 @@ impl XmlToolkitXPathViewState {
             _ => None,
         };
         ui.horizontal(|ui| {
-            run_clicked = ui
-                .add_enabled(
-                    document.is_some()
-                        && self.expression.len() <= MAX_XPATH_EXPRESSION_BYTES
-                        && namespace_validation.is_ok(),
-                    egui::Button::new("Run XPath"),
-                )
-                .clicked();
+            let run = ui.add_enabled(
+                document.is_some()
+                    && self.expression.len() <= MAX_XPATH_EXPRESSION_BYTES
+                    && namespace_validation.is_ok(),
+                egui::Button::new("Run XPath"),
+            );
+            targets.button(
+                ui,
+                &run,
+                format!(
+                    "xpath/{:?}/{}/run",
+                    snapshot.revision, self.query_view_generation
+                ),
+                "Run XPath",
+            );
+            run_clicked = run.clicked();
             match self.visible_status(snapshot) {
                 VisibleXPathStatus::Pending => {
                     ui.weak("Running XPath…");
                 }
                 VisibleXPathStatus::Nodes(nodes) if !nodes.is_empty() => {
                     ui.label(format!("{} matches", nodes.len()));
-                    previous_clicked = ui
-                        .add_enabled(!nodes.is_empty(), egui::Button::new("Previous"))
-                        .clicked();
-                    next_clicked = ui
-                        .add_enabled(!nodes.is_empty(), egui::Button::new("Next"))
-                        .clicked();
+                    let previous = ui.add_enabled(!nodes.is_empty(), egui::Button::new("Previous"));
+                    targets.button(
+                        ui,
+                        &previous,
+                        format!(
+                            "xpath/{:?}/{}/previous",
+                            snapshot.revision, self.query_view_generation
+                        ),
+                        "Previous XPath result",
+                    );
+                    previous_clicked = previous.clicked();
+                    let next = ui.add_enabled(!nodes.is_empty(), egui::Button::new("Next"));
+                    targets.button(
+                        ui,
+                        &next,
+                        format!(
+                            "xpath/{:?}/{}/next",
+                            snapshot.revision, self.query_view_generation
+                        ),
+                        "Next XPath result",
+                    );
+                    next_clicked = next.clicked();
                 }
                 VisibleXPathStatus::Nodes(_) => {
                     ui.label("0 matches");
@@ -469,9 +547,17 @@ impl XmlToolkitXPathViewState {
                 if truncated {
                     ui.weak("Scalar display is clipped; explicit copy keeps the complete bounded result.");
                 }
-                scalar_copy_clicked = ui
-                    .add_enabled(true, egui::Button::new("Copy scalar text"))
-                    .clicked();
+                let copy_scalar = ui.add_enabled(true, egui::Button::new("Copy scalar text"));
+                targets.button(
+                    ui,
+                    &copy_scalar,
+                    format!(
+                        "xpath/{:?}/{}/copy-scalar",
+                        snapshot.revision, self.query_view_generation
+                    ),
+                    "Copy XPath scalar",
+                );
+                scalar_copy_clicked = copy_scalar.clicked();
             }
             VisibleXPathStatus::Nodes(nodes) => {
                 if nodes.is_empty() {
@@ -496,7 +582,7 @@ impl XmlToolkitXPathViewState {
                         _ => None,
                     };
                     let result_viewport_height = (ui.available_height() * 0.45).clamp(100.0, 280.0);
-                    let scroll_to = if first_pass {
+                    let scroll_to = if first_pass && authorized_pass {
                         self.pending_result_scroll_to.take()
                     } else {
                         None
@@ -533,19 +619,45 @@ impl XmlToolkitXPathViewState {
                                 }
                                 let node = &nodes[index];
                                 let label = result_label(index, node);
-                                let response = ui.add_sized(
-                                    egui::vec2(ui.available_width(), XPATH_RESULT_ROW_HEIGHT),
-                                    egui::Button::selectable(
-                                        selected == Some(index),
-                                        egui::RichText::new(label).monospace(),
+                                let (response, focus_selected) = ui
+                                    .push_id(
+                                        ("xml_xpath_result", self.query_view_generation, node.id),
+                                        |ui| {
+                                            let response = ui.add_sized(
+                                                egui::vec2(
+                                                    ui.available_width(),
+                                                    XPATH_RESULT_ROW_HEIGHT,
+                                                ),
+                                                egui::Button::selectable(
+                                                    selected == Some(index),
+                                                    egui::RichText::new(label).monospace(),
+                                                )
+                                                .truncate(),
+                                            );
+                                            let focus_selected = targets.selectable(
+                                                ui,
+                                                &response,
+                                                format!(
+                                                    "xpath/{:?}/{}/node/{:?}/select",
+                                                    snapshot.revision,
+                                                    self.query_view_generation,
+                                                    node.id
+                                                ),
+                                                "XPath result node",
+                                                TargetKind::Action,
+                                            );
+                                            (response, focus_selected)
+                                        },
                                     )
-                                    .truncate(),
-                                );
+                                    .inner;
                                 #[cfg(test)]
                                 {
                                     self.max_rendered_result_row_height = self
                                         .max_rendered_result_row_height
                                         .max(response.rect.height());
+                                }
+                                if focus_selected {
+                                    focus_selected_row = Some(index);
                                 }
                                 if response.clicked() {
                                     selected_row = Some(index);
@@ -589,43 +701,105 @@ impl XmlToolkitXPathViewState {
                             if self.navigation_unavailable {
                                 ui.weak("The selected result could not be revealed in the tree.");
                             }
-                            ui.horizontal(|ui| match node.kind {
-                                XmlTreeNodeKind::Element => {
-                                    if ui.small_button("Copy element text").clicked() {
-                                        node_copy_clicked =
-                                            Some((index, XmlNodeDetailKind::ElementText));
-                                    }
-                                    if ui.small_button("Copy XML fragment").clicked() {
-                                        node_copy_clicked =
-                                            Some((index, XmlNodeDetailKind::XmlFragment));
-                                    }
-                                }
-                                XmlTreeNodeKind::Attribute => {
-                                    if ui.small_button("Copy attribute value").clicked() {
-                                        node_copy_clicked =
-                                            Some((index, XmlNodeDetailKind::AttributeValue));
-                                    }
-                                }
-                                XmlTreeNodeKind::Text
-                                | XmlTreeNodeKind::CData
-                                | XmlTreeNodeKind::Comment
-                                | XmlTreeNodeKind::ProcessingInstruction => {
-                                    if ui.small_button("Copy node value").clicked() {
-                                        node_copy_clicked =
-                                            Some((index, XmlNodeDetailKind::TextValue));
-                                    }
-                                }
-                                XmlTreeNodeKind::Document | XmlTreeNodeKind::Other => {
-                                    ui.weak("This XPath node kind has no tree copy action.");
-                                }
-                            });
+                            ui.push_id(
+                                (
+                                    "xml_xpath_selected_result",
+                                    self.query_view_generation,
+                                    node.id,
+                                ),
+                                |ui| {
+                                    ui.horizontal(|ui| match node.kind {
+                                        XmlTreeNodeKind::Element => {
+                                            let copy_text = ui.small_button("Copy element text");
+                                            targets.button(
+                                                ui,
+                                                &copy_text,
+                                                format!(
+                                                    "xpath/{:?}/{}/node/{:?}/copy-text",
+                                                    snapshot.revision,
+                                                    self.query_view_generation,
+                                                    node.id
+                                                ),
+                                                "Copy XPath node text",
+                                            );
+                                            if copy_text.clicked() {
+                                                node_copy_clicked =
+                                                    Some((index, XmlNodeDetailKind::ElementText));
+                                            }
+                                            let copy_xml = ui.small_button("Copy XML fragment");
+                                            targets.button(
+                                                ui,
+                                                &copy_xml,
+                                                format!(
+                                                    "xpath/{:?}/{}/node/{:?}/copy-xml",
+                                                    snapshot.revision,
+                                                    self.query_view_generation,
+                                                    node.id
+                                                ),
+                                                "Copy XPath XML fragment",
+                                            );
+                                            if copy_xml.clicked() {
+                                                node_copy_clicked =
+                                                    Some((index, XmlNodeDetailKind::XmlFragment));
+                                            }
+                                        }
+                                        XmlTreeNodeKind::Attribute => {
+                                            let copy_attribute =
+                                                ui.small_button("Copy attribute value");
+                                            targets.button(
+                                                ui,
+                                                &copy_attribute,
+                                                format!(
+                                                    "xpath/{:?}/{}/node/{:?}/copy-attribute",
+                                                    snapshot.revision,
+                                                    self.query_view_generation,
+                                                    node.id
+                                                ),
+                                                "Copy XPath attribute",
+                                            );
+                                            if copy_attribute.clicked() {
+                                                node_copy_clicked = Some((
+                                                    index,
+                                                    XmlNodeDetailKind::AttributeValue,
+                                                ));
+                                            }
+                                        }
+                                        XmlTreeNodeKind::Text
+                                        | XmlTreeNodeKind::CData
+                                        | XmlTreeNodeKind::Comment
+                                        | XmlTreeNodeKind::ProcessingInstruction => {
+                                            let copy_value = ui.small_button("Copy node value");
+                                            targets.button(
+                                                ui,
+                                                &copy_value,
+                                                format!(
+                                                    "xpath/{:?}/{}/node/{:?}/copy-value",
+                                                    snapshot.revision,
+                                                    self.query_view_generation,
+                                                    node.id
+                                                ),
+                                                "Copy XPath node value",
+                                            );
+                                            if copy_value.clicked() {
+                                                node_copy_clicked =
+                                                    Some((index, XmlNodeDetailKind::TextValue));
+                                            }
+                                        }
+                                        XmlTreeNodeKind::Document | XmlTreeNodeKind::Other => {
+                                            ui.weak(
+                                                "This XPath node kind has no tree copy action.",
+                                            );
+                                        }
+                                    });
+                                },
+                            );
                         }
                     }
                 }
             }
         }
 
-        if first_pass {
+        if first_pass && authorized_pass {
             if run_clicked {
                 tree.revoke_copy_authority();
                 self.active_request = None;
@@ -636,11 +810,22 @@ impl XmlToolkitXPathViewState {
                 if let (Some(revision), Some(document)) = (snapshot.revision, document)
                     && let Some(request) = self.next_query_request(revision, document)
                 {
+                    self.query_view_generation = self.query_view_generation.wrapping_add(1);
                     self.active_request = Some(request.clone());
                     intents.query = Some(request);
                 }
             }
-            if let Some(index) = selected_row
+            if let Some(index) = focus_selected_row
+                && let VisibleXPathStatus::Nodes(nodes) = self.visible_status(snapshot)
+                && let Some(node) = nodes.get(index)
+                && let Some(selection) = tree.select_node(node.id)
+            {
+                // Jump Select is a focus/selection handoff only: it doesn't
+                // reveal ancestors, request detail computation, or copy.
+                self.selected_result = Some(index);
+                self.pending_result_scroll_to = Some(index);
+                intents.tree.selection = Some(selection);
+            } else if let Some(index) = selected_row
                 && let VisibleXPathStatus::Nodes(nodes) = self.visible_status(snapshot)
                 && let Some(tree_intents) = self.navigate_to_result(index, nodes, tree)
             {

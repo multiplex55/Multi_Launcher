@@ -4,6 +4,7 @@
 //! with the caller so neither filesystem access nor COM work runs in egui's
 //! frame path.
 
+use crate::gui::xml_toolkit_dialog::XmlJumpTargets;
 use crate::xml_toolkit_engine::{XmlDiagnostic, XmlEngineError};
 use crate::xml_toolkit_session::{
     XmlParseStatus, XmlSchemaSessionState, XmlSchemaStatus, XmlSessionSnapshot, XmlTreeStatus,
@@ -33,31 +34,61 @@ impl XmlToolkitSchemaViewState {
     /// Draws the selector/status controls. The caller consumes the committed
     /// intent after rendering and performs any picker or session operation.
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, snapshot: &XmlSessionSnapshot) {
+        self.show_scoped(ui, snapshot, &mut XmlJumpTargets::new(None), true);
+    }
+
+    pub(crate) fn show_scoped(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &XmlSessionSnapshot,
+        targets: &mut XmlJumpTargets<'_>,
+        authorized_pass: bool,
+    ) {
         let first_pass = ui.ctx().current_pass_index() == 0;
         let mut choose_clicked = false;
         let mut clear_clicked = false;
         let mut validate_clicked = false;
+        let action_revision = format!("{:?}/{:?}", snapshot.revision, snapshot.schema.revision);
 
         ui.heading("XSD validation");
-        ui.horizontal(|ui| {
-            let choose = ui.button("Choose local XSD…");
-            #[cfg(test)]
-            {
-                self.choose_button_rect = Some(choose.rect);
-            }
-            choose_clicked = choose.clicked();
-            clear_clicked = ui
-                .add_enabled(
+        ui.push_id((snapshot.revision, snapshot.schema.revision), |ui| {
+            ui.horizontal(|ui| {
+                let choose = ui.button("Choose local XSD…");
+                #[cfg(test)]
+                {
+                    self.choose_button_rect = Some(choose.rect);
+                }
+                targets.button(
+                    ui,
+                    &choose,
+                    format!("validation/{action_revision}/choose-schema"),
+                    "Choose local XML schema",
+                );
+                choose_clicked = choose.clicked();
+                let clear = ui.add_enabled(
                     snapshot.schema.selected_path.is_some(),
                     egui::Button::new("Clear XSD"),
-                )
-                .clicked();
-            let can_validate = snapshot.schema.selected_path.is_some()
-                && snapshot.parse == XmlParseStatus::Ready
-                && matches!(&snapshot.tree, XmlTreeStatus::Ready(_));
-            validate_clicked = ui
-                .add_enabled(can_validate, egui::Button::new("Validate against XSD"))
-                .clicked();
+                );
+                targets.button(
+                    ui,
+                    &clear,
+                    format!("validation/{action_revision}/clear-schema"),
+                    "Clear selected XML schema",
+                );
+                clear_clicked = clear.clicked();
+                let can_validate = snapshot.schema.selected_path.is_some()
+                    && snapshot.parse == XmlParseStatus::Ready
+                    && matches!(&snapshot.tree, XmlTreeStatus::Ready(_));
+                let validate =
+                    ui.add_enabled(can_validate, egui::Button::new("Validate against XSD"));
+                targets.button(
+                    ui,
+                    &validate,
+                    format!("validation/{action_revision}/validate"),
+                    "Validate XML against schema",
+                );
+                validate_clicked = validate.clicked();
+            });
         });
 
         if let Some(path) = &snapshot.schema.selected_path {
@@ -70,7 +101,7 @@ impl XmlToolkitSchemaViewState {
         );
         self.show_status(ui, &snapshot.schema, snapshot);
 
-        if first_pass {
+        if first_pass && authorized_pass {
             let intent = if choose_clicked {
                 Some(XmlToolkitSchemaIntent::ChooseSchema)
             } else if clear_clicked {
