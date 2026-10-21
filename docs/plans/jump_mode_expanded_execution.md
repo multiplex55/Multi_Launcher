@@ -11,7 +11,7 @@ Started 2026-10-20 from clean branch `jump`, HEAD `0cb3dabf148dc720ed560626c32ef
 | M1 | complete | M1-A `3c3b8e91` / M1-B `8648b2d0` / M1-C `a1181df6` pushed; 32 owner and 5 adapter tests passed, independent owner review clean; fixture-only PASS. |
 | M2 File Search | complete | M2-A `b91740f3`, M2-B `5ffdf9a5`, M2-C `251f27e5` pushed; fixture PASS and eight focused QA/lifecycle tests passed. Optional native proof `not_run_environment`: repeated process-inventory denial before UI workflow. |
 | M3 Snippets | complete | M3-A `f4ad295e`, M3-B `788cf705` pushed; M3-C `c5b32aef` pushed; lifecycle checks passed across one slice and exact repaired reruns. |
-| M4 Clipboard History | in_progress | M4-A browse navigation verified; checked actions and lifecycle follow. |
+| M4 Clipboard History | in_progress | M4-A `84a78537` pushed; M4-B checked actions and confirmation verified; lifecycle follows. |
 | M5 Dashboard gaps | pending | |
 | M6 JSON / Regex / XML | pending | |
 | M7 Mouse settings / gestures | pending | |
@@ -44,6 +44,10 @@ File Search (M2-A/B): query, directory roots/Add folder/Remove, refinement/Clear
 Snippets (M3-A): visible filter/Clear Filters/tag filters, snapshot-bound saved-row selection/Edit/Remove, Add/Close, alias/privacy/prompt toggles, tag input/Add/existing choices/removal chips, revealed multiline body, Save/Cancel/enabled Test/Preview, Reveal to Edit, and revealed prompt-field label/default/required/input-kind controls with scoped combo options. Concealed body/default controls and passive text are excluded. Pending inline removal and separate prompt own no parent targets; their explicit navigation is M3-B.
 
 Snippets (M3-B): exclusive inline Confirm/Cancel bound to parent/confirmation instances; exact session-generation prompt fields and enabled Copy/Cancel or Preview Return to Editor. Parent targets, passive rendered preview and sequence-preflight Jump targets remain excluded. Sequence preflight retains ordinary owned keyboard handling.
+
+Clipboard History (M4-A): visible opaque row selection, Edit/Remove/Close real responses. Generic labels exclude clipboard payloads. Passive heading and clipped rows are excluded; context-menu contents retain native access without Jump targets. Editor/Copy and exclusive removal are M4-B.
+
+Clipboard History (M4-B): multiline editor/Save/Cancel, explicit Copy, and exclusive Confirm/Cancel removal. Parent row/Close targets are absent during confirmation; stale Confirm is disabled while Cancel remains available. System clipboard writes require later explicit Copy activation.
 
 ## Git and final gates
 
@@ -147,3 +151,13 @@ Native Snippets evidence remains `not_run_environment` under the previously exha
 Clipboard History now registers clipped-visible selection/Edit/Remove/Close responses with generic labels and opaque per-snapshot tokens, including distinct identical entries. Native row controls share token-based egui identity. Exact foreground/native eligibility stays independent of Jump enabled state; unowned responses disable and surrender only their own focus. Closed dialogs do not reload history on version notifications. Browse insertion/replacement renews mappings; updates during editing retain the draft and invalidate stale authority until safe refresh.
 
 `cargo nextest run --lib -E 'test(jump_mode_clipboard_browse) | test(ensure_open_loads_saved_history_once_and_preserves_edit_draft)'`: **4 passed**. The extended insertion/replacement/draft test then passed its exact rerun, **1/1**. Initial compile feedback was two direct test probes using the old editor signature; their normal-owner argument was corrected. Scoped rustfmt and diff checks passed. Parent inspected source, renderer and tests. No native session. Existing save-failure draft handling is deliberately addressed by M4-B checked persistence, alongside explicit Copy and removal confirmation; M4-A does not claim those actions complete.
+### M4-B evidence
+
+Clipboard History now exposes editor Text/Save/Cancel and explicit row Copy, preserving the existing native multiline editor identity with edit-session isolation. Copy validates the full captured history and exact token/entry before using the existing ClipboardBackend; production uses Arboard, tests inject the existing fake and fail closed if it is missing. Clipboard I/O occurs outside the history transaction lock. Completion only focuses; later fresh Enter performs the existing action.
+
+New ClipboardRemoval parent/confirmation instances bind exclusive inline Confirm/Cancel to the actual Clipboard History layer. All row/context-menu removals share the captured full-snapshot request, parent targets are withheld, distinct native confirmation identities reject carried keys, and stale confirmation remains visible with Cancel until dismissed. A same-version observer reload bug found during parent diff review was fixed before testing.
+
+Checked Save/Remove compare the full expected snapshot within the existing update_history_file transaction lock and atomic replacement. Conflicts preserve external bytes and the draft/confirmation with payload-free feedback. Save exits and clears the draft only after success; I/O failure preserves it. Existing unrelated APIs and string-list serialization remain intact.
+
+`cargo nextest run --lib -E 'test(jump_mode_clipboard_actions) | test(jump_mode_clipboard_checked_persistence) | test(long_history_entry_keeps_browse_and_edit_footers_reachable_without_mutating_text)'`: **5 passed, 1 failed**, then the sole corrected action test passed its exact selector. Six unique tests have passing evidence. Compiler feedback corrected nested Option scope construction. Fixture repairs corrected a reversed native response-ID assertion and established selection in the actual TextEdit state before real multiline Text input; no Ctrl+A claim or production keyboard change. Checked persistence, conflict/I/O draft retention, stale confirmation, held/same-frame key refusal, fake Copy once, fresh Save/Cancel and long-entry geometry passed. No native session or system clipboard mutation.
+Final M4-B `cargo check --lib --features qa-framebuffer-capture`, scoped rustfmt and diff check passed. Parent inspected checked storage, owner routing, state/effect commitment and real-egui tests. The only later source change marked the obsolete test geometry wrapper `#[cfg(test)]`; no redundant verification run followed that annotation.

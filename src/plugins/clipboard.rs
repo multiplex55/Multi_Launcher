@@ -47,6 +47,33 @@ pub fn save_history(path: &str, history: &VecDeque<String>) -> anyhow::Result<()
     .map(|_| ())
 }
 
+/// Result of a clipboard history update that was compared with the caller's
+/// full captured snapshot while holding the same transaction lock as writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckedHistoryUpdate {
+    Updated,
+    Conflict,
+}
+
+/// Replace history only if it still equals the full snapshot the caller read.
+pub fn save_history_if_unchanged(
+    path: &str,
+    expected: &VecDeque<String>,
+    replacement: &VecDeque<String>,
+) -> anyhow::Result<CheckedHistoryUpdate> {
+    let mut outcome = CheckedHistoryUpdate::Conflict;
+    let replacement = replacement.clone();
+    update_history_file(path, |current| {
+        if current != expected {
+            return Ok(false);
+        }
+        *current = replacement;
+        outcome = CheckedHistoryUpdate::Updated;
+        Ok(true)
+    })?;
+    Ok(outcome)
+}
+
 /// Remove the history entry at `index` from the file at `path`.
 pub fn remove_entry(path: &str, index: usize) -> anyhow::Result<()> {
     update_history_file(path, |history| {
@@ -55,6 +82,25 @@ pub fn remove_entry(path: &str, index: usize) -> anyhow::Result<()> {
             .is_some())
     })
     .map(|_| ())
+}
+
+/// Remove one entry only if the complete current history still equals the
+/// caller's captured snapshot.
+pub fn remove_entry_if_unchanged(
+    path: &str,
+    expected: &VecDeque<String>,
+    index: usize,
+) -> anyhow::Result<CheckedHistoryUpdate> {
+    let mut outcome = CheckedHistoryUpdate::Conflict;
+    update_history_file(path, |current| {
+        if current != expected || index >= current.len() {
+            return Ok(false);
+        }
+        current.remove(index);
+        outcome = CheckedHistoryUpdate::Updated;
+        Ok(true)
+    })?;
+    Ok(outcome)
 }
 
 /// Clear the clipboard history file at `path`.
@@ -336,6 +382,51 @@ impl Plugin for ClipboardPlugin {
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+
+    #[test]
+    fn jump_mode_clipboard_checked_persistence_rejects_stale_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clipboard.json");
+        let path_str = path.to_str().unwrap();
+        let expected = VecDeque::from(["first private value".to_owned(), "second".to_owned()]);
+        save_history(path_str, &expected).unwrap();
+
+        let external = VecDeque::from([
+            "external insertion".to_owned(),
+            "first private value".to_owned(),
+            "second".to_owned(),
+        ]);
+        save_history(path_str, &external).unwrap();
+        let external_bytes = std::fs::read(&path).unwrap();
+
+        assert_eq!(
+            save_history_if_unchanged(
+                path_str,
+                &expected,
+                &VecDeque::from(["replacement".to_owned(), "second".to_owned()]),
+            )
+            .unwrap(),
+            CheckedHistoryUpdate::Conflict,
+        );
+        assert_eq!(
+            remove_entry_if_unchanged(path_str, &expected, 0).unwrap(),
+            CheckedHistoryUpdate::Conflict,
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), external_bytes);
+
+        assert_eq!(
+            save_history_if_unchanged(path_str, &external, &expected).unwrap(),
+            CheckedHistoryUpdate::Updated,
+        );
+        assert_eq!(
+            remove_entry_if_unchanged(path_str, &expected, 0).unwrap(),
+            CheckedHistoryUpdate::Updated,
+        );
+        assert_eq!(
+            load_history(path_str).unwrap(),
+            VecDeque::from(["second".to_owned()]),
+        );
+    }
 
     #[test]
     fn missing_initializes_but_malformed_rejects_mutations_unchanged() {

@@ -162,6 +162,12 @@ pub(crate) enum NavigationOwner {
         parent_instance: u64,
         confirmation_instance: u64,
     },
+    /// Inline removal confirmation within the current Clipboard History
+    /// window. Its generation is separate from the parent browse surface.
+    ClipboardRemoval {
+        parent_instance: u64,
+        confirmation_instance: u64,
+    },
     /// One exact, transient snippet prompt window. Its generation is also
     /// part of the window's egui layer ID.
     SnippetPrompt {
@@ -225,6 +231,18 @@ impl NavigationOwner {
                                 kind,
                                 instance,
                             } if kind == "snippets" && *instance == parent_instance
+                        )
+                }
+                Self::ClipboardRemoval {
+                    parent_instance,
+                    confirmation_instance,
+                } => {
+                    kind == "clipboard-removal"
+                        && *instance == confirmation_instance
+                        && matches!(
+                            owner.as_ref(),
+                            SurfaceId::Dialog { kind, instance }
+                                if kind == "clipboard-history" && *instance == parent_instance
                         )
                 }
                 _ => self.owns_surface(owner),
@@ -1692,6 +1710,7 @@ impl JumpModeUi {
             | NavigationOwner::MkMacro { .. }
             | NavigationOwner::Dialog { .. }
             | NavigationOwner::SnippetRemoval { .. }
+            | NavigationOwner::ClipboardRemoval { .. }
             | NavigationOwner::SnippetPrompt { .. } => true,
             NavigationOwner::Blocked => false,
         };

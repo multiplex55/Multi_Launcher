@@ -2478,6 +2478,10 @@ fn qa_navigation_owner(owner: super::jump_mode::ui::NavigationOwner) -> QaNaviga
             confirmation_instance,
             ..
         } => ("snippet_removal", Some(confirmation_instance)),
+        Owner::ClipboardRemoval {
+            confirmation_instance,
+            ..
+        } => ("clipboard_removal", Some(confirmation_instance)),
         Owner::SnippetPrompt { generation } => ("snippet_prompt", Some(generation)),
         Owner::Blocked => ("blocked", None),
     };
@@ -2536,6 +2540,10 @@ fn qa_dialog_state(
             confirmation_instance,
             ..
         } => ("snippet-removal", confirmation_instance),
+        Owner::ClipboardRemoval {
+            confirmation_instance,
+            ..
+        } => ("clipboard-removal", confirmation_instance),
         Owner::SnippetPrompt { generation } => ("snippet-prompt", generation),
     };
     let mut state = QaDialogState {
@@ -2630,7 +2638,10 @@ fn qa_dialog_state(
             state.file_search_form_generation = Some(search.jump_mode_target_generation().0);
             state.target_generation = state.file_search_form_generation;
         }
-        Owner::Dialog { .. } | Owner::SnippetRemoval { .. } | Owner::SnippetPrompt { .. } => {}
+        Owner::Dialog { .. }
+        | Owner::SnippetRemoval { .. }
+        | Owner::ClipboardRemoval { .. }
+        | Owner::SnippetPrompt { .. } => {}
         Owner::Root | Owner::Blocked => unreachable!("handled above"),
     }
     Some(state)

@@ -3317,6 +3317,18 @@ impl LauncherApp {
                             confirmation_instance,
                         }
                     }),
+                NavigationOwner::Dialog {
+                    kind: NavigationDialogKind::ClipboardHistory,
+                    instance: parent_instance,
+                } => self
+                    .clipboard_dialog
+                    .jump_mode_pending_removal_identity()
+                    .map_or(owner, |(confirmation_instance, _)| {
+                        NavigationOwner::ClipboardRemoval {
+                            parent_instance,
+                            confirmation_instance,
+                        }
+                    }),
                 _ => owner,
             };
             match owner {
@@ -4872,6 +4884,7 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
             };
@@ -4998,6 +5011,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
@@ -5066,6 +5080,7 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
             };
             let snippet_native_owner =
@@ -5124,6 +5139,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
@@ -5157,6 +5173,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
@@ -5304,6 +5321,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
@@ -5382,6 +5400,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
@@ -5410,6 +5429,34 @@ impl LauncherApp {
                     false,
                 )
             }
+            crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval {
+                parent_instance,
+                confirmation_instance,
+            } if clipboard_native_owner && !egui::Popup::is_any_open(&ctx) => self
+                .clipboard_dialog
+                .jump_mode_pending_removal_identity()
+                .filter(|(current_confirmation, _)| *current_confirmation == confirmation_instance)
+                .and_then(|(_, entry_token)| {
+                    let generation = self.clipboard_dialog.jump_mode_target_generation();
+                    self.jump_mode_ui.scope_for_navigation_owner(
+                        crate::gui::jump_mode::SurfaceId::popup(
+                            "clipboard-removal",
+                            confirmation_instance,
+                            crate::gui::jump_mode::SurfaceId::dialog(
+                                "clipboard-history",
+                                parent_instance,
+                            ),
+                        ),
+                        generation,
+                        format!(
+                            "clipboard-removal/{}/{}/{}",
+                            generation.0, confirmation_instance, entry_token
+                        ),
+                        ctx.viewport_id(),
+                        clipboard_owner,
+                        false,
+                    )
+                }),
             crate::gui::jump_mode::ui::NavigationOwner::Root
             | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
@@ -5419,6 +5466,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
@@ -23667,6 +23715,59 @@ mod tests {
             .to_owned()
     }
 
+    fn clipboard_target_with_response(
+        app: &LauncherApp,
+        label: &str,
+    ) -> (crate::gui::jump_mode::TargetId, egui::Id) {
+        let target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .unwrap_or_else(|| panic!("no visible clipboard target labeled {label:?}"));
+        (target.id().clone(), target.response_id())
+    }
+
+    fn run_clipboard_frame(ctx: &egui::Context, app: &mut LauncherApp, events: Vec<egui::Event>) {
+        app.run_root_frame_for_test(
+            ctx,
+            egui::RawInput {
+                events,
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+    }
+
+    fn complete_clipboard_hint(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        target: &crate::gui::jump_mode::TargetId,
+        response_id: egui::Id,
+    ) {
+        start_actual_root_jump_mode(ctx, app);
+        let hint = clipboard_hint_for_target(app, target);
+        run_clipboard_frame(ctx, app, vec![egui::Event::Text(hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(response_id));
+        assert!(app.jump_mode_ui.active_session().is_none());
+    }
+
+    fn press_and_release_clipboard_enter(ctx: &egui::Context, app: &mut LauncherApp) {
+        run_clipboard_frame(
+            ctx,
+            app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        run_clipboard_frame(
+            ctx,
+            app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+    }
+
     fn expand_file_search_header(ctx: &egui::Context, app: &LauncherApp, label: &str) {
         let response_id = app
             .jump_mode_ui
@@ -24250,6 +24351,235 @@ mod tests {
         assert_eq!(
             std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap(),
             original_bytes
+        );
+    }
+
+    #[test]
+    fn jump_mode_clipboard_actions_copy_and_edit_save_cancel_require_fresh_keys() {
+        let _lock = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        let private_entry = "clipboard secret λ\nsecond line";
+        prepare_actual_clipboard_history_dialog(&ctx, &mut app, &[private_entry]);
+        let original_bytes = std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap();
+        let fake_clipboard =
+            Arc::new(crate::clipboard_modify::clipboard::fake::FakeClipboardBackend::default());
+        app.clipboard_dialog
+            .set_test_clipboard_backend(fake_clipboard.clone());
+
+        let (copy_target, copy_response) =
+            clipboard_target_with_response(&app, "Copy clipboard entry");
+        complete_clipboard_hint(&ctx, &mut app, &copy_target, copy_response);
+        assert!(fake_clipboard.writes().is_empty());
+        assert_eq!(
+            std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap(),
+            original_bytes,
+            "hint completion only focuses Copy"
+        );
+        press_and_release_clipboard_enter(&ctx, &mut app);
+        assert_eq!(fake_clipboard.writes(), [private_entry]);
+        assert_eq!(
+            std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap(),
+            original_bytes,
+            "Copy does not mutate clipboard history"
+        );
+
+        let (edit_target, edit_response) =
+            clipboard_target_with_response(&app, "Edit clipboard entry");
+        complete_clipboard_hint(&ctx, &mut app, &edit_target, edit_response);
+        assert!(!app.clipboard_dialog.test_is_editing());
+        press_and_release_clipboard_enter(&ctx, &mut app);
+        assert!(app.clipboard_dialog.test_is_editing());
+        run_clipboard_frame(&ctx, &mut app, Vec::new());
+
+        let (text_target, text_response) = clipboard_target_with_response(&app, "Clipboard text");
+        let edit_widget_id = app
+            .clipboard_dialog
+            .test_edit_text_widget_id()
+            .expect("edit has a session-specific native TextEdit ID");
+        assert_eq!(edit_widget_id, text_response);
+        complete_clipboard_hint(&ctx, &mut app, &text_target, text_response);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(text_response));
+        let mut text_state = egui::text_edit::TextEditState::load(&ctx, text_response)
+            .expect("the focused clipboard editor has native text state");
+        text_state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(private_entry.chars().count()),
+            )));
+        text_state.store(&ctx, text_response);
+        run_clipboard_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::Text("saved Unicode λ\nsecond line".into())],
+        );
+        assert_eq!(
+            app.clipboard_dialog.test_text(),
+            "saved Unicode λ\nsecond line"
+        );
+        assert_eq!(
+            std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap(),
+            original_bytes,
+            "typing changes only the draft"
+        );
+
+        let (save_target, save_response) =
+            clipboard_target_with_response(&app, "Save clipboard entry");
+        complete_clipboard_hint(&ctx, &mut app, &save_target, save_response);
+        assert!(app.clipboard_dialog.test_is_editing());
+        assert_eq!(
+            std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap(),
+            original_bytes,
+            "hint completion only focuses Save"
+        );
+        press_and_release_clipboard_enter(&ctx, &mut app);
+        assert!(!app.clipboard_dialog.test_is_editing());
+        let saved =
+            crate::plugins::clipboard::load_history(crate::plugins::clipboard::CLIPBOARD_FILE)
+                .unwrap();
+        assert_eq!(saved, ["saved Unicode λ\nsecond line"]);
+        let saved_bytes = std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap();
+
+        run_clipboard_frame(&ctx, &mut app, Vec::new());
+        let (edit_target, edit_response) =
+            clipboard_target_with_response(&app, "Edit clipboard entry");
+        complete_clipboard_hint(&ctx, &mut app, &edit_target, edit_response);
+        press_and_release_clipboard_enter(&ctx, &mut app);
+        assert!(app.clipboard_dialog.test_is_editing());
+        run_clipboard_frame(&ctx, &mut app, Vec::new());
+        let (cancel_target, cancel_response) =
+            clipboard_target_with_response(&app, "Cancel clipboard edit");
+        complete_clipboard_hint(&ctx, &mut app, &cancel_target, cancel_response);
+        assert!(app.clipboard_dialog.test_is_editing());
+        press_and_release_clipboard_enter(&ctx, &mut app);
+        assert!(!app.clipboard_dialog.test_is_editing());
+        assert_eq!(
+            std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap(),
+            saved_bytes,
+            "Cancel discards the draft without changing saved history"
+        );
+    }
+
+    #[test]
+    fn jump_mode_clipboard_actions_removal_has_an_exclusive_fresh_confirmation() {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        let _lock = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        prepare_actual_clipboard_history_dialog(
+            &ctx,
+            &mut app,
+            &["private row to remove", "unrelated row"],
+        );
+        let original_bytes = std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap();
+
+        let (remove_target, remove_response) =
+            clipboard_target_with_response(&app, "Remove clipboard entry");
+        complete_clipboard_hint(&ctx, &mut app, &remove_target, remove_response);
+        assert!(
+            app.clipboard_dialog
+                .jump_mode_pending_removal_identity()
+                .is_none()
+        );
+        press_and_release_clipboard_enter(&ctx, &mut app);
+        assert!(
+            app.clipboard_dialog
+                .jump_mode_pending_removal_identity()
+                .is_some()
+        );
+        for _ in 0..2 {
+            run_clipboard_frame(&ctx, &mut app, Vec::new());
+        }
+
+        let parent_instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::ClipboardHistory)
+            .expect("the current history window has a live instance");
+        let (confirmation_instance, _) = app
+            .clipboard_dialog
+            .jump_mode_pending_removal_identity()
+            .expect("Remove opens a pending child confirmation");
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::ClipboardRemoval {
+                parent_instance,
+                confirmation_instance,
+            }
+        );
+        assert!(clipboard_target_ids(&app, "Clipboard entry").is_empty());
+        assert!(clipboard_target_ids(&app, "Copy clipboard entry").is_empty());
+        assert!(clipboard_target_ids(&app, "Edit clipboard entry").is_empty());
+        assert!(clipboard_target_ids(&app, "Remove clipboard entry").is_empty());
+        assert!(clipboard_target_ids(&app, "Close Clipboard History").is_empty());
+        assert_eq!(
+            clipboard_target_ids(&app, "Confirm clipboard entry removal").len(),
+            1
+        );
+        assert_eq!(
+            clipboard_target_ids(&app, "Cancel clipboard entry removal").len(),
+            1
+        );
+        assert_eq!(
+            std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap(),
+            original_bytes
+        );
+
+        let (confirm_target, confirm_response) =
+            clipboard_target_with_response(&app, "Confirm clipboard entry removal");
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let confirm_hint = clipboard_hint_for_target(&app, &confirm_target);
+        run_clipboard_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::Text(confirm_hint),
+                key_press(egui::Key::Enter, egui::Modifiers::NONE),
+            ],
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(confirm_response)
+        );
+        assert_eq!(
+            std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap(),
+            original_bytes,
+            "hint completion and same-frame Enter only focus Confirm"
+        );
+        run_clipboard_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(
+            std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap(),
+            original_bytes,
+            "held Enter does not cross the confirmation handoff"
+        );
+        run_clipboard_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        press_and_release_clipboard_enter(&ctx, &mut app);
+        assert_eq!(
+            crate::plugins::clipboard::load_history(crate::plugins::clipboard::CLIPBOARD_FILE,)
+                .unwrap(),
+            ["unrelated row"],
+            "only the later distinct Enter removes the captured row"
         );
     }
 
