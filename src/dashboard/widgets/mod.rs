@@ -163,23 +163,39 @@ pub(crate) fn jump_response_clicked(
     label: impl FnOnce() -> String,
     visual_order: u64,
 ) -> bool {
+    register_jump_response(
+        ui,
+        ctx,
+        response,
+        target_identity,
+        label,
+        crate::gui::jump_mode::TargetKind::Button,
+        visual_order,
+    );
+
+    response.clicked() && ctx.jump_mode_activation_allowed
+}
+
+/// Register a current response with its real interaction kind and apply only
+/// the focus directive. Non-button controls use this when their ordinary
+/// widget behavior remains owned by the rendering component.
+pub(crate) fn register_jump_response(
+    ui: &egui::Ui,
+    ctx: &DashboardContext<'_>,
+    response: &egui::Response,
+    target_identity: impl FnOnce() -> String,
+    label: impl FnOnce() -> String,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: u64,
+) {
     if let Some(scope) = ctx.jump_mode_scope.as_ref()
         && let crate::gui::jump_mode::ui::RegistrationResult::Registered {
             directive: Some(directive),
             ..
-        } = scope.register(
-            ui,
-            response,
-            target_identity(),
-            label(),
-            crate::gui::jump_mode::TargetKind::Button,
-            visual_order,
-        )
+        } = scope.register(ui, response, target_identity(), label(), kind, visual_order)
     {
         directive.apply_to_response(response);
     }
-
-    response.clicked() && ctx.jump_mode_activation_allowed
 }
 
 /// Stable, unambiguous identity for query/history action rows. The duplicate
@@ -227,6 +243,16 @@ pub(crate) fn jump_action_identity(
     identity.push_str("/duplicate:");
     identity.push_str(&duplicate_occurrence.to_string());
     identity
+}
+
+/// Opaque Jump Mode identity for a canonical dashboard action identity. The
+/// digest avoids exposing action arguments, history queries, or other row
+/// payload strings through target metadata.
+pub(crate) fn opaque_dashboard_action_identity(canonical_identity: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(canonical_identity.as_bytes());
+    format!("dashboard-action:{}", hex::encode(digest))
 }
 
 /// Native egui identity for a dynamic action row. It hashes borrowed payload

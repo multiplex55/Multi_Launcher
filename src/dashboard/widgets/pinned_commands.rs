@@ -1,11 +1,14 @@
 use super::{
-    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
+    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    dashboard_action_row_egui_id, edit_typed_settings, jump_action_identity, jump_response_clicked,
+    opaque_dashboard_action_identity,
 };
 use crate::actions::{Action, ActionIdLookup};
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use crate::plugins::fav::FavEntry;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 fn default_layout() -> PinnedLayout {
     PinnedLayout::List
@@ -189,37 +192,106 @@ impl Widget for PinnedCommandsWidget {
             return None;
         }
 
+        let mut duplicate_occurrences = HashMap::new();
+        let mut clicked = None;
+        let mut visual_order = 0;
         match self.cfg.layout {
             PinnedLayout::List => {
                 for action in &self.cached_resolved {
-                    if ui.button(&action.label).clicked() {
-                        return Some(WidgetAction {
-                            query_override: Some(action.label.clone()),
-                            action: action.clone(),
-                        });
+                    let base_row_id = dashboard_action_row_egui_id(
+                        ui,
+                        action,
+                        None,
+                        Some(&action.label),
+                        None,
+                        0,
+                    );
+                    let occurrence =
+                        next_action_occurrence(&mut duplicate_occurrences, base_row_id);
+                    let activated =
+                        render_pinned_action_button(ui, ctx, action, occurrence, visual_order);
+                    if clicked.is_none() {
+                        clicked = activated;
                     }
+                    visual_order += 1;
                 }
             }
             PinnedLayout::Grid => {
-                let mut clicked = None;
                 ui.horizontal_wrapped(|ui| {
                     for action in &self.cached_resolved {
-                        if ui.button(&action.label).clicked() {
-                            clicked = Some(action.clone());
+                        let base_row_id = dashboard_action_row_egui_id(
+                            ui,
+                            action,
+                            None,
+                            Some(&action.label),
+                            None,
+                            0,
+                        );
+                        let occurrence =
+                            next_action_occurrence(&mut duplicate_occurrences, base_row_id);
+                        let activated =
+                            render_pinned_action_button(ui, ctx, action, occurrence, visual_order);
+                        if clicked.is_none() {
+                            clicked = activated;
                         }
+                        visual_order += 1;
                     }
                 });
-                if let Some(action) = clicked {
-                    return Some(WidgetAction {
-                        query_override: Some(action.label.clone()),
-                        action,
-                    });
-                }
             }
         }
 
-        None
+        clicked
     }
+}
+
+fn render_pinned_action_button(
+    ui: &mut egui::Ui,
+    ctx: &DashboardContext<'_>,
+    action: &Action,
+    duplicate_occurrence: usize,
+    visual_order: u64,
+) -> Option<WidgetAction> {
+    let row_id = dashboard_action_row_egui_id(
+        ui,
+        action,
+        None,
+        Some(&action.label),
+        None,
+        duplicate_occurrence,
+    );
+    let response = ui
+        .scope_builder(egui::UiBuilder::new().id(row_id), |ui| {
+            ui.button(&action.label)
+        })
+        .inner;
+    jump_response_clicked(
+        ui,
+        ctx,
+        &response,
+        || {
+            let identity = jump_action_identity(
+                action,
+                None,
+                Some(&action.label),
+                None,
+                duplicate_occurrence,
+            );
+            format!("{}/run", opaque_dashboard_action_identity(&identity))
+        },
+        || "Pinned command".to_owned(),
+        visual_order,
+    )
+    .then(|| WidgetAction {
+        query_override: Some(action.label.clone()),
+        action: action.clone(),
+    })
+}
+
+fn next_action_occurrence(occurrences: &mut HashMap<egui::Id, usize>, base_id: egui::Id) -> usize {
+    let next = occurrences.entry(base_id).or_default();
+    let occurrence = *next;
+    *next = (*next).saturating_add(1);
+    occurrence
 }
 
 fn available_choices(ctx: &WidgetSettingsContext<'_>) -> Vec<(String, String)> {
@@ -303,6 +375,52 @@ mod tests {
             jump_mode_scope: None,
             jump_mode_activation_allowed: true,
         }
+    }
+
+    fn jump_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 500.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn pinned_body_scope(
+        jump: &crate::gui::jump_mode::ui::JumpModeUi,
+    ) -> crate::gui::JumpModeScope {
+        jump.scope(
+            crate::gui::jump_mode::SurfaceId::Dashboard,
+            crate::gui::jump_mode::TargetGeneration(7),
+            "dashboard-test",
+            egui::ViewportId::ROOT,
+            true,
+        )
+        .expect("enabled Jump Mode creates a dashboard scope")
+        .child_namespace("slot-id:pinned")
+        .child_namespace("body")
+    }
+
+    fn render_pinned(
+        widget: &mut PinnedCommandsWidget,
+        ctx: &DashboardContext<'_>,
+        egui_ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> Option<WidgetAction> {
+        let mut activated = None;
+        egui_ctx
+            .run_ui(jump_input(events), |ui| {
+                ui.push_id("slot-id:pinned", |ui| {
+                    ui.push_id("body", |ui| {
+                        activated = widget.render(ui, ctx, WidgetActivation::Click);
+                    });
+                });
+            })
+            .drop_without_applying_deltas();
+        activated
     }
 
     #[test]
@@ -399,5 +517,194 @@ mod tests {
                 "Favorite: Snapshot favorite".into()
             )]
         );
+    }
+
+    #[test]
+    fn jump_mode_dashboard_commands_pinned_rows_are_opaque_stable_and_focus_only() {
+        use crate::gui::jump_mode::ui::JumpModeUi;
+        use crate::gui::jump_mode::{SemanticTargetId, TargetId};
+
+        let data_cache = DashboardDataCache::new();
+        let plugins = PluginManager::new_inert_for_test();
+        let usage = HashMap::new();
+        let actions = Arc::new(Vec::new());
+        let actions_by_id = ActionIdLookup::new(Arc::clone(&actions));
+        let mut widget = PinnedCommandsWidget::new(PinnedCommandsConfig {
+            action_ids: Vec::new(),
+            layout: PinnedLayout::List,
+        });
+        let no_args = make_action(
+            "plugin:private-snippet-command",
+            "Private clipboard payload label",
+        );
+        let empty_args = Action {
+            args: Some(String::new()),
+            ..no_args.clone()
+        };
+        let private_args = Action {
+            args: Some("--private=snippet body".into()),
+            ..no_args.clone()
+        };
+        widget.cached_resolved = vec![
+            no_args.clone(),
+            no_args.clone(),
+            empty_args.clone(),
+            private_args.clone(),
+        ];
+        widget.last_actions_version = 0;
+        widget.last_fav_version = 0;
+        widget.last_action_ids_hash = action_ids_hash(&widget.cfg.action_ids);
+
+        let mut jump = JumpModeUi::new(true);
+        let egui_ctx = egui::Context::default();
+        let mut context = make_context(
+            actions.as_slice(),
+            &actions_by_id,
+            &data_cache,
+            &plugins,
+            &usage,
+            0,
+            0,
+        );
+
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let scope = pinned_body_scope(&jump);
+        context.jump_mode_scope = Some(scope.clone());
+        assert!(render_pinned(&mut widget, &context, &egui_ctx, Vec::new()).is_none());
+        jump.finish_ui_pass();
+        let first_registry = jump.pass_registry().expect("pinned pass was collected");
+        assert_eq!(first_registry.len(), 4);
+        assert!(
+            first_registry
+                .metadata()
+                .all(|metadata| metadata.label() == "Pinned command")
+        );
+        let first_targets = first_registry
+            .targets()
+            .iter()
+            .map(|target| {
+                assert_eq!(
+                    target.metadata().kind(),
+                    crate::gui::jump_mode::TargetKind::Button
+                );
+                assert!(
+                    !format!("{:?}", target.id().semantic()).contains("private-snippet-command")
+                );
+                assert!(!format!("{:?}", target.id().semantic()).contains("Private clipboard"));
+                assert!(!format!("{:?}", target.id().semantic()).contains("snippet body"));
+                (target.id().clone(), target.response_id())
+            })
+            .collect::<HashMap<TargetId, egui::Id>>();
+        assert_eq!(first_targets.len(), 4, "duplicate rows stay distinct");
+        assert!(first_targets.keys().all(|target| matches!(
+            target.semantic(),
+            SemanticTargetId::Named(value) if value.contains("dashboard-action:")
+        )));
+        jump.complete_frame(&egui_ctx, true, true);
+
+        widget.cached_resolved = vec![
+            private_args,
+            empty_args.clone(),
+            no_args.clone(),
+            no_args.clone(),
+        ];
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let mut context = make_context(
+            actions.as_slice(),
+            &actions_by_id,
+            &data_cache,
+            &plugins,
+            &usage,
+            0,
+            0,
+        );
+        context.jump_mode_scope = Some(pinned_body_scope(&jump));
+        assert!(render_pinned(&mut widget, &context, &egui_ctx, Vec::new()).is_none());
+        jump.finish_ui_pass();
+        let reordered_registry = jump.pass_registry().expect("reordered pass was collected");
+        let reordered_targets = reordered_registry
+            .targets()
+            .iter()
+            .map(|target| (target.id().clone(), target.response_id()))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            first_targets, reordered_targets,
+            "list row identity survives reorder"
+        );
+        jump.complete_frame(&egui_ctx, true, true);
+
+        let focus_identity = opaque_dashboard_action_identity(&jump_action_identity(
+            &empty_args,
+            None,
+            Some(&empty_args.label),
+            None,
+            0,
+        ));
+        let target = scope.target_id(format!("{focus_identity}/run"));
+        jump.begin_frame();
+        assert!(jump.queue_focus_intent(
+            target.clone(),
+            egui::ViewportId::ROOT,
+            jump.navigation_epoch(),
+        ));
+        jump.begin_ui_pass();
+        widget.cfg.layout = PinnedLayout::Grid;
+        let mut context = make_context(
+            actions.as_slice(),
+            &actions_by_id,
+            &data_cache,
+            &plugins,
+            &usage,
+            0,
+            0,
+        );
+        context.jump_mode_scope = Some(pinned_body_scope(&jump));
+        assert!(render_pinned(&mut widget, &context, &egui_ctx, Vec::new()).is_none());
+        jump.finish_ui_pass();
+        let focused_response = jump
+            .pass_registry()
+            .expect("focused grid pass was collected")
+            .get(&target)
+            .expect("the exact grid command remains registered")
+            .response_id();
+        assert_eq!(
+            egui_ctx.memory(|memory| memory.focused()),
+            Some(focused_response),
+            "hint completion focuses the actual pinned command button"
+        );
+        jump.complete_frame(&egui_ctx, true, true);
+
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let mut context = make_context(
+            actions.as_slice(),
+            &actions_by_id,
+            &data_cache,
+            &plugins,
+            &usage,
+            0,
+            0,
+        );
+        context.jump_mode_scope = Some(pinned_body_scope(&jump));
+        let activation = render_pinned(
+            &mut widget,
+            &context,
+            &egui_ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        jump.finish_ui_pass();
+        jump.complete_frame(&egui_ctx, true, true);
+        let activation = activation.expect("a distinct Enter activates the focused row");
+        assert_eq!(activation.action.action, empty_args.action);
+        assert_eq!(activation.action.args, Some(String::new()));
+        assert_eq!(activation.query_override, Some(empty_args.label));
     }
 }

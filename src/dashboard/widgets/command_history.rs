@@ -1,6 +1,7 @@
 use super::{
     BackgroundLoader, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
-    edit_typed_settings,
+    dashboard_action_row_egui_id, edit_typed_settings, jump_action_identity, jump_response_clicked,
+    opaque_dashboard_action_identity, register_jump_response,
 };
 use crate::actions::{Action, ActionIdLookup};
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -494,9 +495,24 @@ impl Widget for CommandHistoryWidget {
         ui.label("Command history");
 
         if self.cfg.show_filter {
+            let mut discarded_filter = None;
+            let filter = if ctx.jump_mode_activation_allowed {
+                &mut self.filter
+            } else {
+                discarded_filter.insert(self.filter.clone())
+            };
             ui.horizontal(|ui| {
                 ui.label("Filter");
-                ui.text_edit_singleline(&mut self.filter);
+                let response = ui.text_edit_singleline(filter);
+                register_jump_response(
+                    ui,
+                    ctx,
+                    &response,
+                    || "filter".to_owned(),
+                    || "History filter".to_owned(),
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                    0,
+                );
             });
         }
 
@@ -506,56 +522,142 @@ impl Widget for CommandHistoryWidget {
             ui.label("No history entries.");
         }
 
+        let mut duplicate_occurrences: HashMap<egui::Id, usize> = HashMap::new();
+        let mut visual_order = 1;
         for entry in filtered {
             let timestamp = Self::format_timestamp(entry.timestamp);
-            ui.horizontal(|ui| {
-                let pin_label = if entry.pinned { "★" } else { "☆" };
-                if ui.button(pin_label).clicked() {
-                    let pin = HistoryPin {
-                        action_id: entry.action_id.clone(),
-                        label: entry.action.label.clone(),
-                        desc: entry.action.desc.clone(),
-                        args: entry.action.args.clone(),
-                        query: entry.query.clone(),
-                        timestamp: entry.timestamp,
-                    };
-                    if let Ok(pinned) = toggle_pin(HISTORY_PINS_FILE, &pin) {
-                        if pinned {
-                            self.cached_pins.push(pin);
-                        } else {
-                            self.cached_pins.retain(|p| p != &pin);
+            let base_row_id = dashboard_action_row_egui_id(
+                ui,
+                &entry.action,
+                None,
+                Some(&entry.query),
+                Some(entry.timestamp),
+                0,
+            );
+            let next_occurrence = duplicate_occurrences.entry(base_row_id).or_insert(0);
+            let duplicate_occurrence = *next_occurrence;
+            *next_occurrence = (*next_occurrence).saturating_add(1);
+            let row_id = dashboard_action_row_egui_id(
+                ui,
+                &entry.action,
+                None,
+                Some(&entry.query),
+                Some(entry.timestamp),
+                duplicate_occurrence,
+            );
+            let target_identity = ctx.jump_mode_scope.as_ref().map(|_| {
+                let identity = jump_action_identity(
+                    &entry.action,
+                    None,
+                    Some(&entry.query),
+                    Some(entry.timestamp),
+                    duplicate_occurrence,
+                );
+                opaque_dashboard_action_identity(&identity)
+            });
+            ui.scope_builder(egui::UiBuilder::new().id(row_id), |ui| {
+                ui.horizontal(|ui| {
+                    let pin_label = if entry.pinned { "★" } else { "☆" };
+                    let pin_response = ui.push_id("pin-toggle", |ui| ui.button(pin_label)).inner;
+                    if jump_response_clicked(
+                        ui,
+                        ctx,
+                        &pin_response,
+                        || {
+                            target_identity
+                                .as_ref()
+                                .map_or_else(String::new, |identity| format!("{identity}/pin"))
+                        },
+                        || {
+                            if entry.pinned {
+                                "Unpin history entry".to_owned()
+                            } else {
+                                "Pin history entry".to_owned()
+                            }
+                        },
+                        visual_order,
+                    ) {
+                        let pin = HistoryPin {
+                            action_id: entry.action_id.clone(),
+                            label: entry.action.label.clone(),
+                            desc: entry.action.desc.clone(),
+                            args: entry.action.args.clone(),
+                            query: entry.query.clone(),
+                            timestamp: entry.timestamp,
+                        };
+                        if let Ok(pinned) = toggle_pin(HISTORY_PINS_FILE, &pin) {
+                            if pinned {
+                                self.cached_pins.push(pin);
+                            } else {
+                                self.cached_pins.retain(|p| p != &pin);
+                            }
                         }
                     }
-                }
+                    visual_order += 1;
 
-                let action_label = if entry.missing {
-                    format!("{} (missing)", entry.action.label)
-                } else {
-                    entry.action.label.clone()
-                };
-                if entry.missing {
-                    ui.colored_label(egui::Color32::YELLOW, action_label);
-                } else if ui.button(&action_label).clicked() {
-                    clicked = Some(WidgetAction {
-                        action: entry.action.clone(),
-                        query_override: Some(entry.query.clone()),
-                    });
-                }
-                if entry.missing
-                    && ui.button("Unpin").clicked()
-                    && matches!(
-                        crate::history::remove_pin(
-                            HISTORY_PINS_FILE,
-                            &entry.action_id,
-                            entry.action.args.as_deref(),
-                        ),
-                        Ok(true)
-                    )
-                {
-                    self.cached_pins
-                        .retain(|p| p.action_id != entry.action_id || p.args != entry.action.args);
-                }
-                ui.label(timestamp);
+                    let action_label = if entry.missing {
+                        format!("{} (missing)", entry.action.label)
+                    } else {
+                        entry.action.label.clone()
+                    };
+                    if entry.missing {
+                        ui.colored_label(egui::Color32::YELLOW, action_label);
+                    } else {
+                        let action_response = ui
+                            .push_id("run-action", |ui| ui.button(&action_label))
+                            .inner;
+                        if jump_response_clicked(
+                            ui,
+                            ctx,
+                            &action_response,
+                            || {
+                                target_identity
+                                    .as_ref()
+                                    .map_or_else(String::new, |identity| format!("{identity}/run"))
+                            },
+                            || "Run history action".to_owned(),
+                            visual_order,
+                        ) {
+                            clicked = Some(WidgetAction {
+                                action: entry.action.clone(),
+                                query_override: Some(entry.query.clone()),
+                            });
+                        }
+                        visual_order += 1;
+                    }
+
+                    if entry.missing {
+                        let unpin_response =
+                            ui.push_id("unpin-missing", |ui| ui.button("Unpin")).inner;
+                        if jump_response_clicked(
+                            ui,
+                            ctx,
+                            &unpin_response,
+                            || {
+                                target_identity
+                                    .as_ref()
+                                    .map_or_else(String::new, |identity| {
+                                        format!("{identity}/unpin")
+                                    })
+                            },
+                            || "Unpin unavailable history action".to_owned(),
+                            visual_order,
+                        ) && matches!(
+                            crate::history::remove_pin(
+                                HISTORY_PINS_FILE,
+                                &entry.action_id,
+                                entry.action.args.as_deref(),
+                            ),
+                            Ok(true)
+                        ) {
+                            self.cached_pins.retain(|p| {
+                                p.action_id != entry.action_id || p.args != entry.action.args
+                            });
+                        }
+                        visual_order += 1;
+                    }
+                    ui.label(timestamp);
+                });
             });
         }
 
@@ -621,6 +723,52 @@ mod tests {
             jump_mode_scope: None,
             jump_mode_activation_allowed: true,
         }
+    }
+
+    fn jump_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 650.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn history_body_scope(
+        jump: &crate::gui::jump_mode::ui::JumpModeUi,
+    ) -> crate::gui::JumpModeScope {
+        jump.scope(
+            crate::gui::jump_mode::SurfaceId::Dashboard,
+            crate::gui::jump_mode::TargetGeneration(7),
+            "dashboard-test",
+            egui::ViewportId::ROOT,
+            true,
+        )
+        .expect("enabled Jump Mode creates a dashboard scope")
+        .child_namespace("slot-id:history")
+        .child_namespace("body")
+    }
+
+    fn render_history(
+        widget: &mut CommandHistoryWidget,
+        ctx: &DashboardContext<'_>,
+        egui_ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> Option<WidgetAction> {
+        let mut activated = None;
+        egui_ctx
+            .run_ui(jump_input(events), |ui| {
+                ui.push_id("slot-id:history", |ui| {
+                    ui.push_id("body", |ui| {
+                        activated = widget.render(ui, ctx, WidgetActivation::Click);
+                    });
+                });
+            })
+            .drop_without_applying_deltas();
+        activated
     }
 
     fn resolution_context<'a>(
@@ -724,6 +872,30 @@ mod tests {
 
         fn commands(&self) -> Vec<Action> {
             vec![self.0.clone()]
+        }
+    }
+
+    struct NavigationCatalogPlugin(Vec<Action>);
+
+    impl Plugin for NavigationCatalogPlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            Vec::new()
+        }
+
+        fn name(&self) -> &str {
+            "jump_mode_dashboard_commands_fixture"
+        }
+
+        fn description(&self) -> &str {
+            "Synthetic command history navigation fixture"
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &[]
+        }
+
+        fn commands(&self) -> Vec<Action> {
+            self.0.clone()
         }
     }
 
@@ -1334,6 +1506,208 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn jump_mode_dashboard_commands_history_targets_keep_provenance_and_filter_focus() {
+        use crate::gui::jump_mode::TargetKind;
+        use crate::gui::jump_mode::ui::JumpModeUi;
+
+        let workspace = workloads::IsolatedWorkspace::new();
+        std::fs::write(workspace.root().join(HISTORY_PINS_FILE), b"[]")
+            .expect("write isolated pin state");
+        let command_id = "plugin:private-command-payload";
+        let no_args = action("No args current command", command_id, None);
+        let empty_args = action("Empty args current command", command_id, Some(""));
+        let private_query = "private history query empty";
+        let history = VecDeque::from([
+            history_entry_at(no_args.clone(), "private history query none", 100, 0),
+            history_entry_at(empty_args.clone(), private_query, 101, 1),
+            history_entry_at(empty_args.clone(), private_query, 101, 1),
+        ]);
+        let _history_guard = crate::history::replace_history_for_test(history);
+
+        let data_cache = DashboardDataCache::new();
+        let mut plugins = PluginManager::new_inert_for_test();
+        plugins.register(Box::new(NavigationCatalogPlugin(vec![
+            no_args.clone(),
+            empty_args.clone(),
+        ])));
+        let actions = Vec::new();
+        let actions_by_id = ActionIdLookup::default();
+        let usage = HashMap::new();
+        let mut widget = CommandHistoryWidget::new(CommandHistoryConfig {
+            count: 8,
+            show_pinned_only: false,
+            show_filter: true,
+        });
+        widget.cached_pins.push(HistoryPin {
+            action_id: "plugin:removed-private-command".into(),
+            label: "Private clipboard payload missing action".into(),
+            desc: "fixture".into(),
+            args: Some("private args".into()),
+            query: "private missing query".into(),
+            timestamp: 102,
+        });
+        widget.last_pins_load = Instant::now();
+
+        let mut jump = JumpModeUi::new(true);
+        let egui_ctx = egui::Context::default();
+        let mut render_context = context(&data_cache, &plugins, &actions, &actions_by_id, &usage);
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let scope = history_body_scope(&jump);
+        render_context.jump_mode_scope = Some(scope.clone());
+        assert!(render_history(&mut widget, &render_context, &egui_ctx, Vec::new()).is_none());
+        jump.finish_ui_pass();
+        let initial_registry = jump.pass_registry().expect("history pass was collected");
+        assert_eq!(initial_registry.len(), 9);
+        assert_eq!(
+            initial_registry
+                .metadata()
+                .filter(|metadata| metadata.kind() == TargetKind::TextEntry)
+                .count(),
+            1,
+            "Filter is a native text-entry target"
+        );
+        assert_eq!(
+            initial_registry
+                .metadata()
+                .filter(|metadata| metadata.label() == "Run history action")
+                .count(),
+            3,
+            "only runnable entries receive an action target"
+        );
+        assert!(initial_registry.metadata().all(|metadata| {
+            matches!(
+                metadata.label(),
+                "History filter"
+                    | "Pin history entry"
+                    | "Unpin history entry"
+                    | "Run history action"
+                    | "Unpin unavailable history action"
+            )
+        }));
+        let initial_target_ids = initial_registry
+            .targets()
+            .iter()
+            .map(|target| target.id().clone())
+            .collect::<HashSet<_>>();
+        assert_eq!(initial_target_ids.len(), 9, "duplicate rows stay distinct");
+        for target in initial_registry.targets() {
+            let semantic = format!("{:?}", target.id().semantic());
+            assert!(!semantic.contains(command_id));
+            assert!(!semantic.contains("private history query"));
+            assert!(!semantic.contains("private missing query"));
+            assert!(!semantic.contains("private args"));
+            assert!(!semantic.contains("clipboard payload"));
+        }
+        let filter_target = scope.target_id("filter");
+        assert!(initial_target_ids.contains(&filter_target));
+        jump.complete_frame(&egui_ctx, true, true);
+
+        jump.begin_frame();
+        assert!(jump.queue_focus_intent(
+            filter_target.clone(),
+            egui::ViewportId::ROOT,
+            jump.navigation_epoch(),
+        ));
+        jump.begin_ui_pass();
+        let mut render_context = context(&data_cache, &plugins, &actions, &actions_by_id, &usage);
+        render_context.jump_mode_scope = Some(history_body_scope(&jump));
+        assert!(render_history(&mut widget, &render_context, &egui_ctx, Vec::new()).is_none());
+        jump.finish_ui_pass();
+        let filter_response = jump
+            .pass_registry()
+            .expect("focused Filter pass was collected")
+            .get(&filter_target)
+            .expect("Filter remains registered")
+            .response_id();
+        assert_eq!(
+            egui_ctx.memory(|memory| memory.focused()),
+            Some(filter_response),
+            "hint completion focuses the actual filter text entry"
+        );
+        jump.complete_frame(&egui_ctx, true, true);
+
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let mut render_context = context(&data_cache, &plugins, &actions, &actions_by_id, &usage);
+        render_context.jump_mode_scope = Some(history_body_scope(&jump));
+        assert!(
+            render_history(
+                &mut widget,
+                &render_context,
+                &egui_ctx,
+                vec![egui::Event::Text("empty".into())],
+            )
+            .is_none()
+        );
+        assert_eq!(widget.filter, "empty");
+        jump.finish_ui_pass();
+        assert_eq!(
+            jump.pass_registry()
+                .expect("filtered pass was collected")
+                .len(),
+            5,
+            "the Filter retains its real focused typing behavior"
+        );
+        jump.complete_frame(&egui_ctx, true, true);
+
+        widget.filter.clear();
+        let target_identity = super::super::opaque_dashboard_action_identity(
+            &jump_action_identity(&empty_args, None, Some(private_query), Some(101), 1),
+        );
+        let target = scope.target_id(format!("{target_identity}/run"));
+        jump.begin_frame();
+        assert!(jump.queue_focus_intent(
+            target.clone(),
+            egui::ViewportId::ROOT,
+            jump.navigation_epoch(),
+        ));
+        jump.begin_ui_pass();
+        let mut render_context = context(&data_cache, &plugins, &actions, &actions_by_id, &usage);
+        render_context.jump_mode_scope = Some(history_body_scope(&jump));
+        assert!(render_history(&mut widget, &render_context, &egui_ctx, Vec::new()).is_none());
+        jump.finish_ui_pass();
+        let focused_response = jump
+            .pass_registry()
+            .expect("focused action pass was collected")
+            .get(&target)
+            .expect("the exact duplicate action remains registered")
+            .response_id();
+        assert_eq!(
+            egui_ctx.memory(|memory| memory.focused()),
+            Some(focused_response),
+            "hint completion focuses the selected history action button"
+        );
+        jump.complete_frame(&egui_ctx, true, true);
+
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let mut render_context = context(&data_cache, &plugins, &actions, &actions_by_id, &usage);
+        render_context.jump_mode_scope = Some(history_body_scope(&jump));
+        let activation = render_history(
+            &mut widget,
+            &render_context,
+            &egui_ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        jump.finish_ui_pass();
+        jump.complete_frame(&egui_ctx, true, true);
+        let activation = activation.expect("a distinct Enter activates the exact history row");
+        assert_eq!(activation.action.action, command_id);
+        assert_eq!(activation.action.args, Some(String::new()));
+        assert_eq!(activation.query_override.as_deref(), Some(private_query));
+
+        drop(_history_guard);
+        drop(workspace);
     }
 
     #[test]
