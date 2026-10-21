@@ -20,6 +20,8 @@ pub(crate) struct MouseSettingsDialog {
     last_scroll_area_id: Option<egui::Id>,
     #[cfg(test)]
     last_scroll_max_offset_y: f32,
+    #[cfg(test)]
+    last_cancel_response: Option<egui::Response>,
 }
 
 fn register_mouse_settings_target(
@@ -69,6 +71,11 @@ impl MouseSettingsDialog {
     #[cfg(test)]
     pub(crate) fn test_scroll_max_offset_y(&self) -> f32 {
         self.last_scroll_max_offset_y
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_cancel_response(&self) -> Option<egui::Response> {
+        self.last_cancel_response.clone()
     }
 
     fn reset_from(&mut self, current: &CoordinateToolPreferences) {
@@ -146,6 +153,10 @@ impl MouseSettingsDialog {
         if !self.open {
             return None;
         }
+        #[cfg(test)]
+        {
+            self.last_cancel_response = None;
+        }
         // Native effect status arrives asynchronously from the passive worker.
         // Keep the open dialog's local availability labels fresh even when no
         // other application activity would otherwise request an egui frame.
@@ -171,6 +182,8 @@ impl MouseSettingsDialog {
         let effect_status = adapter.effects_status();
         let mut open = self.open;
         let mut cancel_requested = false;
+        #[cfg(test)]
+        let mut cancel_response = None;
         let output = egui::Window::new("Mouse Settings")
             .open(&mut open)
             .resizable(true)
@@ -1066,6 +1079,10 @@ impl MouseSettingsDialog {
                                 self.last_error = Some(error);
                             }
                             let cancel = ui.button("Cancel");
+                            #[cfg(test)]
+                            {
+                                cancel_response = Some(cancel.clone());
+                            }
                             register_mouse_settings_target(
                                 scope,
                                 ui,
@@ -1099,6 +1116,10 @@ impl MouseSettingsDialog {
             scope.discard_registered_targets();
         }
         let scroll_output = output.and_then(|window| window.inner);
+        #[cfg(test)]
+        {
+            self.last_cancel_response = cancel_response;
+        }
         #[cfg(test)]
         if let Some(output) = &scroll_output {
             self.last_scroll_area_id = Some(output.id);

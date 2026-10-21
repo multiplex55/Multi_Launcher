@@ -26230,6 +26230,10 @@ mod tests {
             .expect("the actual Mouse Settings response is present in the current frame")
             .rect
             .center();
+        click_mouse_settings_at(ctx, app, position);
+    }
+
+    fn click_mouse_settings_at(ctx: &egui::Context, app: &mut LauncherApp, position: egui::Pos2) {
         for pressed in [true, false] {
             let mut events = if pressed {
                 vec![egui::Event::PointerMoved(position)]
@@ -39950,15 +39954,19 @@ mod tests {
         assert_eq!(app.coordinate_tool.preferences(), &committed);
         assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
         scroll_mouse_settings_to_bottom(&ctx, &mut app);
-        let current_cancel_response = ctx
-            .read_response(cancel.response_id())
-            .expect("native Cancel is still a current real button response");
+        // After end_pass, read_response may prefer the older buffer; use the actual response
+        // captured while drawing Cancel in the current frame after the scroll change.
+        let current_cancel_response = app
+            .mouse_settings_dialog
+            .test_cancel_response()
+            .expect("the actual current-pass Mouse Settings Cancel response was rendered");
+        assert_eq!(current_cancel_response.id, cancel.response_id());
         assert!(current_cancel_response.enabled());
-        assert_eq!(
-            ctx.layer_id_at(current_cancel_response.rect.center()),
-            Some(layer)
-        );
-        click_mouse_settings_response(&ctx, &mut app, cancel.response_id());
+        assert!(current_cancel_response.interact_rect.is_positive());
+        assert_eq!(current_cancel_response.layer_id, layer);
+        let cancel_position = current_cancel_response.interact_rect.center();
+        assert_eq!(ctx.layer_id_at(cancel_position), Some(layer));
+        click_mouse_settings_at(&ctx, &mut app, cancel_position);
         assert!(!app.mouse_settings_dialog.open);
         assert_eq!(app.coordinate_tool.preferences(), &committed);
         drop(workspace);
