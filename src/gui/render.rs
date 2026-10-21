@@ -33825,6 +33825,114 @@ mod tests {
     }
 
     #[test]
+    fn jump_mode_file_operations_integration_sort_headers_are_focus_only_and_current() {
+        use crate::gui::jump_mode::TargetKind;
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app, root, root_guard) = prepare_batch_rename_generated_fixture(&ctx);
+        let original_bytes = ["alpha.txt", "beta.txt"]
+            .into_iter()
+            .map(|name| std::fs::read(root.join(name)).unwrap())
+            .collect::<Vec<_>>();
+        let before_rows = app.batch_rename_dialog.test_visible_file_entry_refs();
+        assert_eq!(before_rows.len(), 2);
+        let row_before_sort = batch_rename_select_target_for_ref(&app, before_rows[0]);
+
+        let sort_target = batch_rename_target_by_label(&app, "Sort by original filename");
+        assert_eq!(sort_target.metadata().kind(), TargetKind::Button);
+        assert!(sort_target.enabled());
+        assert!(sort_target.clipped_rect().width() > 0.0);
+        assert!(sort_target.clipped_rect().height() > 0.0);
+        let safety_target = batch_rename_target_by_label(&app, "Batch rename safety and recovery");
+        assert_eq!(safety_target.metadata().kind(), TargetKind::Button);
+        assert!(safety_target.enabled());
+
+        batch_rename_start_hints(&ctx, &mut app);
+        batch_rename_complete_hint(&ctx, &mut app, &sort_target);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(ctx.memory(|memory| memory.has_focus(sort_target.response_id())));
+        assert_eq!(
+            app.batch_rename_dialog.test_visible_file_entry_refs(),
+            before_rows,
+            "completing the hint focuses the sort header without changing the table"
+        );
+        assert_eq!(
+            ["alpha.txt", "beta.txt"]
+                .into_iter()
+                .map(|name| std::fs::read(root.join(name)).unwrap())
+                .collect::<Vec<_>>(),
+            original_bytes,
+            "focus-only navigation does not touch generated files"
+        );
+
+        batch_rename_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        batch_rename_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        batch_rename_test_frame(&ctx, &mut app, Vec::new());
+
+        let sort_after_first_activation =
+            batch_rename_target_by_label(&app, "Sort by original filename");
+        assert_eq!(
+            sort_after_first_activation.response_id(),
+            sort_target.response_id(),
+            "the actual native header control keeps its identity as sort authority renews"
+        );
+        assert_eq!(
+            sort_after_first_activation.id(),
+            sort_target.id(),
+            "the static sort control remains current through its own sort action"
+        );
+        assert_ne!(
+            batch_rename_select_target_for_ref(&app, before_rows[0]).id(),
+            row_before_sort.id(),
+            "sorting renews row semantic authority independently of stable headers"
+        );
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .all(|target| target.id() != row_before_sort.id())
+        );
+
+        batch_rename_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        batch_rename_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        batch_rename_test_frame(&ctx, &mut app, Vec::new());
+        assert_eq!(
+            app.batch_rename_dialog.test_visible_file_entry_refs(),
+            before_rows.iter().rev().copied().collect::<Vec<_>>(),
+            "a later native activation changes the selected column to descending order"
+        );
+        assert_eq!(
+            ["alpha.txt", "beta.txt"]
+                .into_iter()
+                .map(|name| std::fs::read(root.join(name)).unwrap())
+                .collect::<Vec<_>>(),
+            original_bytes,
+            "sorting remains a read-only file operation"
+        );
+        assert!(app.test_activation_trace.is_empty());
+        app.shutdown_batch_rename_scanner();
+        drop(root_guard);
+        drop(workspace);
+    }
+
+    #[test]
     fn jump_mode_batch_rename_confirmation_apply_hint_requires_fresh_cancel() {
         use crate::gui::jump_mode::{SurfaceId, ui::NavigationOwner};
 

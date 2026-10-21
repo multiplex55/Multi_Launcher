@@ -1034,7 +1034,9 @@ impl BatchRenameDialogState {
         if runtime.receipts.is_empty() {
             return;
         }
-        ui.collapsing("Rename recovery and Undo", |ui| {
+        let recovery_header_order = *visual_order;
+        *visual_order += 1;
+        let recovery = ui.collapsing("Rename recovery and Undo", |ui| {
             for receipt in runtime.receipts.iter().rev() {
                 let opaque_receipt = egui::Id::new(("batch_rename_receipt", receipt.id())).value();
                 ui.scope_builder(
@@ -1085,6 +1087,15 @@ impl BatchRenameDialogState {
                 );
             }
         });
+        register_batch_target_at_order(
+            scope,
+            ui,
+            &recovery.header_response,
+            format!("recovery/undo/{parent_instance}/{session_epoch}"),
+            "Rename recovery and Undo",
+            crate::gui::jump_mode::TargetKind::Button,
+            recovery_header_order,
+        );
     }
 
     fn draw_confirmations(
@@ -1347,7 +1358,9 @@ impl BatchRenameDialogState {
         scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         visual_order: &mut u64,
     ) {
-        ui.collapsing("Batch rename safety and recovery", |ui| {
+        let safety_header_order = *visual_order;
+        *visual_order += 1;
+        let safety = ui.collapsing("Batch rename safety and recovery", |ui| {
             ui.label(
                 "Choose the root explicitly. Opening this dialog does not scan; direct children are included by default, and reparse points are excluded.",
             );
@@ -1364,6 +1377,15 @@ impl BatchRenameDialogState {
                 "Undo is available only while the recorded files still match their saved identities and bytes and each original name is free. Receipts persist in app data across restarts, with up to 32 retained; completed Undone receipts may be discarded to make room. Verification is limited to 1 GiB per file and 4 GiB per batch.",
             );
         });
+        register_batch_target_at_order(
+            scope,
+            ui,
+            &safety.header_response,
+            "safety/recovery",
+            "Batch rename safety and recovery",
+            crate::gui::jump_mode::TargetKind::Button,
+            safety_header_order,
+        );
         ui.horizontal_wrapped(|ui| {
             let choose_root = ui.button("Choose root folder…");
             register_batch_target(
@@ -1889,6 +1911,8 @@ impl BatchRenameDialogState {
         let included_by_ref = &self.included_by_ref;
         let session_epoch = self.session_epoch;
         let row_view_revision = self.row_view_revision;
+        let header_scope = scope
+            .map(|scope| scope.child_namespace(format!("sort/{session_epoch}/{}", generation.0)));
         let row_scope = scope.map(|scope| {
             scope.child_namespace(format!(
                 "rows/{session_epoch}/{}/{row_view_revision}",
@@ -1926,41 +1950,57 @@ impl BatchRenameDialogState {
                             ui.strong("Select");
                         });
                         header.col(|ui| {
-                            if sort_button(
+                            if draw_sort_header(
                                 ui,
                                 "Original filename",
                                 sort,
                                 VisualSortColumn::OriginalName,
+                                session_epoch,
+                                generation,
+                                header_scope.as_ref(),
+                                visual_order,
                             ) {
                                 requested_sort = Some(VisualSortColumn::OriginalName);
                             }
                         });
                         header.col(|ui| {
-                            if sort_button(
+                            if draw_sort_header(
                                 ui,
                                 "Relative path",
                                 sort,
                                 VisualSortColumn::RelativePath,
+                                session_epoch,
+                                generation,
+                                header_scope.as_ref(),
+                                visual_order,
                             ) {
                                 requested_sort = Some(VisualSortColumn::RelativePath);
                             }
                         });
                         header.col(|ui| {
-                            if sort_button(
+                            if draw_sort_header(
                                 ui,
                                 "Original full path",
                                 sort,
                                 VisualSortColumn::FullPath,
+                                session_epoch,
+                                generation,
+                                header_scope.as_ref(),
+                                visual_order,
                             ) {
                                 requested_sort = Some(VisualSortColumn::FullPath);
                             }
                         });
                         header.col(|ui| {
-                            if sort_button(
+                            if draw_sort_header(
                                 ui,
                                 "Proposed path",
                                 sort,
                                 VisualSortColumn::ProposedPath,
+                                session_epoch,
+                                generation,
+                                header_scope.as_ref(),
+                                visual_order,
                             ) {
                                 requested_sort = Some(VisualSortColumn::ProposedPath);
                             }
@@ -1970,7 +2010,16 @@ impl BatchRenameDialogState {
                             {
                                 status_column_width = ui.available_width();
                             }
-                            if sort_button(ui, "Status", sort, VisualSortColumn::Status) {
+                            if draw_sort_header(
+                                ui,
+                                "Status",
+                                sort,
+                                VisualSortColumn::Status,
+                                session_epoch,
+                                generation,
+                                header_scope.as_ref(),
+                                visual_order,
+                            ) {
                                 requested_sort = Some(VisualSortColumn::Status);
                             }
                         });
@@ -2144,7 +2193,7 @@ impl BatchRenameDialogState {
             row_authority_changed |= self.apply_row_updates(&updates);
         }
         if row_authority_changed && let Some(row_scope) = &row_scope {
-            row_scope.discard_registered_targets();
+            row_scope.discard_registered_namespace();
         }
     }
 }
@@ -2419,6 +2468,72 @@ fn register_batch_target(
     );
 }
 
+fn register_batch_target_at_order(
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    local_identity: impl AsRef<str>,
+    label: impl Into<String>,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: u64,
+) {
+    let mut reserved_order = visual_order;
+    register_batch_target(
+        scope,
+        ui,
+        response,
+        local_identity,
+        label,
+        kind,
+        &mut reserved_order,
+    );
+}
+
+fn draw_sort_header(
+    ui: &mut egui::Ui,
+    label: &str,
+    sort: VisualSort,
+    column: VisualSortColumn,
+    session_epoch: u64,
+    generation: RenameScanGeneration,
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    visual_order: &mut u64,
+) -> bool {
+    let column_identity = sort_column_identity(column);
+    let response = ui
+        .scope_builder(
+            egui::UiBuilder::new().id(egui::Id::new((
+                "batch_rename_sort_header",
+                session_epoch,
+                generation.0,
+                column_identity,
+            ))),
+            |ui| sort_button(ui, label, sort, column),
+        )
+        .inner;
+    register_batch_target(
+        scope,
+        ui,
+        &response,
+        format!("sort/{column_identity}"),
+        format!("Sort by {}", label.to_lowercase()),
+        crate::gui::jump_mode::TargetKind::Button,
+        visual_order,
+    );
+    response.clicked()
+}
+
+fn sort_column_identity(column: VisualSortColumn) -> &'static str {
+    match column {
+        VisualSortColumn::ScanOrder => "scan-order",
+        VisualSortColumn::OriginalName => "original-name",
+        VisualSortColumn::RelativePath => "relative-path",
+        VisualSortColumn::FullPath => "full-path",
+        VisualSortColumn::ProposedPath => "proposed-path",
+        VisualSortColumn::Status => "status",
+    }
+}
+
 fn new_rule_option_identity(kind: NewRuleKind) -> &'static str {
     match kind {
         NewRuleKind::Prefix => "option/prefix",
@@ -2465,13 +2580,18 @@ fn new_rule_label(kind: NewRuleKind) -> &'static str {
     }
 }
 
-fn sort_button(ui: &mut egui::Ui, label: &str, sort: VisualSort, column: VisualSortColumn) -> bool {
+fn sort_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    sort: VisualSort,
+    column: VisualSortColumn,
+) -> egui::Response {
     let indicator = if sort.column == column {
         if sort.descending { " ↓" } else { " ↑" }
     } else {
         ""
     };
-    ui.button(format!("{label}{indicator}")).clicked()
+    ui.button(format!("{label}{indicator}"))
 }
 
 fn status_sort_key(status: &PreviewRowStatus) -> u8 {
@@ -2629,6 +2749,7 @@ fn draw_folder_nodes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gui::jump_mode::ui::JumpModeUi;
     use std::ffi::OsStr;
     use std::fs;
     use std::time::{Duration, Instant};
@@ -2687,6 +2808,453 @@ mod tests {
             events,
             ..Default::default()
         }
+    }
+
+    fn batch_rename_jump_frame(
+        ctx: &egui::Context,
+        state: &mut BatchRenameDialogState,
+        jump: &mut JumpModeUi,
+        runtime: &RenameRuntimeSnapshot,
+        events: Vec<egui::Event>,
+    ) -> Vec<BatchRenameUiCommand> {
+        use crate::gui::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, NavigationWindows,
+            batch_rename_confirmation_layer_id, resolve_batch_rename_confirmation_owner,
+            resolve_layer_navigation_owner, visible_top_middle_layer,
+        };
+        use crate::gui::jump_mode::{SurfaceId, TargetGeneration};
+
+        jump.begin_frame();
+        let mut commands = Vec::new();
+        let _output = ctx.run_ui(
+            screen_input(egui::vec2(1280.0, 1120.0), events),
+            |root_ui| {
+                let ctx = root_ui.ctx();
+                let first_ui_pass = ctx.current_pass_index() == 0;
+                let parent_instance = state.session_epoch;
+                let parent_owner = NavigationOwner::Dialog {
+                    kind: NavigationDialogKind::BatchRename,
+                    instance: parent_instance,
+                };
+                let mut windows = NavigationWindows::default();
+                let batch_rename_index = NavigationDialogKind::ALL
+                    .iter()
+                    .position(|kind| *kind == NavigationDialogKind::BatchRename)
+                    .expect("Batch Rename belongs to the current dialog inventory");
+                windows.dialogs[batch_rename_index] = state.open.then_some(parent_instance);
+                let parent_candidate = resolve_layer_navigation_owner(ctx, windows);
+                let pending = state.jump_mode_pending_confirmation_identity();
+                let candidate = if let Some((confirmation_instance, kind)) = pending {
+                    let exact_child = resolve_batch_rename_confirmation_owner(
+                        ctx,
+                        parent_instance,
+                        confirmation_instance,
+                        kind,
+                    );
+                    let child_layer = batch_rename_confirmation_layer_id(
+                        parent_instance,
+                        confirmation_instance,
+                        kind,
+                    );
+                    if visible_top_middle_layer(ctx) == Some(child_layer) {
+                        exact_child
+                    } else if visible_top_middle_layer(ctx)
+                        == NavigationDialogKind::BatchRename.layer_id()
+                    {
+                        NavigationOwner::Blocked
+                    } else {
+                        parent_candidate
+                    }
+                } else {
+                    parent_candidate
+                };
+                let navigation_input_allowed = candidate != NavigationOwner::Blocked
+                    && candidate == jump.frame_navigation_owner();
+                jump.handle_root_input(ctx, navigation_input_allowed, first_ui_pass);
+                jump.update_navigation_owner(ctx, candidate, false);
+                let jump_owner = jump.frame_navigation_owner();
+                jump.begin_ui_pass();
+
+                let parent_scope = (jump_owner == parent_owner
+                    && state.jump_mode_parent_targets_allowed())
+                .then(|| {
+                    jump.scope_for_navigation_owner(
+                        SurfaceId::dialog("batch-rename", parent_instance),
+                        TargetGeneration(state.jump_mode_target_generation()),
+                        "batch-rename/form",
+                        ctx.viewport_id(),
+                        parent_owner,
+                        false,
+                    )
+                })
+                .flatten();
+                let child_scope = pending.and_then(|(confirmation_instance, kind)| {
+                    let child_owner = NavigationOwner::BatchRenameConfirmation {
+                        parent_instance,
+                        confirmation_instance,
+                        kind,
+                    };
+                    (jump_owner == child_owner)
+                        .then(|| {
+                            jump.scope_for_navigation_owner(
+                                SurfaceId::popup(
+                                    kind.surface_kind(),
+                                    confirmation_instance,
+                                    SurfaceId::dialog("batch-rename", parent_instance),
+                                ),
+                                TargetGeneration(confirmation_instance),
+                                "batch-rename/confirmation",
+                                ctx.viewport_id(),
+                                child_owner,
+                                false,
+                            )
+                        })
+                        .flatten()
+                });
+                let native_parent_owner =
+                    parent_candidate == parent_owner && state.jump_mode_parent_targets_allowed();
+                let native_child_owner = pending
+                    .map(|(confirmation_instance, kind)| {
+                        resolve_batch_rename_confirmation_owner(
+                            ctx,
+                            parent_instance,
+                            confirmation_instance,
+                            kind,
+                        )
+                    })
+                    .unwrap_or(NavigationOwner::Blocked);
+                let rendered_commands = state.ui_with_jump_mode(
+                    ctx,
+                    parent_scope.as_ref(),
+                    child_scope.as_ref(),
+                    jump_owner,
+                    native_parent_owner,
+                    native_child_owner,
+                    first_ui_pass,
+                    Some(parent_instance),
+                    runtime,
+                );
+                if first_ui_pass {
+                    commands = rendered_commands;
+                }
+                jump.finish_ui_pass();
+                jump.prepare_pass_for_navigation_owner(ctx, jump_owner, false, true);
+                jump.complete_frame_for_navigation_owner(ctx, jump_owner, false, true);
+            },
+        );
+        _output.drop_without_applying_deltas();
+        commands
+    }
+
+    fn batch_rename_hint_target(
+        jump: &JumpModeUi,
+        label: &str,
+    ) -> crate::gui::jump_mode::ui::RegisteredTarget {
+        jump.retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .unwrap_or_else(|| panic!("missing current Batch Rename target: {label}"))
+            .clone()
+    }
+
+    fn batch_rename_hint_target_with_enter(
+        ctx: &egui::Context,
+        state: &mut BatchRenameDialogState,
+        jump: &mut JumpModeUi,
+        runtime: &RenameRuntimeSnapshot,
+        target: &crate::gui::jump_mode::ui::RegisteredTarget,
+    ) -> Vec<BatchRenameUiCommand> {
+        batch_rename_jump_frame(
+            ctx,
+            state,
+            jump,
+            runtime,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::Space,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::SHIFT,
+                },
+                egui::Event::Text(" ".to_owned()),
+            ],
+        );
+        let hint = jump
+            .active_session()
+            .expect("Shift+Space starts the current target session")
+            .hint_map()
+            .hint_for(target.id())
+            .expect("the current real response has a hint")
+            .as_str()
+            .to_owned();
+        batch_rename_jump_frame(
+            ctx,
+            state,
+            jump,
+            runtime,
+            vec![egui::Event::Key {
+                key: egui::Key::Space,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::SHIFT,
+            }],
+        );
+        batch_rename_jump_frame(ctx, state, jump, runtime, vec![egui::Event::Text(hint)])
+    }
+
+    #[test]
+    fn jump_mode_file_operations_integration_recovery_header_and_undo_are_focus_only() {
+        use crate::gui::jump_mode::TargetKind;
+
+        let workspace = tempfile::tempdir().expect("create an isolated receipt fixture");
+        let root = workspace.path();
+        let original = root.join("original.txt");
+        let current = root.join("renamed.txt");
+        let stage = root.join(".mlrn-0123456789abcdef.tmp");
+        std::fs::write(&original, b"original bytes remain untouched").unwrap();
+        std::fs::write(&current, b"current bytes remain untouched").unwrap();
+        let original_bytes = std::fs::read(&original).unwrap();
+        let current_bytes = std::fs::read(&current).unwrap();
+        let identity = serde_json::to_value(crate::file_operations::NativeFileIdentity::default())
+            .expect("serialize the default opaque native identity for the fixture");
+        let receipt: crate::batch_rename_transaction::RenameRecoveryReceipt =
+            serde_json::from_value(serde_json::json!({
+                "id": "0123456789abcdef0123456789abcdef",
+                "root_path": root,
+                "root_identity": identity.clone(),
+                "generation": 1,
+                "rules_revision": 1,
+                "status": "applied",
+                "undo_previous_status": null,
+                "entries": [{
+                    "source_ref": 1,
+                    "original_path": original,
+                    "stage_path": stage,
+                    "stage_paths": [stage],
+                    "final_path": current,
+                    "parent_path": root,
+                    "parent_identity": identity.clone(),
+                    "identity": identity,
+                    "expected_length": current_bytes.len(),
+                    "expected_modified": {
+                        "before_unix_epoch": false,
+                        "seconds": 0,
+                        "nanoseconds": 0,
+                    },
+                    "content_sha256": vec![0_u8; 32],
+                    "current_path": current,
+                    "undo_restore_path": null,
+                    "outcome": "applied",
+                }],
+                "pending_move": null,
+                "message": "isolated presentation-only receipt",
+            }))
+            .expect("deserialize a typed, in-memory receipt for presentation only");
+        let runtime = RenameRuntimeSnapshot {
+            journal_ready: true,
+            receipts: vec![receipt],
+            ..RenameRuntimeSnapshot::default()
+        };
+
+        let mut state = BatchRenameDialogState::default();
+        state.open();
+        state.session_epoch = 1;
+        let mut jump = JumpModeUi::new(true);
+        let context = egui::Context::default();
+        context.all_styles_mut(|style| style.animation_time = 0.0);
+
+        // First frame creates the actual Window, the second commits its owner
+        // transition, and the third collects its stable real response targets.
+        for expected_owner in [
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked,
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked,
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename,
+                instance: 1,
+            },
+        ] {
+            let commands =
+                batch_rename_jump_frame(&context, &mut state, &mut jump, &runtime, Vec::new());
+            assert!(commands.is_empty());
+            assert_eq!(jump.frame_navigation_owner(), expected_owner);
+        }
+
+        let recovery = batch_rename_hint_target(&jump, "Rename recovery and Undo");
+        assert_eq!(recovery.metadata().kind(), TargetKind::Button);
+        assert!(recovery.enabled());
+        assert!(recovery.clipped_rect().width() > 0.0);
+        assert!(recovery.clipped_rect().height() > 0.0);
+        let crate::gui::jump_mode::SemanticTargetId::Named(recovery_identity) =
+            recovery.id().semantic()
+        else {
+            panic!("recovery disclosure metadata uses an opaque named identity");
+        };
+        assert!(!recovery_identity.contains(root.to_string_lossy().as_ref()));
+        assert!(!recovery_identity.contains("original.txt"));
+        assert!(!recovery_identity.contains("renamed.txt"));
+
+        let focus_commands = batch_rename_hint_target_with_enter(
+            &context, &mut state, &mut jump, &runtime, &recovery,
+        );
+        assert!(focus_commands.is_empty());
+        assert!(jump.active_session().is_none());
+        assert!(context.memory(|memory| memory.has_focus(recovery.response_id())));
+        assert!(!state.jump_mode_has_pending_confirmation());
+
+        // The focused real disclosure header opens only on a distinct native
+        // Enter. Its child controls are collected on the following frame.
+        batch_rename_jump_frame(
+            &context,
+            &mut state,
+            &mut jump,
+            &runtime,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        batch_rename_jump_frame(
+            &context,
+            &mut state,
+            &mut jump,
+            &runtime,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        let undo = batch_rename_hint_target(&jump, "Undo rename");
+        assert_eq!(undo.metadata().kind(), TargetKind::Button);
+        assert!(undo.enabled());
+        assert!(undo.clipped_rect().width() > 0.0 && undo.clipped_rect().height() > 0.0);
+        let crate::gui::jump_mode::SemanticTargetId::Named(undo_identity) = undo.id().semantic()
+        else {
+            panic!("receipt-bound Undo metadata uses an opaque named identity");
+        };
+        assert!(!undo_identity.contains(root.to_string_lossy().as_ref()));
+        assert!(!undo_identity.contains("original.txt"));
+        assert!(!undo_identity.contains("renamed.txt"));
+        assert!(!undo_identity.contains("0123456789abcdef0123456789abcdef"));
+
+        let undo_focus_commands =
+            batch_rename_hint_target_with_enter(&context, &mut state, &mut jump, &runtime, &undo);
+        assert!(undo_focus_commands.is_empty());
+        assert!(context.memory(|memory| memory.has_focus(undo.response_id())));
+        assert!(!state.jump_mode_has_pending_confirmation());
+
+        let opening_commands = batch_rename_jump_frame(
+            &context,
+            &mut state,
+            &mut jump,
+            &runtime,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(opening_commands.is_empty());
+        assert_eq!(
+            state
+                .jump_mode_pending_confirmation_identity()
+                .map(|(_, kind)| kind),
+            Some(crate::gui::jump_mode::ui::BatchRenameConfirmationKind::Undo)
+        );
+        assert!(!runtime.operation_active);
+        batch_rename_jump_frame(
+            &context,
+            &mut state,
+            &mut jump,
+            &runtime,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(
+            state
+                .jump_mode_pending_confirmation_identity()
+                .map(|(_, kind)| kind),
+            Some(crate::gui::jump_mode::ui::BatchRenameConfirmationKind::Undo),
+            "opening Enter repetition cannot confirm the child action"
+        );
+        batch_rename_jump_frame(
+            &context,
+            &mut state,
+            &mut jump,
+            &runtime,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        let pending_targets = jump.retained_registry().targets();
+        assert!(
+            pending_targets.is_empty()
+                || pending_targets.iter().all(|target| {
+                    matches!(
+                        target.id().surface(),
+                        crate::gui::jump_mode::SurfaceId::Popup { kind, .. }
+                            if kind == "batch-rename-undo-confirmation"
+                    )
+                })
+        );
+
+        // The child takes over only after its exact real Window layer becomes
+        // visible and the owner transition has had one collection frame.
+        batch_rename_jump_frame(&context, &mut state, &mut jump, &runtime, Vec::new());
+        batch_rename_jump_frame(&context, &mut state, &mut jump, &runtime, Vec::new());
+        let cancel = batch_rename_hint_target(&jump, "Cancel Undo");
+        assert!(cancel.enabled());
+        assert!(cancel.clipped_rect().width() > 0.0 && cancel.clipped_rect().height() > 0.0);
+        assert!(jump.retained_registry().targets().iter().all(|target| {
+            matches!(
+                target.id().surface(),
+                crate::gui::jump_mode::SurfaceId::Popup { kind, .. }
+                    if kind == "batch-rename-undo-confirmation"
+            )
+        }));
+        let cancel_focus_commands =
+            batch_rename_hint_target_with_enter(&context, &mut state, &mut jump, &runtime, &cancel);
+        assert!(cancel_focus_commands.is_empty());
+        assert!(context.memory(|memory| memory.has_focus(cancel.response_id())));
+        assert!(state.jump_mode_has_pending_confirmation());
+
+        let cancel_commands = batch_rename_jump_frame(
+            &context,
+            &mut state,
+            &mut jump,
+            &runtime,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(cancel_commands.is_empty());
+        assert!(!state.jump_mode_has_pending_confirmation());
+        assert!(!runtime.operation_active);
+        assert_eq!(std::fs::read(&original).unwrap(), original_bytes);
+        assert_eq!(std::fs::read(&current).unwrap(), current_bytes);
     }
 
     #[test]
