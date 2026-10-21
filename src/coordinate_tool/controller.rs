@@ -1460,6 +1460,52 @@ mod tests {
         }
     }
 
+    fn offer_click_press_until_accepted(
+        sink: &dyn ClickPressSink,
+        generation: u64,
+        button: ClickButton,
+        point: PhysicalPoint,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let event = click_event(generation, button, point);
+            if sink.try_send(event) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker click ingress should accept a press before the deadline"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn worker_click_press_sink_drops_on_shared_lock_contention_without_queueing() {
+        let shared = Arc::new(Mutex::new(super::SharedState::default()));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let sink = super::WorkerClickPressSink {
+            sender,
+            shared: Arc::clone(&shared),
+        };
+        let blocked_event = click_event(7, ClickButton::Right, PhysicalPoint::new(-10, 20));
+
+        let shared_guard = shared.lock().unwrap();
+        assert!(!sink.try_send(blocked_event));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        drop(shared_guard);
+
+        let accepted_event = click_event(7, ClickButton::Right, PhysicalPoint::new(-10, 20));
+        assert!(sink.try_send(accepted_event));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(super::WorkerMessage::ClickPress { event, .. }) if event == accepted_event
+        ));
+    }
+
     #[test]
     fn one_worker_serves_independent_repeated_modes_and_stops_before_returning() {
         let sample = sample(-1800, 200, "DISPLAY1");
@@ -1949,11 +1995,12 @@ mod tests {
 
         controller.set_click_enabled(true).unwrap();
         let (generation, sink) = observer.current().unwrap();
-        assert!(sink.try_send(click_event(
+        offer_click_press_until_accepted(
+            sink.as_ref(),
             generation,
             ClickButton::Left,
             PhysicalPoint::new(-300, 100),
-        )));
+        );
         receive_click(&controller);
         let deadline = Instant::now() + Duration::from_secs(2);
         while !matches!(
@@ -1970,11 +2017,12 @@ mod tests {
 
         let calls_after_failure = factory.count(&factory.click_render_calls);
         let polls_after_failure = factory.count(&factory.poll_calls);
-        assert!(sink.try_send(click_event(
+        offer_click_press_until_accepted(
+            sink.as_ref(),
             generation,
             ClickButton::Right,
             PhysicalPoint::new(-500, 300),
-        )));
+        );
         receive_click(&controller);
         std::thread::sleep(Duration::from_millis(32));
         assert_eq!(
@@ -2276,11 +2324,12 @@ mod tests {
         let _ = receive(&rendered);
         controller.set_click_enabled(true).unwrap();
         let (old_generation, old_sink) = observer.current().unwrap();
-        assert!(old_sink.try_send(click_event(
+        offer_click_press_until_accepted(
+            old_sink.as_ref(),
             old_generation,
             ClickButton::Left,
             PhysicalPoint::new(-900, 500),
-        )));
+        );
         let old_visual = wait_for_click_render(&factory, |frames| !frames.is_empty());
         assert_eq!(old_visual[0].button, ClickButton::Left);
         controller.set_click_enabled(false).unwrap();
@@ -2292,17 +2341,19 @@ mod tests {
         let (new_generation, new_sink) = observer.current().unwrap();
         assert!(new_generation > old_generation);
 
-        assert!(old_sink.try_send(click_event(
+        offer_click_press_until_accepted(
+            old_sink.as_ref(),
             old_generation,
             ClickButton::Left,
             PhysicalPoint::new(1, 2),
-        )));
+        );
         let expected_point = PhysicalPoint::new(-31, 77);
-        assert!(new_sink.try_send(click_event(
+        offer_click_press_until_accepted(
+            new_sink.as_ref(),
             new_generation,
             ClickButton::Right,
             expected_point,
-        )));
+        );
 
         let observed = receive_click(&controller);
         assert_eq!(observed.button, ClickButton::Right);
