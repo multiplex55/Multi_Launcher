@@ -219,6 +219,16 @@ impl DashboardEditorDialog {
         self.slot_tokens.get(index).copied()
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_slot(&self, index: usize) -> Option<&SlotConfig> {
+        self.config.slots.get(index)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_selected_slot(&self) -> Option<usize> {
+        self.selected_slot
+    }
+
     pub(crate) fn native_combo_popup_is_current(
         &self,
         ctx: &egui::Context,

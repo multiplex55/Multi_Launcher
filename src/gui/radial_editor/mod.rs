@@ -14381,6 +14381,7 @@ mod tests {
         let mut editor = RadialEditorState::default();
         editor.open_test_snapshot();
         editor.tree_visible = true;
+        editor.session.as_mut().unwrap().font_catalog_loaded = true;
         editor.inspector_visible = false;
         let session = editor.session.as_mut().unwrap();
         let menu_id = session.draft.menus[0].id.clone();
@@ -20367,6 +20368,7 @@ mod tests {
         let mut editor = RadialEditorState::default();
         editor.open_test_snapshot();
         editor.tree_visible = true;
+        editor.session.as_mut().unwrap().font_catalog_loaded = true;
         let menu_id = editor
             .session
             .as_ref()
@@ -20620,6 +20622,264 @@ mod tests {
             Some(option.response_id()),
             "focus-only option completion focuses the actual popup response in its viewport"
         );
+    }
+
+    #[test]
+    fn jump_mode_designer_ownership_radial_viewport_replacement_and_pending_picker_are_isolated() {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        use crate::gui::jump_mode::{SurfaceId, TargetKind};
+
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.tree_visible = true;
+        let menu_id = editor
+            .session
+            .as_ref()
+            .expect("authoring session")
+            .draft
+            .menus[0]
+            .id
+            .clone();
+        editor
+            .preferences
+            .expanded_sections
+            .insert(format!("menu:{menu_id}"), true);
+        let original = std::sync::Arc::clone(&editor.session.as_ref().unwrap().draft);
+        let mut driver = RetainedDesignerDriver::new(editor);
+        driver.frame.jump_mode_enabled = true;
+        let first_owner = NavigationOwner::Dialog {
+            kind: NavigationDialogKind::RadialDesigner,
+            instance: 1,
+        };
+
+        driver.frame(Vec::new()).drop_without_applying_deltas();
+        driver.frame(Vec::new()).drop_without_applying_deltas();
+        assert_eq!(
+            driver.editor.native_jump_mode.frame_navigation_owner(),
+            first_owner
+        );
+        let ring_target = driver
+            .editor
+            .native_jump_mode
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label() == "Ring"
+                    && target.metadata().kind() == TargetKind::Action
+            })
+            .cloned()
+            .expect("the visible tree provides an actual authored Ring response");
+        assert_eq!(ring_target.viewport(), radial_designer_viewport_id());
+        assert!(ring_target.clipped_rect().is_positive());
+        let original_selection = driver.editor.session.as_ref().unwrap().selection.clone();
+
+        let root_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_000.0, 720.0),
+            )),
+            viewport_id: egui::ViewportId::ROOT,
+            focused: true,
+            ..Default::default()
+        };
+        let context = driver.context.clone();
+        let frame = &driver.frame;
+        let editor = &mut driver.editor;
+        context
+            .run_ui(root_input, |ui| {
+                editor.viewport_ui(ui, frame, egui::ViewportClass::Deferred);
+            })
+            .drop_without_applying_deltas();
+        let session = driver.editor.session.as_ref().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&session.draft, &original));
+        assert_eq!(session.selection, original_selection);
+        assert_eq!(session.pending_request, None);
+
+        // The pending native picker is tested only through the existing bridge:
+        // no native dialog is processed or opened by this fixture.
+        let bridge = driver.editor.intent_bridge();
+        bridge.enqueue_file_dialog(DesignerFileDialogRequest::ExportPackage {
+            roots: vec![menu_id.clone()],
+        });
+        assert!(bridge.has_pending_file_dialog());
+        driver.frame(Vec::new()).drop_without_applying_deltas();
+        assert_eq!(
+            driver.editor.native_jump_mode.frame_navigation_owner(),
+            NavigationOwner::Blocked
+        );
+        assert!(
+            driver
+                .editor
+                .native_jump_mode
+                .retained_registry()
+                .targets()
+                .is_empty()
+        );
+        let queued = bridge
+            .take_file_dialog()
+            .expect("the fixture queued a request");
+        assert!(matches!(
+            queued,
+            DesignerFileDialogRequest::ExportPackage { .. }
+        ));
+        bridge.finish_file_dialog();
+        assert!(!bridge.has_pending_file_dialog());
+        driver.frame(Vec::new()).drop_without_applying_deltas();
+        driver.frame(Vec::new()).drop_without_applying_deltas();
+        assert_eq!(
+            driver.editor.native_jump_mode.frame_navigation_owner(),
+            first_owner
+        );
+
+        let stale_target = driver
+            .editor
+            .native_jump_mode
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label() == "Ring"
+                    && target.metadata().kind() == TargetKind::Action
+            })
+            .cloned()
+            .expect("the owner recovers after the queued picker request is drained");
+        let leader = egui::Modifiers::SHIFT;
+        driver
+            .frame_with_modifiers(
+                vec![
+                    key_event(egui::Key::Space, leader, true),
+                    egui::Event::Text(" ".into()),
+                ],
+                leader,
+            )
+            .drop_without_applying_deltas();
+        let stale_hint = driver
+            .editor
+            .native_jump_mode
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(stale_target.id())
+            .expect("the old tree target has a current session assignment")
+            .as_str()
+            .to_owned();
+        driver
+            .frame_with_modifiers(vec![key_event(egui::Key::Space, leader, false)], leader)
+            .drop_without_applying_deltas();
+
+        driver.editor.force_close();
+        assert!(driver.editor.session.is_none());
+        assert!(driver.editor.native_jump_mode.active_session().is_none());
+        assert!(
+            driver
+                .editor
+                .native_jump_mode
+                .retained_registry()
+                .targets()
+                .is_empty()
+        );
+        driver.editor.open_test_snapshot();
+        driver.editor.tree_visible = true;
+        driver.editor.session.as_mut().unwrap().font_catalog_loaded = true;
+        driver.editor.viewport_close_pending = false;
+        driver.frame.navigation_instance = Some(2);
+        let reopened_baseline =
+            std::sync::Arc::clone(&driver.editor.session.as_ref().unwrap().draft);
+        let reopened_selection = driver.editor.session.as_ref().unwrap().selection.clone();
+        driver.frame(Vec::new()).drop_without_applying_deltas();
+        driver.frame(Vec::new()).drop_without_applying_deltas();
+        let replacement_owner = NavigationOwner::Dialog {
+            kind: NavigationDialogKind::RadialDesigner,
+            instance: 2,
+        };
+        assert_eq!(
+            driver.editor.native_jump_mode.frame_navigation_owner(),
+            replacement_owner
+        );
+        let replacement_target = driver
+            .editor
+            .native_jump_mode
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label() == "Ring"
+                    && target.metadata().kind() == TargetKind::Action
+            })
+            .cloned()
+            .expect("the reopened viewport collected its current Ring response");
+        assert_ne!(replacement_target.id(), stale_target.id());
+        assert_ne!(
+            replacement_target.id().surface(),
+            &SurfaceId::dialog(NavigationDialogKind::RadialDesigner.surface_kind(), 1)
+        );
+        assert!(driver.editor.native_jump_mode.active_session().is_none());
+
+        // A stale hint string without its retired session/TargetId has no
+        // authoring authority. The reopened document remains untouched.
+        driver
+            .frame(vec![egui::Event::Text(stale_hint)])
+            .drop_without_applying_deltas();
+        let replacement_session = driver.editor.session.as_ref().unwrap();
+        assert!(!replacement_session.is_dirty());
+        assert_eq!(replacement_session.pending_request, None);
+        assert!(std::sync::Arc::ptr_eq(
+            &replacement_session.draft,
+            &reopened_baseline
+        ));
+
+        let fresh_leader = egui::Modifiers::SHIFT;
+        driver
+            .frame_with_modifiers(
+                vec![
+                    key_event(egui::Key::Space, fresh_leader, true),
+                    egui::Event::Text(" ".into()),
+                ],
+                fresh_leader,
+            )
+            .drop_without_applying_deltas();
+        let fresh_session = driver.editor.native_jump_mode.active_session().unwrap();
+        assert!(
+            fresh_session
+                .hint_map()
+                .hint_for(stale_target.id())
+                .is_none()
+        );
+        assert!(
+            fresh_session
+                .hint_map()
+                .hint_for(replacement_target.id())
+                .is_some()
+        );
+        driver
+            .frame_with_modifiers(
+                vec![key_event(egui::Key::Space, fresh_leader, false)],
+                fresh_leader,
+            )
+            .drop_without_applying_deltas();
+
+        let (foreign_frame, focused_layer) =
+            driver.frame_with_foreground_control(Vec::new(), egui::Modifiers::default());
+        foreign_frame.drop_without_applying_deltas();
+        assert_eq!(
+            focused_layer.map(|layer| layer.order),
+            Some(egui::Order::Foreground)
+        );
+        assert!(
+            driver
+                .editor
+                .native_jump_mode
+                .retained_registry()
+                .targets()
+                .is_empty()
+        );
+        let final_session = driver.editor.session.as_ref().unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &final_session.draft,
+            &reopened_baseline
+        ));
+        assert_eq!(final_session.selection, reopened_selection);
     }
 
     #[test]

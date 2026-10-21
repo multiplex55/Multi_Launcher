@@ -39949,6 +39949,452 @@ mod tests {
         drop(workspace);
     }
 
+    fn dashboard_editor_target(
+        app: &LauncherApp,
+        label: &str,
+        local_identity: &str,
+    ) -> crate::gui::jump_mode::ui::RegisteredTarget {
+        use crate::gui::jump_mode::SemanticTargetId;
+
+        let suffix = format!("{}:{local_identity}", local_identity.len());
+        app.jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label() == label
+                    && matches!(
+                        target.id().semantic(),
+                        SemanticTargetId::Named(identity) if identity.ends_with(&suffix)
+                    )
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "no actual Dashboard Editor target {label:?} for {local_identity:?}; targets={:?}",
+                    app.jump_mode_ui
+                        .retained_registry()
+                        .targets()
+                        .iter()
+                        .map(|target| target.metadata().label())
+                        .collect::<Vec<_>>()
+                )
+            })
+            .clone()
+    }
+
+    fn click_dashboard_editor_target(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        target: &crate::gui::jump_mode::ui::RegisteredTarget,
+    ) {
+        assert!(target.enabled() && target.eligible());
+        assert!(target.clipped_rect().is_positive());
+        let position = target.clipped_rect().center();
+        assert_eq!(ctx.layer_id_at(position), Some(target.layer_id()));
+        let response = ctx
+            .read_response(target.response_id())
+            .expect("the target belongs to an actual current Dashboard Editor response");
+        assert!(response.enabled());
+        for pressed in [true, false] {
+            let mut events = if pressed {
+                vec![egui::Event::PointerMoved(position)]
+            } else {
+                Vec::new()
+            };
+            events.push(egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            });
+            app.run_root_frame_for_test(
+                ctx,
+                egui::RawInput {
+                    events,
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+        }
+    }
+
+    fn scroll_dashboard_editor_to_bottom(ctx: &egui::Context, app: &mut LauncherApp) {
+        let (scroll_id, max_offset) = app
+            .dashboard_editor
+            .test_scroll_area_max_offset()
+            .expect("the actual Dashboard Editor ScrollArea reports its extent");
+        let mut state = egui::scroll_area::State::load(ctx, scroll_id).unwrap_or_default();
+        state.offset.y = max_offset;
+        state.store(ctx, scroll_id);
+        run_dialog_frame(ctx, app);
+    }
+
+    fn quick_tools_slot(
+        row: i32,
+        col: i32,
+        queries: &[(&str, bool)],
+    ) -> crate::dashboard::config::SlotConfig {
+        let mut slot = crate::dashboard::config::SlotConfig::with_widget("quick_tools", row, col);
+        slot.settings = serde_json::json!({
+            "queries": queries
+                .iter()
+                .map(|(query, auto_submit)| {
+                    serde_json::json!({"query": query, "auto_submit": auto_submit})
+                })
+                .collect::<Vec<_>>()
+        });
+        slot
+    }
+
+    fn active_hint_for_target(
+        app: &LauncherApp,
+        target: &crate::gui::jump_mode::ui::RegisteredTarget,
+    ) -> String {
+        app.jump_mode_ui
+            .active_session()
+            .and_then(|session| session.hint_map().hint_for(target.id()))
+            .expect("the actual current target has a hint")
+            .as_str()
+            .to_owned()
+    }
+
+    #[test]
+    fn jump_mode_designer_ownership_editor_slot_swap_and_reload_retire_targets() {
+        use crate::dashboard::config::DashboardConfig;
+        use crate::gui::jump_mode::SemanticTargetId;
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let dashboard_path = workspace.root().join("dashboard.json");
+        let mut dashboard = DashboardConfig::default();
+        dashboard.grid.rows = 1;
+        dashboard.grid.cols = 2;
+        dashboard.slots = vec![
+            quick_tools_slot(0, 0, &[("left payload", false)]),
+            quick_tools_slot(0, 1, &[("right payload", true)]),
+        ];
+        assert!(dashboard.slots.iter().all(|slot| slot.id.is_none()));
+        let write_dashboard = |dashboard: &DashboardConfig| {
+            std::fs::write(
+                &dashboard_path,
+                serde_json::to_vec(dashboard).expect("fixture dashboard serializes"),
+            )
+            .expect("write only inside the isolated workspace");
+        };
+        write_dashboard(&dashboard);
+        app.dashboard_path = dashboard_path.to_string_lossy().into_owned();
+        app.show_dashboard_editor = true;
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        assert!(matches!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::DashboardEditor,
+                ..
+            }
+        ));
+
+        let first_token = app.dashboard_editor.test_slot_token(0).unwrap();
+        let second_token = app.dashboard_editor.test_slot_token(1).unwrap();
+        assert_ne!(first_token, second_token);
+
+        let collapse = dashboard_editor_target(&app, "Collapse all slots", "slots/collapse-all");
+        click_dashboard_editor_target(&ctx, &mut app, &collapse);
+        run_dialog_frame(&ctx, &mut app);
+        let first_id_target =
+            dashboard_editor_target(&app, "Slot identifier", &format!("slot/{first_token}/id"));
+        let second_id_target =
+            dashboard_editor_target(&app, "Slot identifier", &format!("slot/{second_token}/id"));
+        assert_ne!(
+            first_id_target.response_id(),
+            second_id_target.response_id()
+        );
+        let select_first =
+            dashboard_editor_target(&app, "Select slot", &format!("slot/{first_token}/select"));
+        click_dashboard_editor_target(&ctx, &mut app, &select_first);
+        run_dialog_frame(&ctx, &mut app);
+        assert_eq!(app.dashboard_editor.test_selected_slot(), Some(0));
+        let swap_second = dashboard_editor_target(
+            &app,
+            "Swap with selected",
+            &format!("slot/{second_token}/swap-with-selected"),
+        );
+        click_dashboard_editor_target(&ctx, &mut app, &swap_second);
+        run_dialog_frame(&ctx, &mut app);
+
+        assert_eq!(app.dashboard_editor.test_slot_token(0), Some(second_token));
+        assert_eq!(app.dashboard_editor.test_slot_token(1), Some(first_token));
+        assert_eq!(
+            app.dashboard_editor.test_slot(0).unwrap().settings["queries"][0]["query"],
+            "right payload"
+        );
+        assert_eq!(
+            app.dashboard_editor.test_slot(1).unwrap().settings["queries"][0]["query"],
+            "left payload"
+        );
+        let moved_second_id_target =
+            dashboard_editor_target(&app, "Slot identifier", &format!("slot/{second_token}/id"));
+        assert_eq!(
+            moved_second_id_target.response_id(),
+            second_id_target.response_id()
+        );
+        let second_id_suffix = format!(
+            "{}:slot/{second_token}/id",
+            format!("slot/{second_token}/id").len()
+        );
+        assert!(matches!(
+            moved_second_id_target.id().semantic(),
+            SemanticTargetId::Named(identity)
+                if identity.ends_with(&second_id_suffix)
+        ));
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let stale_hint = active_hint_for_target(&app, &moved_second_id_target);
+        let stale_id = moved_second_id_target.id().clone();
+        press_dialog_hint_with_enter(&ctx, &mut app, &stale_hint);
+        assert!(ctx.memory(|memory| memory.has_focus(second_id_target.response_id())));
+        release_dialog_hint_enter(&ctx, &mut app);
+
+        let old_generation = app.dashboard_editor.target_generation();
+        let mut replacement = DashboardConfig::default();
+        replacement.grid.rows = 1;
+        replacement.grid.cols = 1;
+        replacement.slots = vec![quick_tools_slot(0, 0, &[("replacement", false)])];
+        write_dashboard(&replacement);
+        let (scroll_id, _) = app
+            .dashboard_editor
+            .test_scroll_area_max_offset()
+            .expect("the actual Dashboard Editor ScrollArea remains current");
+        let mut scroll_state = egui::scroll_area::State::load(&ctx, scroll_id).unwrap_or_default();
+        scroll_state.offset.y = 0.0;
+        scroll_state.store(&ctx, scroll_id);
+        run_dialog_frame(&ctx, &mut app);
+        let reload = dashboard_editor_target(&app, "Reload dashboard", "reload");
+        click_dashboard_editor_target(&ctx, &mut app, &reload);
+        run_dialog_frame(&ctx, &mut app);
+        let generation_after_reload = app.dashboard_editor.target_generation();
+        assert!(generation_after_reload > old_generation);
+        let replacement_token = app.dashboard_editor.test_slot_token(0).unwrap();
+        assert_ne!(replacement_token, first_token);
+        assert_ne!(replacement_token, second_token);
+        assert_eq!(
+            app.dashboard_editor.test_slot(0).unwrap().settings["queries"][0]["query"],
+            "replacement"
+        );
+        let replacement_id_baseline = app.dashboard_editor.test_slot(0).unwrap().id.clone();
+
+        let (scroll_id, _) = app
+            .dashboard_editor
+            .test_scroll_area_max_offset()
+            .expect("the actual Dashboard Editor ScrollArea remains current");
+        let mut state = egui::scroll_area::State::load(&ctx, scroll_id).unwrap_or_default();
+        state.offset.y = 0.0;
+        state.store(&ctx, scroll_id);
+        run_dialog_frame(&ctx, &mut app);
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.id() == &stale_id),
+            "reload retires the old slot target instead of redirecting it"
+        );
+        let replacement_id_target = dashboard_editor_target(
+            &app,
+            "Slot identifier",
+            &format!("slot/{replacement_token}/id"),
+        );
+        assert_ne!(
+            replacement_id_target.response_id(),
+            second_id_target.response_id()
+        );
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text("stale".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.dashboard_editor.test_slot(0).unwrap().id,
+            replacement_id_baseline,
+            "stale text cannot edit the generated replacement identifier"
+        );
+        assert_eq!(
+            app.dashboard_editor.test_slot(0).unwrap().settings["queries"][0]["query"],
+            "replacement"
+        );
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_designer_ownership_quick_tools_rows_follow_move_and_retire_on_remove() {
+        use crate::dashboard::config::DashboardConfig;
+
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let dashboard_path = workspace.root().join("dashboard.json");
+        let mut dashboard = DashboardConfig::default();
+        dashboard.grid.rows = 1;
+        dashboard.grid.cols = 1;
+        dashboard.slots = vec![quick_tools_slot(
+            0,
+            0,
+            &[("same query", false), ("same query", true)],
+        )];
+        std::fs::write(
+            &dashboard_path,
+            serde_json::to_vec(&dashboard).expect("fixture dashboard serializes"),
+        )
+        .expect("write only inside the isolated workspace");
+        app.dashboard_path = dashboard_path.to_string_lossy().into_owned();
+        app.show_dashboard_editor = true;
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let slot_token = app.dashboard_editor.test_slot_token(0).unwrap();
+        let select =
+            dashboard_editor_target(&app, "Select slot", &format!("slot/{slot_token}/select"));
+        click_dashboard_editor_target(&ctx, &mut app, &select);
+        run_dialog_frame(&ctx, &mut app);
+        scroll_dashboard_editor_to_bottom(&ctx, &mut app);
+
+        let first_row_token =
+            app.dashboard_editor
+                .property_identity_store
+                .row_token(slot_token, "quick-tools", 0);
+        let second_row_token =
+            app.dashboard_editor
+                .property_identity_store
+                .row_token(slot_token, "quick-tools", 1);
+        assert_ne!(first_row_token, second_row_token);
+        let first_query =
+            dashboard_editor_target(&app, "Tool query", &format!("row/{first_row_token}/query"));
+        let second_query =
+            dashboard_editor_target(&app, "Tool query", &format!("row/{second_row_token}/query"));
+        assert_ne!(first_query.response_id(), second_query.response_id());
+        let before = app.dashboard_editor.test_slot(0).unwrap().settings["queries"].clone();
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let query_hint = active_hint_for_target(&app, &second_query);
+        press_dialog_hint_with_enter(&ctx, &mut app, &query_hint);
+        assert!(ctx.memory(|memory| memory.has_focus(second_query.response_id())));
+        assert_eq!(
+            app.dashboard_editor.test_slot(0).unwrap().settings["queries"],
+            before,
+            "hint completion focuses the actual query field without editing either duplicate"
+        );
+        release_dialog_hint_enter(&ctx, &mut app);
+
+        let move_up = dashboard_editor_target(
+            &app,
+            "Move tool up",
+            &format!("row/{second_row_token}/move-up"),
+        );
+        click_dashboard_editor_target(&ctx, &mut app, &move_up);
+        run_dialog_frame(&ctx, &mut app);
+        assert_eq!(
+            app.dashboard_editor
+                .property_identity_store
+                .row_token(slot_token, "quick-tools", 0),
+            second_row_token
+        );
+        assert_eq!(
+            app.dashboard_editor
+                .property_identity_store
+                .row_token(slot_token, "quick-tools", 1),
+            first_row_token
+        );
+        let moved_query =
+            dashboard_editor_target(&app, "Tool query", &format!("row/{second_row_token}/query"));
+        assert_eq!(moved_query.response_id(), second_query.response_id());
+        assert_eq!(
+            app.dashboard_editor.test_slot(0).unwrap().settings["queries"][0]["auto_submit"],
+            true,
+            "the row token follows its distinguishable setting as well as the duplicate query"
+        );
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let moved_hint = active_hint_for_target(&app, &moved_query);
+        press_dialog_hint_with_enter(&ctx, &mut app, &moved_hint);
+        assert!(ctx.memory(|memory| memory.has_focus(moved_query.response_id())));
+        release_dialog_hint_enter(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text("猫".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        run_dialog_frame(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text("Ω".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        let edited_value =
+            app.dashboard_editor.test_slot(0).unwrap().settings["queries"][0]["query"]
+                .as_str()
+                .unwrap();
+        assert!(edited_value.contains('猫') && edited_value.contains('Ω'));
+        let edited_query =
+            dashboard_editor_target(&app, "Tool query", &format!("row/{second_row_token}/query"));
+        assert_eq!(edited_query.response_id(), second_query.response_id());
+        assert!(ctx.memory(|memory| memory.has_focus(second_query.response_id())));
+
+        let stale_query_id = edited_query.id().clone();
+        let remove = dashboard_editor_target(
+            &app,
+            "Remove tool",
+            &format!("row/{second_row_token}/remove"),
+        );
+        click_dashboard_editor_target(&ctx, &mut app, &remove);
+        run_dialog_frame(&ctx, &mut app);
+        assert_eq!(
+            app.dashboard_editor.test_slot(0).unwrap().settings["queries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.id() == &stale_query_id)
+        );
+        assert_eq!(
+            app.dashboard_editor
+                .property_identity_store
+                .row_token(slot_token, "quick-tools", 0),
+            first_row_token
+        );
+        drop(app);
+        drop(workspace);
+    }
+
     #[test]
     fn jump_mode_dashboard_editor_selection_and_reset_confirmation_need_fresh_activation() {
         use crate::dashboard::config::{DashboardConfig, SlotConfig};
