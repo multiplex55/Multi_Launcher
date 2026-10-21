@@ -21189,6 +21189,11 @@ mod tests {
     fn jump_mode_radial_tree_foreign_foreground_focus_blocks_native_shortcuts() {
         let mut editor = RadialEditorState::default();
         editor.open_test_snapshot();
+        editor
+            .session
+            .as_mut()
+            .expect("authoring session")
+            .font_catalog_loaded = true;
         editor.make_dirty_for_test();
         let mut driver = RetainedDesignerDriver::new(editor);
         driver.frame.jump_mode_enabled = false;

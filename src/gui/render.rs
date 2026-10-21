@@ -34178,6 +34178,9 @@ mod tests {
 
         let ctx = egui::Context::default();
         let (workspace, mut app, root, root_guard) = prepare_batch_rename_generated_fixture(&ctx);
+        ctx.global_style_mut(|style| {
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
         let original = std::fs::read(root.join("alpha.txt")).unwrap();
         let entry_ref = app
             .batch_rename_dialog
@@ -34185,8 +34188,10 @@ mod tests {
             .expect("the generated fixture creates one ready, selected preview action");
         assert!(app.batch_rename_dialog.test_is_selected(entry_ref));
         app.batch_rename_dialog.test_reveal_apply_target();
-        // The actual response requests scrolling during this frame; collect
-        // its newly visible geometry on the next real render pass.
+        // Pass A queues the actual Apply response's scroll target. Pass B
+        // advances the offset after constructing content at the old scroll
+        // position; pass C collects targets with the newly visible geometry.
+        batch_rename_test_frame(&ctx, &mut app, Vec::new());
         batch_rename_test_frame(&ctx, &mut app, Vec::new());
         batch_rename_test_frame(&ctx, &mut app, Vec::new());
         let apply = app
