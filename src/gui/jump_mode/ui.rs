@@ -47,10 +47,11 @@ pub(crate) enum NavigationDialogKind {
     SearchReplace,
     DashboardEditor,
     RadialDesigner,
+    MouseGestureSettings,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -63,6 +64,7 @@ impl NavigationDialogKind {
         Self::SearchReplace,
         Self::DashboardEditor,
         Self::RadialDesigner,
+        Self::MouseGestureSettings,
     ];
 
     const fn index(self) -> usize {
@@ -79,6 +81,7 @@ impl NavigationDialogKind {
             Self::SearchReplace => 9,
             Self::DashboardEditor => 10,
             Self::RadialDesigner => 11,
+            Self::MouseGestureSettings => 12,
         }
     }
 
@@ -96,6 +99,7 @@ impl NavigationDialogKind {
             Self::SearchReplace => "search-replace",
             Self::DashboardEditor => "dashboard-editor",
             Self::RadialDesigner => "radial-designer",
+            Self::MouseGestureSettings => "mouse-gesture-settings",
         }
     }
 
@@ -116,6 +120,7 @@ impl NavigationDialogKind {
             Self::SearchReplace => egui::Id::new("search_replace_preview_dialog"),
             Self::DashboardEditor => egui::Id::new(Some("Dashboard Editor")),
             Self::RadialDesigner => return None,
+            Self::MouseGestureSettings => egui::Id::new(Some("Mouse Gesture Settings")),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -3168,6 +3173,9 @@ mod tests {
                     }
                     NavigationDialogKind::MouseSettings => {
                         egui::Window::new("Mouse Settings").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::MouseGestureSettings => {
+                        egui::Window::new("Mouse Gesture Settings").show(ctx, |_| {});
                     }
                     NavigationDialogKind::MouseGestures => {
                         egui::Window::new("Mouse Gestures").show(ctx, |_| {});

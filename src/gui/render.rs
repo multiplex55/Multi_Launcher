@@ -3324,6 +3324,33 @@ impl LauncherApp {
                 .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
     }
 
+    fn mouse_gesture_settings_native_ui_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+
+        self.mouse_gesture_settings_dialog.open
+            && !self.mouse_gesture_settings_dialog.window_picker_is_open()
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && NavigationDialogKind::MouseGestureSettings
+                .layer_id()
+                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+    }
+
+    fn mouse_gesture_settings_picker_native_ui_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        self.mouse_gesture_settings_dialog.open
+            && self.mouse_gesture_settings_dialog.window_picker_is_open()
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && Some(crate::gui::mouse_gesture_settings_dialog::window_picker_layer_id())
+                == crate::gui::jump_mode::ui::visible_top_middle_layer(ctx)
+    }
+
     fn json_utility_native_ui_owner_current(
         &self,
         ctx: &egui::Context,
@@ -3400,6 +3427,7 @@ impl LauncherApp {
                         | super::Panel::XmlToolkitDialog
                         | super::Panel::MouseSettingsDialog
                         | super::Panel::MouseGesturesDialog
+                        | super::Panel::MouseGestureSettingsDialog
                         | super::Panel::BatchRenameDialog
                         | super::Panel::SearchReplaceDialog
                         | super::Panel::RadialEditor
@@ -3476,6 +3504,10 @@ impl LauncherApp {
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestures,
                 self.mouse_gestures_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestureSettings,
+                self.mouse_gesture_settings_dialog.open,
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename,
@@ -3642,14 +3674,51 @@ impl LauncherApp {
                 .mouse_gestures_dialog
                 .jump_mode_child_owner(parent_instance)
         {
-            combo_popup = self
-                .jump_mode_ui
-                .resolve_combo_popup_owner(ctx, child_owner);
-            candidate = crate::gui::jump_mode::ui::resolve_mouse_gesture_child_navigation_owner(
-                ctx,
-                child_owner,
-                combo_popup.as_ref(),
-            );
+            use crate::gui::jump_mode::ui::{
+                NavigationDialogKind, NavigationOwner, mouse_gesture_binding_layer_id,
+                mouse_gesture_delete_layer_id, visible_top_middle_layer,
+            };
+
+            let child_layer = match child_owner {
+                NavigationOwner::MouseGestureBinding {
+                    parent_instance,
+                    binding_instance,
+                } => mouse_gesture_binding_layer_id(parent_instance, binding_instance),
+                NavigationOwner::MouseGestureDelete {
+                    parent_instance,
+                    confirmation_instance,
+                } => mouse_gesture_delete_layer_id(parent_instance, confirmation_instance),
+                _ => {
+                    return (
+                        NavigationOwner::Blocked,
+                        supported_dialog_visibility_changed,
+                        None,
+                    );
+                }
+            };
+            let parent_layer = NavigationDialogKind::MouseGestures.layer_id();
+            match visible_top_middle_layer(ctx) {
+                Some(layer) if layer == child_layer => {
+                    combo_popup = self
+                        .jump_mode_ui
+                        .resolve_combo_popup_owner(ctx, child_owner);
+                    candidate =
+                        crate::gui::jump_mode::ui::resolve_mouse_gesture_child_navigation_owner(
+                            ctx,
+                            child_owner,
+                            combo_popup.as_ref(),
+                        );
+                }
+                Some(layer) if Some(layer) == parent_layer => {
+                    // While the child is pending but has not become the visible
+                    // owner, keep the parent from receiving its stale hints.
+                    candidate = NavigationOwner::Blocked;
+                    combo_popup = None;
+                }
+                // A different recognized foreground dialog remains the owner;
+                // unknown foreground layers were already resolved as Blocked.
+                _ => {}
+            }
         }
         (candidate, supported_dialog_visibility_changed, combo_popup)
     }
@@ -5637,8 +5706,42 @@ impl LauncherApp {
             first_ui_pass,
         );
         self.mouse_gestures_dialog = mg_dlg;
+        let mouse_gesture_settings_owner =
+            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+        let mouse_gesture_settings_scope = match mouse_gesture_settings_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestureSettings,
+                instance,
+            } if self.jump_mode_enabled() => self.jump_mode_ui.scope_for_navigation_owner(
+                crate::gui::jump_mode::SurfaceId::dialog("mouse-gesture-settings", instance),
+                crate::gui::jump_mode::TargetGeneration(instance),
+                "mouse-gesture-settings/form",
+                ctx.viewport_id(),
+                mouse_gesture_settings_owner,
+                false,
+            ),
+            _ => None,
+        };
+        let mouse_gesture_settings_native_owner = self
+            .mouse_gesture_settings_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
+        let mouse_gesture_settings_picker_native_owner = self
+            .mouse_gesture_settings_picker_native_ui_owner_current(
+                &ctx,
+                frame_logic.should_be_visible,
+            );
+        let mouse_gesture_settings_instance = self
+            .jump_mode_ui
+            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestureSettings);
         let mut mg_settings_dlg = std::mem::take(&mut self.mouse_gesture_settings_dialog);
-        mg_settings_dlg.ui(&ctx, self);
+        mg_settings_dlg.ui_with_jump_mode(
+            &ctx,
+            self,
+            mouse_gesture_settings_scope.as_ref(),
+            mouse_gesture_settings_instance,
+            mouse_gesture_settings_native_owner,
+            mouse_gesture_settings_picker_native_owner,
+            first_ui_pass,
+        );
         self.mouse_gesture_settings_dialog = mg_settings_dlg;
         let mouse_settings_owner =
             self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
@@ -24934,6 +25037,486 @@ mod tests {
         }
     }
 
+    fn prepare_actual_mouse_gesture_settings_dialog(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        jump_mode_enabled: bool,
+    ) {
+        app.set_jump_mode_enabled(jump_mode_enabled);
+        prepare_actual_query_frame(ctx, app);
+        app.open_mouse_gesture_settings_dialog();
+        for _ in 0..3 {
+            run_mouse_settings_frame(ctx, app, Vec::new());
+        }
+        let kind = crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestureSettings;
+        assert_eq!(
+            crate::gui::jump_mode::ui::visible_top_middle_layer(ctx),
+            kind.layer_id(),
+            "the fixture leaves the actual Mouse Gesture Settings window in front"
+        );
+        if jump_mode_enabled {
+            let instance = app
+                .jump_mode_ui
+                .dialog_instance(kind)
+                .expect("the Mouse Gesture Settings open observation has an instance");
+            assert_eq!(
+                app.jump_mode_ui.frame_navigation_owner(),
+                crate::gui::jump_mode::ui::NavigationOwner::Dialog { kind, instance }
+            );
+        }
+    }
+
+    fn mouse_gesture_settings_target(
+        app: &LauncherApp,
+        label: &str,
+    ) -> crate::gui::jump_mode::ui::RegisteredTarget {
+        use crate::gui::jump_mode::SurfaceId;
+
+        let instance = app
+            .jump_mode_ui
+            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestureSettings)
+            .expect("the actual Mouse Gesture Settings dialog is open");
+        let surface = SurfaceId::dialog("mouse-gesture-settings", instance);
+        app.jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.eligible()
+                    && target.id().surface() == &surface
+                    && target.metadata().label() == label
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "no eligible Mouse Gesture Settings target labeled {label:?}; targets={:?}",
+                    app.jump_mode_ui
+                        .retained_registry()
+                        .targets()
+                        .iter()
+                        .map(|target| (
+                            target.metadata().label(),
+                            target.eligible(),
+                            target.clipped_rect(),
+                            target.id().surface(),
+                        ))
+                        .collect::<Vec<_>>()
+                )
+            })
+            .clone()
+    }
+
+    fn scroll_mouse_gesture_settings_to_bottom(ctx: &egui::Context, app: &mut LauncherApp) {
+        scroll_mouse_gesture_settings_to_fraction(ctx, app, 1.0);
+    }
+
+    fn scroll_mouse_gesture_settings_to_top(ctx: &egui::Context, app: &mut LauncherApp) {
+        scroll_mouse_gesture_settings_to_fraction(ctx, app, 0.0);
+    }
+
+    fn scroll_mouse_gesture_settings_to_fraction(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        fraction: f32,
+    ) {
+        let dialog = &app.mouse_gesture_settings_dialog;
+        let id = dialog
+            .test_scroll_area_id()
+            .expect("the actual Mouse Gesture Settings ScrollArea was rendered");
+        let max_offset = dialog.test_scroll_max_offset_y();
+        assert!(max_offset.is_finite() && max_offset >= 0.0);
+        let mut state = egui::scroll_area::State::load(ctx, id).unwrap_or_default();
+        state.offset.y = max_offset * fraction.clamp(0.0, 1.0);
+        state.store(ctx, id);
+        run_mouse_settings_frame(ctx, app, Vec::new());
+    }
+
+    fn persisted_mouse_gesture_settings(
+        app: &LauncherApp,
+    ) -> crate::plugins::mouse_gestures::MouseGestureSettings {
+        let settings = Settings::load(&app.settings_path).expect("fixture settings load");
+        serde_json::from_value(
+            settings
+                .plugin_settings
+                .get("mouse_gestures")
+                .expect("the fixture has saved mouse gesture settings")
+                .clone(),
+        )
+        .expect("the persisted mouse gesture value has the current schema")
+    }
+
+    fn initialize_mouse_gesture_settings_store(app: &LauncherApp) {
+        crate::settings::Settings::update(&app.settings_path, |_| Ok(()))
+            .expect("the generated settings store is initialized inside the isolated workspace");
+    }
+
+    #[test]
+    fn jump_mode_mouse_gesture_settings_focus_save_close_and_reopen_preserve_live_semantics() {
+        use crate::gui::jump_mode::TargetKind;
+        use crate::gui::jump_mode::ui::NavigationDialogKind;
+
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        initialize_mouse_gesture_settings_store(&app);
+        prepare_actual_mouse_gesture_settings_dialog(&ctx, &mut app, true);
+
+        let initial = app.mouse_gesture_settings_dialog.test_settings().clone();
+        let saved_bytes_before = std::fs::read(&app.settings_path).unwrap();
+        let initial_instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::MouseGestureSettings)
+            .unwrap();
+        let enabled = mouse_gesture_settings_target(&app, "Enable mouse gestures");
+        assert_eq!(enabled.metadata().kind(), TargetKind::Checkbox);
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|metadata| metadata.label() == "Save mouse gesture settings"),
+            "clean Save is not an enabled hint target"
+        );
+
+        start_mouse_settings_jump_mode(&ctx, &mut app);
+        complete_mouse_settings_hint(&ctx, &mut app, enabled.id());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(enabled.response_id())
+        );
+        assert_eq!(
+            app.mouse_gesture_settings_dialog.test_settings(),
+            &initial,
+            "hint completion only focuses the actual checkbox"
+        );
+        assert!(!app.mouse_gesture_settings_dialog.test_dirty());
+
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Space, egui::Modifiers::NONE)],
+        );
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::NONE)],
+        );
+        assert!(!app.mouse_gesture_settings_dialog.test_settings().enabled);
+        assert!(app.mouse_gesture_settings_dialog.test_dirty());
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            saved_bytes_before
+        );
+
+        scroll_mouse_gesture_settings_to_bottom(&ctx, &mut app);
+        let save = mouse_gesture_settings_target(&app, "Save mouse gesture settings");
+        start_mouse_settings_jump_mode(&ctx, &mut app);
+        complete_mouse_settings_hint(&ctx, &mut app, save.id());
+        assert!(app.mouse_gesture_settings_dialog.test_dirty());
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            saved_bytes_before
+        );
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(!app.mouse_gesture_settings_dialog.test_dirty());
+        let saved = persisted_mouse_gesture_settings(&app);
+        assert!(!saved.enabled);
+        assert_eq!(saved.debug_logging, initial.debug_logging);
+        release_mouse_settings_enter(&ctx, &mut app);
+
+        scroll_mouse_gesture_settings_to_top(&ctx, &mut app);
+        let debug = mouse_gesture_settings_target(&app, "Enable debug logging");
+        start_mouse_settings_jump_mode(&ctx, &mut app);
+        complete_mouse_settings_hint(&ctx, &mut app, debug.id());
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Space, egui::Modifiers::NONE)],
+        );
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::NONE)],
+        );
+        assert_ne!(
+            app.mouse_gesture_settings_dialog
+                .test_settings()
+                .debug_logging,
+            saved.debug_logging
+        );
+        assert!(app.mouse_gesture_settings_dialog.test_dirty());
+
+        scroll_mouse_gesture_settings_to_bottom(&ctx, &mut app);
+        let close = mouse_gesture_settings_target(&app, "Close mouse gesture settings");
+        start_mouse_settings_jump_mode(&ctx, &mut app);
+        complete_mouse_settings_hint(&ctx, &mut app, close.id());
+        assert!(app.mouse_gesture_settings_dialog.open);
+        assert!(app.mouse_gesture_settings_dialog.test_dirty());
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(!app.mouse_gesture_settings_dialog.open);
+        assert_ne!(
+            app.mouse_gesture_settings_dialog
+                .test_settings()
+                .debug_logging,
+            saved.debug_logging,
+            "Close leaves the live edit in place rather than undoing it"
+        );
+        assert_eq!(persisted_mouse_gesture_settings(&app), saved);
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+
+        prepare_actual_mouse_gesture_settings_dialog(&ctx, &mut app, true);
+        let reopened_instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::MouseGestureSettings)
+            .unwrap();
+        assert_ne!(initial_instance, reopened_instance);
+        assert_eq!(
+            app.mouse_gesture_settings_dialog.test_settings(),
+            &saved,
+            "reopening reloads the last explicitly saved settings"
+        );
+        crate::plugins::mouse_gestures::apply_runtime_settings(initial);
+    }
+
+    #[test]
+    fn jump_mode_mouse_gesture_settings_combo_options_use_the_exact_popup_owner() {
+        use crate::gui::jump_mode::SurfaceId;
+        use crate::gui::jump_mode::TargetKind;
+
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        initialize_mouse_gesture_settings_store(&app);
+        prepare_actual_mouse_gesture_settings_dialog(&ctx, &mut app, true);
+        let initial = app.mouse_gesture_settings_dialog.test_settings().clone();
+        let saved_bytes_before = std::fs::read(&app.settings_path).unwrap();
+
+        scroll_mouse_gesture_settings_to_fraction(&ctx, &mut app, 0.5);
+        let combo = mouse_gesture_settings_target(&app, "Wheel cycling");
+        assert_eq!(combo.metadata().kind(), TargetKind::ComboBox);
+        start_mouse_settings_jump_mode(&ctx, &mut app);
+        complete_mouse_settings_hint(&ctx, &mut app, combo.id());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(combo.response_id()),
+            "hint completion focuses the actual ComboBox anchor"
+        );
+        assert_eq!(
+            app.mouse_gesture_settings_dialog.test_settings(),
+            &initial,
+            "hint completion does not change the ComboBox value"
+        );
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(egui::ComboBox::is_open(&ctx, combo.response_id()));
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+
+        let popup_targets = app.jump_mode_ui.retained_registry().targets();
+        assert!(
+            !popup_targets.is_empty(),
+            "the actual open ComboBox exposes its current options"
+        );
+        assert!(popup_targets.iter().all(|target| matches!(
+            target.id().surface(),
+            SurfaceId::Popup { kind, .. } if kind.starts_with("combo:")
+        )));
+        let shift_option = popup_targets
+            .iter()
+            .find(|target| target.metadata().label() == "Shift + wheel")
+            .expect("the exact wheel-cycle popup contains its Shift option")
+            .clone();
+        assert_eq!(shift_option.metadata().kind(), TargetKind::Selectable);
+
+        start_mouse_settings_jump_mode(&ctx, &mut app);
+        complete_mouse_settings_hint(&ctx, &mut app, shift_option.id());
+        assert_eq!(
+            app.mouse_gesture_settings_dialog
+                .test_settings()
+                .wheel_cycle_gate,
+            initial.wheel_cycle_gate,
+            "hint completion focuses an option without selecting it"
+        );
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(
+            app.mouse_gesture_settings_dialog
+                .test_settings()
+                .wheel_cycle_gate,
+            crate::mouse_gestures::service::WheelCycleGate::Shift
+        );
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            saved_bytes_before
+        );
+
+        crate::plugins::mouse_gestures::apply_runtime_settings(initial);
+    }
+
+    #[test]
+    fn jump_mode_mouse_gesture_settings_pending_binding_yields_to_settings_and_picker_blocks_parent()
+     {
+        use crate::gui::jump_mode::SurfaceId;
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.actions = Arc::new(vec![Action {
+            label: "Generated binding action".into(),
+            desc: "Inert generated action".into(),
+            action: "test:mouse-gesture-settings-binding".into(),
+            args: None,
+        }]);
+        prepare_actual_mouse_gestures_dialog(
+            &ctx,
+            &mut app,
+            vec![mouse_gesture_fixture("Settings handoff", "R")],
+        );
+        let parent_instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::MouseGestures)
+            .unwrap();
+
+        start_mouse_gesture_jump_mode(&ctx, &mut app);
+        let add_binding = mouse_gesture_target(&app, "Add binding");
+        complete_mouse_gesture_hint(&ctx, &mut app, add_binding.id());
+        assert!(
+            app.mouse_gestures_dialog
+                .jump_mode_child_owner(parent_instance)
+                .is_none()
+        );
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        let binding_owner = app
+            .mouse_gestures_dialog
+            .jump_mode_child_owner(parent_instance)
+            .expect("fresh Enter opens the existing Bind Action child");
+        assert!(matches!(
+            binding_owner,
+            NavigationOwner::MouseGestureBinding { .. }
+        ));
+
+        let private_title = "generated private window title 8e1a";
+        let mut persisted = crate::plugins::mouse_gestures::MouseGestureSettings::default();
+        persisted.ignore_window_titles.push(private_title.into());
+        let persisted_value = serde_json::to_value(persisted).unwrap();
+        crate::settings::Settings::update(&app.settings_path, |settings| {
+            settings
+                .plugin_settings
+                .insert("mouse_gestures".into(), persisted_value);
+            Ok(())
+        })
+        .expect("the generated settings fixture is isolated");
+
+        app.open_mouse_gesture_settings_dialog();
+        for _ in 0..3 {
+            run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+        }
+        let settings_kind = NavigationDialogKind::MouseGestureSettings;
+        let settings_instance = app
+            .jump_mode_ui
+            .dialog_instance(settings_kind)
+            .expect("the separate settings Window has a current instance");
+        assert_eq!(
+            crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
+            settings_kind.layer_id(),
+            "the separate settings Window is above the still-pending binding child"
+        );
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog {
+                kind: settings_kind,
+                instance: settings_instance,
+            },
+            "the pending Bind Action must not replace another recognized foreground owner"
+        );
+        let settings_surface = SurfaceId::dialog("mouse-gesture-settings", settings_instance);
+        let targets = app.jump_mode_ui.retained_registry().targets();
+        assert!(targets.iter().any(|target| {
+            target.id().surface() == &settings_surface
+                && target.metadata().label() == "Enable mouse gestures"
+        }));
+        assert!(
+            targets
+                .iter()
+                .all(|target| target.id().surface() == &settings_surface),
+            "only the actual foreground settings form owns current hints"
+        );
+
+        scroll_mouse_gesture_settings_to_bottom(&ctx, &mut app);
+        let remove = mouse_gesture_settings_target(&app, "Remove ignored window");
+        assert!(!format!("{:?}", remove.id()).contains(private_title));
+        assert_eq!(remove.metadata().label(), "Remove ignored window");
+
+        // This seeds the real picker state without invoking the OS enumerator.
+        app.mouse_gesture_settings_dialog.test_seed_picker();
+        run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+        assert_eq!(
+            crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
+            Some(crate::gui::mouse_gesture_settings_dialog::window_picker_layer_id())
+        );
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Blocked,
+            "the native picker is deliberately unsupported by Jump Mode"
+        );
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+        assert!(
+            app.mouse_gesture_settings_dialog
+                .test_settings()
+                .ignore_window_titles
+                .iter()
+                .any(|title| title == private_title),
+            "opening the seeded picker neither enumerates nor mutates ignored titles"
+        );
+    }
+
+    #[test]
+    fn jump_mode_mouse_gesture_settings_native_form_remains_clickable_when_disabled() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_mouse_gesture_settings_dialog(&ctx, &mut app, false);
+        assert!(!app.jump_mode_enabled());
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+
+        let before = app.mouse_gesture_settings_dialog.test_settings().clone();
+        let response_id = app
+            .mouse_gesture_settings_dialog
+            .test_enable_checkbox_response()
+            .expect("the real enabled checkbox response was rendered")
+            .id;
+        click_mouse_settings_response(&ctx, &mut app, response_id);
+        assert_eq!(
+            app.mouse_gesture_settings_dialog.test_settings().enabled,
+            !before.enabled,
+            "ordinary pointer activation remains available with Jump Mode disabled"
+        );
+        assert!(app.mouse_gesture_settings_dialog.test_dirty());
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+        crate::plugins::mouse_gestures::apply_runtime_settings(before);
+    }
+
     fn mouse_settings_target(
         app: &LauncherApp,
         label: &str,
@@ -32577,7 +33160,7 @@ mod tests {
                     timer: None,
                     paste_sequence: None,
                     mkmacro: None,
-                    dialogs: [None; 12],
+                    dialogs: [None; 13],
                 },
             ),
             NavigationOwner::Settings { instance: 1 },
@@ -32796,7 +33379,7 @@ mod tests {
                     timer: None,
                     paste_sequence: None,
                     mkmacro: None,
-                    dialogs: [None; 12],
+                    dialogs: [None; 13],
                 }
             ),
         );
@@ -33519,7 +34102,7 @@ mod tests {
                     timer: None,
                     paste_sequence: None,
                     mkmacro: None,
-                    dialogs: [None; 12],
+                    dialogs: [None; 13],
                 }
             ),
             app.confirm_modal.is_open(),
