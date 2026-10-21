@@ -648,6 +648,11 @@ impl SnippetDialog {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_entries(&self) -> &[SnippetEntry] {
+        &self.entries
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_is_editing(&self) -> bool {
         self.edit_idx.is_some()
     }
@@ -660,6 +665,11 @@ impl SnippetDialog {
     #[cfg(test)]
     pub(crate) fn test_alias(&self) -> &str {
         &self.alias
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_filter(&self) -> &str {
+        &self.filter
     }
 
     #[cfg(test)]
@@ -2143,6 +2153,63 @@ mod tests {
                 dialog.show_window(ctx, || panic!("unexpected field validation"));
             },
         )
+    }
+
+    #[test]
+    fn jump_mode_snippets_lifecycle_nonauthorized_render_pass_keeps_draft_and_store_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let original = snippet("draft", "Original λ\n{{name}}");
+        save_snippets(path.to_str().unwrap(), std::slice::from_ref(&original)).unwrap();
+        let original_bytes = std::fs::read(&path).unwrap();
+
+        let ctx = egui::Context::default();
+        let mut dialog = SnippetDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        assert!(dialog.begin_existing(0));
+        dialog.reveal_contents();
+        let draft_before = (
+            dialog.alias.clone(),
+            dialog.text.clone(),
+            dialog.entries.clone(),
+        );
+        dialog_frame(&ctx, &mut dialog, Vec::new()).drop_without_applying_deltas();
+        let body_id = dialog
+            .test_body_editor_widget_id()
+            .expect("the actual revealed body response has an egui ID");
+        ctx.memory_mut(|memory| memory.request_focus(body_id));
+        let selected_before = dialog.test_selected_entry_index();
+
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 900.0),
+                )),
+                focused: true,
+                events: vec![egui::Event::Text("discarded draft text".into())],
+                ..Default::default()
+            },
+            |ctx| {
+                dialog.show_window_with_jump_mode(ctx, None, true, false, || {
+                    panic!("unexpected required-field action")
+                });
+            },
+        )
+        .drop_without_applying_deltas();
+
+        assert_eq!(
+            (
+                dialog.alias.clone(),
+                dialog.text.clone(),
+                dialog.entries.clone()
+            ),
+            draft_before,
+            "the noncommitting pass edits only its local widget shadow"
+        );
+        assert_eq!(dialog.test_selected_entry_index(), selected_before);
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        assert!(dialog.test_is_editing());
     }
 
     #[test]

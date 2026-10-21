@@ -19343,6 +19343,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let actions_path = directory.path().join("actions.json");
         let settings_path = directory.path().join("settings.json");
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         let app = LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
@@ -19350,7 +19353,7 @@ mod tests {
             PluginManager::new(),
             actions_path.display().to_string(),
             settings_path.display().to_string(),
-            Settings::default(),
+            settings,
             None,
             None,
             None,
@@ -23639,11 +23642,15 @@ mod tests {
         .0
         .drop_without_applying_deltas();
         assert!(app.jump_mode_ui.active_session().is_some());
+        let instance = app
+            .jump_mode_ui
+            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::Snippets)
+            .expect("the current Snippets window has an observed instance");
         assert_eq!(
             app.jump_mode_ui.frame_navigation_owner(),
             crate::gui::jump_mode::ui::NavigationOwner::Dialog {
                 kind: crate::gui::jump_mode::ui::NavigationDialogKind::Snippets,
-                instance: 1,
+                instance,
             },
         );
         app.run_root_frame_for_test(
@@ -23684,6 +23691,72 @@ mod tests {
             .filter(|target| target.metadata().label() == label)
             .map(|target| target.id().clone())
             .collect()
+    }
+
+    fn snippet_target_with_identity(
+        app: &LauncherApp,
+        label: &str,
+        identity_fragment: &str,
+    ) -> crate::gui::jump_mode::TargetId {
+        app.jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label() == label
+                    && matches!(
+                        target.id().semantic(),
+                        crate::gui::jump_mode::SemanticTargetId::Named(identity)
+                            if identity.contains(identity_fragment)
+                    )
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "no Snippets target {label:?} with identity fragment {identity_fragment:?}; targets={:?}",
+                    app.jump_mode_ui
+                        .retained_registry()
+                        .targets()
+                        .iter()
+                        .map(|target| (target.metadata().label(), target.id()))
+                        .collect::<Vec<_>>()
+                )
+            })
+            .id()
+            .clone()
+    }
+
+    fn place_snippet_body_cursor_at_end(ctx: &egui::Context, app: &LauncherApp) {
+        let body_id = app
+            .snippet_dialog
+            .test_body_editor_widget_id()
+            .expect("the revealed body editor has a real response ID");
+        let mut state = egui::text_edit::TextEditState::load(ctx, body_id)
+            .expect("the revealed body editor has native text state");
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(app.snippet_dialog.test_text().chars().count()),
+            )));
+        state.store(ctx, body_id);
+    }
+
+    fn run_with_secondary_test_window(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        input: egui::RawInput,
+    ) -> egui::FullOutput {
+        app.run_root_frame_for_test_with(ctx, input, false, |app, ui| {
+            app.render_root_ui(ui);
+            egui::Window::new("Secondary visible window")
+                .id(egui::Id::new("m3c-secondary-visible-window"))
+                .fixed_pos(egui::pos2(16.0, 16.0))
+                .show(ui.ctx(), |ui| {
+                    ui.label(
+                        "Secondary window remains visible while the user returns to Snippets.",
+                    );
+                });
+        })
+        .0
     }
 
     fn set_snippet_contents_scroll_offset(
@@ -23885,6 +23958,571 @@ mod tests {
             "Select and explicit Edit do not save or start a preview"
         );
         assert!(!app.snippet_prompt_dialog.is_open());
+    }
+
+    #[test]
+    fn jump_mode_snippets_lifecycle_duplicate_edit_cancel_reopen_and_fresh_save() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        let snippets_path = workspace
+            .root()
+            .join(crate::plugins::snippets::SNIPPETS_FILE)
+            .to_string_lossy()
+            .into_owned();
+        let mut private_field = crate::plugins::snippets::SnippetFieldDefinition::new("name");
+        private_field.label = "Private field label".into();
+        private_field.default_value = "Private default λ".into();
+        let entries = vec![
+            snippet_fixture_entry("duplicate", "First body", false, false, vec![], &["first"]),
+            snippet_fixture_entry(
+                "duplicate",
+                "Stored λ\n猫 {{name}}",
+                true,
+                true,
+                vec![private_field],
+                &["private-tag"],
+            ),
+        ];
+        crate::plugins::snippets::save_snippets(&snippets_path, &entries)
+            .expect("the generated duplicate fixture is writable");
+        let original_bytes = std::fs::read(&snippets_path).unwrap();
+        prepare_actual_snippet_dialog(&ctx, &mut app, &snippets_path);
+
+        start_actual_snippet_jump_mode(&ctx, &mut app);
+        let edit_second = snippet_target_with_identity(&app, "Edit snippet", "entry/1/edit");
+        let edit_hint = snippet_hint_for_target(&app, &edit_second);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(edit_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(std::fs::read(&snippets_path).unwrap(), original_bytes);
+        assert!(!app.snippet_dialog.test_is_editing());
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.snippet_dialog.test_is_editing());
+        assert_eq!(app.snippet_dialog.test_edit_index(), Some(1));
+        assert!(!app.snippet_dialog.test_body_revealed());
+        assert_eq!(std::fs::read(&snippets_path).unwrap(), original_bytes);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_none());
+
+        set_snippet_contents_scroll_offset(&ctx, &mut app, 10_000.0);
+        let reveal = snippet_target_ids(&app, "Reveal snippet contents")
+            .into_iter()
+            .next()
+            .expect("the actual Reveal response is visible at the bottom of the editor");
+        click_snippet_target(&ctx, &mut app, &reveal);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.snippet_dialog.test_body_revealed());
+        start_actual_snippet_jump_mode(&ctx, &mut app);
+        let body_target = snippet_target_ids(&app, "Snippet text")[0].clone();
+        let body_hint = snippet_hint_for_target(&app, &body_target);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(body_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        place_snippet_body_cursor_at_end(&ctx, &app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text("\nUnsaved λ\n猫".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.snippet_dialog.test_text().contains("Unsaved λ\n猫"));
+        assert_eq!(std::fs::read(&snippets_path).unwrap(), original_bytes);
+
+        set_snippet_contents_scroll_offset(&ctx, &mut app, 10_000.0);
+        let cancel = snippet_target_ids(&app, "Cancel snippet edit")[0].clone();
+        click_snippet_target(&ctx, &mut app, &cancel);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!app.snippet_dialog.test_is_editing());
+        assert_eq!(std::fs::read(&snippets_path).unwrap(), original_bytes);
+
+        let close = snippet_target_ids(&app, "Close snippets")[0].clone();
+        click_snippet_target(&ctx, &mut app, &close);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!app.snippet_dialog.open);
+        assert!(snippet_target_ids(&app, "Snippet entry").is_empty());
+        app.set_jump_mode_enabled(false);
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+        app.snippet_dialog.test_open_from(&snippets_path);
+        for _ in 0..3 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        set_snippet_contents_scroll_offset(&ctx, &mut app, 0.0);
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+        assert_eq!(app.snippet_dialog.test_entries(), entries.as_slice());
+        assert!(!app.snippet_dialog.test_is_editing());
+        assert!(!app.snippet_dialog.test_body_revealed());
+        assert_eq!(std::fs::read(&snippets_path).unwrap(), original_bytes);
+
+        app.set_jump_mode_enabled(true);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        // The first enabled frame observes the reopened foreground layer and
+        // renews its navigation owner. Collect a second stable registry pass
+        // before a leader can snapshot its targets.
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        let reopened_instance = app
+            .jump_mode_ui
+            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::Snippets)
+            .expect("the reopened Snippets window has a new instance");
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::Snippets,
+                instance: reopened_instance,
+            }
+        );
+        assert_eq!(snippet_target_ids(&app, "Snippet entry").len(), 2);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        start_actual_snippet_jump_mode(&ctx, &mut app);
+        let edit_second = snippet_target_with_identity(&app, "Edit snippet", "entry/1/edit");
+        let edit_hint = snippet_hint_for_target(&app, &edit_second);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(edit_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(std::fs::read(&snippets_path).unwrap(), original_bytes);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.snippet_dialog.test_edit_index(), Some(1));
+        assert!(app.jump_mode_ui.active_session().is_none());
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        set_snippet_contents_scroll_offset(&ctx, &mut app, 10_000.0);
+        let reveal = snippet_target_ids(&app, "Reveal snippet contents")[0].clone();
+        click_snippet_target(&ctx, &mut app, &reveal);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+
+        set_snippet_contents_scroll_offset(&ctx, &mut app, 0.0);
+        start_actual_snippet_jump_mode(&ctx, &mut app);
+        let alias_target = snippet_target_ids(&app, "Snippet alias")[0].clone();
+        let alias_hint = snippet_hint_for_target(&app, &alias_target);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(alias_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(" revised".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        let edited_alias = app.snippet_dialog.test_alias().to_owned();
+        assert_ne!(edited_alias, entries[1].alias);
+        set_snippet_contents_scroll_offset(&ctx, &mut app, 10_000.0);
+        start_actual_snippet_jump_mode(&ctx, &mut app);
+        let body_target = snippet_target_ids(&app, "Snippet text")[0].clone();
+        let body_hint = snippet_hint_for_target(&app, &body_target);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(body_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        place_snippet_body_cursor_at_end(&ctx, &app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text("\nSaved λ".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(std::fs::read(&snippets_path).unwrap(), original_bytes);
+
+        set_snippet_contents_scroll_offset(&ctx, &mut app, 10_000.0);
+        start_actual_snippet_jump_mode(&ctx, &mut app);
+        let save_target = snippet_target_ids(&app, "Save snippet")[0].clone();
+        let save_hint = snippet_hint_for_target(&app, &save_target);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(save_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.snippet_dialog.test_is_editing());
+        assert_eq!(std::fs::read(&snippets_path).unwrap(), original_bytes);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.snippet_dialog.test_is_editing());
+        let saved = crate::plugins::snippets::load_snippets(&snippets_path).unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0], entries[0], "the duplicate neighbor remains exact");
+        assert_eq!(saved[1].alias, edited_alias);
+        assert!(saved[1].text.contains("Saved λ"));
+        assert_eq!(saved[1].tags, entries[1].tags);
+        assert!(saved[1].hide_contents);
+        assert!(saved[1].prompt_for_fields);
+    }
+
+    #[test]
+    fn jump_mode_snippets_lifecycle_default_off_returns_to_native_filter_from_other_window() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        let snippets_path = workspace
+            .root()
+            .join(crate::plugins::snippets::SNIPPETS_FILE)
+            .to_string_lossy()
+            .into_owned();
+        crate::plugins::snippets::save_snippets(
+            &snippets_path,
+            &[snippet_fixture_entry(
+                "native",
+                "Visible body",
+                false,
+                false,
+                vec![],
+                &[],
+            )],
+        )
+        .expect("the generated native field fixture is writable");
+        prepare_actual_snippet_dialog(&ctx, &mut app, &snippets_path);
+        start_actual_snippet_jump_mode(&ctx, &mut app);
+        let filter = snippet_target_ids(&app, "Filter snippets")[0].clone();
+        let registered_filter = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.id() == &filter)
+            .expect("the actual Filter TextEdit response is registered");
+        let filter_response = registered_filter.response_id();
+        let filter_position = registered_filter.clipped_rect().center();
+        let response_rect = ctx
+            .read_response(filter_response)
+            .expect("the current Filter response is real egui widget state")
+            .rect;
+        assert!(response_rect.contains(filter_position));
+        let snippet_layer = crate::gui::jump_mode::ui::NavigationDialogKind::Snippets
+            .layer_id()
+            .expect("Snippets uses a native Middle layer");
+        app.set_jump_mode_enabled(false);
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+
+        run_with_secondary_test_window(&ctx, &mut app, actual_query_input(true))
+            .drop_without_applying_deltas();
+        assert_ne!(
+            crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
+            Some(snippet_layer),
+            "the secondary window is initially the foreground owner"
+        );
+        assert_eq!(
+            ctx.layer_id_at(filter_position),
+            Some(snippet_layer),
+            "the actual Filter response remains exposed beneath the secondary window"
+        );
+
+        for pressed in [true, false] {
+            let mut events = if pressed {
+                vec![egui::Event::PointerMoved(filter_position)]
+            } else {
+                Vec::new()
+            };
+            events.push(egui::Event::PointerButton {
+                pos: filter_position,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            });
+            let input = egui::RawInput {
+                events,
+                ..actual_query_input(true)
+            };
+            run_with_secondary_test_window(&ctx, &mut app, input).drop_without_applying_deltas();
+        }
+        assert_eq!(
+            crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
+            Some(snippet_layer),
+            "the user's pointer selection naturally activates the real Snippets window"
+        );
+
+        run_with_secondary_test_window(
+            &ctx,
+            &mut app,
+            egui::RawInput {
+                events: vec![egui::Event::Text("native λ".into())],
+                ..actual_query_input(true)
+            },
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(app.snippet_dialog.test_filter(), "native λ");
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+    }
+
+    #[test]
+    fn jump_mode_snippets_lifecycle_preview_return_restores_exact_unsaved_draft() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        let snippets_path = workspace
+            .root()
+            .join(crate::plugins::snippets::SNIPPETS_FILE)
+            .to_string_lossy()
+            .into_owned();
+        let mut field = crate::plugins::snippets::SnippetFieldDefinition::new("name");
+        field.label = "Private label".into();
+        field.default_value = "Private default".into();
+        let entry = snippet_fixture_entry(
+            "private preview",
+            "Stored λ\n猫 {{name}}",
+            true,
+            true,
+            vec![field],
+            &["private tag"],
+        );
+        crate::plugins::snippets::save_snippets(&snippets_path, std::slice::from_ref(&entry))
+            .expect("the generated prompted entry is writable");
+        let original_bytes = std::fs::read(&snippets_path).unwrap();
+        prepare_actual_snippet_dialog(&ctx, &mut app, &snippets_path);
+
+        start_actual_snippet_jump_mode(&ctx, &mut app);
+        let edit = snippet_target_with_identity(&app, "Edit snippet", "entry/0/edit");
+        let edit_hint = snippet_hint_for_target(&app, &edit);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(edit_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.snippet_dialog.test_edit_index(), Some(0));
+
+        let reveal = snippet_target_ids(&app, "Reveal snippet contents")[0].clone();
+        click_snippet_target(&ctx, &mut app, &reveal);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        start_actual_snippet_jump_mode(&ctx, &mut app);
+        let body = snippet_target_ids(&app, "Snippet text")[0].clone();
+        let body_hint = snippet_hint_for_target(&app, &body);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(body_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        place_snippet_body_cursor_at_end(&ctx, &app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text("\nDraft 猫✨".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        let draft_text = app.snippet_dialog.test_text().to_owned();
+        let draft_alias = app.snippet_dialog.test_alias().to_owned();
+        assert!(draft_text.ends_with("\nDraft 猫✨"));
+        assert_eq!(std::fs::read(&snippets_path).unwrap(), original_bytes);
+
+        set_snippet_contents_scroll_offset(&ctx, &mut app, 10_000.0);
+        let preview = snippet_target_ids(&app, "Test snippet preview")[0].clone();
+        click_snippet_target(&ctx, &mut app, &preview);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.snippet_prompt_dialog.is_open());
+        assert!(app.snippet_prompt_dialog.is_preview_only());
+        assert_eq!(std::fs::read(&snippets_path).unwrap(), original_bytes);
+        assert!(snippet_target_ids(&app, "Copy snippet").is_empty());
+        assert_eq!(
+            snippet_target_ids(&app, "Return to snippet editor").len(),
+            1
+        );
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let return_to_editor = snippet_target_ids(&app, "Return to snippet editor")[0].clone();
+        let return_hint = snippet_hint_for_target(&app, &return_to_editor);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(return_hint)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.snippet_prompt_dialog.is_open());
+        assert_eq!(std::fs::read(&snippets_path).unwrap(), original_bytes);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.snippet_prompt_dialog.is_open());
+        assert!(app.snippet_dialog.test_is_editing());
+        assert_eq!(app.snippet_dialog.test_edit_index(), Some(0));
+        assert_eq!(app.snippet_dialog.test_alias(), draft_alias);
+        assert_eq!(app.snippet_dialog.test_text(), draft_text);
+        assert_eq!(std::fs::read(&snippets_path).unwrap(), original_bytes);
+        assert!(snippet_target_ids(&app, "Copy snippet").is_empty());
+
+        app.set_jump_mode_enabled(false);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
     }
 
     #[test]
