@@ -74,6 +74,13 @@ impl HelpWindow {
                             }
                             ui.label("Older query: Ctrl+Up");
                             ui.label("Newer query / restore draft: Ctrl+Down");
+                            ui.label(egui::RichText::new("Experimental Jump Mode").strong());
+                            ui.label(
+                                "Jump Mode is off by default. Enable Experimental Jump Mode in Settings and save. On supported screens, Shift+Space shows hints for visible, enabled controls. Typing a hint only focuses or highlights its control; a later, separate Enter, Space, or normal typing interacts with it. Escape cancels hints. Existing Save, Apply, and confirmation steps still require their normal action.",
+                            );
+                            ui.label(
+                                "Coverage includes File Search; Snippets; Clipboard History; Dashboard commands and simple widgets; JSON, Regex, and XML tools; Mouse Settings and Gestures; Rename and Replace; and Dashboard and Radial editors. Pointer-only canvas drags, capture or recording, native picker internals, unknown popups, and hidden, clipped, or disabled controls are not hint targets.",
+                            );
                             ui.separator();
                             ui.label(egui::RichText::new("Launcher search").strong());
                             ui.label(

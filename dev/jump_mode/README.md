@@ -1,5 +1,10 @@
 # Jump Mode GUI fixture harness
 
+Current implementation coverage and verification limits are tracked in the
+[Jump Mode execution ledger](../../docs/plans/jump_mode_expanded_execution.md).
+The fixture-only command validates existing fixture inputs without launching
+the app; it does not establish interactive desktop or native-focus behavior.
+
 Run the current M01 baseline from the repository root with one command:
 
 ```powershell

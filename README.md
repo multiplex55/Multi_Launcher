@@ -86,6 +86,21 @@ Multi Launcher is centered around a **single query box**:
   - `layout ...` (window layouts)
   - `mm ...` (MultiManager window workspaces)
 
+### Optional keyboard hints
+
+Experimental Jump Mode is off by default. To enable it, turn on **Experimental
+Jump Mode** in Settings and save. On supported screens, **Shift+Space** shows
+hints for visible, enabled controls. Typing a hint only focuses or highlights
+that control; use a later, separate Enter, Space, or normal typing to interact
+with it. **Escape** cancels the hint session. Existing Save, Apply, and explicit
+confirmation steps still require their normal action.
+
+Coverage includes File Search; Snippets; Clipboard History; Dashboard commands
+and simple widgets; JSON, Regex, and XML tools; Mouse Settings and Gestures;
+Rename and Replace; and Dashboard and Radial editors. Coverage is selective:
+pointer-only canvas drags, capture or recording, native picker internals,
+unknown popups, and hidden, clipped, or disabled controls are not hint targets.
+
 ---
 
 ## Command prefixes cheat sheet
