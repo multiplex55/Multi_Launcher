@@ -928,6 +928,115 @@ mod tests {
         }
     }
 
+    struct DashboardCompositionHarness {
+        egui_ctx: egui::Context,
+        dashboard: Dashboard,
+        jump: crate::gui::jump_mode::ui::JumpModeUi,
+        plugins: PluginManager,
+        data_cache: DashboardDataCache,
+        actions: Vec<Action>,
+        actions_by_id: ActionIdLookup,
+    }
+
+    impl DashboardCompositionHarness {
+        fn frame(
+            &mut self,
+            screen_size: egui::Vec2,
+            events: Vec<egui::Event>,
+            activation: WidgetActivation,
+        ) -> Option<WidgetAction> {
+            use crate::gui::jump_mode::ui::{
+                NavigationOwner, NavigationWindows, resolve_layer_navigation_owner,
+            };
+
+            self.jump.begin_frame();
+            let mut final_owner = NavigationOwner::Root;
+            let mut final_root_allowed = true;
+            let mut first_ui_pass = true;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size)),
+                focused: true,
+                events,
+                ..Default::default()
+            };
+            let mut activated = None;
+            self.egui_ctx
+                .run_ui(input, |root| {
+                    let ctx = root.ctx().clone();
+                    let candidate =
+                        resolve_layer_navigation_owner(&ctx, NavigationWindows::default());
+                    let owner_transition_pending = candidate != self.jump.frame_navigation_owner();
+                    let navigation_input_allowed =
+                        !owner_transition_pending && candidate == NavigationOwner::Root;
+                    self.jump
+                        .handle_root_input(&ctx, navigation_input_allowed, first_ui_pass);
+                    let owner = self.jump.update_navigation_owner(&ctx, candidate, false);
+                    let root_targets_allowed = owner == NavigationOwner::Root;
+                    self.jump.begin_ui_pass();
+
+                    let mut dashboard_ctx = dashboard_context(&self.plugins, &self.data_cache);
+                    dashboard_ctx.actions = &self.actions;
+                    dashboard_ctx.actions_by_id = &self.actions_by_id;
+                    dashboard_ctx.dashboard_visible = true;
+                    dashboard_ctx.dashboard_focused = root_targets_allowed;
+                    dashboard_ctx.jump_mode_activation_allowed = first_ui_pass;
+                    dashboard_ctx.jump_mode_scope =
+                        (self.jump.is_enabled() && root_targets_allowed).then(|| {
+                            dashboard_jump_scope(&self.jump, self.dashboard.target_generation())
+                        });
+
+                    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size);
+                    let pass_activation = root
+                        .scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                            self.dashboard.ui(ui, &dashboard_ctx, activation)
+                        })
+                        .inner;
+                    if first_ui_pass {
+                        activated = pass_activation;
+                    } else {
+                        debug_assert!(
+                            pass_activation.is_none(),
+                            "discarded dashboard passes cannot repeat widget actions"
+                        );
+                    }
+
+                    self.jump.finish_ui_pass();
+                    final_owner =
+                        resolve_layer_navigation_owner(&ctx, NavigationWindows::default());
+                    final_root_allowed = final_owner == NavigationOwner::Root;
+                    self.jump.prepare_pass_for_navigation_owner(
+                        &ctx,
+                        final_owner,
+                        final_root_allowed,
+                        true,
+                    );
+                    first_ui_pass = false;
+                })
+                .drop_without_applying_deltas();
+            self.jump.complete_frame_for_navigation_owner(
+                &self.egui_ctx,
+                final_owner,
+                final_root_allowed,
+                true,
+            );
+            activated
+        }
+    }
+
+    fn dashboard_key_event(
+        key: egui::Key,
+        pressed: bool,
+        modifiers: egui::Modifiers,
+    ) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed,
+            repeat: false,
+            modifiers,
+        }
+    }
+
     fn enter_event() -> egui::Event {
         egui::Event::Key {
             key: egui::Key::Enter,
@@ -1151,6 +1260,311 @@ mod tests {
         assert_ne!(activated.action.action, "refresh-b");
     }
 
+    #[test]
+    fn jump_mode_dashboard_composition_collects_and_activates_only_the_pinned_action() {
+        use crate::actions::Action;
+        use crate::dashboard::config::{GridConfig, OverflowMode, SlotConfig};
+        use crate::dashboard::data_cache::DashboardDataSnapshot;
+        use crate::dashboard::widgets::WidgetRegistry;
+        use crate::gui::jump_mode::ui::JumpModeUi;
+        use crate::gui::jump_mode::{SemanticTargetId, TargetId};
+        use crate::performance::workloads::IsolatedWorkspace;
+        use std::collections::{BTreeSet, VecDeque};
+        use std::sync::Arc;
+
+        fn slot(
+            id: &str,
+            widget: &str,
+            row: i32,
+            col: i32,
+            col_span: u8,
+            settings: serde_json::Value,
+        ) -> SlotConfig {
+            SlotConfig {
+                id: Some(id.to_owned()),
+                widget: widget.to_owned(),
+                row,
+                col,
+                row_span: 1,
+                col_span,
+                settings,
+                overflow: OverflowMode::Clip,
+            }
+        }
+
+        fn ids(jump: &JumpModeUi) -> BTreeSet<TargetId> {
+            jump.retained_registry()
+                .targets()
+                .iter()
+                .map(|target| target.id().clone())
+                .collect()
+        }
+
+        let workspace = IsolatedWorkspace::new();
+        std::fs::write(workspace.root().join("history_pins.json"), "[]").unwrap();
+        let scratchpad_path = workspace.root().join("scratchpad.json");
+        std::fs::write(
+            &scratchpad_path,
+            r#"{"content":"generated dashboard note"}"#,
+        )
+        .unwrap();
+
+        let action = Action {
+            label: "Harmless dashboard action".to_owned(),
+            desc: "Generated test action".to_owned(),
+            action: "test:harmless-dashboard-action".to_owned(),
+            args: Some("dry-run".to_owned()),
+        };
+        let actions = vec![action.clone()];
+        let actions_by_id = ActionIdLookup::new(Arc::new(actions.clone()));
+        let _history_guard = crate::history::replace_history_for_test(VecDeque::from([
+            crate::history::HistoryEntry {
+                query: "harmless query".to_owned(),
+                query_lc: "harmless query".to_owned(),
+                action: action.clone(),
+                source: None,
+                timestamp: 1_700_000_000,
+            },
+        ]));
+        let mut snapshot = DashboardDataSnapshot::default();
+        snapshot.todos = Arc::new(vec![crate::plugins::todo::TodoEntry {
+            id: "generated-todo".to_owned(),
+            text: "Generated todo".to_owned(),
+            done: false,
+            priority: 2,
+            tags: vec!["safe".to_owned()],
+            entity_refs: Vec::new(),
+        }]);
+        let data_cache = DashboardDataCache::new();
+        data_cache.set_snapshot_for_test(snapshot);
+        let config = DashboardConfig {
+            version: 1,
+            grid: GridConfig { rows: 2, cols: 3 },
+            slots: vec![
+                slot(
+                    "pinned",
+                    "pinned_commands",
+                    0,
+                    0,
+                    1,
+                    json!({ "action_ids": ["test:harmless-dashboard-action"] }),
+                ),
+                slot("history", "command_history", 0, 1, 1, json!({})),
+                slot("todo", "todo", 0, 2, 1, json!({})),
+                slot(
+                    "scratch",
+                    "scratchpad",
+                    1,
+                    0,
+                    1,
+                    json!({
+                        "storage_path": scratchpad_path.to_string_lossy(),
+                        "refresh_mode": "manual",
+                        "manual_refresh_only": true,
+                    }),
+                ),
+                slot(
+                    "calendar",
+                    "calendar",
+                    1,
+                    1,
+                    2,
+                    json!({ "mode": "month", "default_date": "2024-05-15", "compact": true }),
+                ),
+            ],
+        };
+        let dashboard_path = workspace.root().join("dashboard.json");
+        config.save(&dashboard_path).unwrap();
+        let dashboard = Dashboard::new(&dashboard_path, WidgetRegistry::with_defaults(), None);
+        let mut fixture = DashboardCompositionHarness {
+            egui_ctx: egui::Context::default(),
+            dashboard,
+            jump: JumpModeUi::new(true),
+            plugins: PluginManager::new_inert_for_test(),
+            data_cache,
+            actions,
+            actions_by_id,
+        };
+
+        fixture.frame(
+            egui::vec2(900.0, 700.0),
+            Vec::new(),
+            WidgetActivation::Click,
+        );
+        let wide_ids = ids(&fixture.jump);
+        let wide_targets = fixture.jump.retained_registry().targets();
+        assert_eq!(
+            wide_ids.len(),
+            wide_targets.len(),
+            "composed target IDs do not collide"
+        );
+        for slot_id in ["pinned", "history", "todo", "scratch", "calendar"] {
+            assert!(
+                wide_targets.iter().any(|target| matches!(
+                    target.id().semantic(),
+                    SemanticTargetId::Named(name) if name.contains(&format!("slot-id:{slot_id}"))
+                )),
+                "the real {slot_id} slot contributes visible targets"
+            );
+        }
+        fixture.frame(
+            egui::vec2(900.0, 700.0),
+            Vec::new(),
+            WidgetActivation::Click,
+        );
+        assert_eq!(
+            ids(&fixture.jump),
+            wide_ids,
+            "repeated rendering keeps target identities"
+        );
+        fixture.frame(
+            egui::vec2(390.0, 250.0),
+            Vec::new(),
+            WidgetActivation::Click,
+        );
+        let small_targets = fixture.jump.retained_registry().targets();
+        let small_ids = ids(&fixture.jump);
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(390.0, 250.0));
+        assert!(
+            small_ids.len() < wide_ids.len(),
+            "clipped slots omit offscreen controls"
+        );
+        assert!(small_targets.iter().all(|target| {
+            let clip = target.clipped_rect();
+            clip.is_positive()
+                && clip.min.x >= viewport.min.x
+                && clip.min.y >= viewport.min.y
+                && clip.max.x <= viewport.max.x
+                && clip.max.y <= viewport.max.y
+        }));
+        fixture.frame(
+            egui::vec2(900.0, 700.0),
+            Vec::new(),
+            WidgetActivation::Click,
+        );
+
+        let pinned = fixture
+            .jump
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Pinned command")
+            .expect("pinned command has a visible response");
+        let pinned_id = pinned.id().clone();
+        let pinned_response_id = pinned.response_id();
+        fixture.frame(
+            egui::vec2(900.0, 700.0),
+            vec![
+                dashboard_key_event(egui::Key::Space, true, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".to_owned()),
+            ],
+            WidgetActivation::Click,
+        );
+        let hint = fixture
+            .jump
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(&pinned_id)
+            .unwrap()
+            .as_str()
+            .to_owned();
+        fixture.frame(
+            egui::vec2(900.0, 700.0),
+            vec![dashboard_key_event(
+                egui::Key::Space,
+                false,
+                egui::Modifiers::SHIFT,
+            )],
+            WidgetActivation::Click,
+        );
+        assert!(
+            fixture
+                .frame(
+                    egui::vec2(900.0, 700.0),
+                    vec![egui::Event::Text(hint)],
+                    WidgetActivation::Click,
+                )
+                .is_none()
+        );
+        assert!(
+            fixture.jump.active_session().is_none(),
+            "hint completion does not activate"
+        );
+        assert_eq!(
+            fixture.egui_ctx.memory(|memory| memory.focused()),
+            Some(pinned_response_id)
+        );
+        let activated = fixture
+            .frame(
+                egui::vec2(900.0, 700.0),
+                vec![enter_event()],
+                WidgetActivation::Keyboard,
+            )
+            .expect("a distinct Enter activates the focused real button");
+        assert_eq!(activated.action, action);
+        assert_eq!(
+            activated.query_override.as_deref(),
+            Some("Harmless dashboard action")
+        );
+
+        let old_generation = fixture.dashboard.target_generation();
+        fixture.frame(
+            egui::vec2(900.0, 700.0),
+            vec![
+                dashboard_key_event(egui::Key::Space, true, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".to_owned()),
+            ],
+            WidgetActivation::Click,
+        );
+        let stale_hint = fixture
+            .jump
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(&pinned_id)
+            .unwrap()
+            .as_str()
+            .to_owned();
+        let mut reordered = config;
+        reordered.slots.rotate_left(1);
+        let scratch_slot = reordered
+            .slots
+            .iter_mut()
+            .find(|slot| slot.id.as_deref() == Some("scratch"))
+            .unwrap();
+        scratch_slot.widget = "todo".to_owned();
+        scratch_slot.settings = json!({});
+        reordered.save(&dashboard_path).unwrap();
+        fixture.dashboard.reload();
+        assert_ne!(fixture.dashboard.target_generation(), old_generation);
+        fixture.frame(
+            egui::vec2(900.0, 700.0),
+            vec![dashboard_key_event(
+                egui::Key::Space,
+                false,
+                egui::Modifiers::SHIFT,
+            )],
+            WidgetActivation::Click,
+        );
+        assert!(fixture.jump.active_session().is_none());
+        assert!(!ids(&fixture.jump).contains(&pinned_id));
+        assert!(
+            fixture
+                .frame(
+                    egui::vec2(900.0, 700.0),
+                    vec![egui::Event::Text(stale_hint)],
+                    WidgetActivation::Click,
+                )
+                .is_none()
+        );
+        assert!(fixture.jump.active_session().is_none());
+        assert!(
+            ids(&fixture.jump)
+                .iter()
+                .all(|id| id.generation().0 == fixture.dashboard.target_generation())
+        );
+    }
     #[test]
     fn auto_overflow_scrolls_when_needed() {
         take_scroll_visibilities();
