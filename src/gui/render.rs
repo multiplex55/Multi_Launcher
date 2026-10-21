@@ -3209,6 +3209,20 @@ impl LauncherApp {
                 .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
     }
 
+    fn mouse_settings_native_ui_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+
+        self.mouse_settings_dialog.open
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && NavigationDialogKind::MouseSettings
+                .layer_id()
+                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+    }
+
     fn json_utility_native_ui_owner_current(
         &self,
         ctx: &egui::Context,
@@ -5391,8 +5405,32 @@ impl LauncherApp {
         let mut mg_settings_dlg = std::mem::take(&mut self.mouse_gesture_settings_dialog);
         mg_settings_dlg.ui(&ctx, self);
         self.mouse_gesture_settings_dialog = mg_settings_dlg;
+        let mouse_settings_owner =
+            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+        let mouse_settings_scope = match mouse_settings_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::MouseSettings,
+                instance,
+            } if self.jump_mode_enabled() => self.jump_mode_ui.scope_for_navigation_owner(
+                crate::gui::jump_mode::SurfaceId::dialog("mouse-settings", instance),
+                crate::gui::jump_mode::TargetGeneration(instance),
+                "mouse-settings/form",
+                ctx.viewport_id(),
+                mouse_settings_owner,
+                false,
+            ),
+            _ => None,
+        };
+        let mouse_settings_native_owner =
+            self.mouse_settings_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
         let mut mouse_settings_dlg = std::mem::take(&mut self.mouse_settings_dialog);
-        mouse_settings_dlg.ui(&ctx, &mut self.coordinate_tool);
+        mouse_settings_dlg.ui_with_jump_mode(
+            &ctx,
+            &mut self.coordinate_tool,
+            mouse_settings_scope.as_ref(),
+            mouse_settings_native_owner,
+            first_ui_pass,
+        );
         self.mouse_settings_dialog = mouse_settings_dlg;
         if self.theme_settings_dialog_open {
             let mut theme_state = std::mem::take(&mut self.theme_settings_dialog);
@@ -24577,6 +24615,213 @@ mod tests {
             .to_owned()
     }
 
+    fn mouse_settings_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_200.0, 1_500.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn run_mouse_settings_frame(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        events: Vec<egui::Event>,
+    ) {
+        app.run_root_frame_for_test(ctx, mouse_settings_input(events), false)
+            .0
+            .drop_without_applying_deltas();
+    }
+
+    fn scroll_mouse_settings_form(ctx: &egui::Context, app: &mut LauncherApp, offset: f32) {
+        let id = app
+            .mouse_settings_dialog
+            .test_scroll_area_id()
+            .expect("the actual Mouse Settings ScrollArea was rendered");
+        let mut state = egui::scroll_area::State::load(ctx, id).unwrap_or_default();
+        state.offset.y = offset;
+        state.store(ctx, id);
+        run_mouse_settings_frame(ctx, app, Vec::new());
+    }
+
+    fn scroll_mouse_settings_to_bottom(ctx: &egui::Context, app: &mut LauncherApp) {
+        let max_offset = app.mouse_settings_dialog.test_scroll_max_offset_y();
+        scroll_mouse_settings_form(ctx, app, max_offset);
+    }
+
+    fn prepare_actual_mouse_settings_dialog(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        jump_mode_enabled: bool,
+    ) {
+        let settings_path = app.settings_path.clone();
+        let preferences = app.coordinate_tool.preferences().clone();
+        app.coordinate_tool
+            .shutdown()
+            .expect("stop the unused native coordinate adapter in this fixture");
+        app.coordinate_tool = crate::gui::mouse_settings_dialog::test_coordinate_tool_adapter(
+            settings_path,
+            preferences,
+        );
+        app.set_jump_mode_enabled(jump_mode_enabled);
+        prepare_actual_query_frame(ctx, app);
+        app.open_mouse_settings_dialog();
+        for _ in 0..4 {
+            run_mouse_settings_frame(ctx, app, Vec::new());
+        }
+        assert_eq!(
+            crate::gui::jump_mode::ui::visible_top_middle_layer(ctx),
+            crate::gui::jump_mode::ui::NavigationDialogKind::MouseSettings.layer_id(),
+            "the fixture leaves the actual Mouse Settings window in front"
+        );
+        if jump_mode_enabled {
+            let instance = app
+                .jump_mode_ui
+                .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::MouseSettings)
+                .expect("the Mouse Settings open observation has an instance");
+            assert_eq!(
+                app.jump_mode_ui.frame_navigation_owner(),
+                crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                    kind: crate::gui::jump_mode::ui::NavigationDialogKind::MouseSettings,
+                    instance,
+                }
+            );
+        }
+    }
+
+    fn mouse_settings_target(
+        app: &LauncherApp,
+        label: &str,
+    ) -> crate::gui::jump_mode::ui::RegisteredTarget {
+        app.jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label && target.eligible())
+            .unwrap_or_else(|| {
+                panic!(
+                    "no eligible current Mouse Settings target labeled {label:?}; targets={:?}",
+                    app.jump_mode_ui
+                        .retained_registry()
+                        .targets()
+                        .iter()
+                        .map(|target| (
+                            target.metadata().label(),
+                            target.eligible(),
+                            target.clipped_rect(),
+                        ))
+                        .collect::<Vec<_>>()
+                )
+            })
+            .clone()
+    }
+
+    fn start_mouse_settings_jump_mode(ctx: &egui::Context, app: &mut LauncherApp) {
+        run_mouse_settings_frame(
+            ctx,
+            app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        assert!(app.jump_mode_ui.active_session().is_some());
+        run_mouse_settings_frame(
+            ctx,
+            app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+    }
+
+    fn complete_mouse_settings_hint(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        target: &crate::gui::jump_mode::TargetId,
+    ) {
+        let hint = app
+            .jump_mode_ui
+            .active_session()
+            .expect("Jump Mode is active for Mouse Settings")
+            .hint_map()
+            .hint_for(target)
+            .expect("the current Mouse Settings target has a hint")
+            .as_str()
+            .to_ascii_lowercase();
+        run_mouse_settings_frame(
+            ctx,
+            app,
+            vec![
+                egui::Event::Text(hint),
+                key_press(egui::Key::Enter, egui::Modifiers::NONE),
+            ],
+        );
+    }
+
+    fn release_mouse_settings_enter(ctx: &egui::Context, app: &mut LauncherApp) {
+        run_mouse_settings_frame(
+            ctx,
+            app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+    }
+
+    fn click_mouse_settings_target(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        target: &crate::gui::jump_mode::ui::RegisteredTarget,
+    ) {
+        let position = target.clipped_rect().center();
+        run_mouse_settings_frame(
+            ctx,
+            app,
+            vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        run_mouse_settings_frame(
+            ctx,
+            app,
+            vec![egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+    }
+
+    fn click_mouse_settings_response(ctx: &egui::Context, app: &mut LauncherApp, id: egui::Id) {
+        let position = ctx
+            .read_response(id)
+            .expect("the actual Mouse Settings response is present in the current frame")
+            .rect
+            .center();
+        for pressed in [true, false] {
+            let mut events = if pressed {
+                vec![egui::Event::PointerMoved(position)]
+            } else {
+                Vec::new()
+            };
+            events.push(egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            });
+            run_mouse_settings_frame(ctx, app, events);
+        }
+    }
+
     fn prepare_actual_clipboard_history_dialog(
         ctx: &egui::Context,
         app: &mut LauncherApp,
@@ -35825,6 +36070,334 @@ mod tests {
                 .any(|target| target.id() == &old_identity),
             "replacing the document removes the prior tree-node mapping"
         );
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_mouse_settings_focuses_checkbox_and_slider_then_cancel_discards_draft() {
+        use crate::gui::jump_mode::SurfaceId;
+        use crate::gui::jump_mode::TargetKind;
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_mouse_settings_dialog(&ctx, &mut app, true);
+
+        let instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::MouseSettings)
+            .expect("the actual Mouse Settings window has an observed instance");
+        let owner = NavigationOwner::Dialog {
+            kind: NavigationDialogKind::MouseSettings,
+            instance,
+        };
+        let surface = SurfaceId::dialog("mouse-settings", instance);
+        assert_eq!(app.jump_mode_ui.frame_navigation_owner(), owner);
+        let initial_inventory = app.jump_mode_ui.retained_registry();
+        assert!(initial_inventory.targets().iter().any(|target| {
+            target.metadata().label() == "Click effect style"
+                && target.metadata().kind() == TargetKind::ComboBox
+                && target.id().surface() == &surface
+                && target.clipped_rect().is_positive()
+        }));
+
+        scroll_mouse_settings_form(&ctx, &mut app, 360.0);
+        let middle_inventory = app.jump_mode_ui.retained_registry();
+        assert!(middle_inventory.targets().iter().any(|target| {
+            target.metadata().label() == "Crosshair high-contrast outline"
+                && target.metadata().kind() == TargetKind::Checkbox
+                && target.id().surface() == &surface
+                && target.clipped_rect().is_positive()
+        }));
+        assert!(middle_inventory.targets().iter().any(|target| {
+            target.metadata().label() == "Crosshair opacity"
+                && target.metadata().kind() == TargetKind::Slider
+                && target.id().surface() == &surface
+                && target.clipped_rect().is_positive()
+        }));
+        scroll_mouse_settings_to_bottom(&ctx, &mut app);
+        let bottom_inventory = app.jump_mode_ui.retained_registry();
+        assert!(
+            bottom_inventory
+                .metadata()
+                .any(|metadata| metadata.label() == "Cancel appearance changes")
+        );
+        assert!(
+            !bottom_inventory
+                .metadata()
+                .any(|metadata| metadata.label() == "Apply appearance changes"),
+            "the disabled clean-state Apply control is not a Jump target"
+        );
+
+        scroll_mouse_settings_form(&ctx, &mut app, 360.0);
+
+        let committed = app.coordinate_tool.preferences().clone();
+        let initial_high_contrast = app
+            .mouse_settings_dialog
+            .test_draft()
+            .crosshair
+            .high_contrast_outline;
+        let checkbox = mouse_settings_target(&app, "Crosshair high-contrast outline");
+        assert_eq!(checkbox.metadata().kind(), TargetKind::Checkbox);
+        start_mouse_settings_jump_mode(&ctx, &mut app);
+        complete_mouse_settings_hint(&ctx, &mut app, checkbox.id());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(checkbox.response_id())
+        );
+        assert_eq!(
+            app.mouse_settings_dialog
+                .test_draft()
+                .crosshair
+                .high_contrast_outline,
+            initial_high_contrast,
+            "hint completion only transfers focus"
+        );
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Space, egui::Modifiers::NONE)],
+        );
+        assert_eq!(
+            app.mouse_settings_dialog
+                .test_draft()
+                .crosshair
+                .high_contrast_outline,
+            !initial_high_contrast
+        );
+        assert_eq!(app.coordinate_tool.preferences(), &committed);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::NONE)],
+        );
+
+        let slider = mouse_settings_target(&app, "Crosshair opacity");
+        start_mouse_settings_jump_mode(&ctx, &mut app);
+        complete_mouse_settings_hint(&ctx, &mut app, slider.id());
+        release_mouse_settings_enter(&ctx, &mut app);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(slider.response_id())
+        );
+        let before = app.mouse_settings_dialog.test_draft().crosshair.opacity;
+        for _ in 0..2 {
+            run_mouse_settings_frame(
+                &ctx,
+                &mut app,
+                vec![key_press(egui::Key::ArrowLeft, egui::Modifiers::NONE)],
+            );
+            run_mouse_settings_frame(
+                &ctx,
+                &mut app,
+                vec![key_release(egui::Key::ArrowLeft, egui::Modifiers::NONE)],
+            );
+        }
+        assert!(app.mouse_settings_dialog.test_draft().crosshair.opacity < before);
+        assert_eq!(app.coordinate_tool.preferences(), &committed);
+
+        scroll_mouse_settings_to_bottom(&ctx, &mut app);
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|metadata| metadata.label() == "Apply appearance changes")
+        );
+        let cancel = mouse_settings_target(&app, "Cancel appearance changes");
+        start_mouse_settings_jump_mode(&ctx, &mut app);
+        complete_mouse_settings_hint(&ctx, &mut app, cancel.id());
+        assert!(
+            app.mouse_settings_dialog.open,
+            "hint completion is focus-only"
+        );
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(!app.mouse_settings_dialog.open);
+        assert_eq!(app.coordinate_tool.preferences(), &committed);
+        assert_eq!(
+            crate::settings::Settings::load(&app.settings_path)
+                .expect("read isolated settings after Cancel")
+                .coordinate_tool,
+            committed,
+            "Cancel leaves persisted appearance unchanged"
+        );
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_mouse_settings_combo_options_are_exact_popup_targets_and_cancelled() {
+        use crate::gui::jump_mode::SurfaceId;
+        use crate::gui::jump_mode::TargetKind;
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_mouse_settings_dialog(&ctx, &mut app, true);
+        let committed = app.coordinate_tool.preferences().clone();
+        let combo = mouse_settings_target(&app, "Click effect style");
+        assert_eq!(combo.metadata().kind(), TargetKind::ComboBox);
+
+        start_mouse_settings_jump_mode(&ctx, &mut app);
+        complete_mouse_settings_hint(&ctx, &mut app, combo.id());
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(egui::Popup::is_any_open(&ctx));
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+
+        let parent_surface = SurfaceId::dialog(
+            "mouse-settings",
+            app.jump_mode_ui
+                .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::MouseSettings)
+                .expect("the current Mouse Settings instance remains open"),
+        );
+        let popup_registry = app.jump_mode_ui.retained_registry();
+        assert_eq!(popup_registry.targets().len(), 3);
+        assert!(popup_registry.targets().iter().all(|target| {
+            target.metadata().kind() == TargetKind::Selectable
+                && matches!(
+                    target.id().surface(),
+                    SurfaceId::Popup { kind, owner, .. }
+                        if kind.starts_with("combo:") && owner.as_ref() == &parent_surface
+                )
+        }));
+        let option = mouse_settings_target(&app, "Circle");
+        let circle_hint_target = option.id().clone();
+        start_mouse_settings_jump_mode(&ctx, &mut app);
+        complete_mouse_settings_hint(&ctx, &mut app, &circle_hint_target);
+        assert_eq!(
+            app.mouse_settings_dialog.test_draft().click.style,
+            crate::coordinate_tool::ClickEffectStyle::Ripple,
+            "hint completion does not choose a ComboBox option"
+        );
+        release_mouse_settings_enter(&ctx, &mut app);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(
+            app.mouse_settings_dialog.test_draft().click.style,
+            crate::coordinate_tool::ClickEffectStyle::Circle
+        );
+        assert_eq!(app.coordinate_tool.preferences(), &committed);
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+
+        if egui::Popup::is_any_open(&ctx) {
+            run_mouse_settings_frame(
+                &ctx,
+                &mut app,
+                vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+            run_mouse_settings_frame(
+                &ctx,
+                &mut app,
+                vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+            assert!(app.mouse_settings_dialog.open);
+        }
+        scroll_mouse_settings_to_bottom(&ctx, &mut app);
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .metadata()
+                .any(|metadata| metadata.label() == "Apply appearance changes")
+        );
+        let cancel = mouse_settings_target(&app, "Cancel appearance changes");
+        click_mouse_settings_target(&ctx, &mut app, &cancel);
+        assert!(!app.mouse_settings_dialog.open);
+        assert_eq!(app.coordinate_tool.preferences(), &committed);
+        drop(workspace);
+    }
+
+    #[test]
+    fn jump_mode_mouse_settings_native_click_remains_available_when_jump_is_disabled() {
+        use crate::gui::jump_mode::SurfaceId;
+        use crate::gui::jump_mode::ui::NavigationDialogKind;
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_mouse_settings_dialog(&ctx, &mut app, true);
+        let committed = app.coordinate_tool.preferences().clone();
+        scroll_mouse_settings_to_bottom(&ctx, &mut app);
+        let cancel = mouse_settings_target(&app, "Cancel appearance changes");
+        scroll_mouse_settings_form(&ctx, &mut app, 360.0);
+        let checkbox = mouse_settings_target(&app, "Crosshair high-contrast outline");
+        let layer = NavigationDialogKind::MouseSettings
+            .layer_id()
+            .expect("Mouse Settings uses a real Window layer");
+        assert_eq!(
+            checkbox.id().surface(),
+            &SurfaceId::dialog(
+                "mouse-settings",
+                app.jump_mode_ui
+                    .dialog_instance(NavigationDialogKind::MouseSettings)
+                    .unwrap()
+            )
+        );
+
+        app.set_jump_mode_enabled(false);
+        run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+        assert_eq!(
+            crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
+            Some(layer)
+        );
+        assert_eq!(
+            ctx.layer_id_at(checkbox.clipped_rect().center()),
+            Some(layer)
+        );
+        assert!(
+            ctx.read_response(checkbox.response_id())
+                .is_some_and(|response| response.enabled())
+        );
+
+        let initial_high_contrast = app
+            .mouse_settings_dialog
+            .test_draft()
+            .crosshair
+            .high_contrast_outline;
+        click_mouse_settings_target(&ctx, &mut app, &checkbox);
+        assert_eq!(
+            app.mouse_settings_dialog
+                .test_draft()
+                .crosshair
+                .high_contrast_outline,
+            !initial_high_contrast
+        );
+        assert_eq!(app.coordinate_tool.preferences(), &committed);
+        assert!(app.jump_mode_ui.retained_registry().targets().is_empty());
+        scroll_mouse_settings_to_bottom(&ctx, &mut app);
+        let current_cancel_response = ctx
+            .read_response(cancel.response_id())
+            .expect("native Cancel is still a current real button response");
+        assert!(current_cancel_response.enabled());
+        assert_eq!(
+            ctx.layer_id_at(current_cancel_response.rect.center()),
+            Some(layer)
+        );
+        click_mouse_settings_response(&ctx, &mut app, cancel.response_id());
+        assert!(!app.mouse_settings_dialog.open);
+        assert_eq!(app.coordinate_tool.preferences(), &committed);
         drop(workspace);
     }
 

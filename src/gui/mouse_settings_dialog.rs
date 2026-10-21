@@ -16,6 +16,30 @@ pub(crate) struct MouseSettingsDialog {
     baseline: CoordinateToolPreferences,
     draft: CoordinateToolPreferences,
     last_error: Option<String>,
+    #[cfg(test)]
+    last_scroll_area_id: Option<egui::Id>,
+    #[cfg(test)]
+    last_scroll_max_offset_y: f32,
+}
+
+fn register_mouse_settings_target(
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    identity: &'static str,
+    label: &'static str,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: &mut u64,
+) {
+    let _ = crate::gui::jump_mode::ui::register_and_apply_target(
+        scope,
+        ui,
+        response,
+        identity,
+        label,
+        kind,
+        visual_order,
+    );
 }
 
 impl MouseSettingsDialog {
@@ -30,6 +54,21 @@ impl MouseSettingsDialog {
 
     fn is_dirty(&self) -> bool {
         self.draft != self.baseline
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_draft(&self) -> &CoordinateToolPreferences {
+        &self.draft
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_scroll_area_id(&self) -> Option<egui::Id> {
+        self.last_scroll_area_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_scroll_max_offset_y(&self) -> f32 {
+        self.last_scroll_max_offset_y
     }
 
     fn reset_from(&mut self, current: &CoordinateToolPreferences) {
@@ -74,13 +113,35 @@ impl MouseSettingsDialog {
     }
 
     pub(crate) fn ui(&mut self, ctx: &egui::Context, adapter: &mut CoordinateToolGui) {
-        let _ = self.show_ui(ctx, adapter);
+        self.ui_with_jump_mode(ctx, adapter, None, true, true);
     }
 
     fn show_ui(
         &mut self,
         ctx: &egui::Context,
         adapter: &mut CoordinateToolGui,
+    ) -> Option<egui::containers::scroll_area::ScrollAreaOutput<()>> {
+        self.show_ui_with_jump_mode(ctx, adapter, None, true, true)
+    }
+
+    pub(crate) fn ui_with_jump_mode(
+        &mut self,
+        ctx: &egui::Context,
+        adapter: &mut CoordinateToolGui,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        first_ui_pass: bool,
+    ) {
+        let _ = self.show_ui_with_jump_mode(ctx, adapter, scope, native_ui_owner, first_ui_pass);
+    }
+
+    fn show_ui_with_jump_mode(
+        &mut self,
+        ctx: &egui::Context,
+        adapter: &mut CoordinateToolGui,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        first_ui_pass: bool,
     ) -> Option<egui::containers::scroll_area::ScrollAreaOutput<()>> {
         if !self.open {
             return None;
@@ -93,6 +154,19 @@ impl MouseSettingsDialog {
             self.sync_clean_draft(adapter.preferences());
         }
 
+        let scope = native_ui_owner.then_some(scope).flatten();
+        let draft_before_ui = self.draft.clone();
+        let error_before_ui = self.last_error.clone();
+        let open_before_ui = self.open;
+        let mut authorized_owner_pass = native_ui_owner && first_ui_pass;
+        if !native_ui_owner
+            && crate::gui::jump_mode::ui::focused_response_layer(ctx)
+                == crate::gui::jump_mode::ui::NavigationDialogKind::MouseSettings.layer_id()
+            && let Some(focused) = ctx.memory(|memory| memory.focused())
+        {
+            ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        }
+
         let runtime = adapter.runtime_state();
         let effect_status = adapter.effects_status();
         let mut open = self.open;
@@ -103,10 +177,13 @@ impl MouseSettingsDialog {
             .default_width(420.0)
             .max_width((ctx.content_rect().width() - 16.0).max(240.0))
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("mouse_settings_form")
-                    .max_height(ui.available_height().max(1.0))
-                    .show(ui, |ui| {
+                authorized_owner_pass &= ui.is_visible() && !ui.is_sizing_pass();
+                ui.add_enabled_ui(native_ui_owner, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("mouse_settings_form")
+                        .max_height(ui.available_height().max(1.0))
+                        .show(ui, |ui| {
+                            let mut visual_order = 0;
                         compact_section_heading(
                             ui,
                             "Coordinate overlays",
@@ -125,20 +202,40 @@ impl MouseSettingsDialog {
 
                         ui.horizontal_wrapped(|ui| {
                             compact_section_heading(ui, "Click Visualization", None);
-                            if ui.small_button("Reset click draft").clicked() {
+                            let reset = ui.small_button("Reset click draft");
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &reset,
+                                "click/reset",
+                                "Reset click draft",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            );
+                            if reset.clicked() && authorized_owner_pass {
                                 self.reset_click_draft();
                             }
                         });
                         let mut click_enabled = runtime.click_enabled();
-                        if ui
+                        let click_enabled_response = ui
                             .push_id("mouse_settings_click_enabled", |ui| {
                                 ui.checkbox(&mut click_enabled, "Enabled for this session")
                             })
                             .inner
                             .on_hover_text(
                                 "Starts or stops passive click feedback immediately. Enablement is not saved.",
-                            )
-                            .changed()
+                            );
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &click_enabled_response,
+                            "click/session-enabled",
+                            "Click feedback session switch",
+                            crate::gui::jump_mode::TargetKind::Checkbox,
+                            &mut visual_order,
+                        );
+                        if click_enabled_response.changed()
+                            && authorized_owner_pass
                             && let Err(error) =
                                 adapter.execute(&CoordinateToolCommand::SetClickEnabled(click_enabled))
                         {
@@ -154,58 +251,135 @@ impl MouseSettingsDialog {
                         ui.small(applied_click_summary(adapter.preferences()));
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Style");
-                            egui::ComboBox::from_id_salt("mouse_settings_click_style")
+                            let popup_scope = scope.map(|scope| {
+                                scope.combo_popup_scope("click/style")
+                            });
+                            let combo = egui::ComboBox::from_id_salt("mouse_settings_click_style")
                                 .selected_text(click_style_label(self.draft.click.style))
                                 .show_ui(ui, |ui| {
-                                    ui.selectable_value(
+                                    let ripple = ui.selectable_value(
                                         &mut self.draft.click.style,
                                         ClickEffectStyle::Ripple,
                                         "Ripple",
                                     );
-                                    ui.selectable_value(
+                                    register_mouse_settings_target(
+                                        popup_scope.as_ref(),
+                                        ui,
+                                        &ripple,
+                                        "style/ripple",
+                                        "Ripple",
+                                        crate::gui::jump_mode::TargetKind::Selectable,
+                                        &mut visual_order,
+                                    );
+                                    let circle = ui.selectable_value(
                                         &mut self.draft.click.style,
                                         ClickEffectStyle::Circle,
                                         "Circle",
                                     );
-                                    ui.selectable_value(
+                                    register_mouse_settings_target(
+                                        popup_scope.as_ref(),
+                                        ui,
+                                        &circle,
+                                        "style/circle",
+                                        "Circle",
+                                        crate::gui::jump_mode::TargetKind::Selectable,
+                                        &mut visual_order,
+                                    );
+                                    let flash = ui.selectable_value(
                                         &mut self.draft.click.style,
                                         ClickEffectStyle::Flash,
                                         "Flash",
                                     );
+                                    register_mouse_settings_target(
+                                        popup_scope.as_ref(),
+                                        ui,
+                                        &flash,
+                                        "style/flash",
+                                        "Flash",
+                                        crate::gui::jump_mode::TargetKind::Selectable,
+                                        &mut visual_order,
+                                    );
                                 });
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &combo.response,
+                                "click/style",
+                                "Click effect style",
+                                crate::gui::jump_mode::TargetKind::ComboBox,
+                                &mut visual_order,
+                            );
                         });
                         let mut click_rgb = [
                             self.draft.click.color.red,
                             self.draft.click.color.green,
                             self.draft.click.color.blue,
                         ];
-                        if crate::gui::theme::widgets::labeled_form_row(
+                        let click_color_row = crate::gui::theme::widgets::labeled_form_row(
                             ui,
                             "RGB color",
-                            |ui| ui.color_edit_button_srgb(&mut click_rgb),
-                        )
-                        .changed()
-                        {
+                            |ui| {
+                                let color = ui.color_edit_button_srgb(&mut click_rgb);
+                                register_mouse_settings_target(
+                                    scope,
+                                    ui,
+                                    &color,
+                                    "click/color",
+                                    "Click effect color",
+                                    crate::gui::jump_mode::TargetKind::Button,
+                                    &mut visual_order,
+                                );
+                                color
+                            },
+                        );
+                        if click_color_row.changed() {
                             self.draft.click.color = CrosshairColor::new(
                                 click_rgb[0],
                                 click_rgb[1],
                                 click_rgb[2],
                             );
                         }
-                        ui.add(
+                        let click_size = ui.add(
                             egui::Slider::new(&mut self.draft.click.size_px, 4..=256)
                                 .show_value(true)
                                 .text("Size (physical pixels)"),
                         );
-                        ui.add(
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &click_size,
+                            "click/size",
+                            "Click effect size",
+                            crate::gui::jump_mode::TargetKind::Slider,
+                            &mut visual_order,
+                        );
+                        let click_opacity = ui.add(
                             egui::Slider::new(&mut self.draft.click.opacity, 0.1..=1.0)
                                 .show_value(true)
                                 .text("Opacity"),
                         );
-                        ui.add(
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &click_opacity,
+                            "click/opacity",
+                            "Click effect opacity",
+                            crate::gui::jump_mode::TargetKind::Slider,
+                            &mut visual_order,
+                        );
+                        let click_duration = ui.add(
                             egui::Slider::new(&mut self.draft.click.duration_ms, 50..=2_000)
                                 .show_value(true)
                                 .text("Duration (ms)"),
+                        );
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &click_duration,
+                            "click/duration",
+                            "Click effect duration",
+                            crate::gui::jump_mode::TargetKind::Slider,
+                            &mut visual_order,
                         );
                         ui.small(
                             "The indicator follows the physical press point and disappears after its saved duration. Appearance changes stay in draft until Apply.",
@@ -214,12 +388,23 @@ impl MouseSettingsDialog {
 
                         compact_section_heading(ui, "Crosshair", None);
                         let mut crosshair_enabled = runtime.crosshair_enabled();
-                        if ui
+                        let crosshair_enabled_response = ui
                             .push_id("mouse_settings_crosshair_enabled", |ui| {
                                 ui.checkbox(&mut crosshair_enabled, "Enabled for this session")
                             })
                             .inner
-                            .changed()
+                            ;
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &crosshair_enabled_response,
+                            "crosshair/session-enabled",
+                            "Crosshair session switch",
+                            crate::gui::jump_mode::TargetKind::Checkbox,
+                            &mut visual_order,
+                        );
+                        if crosshair_enabled_response.changed()
+                            && authorized_owner_pass
                             && let Err(error) = adapter.execute(
                                 &CoordinateToolCommand::SetCrosshairEnabled(crosshair_enabled),
                             )
@@ -232,13 +417,24 @@ impl MouseSettingsDialog {
                             self.draft.crosshair.color.green,
                             self.draft.crosshair.color.blue,
                         ];
-                        if crate::gui::theme::widgets::labeled_form_row(
+                        let crosshair_color_row = crate::gui::theme::widgets::labeled_form_row(
                             ui,
                             "RGB color",
-                            |ui| ui.color_edit_button_srgb(&mut crosshair_rgb),
-                        )
-                        .changed()
-                        {
+                            |ui| {
+                                let color = ui.color_edit_button_srgb(&mut crosshair_rgb);
+                                register_mouse_settings_target(
+                                    scope,
+                                    ui,
+                                    &color,
+                                    "crosshair/color",
+                                    "Crosshair color",
+                                    crate::gui::jump_mode::TargetKind::Button,
+                                    &mut visual_order,
+                                );
+                                color
+                            },
+                        );
+                        if crosshair_color_row.changed() {
                             self.draft.crosshair.color = CrosshairColor::new(
                                 crosshair_rgb[0],
                                 crosshair_rgb[1],
@@ -247,57 +443,131 @@ impl MouseSettingsDialog {
                         }
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Thickness");
-                            ui.add(
+                            let thickness = ui.add(
                                 egui::DragValue::new(&mut self.draft.crosshair.thickness)
                                     .range(1..=16),
                             );
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &thickness,
+                                "crosshair/thickness",
+                                "Crosshair thickness",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut visual_order,
+                            );
                             ui.label("Arm length");
-                            ui.add(
+                            let arm_length = ui.add(
                                 egui::DragValue::new(&mut self.draft.crosshair.arm_length)
                                     .range(2..=256),
+                            );
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &arm_length,
+                                "crosshair/arm-length",
+                                "Crosshair arm length",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut visual_order,
                             );
                         });
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Center gap (physical pixels)");
-                            ui.add(
+                            let center_gap = ui.add(
                                 egui::DragValue::new(&mut self.draft.crosshair.center_gap)
                                     .range(0..=128),
                             )
                             .on_hover_text(
                                 "Per-arm distance from the cursor hotspot to the first visible pixel, including the outline, in physical pixels. Set to 0 to meet at the hotspot.",
                             );
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &center_gap,
+                                "crosshair/center-gap",
+                                "Crosshair center gap",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut visual_order,
+                            );
                         });
-                        ui.add(
+                        let crosshair_opacity = ui.add(
                             egui::Slider::new(&mut self.draft.crosshair.opacity, 0.1..=1.0)
                                 .show_value(true)
                                 .text("Opacity"),
                         );
-                        ui.checkbox(
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &crosshair_opacity,
+                            "crosshair/opacity",
+                            "Crosshair opacity",
+                            crate::gui::jump_mode::TargetKind::Slider,
+                            &mut visual_order,
+                        );
+                        let guides = ui.checkbox(
                             &mut self.draft.crosshair.virtual_desktop_guides,
                             "Show virtual-desktop guide lines",
                         );
-                        ui.checkbox(
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &guides,
+                            "crosshair/virtual-desktop-guides",
+                            "Virtual desktop guide lines",
+                            crate::gui::jump_mode::TargetKind::Checkbox,
+                            &mut visual_order,
+                        );
+                        let high_contrast = ui.checkbox(
                             &mut self.draft.crosshair.high_contrast_outline,
                             "High-contrast outline",
+                        );
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &high_contrast,
+                            "crosshair/high-contrast-outline",
+                            "Crosshair high-contrast outline",
+                            crate::gui::jump_mode::TargetKind::Checkbox,
+                            &mut visual_order,
                         );
 
                         ui.separator();
                         ui.horizontal_wrapped(|ui| {
                             compact_section_heading(ui, "Cursor Halo", None);
-                            if ui.small_button("Reset halo draft").clicked() {
+                            let reset = ui.small_button("Reset halo draft");
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &reset,
+                                "halo/reset",
+                                "Reset halo draft",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            );
+                            if reset.clicked() && authorized_owner_pass {
                                 self.reset_halo_draft();
                             }
                         });
                         let mut halo_enabled = runtime.halo_enabled();
-                        if ui
+                        let halo_enabled_response = ui
                             .push_id("mouse_settings_halo_enabled", |ui| {
                                 ui.checkbox(&mut halo_enabled, "Enabled for this session")
                             })
                             .inner
                             .on_hover_text(
                                 "Starts or stops the halo immediately for this session. This switch is not saved.",
-                            )
-                            .changed()
+                            );
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &halo_enabled_response,
+                            "halo/session-enabled",
+                            "Halo session switch",
+                            crate::gui::jump_mode::TargetKind::Checkbox,
+                            &mut visual_order,
+                        );
+                        if halo_enabled_response.changed()
+                            && authorized_owner_pass
                             && let Err(error) = adapter.set_halo_enabled(halo_enabled)
                         {
                             self.last_error = Some(error);
@@ -310,13 +580,22 @@ impl MouseSettingsDialog {
                             None,
                         );
                         ui.small(applied_halo_summary(adapter.preferences()));
-                        ui.add(
+                        let halo_radius = ui.add(
                             egui::Slider::new(&mut self.draft.halo.radius, 8..=256)
                                 .show_value(true)
                                 .text("Radius (physical pixels)"),
                         )
                         .on_hover_text("Outer halo radius in physical desktop pixels.");
-                        ui.add(
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &halo_radius,
+                            "halo/radius",
+                            "Halo radius",
+                            crate::gui::jump_mode::TargetKind::Slider,
+                            &mut visual_order,
+                        );
+                        let halo_inversion = ui.add(
                             egui::Slider::new(
                                 &mut self.draft.halo.inversion_strength,
                                 0.0..=1.0,
@@ -327,22 +606,51 @@ impl MouseSettingsDialog {
                         .on_hover_text(
                             "0 leaves colors unchanged; 1 applies full inversion. Apply saves this draft value.",
                         );
-                        ui.checkbox(
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &halo_inversion,
+                            "halo/inversion-strength",
+                            "Halo inversion strength",
+                            crate::gui::jump_mode::TargetKind::Slider,
+                            &mut visual_order,
+                        );
+                        let halo_outline_enabled = ui.checkbox(
                             &mut self.draft.halo.outline_enabled,
                             "Show halo outline",
+                        );
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &halo_outline_enabled,
+                            "halo/outline-enabled",
+                            "Halo outline",
+                            crate::gui::jump_mode::TargetKind::Checkbox,
+                            &mut visual_order,
                         );
                         let mut halo_outline_rgb = [
                             self.draft.halo.outline_color.red,
                             self.draft.halo.outline_color.green,
                             self.draft.halo.outline_color.blue,
                         ];
-                        if crate::gui::theme::widgets::labeled_form_row(
+                        let halo_outline_color_row = crate::gui::theme::widgets::labeled_form_row(
                             ui,
                             "Outline RGB",
-                            |ui| ui.color_edit_button_srgb(&mut halo_outline_rgb),
-                        )
-                        .changed()
-                        {
+                            |ui| {
+                                let color = ui.color_edit_button_srgb(&mut halo_outline_rgb);
+                                register_mouse_settings_target(
+                                    scope,
+                                    ui,
+                                    &color,
+                                    "halo/outline-color",
+                                    "Halo outline color",
+                                    crate::gui::jump_mode::TargetKind::Button,
+                                    &mut visual_order,
+                                );
+                                color
+                            },
+                        );
+                        if halo_outline_color_row.changed() {
                             self.draft.halo.outline_color = CrosshairColor::new(
                                 halo_outline_rgb[0],
                                 halo_outline_rgb[1],
@@ -351,29 +659,58 @@ impl MouseSettingsDialog {
                         }
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Thickness (px)");
-                            ui.add(
+                            let outline_thickness = ui.add(
                                 egui::DragValue::new(&mut self.draft.halo.outline_thickness)
                                     .range(1..=8),
+                            );
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &outline_thickness,
+                                "halo/outline-thickness",
+                                "Halo outline thickness",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut visual_order,
                             );
                         });
 
                         ui.separator();
                         ui.horizontal_wrapped(|ui| {
                             compact_section_heading(ui, "Cursor Magnifier", None);
-                            if ui.small_button("Reset magnifier draft").clicked() {
+                            let reset = ui.small_button("Reset magnifier draft");
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &reset,
+                                "magnifier/reset",
+                                "Reset magnifier draft",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            );
+                            if reset.clicked() && authorized_owner_pass {
                                 self.reset_zoom_draft();
                             }
                         });
                         let mut zoom_enabled = runtime.zoom_enabled();
-                        if ui
+                        let zoom_enabled_response = ui
                             .push_id("mouse_settings_zoom_enabled", |ui| {
                                 ui.checkbox(&mut zoom_enabled, "Enabled for this session")
                             })
                             .inner
                             .on_hover_text(
                                 "Starts or stops the magnifier immediately for this session. This switch is not saved.",
-                            )
-                            .changed()
+                            );
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &zoom_enabled_response,
+                            "magnifier/session-enabled",
+                            "Magnifier session switch",
+                            crate::gui::jump_mode::TargetKind::Checkbox,
+                            &mut visual_order,
+                        );
+                        if zoom_enabled_response.changed()
+                            && authorized_owner_pass
                             && let Err(error) = adapter.set_zoom_enabled(zoom_enabled)
                         {
                             self.last_error = Some(error);
@@ -388,24 +725,55 @@ impl MouseSettingsDialog {
                         ui.small(applied_zoom_summary(adapter.preferences()));
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Destination mode");
-                            egui::ComboBox::from_id_salt("mouse_settings_zoom_mode")
+                            let popup_scope = scope.map(|scope| {
+                                scope.combo_popup_scope("magnifier/destination-mode")
+                            });
+                            let combo = egui::ComboBox::from_id_salt("mouse_settings_zoom_mode")
                                 .selected_text(zoom_mode_label(self.draft.zoom.mode))
                                 .show_ui(ui, |ui| {
-                                    ui.selectable_value(
+                                    let offset = ui.selectable_value(
                                         &mut self.draft.zoom.mode,
                                         ZoomMode::Offset,
                                         "Offset",
                                     );
-                                    ui.selectable_value(
+                                    register_mouse_settings_target(
+                                        popup_scope.as_ref(),
+                                        ui,
+                                        &offset,
+                                        "mode/offset",
+                                        "Offset",
+                                        crate::gui::jump_mode::TargetKind::Selectable,
+                                        &mut visual_order,
+                                    );
+                                    let centered = ui.selectable_value(
                                         &mut self.draft.zoom.mode,
                                         ZoomMode::Centered,
                                         "Centered on cursor",
                                     );
-                                })
-                                .response
-                                .on_hover_text("Choose where the lens is placed; its source remains centered on the cursor.");
+                                    register_mouse_settings_target(
+                                        popup_scope.as_ref(),
+                                        ui,
+                                        &centered,
+                                        "mode/centered",
+                                        "Centered on cursor",
+                                        crate::gui::jump_mode::TargetKind::Selectable,
+                                        &mut visual_order,
+                                    );
+                                });
+                            let combo_response = combo.response.on_hover_text(
+                                "Choose where the lens is placed; its source remains centered on the cursor.",
+                            );
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &combo_response,
+                                "magnifier/destination-mode",
+                                "Magnifier destination mode",
+                                crate::gui::jump_mode::TargetKind::ComboBox,
+                                &mut visual_order,
+                            );
                         });
-                        ui.add(
+                        let zoom_factor = ui.add(
                             egui::Slider::new(&mut self.draft.zoom.zoom_factor, 1.25..=4.0)
                                 .show_value(true)
                                 .text("Magnification factor"),
@@ -413,43 +781,99 @@ impl MouseSettingsDialog {
                         .on_hover_text(
                             "Scale applied to the cursor-centered desktop source. Apply saves this draft value.",
                         );
-                        ui.add(
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &zoom_factor,
+                            "magnifier/factor",
+                            "Magnifier factor",
+                            crate::gui::jump_mode::TargetKind::Slider,
+                            &mut visual_order,
+                        );
+                        let zoom_diameter = ui.add(
                             egui::Slider::new(&mut self.draft.zoom.diameter, 64..=480)
                                 .show_value(true)
                                 .text("Lens diameter (physical pixels)"),
                         );
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &zoom_diameter,
+                            "magnifier/diameter",
+                            "Magnifier lens diameter",
+                            crate::gui::jump_mode::TargetKind::Slider,
+                            &mut visual_order,
+                        );
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Destination X offset (physical px)");
-                            ui.add(
+                            let x_offset = ui.add(
                                 egui::DragValue::new(&mut self.draft.zoom.destination_offset.x)
                                     .range(-2048..=2048),
                             );
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &x_offset,
+                                "magnifier/destination-x",
+                                "Magnifier destination X offset",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut visual_order,
+                            );
                             ui.label("Y offset");
-                            ui.add(
+                            let y_offset = ui.add(
                                 egui::DragValue::new(&mut self.draft.zoom.destination_offset.y)
                                     .range(-2048..=2048),
+                            );
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &y_offset,
+                                "magnifier/destination-y",
+                                "Magnifier destination Y offset",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut visual_order,
                             );
                         })
                         .response
                         .on_hover_text(
                             "Signed physical-pixel displacement of the lens center from the live cursor. The source remains cursor-centered.",
                         );
-                        ui.checkbox(
+                        let zoom_outline_enabled = ui.checkbox(
                             &mut self.draft.zoom.outline_enabled,
                             "Show magnifier outline",
+                        );
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &zoom_outline_enabled,
+                            "magnifier/outline-enabled",
+                            "Magnifier outline",
+                            crate::gui::jump_mode::TargetKind::Checkbox,
+                            &mut visual_order,
                         );
                         let mut zoom_outline_rgb = [
                             self.draft.zoom.outline_color.red,
                             self.draft.zoom.outline_color.green,
                             self.draft.zoom.outline_color.blue,
                         ];
-                        if crate::gui::theme::widgets::labeled_form_row(
+                        let zoom_outline_color_row = crate::gui::theme::widgets::labeled_form_row(
                             ui,
                             "Outline RGB",
-                            |ui| ui.color_edit_button_srgb(&mut zoom_outline_rgb),
-                        )
-                        .changed()
-                        {
+                            |ui| {
+                                let color = ui.color_edit_button_srgb(&mut zoom_outline_rgb);
+                                register_mouse_settings_target(
+                                    scope,
+                                    ui,
+                                    &color,
+                                    "magnifier/outline-color",
+                                    "Magnifier outline color",
+                                    crate::gui::jump_mode::TargetKind::Button,
+                                    &mut visual_order,
+                                );
+                                color
+                            },
+                        );
+                        if zoom_outline_color_row.changed() {
                             self.draft.zoom.outline_color = CrosshairColor::new(
                                 zoom_outline_rgb[0],
                                 zoom_outline_rgb[1],
@@ -458,21 +882,41 @@ impl MouseSettingsDialog {
                         }
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Thickness (px)");
-                            ui.add(
+                            let outline_thickness = ui.add(
                                 egui::DragValue::new(&mut self.draft.zoom.outline_thickness)
                                     .range(1..=8),
+                            );
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &outline_thickness,
+                                "magnifier/outline-thickness",
+                                "Magnifier outline thickness",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut visual_order,
                             );
                         });
 
                         ui.separator();
                         compact_section_heading(ui, "Coordinate Display", None);
                         let mut hud_enabled = runtime.hud_enabled();
-                        if ui
+                        let hud_enabled_response = ui
                             .push_id("mouse_settings_hud_enabled", |ui| {
                                 ui.checkbox(&mut hud_enabled, "Enabled for this session")
                             })
                             .inner
-                            .changed()
+                            ;
+                        register_mouse_settings_target(
+                            scope,
+                            ui,
+                            &hud_enabled_response,
+                            "hud/session-enabled",
+                            "HUD session switch",
+                            crate::gui::jump_mode::TargetKind::Checkbox,
+                            &mut visual_order,
+                        );
+                        if hud_enabled_response.changed()
+                            && authorized_owner_pass
                             && let Err(error) =
                                 adapter.execute(&CoordinateToolCommand::SetHudEnabled(hud_enabled))
                         {
@@ -481,40 +925,123 @@ impl MouseSettingsDialog {
 
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Coordinate space");
-                            egui::ComboBox::from_id_salt("mouse_settings_coordinate_space")
+                            let popup_scope = scope.map(|scope| {
+                                scope.combo_popup_scope("hud/coordinate-space")
+                            });
+                            let combo = egui::ComboBox::from_id_salt("mouse_settings_coordinate_space")
                                 .selected_text(space_label(self.draft.space))
                                 .show_ui(ui, |ui| {
-                                    ui.selectable_value(
+                                    let desktop = ui.selectable_value(
                                         &mut self.draft.space,
                                         CoordinateSpace::Desktop,
                                         "Desktop",
                                     );
-                                    ui.selectable_value(
+                                    register_mouse_settings_target(
+                                        popup_scope.as_ref(),
+                                        ui,
+                                        &desktop,
+                                        "space/desktop",
+                                        "Desktop",
+                                        crate::gui::jump_mode::TargetKind::Selectable,
+                                        &mut visual_order,
+                                    );
+                                    let monitor = ui.selectable_value(
                                         &mut self.draft.space,
                                         CoordinateSpace::Monitor,
                                         "Monitor",
                                     );
-                                    ui.selectable_value(
+                                    register_mouse_settings_target(
+                                        popup_scope.as_ref(),
+                                        ui,
+                                        &monitor,
+                                        "space/monitor",
+                                        "Monitor",
+                                        crate::gui::jump_mode::TargetKind::Selectable,
+                                        &mut visual_order,
+                                    );
+                                    let foreground = ui.selectable_value(
                                         &mut self.draft.space,
                                         CoordinateSpace::ForegroundClient,
                                         "Foreground client",
                                     );
+                                    register_mouse_settings_target(
+                                        popup_scope.as_ref(),
+                                        ui,
+                                        &foreground,
+                                        "space/foreground-client",
+                                        "Foreground client",
+                                        crate::gui::jump_mode::TargetKind::Selectable,
+                                        &mut visual_order,
+                                    );
                                 });
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &combo.response,
+                                "hud/coordinate-space",
+                                "Coordinate space",
+                                crate::gui::jump_mode::TargetKind::ComboBox,
+                                &mut visual_order,
+                            );
                         });
                         ui.horizontal_wrapped(|ui| {
                             ui.label("HUD format");
-                            ui.selectable_value(&mut self.draft.hud_detail, HudDetail::Compact, "Compact");
-                            ui.selectable_value(&mut self.draft.hud_detail, HudDetail::Detailed, "Detailed");
+                            let compact = ui.selectable_value(
+                                &mut self.draft.hud_detail,
+                                HudDetail::Compact,
+                                "Compact",
+                            );
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &compact,
+                                "hud/detail-compact",
+                                "Compact HUD",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                &mut visual_order,
+                            );
+                            let detailed = ui.selectable_value(
+                                &mut self.draft.hud_detail,
+                                HudDetail::Detailed,
+                                "Detailed",
+                            );
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &detailed,
+                                "hud/detail-detailed",
+                                "Detailed HUD",
+                                crate::gui::jump_mode::TargetKind::Selectable,
+                                &mut visual_order,
+                            );
                         });
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Cursor offset (physical pixels)");
-                            ui.add(
+                            let x_offset = ui.add(
                                 egui::DragValue::new(&mut self.draft.cursor_offset.x)
                                     .range(-512..=512),
                             );
-                            ui.add(
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &x_offset,
+                                "hud/cursor-offset-x",
+                                "HUD cursor offset X",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut visual_order,
+                            );
+                            let y_offset = ui.add(
                                 egui::DragValue::new(&mut self.draft.cursor_offset.y)
                                     .range(-512..=512),
+                            );
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &y_offset,
+                                "hud/cursor-offset-y",
+                                "HUD cursor offset Y",
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                &mut visual_order,
                             );
                         });
 
@@ -522,23 +1049,63 @@ impl MouseSettingsDialog {
                         ui.horizontal(|ui| {
                             let apply_button =
                                 ui.add_enabled(self.is_dirty(), egui::Button::new("Apply"));
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &apply_button,
+                                "form/apply",
+                                "Apply appearance changes",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            );
                             if with_button_emphasis(ui, apply_button, ButtonEmphasis::Primary)
                                 .clicked()
+                                && authorized_owner_pass
                                 && let Err(error) = self.apply_to(adapter)
                             {
                                 self.last_error = Some(error);
                             }
-                            if ui.button("Cancel").clicked() {
+                            let cancel = ui.button("Cancel");
+                            register_mouse_settings_target(
+                                scope,
+                                ui,
+                                &cancel,
+                                "form/cancel",
+                                "Cancel appearance changes",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            );
+                            if cancel.clicked() && authorized_owner_pass {
                                 cancel_requested = true;
                             }
                         });
-                    })
+                        })
+                })
+                .inner
             });
-        self.open = open;
-        if cancel_requested {
-            self.cancel_draft(adapter.preferences());
+        if authorized_owner_pass {
+            self.open = open;
+            if cancel_requested {
+                self.cancel_draft(adapter.preferences());
+            }
+        } else {
+            self.draft = draft_before_ui;
+            self.last_error = error_before_ui;
+            self.open = open_before_ui;
         }
-        output.and_then(|window| window.inner)
+        if !self.open
+            && let Some(scope) = scope
+        {
+            scope.discard_registered_targets();
+        }
+        let scroll_output = output.and_then(|window| window.inner);
+        #[cfg(test)]
+        if let Some(output) = &scroll_output {
+            self.last_scroll_area_id = Some(output.id);
+            self.last_scroll_max_offset_y =
+                (output.content_size.y - output.inner_rect.height()).max(0.0);
+        }
+        scroll_output
     }
 }
 
@@ -618,6 +1185,14 @@ fn concise_status_reason(reason: &str) -> String {
     } else {
         concise
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_coordinate_tool_adapter(
+    path: String,
+    preferences: CoordinateToolPreferences,
+) -> CoordinateToolGui {
+    tests::fake_adapter(path, preferences)
 }
 
 fn applied_halo_summary(preferences: &CoordinateToolPreferences) -> String {
@@ -722,7 +1297,10 @@ mod tests {
         }
     }
 
-    fn fake_adapter(path: String, preferences: CoordinateToolPreferences) -> CoordinateToolGui {
+    pub(super) fn fake_adapter(
+        path: String,
+        preferences: CoordinateToolPreferences,
+    ) -> CoordinateToolGui {
         CoordinateToolGui::with_backends_and_click_observation(
             path,
             preferences,
