@@ -1228,6 +1228,12 @@ fn canonical_reset(id: PersistentStoreId, kind: StoreKind) -> Result<ResetCandid
         Id::Layouts => json!(LayoutStore::default()),
         Id::DashboardConfig => json!(DashboardConfig::default()),
         Id::MouseGestureDefinitions => json!(GestureDb::default()),
+        Id::HotFolderRules => json!(serde_json::json!({
+            "format_version": crate::hotfolder::HOT_FOLDER_RULES_FORMAT_VERSION,
+            "revision": 1,
+            "quarantined_rows": [],
+            "rules": []
+        })),
         Id::MkMacroDocument => json!(MkMacroDocument::default()),
         Id::RadialDocument => json!(RadialDocument::starter()),
         Id::MkMacroTemplates => json!(crate::mkmacro::MkMacroTemplateCatalog::default()),
@@ -2699,26 +2705,25 @@ mod tests {
     #[test]
     fn every_reset_candidate_passes_its_domain_probe() {
         let (dir, _root, catalog) = fixture();
-        for id in PersistentStoreId::ALL {
-            if matches!(
-                id,
-                PersistentStoreId::MkMacroAssets
-                    | PersistentStoreId::RadialAssets
-                    | PersistentStoreId::NotesAssets
-                    | PersistentStoreId::LauncherLog
-                    | PersistentStoreId::ToastLog
-            ) {
+        assert!(
+            catalog
+                .get(PersistentStoreId::HotFolderRules)
+                .reset_eligible
+        );
+        for id in [
+            PersistentStoreId::BatchRenameRecovery,
+            PersistentStoreId::SearchReplaceRecovery,
+        ] {
+            let journal = catalog.get(id);
+            assert!(!journal.reset_eligible);
+            assert!(canonical_reset(id, journal.kind).is_err());
+        }
+        for store in catalog.stores() {
+            let id = store.id;
+            if !store.reset_eligible {
                 continue;
             }
-            let kind = if matches!(
-                id,
-                PersistentStoreId::Notes | PersistentStoreId::NoteTemplates
-            ) {
-                StoreKind::Directory
-            } else {
-                StoreKind::File
-            };
-            let candidate = canonical_reset(id, kind).unwrap();
+            let candidate = canonical_reset(id, store.kind).unwrap();
             let path = dir.path().join(format!("candidate-{id:?}"));
             match candidate {
                 ResetCandidate::File(bytes) => fs::write(&path, bytes).unwrap(),

@@ -115,7 +115,7 @@ fn secure_msxml_gate_proves_parse_xpath_xsd_and_local_resource_policy() {
     }
     assert!(matches!(
         worker.query(document, "document('http://127.0.0.1/a')", Vec::new()),
-        Err(XmlEngineError::SchemaPolicy(_))
+        Err(XmlEngineError::XPath(message)) if message == "the XSLT document() function is disabled"
     ));
     assert!(matches!(
         worker.query(document, "//g:entry[", namespaces.clone()),

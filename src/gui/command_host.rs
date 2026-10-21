@@ -2881,7 +2881,7 @@ pub(in crate::gui) mod tests {
             Some("invocation clipboard".into()),
             origin,
         );
-        let mut app = inert_test_app(root.path());
+        let mut app = inert_test_app_with_paste_shortcuts_disabled(root.path());
         app.enabled_plugins = None;
         app.sequence_routes = Some(SequenceRoutePresentation {
             generation: 7,
@@ -2990,6 +2990,7 @@ pub(in crate::gui) mod tests {
             history_text,
             temporary_text,
         ];
+        let total_steps = expected.len();
         for (index, expected) in expected.iter().enumerate() {
             if index == 1 {
                 platform.target = target_b.clone();
@@ -3032,7 +3033,7 @@ pub(in crate::gui) mod tests {
             assert_eq!(platform.pastes, index + 1);
             assert_eq!(
                 app.sequence_playback.current_step_number(),
-                Some((index + 1, 3))
+                Some((index + 1, total_steps))
             );
             let metadata = format!(
                 "{:?}",
@@ -3111,9 +3112,14 @@ pub(in crate::gui) mod tests {
             let now = platform.now;
             app.sequence_playback.tick(&mut platform, now);
             app.sync_physical_paste_admission().unwrap();
+            let expected_next_step = if index + 1 < total_steps {
+                Some((index + 2, total_steps))
+            } else {
+                None
+            };
             assert_eq!(
                 app.sequence_playback.current_step_number(),
-                Some(((index + 2).min(3), 3))
+                expected_next_step
             );
             assert!(!bridge.valid(&admission));
         }
@@ -3784,8 +3790,21 @@ pub(in crate::gui) mod tests {
     }
 
     pub(in crate::gui) fn inert_test_app(root: &std::path::Path) -> LauncherApp {
-        let ctx = eframe::egui::Context::default();
+        inert_test_app_with_settings(root, crate::settings::Settings::default())
+    }
+
+    fn inert_test_app_with_paste_shortcuts_disabled(root: &std::path::Path) -> LauncherApp {
         let mut settings = crate::settings::Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        inert_test_app_with_settings(root, settings)
+    }
+
+    fn inert_test_app_with_settings(
+        root: &std::path::Path,
+        mut settings: crate::settings::Settings,
+    ) -> LauncherApp {
+        let ctx = eframe::egui::Context::default();
         settings.hotkey = None;
         settings.quit_hotkey = None;
         settings.help_hotkey = None;

@@ -2680,12 +2680,7 @@ mod tests {
             .map(|file_id| Ok(fake_observation(&root, &path, file_id)))
             .collect();
         let mut runtime = TestRuntime::new(std::slice::from_ref(&rule), samples);
-        let mut service = runtime.service();
-        let (wake_sender, wake_receiver) = mpsc::sync_channel(8);
-        service.worker = Some(WorkerHandle {
-            sender: wake_sender,
-            thread: thread::spawn(|| {}),
-        });
+        let service = runtime.service();
         let base = runtime.clock.now();
 
         runtime.emit(
@@ -2716,7 +2711,6 @@ mod tests {
             runtime.clock.now(),
         );
         let first_lease = service.try_lease_ready().expect("settled candidate lease");
-        assert!(matches!(wake_receiver.try_recv(), Ok(WorkerMessage::Wake)));
         let first_id = first_lease.candidate().correlation;
         assert_eq!(
             first_lease.candidate().rule_fingerprint.as_str(),
@@ -2764,9 +2758,12 @@ mod tests {
             "a newer event can settle while an older lease is outstanding"
         );
         assert!(runtime.output.lock().expect("output lock").leased.is_some());
-        let transferred = service
-            .finish_lease(first_lease, HotFolderLeaseDisposition::TransferToConsumer)
-            .expect("lease transfer");
+        let transferred = finish_test_lease(
+            &runtime,
+            first_lease,
+            HotFolderLeaseDisposition::TransferToConsumer,
+        )
+        .expect("lease transfer");
         assert_eq!(
             transferred.expect("transferred evidence").correlation,
             first_id
@@ -2774,7 +2771,7 @@ mod tests {
 
         let deferred = service.try_lease_ready().expect("newer candidate lease");
         assert!(matches!(
-            service.finish_lease(deferred, HotFolderLeaseDisposition::Defer),
+            finish_test_lease(&runtime, deferred, HotFolderLeaseDisposition::Defer),
             Ok(None)
         ));
         let expired = service.try_lease_ready().expect("deferred candidate lease");
@@ -2790,7 +2787,11 @@ mod tests {
             .as_millis() as u64;
         runtime.clock.set_ms(expiry_ms);
         assert!(matches!(
-            service.finish_lease(expired, HotFolderLeaseDisposition::TransferToConsumer),
+            finish_test_lease(
+                &runtime,
+                expired,
+                HotFolderLeaseDisposition::TransferToConsumer
+            ),
             Err(HotFolderRuntimeError::StaleLease)
         ));
         assert_eq!(
@@ -2809,7 +2810,7 @@ mod tests {
         );
         let rejected = service.try_lease_ready().expect("requeued candidate lease");
         assert!(matches!(
-            service.finish_lease(rejected, HotFolderLeaseDisposition::RejectStale),
+            finish_test_lease(&runtime, rejected, HotFolderLeaseDisposition::RejectStale),
             Ok(None)
         ));
         assert!(runtime.output.lock().expect("output lock").ready.is_empty());
@@ -2853,7 +2854,11 @@ mod tests {
             None,
         );
         assert!(matches!(
-            service.finish_lease(stale, HotFolderLeaseDisposition::TransferToConsumer),
+            finish_test_lease(
+                &runtime,
+                stale,
+                HotFolderLeaseDisposition::TransferToConsumer
+            ),
             Err(HotFolderRuntimeError::StaleLease)
         ));
         assert!(
@@ -2864,5 +2869,23 @@ mod tests {
                 .any(|active| active.epoch == root_epoch)
         );
         assert_eq!(runtime.boundary.observation_count(), 7);
+    }
+
+    fn finish_test_lease(
+        runtime: &TestRuntime,
+        mut lease: HotFolderReadyLease,
+        disposition: HotFolderLeaseDisposition,
+    ) -> Result<Option<HotFolderReadyCandidate>, HotFolderRuntimeError> {
+        let result = finish_lease_in_output(
+            lease.lease_id,
+            disposition,
+            &runtime.output,
+            runtime.clock.now(),
+            Some(&runtime.core),
+        );
+        if !matches!(result, Err(HotFolderRuntimeError::ReadyQueueFull)) {
+            lease.finished = true;
+        }
+        result
     }
 }

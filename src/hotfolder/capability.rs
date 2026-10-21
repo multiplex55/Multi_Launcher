@@ -738,12 +738,16 @@ mod tests {
             signature: Default::default(),
             steps: Vec::new(),
         });
-        let roots = roots();
+        let destination = std::env::temp_dir().join("target/productivity_expansion/app_data/out");
+        let roots = HashMap::from([
+            (root(), RootAvailability::ExistingDirectory),
+            (destination.clone(), RootAvailability::ExistingDirectory),
+        ]);
         let empty_targets = [];
         let context = capability_context(&empty_targets, &macro_document, &roots);
 
         let copy = rule(RuleAction::Copy {
-            destination: std::env::temp_dir().join("target/productivity_expansion/app_data/out"),
+            destination: destination.clone(),
         });
         assert_eq!(
             evaluate_action_capability(&copy, &context),
@@ -751,9 +755,7 @@ mod tests {
                 enablement: ActionEnablement::Standard,
             }
         );
-        let move_rule = rule(RuleAction::Move {
-            destination: std::env::temp_dir().join("target/productivity_expansion/app_data/out"),
-        });
+        let move_rule = rule(RuleAction::Move { destination });
         assert_eq!(
             evaluate_action_capability(&move_rule, &context),
             ActionCapability::Supported {
