@@ -2863,6 +2863,8 @@ impl LauncherApp {
         let query_geometry_cause = self.run_runtime_tick(ctx, frame);
         let (visibility_request, visibility_invocation_id, should_be_visible, just_became_visible) =
             self.reconcile_root_visibility(ctx);
+        self.mouse_gestures_dialog
+            .reconcile_canvas_drag_with_root_lifecycle(ctx, should_be_visible);
         #[cfg(feature = "qa-framebuffer-capture")]
         self.qa_framebuffer_revalidate_root_logic(ctx, should_be_visible);
         if !should_be_visible {
@@ -2890,6 +2892,8 @@ impl LauncherApp {
     fn run_hidden_logic_tick(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.root_frame_logic = None;
         self.pending_ui_frame_receipt = None;
+        self.mouse_gestures_dialog
+            .reconcile_canvas_drag_with_root_lifecycle(ctx, false);
         self.jump_mode_ui.cancel_all();
         let bootstrap_before_tick = self.viewport_bootstrap_state();
         self.run_runtime_tick(ctx, frame);
@@ -25466,6 +25470,169 @@ mod tests {
         assert!(app.native_ui_application_input_allowed_with_gesture_capture(false, false));
         assert!(!app.native_ui_application_input_allowed_with_gesture_capture(false, true));
         assert!(!app.native_ui_application_input_allowed_with_gesture_capture(true, true));
+    }
+
+    #[test]
+    fn jump_mode_mouse_gestures_review_select_focuses_the_exact_row_without_saving() {
+        use crate::gui::jump_mode::ui::NavigationDialogKind;
+
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_mouse_gestures_dialog(
+            &ctx,
+            &mut app,
+            vec![
+                mouse_gesture_fixture("Alpha", "R"),
+                mouse_gesture_fixture("Beta", "L"),
+            ],
+        );
+        let initial_file = gesture_fixture_bytes();
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: NavigationDialogKind::MouseGestures,
+                instance: app
+                    .jump_mode_ui
+                    .dialog_instance(NavigationDialogKind::MouseGestures)
+                    .unwrap(),
+            }
+        );
+
+        let mut rows = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| target.metadata().label() == "Gesture" && target.eligible())
+            .cloned()
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            left.clipped_rect()
+                .center()
+                .y
+                .total_cmp(&right.clipped_rect().center().y)
+        });
+        assert_eq!(rows.len(), 2, "both actual gesture rows are visible");
+        let second_row = rows.pop().unwrap();
+
+        start_mouse_gesture_jump_mode(&ctx, &mut app);
+        let hint = app
+            .jump_mode_ui
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(second_row.id())
+            .unwrap()
+            .as_str()
+            .to_owned();
+        run_mouse_settings_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::Text(hint),
+                key_press(egui::Key::Enter, egui::Modifiers::NONE),
+            ],
+        );
+
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(second_row.response_id()),
+            "Select focuses the exact current row response"
+        );
+        assert_eq!(
+            app.mouse_gestures_dialog.test_selected_gesture_label(),
+            Some("Beta")
+        );
+        assert_eq!(
+            gesture_fixture_bytes(),
+            initial_file,
+            "Select has no persistence effects"
+        );
+        assert!(app.jump_mode_ui.active_session().is_none());
+    }
+
+    #[test]
+    fn jump_mode_mouse_gestures_review_canvas_capture_retires_when_root_hides() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_mouse_gestures_dialog(
+            &ctx,
+            &mut app,
+            vec![mouse_gesture_fixture("Alpha", "R")],
+        );
+        app.mouse_gestures_dialog.test_set_canvas_drag_active(true);
+
+        let pointer = egui::pos2(1_190.0, 1_490.0);
+        let held_events = vec![
+            egui::Event::PointerMoved(pointer),
+            egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+            egui::Event::Text(" ".into()),
+        ];
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: held_events,
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.mouse_gestures_dialog.recorder_canvas_active());
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(ctx.input(|input| input.pointer.any_down()));
+
+        app.visible_flag.store(false, Ordering::SeqCst);
+        drop(app.run_hidden_logic_tick_for_test(&ctx, mouse_settings_input(Vec::new())));
+        assert!(
+            ctx.input(|input| input.pointer.any_down()),
+            "the hidden tick must exercise a missed release rather than a pointer-up"
+        );
+        assert!(
+            !app.mouse_gestures_dialog.recorder_canvas_active(),
+            "hiding the root retires local canvas capture even while the pointer remains down"
+        );
+
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![
+                    egui::Event::PointerButton {
+                        pos: pointer,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    key_release(egui::Key::Space, egui::Modifiers::SHIFT),
+                ],
+                ..mouse_settings_input(Vec::new())
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!ctx.input(|input| input.pointer.any_down()));
+        run_mouse_settings_frame(&ctx, &mut app, Vec::new());
+        let kind = crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestures;
+        let instance = app
+            .jump_mode_ui
+            .dialog_instance(kind)
+            .expect("the open Mouse Gestures Window is observed after restore");
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog { kind, instance }
+        );
+        assert!(mouse_gesture_target(&app, "Gesture").eligible());
+
+        start_mouse_gesture_jump_mode(&ctx, &mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
     }
 
     fn prepare_actual_clipboard_history_dialog(

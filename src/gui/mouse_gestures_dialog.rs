@@ -613,6 +613,30 @@ impl MgGesturesDialog {
         self.canvas_drag_active
     }
 
+    pub(crate) fn reconcile_canvas_drag_with_root_lifecycle(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) {
+        if self.canvas_drag_active
+            && (!root_visible || !self.open || !ctx.input(|input| input.pointer.any_down()))
+        {
+            self.canvas_drag_active = false;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_canvas_drag_active(&mut self, active: bool) {
+        self.canvas_drag_active = active;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_selected_gesture_label(&self) -> Option<&str> {
+        self.selected_idx
+            .and_then(|idx| self.db.gestures.get(idx))
+            .map(|gesture| gesture.label.as_str())
+    }
+
     pub(crate) fn jump_mode_child_owner(&self, parent_instance: u64) -> Option<NavigationOwner> {
         if let Some(pending) = &self.pending_delete {
             Some(NavigationOwner::MouseGestureDelete {
@@ -717,6 +741,7 @@ impl MgGesturesDialog {
     }
 
     pub fn open(&mut self) {
+        self.canvas_drag_active = false;
         self.reload_from(GESTURES_FILE);
         self.open = true;
         self.selected_idx = self.sorted_gesture_indices().into_iter().next();
@@ -1718,6 +1743,9 @@ impl MgGesturesDialog {
                                                         || directive
                                                             == Some(FocusDirective::Select))
                                                 {
+                                                    if directive == Some(FocusDirective::Select) {
+                                                        select.request_focus();
+                                                    }
                                                     self.selected_idx = Some(idx);
                                                     self.recorder.set_dir_mode(entry.dir_mode);
                                                     self.token_buffer = entry.tokens.clone();
@@ -2219,7 +2247,12 @@ impl MgGesturesDialog {
             }
         }
         if authorized_parent {
-            self.open = if close { false } else { open };
+            if close || !open {
+                self.canvas_drag_active = false;
+                self.open = false;
+            } else {
+                self.open = open;
+            }
         }
         self.ensure_identity_tokens();
         if let Some(snapshot) = rollback {
