@@ -27455,11 +27455,26 @@ mod tests {
             clipboard_target_ids(&app, "Close Clipboard History").len(),
             1
         );
-        assert!(
-            dialog_targets
+        let copy_targets = clipboard_target_ids(&app, "Copy clipboard entry");
+        assert_eq!(copy_targets.len(), 2);
+        assert_ne!(copy_targets[0], copy_targets[1]);
+        for copy_target_id in &copy_targets {
+            let target = dialog_targets
                 .iter()
-                .all(|target| { !target.metadata().label().to_lowercase().contains("copy") })
-        );
+                .find(|target| target.id() == copy_target_id)
+                .expect("each visible Copy control has a registered target");
+            assert_eq!(
+                target.metadata().kind(),
+                crate::gui::jump_mode::TargetKind::Button
+            );
+            let crate::gui::jump_mode::SemanticTargetId::Named(identity) = target.id().semantic()
+            else {
+                panic!("clipboard Copy identities use opaque named tokens");
+            };
+            assert!(!identity.contains(private_entry));
+            assert!(!identity.contains("private clipboard"));
+            assert!(!identity.contains("line two"));
+        }
 
         let second_row = row_targets[1].clone();
         let response_id = app

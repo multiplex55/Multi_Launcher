@@ -14407,6 +14407,7 @@ mod tests {
         let context = driver.context;
         let frame_context = driver.frame;
         let mut editor = driver.editor;
+        let viewport_id = radial_designer_viewport_id();
         let frame = |editor: &mut RadialEditorState,
                      time: f64,
                      events: Vec<egui::Event>,
@@ -14415,14 +14416,25 @@ mod tests {
             let mut events = events;
             events.push(egui::Event::ModifiersChanged(modifiers));
             let mut input = egui::RawInput {
+                viewport_id,
                 screen_rect: Some(client_rect),
                 time: Some(time),
+                focused: true,
                 events,
                 ..Default::default()
             };
-            let viewport = input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
-            viewport.inner_rect = Some(client_rect);
-            viewport.native_pixels_per_point = Some(1.0);
+            input
+                .viewports
+                .insert(egui::ViewportId::ROOT, egui::ViewportInfo::default());
+            input.viewports.insert(
+                viewport_id,
+                egui::ViewportInfo {
+                    parent: Some(egui::ViewportId::ROOT),
+                    focused: Some(true),
+                    inner_rect: Some(client_rect),
+                    ..Default::default()
+                },
+            );
             context.run_ui(input, |ctx| {
                 editor.viewport_ui(ctx, &frame_context, egui::ViewportClass::Deferred);
             })

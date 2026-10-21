@@ -448,13 +448,12 @@ impl NavigationViewportBinding {
         ctx: &egui::Context,
         popup_layer: Option<egui::LayerId>,
     ) -> bool {
-        focused_response_layer(ctx)
-            .is_none_or(|layer| {
-                layer == self.base_layer
-                    || Some(layer) == popup_layer
-                    || (matches!(self.owner, NavigationOwner::RadialDesignerChild { .. })
-                        && layer == egui::LayerId::background())
-            })
+        focused_response_layer(ctx).is_none_or(|layer| {
+            layer == self.base_layer
+                || Some(layer) == popup_layer
+                || (matches!(self.owner, NavigationOwner::RadialDesignerChild { .. })
+                    && layer == egui::LayerId::background())
+        })
     }
 }
 
@@ -5434,6 +5433,34 @@ mod tests {
                     &nested_popup,
                     "nested",
                     "Nested popup",
+                    TargetKind::Button,
+                );
+            });
+        });
+        jump.finish_ui_pass();
+        let targets = jump.pass_registry().unwrap();
+        let nested_target = nested_popup.target_id("nested");
+        assert_eq!(targets.len(), 1);
+        assert!(targets.get(&nested_target).is_some());
+
+        let (mut jump, root) = setup(true);
+        let dialog = root.with_surface(SurfaceId::dialog("notes", 1), TargetGeneration(1));
+        let first_popup = dialog.with_surface(
+            SurfaceId::popup("first", 1, SurfaceId::dialog("notes", 1)),
+            TargetGeneration(1),
+        );
+        let second_popup = dialog.with_surface(
+            SurfaceId::popup("second", 2, SurfaceId::dialog("notes", 1)),
+            TargetGeneration(1),
+        );
+        input_context(|ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                register_button(ui, &first_popup, "first", "First popup", TargetKind::Button);
+                register_button(
+                    ui,
+                    &second_popup,
+                    "second",
+                    "Second popup",
                     TargetKind::Button,
                 );
             });
