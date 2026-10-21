@@ -24584,6 +24584,177 @@ mod tests {
     }
 
     #[test]
+    fn jump_mode_clipboard_lifecycle_close_reopen_rejects_old_target() {
+        use crate::gui::jump_mode::ui::NavigationDialogKind;
+
+        let _lock = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        prepare_actual_clipboard_history_dialog(&ctx, &mut app, &["reopened row"]);
+
+        let old_instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::ClipboardHistory)
+            .expect("the initial Clipboard History window has an observed instance");
+        let old_row = clipboard_target_ids(&app, "Clipboard entry")[0].clone();
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let old_row_hint = clipboard_hint_for_target(&app, &old_row);
+        assert!(!old_row_hint.is_empty());
+        let (close_target, close_response) =
+            clipboard_target_with_response(&app, "Close Clipboard History");
+        let close_hint = clipboard_hint_for_target(&app, &close_target);
+        run_clipboard_frame(&ctx, &mut app, vec![egui::Event::Text(close_hint)]);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(close_response));
+        assert!(app.clipboard_dialog.open);
+        press_and_release_clipboard_enter(&ctx, &mut app);
+
+        assert!(!app.clipboard_dialog.open);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(clipboard_target_ids(&app, "Clipboard entry").is_empty());
+        assert!(clipboard_target_ids(&app, "Edit clipboard entry").is_empty());
+        assert!(clipboard_target_ids(&app, "Close Clipboard History").is_empty());
+
+        app.clipboard_dialog.open();
+        // One event-free collection pass observes the reopened native window and
+        // builds its current target registry before any new hint is accepted.
+        run_clipboard_frame(&ctx, &mut app, Vec::new());
+        let new_instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::ClipboardHistory)
+            .expect("the reopened Clipboard History window has an observed instance");
+        assert_ne!(new_instance, old_instance);
+        // Ownership changes are observed at the end of that frame, so collect
+        // the first registry belonging to the reopened instance next.
+        run_clipboard_frame(&ctx, &mut app, Vec::new());
+        let new_row = clipboard_target_ids(&app, "Clipboard entry")[0].clone();
+        assert_ne!(new_row, old_row, "reopen renews the target identity");
+        assert!(app.jump_mode_ui.active_session().is_none());
+        run_clipboard_frame(&ctx, &mut app, vec![egui::Event::Text(old_row_hint)]);
+        assert!(!app.clipboard_dialog.test_is_editing());
+        assert_eq!(app.clipboard_dialog.test_selected_entry_index(), None);
+        let (new_edit, new_edit_response) =
+            clipboard_target_with_response(&app, "Edit clipboard entry");
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let session = app
+            .jump_mode_ui
+            .active_session()
+            .expect("the reopened window accepts a fresh hint session");
+        assert!(
+            session.hint_map().hint_for(&old_row).is_none(),
+            "the previous instance's row identity is not in the new hint map"
+        );
+        assert!(session.hint_map().hint_for(&new_row).is_some());
+        let edit_hint = clipboard_hint_for_target(&app, &new_edit);
+        run_clipboard_frame(&ctx, &mut app, vec![egui::Event::Text(edit_hint)]);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(new_edit_response)
+        );
+        assert!(!app.clipboard_dialog.test_is_editing());
+        press_and_release_clipboard_enter(&ctx, &mut app);
+        assert!(app.clipboard_dialog.test_is_editing());
+        assert_eq!(app.clipboard_dialog.test_text(), "reopened row");
+    }
+
+    #[test]
+    fn jump_mode_clipboard_privacy_foreign_window_preserves_draft_and_returns_focus() {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+
+        let _lock = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        prepare_actual_clipboard_history_dialog(&ctx, &mut app, &["private saved entry"]);
+        let saved_bytes = std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap();
+
+        let (edit_target, edit_response) =
+            clipboard_target_with_response(&app, "Edit clipboard entry");
+        complete_clipboard_hint(&ctx, &mut app, &edit_target, edit_response);
+        press_and_release_clipboard_enter(&ctx, &mut app);
+        assert!(app.clipboard_dialog.test_is_editing());
+        run_clipboard_frame(&ctx, &mut app, Vec::new());
+
+        let (text_target, text_response) = clipboard_target_with_response(&app, "Clipboard text");
+        complete_clipboard_hint(&ctx, &mut app, &text_target, text_response);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(text_response));
+        let mut text_state = egui::text_edit::TextEditState::load(&ctx, text_response)
+            .expect("the actual Clipboard TextEdit has native state");
+        text_state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(app.clipboard_dialog.test_text().chars().count()),
+            )));
+        text_state.store(&ctx, text_response);
+        run_clipboard_frame(&ctx, &mut app, vec![egui::Event::Text(" draft λ".into())]);
+        let draft = app.clipboard_dialog.test_text().to_owned();
+        assert_eq!(draft, "private saved entry draft λ");
+        assert_eq!(
+            std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap(),
+            saved_bytes,
+            "typing remains an unsaved private draft"
+        );
+
+        let clipboard_layer = NavigationDialogKind::ClipboardHistory
+            .layer_id()
+            .expect("Clipboard History has a real Middle layer");
+        run_with_secondary_test_window(&ctx, &mut app, actual_query_input(true))
+            .drop_without_applying_deltas();
+        assert_ne!(visible_top_middle_layer(&ctx), Some(clipboard_layer));
+        assert!(!app.clipboard_history_native_ui_owner_current(&ctx, true));
+        run_with_secondary_test_window(
+            &ctx,
+            &mut app,
+            egui::RawInput {
+                events: vec![egui::Event::Text(" blocked".into())],
+                ..actual_query_input(true)
+            },
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(app.clipboard_dialog.test_text(), draft);
+        assert_eq!(
+            std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap(),
+            saved_bytes,
+            "a foreign foreground window cannot edit or persist the draft"
+        );
+        assert!(clipboard_target_ids(&app, "Clipboard text").is_empty());
+
+        run_clipboard_frame(&ctx, &mut app, Vec::new());
+        assert_eq!(visible_top_middle_layer(&ctx), Some(clipboard_layer));
+        assert!(app.clipboard_history_native_ui_owner_current(&ctx, true));
+        // The first frame removes the foreign layer; this next event-free
+        // pass collects the Clipboard response registry under its restored ownership.
+        run_clipboard_frame(&ctx, &mut app, Vec::new());
+        let (returned_text_target, returned_text_response) =
+            clipboard_target_with_response(&app, "Clipboard text");
+        complete_clipboard_hint(
+            &ctx,
+            &mut app,
+            &returned_text_target,
+            returned_text_response,
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(returned_text_response),
+            "after the foreground window closes, a fresh hint can focus the real editor"
+        );
+        run_clipboard_frame(&ctx, &mut app, vec![egui::Event::Text(" returned".into())]);
+        assert_eq!(
+            app.clipboard_dialog.test_text(),
+            "private saved entry draft λ returned"
+        );
+        assert_eq!(
+            std::fs::read(crate::plugins::clipboard::CLIPBOARD_FILE).unwrap(),
+            saved_bytes
+        );
+    }
+
+    #[test]
     fn jump_mode_snippets_lifecycle_duplicate_edit_cancel_reopen_and_fresh_save() {
         let ctx = egui::Context::default();
         let (workspace, mut app) = root_list_test_app(&ctx, two_results());
