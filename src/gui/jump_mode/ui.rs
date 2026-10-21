@@ -211,12 +211,61 @@ pub(crate) enum NavigationOwner {
         confirmation_instance: u64,
         kind: DashboardEditorConfirmationKind,
     },
+    /// One exact, short-lived Radial Designer child window. The subject is an
+    /// opaque identity for the pending entity/request, never its displayed
+    /// label or authored contents.
+    RadialDesignerChild {
+        parent_instance: u64,
+        child_instance: u64,
+        kind: RadialDesignerChildKind,
+        subject: u64,
+    },
     /// One exact, transient snippet prompt window. Its generation is also
     /// part of the window's egui layer ID.
     SnippetPrompt {
         generation: u64,
     },
     Blocked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum RadialDesignerChildKind {
+    CellProperties,
+    ScopeChangeGuard,
+    AddToRadial,
+    ClosePrompt,
+    DeleteMessage,
+    DeleteRing,
+    ResizeResolution,
+}
+
+impl RadialDesignerChildKind {
+    pub(crate) const fn surface_kind(self) -> &'static str {
+        match self {
+            Self::CellProperties => "radial-cell-properties",
+            Self::ScopeChangeGuard => "radial-scope-change-guard",
+            Self::AddToRadial => "radial-add-to-menu",
+            Self::ClosePrompt => "radial-close-prompt",
+            Self::DeleteMessage => "radial-delete-message",
+            Self::DeleteRing => "radial-delete-ring",
+            Self::ResizeResolution => "radial-resize-resolution",
+        }
+    }
+}
+
+pub(crate) fn radial_designer_child_window_id(
+    parent_instance: u64,
+    child_instance: u64,
+    kind: RadialDesignerChildKind,
+    subject: u64,
+) -> egui::Id {
+    egui::Id::new((
+        "radial-designer-child-window",
+        parent_instance,
+        child_instance,
+        kind,
+        subject,
+    ))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -354,6 +403,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::RadialDesigner,
                 ..
             } | NavigationOwner::XmlOverwriteConfirmation { .. }
+                | NavigationOwner::RadialDesignerChild { .. }
         )
     }
 
@@ -368,6 +418,21 @@ impl NavigationViewportBinding {
                     == xml_overwrite_confirmation_layer_id(parent_instance, confirmation_instance)
                     && visible_layer == Some(self.base_layer)
             }
+            NavigationOwner::RadialDesignerChild {
+                parent_instance,
+                child_instance,
+                kind,
+                subject,
+            } => {
+                self.base_layer
+                    == radial_designer_child_layer_id(
+                        parent_instance,
+                        child_instance,
+                        kind,
+                        subject,
+                    )
+                    && visible_layer == Some(self.base_layer)
+            }
             _ => visible_layer.is_none(),
         };
         self.owner_is_admissible()
@@ -378,10 +443,31 @@ impl NavigationViewportBinding {
             && layer_is_current
     }
 
-    fn focus_is_owned(self, ctx: &egui::Context, popup_layer: Option<egui::LayerId>) -> bool {
+    pub(crate) fn focus_is_owned(
+        self,
+        ctx: &egui::Context,
+        popup_layer: Option<egui::LayerId>,
+    ) -> bool {
         focused_response_layer(ctx)
-            .is_none_or(|layer| layer == self.base_layer || Some(layer) == popup_layer)
+            .is_none_or(|layer| {
+                layer == self.base_layer
+                    || Some(layer) == popup_layer
+                    || (matches!(self.owner, NavigationOwner::RadialDesignerChild { .. })
+                        && layer == egui::LayerId::background())
+            })
     }
+}
+
+pub(crate) fn radial_designer_child_layer_id(
+    parent_instance: u64,
+    child_instance: u64,
+    kind: RadialDesignerChildKind,
+    subject: u64,
+) -> egui::LayerId {
+    egui::LayerId::new(
+        egui::Order::Middle,
+        radial_designer_child_window_id(parent_instance, child_instance, kind, subject),
+    )
 }
 
 /// Resolve the already-identified viewport owner only while its actual
@@ -564,6 +650,21 @@ impl NavigationOwner {
                             SurfaceId::Dialog { kind, instance }
                                 if kind == "dashboard-editor" && *instance == parent_instance
                         )
+                }
+                Self::RadialDesignerChild {
+                    parent_instance,
+                    child_instance,
+                    kind: owner_kind,
+                    ..
+                } => {
+                    (kind == owner_kind.surface_kind()
+                        && *instance == child_instance
+                        && matches!(
+                            owner.as_ref(),
+                            SurfaceId::Dialog { kind, instance }
+                                if kind == "radial-designer" && *instance == parent_instance
+                        ))
+                        || (kind.starts_with("combo:") && self.owns_surface(owner))
                 }
                 _ => self.owns_surface(owner),
             },
@@ -2522,7 +2623,8 @@ impl JumpModeUi {
             | NavigationOwner::BatchRenameConfirmation { .. }
             | NavigationOwner::SearchReplaceConfirmation { .. }
             | NavigationOwner::DashboardEditorConfirmation { .. }
-            | NavigationOwner::SnippetPrompt { .. } => true,
+            | NavigationOwner::SnippetPrompt { .. }
+            | NavigationOwner::RadialDesignerChild { .. } => true,
             NavigationOwner::Blocked => false,
         };
         let population_changed = navigation_allowed

@@ -721,8 +721,10 @@ fn step_buttons(
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
     target: DesignerAuthoringTarget,
+    identity: &str,
     viewport: ViewportClass,
     session: &RadialAuthoringSession,
+    ui_pass: &RadialUiPass,
 ) -> bool {
     let mut changed = false;
     let step = if *range.end() > 8.0 { 1.0 } else { 0.05 };
@@ -731,6 +733,17 @@ fn step_buttons(
             let next = (*value + delta).clamp(*range.start(), *range.end());
             let enabled = next != *value;
             let response = ui.add_enabled(enabled, egui::Button::new(label));
+            ui_pass.register(
+                ui,
+                &response,
+                &format!("appearance/simple/{identity}/step/{index}"),
+                if index == 0 {
+                    "Decrease appearance setting"
+                } else {
+                    "Increase appearance setting"
+                },
+                TargetKind::Button,
+            );
             trace_designer_authoring_control(
                 ui,
                 &response,
@@ -877,6 +890,32 @@ pub(super) struct PreparedAppearance {
 }
 
 impl AppearanceGallery {
+    #[cfg(test)]
+    pub(super) fn prepare_choice_for_test(
+        &mut self,
+        session: &RadialAuthoringSession,
+        destination: MenuId,
+        index: usize,
+    ) -> Result<(), String> {
+        self.destination = Some(destination);
+        self.sync(session, 1.0);
+        self.choose(session, index)
+    }
+
+    #[cfg(test)]
+    pub(super) fn entry_key_digest_for_test(&self, index: usize) -> Option<u64> {
+        self.entries
+            .get(index)
+            .map(|entry| super::radial_value_digest(&entry.key))
+    }
+
+    #[cfg(test)]
+    pub(super) fn choice_key_digest_for_test(&self) -> Option<u64> {
+        self.choice
+            .as_ref()
+            .map(|choice| super::radial_value_digest(&choice.key))
+    }
+
     /// Capture the existing embedded preview owner's completed candidate before
     /// controls can change the choice during this frame.
     pub(super) fn prepared_identity(
@@ -1415,6 +1454,19 @@ impl AppearanceGallery {
         viewport: ViewportClass,
         prepared: Option<PreparedAppearance>,
     ) {
+        let mut ui_pass = RadialUiPass::default();
+        self.ui_with_jump_mode(ui, session, client, viewport, prepared, &mut ui_pass);
+    }
+
+    pub(super) fn ui_with_jump_mode(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &mut RadialAuthoringSession,
+        client: Option<&AuthoringClient>,
+        viewport: ViewportClass,
+        prepared: Option<PreparedAppearance>,
+        ui_pass: &mut RadialUiPass,
+    ) {
         self.sync(session, ui.ctx().pixels_per_point());
         ui.heading("Appearance gallery");
         if let Some(id) = &self.destination {
@@ -1446,6 +1498,13 @@ impl AppearanceGallery {
                             }),
                             &entry.skin.name,
                         ));
+                        ui_pass.register(
+                            ui,
+                            &response,
+                            &format!("appearance/tile/{:016x}", radial_value_digest(&entry.key)),
+                            "Appearance choice",
+                            TargetKind::Selectable,
+                        );
                         trace_designer_authoring_control(
                             ui,
                             &response,
@@ -1511,7 +1570,8 @@ impl AppearanceGallery {
                                 ui.put(rect, egui::Label::new("Preview pending"));
                             }
                         }
-                        if response.clicked()
+                        if ui_pass.commit_allowed()
+                            && response.clicked()
                             && let Err(error) = self.choose(session, index)
                         {
                             self.feedback = Some(error);
@@ -1522,10 +1582,19 @@ impl AppearanceGallery {
                     }
                 }
             });
-        self.request_visible(&visible, session, client);
+        if ui_pass.commit_allowed() {
+            self.request_visible(&visible, session, client);
+        }
         ui.horizontal(|ui| {
             let can_apply = self.choice_is_prepared(prepared);
             let response = ui.add_enabled(can_apply, egui::Button::new("Apply appearance"));
+            ui_pass.register(
+                ui,
+                &response,
+                "appearance/apply",
+                "Apply appearance",
+                TargetKind::Button,
+            );
             trace_designer_authoring_control(
                 ui,
                 &response,
@@ -1537,7 +1606,8 @@ impl AppearanceGallery {
                 viewport,
                 trace_correlation(Some(session)),
             );
-            if response.clicked()
+            if ui_pass.commit_allowed()
+                && response.clicked()
                 && let Err(error) = self.apply(session)
             {
                 self.feedback = Some(error);
@@ -1545,6 +1615,13 @@ impl AppearanceGallery {
             let response = ui.add_enabled(
                 self.choice.is_some(),
                 egui::Button::new("Cancel appearance preview"),
+            );
+            ui_pass.register(
+                ui,
+                &response,
+                "appearance/cancel",
+                "Cancel appearance preview",
+                TargetKind::Button,
             );
             trace_designer_authoring_control(
                 ui,
@@ -1557,7 +1634,7 @@ impl AppearanceGallery {
                 viewport,
                 trace_correlation(Some(session)),
             );
-            if response.clicked() {
+            if ui_pass.commit_allowed() && response.clicked() {
                 self.choice = None;
                 self.feedback = None;
             }
@@ -1566,7 +1643,7 @@ impl AppearanceGallery {
             ui.colored_label(ui.visuals().error_fg_color, feedback);
         }
         if let Some(destination) = self.destination.clone() {
-            self.simple_ui(ui, session, &destination, viewport);
+            self.simple_ui_with_jump(ui, session, &destination, viewport, ui_pass);
         }
     }
 
@@ -1577,6 +1654,18 @@ impl AppearanceGallery {
         destination: &MenuId,
         viewport: ViewportClass,
     ) {
+        let ui_pass = RadialUiPass::default();
+        self.simple_ui_with_jump(ui, session, destination, viewport, &ui_pass);
+    }
+
+    fn simple_ui_with_jump(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &mut RadialAuthoringSession,
+        destination: &MenuId,
+        viewport: ViewportClass,
+        ui_pass: &RadialUiPass,
+    ) {
         let Ok(state) = simple_state(&session.draft, destination) else {
             return;
         };
@@ -1584,6 +1673,7 @@ impl AppearanceGallery {
         ui.heading("Simple appearance · current menu");
         ui.small("Accent changes label RGB. Opacity changes label alpha, icons, glow and decorative image channels; fallback wheel fills stay opaque. Radial spacing changes effective radius geometry.");
         let mut edit = None;
+        let mut reset_descendants = self.reset_descendants;
         let mut key = "";
         let mut phase = EditPhase::Atomic;
         macro_rules! control {
@@ -1591,6 +1681,13 @@ impl AppearanceGallery {
                 if let Ok(mut v) = value($slot) {
                     ui.label(format!("{}: {:.2}", $label, v));
                     let response = ui.add(egui::Slider::new(&mut v, $range).show_value(false));
+                    ui_pass.register(
+                        ui,
+                        &response,
+                        &format!("appearance/simple/{}", $key),
+                        "Appearance setting",
+                        TargetKind::Slider,
+                    );
                     trace_designer_authoring_control(
                         ui,
                         &response,
@@ -1612,8 +1709,10 @@ impl AppearanceGallery {
                         &mut v,
                         $range,
                         DesignerAuthoringTarget::$target,
+                        $key,
                         viewport,
                         session,
+                        ui_pass,
                     ) {
                         edit = Some(SimpleEdit::$variant(v));
                         key = $key;
@@ -1625,6 +1724,13 @@ impl AppearanceGallery {
         if let Ok(color) = value(&state.values.text.color) {
             let mut rgb = [color.red, color.green, color.blue];
             let response = ui.color_edit_button_srgb(&mut rgb);
+            ui_pass.register(
+                ui,
+                &response,
+                "appearance/simple/accent",
+                "Accent color",
+                TargetKind::Button,
+            );
             ui.label("Accent (labels)");
             trace_designer_authoring_control(
                 ui,
@@ -1653,6 +1759,13 @@ impl AppearanceGallery {
             )
         });
         let response = ui.add(egui::Slider::new(&mut opacity, 0.0..=1.0).show_value(false));
+        ui_pass.register(
+            ui,
+            &response,
+            "appearance/simple/opacity",
+            "Opacity",
+            TargetKind::Slider,
+        );
         trace_designer_authoring_control(
             ui,
             &response,
@@ -1674,8 +1787,10 @@ impl AppearanceGallery {
             &mut opacity,
             0.0..=1.0,
             DesignerAuthoringTarget::SimpleOpacity,
+            "opacity",
             viewport,
             session,
+            ui_pass,
         ) {
             edit = Some(SimpleEdit::Opacity(opacity));
             key = "opacity";
@@ -1727,6 +1842,18 @@ impl AppearanceGallery {
         ] {
             if let Ok(mut v) = value(slot) {
                 let response = ui.checkbox(&mut v, label);
+                let identity = match kind {
+                    0 => "labels",
+                    1 => "bold",
+                    _ => "shadow",
+                };
+                ui_pass.register(
+                    ui,
+                    &response,
+                    &format!("appearance/simple/{identity}"),
+                    "Appearance option",
+                    TargetKind::Checkbox,
+                );
                 trace_designer_authoring_control(
                     ui,
                     &response,
@@ -1749,9 +1876,16 @@ impl AppearanceGallery {
             }
         }
         egui::CollapsingHeader::new("Inheritance and explicit resets").show(ui, |ui| {
-            ui.checkbox(
-                &mut self.reset_descendants,
+            let response = ui.checkbox(
+                &mut reset_descendants,
                 "Also reset masking ring/cell overrides (explicit opt-in)",
+            );
+            ui_pass.register(
+                ui,
+                &response,
+                "appearance/simple/reset-descendants",
+                "Reset descendant overrides",
+                TargetKind::Checkbox,
             );
             for control in [
                 SimpleControl::Accent,
@@ -1779,19 +1913,29 @@ impl AppearanceGallery {
                 if overflow > 0 {
                     ui.small(format!("and {overflow} more masking owners"));
                 }
-                if ui
-                    .button(format!("Reset {control:?} to Inherit at menu scope"))
-                    .clicked()
-                {
+                let reset = ui.button(format!("Reset {control:?} to Inherit at menu scope"));
+                ui_pass.register(
+                    ui,
+                    &reset,
+                    &format!("appearance/simple/reset/{}", control as u8),
+                    "Reset style field",
+                    TargetKind::Button,
+                );
+                if reset.clicked() {
                     edit = Some(SimpleEdit::Reset {
                         control,
-                        descendants: self.reset_descendants,
+                        descendants: reset_descendants,
                     });
                     key = "reset";
                 }
             }
         });
-        if let Some(edit) = edit {
+        if ui_pass.commit_allowed() {
+            self.reset_descendants = reset_descendants;
+        }
+        if ui_pass.commit_allowed()
+            && let Some(edit) = edit
+        {
             match simple_candidate(&session.draft, destination, &edit).and_then(|candidate| {
                 session
                     .replace_document_edit(

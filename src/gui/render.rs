@@ -5544,6 +5544,7 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
             };
             let mut ed = std::mem::take(&mut self.settings_editor);
@@ -5787,6 +5788,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut timer_dlg = std::mem::take(&mut self.timer_dialog);
@@ -5865,6 +5867,7 @@ impl LauncherApp {
                 }
                 | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
+                | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
             };
             let snippet_native_owner =
@@ -5931,6 +5934,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut paste_sequence_dlg = std::mem::take(&mut self.paste_sequence_dialog);
@@ -5971,6 +5975,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         self.mkmacro_dialog
@@ -6462,6 +6467,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
@@ -6547,6 +6553,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut todo_dlg = std::mem::take(&mut self.todo_dialog);
@@ -6619,6 +6626,7 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation { .. }
+            | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         if !clipboard_native_owner

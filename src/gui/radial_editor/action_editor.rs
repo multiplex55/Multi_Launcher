@@ -1,5 +1,6 @@
 //! Query-first Universal Action editor shared by Cell Properties and Inspector.
 
+use crate::gui::jump_mode::TargetKind;
 use crate::radial::authoring::{AuthoringSessionId, DraftGeneration, StableSelection};
 use crate::radial::context::InvocationContext;
 use crate::radial::model::{ActionBinding, QueryRunMode};
@@ -489,6 +490,45 @@ pub(crate) fn trace_picker_row_identity(
     }
 }
 
+fn jump_picker_row_prefix(
+    visit: &AuthoringBindingEditorIdentity,
+    row: PickerRowTraceIdentity,
+    contextual: bool,
+) -> String {
+    format!(
+        "binding-editor/{}/{:016x}/{:016x}/{:016x}/{:016x}/{:016x}/{:016x}/{:016x}/{:016x}",
+        if contextual { "context" } else { "result" },
+        visit.editor_epoch,
+        visit.edit_generation,
+        visit.query_generation,
+        visit.query_request_generation,
+        visit.search_request_generation,
+        row.target,
+        row.action,
+        row.binding,
+    )
+}
+
+fn picker_row_native_id(
+    visit: &AuthoringBindingEditorIdentity,
+    row: PickerRowTraceIdentity,
+    contextual: bool,
+) -> egui::Id {
+    egui::Id::new((
+        "radial-binding-picker-row",
+        &visit.scope,
+        contextual,
+        visit.editor_epoch,
+        visit.edit_generation,
+        visit.query_generation,
+        visit.query_request_generation,
+        visit.search_request_generation,
+        row.target,
+        row.action,
+        row.binding,
+    ))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum BindingEditorSurface {
     Properties,
@@ -582,6 +622,8 @@ pub(crate) struct ActionBindingEditorState {
     pending_test_identity: Option<AuthoringBindingEditorIdentity>,
     pending_test_query: Option<String>,
     test_status: Option<String>,
+    #[cfg(test)]
+    rendered_result_response_ids: Vec<egui::Id>,
 }
 
 #[derive(Clone, Debug)]
@@ -1013,6 +1055,62 @@ impl ActionBindingEditorState {
             &crate::gui::universal_action_catalog::UniversalActionCatalogSnapshot,
         >,
     ) -> Vec<ActionBindingEditorIntent> {
+        self.show_with_action_catalog_and_jump(
+            ui,
+            scope,
+            assigned_binding,
+            invocation,
+            action_catalog,
+            None,
+        )
+    }
+
+    pub(crate) fn show_with_action_catalog_and_jump(
+        &mut self,
+        ui: &mut egui::Ui,
+        scope: BindingEditorScope,
+        assigned_binding: Option<&ActionBinding>,
+        invocation: &InvocationContext,
+        action_catalog: Option<
+            &crate::gui::universal_action_catalog::UniversalActionCatalogSnapshot,
+        >,
+        jump: Option<&super::RadialUiPass>,
+    ) -> Vec<ActionBindingEditorIntent> {
+        // A non-authorized pass still creates the real widgets and responses,
+        // but its bounded editor state changes and intents are discarded.
+        let shadow = jump
+            .filter(|pass| !pass.commit_allowed())
+            .map(|_| self.clone());
+        let intents = self.show_with_action_catalog_inner(
+            ui,
+            scope,
+            assigned_binding,
+            invocation,
+            action_catalog,
+            jump,
+        );
+        if let Some(shadow) = shadow {
+            *self = shadow;
+            Vec::new()
+        } else {
+            intents
+        }
+    }
+
+    fn show_with_action_catalog_inner(
+        &mut self,
+        ui: &mut egui::Ui,
+        scope: BindingEditorScope,
+        assigned_binding: Option<&ActionBinding>,
+        invocation: &InvocationContext,
+        action_catalog: Option<
+            &crate::gui::universal_action_catalog::UniversalActionCatalogSnapshot,
+        >,
+        jump: Option<&super::RadialUiPass>,
+    ) -> Vec<ActionBindingEditorIntent> {
+        #[cfg(test)]
+        self.rendered_result_response_ids.clear();
+
         let new_catalog_visit =
             !self.matches_scope(&scope) || self.active_binding.as_ref() != assigned_binding;
         if !self.matches_buffer_owner(&scope) || self.active_binding.as_ref() != assigned_binding {
@@ -1035,6 +1133,15 @@ impl ActionBindingEditorState {
         ui.push_id(widget_scope, |ui| {
             ui.horizontal(|ui| {
                 let response = ui.selectable_label(self.tab == EditorTab::Query, "Query / Pin");
+                if let Some(jump) = jump {
+                    jump.register(
+                        ui,
+                        &response,
+                        "binding-editor/tab/query",
+                        "Query tab",
+                        TargetKind::Button,
+                    );
+                }
                 if response.clicked() {
                     self.tab = EditorTab::Query;
                 }
@@ -1052,6 +1159,15 @@ impl ActionBindingEditorState {
                     self.tab == EditorTab::Query,
                 );
                 let response = ui.selectable_label(self.tab == EditorTab::Advanced, "Advanced");
+                if let Some(jump) = jump {
+                    jump.register(
+                        ui,
+                        &response,
+                        "binding-editor/tab/advanced",
+                        "Advanced tab",
+                        TargetKind::Button,
+                    );
+                }
                 if response.clicked() {
                     self.tab = EditorTab::Advanced;
                 }
@@ -1071,13 +1187,13 @@ impl ActionBindingEditorState {
             });
 
             match self.tab {
-                EditorTab::Query => self.query_ui(ui, invocation, now, &mut intents),
-                EditorTab::Advanced => self.advanced_ui(ui, &mut intents),
+                EditorTab::Query => self.query_ui(ui, invocation, now, &mut intents, jump),
+                EditorTab::Advanced => self.advanced_ui(ui, &mut intents, jump),
             }
 
             if let Some(binding) = self.active_binding.clone() {
                 let presentation = assigned_binding_presentation(&binding, action_catalog);
-                self.assigned_binding_ui(ui, &binding, presentation, &mut intents);
+                self.assigned_binding_ui(ui, &binding, presentation, &mut intents, jump);
             }
             if let Some(status) = &self.test_status {
                 ui.small(status);
@@ -1100,6 +1216,7 @@ impl ActionBindingEditorState {
         binding: &ActionBinding,
         presentation: (String, Option<String>),
         intents: &mut Vec<ActionBindingEditorIntent>,
+        jump: Option<&super::RadialUiPass>,
     ) {
         ui.separator();
         let (summary, unavailable_reason) = presentation;
@@ -1114,6 +1231,15 @@ impl ActionBindingEditorState {
         }
         let test_enabled = unavailable_reason.is_none();
         let response = ui.add_enabled(test_enabled, egui::Button::new("Test assigned binding"));
+        if let Some(jump) = jump {
+            jump.register(
+                ui,
+                &response,
+                "binding-editor/assigned/test",
+                "Test assigned action",
+                TargetKind::Button,
+            );
+        }
         if test_enabled && response.clicked() {
             self.emit_test(binding.clone(), intents);
         }
@@ -1177,6 +1303,7 @@ impl ActionBindingEditorState {
         invocation: &InvocationContext,
         now: Instant,
         intents: &mut Vec<ActionBindingEditorIntent>,
+        jump: Option<&super::RadialUiPass>,
     ) {
         // Earlier horizontal controls can expand the parent min rect; keep the pane's entry width.
         let column_width_at_query_start = ui.available_width();
@@ -1186,6 +1313,15 @@ impl ActionBindingEditorState {
                 .hint_text("Search launcher results")
                 .desired_width(f32::INFINITY),
         );
+        if let Some(jump) = jump {
+            jump.register(
+                ui,
+                &response,
+                "binding-editor/query",
+                "Action query",
+                TargetKind::TextEntry,
+            );
+        }
         if response.changed() {
             self.query_request_generation = self.query_request_generation.wrapping_add(1).max(1);
             self.query_generation = self.query_generation.wrapping_add(1).max(1);
@@ -1227,6 +1363,15 @@ impl ActionBindingEditorState {
             self.emit_search(intents);
         }
         let response = ui.button("Search / preview");
+        if let Some(jump) = jump {
+            jump.register(
+                ui,
+                &response,
+                "binding-editor/search",
+                "Search actions",
+                TargetKind::Button,
+            );
+        }
         if response.clicked() {
             self.pending_search_due = None;
             self.search_retry_attempts = 0;
@@ -1254,6 +1399,15 @@ impl ActionBindingEditorState {
             ui.label("Saved query mode");
             let mut execute_first = self.query_mode == QueryRunMode::ExecuteFirst;
             let response = ui.checkbox(&mut execute_first, "Auto Submit (execute first result)");
+            if let Some(jump) = jump {
+                jump.register(
+                    ui,
+                    &response,
+                    "binding-editor/query-mode",
+                    "Query behavior",
+                    TargetKind::Button,
+                );
+            }
             if response.changed() {
                 self.query_mode = if execute_first {
                     QueryRunMode::ExecuteFirst
@@ -1333,6 +1487,15 @@ impl ActionBindingEditorState {
                 mode: self.query_mode,
             };
             let response = ui.add_enabled(save_enabled, egui::Button::new("Save query"));
+            if let Some(jump) = jump {
+                jump.register(
+                    ui,
+                    &response,
+                    "binding-editor/save-query",
+                    "Save query",
+                    TargetKind::Button,
+                );
+            }
             #[cfg(test)]
             crate::gui::render::observe_d08_response(
                 ui.ctx(),
@@ -1358,6 +1521,15 @@ impl ActionBindingEditorState {
                 false,
             );
             let response = ui.add_enabled(save_enabled, egui::Button::new("Test query"));
+            if let Some(jump) = jump {
+                jump.register(
+                    ui,
+                    &response,
+                    "binding-editor/test-query",
+                    "Test query",
+                    TargetKind::Button,
+                );
+            }
             if response.clicked() {
                 self.emit_test(binding.clone(), intents);
             }
@@ -1418,79 +1590,56 @@ impl ActionBindingEditorState {
                             // them; the next frame publishes the new editor identity.
                             let rendered_editor_identity =
                                 self.identity().expect("editor scope initialized above");
+                            let row_jump_prefix = jump_picker_row_prefix(
+                                &rendered_editor_identity,
+                                row_identity,
+                                false,
+                            );
+                            let row_native_id = picker_row_native_id(
+                                &rendered_editor_identity,
+                                row_identity,
+                                false,
+                            );
                             let display_label = row.display_label();
-                            ui.vertical(|ui| {
-                                // Keep the complete target/action identity inside the
-                                // Inspector's narrow column. The action controls live
-                                // on a second line so they cannot steal the width the
-                                // label needs to wrap.
-                                let response = ui
-                                    .add(
-                                        egui::Button::new(&display_label)
-                                            .wrap_mode(egui::TextWrapMode::Wrap)
-                                            .selected(selected),
-                                    )
-                                    .on_hover_text(
-                                        row.unavailable_reason
-                                            .as_deref()
-                                            .or(row.availability.disabled_reason())
-                                            .unwrap_or("Target and action identity"),
-                                    );
-                                if response.clicked() {
-                                    self.select_binding_candidate(row.binding.clone());
-                                }
-                                trace_action_editor_control_with_full_text(
-                                    ui,
-                                    &response,
-                                    &rendered_editor_identity,
-                                    "result_target",
-                                    Some(row_index),
-                                    row_identity.target,
-                                    [
-                                        row_identity.title,
-                                        row_identity.target_type,
-                                        row_identity.disambiguator,
-                                    ],
-                                    row_identity.action,
-                                    row.binding.as_ref(),
-                                    &self.query,
-                                    true,
-                                    self.selected_binding.as_ref() == row.binding.as_ref(),
-                                    response.changed(),
-                                    false,
-                                    Some(&display_label),
-                                );
-                                let assignable = row.binding.is_some();
-                                let reason = row
-                                    .unavailable_reason
-                                    .as_deref()
-                                    .or(row.availability.disabled_reason())
-                                    .unwrap_or("This live target cannot be saved");
-                                if !assignable || !row.availability.is_available() {
-                                    ui.small(format!("Availability: unavailable — {reason}"));
-                                }
-                                ui.horizontal(|ui| {
-                                    let response = ui.add_enabled(
-                                        assignable,
-                                        egui::Button::new("Pin this action"),
-                                    );
+                            ui.scope_builder(egui::UiBuilder::new().id(row_native_id), |ui| {
+                                ui.vertical(|ui| {
+                                    // Keep the complete target/action identity inside the
+                                    // Inspector's narrow column. The action controls live
+                                    // on a second line so they cannot steal the width the
+                                    // label needs to wrap.
+                                    let response = ui
+                                        .add(
+                                            egui::Button::new(&display_label)
+                                                .wrap_mode(egui::TextWrapMode::Wrap)
+                                                .selected(selected),
+                                        )
+                                        .on_hover_text(
+                                            row.unavailable_reason
+                                                .as_deref()
+                                                .or(row.availability.disabled_reason())
+                                                .unwrap_or("Target and action identity"),
+                                        );
                                     #[cfg(test)]
-                                    crate::gui::render::observe_d08_response(
-                                        ui.ctx(),
-                                        crate::gui::render::D08Control::PickerPin,
-                                        &response,
-                                    );
-                                    if response.clicked()
-                                        && let Ok(binding) = row.assignment()
-                                    {
-                                        self.stage_pinned_binding(binding.clone());
-                                        intents.push(ActionBindingEditorIntent::Pin { binding });
+                                    if !self.rendered_result_response_ids.contains(&response.id) {
+                                        self.rendered_result_response_ids.push(response.id);
                                     }
-                                    trace_action_editor_control_with_presentation(
+                                    if let Some(jump) = jump {
+                                        jump.register(
+                                            ui,
+                                            &response,
+                                            &format!("{row_jump_prefix}/select"),
+                                            "Select action result",
+                                            TargetKind::Selectable,
+                                        );
+                                    }
+                                    if response.clicked() {
+                                        self.select_binding_candidate(row.binding.clone());
+                                    }
+                                    trace_action_editor_control_with_full_text(
                                         ui,
                                         &response,
                                         &rendered_editor_identity,
-                                        "pin_result",
+                                        "result_target",
                                         Some(row_index),
                                         row_identity.target,
                                         [
@@ -1501,46 +1650,115 @@ impl ActionBindingEditorState {
                                         row_identity.action,
                                         row.binding.as_ref(),
                                         &self.query,
-                                        assignable,
+                                        true,
                                         self.selected_binding.as_ref() == row.binding.as_ref(),
                                         response.changed(),
                                         false,
+                                        Some(&display_label),
                                     );
-                                    let test_enabled =
-                                        assignable && row.availability.is_available();
-                                    let response =
-                                        ui.add_enabled(test_enabled, egui::Button::new("Test"));
-                                    #[cfg(test)]
-                                    crate::gui::render::observe_d08_response(
-                                        ui.ctx(),
-                                        crate::gui::render::D08Control::PickerTest,
-                                        &response,
-                                    );
-                                    if response.clicked()
-                                        && let Ok(binding) = row.assignment()
-                                    {
-                                        self.emit_test(binding, intents);
+                                    let assignable = row.binding.is_some();
+                                    let reason = row
+                                        .unavailable_reason
+                                        .as_deref()
+                                        .or(row.availability.disabled_reason())
+                                        .unwrap_or("This live target cannot be saved");
+                                    if !assignable || !row.availability.is_available() {
+                                        ui.small(format!("Availability: unavailable — {reason}"));
                                     }
-                                    trace_action_editor_control_with_presentation(
-                                        ui,
-                                        &response,
-                                        &self.identity().expect("editor scope initialized above"),
-                                        "test_result",
-                                        Some(row_index),
-                                        row_identity.target,
-                                        [
-                                            row_identity.title,
-                                            row_identity.target_type,
-                                            row_identity.disambiguator,
-                                        ],
-                                        row_identity.action,
-                                        row.binding.as_ref(),
-                                        &self.query,
-                                        test_enabled,
-                                        self.selected_binding.as_ref() == row.binding.as_ref(),
-                                        response.changed(),
-                                        false,
-                                    );
+                                    ui.horizontal(|ui| {
+                                        let response = ui.add_enabled(
+                                            assignable,
+                                            egui::Button::new("Pin this action"),
+                                        );
+                                        if let Some(jump) = jump {
+                                            jump.register(
+                                                ui,
+                                                &response,
+                                                &format!("{row_jump_prefix}/pin"),
+                                                "Pin action",
+                                                TargetKind::Button,
+                                            );
+                                        }
+                                        #[cfg(test)]
+                                        crate::gui::render::observe_d08_response(
+                                            ui.ctx(),
+                                            crate::gui::render::D08Control::PickerPin,
+                                            &response,
+                                        );
+                                        if response.clicked()
+                                            && let Ok(binding) = row.assignment()
+                                        {
+                                            self.stage_pinned_binding(binding.clone());
+                                            intents
+                                                .push(ActionBindingEditorIntent::Pin { binding });
+                                        }
+                                        trace_action_editor_control_with_presentation(
+                                            ui,
+                                            &response,
+                                            &rendered_editor_identity,
+                                            "pin_result",
+                                            Some(row_index),
+                                            row_identity.target,
+                                            [
+                                                row_identity.title,
+                                                row_identity.target_type,
+                                                row_identity.disambiguator,
+                                            ],
+                                            row_identity.action,
+                                            row.binding.as_ref(),
+                                            &self.query,
+                                            assignable,
+                                            self.selected_binding.as_ref() == row.binding.as_ref(),
+                                            response.changed(),
+                                            false,
+                                        );
+                                        let test_enabled =
+                                            assignable && row.availability.is_available();
+                                        let response =
+                                            ui.add_enabled(test_enabled, egui::Button::new("Test"));
+                                        if let Some(jump) = jump {
+                                            jump.register(
+                                                ui,
+                                                &response,
+                                                &format!("{row_jump_prefix}/test"),
+                                                "Test action",
+                                                TargetKind::Button,
+                                            );
+                                        }
+                                        #[cfg(test)]
+                                        crate::gui::render::observe_d08_response(
+                                            ui.ctx(),
+                                            crate::gui::render::D08Control::PickerTest,
+                                            &response,
+                                        );
+                                        if response.clicked()
+                                            && let Ok(binding) = row.assignment()
+                                        {
+                                            self.emit_test(binding, intents);
+                                        }
+                                        trace_action_editor_control_with_presentation(
+                                            ui,
+                                            &response,
+                                            &self
+                                                .identity()
+                                                .expect("editor scope initialized above"),
+                                            "test_result",
+                                            Some(row_index),
+                                            row_identity.target,
+                                            [
+                                                row_identity.title,
+                                                row_identity.target_type,
+                                                row_identity.disambiguator,
+                                            ],
+                                            row_identity.action,
+                                            row.binding.as_ref(),
+                                            &self.query,
+                                            test_enabled,
+                                            self.selected_binding.as_ref() == row.binding.as_ref(),
+                                            response.changed(),
+                                            false,
+                                        );
+                                    });
                                 });
                             });
                         }
@@ -1561,13 +1779,26 @@ impl ActionBindingEditorState {
                 let rows = self.contextual_cache.as_ref().map(|(_, rows)| rows.clone()).unwrap_or_default();
                 for (row_index, row) in rows.iter().enumerate() {
                     let row_identity = trace_picker_row_identity(row);
+                    let visit = self.identity().expect("editor scope initialized above");
+                    let row_jump_prefix = jump_picker_row_prefix(&visit, row_identity, true);
+                    let row_native_id = picker_row_native_id(&visit, row_identity, true);
                     let display_label = row.display_label();
+                    ui.scope_builder(egui::UiBuilder::new().id(row_native_id), |ui| {
                     ui.vertical(|ui| {
                         let response = ui.add(
                             egui::Button::new(&display_label)
                                 .wrap_mode(egui::TextWrapMode::Wrap)
                                 .selected(self.selected_binding.as_ref() == row.binding.as_ref()),
                         );
+                        if let Some(jump) = jump {
+                            jump.register(
+                                ui,
+                                &response,
+                                &format!("{row_jump_prefix}/select"),
+                                "Select contextual action",
+                                TargetKind::Selectable,
+                            );
+                        }
                         if response.clicked() {
                             self.select_binding_candidate(row.binding.clone());
                         }
@@ -1607,6 +1838,15 @@ impl ActionBindingEditorState {
                                 pin_enabled,
                                 egui::Button::new("Pin contextual action"),
                             );
+                            if let Some(jump) = jump {
+                                jump.register(
+                                    ui,
+                                    &response,
+                                &format!("{row_jump_prefix}/pin"),
+                                    "Pin contextual action",
+                                    TargetKind::Button,
+                                );
+                            }
                             if response.clicked() && let Ok(binding) = row.assignment() {
                                 self.stage_pinned_binding(binding.clone());
                                 intents.push(ActionBindingEditorIntent::Pin { binding });
@@ -1633,11 +1873,17 @@ impl ActionBindingEditorState {
                             );
                         });
                     });
+                    });
                 }
             });
     }
 
-    fn advanced_ui(&mut self, ui: &mut egui::Ui, intents: &mut Vec<ActionBindingEditorIntent>) {
+    fn advanced_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        intents: &mut Vec<ActionBindingEditorIntent>,
+        jump: Option<&super::RadialUiPass>,
+    ) {
         ui.label("Exact command uses the launcher's existing parser and arguments.");
         let command_response = ui.add(
             egui::TextEdit::singleline(&mut self.command)
@@ -1649,6 +1895,22 @@ impl ActionBindingEditorState {
                 .hint_text("Arguments (optional)")
                 .desired_width(f32::INFINITY),
         );
+        if let Some(jump) = jump {
+            jump.register(
+                ui,
+                &command_response,
+                "binding-editor/exact-command",
+                "Command",
+                TargetKind::TextEntry,
+            );
+            jump.register(
+                ui,
+                &args_response,
+                "binding-editor/exact-args",
+                "Arguments",
+                TargetKind::TextEntry,
+            );
+        }
         if command_response.changed() || args_response.changed() {
             self.clear_selected_binding();
             self.bump_edit_generation();
@@ -1698,6 +1960,15 @@ impl ActionBindingEditorState {
             };
             ui.horizontal(|ui| {
                 let response = ui.button("Use exact command");
+                if let Some(jump) = jump {
+                    jump.register(
+                        ui,
+                        &response,
+                        "binding-editor/use-exact-command",
+                        "Use command",
+                        TargetKind::Button,
+                    );
+                }
                 if response.clicked() {
                     intents.push(ActionBindingEditorIntent::SetCommand {
                         binding: binding.clone(),
@@ -1731,6 +2002,15 @@ impl ActionBindingEditorState {
                         )
                     });
                 let response = ui.add_enabled(valid, egui::Button::new("Test exact command"));
+                if let Some(jump) = jump {
+                    jump.register(
+                        ui,
+                        &response,
+                        "binding-editor/test-exact-command",
+                        "Test command",
+                        TargetKind::Button,
+                    );
+                }
                 if response.clicked() {
                     self.emit_test(binding.clone(), intents);
                 }
@@ -2054,7 +2334,7 @@ fn assigned_persisted_action_presentation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::radial_editor::{PropertiesDraft, RadialEditorState};
+    use crate::gui::radial_editor::{PropertiesDraft, RadialEditorState, RadialUiPass};
 
     #[test]
     fn action_editor_and_request_query_digests_share_the_same_recipe() {
@@ -3069,7 +3349,7 @@ mod tests {
         let mut intents = Vec::new();
         let output = context.run_ui(input, |context| {
             egui::CentralPanel::default().show(context, |ui| {
-                state.assigned_binding_ui(ui, binding, presentation.clone(), &mut intents);
+                state.assigned_binding_ui(ui, binding, presentation.clone(), &mut intents, None);
             });
         });
         (output, intents)
@@ -3873,7 +4153,10 @@ mod tests {
                 events,
                 ..Default::default()
             },
-            |context| editor.prompts(context),
+            |context| {
+                let mut ui_pass = RadialUiPass::default();
+                editor.prompts(context, None, &mut ui_pass);
+            },
         )
     }
 
@@ -6401,5 +6684,96 @@ mod tests {
         assert!(app.test_recorded_history_queries.is_empty());
         assert!(app.usage.is_empty());
         assert!(app.radial_preparations.is_empty());
+    }
+
+    #[test]
+    fn jump_mode_radial_children_action_rows_use_complete_native_identity() {
+        let context = egui::Context::default();
+        let first_binding = ActionBinding::LauncherQuery {
+            query: "first fixture action".into(),
+            mode: QueryRunMode::OpenLauncher,
+        };
+        let second_binding = ActionBinding::LauncherQuery {
+            query: "second fixture action".into(),
+            mode: QueryRunMode::OpenLauncher,
+        };
+        let mut first_row = crate::gui::universal_action_catalog::UniversalActionPickerRow::fixture(
+            first_binding.clone(),
+        );
+        first_row.target_command = "fixture:shared-target".into();
+        first_row.target_title = "Shared fixture target".into();
+        first_row.target_type = "Fixture".into();
+        first_row.target_disambiguator = "same target".into();
+        first_row.action_id = crate::universal_actions::ActionId::new("fixture.action.first");
+        let mut second_row = first_row.clone();
+        second_row.action_id = crate::universal_actions::ActionId::new("fixture.action.second");
+        second_row.binding = Some(second_binding.clone());
+        assert_eq!(
+            trace_picker_row_identity(&first_row).target,
+            trace_picker_row_identity(&second_row).target,
+            "the two rows deliberately share one complete target identity"
+        );
+        assert_ne!(
+            trace_picker_row_identity(&first_row).action,
+            trace_picker_row_identity(&second_row).action
+        );
+
+        let rows = vec![first_row, second_row];
+        let draw = |context: &egui::Context,
+                    state: &mut ActionBindingEditorState,
+                    editor_scope: BindingEditorScope,
+                    binding: &ActionBinding| {
+            let size = egui::vec2(900.0, 600.0);
+            let output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| {
+                        let _ = state.show(
+                            ui,
+                            editor_scope.clone(),
+                            Some(binding),
+                            &InvocationContext::empty(0),
+                        );
+                    });
+                },
+            );
+            let response_ids = state.rendered_result_response_ids.clone();
+            (output, response_ids)
+        };
+
+        let mut properties_scope = scope();
+        properties_scope.surface = BindingEditorSurface::Properties;
+        let mut properties = ActionBindingEditorState::default();
+        properties.reset_for(properties_scope.clone(), Some(&first_binding));
+        properties.search_rows = rows.clone();
+        properties.search_status = SearchStatus::Results;
+        let (properties_output, properties_ids) =
+            draw(&context, &mut properties, properties_scope, &first_binding);
+        properties_output.drop_without_applying_deltas();
+
+        assert_eq!(properties_ids.len(), 2, "both actual rows were painted");
+        assert_ne!(
+            properties_ids[0], properties_ids[1],
+            "actions sharing a target retain separate real button response IDs"
+        );
+
+        let mut inspector_scope = scope();
+        inspector_scope.surface = BindingEditorSurface::Inspector;
+        let mut inspector = ActionBindingEditorState::default();
+        inspector.reset_for(inspector_scope.clone(), Some(&first_binding));
+        inspector.search_rows = rows;
+        inspector.search_status = SearchStatus::Results;
+        let (inspector_output, inspector_ids) =
+            draw(&context, &mut inspector, inspector_scope, &first_binding);
+        inspector_output.drop_without_applying_deltas();
+
+        assert_eq!(inspector_ids.len(), 2, "both actual rows were painted");
+        assert_ne!(
+            properties_ids[0], inspector_ids[0],
+            "Properties and Inspector cannot share an absolute row response ID"
+        );
     }
 }

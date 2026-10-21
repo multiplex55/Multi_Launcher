@@ -13,7 +13,8 @@ mod work_area;
 use crate::gui::LauncherApp;
 use crate::gui::jump_mode::ui::{
     FocusDirective, JumpModeScope, JumpModeUi, NavigationDialogKind, NavigationOwner,
-    NavigationViewportBinding, register_and_apply_target,
+    NavigationViewportBinding, RadialDesignerChildKind, radial_designer_child_layer_id,
+    radial_designer_child_window_id, register_and_apply_target, visible_top_middle_layer,
 };
 use crate::gui::jump_mode::{SurfaceId, TargetGeneration, TargetKind};
 use crate::gui::theme::widgets::{
@@ -54,8 +55,8 @@ use canvas::{
 use eframe::egui;
 use import_export::PendingImport;
 use preview::{EmbeddedPreview, PreviewPreset};
-use std::collections::VecDeque;
 use std::collections::hash_map::RandomState;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1239,32 +1240,133 @@ struct RadialNativeComboAnchor {
     viewport: egui::ViewportId,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct RadialChildLifetimeKey {
+    kind: RadialDesignerChildKind,
+    subject: u64,
+}
+
 /// Explicit, callback-local navigation context for one Radial UI pass.
 ///
 /// This is passed through the actual render call chain so neither viewport
 /// ownership nor combo provenance is hidden in egui's cross-viewport data.
-#[derive(Default)]
-struct RadialUiPass {
+pub(super) struct RadialUiPass {
     jump: Option<RadialJumpPass>,
     combo_anchors: Vec<RadialNativeComboAnchor>,
+    owner: NavigationOwner,
+    native_ui_allowed: bool,
+    commit_allowed: bool,
+}
+
+impl Default for RadialUiPass {
+    fn default() -> Self {
+        Self {
+            jump: None,
+            combo_anchors: Vec::new(),
+            owner: NavigationOwner::Blocked,
+            // Direct legacy and unit-test callers use the unscoped path.
+            native_ui_allowed: true,
+            commit_allowed: true,
+        }
+    }
 }
 
 impl RadialUiPass {
-    fn new(scope: Option<JumpModeScope>) -> Self {
+    fn new(
+        scope: Option<JumpModeScope>,
+        owner: NavigationOwner,
+        native_ui_allowed: bool,
+        commit_allowed: bool,
+    ) -> Self {
         Self {
             jump: scope.map(RadialJumpPass::new),
             combo_anchors: Vec::new(),
+            owner,
+            native_ui_allowed,
+            commit_allowed,
         }
+    }
+
+    fn owns_child(
+        &self,
+        parent_instance: u64,
+        child_instance: u64,
+        kind: RadialDesignerChildKind,
+        subject: u64,
+    ) -> bool {
+        self.owner
+            == (NavigationOwner::RadialDesignerChild {
+                parent_instance,
+                child_instance,
+                kind,
+                subject,
+            })
     }
 
     fn child_jump(&self, namespace: &str) -> Option<RadialJumpPass> {
         self.jump.as_ref().map(|pass| pass.child(namespace))
     }
 
+    pub(super) fn register(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: &str,
+        label: &'static str,
+        kind: TargetKind,
+    ) -> Option<FocusDirective> {
+        self.jump
+            .as_ref()
+            .filter(|_| self.native_ui_allowed)
+            .and_then(|jump| jump.register(ui, response, identity, label, kind))
+    }
+
+    pub(super) fn register_combo_anchor(&mut self, response: &egui::Response) {
+        self.record_combo(response);
+    }
+
+    pub(super) fn register_combo(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        identity: &str,
+        label: &'static str,
+    ) {
+        self.record_combo(response);
+        self.register(ui, response, identity, label, TargetKind::ComboBox);
+    }
+
+    pub(super) fn register_combo_option(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        combo_identity: &str,
+        option_identity: &str,
+        label: &'static str,
+    ) {
+        if !self.native_ui_allowed {
+            return;
+        }
+        if let Some(jump) = self.jump.as_ref() {
+            jump.combo_popup(combo_identity).register(
+                ui,
+                response,
+                option_identity,
+                label,
+                TargetKind::Selectable,
+            );
+        }
+    }
+
+    pub(super) fn commit_allowed(&self) -> bool {
+        self.commit_allowed
+    }
+
     fn record_combo(&mut self, response: &egui::Response) {
         let clipped = response.interact_rect;
         let viewport = response.ctx.viewport_id();
-        if response.enabled()
+        if self.native_ui_allowed
+            && response.enabled()
             && clipped.is_positive()
             && response.ctx.layer_id_at(clipped.center()) == Some(response.layer_id)
         {
@@ -1777,7 +1879,9 @@ pub(crate) struct RadialEditorState {
     native_jump_mode: JumpModeUi,
     native_jump_frame: Option<u64>,
     native_combo_anchors: Vec<RadialNativeComboAnchor>,
-    native_combo_owner: Option<(u64, u64)>,
+    native_combo_owner: Option<(NavigationOwner, u64)>,
+    child_lifetimes: HashMap<RadialChildLifetimeKey, u64>,
+    next_child_lifetime: u64,
     session: Option<RadialAuthoringSession>,
     client: Option<AuthoringClient>,
     preview: EmbeddedPreview,
@@ -1869,6 +1973,8 @@ impl Default for RadialEditorState {
             native_jump_frame: None,
             native_combo_anchors: Vec::new(),
             native_combo_owner: None,
+            child_lifetimes: HashMap::new(),
+            next_child_lifetime: 1,
             session: None,
             client: None,
             preview: EmbeddedPreview::default(),
@@ -2976,6 +3082,9 @@ impl RadialEditorState {
         self.open = true;
         self.native_jump_mode.cancel_all();
         self.native_jump_frame = None;
+        self.native_combo_anchors.clear();
+        self.native_combo_owner = None;
+        self.child_lifetimes.clear();
         self.last_radial_add_reopen_pending = self.last_radial_add_trace.is_some();
         self.viewport_close_pending = false;
         self.viewport_restore_pending = true;
@@ -3254,6 +3363,9 @@ impl RadialEditorState {
         self.open = false;
         self.native_jump_mode.cancel_all();
         self.native_jump_frame = None;
+        self.native_combo_anchors.clear();
+        self.native_combo_owner = None;
+        self.child_lifetimes.clear();
         self.viewport_close_pending = true;
         self.session = None;
         self.trace_submission = None;
@@ -3324,6 +3436,9 @@ impl RadialEditorState {
         self.open = false;
         self.native_jump_mode.cancel_all();
         self.native_jump_frame = None;
+        self.native_combo_anchors.clear();
+        self.native_combo_owner = None;
+        self.child_lifetimes.clear();
         self.viewport_close_pending = true;
         self.viewport_restore_pending = true;
         self.viewport_focus_pending = false;
@@ -3560,7 +3675,12 @@ impl RadialEditorState {
         self.bulk_feedback = None;
     }
 
-    fn inspector_scope_change_guard_ui(&mut self, ctx: &egui::Context) {
+    fn inspector_scope_change_guard_ui(
+        &mut self,
+        ctx: &egui::Context,
+        parent_instance: Option<u64>,
+        ui_pass: &mut RadialUiPass,
+    ) {
         let Some(pending) = self.pending_scope_change.as_ref() else {
             return;
         };
@@ -3589,57 +3709,95 @@ impl RadialEditorState {
             "The requested change no longer matches the session, generation, or selected target."
         };
         let mut decision = None;
-        let correlation = trace_correlation(self.session.as_ref());
+        let subject = radial_value_digest(&(
+            pending.anchor.editor_session,
+            pending.anchor.generation,
+            pending.anchor.selection.as_ref(),
+            std::mem::discriminant(&pending.intent),
+        ));
+        let (window_id, native_owner) = self.radial_child_window_config(
+            ui_pass,
+            parent_instance,
+            RadialDesignerChildKind::ScopeChangeGuard,
+            subject,
+            egui::Id::new("radial-designer-scope-change-guard"),
+        );
+        let mut window_open = true;
+        let mut visible_commit = false;
         egui::Window::new(title)
-            .id(egui::Id::new("radial-designer-scope-change-guard"))
+            .id(window_id)
             .collapsible(false)
             .resizable(false)
+            .open(&mut window_open)
             .show(ctx, |ui| {
-                ui.label(window_message);
-                if current && !can_apply && !apply_only {
-                    ui.small("The action input is incomplete or its target has changed.");
-                }
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(
+                visible_commit = native_owner
+                    && ctx.current_pass_index() == 0
+                    && ui.is_visible()
+                    && !ui.is_sizing_pass();
+                ui_pass.commit_allowed = visible_commit;
+                ui.add_enabled_ui(native_owner, |ui| {
+                    ui.label(window_message);
+                    if current && !can_apply && !apply_only {
+                        ui.small("The action input is incomplete or its target has changed.");
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        let apply = ui.add_enabled(
                             can_apply || apply_only,
                             egui::Button::new(if apply_only {
                                 "Apply action"
                             } else {
                                 "Apply and continue"
                             }),
-                        )
-                        .clicked()
-                    {
-                        decision = Some(PropertiesNavigationDecision::Apply);
-                    }
-                    let button = ui.button(if current {
-                        "Discard and continue"
-                    } else {
-                        "Discard action and cancel stale change"
-                    });
-                    let response = with_button_emphasis(ui, button, ButtonEmphasis::Destructive);
-                    if current {
-                        trace_designer_authoring_control(
+                        );
+                        let apply = with_button_emphasis(ui, apply, ButtonEmphasis::Primary);
+                        ui_pass.register(
+                            ui,
+                            &apply,
+                            "scope-change/apply",
+                            "Apply action",
+                            TargetKind::Button,
+                        );
+                        if apply.clicked() && visible_commit {
+                            decision = Some(PropertiesNavigationDecision::Apply);
+                        }
+                        let button = ui.button(if current {
+                            "Discard and continue"
+                        } else {
+                            "Discard action and cancel stale change"
+                        });
+                        let response =
+                            with_button_emphasis(ui, button, ButtonEmphasis::Destructive);
+                        ui_pass.register(
                             ui,
                             &response,
-                            DesignerAuthoringTarget::InspectorDiscardAndContinue,
-                            DesignerAuthoringRole::Button,
-                            None,
-                            true,
-                            false,
-                            ViewportClass::Deferred,
-                            correlation,
+                            "scope-change/discard",
+                            "Discard action",
+                            TargetKind::Button,
                         );
-                    }
-                    if response.clicked() {
-                        decision = Some(PropertiesNavigationDecision::Discard);
-                    }
-                    if current && ui.button("Cancel change").clicked() {
-                        decision = Some(PropertiesNavigationDecision::Cancel);
-                    }
+                        if response.clicked() && visible_commit {
+                            decision = Some(PropertiesNavigationDecision::Discard);
+                        }
+                        if current {
+                            let response = ui.button("Cancel change");
+                            ui_pass.register(
+                                ui,
+                                &response,
+                                "scope-change/cancel",
+                                "Cancel change",
+                                TargetKind::Button,
+                            );
+                            if response.clicked() && visible_commit {
+                                decision = Some(PropertiesNavigationDecision::Cancel);
+                            }
+                        }
+                    });
                 });
             });
+        if !native_owner || !visible_commit {
+            decision = None;
+        } else if !window_open {
+            decision = Some(PropertiesNavigationDecision::Cancel);
+        }
         match decision {
             Some(PropertiesNavigationDecision::Cancel) => {
                 self.pending_scope_change = None;
@@ -4350,6 +4508,161 @@ impl RadialEditorState {
         })
     }
 
+    fn active_radial_child_keys(&self) -> HashSet<RadialChildLifetimeKey> {
+        let mut keys = HashSet::new();
+        if let Some(selection) = self.properties_popup.as_ref() {
+            keys.insert(RadialChildLifetimeKey {
+                kind: RadialDesignerChildKind::CellProperties,
+                subject: radial_selection_digest(selection),
+            });
+        }
+        if let Some(pending) = self.pending_scope_change.as_ref() {
+            keys.insert(RadialChildLifetimeKey {
+                kind: RadialDesignerChildKind::ScopeChangeGuard,
+                subject: radial_value_digest(&(
+                    pending.anchor.editor_session,
+                    pending.anchor.generation,
+                    pending.anchor.selection.as_ref(),
+                    std::mem::discriminant(&pending.intent),
+                )),
+            });
+        }
+        if let Some(request) = self.radial_add_request.as_ref() {
+            keys.insert(RadialChildLifetimeKey {
+                kind: RadialDesignerChildKind::AddToRadial,
+                subject: request.trace_identity.request_id,
+            });
+        }
+        if self.close_prompt {
+            keys.insert(RadialChildLifetimeKey {
+                kind: RadialDesignerChildKind::ClosePrompt,
+                subject: 0,
+            });
+        }
+        if self.delete_message.is_some() {
+            keys.insert(RadialChildLifetimeKey {
+                kind: RadialDesignerChildKind::DeleteMessage,
+                subject: 0,
+            });
+        }
+        if let Some((menu_id, ring_id)) = self.delete_ring_prompt.as_ref() {
+            keys.insert(RadialChildLifetimeKey {
+                kind: RadialDesignerChildKind::DeleteRing,
+                subject: radial_value_digest(&(menu_id, ring_id)),
+            });
+        }
+        if let Some(plan) = self.resize_prompt.as_ref() {
+            keys.insert(RadialChildLifetimeKey {
+                kind: RadialDesignerChildKind::ResizeResolution,
+                subject: radial_value_digest(&(&plan.menu_id, &plan.ring_id, plan.requested_len)),
+            });
+        }
+        keys
+    }
+
+    fn reconcile_radial_child_lifetimes(&mut self) {
+        let active = self.active_radial_child_keys();
+        self.child_lifetimes.retain(|key, _| active.contains(key));
+    }
+
+    fn radial_child_owner(
+        &mut self,
+        parent_instance: u64,
+        key: RadialChildLifetimeKey,
+    ) -> NavigationOwner {
+        let child_instance = if let Some(instance) = self.child_lifetimes.get(&key) {
+            *instance
+        } else {
+            let instance = self.next_child_lifetime.max(1);
+            self.next_child_lifetime = instance.wrapping_add(1).max(1);
+            self.child_lifetimes.insert(key, instance);
+            instance
+        };
+        NavigationOwner::RadialDesignerChild {
+            parent_instance,
+            child_instance,
+            kind: key.kind,
+            subject: key.subject,
+        }
+    }
+
+    fn active_radial_child_owners(&mut self, parent_instance: u64) -> Vec<NavigationOwner> {
+        let mut keys = self
+            .active_radial_child_keys()
+            .into_iter()
+            .collect::<Vec<_>>();
+        keys.sort_by_key(|key| (key.kind as u8, key.subject));
+        keys.into_iter()
+            .map(|key| self.radial_child_owner(parent_instance, key))
+            .collect()
+    }
+
+    fn radial_child_binding(
+        owner: NavigationOwner,
+        viewport: egui::ViewportId,
+    ) -> Option<NavigationViewportBinding> {
+        let NavigationOwner::RadialDesignerChild {
+            parent_instance,
+            child_instance,
+            kind,
+            subject,
+        } = owner
+        else {
+            return None;
+        };
+        Some(NavigationViewportBinding {
+            viewport,
+            owner,
+            base_layer: radial_designer_child_layer_id(
+                parent_instance,
+                child_instance,
+                kind,
+                subject,
+            ),
+        })
+    }
+
+    fn radial_owner_layer(owner: NavigationOwner) -> Option<egui::LayerId> {
+        let NavigationOwner::RadialDesignerChild {
+            parent_instance,
+            child_instance,
+            kind,
+            subject,
+        } = owner
+        else {
+            return None;
+        };
+        Some(radial_designer_child_layer_id(
+            parent_instance,
+            child_instance,
+            kind,
+            subject,
+        ))
+    }
+
+    fn radial_child_window_config(
+        &mut self,
+        ui_pass: &RadialUiPass,
+        parent_instance: Option<u64>,
+        kind: RadialDesignerChildKind,
+        subject: u64,
+        legacy_id: egui::Id,
+    ) -> (egui::Id, bool) {
+        let Some(parent_instance) = parent_instance else {
+            return (legacy_id, ui_pass.native_ui_allowed);
+        };
+        let owner =
+            self.radial_child_owner(parent_instance, RadialChildLifetimeKey { kind, subject });
+        let NavigationOwner::RadialDesignerChild { child_instance, .. } = owner else {
+            return (legacy_id, false);
+        };
+        (
+            radial_designer_child_window_id(parent_instance, child_instance, kind, subject),
+            ui_pass.owns_child(parent_instance, child_instance, kind, subject)
+                && ui_pass.native_ui_allowed,
+        )
+    }
+
     fn viewport_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -4363,7 +4676,7 @@ impl RadialEditorState {
         }
         let ctx = ui.ctx().clone();
         let viewport = radial_designer_viewport_id();
-        let binding = frame
+        let parent_binding = frame
             .navigation_instance
             .map(|instance| NavigationViewportBinding {
                 viewport,
@@ -4373,13 +4686,26 @@ impl RadialEditorState {
                 },
                 base_layer: egui::LayerId::background(),
             });
-        let combo_owner = binding.and_then(|binding| {
+        self.reconcile_radial_child_lifetimes();
+        let child_owners = parent_binding.map_or_else(Vec::new, |binding| {
             let NavigationOwner::Dialog { instance, .. } = binding.owner else {
-                return None;
+                return Vec::new();
             };
+            self.active_radial_child_owners(instance)
+        });
+        let top_layer = visible_top_middle_layer(&ctx);
+        let selected_child = child_owners
+            .iter()
+            .copied()
+            .find(|owner| Self::radial_owner_layer(*owner) == top_layer)
+            .or_else(|| child_owners.first().copied());
+        let binding = selected_child
+            .and_then(|owner| Self::radial_child_binding(owner, viewport))
+            .or(parent_binding);
+        let combo_owner = binding.and_then(|binding| {
             self.session
                 .as_ref()
-                .map(|session| (instance, session.editor_session.0))
+                .map(|session| (binding.owner, session.editor_session.0))
         });
         if self.native_combo_owner != combo_owner {
             self.native_combo_anchors.clear();
@@ -4394,10 +4720,8 @@ impl RadialEditorState {
         let owned_popup_layer =
             binding.and_then(|binding| self.current_native_combo_popup_layer(&ctx, binding));
         let native_popup_is_owned = !egui::Popup::is_any_open(&ctx) || owned_popup_layer.is_some();
-        let native_focus_is_owned = binding.is_some_and(|binding| {
-            crate::gui::jump_mode::ui::focused_response_layer(&ctx)
-                .is_none_or(|layer| layer == binding.base_layer || Some(layer) == owned_popup_layer)
-        });
+        let native_focus_is_owned =
+            binding.is_some_and(|binding| binding.focus_is_owned(&ctx, owned_popup_layer));
         let native_ui_owner_current = frame.application_input_allowed
             && !frame.intent_bridge.has_pending_file_dialog()
             && binding.is_some_and(|binding| binding.base_is_current(&ctx))
@@ -4427,26 +4751,58 @@ impl RadialEditorState {
             .filter(|_| jump_owner_current && frame.jump_mode_enabled)
             .and_then(|binding| {
                 let owner = binding.owner;
-                let NavigationOwner::Dialog { instance, .. } = owner else {
-                    return None;
-                };
                 let session = self.session.as_ref()?;
-                let target_generation = radial_jump_target_generation(
-                    instance,
-                    session.editor_session,
-                    session.generation,
-                );
-                self.native_jump_mode.scope_for_viewport_binding(
-                    SurfaceId::dialog(
-                        NavigationDialogKind::RadialDesigner.surface_kind(),
-                        instance,
-                    ),
-                    target_generation,
-                    "radial-designer",
-                    binding,
-                )
+                match owner {
+                    NavigationOwner::Dialog { instance, .. } => {
+                        let target_generation = radial_jump_target_generation(
+                            instance,
+                            session.editor_session,
+                            session.generation,
+                        );
+                        self.native_jump_mode.scope_for_viewport_binding(
+                            SurfaceId::dialog(
+                                NavigationDialogKind::RadialDesigner.surface_kind(),
+                                instance,
+                            ),
+                            target_generation,
+                            "radial-designer",
+                            binding,
+                        )
+                    }
+                    NavigationOwner::RadialDesignerChild {
+                        parent_instance,
+                        child_instance,
+                        kind,
+                        subject,
+                    } => {
+                        let target_generation = radial_jump_target_generation(
+                            child_instance,
+                            session.editor_session,
+                            session.generation,
+                        );
+                        self.native_jump_mode.scope_for_viewport_binding(
+                            SurfaceId::popup(
+                                kind.surface_kind(),
+                                child_instance,
+                                SurfaceId::dialog(
+                                    NavigationDialogKind::RadialDesigner.surface_kind(),
+                                    parent_instance,
+                                ),
+                            ),
+                            TargetGeneration(target_generation.0 ^ subject),
+                            format!("radial-designer-child/{:?}", kind),
+                            binding,
+                        )
+                    }
+                    _ => None,
+                }
             });
-        let mut radial_ui_pass = RadialUiPass::new(target_scope);
+        let mut radial_ui_pass = RadialUiPass::new(
+            target_scope,
+            binding.map_or(NavigationOwner::Blocked, |binding| binding.owner),
+            native_ui_owner_current,
+            native_ui_owner_current && first_ui_pass,
+        );
         // Eframe initializes native AccessKit on the root viewport only. The
         // deferred Designer still needs to publish its semantic widget tree.
         ctx.enable_accesskit();
@@ -4491,6 +4847,7 @@ impl RadialEditorState {
             self.native_jump_frame = None;
             self.native_combo_anchors.clear();
             self.native_combo_owner = None;
+            self.child_lifetimes.clear();
             return;
         }
         if let Some(document) = self.session.as_ref().map(|session| session.draft.clone()) {
@@ -4882,16 +5239,31 @@ impl RadialEditorState {
         // `show_deferred` handles the embedded class with a bounded status
         // message before this body can be reached.  The authoritative editor
         // is therefore rendered only by the independent native viewport.
+        let parent_native_ui_owner_current = native_ui_owner_current
+            && binding
+                .is_some_and(|binding| matches!(binding.owner, NavigationOwner::Dialog { .. }));
         egui::CentralPanel::default().show(ui, |ui| {
-            ui.add_enabled_ui(native_ui_owner_current, |ui| {
-                designer_body(ui, &mut radial_ui_pass)
-            });
+            if parent_native_ui_owner_current {
+                radial_ui_pass.commit_allowed =
+                    first_ui_pass && ui.is_visible() && !ui.is_sizing_pass();
+                designer_body(ui, &mut radial_ui_pass);
+            } else {
+                let mut parent_pass = RadialUiPass::default();
+                parent_pass.native_ui_allowed = false;
+                parent_pass.commit_allowed = false;
+                radial_ui_pass.commit_allowed = false;
+                ui.add_enabled_ui(false, |ui| designer_body(ui, &mut parent_pass));
+            }
         });
         if self.preferences.expanded_sections != expanded_sections_before {
             self.mark_preferences_changed();
         }
         self.properties_popup_ui(&ctx, frame, &mut radial_ui_pass);
-        self.radial_add_to_menu_ui(&ctx, &mut radial_ui_pass);
+        self.radial_add_to_menu_ui_for_instance(
+            &ctx,
+            frame.navigation_instance,
+            &mut radial_ui_pass,
+        );
         if !ctx.will_discard() {
             self.native_combo_anchors = std::mem::take(&mut radial_ui_pass.combo_anchors);
         }
@@ -4900,15 +5272,17 @@ impl RadialEditorState {
         {
             self.mark_preferences_changed();
         }
-        if !self
-            .session
-            .as_ref()
-            .is_some_and(RadialAuthoringSession::is_initial_snapshot_pending)
+        if native_ui_owner_current
+            && radial_ui_pass.commit_allowed
+            && !self
+                .session
+                .as_ref()
+                .is_some_and(RadialAuthoringSession::is_initial_snapshot_pending)
         {
             self.apply_post_render();
         }
-        self.prompts(&ctx);
-        if native_ui_owner_current && !egui::Popup::is_any_open(&ctx) {
+        self.prompts(&ctx, frame.navigation_instance, &mut radial_ui_pass);
+        if parent_native_ui_owner_current && !egui::Popup::is_any_open(&ctx) {
             self.keyboard_shortcuts(&ctx);
         }
         self.trace_designer_submission();
@@ -5070,7 +5444,7 @@ impl RadialEditorState {
             cell_id,
         }) = self.properties_popup.clone()
         else {
-            self.inspector_scope_change_guard_ui(ctx);
+            self.inspector_scope_change_guard_ui(ctx, frame.navigation_instance, ui_pass);
             return;
         };
         let cell = self
@@ -5123,7 +5497,7 @@ impl RadialEditorState {
             .pending_scope_change
             .as_ref()
             .is_some_and(|pending| self.scope_change_is_current(pending));
-        let Some(draft) = self.properties_draft.as_mut() else {
+        let Some(mut draft) = self.properties_draft.clone() else {
             return;
         };
         let mut apply = false;
@@ -5132,6 +5506,27 @@ impl RadialEditorState {
         let mut cancel = false;
         let mut navigate_after_apply = false;
         let mut popup_open = true;
+        let mut handoff_prompt = self.properties_handoff_prompt;
+        let (popup_window_id, popup_native_owner) = self.radial_child_window_config(
+            ui_pass,
+            frame.navigation_instance,
+            RadialDesignerChildKind::CellProperties,
+            radial_selection_digest(&target),
+            egui::Id::new(("radial-designer-cell-popup", &cell_id)),
+        );
+        let mut popup_pass = RadialUiPass {
+            jump: popup_native_owner.then(|| ui_pass.jump.clone()).flatten(),
+            combo_anchors: Vec::new(),
+            owner: if popup_native_owner {
+                ui_pass.owner
+            } else {
+                NavigationOwner::Blocked
+            },
+            native_ui_allowed: popup_native_owner && ui_pass.native_ui_allowed,
+            commit_allowed: popup_native_owner && ui_pass.commit_allowed,
+        };
+        let mut popup_visible_commit = false;
+        let titlebar_commit = popup_native_owner && ctx.current_pass_index() == 0;
         let invocation_context = self
             .session
             .as_ref()
@@ -5157,12 +5552,18 @@ impl RadialEditorState {
             })
             .unwrap_or_default();
         egui::Window::new("Cell properties")
-            .id(egui::Id::new(("radial-designer-cell-popup", &cell_id)))
+            .id(popup_window_id)
             .collapsible(false)
             .resizable(false)
             .default_width(300.0)
             .open(&mut popup_open)
             .show(ctx, |ui| {
+                popup_visible_commit = popup_native_owner
+                    && ctx.current_pass_index() == 0
+                    && ui.is_visible()
+                    && !ui.is_sizing_pass();
+                popup_pass.commit_allowed = popup_visible_commit;
+                ui.add_enabled_ui(popup_native_owner, |ui| {
                 compact_section_heading(ui, "Cell properties", None);
                 if self.radial_add_request.is_some() {
                     secondary_help(
@@ -5170,7 +5571,8 @@ impl RadialEditorState {
                         "Add to radial is waiting. Apply or cancel these staged properties first; the add request will resume afterward.",
                     );
                 }
-                ui.add(egui::TextEdit::singleline(&mut draft.label).hint_text("Label"));
+                let label_response = ui.add(egui::TextEdit::singleline(&mut draft.label).hint_text("Label"));
+                popup_pass.register(ui, &label_response, "cell-properties/label", "Cell label", TargetKind::TextEntry);
                 let selected_type = [
                     ("Spacer", 0),
                     ("Action", 1),
@@ -5181,6 +5583,10 @@ impl RadialEditorState {
                 .iter()
                 .find(|(_, kind)| *kind == draft.content_kind)
                 .map_or("Unknown", |(label, _)| *label);
+                let type_combo_identity = format!(
+                    "cell-properties/type/{:016x}",
+                    ui.make_persistent_id("Type").value()
+                );
                 let type_combo = egui::ComboBox::from_label("Type")
                     .selected_text(selected_type)
                     .show_ui(ui, |ui| {
@@ -5191,8 +5597,17 @@ impl RadialEditorState {
                             ("Dynamic source", 3),
                             ("Control", 4),
                         ] {
-                            let response =
-                                ui.selectable_value(&mut draft.content_kind, kind, label);
+                            let response = ui.scope_builder(
+                                egui::UiBuilder::new().id(ui.id().with(("cell-property-type", kind))),
+                                |ui| ui.selectable_value(&mut draft.content_kind, kind, label),
+                            ).inner;
+                            popup_pass.register_combo_option(
+                                ui,
+                                &response,
+                                &type_combo_identity,
+                                &format!("cell-properties/type/{kind}"),
+                                "Cell type",
+                            );
                             if kind == 1 {
                                 trace_designer_authoring_control(
                                     ui,
@@ -5208,7 +5623,7 @@ impl RadialEditorState {
                             }
                         }
                     });
-                ui_pass.record_combo(&type_combo.response);
+                popup_pass.register_combo(ui, &type_combo.response, &type_combo_identity, "Cell type");
                 trace_designer_authoring_control(
                     ui,
                     &type_combo.response,
@@ -5238,7 +5653,7 @@ impl RadialEditorState {
                             ("Launcher results", 9),
                             ("Launcher query", 10),
                         ],
-                        ui_pass);
+                        &mut popup_pass);
                 }
                 if draft.content_kind != 1 {
                     draft.action_editor.invalidate_visit();
@@ -5252,15 +5667,20 @@ impl RadialEditorState {
                         slot: BindingEditorSlot::CellPrimary,
                     };
                     let assigned_binding = draft.action_binding.clone();
-                    binding_editor_intents.extend(draft.action_editor.show_with_action_catalog(
+                    binding_editor_intents.extend(draft.action_editor.show_with_action_catalog_and_jump(
                         ui,
                         scope,
                         assigned_binding.as_ref(),
                         &invocation_context,
                         Some(frame.action_catalog.as_ref()),
+                        Some(&popup_pass),
                     ));
                 }
                 if draft.content_kind == 2 {
+                    let submenu_combo_identity = format!(
+                        "cell-properties/submenu/{:016x}",
+                        ui.make_persistent_id("Submenu").value()
+                    );
                     let submenu_combo = egui::ComboBox::from_label("Submenu")
                         .selected_text(
                             draft
@@ -5276,20 +5696,28 @@ impl RadialEditorState {
                         )
                         .show_ui(ui, |ui| {
                             for (id, name) in &submenu_choices {
-                                ui.selectable_value(
+                                let response = ui.selectable_value(
                                     &mut draft.submenu_target,
                                     Some(id.clone()),
                                     name,
                                 );
+                                popup_pass.register_combo_option(
+                                    ui,
+                                    &response,
+                                    &submenu_combo_identity,
+                                    &format!("cell-properties/submenu/{:016x}", radial_value_digest(id)),
+                                    "Submenu choice",
+                                );
                             }
                         });
-                    ui_pass.record_combo(&submenu_combo.response);
+                    popup_pass.register_combo(ui, &submenu_combo.response, &submenu_combo_identity, "Submenu choice");
                 }
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Icon");
-                    ui.selectable_value(&mut draft.icon_kind, 0, "Inherit");
-                    ui.selectable_value(&mut draft.icon_kind, 1, "Clear");
-                    ui.selectable_value(&mut draft.icon_kind, 2, "Keep value");
+                    for (identity, value, label) in [("inherit", 0, "Inherit"), ("clear", 1, "Clear"), ("keep", 2, "Keep value")] {
+                        let response = ui.selectable_value(&mut draft.icon_kind, value, label);
+                        popup_pass.register(ui, &response, &format!("cell-properties/icon/{identity}"), "Icon option", TargetKind::Selectable);
+                    }
                 });
                 secondary_help(
                     ui,
@@ -5308,6 +5736,7 @@ impl RadialEditorState {
                         egui::Button::new("Apply"),
                     );
                     let response = with_button_emphasis(ui, button, ButtonEmphasis::Primary);
+                    popup_pass.register(ui, &response, "cell-properties/apply", "Apply cell properties", TargetKind::Button);
                     trace_designer_authoring_control(
                         ui,
                         &response,
@@ -5323,6 +5752,7 @@ impl RadialEditorState {
                         apply = true;
                     }
                     let response = ui.button("Cancel");
+                    popup_pass.register(ui, &response, "cell-properties/cancel", "Cancel cell properties", TargetKind::Button);
                     trace_designer_authoring_control(
                         ui,
                         &response,
@@ -5338,6 +5768,7 @@ impl RadialEditorState {
                         cancel = true;
                     }
                     let response = ui.button("Open in Inspector");
+                    popup_pass.register(ui, &response, "cell-properties/open-inspector", "Open Inspector", TargetKind::Button);
                     trace_designer_authoring_control(
                         ui,
                         &response,
@@ -5351,13 +5782,13 @@ impl RadialEditorState {
                     );
                     if response.clicked() && !has_pending_scope_change {
                         if draft.differs_from(&cell) {
-                            self.properties_handoff_prompt = true;
+                            handoff_prompt = true;
                         } else {
                             discard_and_open = true;
                         }
                     }
                 });
-                if self.properties_handoff_prompt && !has_pending_scope_change {
+                if handoff_prompt && !has_pending_scope_change {
                     ui.separator();
                     ui.label("Apply popup edits before opening Inspector?");
                     ui.horizontal_wrapped(|ui| {
@@ -5368,6 +5799,7 @@ impl RadialEditorState {
                         );
                         let response =
                             with_button_emphasis(ui, button, ButtonEmphasis::Primary);
+                        popup_pass.register(ui, &response, "cell-properties/apply-and-open", "Apply and open Inspector", TargetKind::Button);
                         trace_designer_authoring_control(
                             ui,
                             &response,
@@ -5382,11 +5814,12 @@ impl RadialEditorState {
                         if response.clicked() && can_apply_popup {
                             apply = true;
                             open_inspector_after_apply = true;
-                            self.properties_handoff_prompt = false;
+                            handoff_prompt = false;
                         }
                         let button = ui.button("Discard and open");
                         let response =
                             with_button_emphasis(ui, button, ButtonEmphasis::Destructive);
+                        popup_pass.register(ui, &response, "cell-properties/discard-and-open", "Discard and open Inspector", TargetKind::Button);
                         trace_designer_authoring_control(
                             ui,
                             &response,
@@ -5400,9 +5833,10 @@ impl RadialEditorState {
                         );
                         if response.clicked() {
                             discard_and_open = true;
-                            self.properties_handoff_prompt = false;
+                            handoff_prompt = false;
                         }
                         let response = ui.button("Keep editing");
+                        popup_pass.register(ui, &response, "cell-properties/keep-editing", "Keep editing", TargetKind::Button);
                         trace_designer_authoring_control(
                             ui,
                             &response,
@@ -5415,11 +5849,28 @@ impl RadialEditorState {
                             correlation,
                         );
                         if response.clicked() {
-                            self.properties_handoff_prompt = false;
+                            handoff_prompt = false;
                         }
                     });
                 }
             });
+            });
+        ui_pass.combo_anchors.extend(popup_pass.combo_anchors);
+        let titlebar_close = titlebar_commit && !popup_open;
+        if titlebar_close {
+            popup_open = false;
+        }
+        if popup_visible_commit {
+            self.properties_draft = Some(draft.clone());
+            self.properties_handoff_prompt = handoff_prompt;
+        } else {
+            // The parent popup may still paint underneath an exact child
+            // confirmation. Keep rendering it disabled, but derive any guard
+            // state from the last committed draft rather than the shadow UI.
+            if let Some(committed_draft) = self.properties_draft.clone() {
+                draft = committed_draft;
+            }
+        }
         let properties_action_pending = draft.action_editor.has_unassigned_text();
         let navigation_dirty = draft.differs_from(&cell)
             || draft.action_editor.has_unassigned_text()
@@ -5429,11 +5880,37 @@ impl RadialEditorState {
             && (!inspector_dirty || inspector_buffer.is_some());
         let mut navigation_decision = None;
         if has_pending_scope_change && navigation_dirty {
+            let guard_subject = self.pending_scope_change.as_ref().map_or(0, |pending| {
+                radial_value_digest(&(
+                    pending.anchor.editor_session,
+                    pending.anchor.generation,
+                    pending.anchor.selection.as_ref(),
+                    std::mem::discriminant(&pending.intent),
+                ))
+            });
+            let (guard_window_id, guard_native_owner) = self.radial_child_window_config(
+                ui_pass,
+                frame.navigation_instance,
+                RadialDesignerChildKind::ScopeChangeGuard,
+                guard_subject,
+                egui::Id::new("radial-designer-navigation-guard"),
+            );
+            let mut guard_open = true;
+            let mut guard_visible_commit = false;
             egui::Window::new("Unsaved cell properties")
-                .id(egui::Id::new("radial-designer-navigation-guard"))
+                .id(guard_window_id)
                 .collapsible(false)
                 .resizable(false)
+                .open(&mut guard_open)
                 .show(ctx, |ui| {
+                    guard_visible_commit = guard_native_owner
+                        && ctx.current_pass_index() == 0
+                        && ui.is_visible()
+                        && !ui.is_sizing_pass();
+                    ui_pass.commit_allowed = guard_visible_commit;
+                    if !guard_native_owner {
+                        ui.disable();
+                    }
                     ui.label(if pending_scope_change_current {
                         "Apply or discard the current edits before continuing."
                     } else {
@@ -5461,7 +5938,9 @@ impl RadialEditorState {
                                     "Apply and continue"
                                 }),
                             );
-                        if with_button_emphasis(ui, apply, ButtonEmphasis::Primary).clicked() {
+                        let apply = with_button_emphasis(ui, apply, ButtonEmphasis::Primary);
+                        ui_pass.register(ui, &apply, "scope-change/apply", "Apply property changes", TargetKind::Button);
+                        if apply.clicked() && guard_visible_commit {
                             navigation_decision = Some(PropertiesNavigationDecision::Apply);
                         }
                         let discard = ui.button(if pending_scope_change_current {
@@ -5469,14 +5948,23 @@ impl RadialEditorState {
                             } else {
                                 "Discard edits and cancel stale change"
                             });
-                        if with_button_emphasis(ui, discard, ButtonEmphasis::Destructive).clicked() {
+                        let discard = with_button_emphasis(ui, discard, ButtonEmphasis::Destructive);
+                        ui_pass.register(ui, &discard, "scope-change/discard", "Discard property changes", TargetKind::Button);
+                        if discard.clicked() && guard_visible_commit {
                             navigation_decision = Some(PropertiesNavigationDecision::Discard);
                         }
-                        if ui.button("Cancel navigation").clicked() {
+                        let cancel = ui.button("Cancel navigation");
+                        ui_pass.register(ui, &cancel, "scope-change/cancel", "Cancel navigation", TargetKind::Button);
+                        if cancel.clicked() && guard_visible_commit {
                             navigation_decision = Some(PropertiesNavigationDecision::Cancel);
                         }
                     });
                 });
+            if !guard_native_owner || (!guard_visible_commit && guard_open) {
+                navigation_decision = None;
+            } else if !guard_open {
+                navigation_decision = Some(PropertiesNavigationDecision::Cancel);
+            }
         }
         for intent in binding_editor_intents {
             match intent {
@@ -5538,6 +6026,12 @@ impl RadialEditorState {
                 navigate_after_apply = true;
             }
             None => {}
+        }
+        if !popup_native_owner && !apply {
+            return;
+        }
+        if !popup_visible_commit && !titlebar_close && !apply {
+            return;
         }
         if !popup_open {
             if has_pending_scope_change {
@@ -6371,8 +6865,14 @@ impl RadialEditorState {
                 self.appearance.destination = self.visited_path.current().cloned();
             }
             let prepared = self.appearance.prepared_identity(session, &self.preview);
-            self.appearance
-                .ui(ui, session, self.client.as_ref(), viewport, prepared);
+            self.appearance.ui_with_jump_mode(
+                ui,
+                session,
+                self.client.as_ref(),
+                viewport,
+                prepared,
+                ui_pass,
+            );
             ui.separator();
             compact_section_heading(ui, "Advanced style, assets and packages", None);
         }
@@ -9411,13 +9911,16 @@ impl RadialEditorState {
                 CellContent::Action { binding } => Some(binding.clone()),
                 _ => None,
             });
-        let editor_intents = self.inspector_action_editor.show_with_action_catalog(
-            ui,
-            scope,
-            assigned_binding.as_ref(),
-            &invocation_context,
-            Some(frame.action_catalog.as_ref()),
-        );
+        let editor_intents = self
+            .inspector_action_editor
+            .show_with_action_catalog_and_jump(
+                ui,
+                scope,
+                assigned_binding.as_ref(),
+                &invocation_context,
+                Some(frame.action_catalog.as_ref()),
+                Some(ui_pass),
+            );
         for intent in editor_intents {
             match intent {
                 ActionBindingEditorIntent::Pin { binding } => {
@@ -9681,9 +10184,33 @@ impl RadialEditorState {
     }
 
     fn radial_add_to_menu_ui(&mut self, ctx: &egui::Context, ui_pass: &mut RadialUiPass) {
+        self.radial_add_to_menu_ui_for_instance(ctx, None, ui_pass);
+    }
+
+    fn radial_add_to_menu_ui_for_instance(
+        &mut self,
+        ctx: &egui::Context,
+        parent_instance: Option<u64>,
+        ui_pass: &mut RadialUiPass,
+    ) {
         let Some(request) = self.radial_add_request.clone() else {
             return;
         };
+        let child_subject = request.trace_identity.request_id;
+        let (window_id, native_owner) = self.radial_child_window_config(
+            ui_pass,
+            parent_instance,
+            RadialDesignerChildKind::AddToRadial,
+            child_subject,
+            egui::Id::new("radial-add-to-menu"),
+        );
+        let original_destination = (
+            self.radial_add_menu.clone(),
+            self.radial_add_ring.clone(),
+            self.radial_add_cell.clone(),
+            self.radial_add_replace_confirmed,
+            self.radial_add_close_tree_confirmed,
+        );
         // Properties owns a separate staged draft. Insertion advances the
         // authoring generation, so keep its popup fully interactive and defer
         // this request until that draft is explicitly applied or cancelled.
@@ -9823,14 +10350,23 @@ impl RadialEditorState {
             prior_binding_digest
         };
         let mut window_open = true;
+        let mut visible_commit = false;
         let mut cancel = false;
         let mut insertion: Option<(MenuId, RingId, menu::ActionInsertDestination, bool)> = None;
         egui::Window::new("Add to radial")
-            .id(egui::Id::new("radial-add-to-menu"))
+            .id(window_id)
             .collapsible(false)
             .resizable(false)
             .open(&mut window_open)
             .show(ctx, |ui| {
+                visible_commit = native_owner
+                    && ctx.current_pass_index() == 0
+                    && ui.is_visible()
+                    && !ui.is_sizing_pass();
+                ui_pass.commit_allowed = visible_commit;
+                if !native_owner {
+                    ui.disable();
+                }
                 ui.label(format!("Add {}", request.label));
                 if !request.source_query.is_empty() {
                     ui.small(format!("Source query: {:?}", request.source_query));
@@ -9855,6 +10391,13 @@ impl RadialEditorState {
                                     &mut self.radial_add_menu,
                                     Some(menu.id.clone()),
                                     &menu.name,
+                                );
+                                ui_pass.register_combo_option(
+                                    ui,
+                                    &response,
+                                    "radial-add/menu",
+                                    &format!("radial-add/menu/{:016x}", radial_value_digest(&menu.id)),
+                                    "Destination menu",
                                 );
                                 let option_ring = menu.rings.first();
                                 let option_cell = option_ring.and_then(|ring| ring.cells.first());
@@ -9897,7 +10440,7 @@ impl RadialEditorState {
                                 }
                             }
                         });
-                        ui_pass.record_combo(&combo.response);
+                        ui_pass.register_combo(ui, &combo.response, "radial-add/menu", "Destination menu");
                         ui.label("Menu");
                         combo.response
                     }).inner;
@@ -9930,6 +10473,13 @@ impl RadialEditorState {
                                         &mut self.radial_add_ring,
                                         Some(ring.id.clone()),
                                         format!("{} · {} slots", ring.id, ring.cells.len()),
+                                    );
+                                    ui_pass.register_combo_option(
+                                        ui,
+                                        &response,
+                                        "radial-add/ring",
+                                        &format!("radial-add/ring/{:016x}", radial_value_digest(&(&menu.id, &ring.id))),
+                                        "Destination ring",
                                     );
                                     let option_cell = ring
                                         .cells
@@ -9976,7 +10526,7 @@ impl RadialEditorState {
                                 }
                             }
                         });
-                        ui_pass.record_combo(&combo.response);
+                        ui_pass.register_combo(ui, &combo.response, "radial-add/ring", "Destination ring");
                         ui.label("Ring");
                         combo.response
                     }).inner;
@@ -10014,6 +10564,13 @@ impl RadialEditorState {
                                             cell.label,
                                             cell_content_kind(&cell.content)
                                         ),
+                                    );
+                                    ui_pass.register_combo_option(
+                                        ui,
+                                        &response,
+                                        "radial-add/cell",
+                                        &format!("radial-add/cell/{:016x}", radial_value_digest(&(&cell.id, radial_add_cell_binding_digest(session, self.radial_add_menu.as_ref(), self.radial_add_ring.as_ref(), Some(&cell.id))))),
+                                        "Destination cell",
                                     );
                                     let option_binding = radial_add_cell_binding_digest(
                                         session,
@@ -10062,7 +10619,7 @@ impl RadialEditorState {
                                 }
                             }
                         });
-                        ui_pass.record_combo(&combo.response);
+                        ui_pass.register_combo(ui, &combo.response, "radial-add/cell", "Destination cell");
                         ui.label("Cell");
                         combo.response
                     }).inner;
@@ -10094,6 +10651,7 @@ impl RadialEditorState {
                             &mut self.radial_add_close_tree_confirmed,
                             "Confirm CloseTree for the inserted action",
                         );
+                        ui_pass.register(ui, &response, "radial-add/close-tree", "Confirm action behavior", TargetKind::Button);
                         emit_radial_add_widget_control(
                             ui,
                             &response,
@@ -10142,6 +10700,7 @@ impl RadialEditorState {
                                             || self.radial_add_close_tree_confirmed,
                                         egui::Button::new("Add to selected spacer"),
                                     );
+                                ui_pass.register(ui, &response, "radial-add/insert-selected", "Add to selected cell", TargetKind::Button);
                                 emit_radial_add_widget_control(
                                     ui,
                                     &response,
@@ -10171,6 +10730,7 @@ impl RadialEditorState {
                                     &mut self.radial_add_replace_confirmed,
                                     "Replace occupied cell",
                                 );
+                                ui_pass.register(ui, &response, "radial-add/replace-toggle", "Confirm replacement", TargetKind::Button);
                                 emit_radial_add_widget_control(
                                     ui,
                                     &response,
@@ -10209,6 +10769,7 @@ impl RadialEditorState {
                                                 || self.radial_add_close_tree_confirmed),
                                         egui::Button::new("Replace selected cell"),
                                     );
+                                ui_pass.register(ui, &response, "radial-add/replace", "Replace selected cell", TargetKind::Button);
                                 emit_radial_add_widget_control(
                                     ui,
                                     &response,
@@ -10256,6 +10817,7 @@ impl RadialEditorState {
                             let response = ui
                                 .add_enabled(can_append, egui::Button::new("Append to ring"))
                                 ;
+                            ui_pass.register(ui, &response, "radial-add/append", "Append to ring", TargetKind::Button);
                             emit_radial_add_widget_control(
                                 ui,
                                 &response,
@@ -10285,6 +10847,7 @@ impl RadialEditorState {
                 }
                 ui.separator();
                 let response = ui.button("Cancel Add");
+                ui_pass.register(ui, &response, "radial-add/cancel", "Cancel add", TargetKind::Button);
                 emit_radial_add_widget_control(
                     ui,
                     &response,
@@ -10318,6 +10881,22 @@ impl RadialEditorState {
                     cancel = true;
                 }
             });
+
+        let titlebar_close = native_owner && ctx.current_pass_index() == 0 && !window_open;
+        if !native_owner || (!visible_commit && !titlebar_close) {
+            (
+                self.radial_add_menu,
+                self.radial_add_ring,
+                self.radial_add_cell,
+                self.radial_add_replace_confirmed,
+                self.radial_add_close_tree_confirmed,
+            ) = original_destination;
+            return;
+        }
+        ui_pass.commit_allowed = visible_commit;
+        if titlebar_close {
+            window_open = false;
+        }
 
         let destination_after_widgets = (
             self.radial_add_menu.clone(),
@@ -10438,13 +11017,35 @@ impl RadialEditorState {
         )
     }
 
-    fn prompts(&mut self, ctx: &egui::Context) {
+    fn prompts(
+        &mut self,
+        ctx: &egui::Context,
+        parent_instance: Option<u64>,
+        ui_pass: &mut RadialUiPass,
+    ) {
         if self.close_prompt {
             let correlation = trace_correlation(self.session.as_ref());
+            let (window_id, native_owner) = self.radial_child_window_config(
+                ui_pass,
+                parent_instance,
+                RadialDesignerChildKind::ClosePrompt,
+                0,
+                egui::Id::new("radial-designer-close-prompt"),
+            );
+            let mut visible_commit = false;
             egui::Window::new("Unsaved radial changes")
+                .id(window_id)
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
+                    visible_commit = native_owner
+                        && ctx.current_pass_index() == 0
+                        && ui.is_visible()
+                        && !ui.is_sizing_pass();
+                    ui_pass.commit_allowed = visible_commit;
+                    if !native_owner {
+                        ui.disable();
+                    }
                     let popup_dirty = self.properties_popup_dirty();
                     ui.label(if popup_dirty {
                         "Cell properties still have unapplied edits. Keep editing to Apply them, or discard all changes."
@@ -10455,13 +11056,16 @@ impl RadialEditorState {
                         let save = ui
                             .add_enabled(!popup_dirty, egui::Button::new("Save"))
                             .on_disabled_hover_text("Apply or cancel the open cell properties first");
-                        if with_button_emphasis(ui, save, ButtonEmphasis::Primary).clicked() {
+                        let save = with_button_emphasis(ui, save, ButtonEmphasis::Primary);
+                        ui_pass.register(ui, &save, "radial-close/save", "Save changes", TargetKind::Button);
+                        if save.clicked() && visible_commit {
                             self.close_prompt = false;
                             self.send_commit(CommitDisposition::Save);
                         }
                         let button = ui.button("Discard");
                         let response =
                             with_button_emphasis(ui, button, ButtonEmphasis::Destructive);
+                        ui_pass.register(ui, &response, "radial-close/discard", "Discard changes", TargetKind::Button);
                         trace_designer_authoring_control(
                             ui,
                             &response,
@@ -10473,7 +11077,7 @@ impl RadialEditorState {
                             ViewportClass::Deferred,
                             correlation,
                         );
-                        if response.clicked() {
+                        if response.clicked() && visible_commit {
                             self.close_intent = CloseIntent::DiscardRequested;
                             if let Some(session) = self.session.as_mut() {
                                 session.request_discard_close_intent();
@@ -10482,6 +11086,7 @@ impl RadialEditorState {
                             self.cancel();
                         }
                         let response = ui.button("Keep editing");
+                        ui_pass.register(ui, &response, "radial-close/keep", "Keep editing", TargetKind::Button);
                         trace_designer_authoring_control(
                             ui,
                             &response,
@@ -10493,7 +11098,7 @@ impl RadialEditorState {
                             ViewportClass::Deferred,
                             correlation,
                         );
-                        if response.clicked() {
+                        if response.clicked() && visible_commit {
                             self.close_prompt = false;
                             self.close_intent = CloseIntent::None;
                             self.close_stop_attempted = false;
@@ -10506,12 +11111,38 @@ impl RadialEditorState {
                 });
         }
         if let Some(message) = self.delete_message.clone() {
-            egui::Window::new("Delete impact").show(ctx, |ui| {
-                ui.label(message);
-                if ui.button("OK").clicked() {
-                    self.delete_message = None;
-                }
-            });
+            let (window_id, native_owner) = self.radial_child_window_config(
+                ui_pass,
+                parent_instance,
+                RadialDesignerChildKind::DeleteMessage,
+                0,
+                egui::Id::new("radial-designer-delete-message"),
+            );
+            let mut visible_commit = false;
+            egui::Window::new("Delete impact")
+                .id(window_id)
+                .show(ctx, |ui| {
+                    visible_commit = native_owner
+                        && ctx.current_pass_index() == 0
+                        && ui.is_visible()
+                        && !ui.is_sizing_pass();
+                    ui_pass.commit_allowed = visible_commit;
+                    if !native_owner {
+                        ui.disable();
+                    }
+                    ui.label(message);
+                    let response = ui.button("OK");
+                    ui_pass.register(
+                        ui,
+                        &response,
+                        "radial-delete-message/ok",
+                        "Dismiss message",
+                        TargetKind::Button,
+                    );
+                    if response.clicked() && visible_commit {
+                        self.delete_message = None;
+                    }
+                });
         }
         if let Some((menu_id, ring_id)) = self.delete_ring_prompt.clone() {
             let destinations: Vec<_> = self
@@ -10535,100 +11166,232 @@ impl RadialEditorState {
                         .filter(|cell| !matches!(cell.content, CellContent::Spacer))
                         .count()
                 });
-            egui::Window::new("Delete populated ring").show(ctx, |ui| {
-                ui.label(format!(
+            let subject = radial_value_digest(&(&menu_id, &ring_id));
+            let (window_id, native_owner) = self.radial_child_window_config(
+                ui_pass,
+                parent_instance,
+                RadialDesignerChildKind::DeleteRing,
+                subject,
+                egui::Id::new("radial-designer-delete-ring"),
+            );
+            let mut visible_commit = false;
+            egui::Window::new("Delete populated ring")
+                .id(window_id)
+                .show(ctx, |ui| {
+                    visible_commit = native_owner
+                        && ctx.current_pass_index() == 0
+                        && ui.is_visible()
+                        && !ui.is_sizing_pass();
+                    ui_pass.commit_allowed = visible_commit;
+                    if !native_owner {
+                        ui.disable();
+                    }
+                    ui.label(format!(
                     "This removes {populated} populated cells. Relocate them or explicitly discard."
                 ));
-                for destination in destinations {
-                    if ui
-                        .button(format!("Move cells to {destination} and delete"))
-                        .clicked()
+                    for destination in destinations {
+                        let response = ui.button(format!("Move cells to {destination} and delete"));
+                        let identity = format!(
+                            "radial-delete-ring/move/{:016x}",
+                            radial_value_digest(&destination)
+                        );
+                        ui_pass.register(
+                            ui,
+                            &response,
+                            &identity,
+                            "Move cells and delete",
+                            TargetKind::Button,
+                        );
+                        if response.clicked()
+                            && visible_commit
+                            && let Some(session) = self.session.as_mut()
+                        {
+                            match relocate_and_delete_ring(
+                                session,
+                                &menu_id,
+                                &ring_id,
+                                &destination,
+                            ) {
+                                Ok(()) => self.delete_ring_prompt = None,
+                                Err(error) => self.delete_message = Some(error),
+                            }
+                        }
+                    }
+                    let discard = ui.button("Discard populated cells and delete");
+                    let discard = with_button_emphasis(ui, discard, ButtonEmphasis::Destructive);
+                    ui_pass.register(
+                        ui,
+                        &discard,
+                        "radial-delete-ring/discard",
+                        "Discard cells and delete",
+                        TargetKind::Button,
+                    );
+                    if discard.clicked()
+                        && visible_commit
                         && let Some(session) = self.session.as_mut()
                     {
-                        match relocate_and_delete_ring(session, &menu_id, &ring_id, &destination) {
+                        match menu::delete_ring(session, &menu_id, &ring_id) {
                             Ok(()) => self.delete_ring_prompt = None,
-                            Err(error) => self.delete_message = Some(error),
+                            Err(error) => {
+                                self.delete_message = Some(format!("Delete failed: {error:?}"))
+                            }
                         }
                     }
-                }
-                let discard = ui.button("Discard populated cells and delete");
-                if with_button_emphasis(ui, discard, ButtonEmphasis::Destructive).clicked()
-                    && let Some(session) = self.session.as_mut()
-                {
-                    match menu::delete_ring(session, &menu_id, &ring_id) {
-                        Ok(()) => self.delete_ring_prompt = None,
-                        Err(error) => {
-                            self.delete_message = Some(format!("Delete failed: {error:?}"))
-                        }
+                    let response = ui.button("Cancel");
+                    ui_pass.register(
+                        ui,
+                        &response,
+                        "radial-delete-ring/cancel",
+                        "Cancel delete",
+                        TargetKind::Button,
+                    );
+                    if response.clicked() && visible_commit {
+                        self.delete_ring_prompt = None;
                     }
-                }
-                if ui.button("Cancel").clicked() {
-                    self.delete_ring_prompt = None;
-                }
-            });
+                });
         }
         if let Some(plan) = self.resize_prompt.clone() {
             let correlation = trace_correlation(self.session.as_ref());
-            egui::Window::new("Resolve populated cells").show(ctx, |ui| {
-                ui.label(format!(
-                    "{} populated cells would be removed.",
-                    plan.populated_removed.len()
-                ));
-                let response = ui.button("Move to overflow ring");
-                trace_designer_authoring_control(
-                    ui,
-                    &response,
-                    DesignerAuthoringTarget::MoveToOverflow,
-                    DesignerAuthoringRole::Button,
-                    None,
-                    true,
-                    false,
-                    ViewportClass::Deferred,
-                    correlation,
-                );
-                if response.clicked() {
-                    let proposal = self.session.as_mut().map(|session| {
-                        let overflow_id = session.allocate_ring_id("overflow");
-                        menu::propose_resolved_resize(
-                            &session.draft,
-                            session.generation,
-                            &plan,
-                            ResizeResolution::OverflowRing,
-                            Some(overflow_id),
-                        )
-                    });
-                    match proposal {
-                        Some(Ok(proposal)) => {
-                            self.resize_prompt = None;
-                            self.install_ring_proposal(proposal);
-                        }
-                        Some(Err(error)) => {
-                            self.delete_message = Some(format!("Resize failed: {error:?}"))
-                        }
-                        None => {}
+            let subject = radial_value_digest(&(&plan.menu_id, &plan.ring_id, plan.requested_len));
+            let (window_id, native_owner) = self.radial_child_window_config(
+                ui_pass,
+                parent_instance,
+                RadialDesignerChildKind::ResizeResolution,
+                subject,
+                egui::Id::new("radial-designer-resize-resolution"),
+            );
+            let mut visible_commit = false;
+            egui::Window::new("Resolve populated cells")
+                .id(window_id)
+                .show(ctx, |ui| {
+                    visible_commit = native_owner
+                        && ctx.current_pass_index() == 0
+                        && ui.is_visible()
+                        && !ui.is_sizing_pass();
+                    ui_pass.commit_allowed = visible_commit;
+                    if !native_owner {
+                        ui.disable();
                     }
-                }
-                let destinations: Vec<_> = self
-                    .session
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|session| session.draft.menus.iter())
-                    .filter(|menu| menu.id == plan.menu_id)
-                    .flat_map(|menu| menu.rings.iter())
-                    .filter(|ring| ring.id != plan.ring_id)
-                    .map(|ring| ring.id.clone())
-                    .collect();
-                for destination in destinations {
-                    if ui.button(format!("Relocate to {destination}")).clicked() {
+                    ui.label(format!(
+                        "{} populated cells would be removed.",
+                        plan.populated_removed.len()
+                    ));
+                    let response = ui.button("Move to overflow ring");
+                    ui_pass.register(
+                        ui,
+                        &response,
+                        "radial-resize/overflow",
+                        "Move to overflow ring",
+                        TargetKind::Button,
+                    );
+                    trace_designer_authoring_control(
+                        ui,
+                        &response,
+                        DesignerAuthoringTarget::MoveToOverflow,
+                        DesignerAuthoringRole::Button,
+                        None,
+                        true,
+                        false,
+                        ViewportClass::Deferred,
+                        correlation,
+                    );
+                    if response.clicked() && visible_commit {
+                        let proposal = self.session.as_mut().map(|session| {
+                            let overflow_id = session.allocate_ring_id("overflow");
+                            menu::propose_resolved_resize(
+                                &session.draft,
+                                session.generation,
+                                &plan,
+                                ResizeResolution::OverflowRing,
+                                Some(overflow_id),
+                            )
+                        });
+                        match proposal {
+                            Some(Ok(proposal)) => {
+                                self.resize_prompt = None;
+                                self.install_ring_proposal(proposal);
+                            }
+                            Some(Err(error)) => {
+                                self.delete_message = Some(format!("Resize failed: {error:?}"))
+                            }
+                            None => {}
+                        }
+                    }
+                    let destinations: Vec<_> = self
+                        .session
+                        .as_ref()
+                        .into_iter()
+                        .flat_map(|session| session.draft.menus.iter())
+                        .filter(|menu| menu.id == plan.menu_id)
+                        .flat_map(|menu| menu.rings.iter())
+                        .filter(|ring| ring.id != plan.ring_id)
+                        .map(|ring| ring.id.clone())
+                        .collect();
+                    for destination in destinations {
+                        let response = ui.button(format!("Relocate to {destination}"));
+                        let identity = format!(
+                            "radial-resize/relocate/{:016x}",
+                            radial_value_digest(&destination)
+                        );
+                        ui_pass.register(
+                            ui,
+                            &response,
+                            &identity,
+                            "Relocate cells",
+                            TargetKind::Button,
+                        );
+                        if response.clicked() && visible_commit {
+                            let proposal = self.session.as_ref().map(|session| {
+                                menu::propose_resolved_resize(
+                                    &session.draft,
+                                    session.generation,
+                                    &plan,
+                                    ResizeResolution::Relocate {
+                                        menu_id: plan.menu_id.clone(),
+                                        ring_id: destination,
+                                    },
+                                    None,
+                                )
+                            });
+                            match proposal {
+                                Some(Ok(proposal)) => {
+                                    self.resize_prompt = None;
+                                    self.install_ring_proposal(proposal);
+                                }
+                                Some(Err(error)) => {
+                                    self.delete_message = Some(format!("Resize failed: {error:?}"))
+                                }
+                                None => {}
+                            }
+                        }
+                    }
+                    let button = ui.button("Discard cells");
+                    let response = with_button_emphasis(ui, button, ButtonEmphasis::Destructive);
+                    ui_pass.register(
+                        ui,
+                        &response,
+                        "radial-resize/discard",
+                        "Discard cells",
+                        TargetKind::Button,
+                    );
+                    trace_designer_authoring_control(
+                        ui,
+                        &response,
+                        DesignerAuthoringTarget::DiscardCells,
+                        DesignerAuthoringRole::Button,
+                        None,
+                        true,
+                        false,
+                        ViewportClass::Deferred,
+                        correlation,
+                    );
+                    if response.clicked() && visible_commit {
                         let proposal = self.session.as_ref().map(|session| {
                             menu::propose_resolved_resize(
                                 &session.draft,
                                 session.generation,
                                 &plan,
-                                ResizeResolution::Relocate {
-                                    menu_id: plan.menu_id.clone(),
-                                    ring_id: destination,
-                                },
+                                ResizeResolution::ConfirmDiscard,
                                 None,
                             )
                         });
@@ -10643,57 +11406,29 @@ impl RadialEditorState {
                             None => {}
                         }
                     }
-                }
-                let button = ui.button("Discard cells");
-                let response = with_button_emphasis(ui, button, ButtonEmphasis::Destructive);
-                trace_designer_authoring_control(
-                    ui,
-                    &response,
-                    DesignerAuthoringTarget::DiscardCells,
-                    DesignerAuthoringRole::Button,
-                    None,
-                    true,
-                    false,
-                    ViewportClass::Deferred,
-                    correlation,
-                );
-                if response.clicked() {
-                    let proposal = self.session.as_ref().map(|session| {
-                        menu::propose_resolved_resize(
-                            &session.draft,
-                            session.generation,
-                            &plan,
-                            ResizeResolution::ConfirmDiscard,
-                            None,
-                        )
-                    });
-                    match proposal {
-                        Some(Ok(proposal)) => {
-                            self.resize_prompt = None;
-                            self.install_ring_proposal(proposal);
-                        }
-                        Some(Err(error)) => {
-                            self.delete_message = Some(format!("Resize failed: {error:?}"))
-                        }
-                        None => {}
+                    let response = ui.button("Cancel");
+                    ui_pass.register(
+                        ui,
+                        &response,
+                        "radial-resize/cancel",
+                        "Cancel resize",
+                        TargetKind::Button,
+                    );
+                    trace_designer_authoring_control(
+                        ui,
+                        &response,
+                        DesignerAuthoringTarget::CancelResolution,
+                        DesignerAuthoringRole::Button,
+                        None,
+                        true,
+                        false,
+                        ViewportClass::Deferred,
+                        correlation,
+                    );
+                    if response.clicked() && visible_commit {
+                        self.resize_prompt = None;
                     }
-                }
-                let response = ui.button("Cancel");
-                trace_designer_authoring_control(
-                    ui,
-                    &response,
-                    DesignerAuthoringTarget::CancelResolution,
-                    DesignerAuthoringRole::Button,
-                    None,
-                    true,
-                    false,
-                    ViewportClass::Deferred,
-                    correlation,
-                );
-                if response.clicked() {
-                    self.resize_prompt = None;
-                }
-            });
+                });
         }
     }
 }
@@ -17356,6 +18091,68 @@ mod tests {
         driver.frame(vec![pointer_button_event(point, false)])
     }
 
+    fn start_retained_hint_session(
+        driver: &mut RetainedDesignerDriver,
+        target: &crate::gui::jump_mode::ui::RegisteredTarget,
+    ) -> String {
+        let leader = egui::Modifiers::SHIFT;
+        driver
+            .frame_with_modifiers(
+                vec![
+                    key_event(egui::Key::Space, leader, true),
+                    egui::Event::Text(" ".into()),
+                ],
+                leader,
+            )
+            .drop_without_applying_deltas();
+        driver
+            .editor
+            .native_jump_mode
+            .active_session()
+            .expect("the focused retained viewport starts a hint session")
+            .hint_map()
+            .hint_for(target.id())
+            .expect("the current visible target is in the captured hint map")
+            .as_str()
+            .to_owned()
+    }
+
+    fn complete_retained_hint_session(
+        driver: &mut RetainedDesignerDriver,
+        hint: String,
+    ) -> (egui::FullOutput, Option<egui::Id>) {
+        let leader = egui::Modifiers::SHIFT;
+        driver
+            .frame_with_modifiers(vec![key_event(egui::Key::Space, leader, false)], leader)
+            .drop_without_applying_deltas();
+        let mut focused = None;
+        let output = driver.frame_with_observer(
+            vec![egui::Event::Text(hint)],
+            egui::Modifiers::default(),
+            |ctx, _| {
+                assert_eq!(
+                    ctx.viewport_id(),
+                    radial_designer_viewport_id(),
+                    "the native response is observed during the actual retained viewport pass"
+                );
+                focused = ctx.memory(|memory| memory.focused());
+            },
+        );
+        (output, focused)
+    }
+
+    fn target_has_local_identity(
+        target: &crate::gui::jump_mode::ui::RegisteredTarget,
+        local_identity: &str,
+    ) -> bool {
+        let suffix = format!("{}:{local_identity}", local_identity.len());
+        matches!(
+            target.id().semantic(),
+            crate::gui::jump_mode::SemanticTargetId::Named(identity)
+                if identity.ends_with(&suffix)
+        )
+    }
+
     fn replace_retained_text(
         driver: &mut RetainedDesignerDriver,
         output: &egui::FullOutput,
@@ -17437,6 +18234,121 @@ mod tests {
         let initial = driver.frame(Vec::new());
         assert!(driver.editor.properties_draft.is_some());
         (driver, target, initial)
+    }
+
+    fn retained_jump_properties_popup() -> (RetainedDesignerDriver, StableSelection) {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.tree_visible = true;
+        editor.tree_width = 300.0;
+        if let Some(session) = editor.session.as_mut() {
+            // This focused Jump fixture does not provide an authoring client.
+            // Mark the optional catalog as already settled so the first real
+            // callback cannot introduce an unrelated ServiceClosed status.
+            session.font_catalog_loaded = true;
+        }
+        let target = {
+            let session = editor.session.as_mut().expect("authoring session");
+            let menu = session
+                .draft
+                .menus
+                .iter()
+                .find(|menu| menu.id == MenuId::new("starter-screen-tools"))
+                .expect("screen tools menu");
+            let ring = &menu.rings[0];
+            let cell = ring
+                .cells
+                .iter()
+                .find(|cell| cell.id == CellId::new("starter-screen-tools-draw"))
+                .expect("screen draw action");
+            let target = StableSelection::Cell {
+                menu_id: menu.id.clone(),
+                ring_id: ring.id.clone(),
+                cell_id: cell.id.clone(),
+            };
+            session.select(Some(target.clone()));
+            target
+        };
+        editor.properties_popup = Some(target.clone());
+        let mut driver = RetainedDesignerDriver::new(editor);
+        driver.frame.jump_mode_enabled = true;
+
+        let opening = driver.frame(Vec::new());
+        opening.drop_without_applying_deltas();
+        let stable = driver.frame(Vec::new());
+        stable.drop_without_applying_deltas();
+        // The first frame that observes the new child layer is intentionally
+        // blocked by the shared owner-transition guard. Collect once more
+        // under the now-stable exact child owner before inspecting targets.
+        let child_owned = driver.frame(Vec::new());
+        child_owned.drop_without_applying_deltas();
+        assert!(matches!(
+            driver.editor.native_jump_mode.frame_navigation_owner(),
+            NavigationOwner::RadialDesignerChild {
+                kind: RadialDesignerChildKind::CellProperties,
+                parent_instance: 1,
+                ..
+            }
+        ));
+        (driver, target)
+    }
+
+    fn retained_jump_query_properties_popup()
+    -> (RetainedDesignerDriver, StableSelection, egui::FullOutput) {
+        let (mut driver, target) = retained_jump_properties_popup();
+        let binding = ActionBinding::LauncherQuery {
+            query: String::new(),
+            mode: crate::radial::model::QueryRunMode::OpenLauncher,
+        };
+        let session = driver.editor.session.as_ref().expect("authoring session");
+        let scope = BindingEditorScope {
+            surface: BindingEditorSurface::Properties,
+            editor_session: session.editor_session,
+            draft_generation: session.generation,
+            target: target.clone(),
+            slot: BindingEditorSlot::CellPrimary,
+        };
+        let draft = driver
+            .editor
+            .properties_draft
+            .as_mut()
+            .expect("retained Properties draft");
+        draft.action_binding = Some(binding.clone());
+        draft
+            .action_editor
+            .seed_unassigned_query_for_test(scope, Some(&binding), "");
+        let rendered = driver.frame(Vec::new());
+        (driver, target, rendered)
+    }
+
+    fn retained_jump_radial_add_request() -> RetainedDesignerDriver {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.radial_add_request = Some(test_radial_add_request());
+        if let Some(session) = editor.session.as_mut() {
+            session.font_catalog_loaded = true;
+        }
+        let mut driver = RetainedDesignerDriver::new(editor);
+        driver.frame.jump_mode_enabled = true;
+        let opening = driver.frame(Vec::new());
+        opening.drop_without_applying_deltas();
+        let stable = driver.frame(Vec::new());
+        stable.drop_without_applying_deltas();
+        // The first frame that observes the new child layer is intentionally
+        // blocked by the shared owner-transition guard. Collect once more
+        // under the now-stable exact child owner before inspecting targets.
+        let child_owned = driver.frame(Vec::new());
+        child_owned.drop_without_applying_deltas();
+        assert!(matches!(
+            driver.editor.native_jump_mode.frame_navigation_owner(),
+            NavigationOwner::RadialDesignerChild {
+                kind: RadialDesignerChildKind::AddToRadial,
+                parent_instance: 1,
+                subject: 901,
+                ..
+            }
+        ));
+        driver
     }
 
     fn retained_inspector_editor() -> (RadialEditorState, StableSelection) {
@@ -19746,6 +20658,421 @@ mod tests {
         assert!(session.is_dirty());
         assert_eq!(session.last_error, before.2);
         assert_eq!(session.pending_request, None);
+    }
+
+    #[test]
+    fn jump_mode_radial_children_properties_query_focus_types_then_guard_cancel_is_fresh() {
+        use crate::gui::jump_mode::{SemanticTargetId, SurfaceId, TargetKind};
+
+        let (mut driver, selection, initial) = retained_jump_query_properties_popup();
+        initial.drop_without_applying_deltas();
+        let original_document = std::sync::Arc::clone(
+            &driver
+                .editor
+                .session
+                .as_ref()
+                .expect("authoring session")
+                .draft,
+        );
+        let original_query = driver
+            .editor
+            .properties_draft
+            .as_ref()
+            .expect("Properties draft")
+            .action_editor
+            .query_for_test()
+            .to_owned();
+        assert!(original_query.is_empty());
+
+        let query_target = driver
+            .editor
+            .native_jump_mode
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label() == "Action query"
+                    && target.metadata().kind() == TargetKind::TextEntry
+                    && matches!(target.id().semantic(), SemanticTargetId::Named(_))
+                    && matches!(target.id().surface(), SurfaceId::Popup { kind, owner, .. }
+                        if kind == "radial-cell-properties"
+                            && owner.as_ref() == &SurfaceId::dialog("radial-designer", 1))
+            })
+            .cloned()
+            .expect("the current Properties query is a real child TextEdit target");
+        assert!(query_target.eligible());
+        assert!(query_target.clipped_rect().is_positive());
+        assert_eq!(query_target.viewport(), radial_designer_viewport_id());
+
+        let hint = start_retained_hint_session(&mut driver, &query_target);
+        let (focused_frame, focus_after_hint) = complete_retained_hint_session(&mut driver, hint);
+        focused_frame.drop_without_applying_deltas();
+        assert_eq!(focus_after_hint, Some(query_target.response_id()));
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .query_for_test(),
+            original_query
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &driver.editor.session.as_ref().unwrap().draft,
+            &original_document,
+        ));
+        assert_eq!(
+            driver.editor.session.as_ref().unwrap().pending_request,
+            None
+        );
+
+        let typed = driver.frame(vec![egui::Event::Text("λ query".into())]);
+        typed.drop_without_applying_deltas();
+        let mut focus_after_typing = None;
+        let typed_again = driver.frame_with_observer(
+            vec![egui::Event::Text(" second".into())],
+            egui::Modifiers::default(),
+            |ctx, _| focus_after_typing = ctx.memory(|memory| memory.focused()),
+        );
+        typed_again.drop_without_applying_deltas();
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .query_for_test(),
+            "λ query second",
+            "the native query editor accepts Unicode after focus-only completion"
+        );
+        assert_eq!(focus_after_typing, Some(query_target.response_id()));
+        assert!(std::sync::Arc::ptr_eq(
+            &driver.editor.session.as_ref().unwrap().draft,
+            &original_document
+        ));
+        assert_eq!(
+            driver.editor.session.as_ref().unwrap().pending_request,
+            None
+        );
+
+        queue_navigation_to_screenshot_region(&mut driver);
+        let transition = driver.frame(Vec::new());
+        transition.drop_without_applying_deltas();
+        assert!(driver.editor.pending_scope_change.is_some());
+        assert_eq!(
+            driver.editor.session.as_ref().unwrap().selection.as_ref(),
+            Some(&selection)
+        );
+        let guard_frame = driver.frame(Vec::new());
+        guard_frame.drop_without_applying_deltas();
+        // The guard’s first retained-layer frame is blocked while the shared
+        // owner transition settles. Observe its controls on the next frame.
+        let guard_owned_frame = driver.frame(Vec::new());
+        guard_owned_frame.drop_without_applying_deltas();
+        assert!(matches!(
+            driver.editor.native_jump_mode.frame_navigation_owner(),
+            NavigationOwner::RadialDesignerChild {
+                kind: RadialDesignerChildKind::ScopeChangeGuard,
+                ..
+            }
+        ));
+        let cancel_target = driver
+            .editor
+            .native_jump_mode
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label() == "Cancel navigation"
+                    && target.metadata().kind() == TargetKind::Button
+            })
+            .cloned()
+            .expect("the exact scope-change child exposes Cancel navigation");
+        assert!(cancel_target.eligible());
+        assert!(cancel_target.clipped_rect().is_positive());
+
+        let hint = start_retained_hint_session(&mut driver, &cancel_target);
+        let (focused_frame, focus_after_hint) = complete_retained_hint_session(&mut driver, hint);
+        focused_frame.drop_without_applying_deltas();
+        assert_eq!(focus_after_hint, Some(cancel_target.response_id()));
+        assert!(driver.editor.pending_scope_change.is_some());
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .query_for_test(),
+            "λ query second",
+            "hint completion only focuses the guard button"
+        );
+
+        driver
+            .frame(vec![key_event(
+                egui::Key::Enter,
+                egui::Modifiers::default(),
+                true,
+            )])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![key_event(
+                egui::Key::Enter,
+                egui::Modifiers::default(),
+                false,
+            )])
+            .drop_without_applying_deltas();
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert_eq!(
+            driver.editor.session.as_ref().unwrap().selection.as_ref(),
+            Some(&selection),
+            "fresh Cancel retires the pending navigation without applying it"
+        );
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .query_for_test(),
+            "λ query second",
+            "Cancel keeps the unsaved Properties buffer"
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &driver.editor.session.as_ref().unwrap().draft,
+            &original_document,
+        ));
+        assert!(
+            driver
+                .editor
+                .session
+                .as_ref()
+                .unwrap()
+                .pending_request
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn jump_mode_radial_children_add_destination_popup_keeps_exact_child_scope() {
+        use crate::gui::jump_mode::{SemanticTargetId, SurfaceId, TargetKind};
+
+        let mut driver = retained_jump_radial_add_request();
+        let request = driver
+            .editor
+            .radial_add_request
+            .as_ref()
+            .expect("pending Add-to-Radial request")
+            .trace_identity
+            .request_id;
+        assert_eq!(request, 901);
+        let original_document = std::sync::Arc::clone(
+            &driver
+                .editor
+                .session
+                .as_ref()
+                .expect("authoring session")
+                .draft,
+        );
+        let original_menu = driver.editor.radial_add_menu.clone();
+        let parent_surface = SurfaceId::dialog("radial-designer", 1);
+        let combo = driver
+            .editor
+            .native_jump_mode
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label() == "Destination menu"
+                    && target.metadata().kind() == TargetKind::ComboBox
+                    && matches!(target.id().surface(), SurfaceId::Popup { kind, owner, .. }
+                        if kind == "radial-add-to-menu" && owner.as_ref() == &parent_surface)
+            })
+            .cloned()
+            .expect("the real destination combo belongs to the exact Add child");
+        assert!(combo.eligible());
+        assert!(combo.enabled());
+        assert!(combo.clipped_rect().is_positive());
+
+        let combo_point = combo.clipped_rect().center();
+        driver
+            .frame(vec![egui::Event::PointerMoved(combo_point)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(combo_point, true)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(combo_point, false)])
+            .drop_without_applying_deltas();
+        let mut combo_open_in_child = false;
+        let sizing_or_open =
+            driver.frame_with_observer(Vec::new(), egui::Modifiers::default(), |ctx, _| {
+                combo_open_in_child = egui::ComboBox::is_open(ctx, combo.response_id());
+            });
+        sizing_or_open.drop_without_applying_deltas();
+        assert!(combo_open_in_child, "the actual child ComboBox opened");
+
+        let options = driver
+            .editor
+            .native_jump_mode
+            .retained_registry()
+            .targets()
+            .iter()
+            .filter(|target| {
+                target.metadata().label() == "Destination menu"
+                    && target.metadata().kind() == TargetKind::Selectable
+                    && matches!(target.id().semantic(), SemanticTargetId::Named(_))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            options.len() >= 2,
+            "at least two actual menu choices are visible"
+        );
+        let option = options
+            .iter()
+            .find(|target| {
+                matches!(target.id().surface(), SurfaceId::Popup { owner, .. }
+                    if owner.as_ref() == combo.id().surface())
+                    && driver
+                        .editor
+                        .session
+                        .as_ref()
+                        .unwrap()
+                        .draft
+                        .menus
+                        .iter()
+                        .filter(|menu| Some(&menu.id) != original_menu.as_ref())
+                        .any(|menu| {
+                            target_has_local_identity(
+                                target,
+                                &format!("radial-add/menu/{:016x}", radial_value_digest(&menu.id)),
+                            )
+                        })
+            })
+            .cloned()
+            .expect("an option for another real menu is under the combo popup surface");
+        assert!(option.eligible());
+        assert!(option.enabled());
+        assert!(option.clipped_rect().is_positive());
+        assert_eq!(option.viewport(), radial_designer_viewport_id());
+        assert_eq!(option.metadata().label(), "Destination menu");
+        if let SemanticTargetId::Named(identity) = option.id().semantic() {
+            assert!(!identity.contains("first argument"));
+            assert!(!identity.contains("Close window"));
+        }
+
+        let hint = start_retained_hint_session(&mut driver, &option);
+        let (focused_frame, focus_after_hint) = complete_retained_hint_session(&mut driver, hint);
+        focused_frame.drop_without_applying_deltas();
+        assert_eq!(focus_after_hint, Some(option.response_id()));
+        assert_eq!(driver.editor.radial_add_menu, original_menu);
+        assert!(driver.editor.radial_add_request.is_some());
+        assert_eq!(
+            driver.editor.session.as_ref().unwrap().pending_request,
+            None
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &driver.editor.session.as_ref().unwrap().draft,
+            &original_document
+        ));
+    }
+
+    #[test]
+    fn jump_mode_radial_children_appearance_choice_is_focus_only() {
+        use crate::gui::jump_mode::{SemanticTargetId, SurfaceId, TargetKind};
+
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.show_resources = true;
+        let destination = {
+            let session = editor.session.as_mut().expect("authoring session");
+            session.font_catalog_loaded = true;
+            let destination = session.draft.default_menu_id.clone();
+            session.select(Some(StableSelection::Menu(destination.clone())));
+            destination
+        };
+        editor
+            .appearance
+            .prepare_choice_for_test(editor.session.as_ref().unwrap(), destination.clone(), 0)
+            .expect("the current gallery choice is a valid prepared candidate");
+        let original_document =
+            std::sync::Arc::clone(&editor.session.as_ref().expect("authoring session").draft);
+        let original_choice_key = editor
+            .appearance
+            .choice_key_digest_for_test()
+            .expect("the selected gallery tile has a key");
+        assert_eq!(
+            editor.appearance.entry_key_digest_for_test(0),
+            Some(original_choice_key)
+        );
+        let mut driver = RetainedDesignerDriver::new(editor);
+        driver.frame.jump_mode_enabled = true;
+        driver.frame(Vec::new()).drop_without_applying_deltas();
+        let initial = driver.frame(Vec::new());
+        initial.drop_without_applying_deltas();
+        let original_preview_menu = driver.editor.preview.current_menu().cloned();
+        let original_candidate = driver
+            .editor
+            .appearance
+            .candidate(driver.editor.session.as_ref().unwrap())
+            .expect("the prepared candidate survives the initial real viewport pass");
+        let tile = driver
+            .editor
+            .native_jump_mode
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| {
+                target.metadata().label() == "Appearance choice"
+                    && target.metadata().kind() == TargetKind::Selectable
+                    && matches!(target.id().semantic(), SemanticTargetId::Named(_))
+                    && matches!(target.id().surface(), SurfaceId::Dialog { kind, instance }
+                        if kind == "radial-designer" && *instance == 1)
+                    && !target_has_local_identity(
+                        target,
+                        &format!("appearance/tile/{original_choice_key:016x}"),
+                    )
+            })
+            .cloned()
+            .expect("an alternate real gallery tile is visible and targetable");
+        assert!(tile.eligible());
+        assert!(tile.enabled());
+        assert!(tile.clipped_rect().is_positive());
+        assert_eq!(tile.viewport(), radial_designer_viewport_id());
+
+        let hint = start_retained_hint_session(&mut driver, &tile);
+        let (focused_frame, focus_after_hint) = complete_retained_hint_session(&mut driver, hint);
+        focused_frame.drop_without_applying_deltas();
+        assert_eq!(focus_after_hint, Some(tile.response_id()));
+        let session = driver.editor.session.as_ref().expect("authoring session");
+        let candidate_after = driver
+            .editor
+            .appearance
+            .candidate(session)
+            .expect("the same prepared gallery candidate remains available");
+        assert!(std::sync::Arc::ptr_eq(&session.draft, &original_document));
+        assert_eq!(session.selection, Some(StableSelection::Menu(destination)));
+        assert_eq!(session.pending_request, None);
+        assert!(!session.is_dirty());
+        assert_eq!(
+            driver.editor.appearance.choice_key_digest_for_test(),
+            Some(original_choice_key),
+            "hint completion focuses a tile without choosing it"
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &candidate_after.0,
+            &original_candidate.0
+        ));
+        assert_eq!(candidate_after.1, original_candidate.1);
+        assert_eq!(
+            driver.editor.preview.current_menu().cloned(),
+            original_preview_menu,
+            "the actual preview destination stays unchanged"
+        );
     }
 
     #[test]

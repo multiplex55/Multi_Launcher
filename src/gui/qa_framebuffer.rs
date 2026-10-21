@@ -2508,6 +2508,11 @@ fn qa_navigation_owner(owner: super::jump_mode::ui::NavigationOwner) -> QaNaviga
             kind,
             ..
         } => (kind.surface_kind(), Some(confirmation_instance)),
+        Owner::RadialDesignerChild {
+            child_instance,
+            kind,
+            ..
+        } => (kind.surface_kind(), Some(child_instance)),
         Owner::SnippetPrompt { generation } => ("snippet_prompt", Some(generation)),
         Owner::Blocked => ("blocked", None),
     };
@@ -2596,6 +2601,11 @@ fn qa_dialog_state(
             kind,
             ..
         } => (kind.surface_kind(), confirmation_instance),
+        Owner::RadialDesignerChild {
+            child_instance,
+            kind,
+            ..
+        } => (kind.surface_kind(), child_instance),
         Owner::SnippetPrompt { generation } => ("snippet-prompt", generation),
     };
     let mut state = QaDialogState {
@@ -2699,6 +2709,7 @@ fn qa_dialog_state(
         | Owner::BatchRenameConfirmation { .. }
         | Owner::SearchReplaceConfirmation { .. }
         | Owner::DashboardEditorConfirmation { .. }
+        | Owner::RadialDesignerChild { .. }
         | Owner::SnippetPrompt { .. } => {}
         Owner::Root | Owner::Blocked => unreachable!("handled above"),
     }
