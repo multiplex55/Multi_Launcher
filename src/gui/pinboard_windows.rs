@@ -545,12 +545,76 @@ struct PinWindowState {
     native_error: Option<String>,
     native_destroyed: bool,
     capture_visibility: Option<CaptureVisibilityState>,
+    #[cfg(test)]
+    last_opacity_slider_widget: Option<(egui::Id, egui::Rect, bool)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AppliedPinOpacity {
     binding: NativeWindowBinding,
     opacity_percent: u8,
+}
+
+#[derive(Clone)]
+struct PinOpacityPresentation {
+    desired_percent: u8,
+    current_percent: Option<u8>,
+    last_successful_percent: Option<u8>,
+    pending: bool,
+    native_error: Option<String>,
+}
+
+impl PinOpacityPresentation {
+    fn from_state(state: &PinWindowState) -> Self {
+        let current_percent = state.applied_opacity.as_ref().and_then(|applied| {
+            state
+                .native
+                .as_ref()
+                .filter(|binding| *binding == &applied.binding)
+                .map(|_| applied.opacity_percent)
+        });
+        Self {
+            desired_percent: state.opacity_percent,
+            current_percent,
+            last_successful_percent: state
+                .last_successful_opacity
+                .as_ref()
+                .map(|applied| applied.opacity_percent),
+            pending: state.opacity_sync_pending,
+            native_error: state.native_error.clone(),
+        }
+    }
+
+    fn status_text(&self) -> String {
+        let mut text = if self.pending {
+            let mut pending = format!("Opacity pending: {}%", self.desired_percent);
+            if let Some(current) = self.current_percent {
+                pending.push_str(&format!(" · current native value: {current}%"));
+            }
+            pending
+        } else if self.current_percent == Some(self.desired_percent) {
+            format!("Opacity applied: {}%", self.desired_percent)
+        } else if let Some(current) = self.current_percent {
+            format!(
+                "Opacity requested: {}% · current native value: {current}%",
+                self.desired_percent
+            )
+        } else {
+            format!(
+                "Opacity requested: {}% · awaiting native confirmation",
+                self.desired_percent
+            )
+        };
+        if let Some(error) = self.native_error.as_deref() {
+            text.push_str(&format!(" · status: {error}"));
+        }
+        if let Some(last_successful) = self.last_successful_percent
+            && self.current_percent != Some(last_successful)
+        {
+            text.push_str(&format!(" · last successful: {last_successful}%"));
+        }
+        text
+    }
 }
 
 #[derive(Debug)]
@@ -598,6 +662,7 @@ struct PinListEntry {
     dimensions: (u32, u32),
     always_on_top: bool,
     click_through: bool,
+    opacity: PinOpacityPresentation,
     texture: Option<egui::TextureHandle>,
     native_status: String,
     controls_available: bool,
@@ -742,6 +807,8 @@ pub(crate) struct PinWindowPresenter {
     pin_list_focus_requested: bool,
     #[cfg(test)]
     last_recover_all_widget_id: Option<egui::Id>,
+    #[cfg(test)]
+    last_opacity_slider_widgets: BTreeMap<(PinId, u64), (egui::Id, egui::Rect, bool)>,
 }
 
 impl PinWindowPresenter {
@@ -801,6 +868,8 @@ impl PinWindowPresenter {
             pin_list_focus_requested: false,
             #[cfg(test)]
             last_recover_all_widget_id: None,
+            #[cfg(test)]
+            last_opacity_slider_widgets: BTreeMap::new(),
         }
     }
 
@@ -974,6 +1043,8 @@ impl PinWindowPresenter {
                             native_error: None,
                             native_destroyed: false,
                             capture_visibility: None,
+                            #[cfg(test)]
+                            last_opacity_slider_widget: None,
                         }),
                     });
                     if let Some(preparation) = runtime.image_source.live_preparation() {
@@ -1108,6 +1179,7 @@ impl PinWindowPresenter {
                         dimensions: runtime.dimensions,
                         always_on_top: state.always_on_top,
                         click_through: state.click_through,
+                        opacity: PinOpacityPresentation::from_state(&state),
                         texture: state.texture.clone(),
                         native_status: if state.close_requested || state.native_destroyed {
                             "Closing".into()
@@ -1147,6 +1219,8 @@ impl PinWindowPresenter {
         let mut focus_widget_id = None;
         #[cfg(test)]
         let mut recover_all_widget_id = None;
+        #[cfg(test)]
+        let mut opacity_slider_widgets = BTreeMap::new();
         egui::Window::new("Screenshot Pins")
             .id(egui::Id::new("screenshot-pin-list"))
             .open(open)
@@ -1286,6 +1360,42 @@ impl PinWindowPresenter {
                                             }
                                         });
                                         ui.horizontal(|ui| {
+                                            let mut opacity_percent = entry.opacity.desired_percent;
+                                            let response = ui.add_enabled(
+                                                entry.controls_available && !shutting_down,
+                                                egui::Slider::new(
+                                                    &mut opacity_percent,
+                                                    crate::pinboard::MIN_PIN_OPACITY_PERCENT
+                                                        ..=crate::pinboard::MAX_PIN_OPACITY_PERCENT,
+                                                )
+                                                .integer()
+                                                .suffix("%")
+                                                .text("Opacity"),
+                                            );
+                                            #[cfg(test)]
+                                            opacity_slider_widgets.insert(
+                                                (entry.pin_id, entry.lifetime),
+                                                (response.id, response.rect, response.enabled()),
+                                            );
+                                            if response.changed() && ctx.current_pass_index() == 0 {
+                                                actions.push(PinListAction::Control {
+                                                    pin_id: entry.pin_id,
+                                                    lifetime: entry.lifetime,
+                                                    change: PinControlChange {
+                                                        always_on_top: None,
+                                                        click_through: None,
+                                                        opacity_percent: Some(opacity_percent),
+                                                    },
+                                                });
+                                            }
+                                        });
+                                        let opacity_status = entry.opacity.status_text();
+                                        if entry.opacity.native_error.is_some() {
+                                            ui.colored_label(egui::Color32::LIGHT_RED, opacity_status);
+                                        } else {
+                                            ui.weak(opacity_status);
+                                        }
+                                        ui.horizontal(|ui| {
                                             if ui
                                                 .add_enabled(
                                                     entry.click_through
@@ -1329,6 +1439,7 @@ impl PinWindowPresenter {
         #[cfg(test)]
         {
             self.last_recover_all_widget_id = recover_all_widget_id;
+            self.last_opacity_slider_widgets = opacity_slider_widgets;
         }
 
         for action in actions {
@@ -1348,6 +1459,9 @@ impl PinWindowPresenter {
                         root_hwnd,
                     ) {
                         tracing::debug!(pin_id = pin_id.get(), %error, "pin-list control request was rejected");
+                        if change.opacity_percent.is_some() {
+                            ctx.request_repaint_of(egui::ViewportId::ROOT);
+                        }
                     }
                 }
                 PinListAction::RecoverAll => {
@@ -1462,6 +1576,17 @@ impl PinWindowPresenter {
     #[cfg(test)]
     pub(super) fn recover_all_widget_id_for_test(&self) -> Option<egui::Id> {
         self.last_recover_all_widget_id
+    }
+
+    #[cfg(test)]
+    fn opacity_slider_widget_for_test(
+        &self,
+        pin_id: PinId,
+        lifetime: u64,
+    ) -> Option<(egui::Id, egui::Rect, bool)> {
+        self.last_opacity_slider_widgets
+            .get(&(pin_id, lifetime))
+            .copied()
     }
 
     fn apply_list_control(
@@ -2814,7 +2939,15 @@ fn render_pin_viewport(
     } else {
         None
     };
-    let (close_requested, action_status, scale_mode, zoom, mut always_on_top, mut click_through) = {
+    let (
+        close_requested,
+        action_status,
+        scale_mode,
+        zoom,
+        mut always_on_top,
+        mut click_through,
+        opacity_percent,
+    ) = {
         let Ok(state) = runtime.state.lock() else {
             return;
         };
@@ -2825,6 +2958,7 @@ fn render_pin_viewport(
             state.zoom,
             state.always_on_top,
             state.click_through,
+            state.opacity_percent,
         )
     };
     let mut native_destroyed = false;
@@ -2913,6 +3047,11 @@ fn render_pin_viewport(
     {
         state.native_error = Some(error);
     }
+    let opacity_presentation = runtime
+        .state
+        .lock()
+        .ok()
+        .map(|state| PinOpacityPresentation::from_state(&state));
 
     let first_pass = ctx.current_pass_index() == 0;
     let native_close = ctx.input(|input| input.viewport().close_requested());
@@ -2964,6 +3103,7 @@ fn render_pin_viewport(
     let mut control_change = PinControlChange::default();
     let mut next_mode = scale_mode;
     let mut next_zoom = zoom;
+    let mut next_opacity = opacity_percent;
 
     ui.push_id(("screenshot-pin", runtime.pin_id.get()), |ui| {
         ui.horizontal_wrapped(|ui| {
@@ -3037,6 +3177,28 @@ fn render_pin_viewport(
                 control_change.click_through = Some(passthrough);
                 click_through = passthrough;
             }
+            let opacity_response = ui.add_enabled(
+                native_ready,
+                egui::Slider::new(
+                    &mut next_opacity,
+                    crate::pinboard::MIN_PIN_OPACITY_PERCENT
+                        ..=crate::pinboard::MAX_PIN_OPACITY_PERCENT,
+                )
+                .integer()
+                .suffix("%")
+                .text("Opacity"),
+            );
+            #[cfg(test)]
+            if let Ok(mut state) = runtime.state.lock() {
+                state.last_opacity_slider_widget = Some((
+                    opacity_response.id,
+                    opacity_response.rect,
+                    opacity_response.enabled(),
+                ));
+            }
+            if opacity_response.changed() && first_pass {
+                control_change.opacity_percent = Some(next_opacity);
+            }
             if ui.button("Close").clicked() && first_pass {
                 close_clicked = true;
             }
@@ -3051,6 +3213,14 @@ fn render_pin_viewport(
                 ui.visuals().weak_text_color()
             };
             ui.colored_label(color, message);
+        }
+        if let Some(opacity) = &opacity_presentation {
+            let status = opacity.status_text();
+            if opacity.native_error.is_some() {
+                ui.colored_label(egui::Color32::LIGHT_RED, status);
+            } else {
+                ui.weak(status);
+            }
         }
 
         let available = ui.available_size().max(egui::vec2(1.0, 1.0));
@@ -3139,6 +3309,11 @@ fn render_pin_viewport(
             && let Ok(mut state) = runtime.state.lock()
         {
             state.native_error = Some(error);
+        }
+        if control_change.opacity_percent.is_some() {
+            // One follow-up child pass paints the native receipt or error. The
+            // slider does not change again without another user interaction.
+            ctx.request_repaint_of(runtime.viewport_id);
         }
         if close_clicked {
             if let Ok(mut state) = runtime.state.lock() {
@@ -5269,6 +5444,36 @@ mod tests {
         }
     }
 
+    fn key_release_event(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn append_shape_text(shape: &egui::epaint::Shape, output: &mut String) {
+        match shape {
+            egui::epaint::Shape::Text(text) => output.push_str(&text.galley.job.text),
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    append_shape_text(shape, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn output_text(output: &egui::FullOutput) -> String {
+        let mut text = String::new();
+        for clipped_shape in &output.shapes {
+            append_shape_text(&clipped_shape.shape, &mut text);
+        }
+        text
+    }
+
     struct PinboardFixtureCaptureBackend {
         desktop: ScreenRect,
         captures: AtomicUsize,
@@ -6683,6 +6888,230 @@ mod tests {
     }
 
     #[test]
+    fn pin_opacity_ui_toolbar_and_pin_list_share_validated_state() {
+        let mut board = Pinboard::default();
+        let first = add_pin(&mut board, 11, ScreenRect::new(20, 30, 2, 2));
+        let second = add_pin(&mut board, 12, ScreenRect::new(60, 70, 2, 2));
+        board
+            .get_mut(first)
+            .unwrap()
+            .set_opacity_percent(30)
+            .unwrap();
+        board
+            .get_mut(second)
+            .unwrap()
+            .set_opacity_percent(90)
+            .unwrap();
+
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let fake_native = Arc::new(FakePinNativeApi::default());
+        let native_api: Arc<dyn PinNativeApi> = fake_native.clone();
+        let mut presenter = PinWindowPresenter::with_native_api(native_api);
+        let callbacks = pin_callbacks(&ctx, &mut presenter, &board);
+        let (first_runtime, second_runtime) = {
+            let registry = presenter.registry.lock().unwrap();
+            (
+                registry.pins[&first].clone(),
+                registry.pins[&second].clone(),
+            )
+        };
+        fake_native.add_window(
+            &first_runtime,
+            0x401,
+            true,
+            ScreenRect::new(20, 30, 400, 300),
+        );
+        fake_native.add_window(
+            &second_runtime,
+            0x402,
+            true,
+            ScreenRect::new(60, 70, 400, 300),
+        );
+
+        for (pin_id, runtime, hwnd, expected) in [
+            (first, &first_runtime, 0x401, 30),
+            (second, &second_runtime, 0x402, 90),
+        ] {
+            let output = ctx.run_ui(child_input(runtime.viewport_id, 1.0), |child| {
+                callbacks[&pin_id](child)
+            });
+            assert_eq!(fake_native.opacity_for_test(hwnd), expected);
+            let (_, rect, enabled) = runtime
+                .state
+                .lock()
+                .unwrap()
+                .last_opacity_slider_widget
+                .expect("the child toolbar rendered its actual opacity slider");
+            assert!(enabled);
+            assert!(rect.is_positive());
+            assert_eq!(
+                ctx.memory(|memory| memory.focused()),
+                None,
+                "rendering an opacity control does not take keyboard focus"
+            );
+            let presentation = PinOpacityPresentation::from_state(&runtime.state.lock().unwrap());
+            assert_eq!(presentation.desired_percent, expected);
+            assert_eq!(presentation.current_percent, Some(expected));
+            assert!(presentation.status_text().contains("Opacity applied"));
+            assert_no_pin_control_commands(&output, "initial toolbar opacity control");
+            output.drop_without_applying_deltas();
+        }
+
+        let (first_widget_id, _, _) = first_runtime
+            .state
+            .lock()
+            .unwrap()
+            .last_opacity_slider_widget
+            .unwrap();
+        let child_focus_handoff =
+            ctx.run_ui(child_input(first_runtime.viewport_id, 1.0), |child| {
+                child
+                    .ctx()
+                    .memory_mut(|memory| memory.request_focus(first_widget_id));
+                callbacks[&first](child);
+                assert_eq!(
+                    child.ctx().memory(|memory| memory.focused()),
+                    Some(first_widget_id)
+                );
+            });
+        child_focus_handoff.drop_without_applying_deltas();
+        let mut child_key_input = child_input(first_runtime.viewport_id, 1.0);
+        child_key_input.events = vec![
+            key_event(egui::Key::ArrowRight),
+            key_release_event(egui::Key::ArrowRight),
+        ];
+        let toolbar_edit = ctx.run_ui(child_key_input, |child| callbacks[&first](child));
+        let toolbar_value = first_runtime.state.lock().unwrap().opacity_percent;
+        assert!(
+            toolbar_value > 30,
+            "the actual child toolbar slider accepts keyboard adjustment"
+        );
+        assert_eq!(fake_native.opacity_for_test(0x401), toolbar_value);
+        assert_eq!(fake_native.opacity_for_test(0x402), 90);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(first_widget_id));
+        assert_no_pin_control_commands(&toolbar_edit, "toolbar opacity-only edit");
+        toolbar_edit.drop_without_applying_deltas();
+
+        let mut pin_list_open = true;
+        let sizing_list = ctx.run_ui(root_input(Vec::new()), |root| {
+            presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
+        });
+        sizing_list.drop_without_applying_deltas();
+        let initial_list = ctx.run_ui(root_input(Vec::new()), |root| {
+            presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
+        });
+        initial_list.drop_without_applying_deltas();
+        let first_list_widget = presenter
+            .opacity_slider_widget_for_test(first, first_runtime.lifetime)
+            .expect("the Pin List rendered the first actual opacity response");
+        let second_list_widget = presenter
+            .opacity_slider_widget_for_test(second, second_runtime.lifetime)
+            .expect("the Pin List rendered the second actual opacity response");
+        assert!(first_list_widget.2 && second_list_widget.2);
+        assert!(first_list_widget.1.is_positive() && second_list_widget.1.is_positive());
+
+        let list_focus_handoff = ctx.run_ui(root_input(Vec::new()), |root| {
+            root.ctx()
+                .memory_mut(|memory| memory.request_focus(first_list_widget.0));
+            presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
+            assert_eq!(
+                root.ctx().memory(|memory| memory.focused()),
+                Some(first_list_widget.0)
+            );
+        });
+        list_focus_handoff.drop_without_applying_deltas();
+        let mut root_key_input = root_input(vec![
+            key_event(egui::Key::ArrowRight),
+            key_release_event(egui::Key::ArrowRight),
+        ]);
+        root_key_input.viewport_id = egui::ViewportId::ROOT;
+        let attempts_before_list_edit = fake_native.opacity_attempts().len();
+        let mut list_edit_pass_count = 0;
+        let list_edit = ctx.run_ui(root_key_input, |root| {
+            let first_pass = root.ctx().current_pass_index() == 0;
+            presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
+            if first_pass {
+                root.ctx()
+                    .request_discard("pin list opacity edit once-only test");
+            }
+            list_edit_pass_count += 1;
+        });
+        assert!(
+            list_edit_pass_count > 1,
+            "the Pin List opacity action must survive a discarded egui pass"
+        );
+        let list_value = first_runtime.state.lock().unwrap().opacity_percent;
+        assert!(
+            list_value > toolbar_value,
+            "the actual Pin List slider routes through validated list control ownership"
+        );
+        assert_eq!(fake_native.opacity_for_test(0x401), list_value);
+        assert_eq!(fake_native.opacity_for_test(0x402), 90);
+        assert_eq!(
+            fake_native.opacity_attempts().len(),
+            attempts_before_list_edit + 1,
+            "a discarded pass applies the selected opacity exactly once"
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(first_list_widget.0)
+        );
+        assert_no_pin_control_commands(&list_edit, "Pin List opacity-only edit");
+        list_edit.drop_without_applying_deltas();
+
+        *fake_native.opacity_failure.lock().unwrap() = Some("injected UI opacity failure".into());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(first_list_widget.0),
+            "the focused Pin List response remains active for the next deliberate edit"
+        );
+        let mut failed_key_input = root_input(vec![
+            key_event(egui::Key::ArrowRight),
+            key_release_event(egui::Key::ArrowRight),
+        ]);
+        failed_key_input.viewport_id = egui::ViewportId::ROOT;
+        let failed_list_edit = ctx.run_ui(failed_key_input, |root| {
+            presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
+        });
+        let failed_desired = first_runtime.state.lock().unwrap().opacity_percent;
+        assert!(failed_desired > list_value);
+        assert_eq!(fake_native.opacity_for_test(0x401), list_value);
+        assert_eq!(fake_native.opacity_for_test(0x402), 90);
+        {
+            let state = first_runtime.state.lock().unwrap();
+            let binding = state.native.as_ref().unwrap();
+            assert_eq!(
+                state.native_error.as_deref(),
+                Some("injected UI opacity failure")
+            );
+            assert!(state.applied_opacity.is_none());
+            assert!(
+                state
+                    .last_successful_opacity
+                    .as_ref()
+                    .is_some_and(|applied| applied.matches(binding, list_value))
+            );
+            assert!(!state.opacity_sync_pending);
+        }
+        assert_no_pin_control_commands(&failed_list_edit, "failed Pin List opacity edit");
+        failed_list_edit.drop_without_applying_deltas();
+
+        let failed_feedback = ctx.run_ui(root_input(Vec::new()), |root| {
+            presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
+        });
+        let feedback_text = output_text(&failed_feedback);
+        assert!(feedback_text.contains(&format!("Opacity requested: {failed_desired}%")));
+        assert!(feedback_text.contains("injected UI opacity failure"));
+        assert!(feedback_text.contains(&format!("last successful: {list_value}%")));
+        assert_eq!(fake_native.opacity_attempts().len(), 5);
+        assert_no_pin_control_commands(&failed_feedback, "idle Pin List opacity feedback");
+        failed_feedback.drop_without_applying_deltas();
+
+        presenter.shutdown().unwrap();
+    }
+
+    #[test]
     fn pin_list_is_keyboard_focusable_and_stale_rows_cannot_reopen_closed_pins() {
         let mut board = Pinboard::default();
         let first = add_pin(&mut board, 1, ScreenRect::new(-1600, -100, 2, 2));
@@ -6747,6 +7176,7 @@ mod tests {
 
         assert!(presenter.close_lifetime(&mut board, first, first_lifetime));
         assert!(board.get(first).is_none());
+        let attempts_before_stale_opacity = fake_native.opacity_attempts().len();
         let mut stale_control_result = None;
         let stale_control = ctx.run_ui(root_input(Vec::new()), |root| {
             presenter.show_pin_list(root.ctx(), &mut board, &mut open);
@@ -6758,13 +7188,18 @@ mod tests {
                 PinControlChange {
                     always_on_top: None,
                     click_through: Some(false),
-                    opacity_percent: None,
+                    opacity_percent: Some(70),
                 },
                 fake_native.as_ref(),
                 ROOT_HWND,
             ));
         });
         assert!(stale_control_result.unwrap().is_err());
+        assert_eq!(
+            fake_native.opacity_attempts().len(),
+            attempts_before_stale_opacity,
+            "a stale list lifetime cannot mutate native opacity"
+        );
         assert!(
             !stale_control
                 .viewport_output
