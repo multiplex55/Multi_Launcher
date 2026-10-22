@@ -58,6 +58,8 @@ mod ocr_view;
 mod paste_sequence_dialog;
 pub(crate) mod pinboard;
 mod pinboard_windows;
+#[cfg(all(windows, feature = "dev-smoke-binaries"))]
+pub use pinboard_windows::run_pin_opacity_smoke;
 #[cfg(feature = "qa-framebuffer-capture")]
 mod qa_framebuffer;
 mod qr_dialog;

@@ -512,6 +512,8 @@ struct PinWindowRuntime {
     title: String,
     image_source: PinWindowImageSource,
     dimensions: (u32, u32),
+    #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+    smoke_position_points: Option<egui::Pos2>,
     state: Mutex<PinWindowState>,
 }
 
@@ -545,6 +547,8 @@ struct PinWindowState {
     native_error: Option<String>,
     native_destroyed: bool,
     capture_visibility: Option<CaptureVisibilityState>,
+    #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+    smoke_image_region: Option<(egui::Rect, egui::Rect, f32)>,
     #[cfg(test)]
     last_opacity_slider_widget: Option<(egui::Id, egui::Rect, bool)>,
 }
@@ -809,6 +813,8 @@ pub(crate) struct PinWindowPresenter {
     last_recover_all_widget_id: Option<egui::Id>,
     #[cfg(test)]
     last_opacity_slider_widgets: BTreeMap<(PinId, u64), (egui::Id, egui::Rect, bool)>,
+    #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+    smoke_positions: BTreeMap<PinId, egui::Pos2>,
 }
 
 impl PinWindowPresenter {
@@ -870,7 +876,14 @@ impl PinWindowPresenter {
             last_recover_all_widget_id: None,
             #[cfg(test)]
             last_opacity_slider_widgets: BTreeMap::new(),
+            #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+            smoke_positions: BTreeMap::new(),
         }
+    }
+
+    #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+    fn configure_smoke_positions(&mut self, positions: BTreeMap<PinId, egui::Pos2>) {
+        self.smoke_positions = positions;
     }
 
     pub(crate) fn visibility_coordinator(&self) -> Box<dyn PinWindowVisibilityCoordinator> {
@@ -1018,6 +1031,8 @@ impl PinWindowPresenter {
                         title,
                         image_source,
                         dimensions,
+                        #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+                        smoke_position_points: self.smoke_positions.get(&pin.id()).copied(),
                         state: Mutex::new(PinWindowState {
                             texture: None,
                             texture_sequence: None,
@@ -1043,6 +1058,8 @@ impl PinWindowPresenter {
                             native_error: None,
                             native_destroyed: false,
                             capture_visibility: None,
+                            #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+                            smoke_image_region: None,
                             #[cfg(test)]
                             last_opacity_slider_widget: None,
                         }),
@@ -2656,7 +2673,7 @@ fn pin_viewport_builder(runtime: &PinWindowRuntime) -> egui::ViewportBuilder {
         .lock()
         .map(|state| (state.always_on_top, state.click_through))
         .unwrap_or((true, false));
-    egui::ViewportBuilder::default()
+    let builder = egui::ViewportBuilder::default()
         .with_title(runtime.title.clone())
         .with_inner_size([width.max(220.0), height.max(160.0)])
         .with_min_inner_size([220.0, 160.0])
@@ -2666,7 +2683,14 @@ fn pin_viewport_builder(runtime: &PinWindowRuntime) -> egui::ViewportBuilder {
         } else {
             egui::WindowLevel::Normal
         })
-        .with_mouse_passthrough(click_through)
+        .with_mouse_passthrough(click_through);
+    #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+    let builder = if let Some(position) = runtime.smoke_position_points {
+        builder.with_position(position)
+    } else {
+        builder
+    };
+    builder
 }
 
 fn apply_pin_control_change(
@@ -3231,17 +3255,31 @@ fn render_pin_viewport(
             available,
             child_pixels_per_point,
         );
+        #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+        let mut smoke_image_region = None;
         egui::ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if let Some(texture) = &texture {
-                    ui.add(egui::Image::new((texture.id(), image_size)));
+                    let _image_response = ui.add(egui::Image::new((texture.id(), image_size)));
+                    #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+                    {
+                        smoke_image_region = Some((
+                            _image_response.rect,
+                            ui.clip_rect(),
+                            ui.ctx().pixels_per_point(),
+                        ));
+                    }
                 } else {
                     ui.centered_and_justified(|ui| {
                         ui.label("Waiting for a prepared source frame…");
                     });
                 }
             });
+        #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+        if let Ok(mut state) = runtime.state.lock() {
+            state.smoke_image_region = smoke_image_region;
+        }
     });
 
     if first_pass {
@@ -7838,4 +7876,13 @@ mod tests {
         drop(ctx);
         assert_eq!(board.image_bytes(), 0);
     }
+}
+
+#[cfg(all(windows, feature = "dev-smoke-binaries"))]
+#[path = "pinboard_windows_smoke.rs"]
+mod opacity_smoke;
+
+#[cfg(all(windows, feature = "dev-smoke-binaries"))]
+pub fn run_pin_opacity_smoke() -> Result<(), String> {
+    opacity_smoke::run()
 }
