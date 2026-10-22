@@ -2069,6 +2069,23 @@ impl LauncherApp {
         geometry: QueryShowGeometry,
     ) -> bool {
         let query_id = egui::Id::new("query_input");
+        let hint_source_is_current = match session.origin {
+            super::QueryFocusOrigin::Hint {
+                notes_instance,
+                notes_generation,
+            } => {
+                notes_generation == self.notes_dialog.jump_mode_target_generation()
+                    && self.jump_mode_ui.notes_instance() == notes_instance
+                    && self.notes_query_bridge_context_is_eligible(
+                        ctx,
+                        crate::gui::jump_mode::ui::NavigationOwner::Notes {
+                            instance: notes_instance,
+                        },
+                        geometry,
+                    )
+            }
+            super::QueryFocusOrigin::Show | super::QueryFocusOrigin::Mouse => true,
+        };
         self.query_focus_notes_context().as_ref() == Some(&session.notes_context)
             && self.visibility_revision.current() == session.visibility_revision
             && self.visible_flag.load(Ordering::Relaxed)
@@ -2081,7 +2098,144 @@ impl LauncherApp {
             && ctx.memory(|memory| memory.has_focus(query_id))
             && !self.pending_show_query_focus_owner_blocks(ctx, Some(geometry.layer_id))
             && self.jump_mode_ui.active_session().is_none()
+            && hint_source_is_current
             && self.query_show_geometry_is_eligible(ctx, geometry) == Some(true)
+    }
+
+    fn query_geometry_from_registered_target(
+        target: &crate::gui::jump_mode::ui::RegisteredTarget,
+    ) -> QueryShowGeometry {
+        QueryShowGeometry {
+            rect: target.rect(),
+            clip_rect: target.ui_clip_rect(),
+            layer_id: target.layer_id(),
+        }
+    }
+
+    fn current_query_focus_geometry(&self, ctx: &egui::Context) -> Option<QueryShowGeometry> {
+        let published = self.last_query_focus_geometry?;
+        let response = ctx.read_response(egui::Id::new("query_input"))?;
+        (published.response_id == egui::Id::new("query_input")
+            && published.viewport == egui::ViewportId::ROOT
+            && response.id == published.response_id
+            && response.ctx.viewport_id() == published.viewport
+            && response.rect == published.rect
+            && response.layer_id == published.layer_id)
+            .then_some(QueryShowGeometry {
+                rect: published.rect,
+                clip_rect: published.ui_clip_rect,
+                layer_id: published.layer_id,
+            })
+    }
+
+    fn notes_query_bridge_context_is_eligible(
+        &self,
+        ctx: &egui::Context,
+        owner: crate::gui::jump_mode::ui::NavigationOwner,
+        geometry: QueryShowGeometry,
+    ) -> bool {
+        let crate::gui::jump_mode::ui::NavigationOwner::Notes { instance } = owner else {
+            return false;
+        };
+        use crate::gui::jump_mode::ui::{
+            focused_response_layer, notes_dialog_layer_id, visible_top_middle_layer,
+        };
+        let notes_layer = notes_dialog_layer_id();
+        let Some(root_identity) = self.published_root_identity_for_query_focus() else {
+            return false;
+        };
+        self.jump_mode_enabled()
+            && self.visible_flag.load(Ordering::Relaxed)
+            && ctx.viewport_id() == egui::ViewportId::ROOT
+            && ctx.input(|input| input.focused)
+            && self
+                .root_window_bridge
+                .is_current(root_identity.0, root_identity.1)
+            && self.notes_dialog.open
+            && self.jump_mode_ui.notes_instance() == instance
+            && self.jump_mode_ui.frame_navigation_owner() == owner
+            && visible_top_middle_layer(ctx) == Some(notes_layer)
+            && focused_response_layer(ctx)
+                .is_none_or(|layer| layer == notes_layer || layer.order != egui::Order::Middle)
+            && !self.notes_dialog.jump_mode_unsupported_nested_owner_open()
+            && !self.unused_assets_dialog.open
+            && !self.query_focus_owner_blocks(ctx, true)
+            && self.query_show_geometry_is_eligible(ctx, geometry) == Some(true)
+    }
+
+    fn notes_query_bridge_target_is_eligible(
+        &self,
+        ctx: &egui::Context,
+        owner: crate::gui::jump_mode::ui::NavigationOwner,
+        target: &crate::gui::jump_mode::ui::RegisteredTarget,
+    ) -> bool {
+        let crate::gui::jump_mode::ui::NavigationOwner::Notes { instance } = owner else {
+            return false;
+        };
+        let Some(provenance) = target.notes_query_bridge_provenance() else {
+            return false;
+        };
+        let query_id = egui::Id::new("query_input");
+        let Some(response) = ctx.read_response(provenance.root_response_id) else {
+            return false;
+        };
+        provenance.notes_instance == instance
+            && provenance.notes_generation == self.notes_dialog.jump_mode_target_generation()
+            && provenance.root_response_id == query_id
+            && provenance.root_layer_id == target.layer_id()
+            && provenance.root_viewport == egui::ViewportId::ROOT
+            && target.id().surface() == &crate::gui::jump_mode::SurfaceId::dialog("notes", instance)
+            && target.id().generation() == provenance.notes_generation
+            && target.response_id() == query_id
+            && target.viewport() == egui::ViewportId::ROOT
+            && response.id == query_id
+            && response.layer_id == provenance.root_layer_id
+            && response.ctx.viewport_id() == egui::ViewportId::ROOT
+            && response.enabled()
+            && response.rect == target.rect()
+            && target.clipped_rect() == target.rect().intersect(target.ui_clip_rect())
+            && self.notes_query_bridge_context_is_eligible(
+                ctx,
+                owner,
+                Self::query_geometry_from_registered_target(target),
+            )
+    }
+
+    fn retained_notes_query_bridge_is_eligible(
+        &self,
+        ctx: &egui::Context,
+        owner: crate::gui::jump_mode::ui::NavigationOwner,
+    ) -> bool {
+        self.jump_mode_ui
+            .retained_notes_query_bridge_target()
+            .is_some_and(|target| self.notes_query_bridge_target_is_eligible(ctx, owner, target))
+    }
+
+    fn current_notes_query_bridge_is_eligible(
+        &self,
+        ctx: &egui::Context,
+        owner: crate::gui::jump_mode::ui::NavigationOwner,
+    ) -> bool {
+        self.jump_mode_ui
+            .current_notes_query_bridge_target()
+            .is_some_and(|target| self.notes_query_bridge_target_is_eligible(ctx, owner, target))
+    }
+
+    fn notes_query_bridge_session_geometry(
+        &self,
+        ctx: &egui::Context,
+        session: &super::QueryFocusSession,
+    ) -> Option<QueryShowGeometry> {
+        match session.origin {
+            super::QueryFocusOrigin::Hint { .. } => self.current_query_focus_geometry(ctx),
+            super::QueryFocusOrigin::Show | super::QueryFocusOrigin::Mouse => ctx
+                .read_response(egui::Id::new("query_input"))
+                .map(|response| QueryShowGeometry {
+                    rect: response.rect,
+                    clip_rect: ctx.content_rect(),
+                    layer_id: response.layer_id,
+                }),
+        }
     }
 
     fn query_focus_session_is_eligible(
@@ -4853,23 +5007,31 @@ impl LauncherApp {
         let root_targets_allowed = self.jump_mode_root_targets_allowed(ctx, root_visible)
             && navigation_owner == crate::gui::jump_mode::ui::NavigationOwner::Root;
         let preserve_query_focus = self.query_focus_preservation_for_jump(ctx);
+        let notes_query_bridge_allowed =
+            self.current_notes_query_bridge_is_eligible(ctx, navigation_owner);
         self.jump_mode_ui
-            .complete_frame_for_navigation_owner_with_query_focus(
+            .complete_frame_for_navigation_owner_with_query_focus_and_notes_bridge(
                 ctx,
                 navigation_owner,
                 root_targets_allowed,
                 root_visible,
                 preserve_query_focus,
+                notes_query_bridge_allowed,
             );
     }
 
     fn query_focus_preservation_for_jump(&self, ctx: &egui::Context) -> bool {
-        let geometry = ctx
-            .read_response(egui::Id::new("query_input"))
-            .map(|response| QueryShowGeometry {
-                rect: response.rect,
-                clip_rect: ctx.content_rect(),
-                layer_id: response.layer_id,
+        let geometry = self
+            .query_focus_session
+            .as_ref()
+            .and_then(|session| self.notes_query_bridge_session_geometry(ctx, session))
+            .or_else(|| {
+                ctx.read_response(egui::Id::new("query_input"))
+                    .map(|response| QueryShowGeometry {
+                        rect: response.rect,
+                        clip_rect: ctx.content_rect(),
+                        layer_id: response.layer_id,
+                    })
             });
         self.pending_show_query_focus_preserves_query_owner(ctx, geometry)
     }
@@ -4881,14 +5043,17 @@ impl LauncherApp {
         let root_targets_allowed = self.jump_mode_root_targets_allowed(ctx, root_visible)
             && navigation_owner == crate::gui::jump_mode::ui::NavigationOwner::Root;
         let preserve_query_focus = self.query_focus_preservation_for_jump(ctx);
+        let notes_query_bridge_allowed =
+            self.current_notes_query_bridge_is_eligible(ctx, navigation_owner);
         if self
             .jump_mode_ui
-            .prepare_pass_for_navigation_owner_with_query_focus(
+            .prepare_pass_for_navigation_owner_with_query_focus_and_notes_bridge(
                 ctx,
                 navigation_owner,
                 root_targets_allowed,
                 root_visible,
                 preserve_query_focus,
+                notes_query_bridge_allowed,
             )
         {
             crate::gui::jump_mode::paint::paint(ctx, &self.jump_mode_ui);
@@ -4915,13 +5080,40 @@ impl LauncherApp {
             || self
                 .jump_mode_ui
                 .combo_popup_transition_pending(combo_popup_candidate.as_ref());
-        let previous_query_geometry =
+        let retained_query_geometry = self.current_query_focus_geometry(&ctx).or_else(|| {
+            self.jump_mode_ui
+                .retained_query_response_target()
+                .and_then(|target| {
+                    ctx.read_response(egui::Id::new("query_input"))
+                        .filter(|response| {
+                            response.id == target.response_id()
+                                && response.layer_id == target.layer_id()
+                                && response.rect == target.rect()
+                                && response.ctx.viewport_id() == target.viewport()
+                        })
+                        .map(|_| Self::query_geometry_from_registered_target(target))
+                })
+        });
+        let previous_query_geometry = retained_query_geometry.or_else(|| {
             ctx.read_response(egui::Id::new("query_input"))
                 .map(|response| QueryShowGeometry {
                     rect: response.rect,
                     clip_rect: ctx.content_rect(),
                     layer_id: response.layer_id,
-                });
+                })
+        });
+        let retained_notes_query_bridge_eligible = !owner_transition_pending
+            && self.retained_notes_query_bridge_is_eligible(&ctx, navigation_owner_candidate);
+        self.jump_mode_ui
+            .prune_retained_notes_query_bridge(retained_notes_query_bridge_eligible);
+        let notes_query_bridge_candidate = !owner_transition_pending
+            && retained_query_geometry.is_some_and(|geometry| {
+                self.notes_query_bridge_context_is_eligible(
+                    &ctx,
+                    navigation_owner_candidate,
+                    geometry,
+                )
+            });
         let mouse_query_focus_candidate =
             self.query_mouse_focus_candidate_is_eligible(&ctx, previous_query_geometry);
         let mouse_query_session_transfer_pending = self
@@ -5393,6 +5585,7 @@ impl LauncherApp {
                 let query_editor_interactive = root_navigation_allowed
                     || query_focus_session_active
                     || pending_show_can_enable_query
+                    || notes_query_bridge_candidate
                     || (!root_navigation_allowed
                         && self.query_mouse_focus_available(&ctx, previous_query_geometry));
                 let query_owned_focus = root_navigation_allowed
@@ -5479,6 +5672,13 @@ impl LauncherApp {
                 }
                 let query_response = query_output.response;
                 query_bottom = query_response.rect.bottom();
+                self.last_query_focus_geometry = Some(super::QueryFocusResponseGeometry {
+                    response_id: query_response.id,
+                    viewport: ctx.viewport_id(),
+                    rect: query_response.rect,
+                    ui_clip_rect: query_clip_rect,
+                    layer_id: query_response.layer_id,
+                });
                 #[cfg(test)]
                 ctx.data_mut(|data| {
                     data.insert_temp(egui::Id::new("launcher-query-response-rect"), query_response.rect)
@@ -5831,6 +6031,59 @@ impl LauncherApp {
                     )
                 {
                     directive.apply_to_response(&query_response);
+                }
+                let notes_query_geometry = QueryShowGeometry {
+                    rect: query_response.rect,
+                    clip_rect: query_clip_rect,
+                    layer_id: query_response.layer_id,
+                };
+                let notes_owner = self.jump_mode_ui.frame_navigation_owner();
+                if let crate::gui::jump_mode::ui::NavigationOwner::Notes { instance } = notes_owner
+                    && query_response.enabled()
+                    && self.notes_query_bridge_context_is_eligible(
+                        &ctx,
+                        notes_owner,
+                        notes_query_geometry,
+                    )
+                    && let Some(scope) = self.jump_mode_ui.scope_for_navigation_owner(
+                        crate::gui::jump_mode::SurfaceId::dialog("notes", instance),
+                        self.notes_dialog.jump_mode_target_generation(),
+                        "quick-notes",
+                        ctx.viewport_id(),
+                        notes_owner,
+                        false,
+                    )
+                    && let crate::gui::jump_mode::ui::RegistrationResult::Registered {
+                        directive: Some(directive @ crate::gui::jump_mode::ui::FocusDirective::Focus(
+                            crate::gui::jump_mode::TargetKind::TextEntry,
+                        )),
+                        ..
+                    } = scope.register_notes_query_bridge(
+                        ui,
+                        &query_response,
+                        instance,
+                        self.notes_dialog.jump_mode_target_generation(),
+                    )
+                {
+                    directive.apply_to_response(&query_response);
+                    if query_response.has_focus()
+                        && ctx.memory(|memory| memory.has_focus(query_input_id))
+                        && let (Some(root_identity), Some(notes_context)) = (
+                            self.published_root_identity_for_query_focus(),
+                            self.query_focus_notes_context(),
+                        )
+                        && self.root_window_bridge.is_current(root_identity.0, root_identity.1)
+                    {
+                        self.query_focus_session = Some(super::QueryFocusSession {
+                            origin: super::QueryFocusOrigin::Hint {
+                                notes_instance: instance,
+                                notes_generation: self.notes_dialog.jump_mode_target_generation(),
+                            },
+                            visibility_revision: self.visibility_revision.current(),
+                            root_identity,
+                            notes_context,
+                        });
+                    }
                 }
                 jump_mode_query_response = Some(query_response.response.clone());
                 jump_mode_root_scope = query_scope;
@@ -38137,6 +38390,103 @@ mod tests {
         );
     }
 
+    fn notes_query_hint_start_leader(
+        app: &mut LauncherApp,
+        ctx: &egui::Context,
+        screen_size: egui::Vec2,
+    ) {
+        app.run_root_frame_for_test(
+            ctx,
+            egui::RawInput {
+                events: vec![
+                    key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                    egui::Event::Text(" ".into()),
+                ],
+                ..launcher_show_owner_input(true, screen_size)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_some());
+        app.run_root_frame_for_test(
+            ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+                ..launcher_show_owner_input(true, screen_size)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+    }
+
+    fn notes_query_hint_release_enter(
+        app: &mut LauncherApp,
+        ctx: &egui::Context,
+        screen_size: egui::Vec2,
+    ) {
+        app.run_root_frame_for_test(
+            ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..launcher_show_owner_input(true, screen_size)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+    }
+
+    fn notes_query_hint_completion_events(hint: &str) -> Vec<egui::Event> {
+        let key_for_hint = |character: char| match character.to_ascii_uppercase() {
+            'A' => egui::Key::A,
+            'B' => egui::Key::B,
+            'C' => egui::Key::C,
+            'D' => egui::Key::D,
+            'E' => egui::Key::E,
+            'F' => egui::Key::F,
+            'G' => egui::Key::G,
+            'H' => egui::Key::H,
+            'I' => egui::Key::I,
+            'J' => egui::Key::J,
+            'K' => egui::Key::K,
+            'L' => egui::Key::L,
+            'M' => egui::Key::M,
+            'N' => egui::Key::N,
+            'O' => egui::Key::O,
+            'P' => egui::Key::P,
+            'Q' => egui::Key::Q,
+            'R' => egui::Key::R,
+            'S' => egui::Key::S,
+            'T' => egui::Key::T,
+            'U' => egui::Key::U,
+            'V' => egui::Key::V,
+            'W' => egui::Key::W,
+            'X' => egui::Key::X,
+            'Y' => egui::Key::Y,
+            'Z' => egui::Key::Z,
+            _ => unreachable!("Jump hints contain only ASCII letters"),
+        };
+        let mut events = Vec::new();
+        for character in hint.chars() {
+            events.push(key_press(key_for_hint(character), egui::Modifiers::NONE));
+            events.push(egui::Event::Text(character.to_string()));
+        }
+        events.push(key_press(egui::Key::Enter, egui::Modifiers::NONE));
+        events
+    }
+
+    fn notes_query_hint_release_events(hint: &str) -> Vec<egui::Event> {
+        notes_query_hint_completion_events(hint)
+            .into_iter()
+            .filter_map(|event| match event {
+                egui::Event::Key { key, modifiers, .. } => Some(key_release(key, modifiers)),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn launcher_show_owner_passive_note_panel_keeps_query_focus_and_accepts_unicode_in_both_jump_modes()
      {
@@ -38820,6 +39170,397 @@ mod tests {
             assert_eq!(app.query, query_before_click);
             assert!(app.query_focus_session.is_none());
             assert!(!ctx.memory(|memory| memory.has_focus(query_id)));
+            drop(app);
+            drop(_workspace);
+        }
+    }
+
+    #[test]
+    fn notes_query_hint_focuses_actual_query_and_returns_to_quick_notes_draft() {
+        let query_id = egui::Id::new("query_input");
+        let screen_size = egui::vec2(1600.0, 1200.0);
+        for jump_mode in [false, true] {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "hint query");
+            app.set_jump_mode_enabled(jump_mode);
+            app.notes_dialog
+                .test_set_edit_draft("unsaved Quick Notes hint draft");
+            let notes_layer = crate::gui::jump_mode::ui::notes_dialog_layer_id();
+            launcher_show_owner_seed_window_position(&ctx, notes_layer, "Quick Notes", screen_size);
+            launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen_size);
+            for _ in 0..2 {
+                notes_query_mouse_run_frame(&mut app, &ctx, screen_size, Vec::new());
+            }
+
+            let bridge_targets = app
+                .jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .filter(|target| target.notes_query_bridge_provenance().is_some())
+                .collect::<Vec<_>>();
+            if !jump_mode {
+                assert!(
+                    bridge_targets.is_empty(),
+                    "Jump Mode off must not publish a Notes query bridge"
+                );
+                drop(app);
+                drop(_workspace);
+                continue;
+            }
+
+            assert_eq!(bridge_targets.len(), 1);
+            assert_eq!(bridge_targets[0].metadata().label(), "Search query");
+            assert!(
+                app.jump_mode_ui
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .all(|target| {
+                        target.id().surface()
+                            == &crate::gui::jump_mode::SurfaceId::dialog(
+                                "notes",
+                                app.jump_mode_ui.notes_instance(),
+                            )
+                    }),
+                "the bridge must not admit launcher results or Dashboard targets"
+            );
+            assert!(!ctx.memory(|memory| memory.has_focus(query_id)));
+            assert!(!app.query_focus_session.as_ref().is_some_and(|session| {
+                matches!(session.origin, super::super::QueryFocusOrigin::Hint { .. })
+            }));
+
+            let notes_editor_rect = app
+                .notes_dialog
+                .test_edit_text_rect()
+                .expect("Quick Notes renders its actual draft editor");
+            let initial_query_rect = ctx
+                .read_response(query_id)
+                .expect("the actual query response renders beside Quick Notes")
+                .rect;
+            assert!(!notes_editor_rect.intersects(initial_query_rect));
+            notes_query_mouse_click(&mut app, &ctx, screen_size, notes_editor_rect);
+            assert_eq!(
+                crate::gui::jump_mode::ui::focused_response_layer(&ctx),
+                Some(notes_layer),
+                "the real Notes editor owns input before the query hint starts"
+            );
+
+            let query_before_hint = app.query.clone();
+            let draft_before_hint = app.notes_dialog.test_edit_draft().to_owned();
+            let notes_instance = app.jump_mode_ui.notes_instance();
+            let notes_generation = app.notes_dialog.jump_mode_target_generation();
+            notes_query_hint_start_leader(&mut app, &ctx, screen_size);
+            let query_hint = dialog_hint_for_label(&app, "Search query");
+            let (output, passes) = app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::Text(query_hint.clone()),
+                        key_press(egui::Key::Enter, egui::Modifiers::NONE),
+                    ],
+                    ..launcher_show_owner_input(true, screen_size)
+                },
+                true,
+            );
+            output.drop_without_applying_deltas();
+            assert!(
+                passes >= 2,
+                "the query hint handoff survives a discarded pass"
+            );
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+            assert_eq!(app.query, query_before_hint);
+            assert_eq!(app.notes_dialog.test_edit_draft(), draft_before_hint);
+            assert!(app.test_activation_trace.is_empty());
+            assert!(app.query_focus_session.as_ref().is_some_and(|session| {
+                session.origin
+                    == super::super::QueryFocusOrigin::Hint {
+                        notes_instance,
+                        notes_generation,
+                    }
+            }));
+
+            notes_query_hint_release_enter(&mut app, &ctx, screen_size);
+            notes_query_mouse_run_frame(&mut app, &ctx, screen_size, Vec::new());
+            assert!(
+                ctx.memory(|memory| memory.has_focus(query_id)),
+                "the completed Notes hint retains only real query focus"
+            );
+            let query_after_hint = app.query.clone();
+            notes_query_mouse_type(&mut app, &ctx, screen_size, "🧭");
+            assert_eq!(app.query, format!("{query_after_hint}🧭"));
+            assert_eq!(app.notes_dialog.test_edit_draft(), draft_before_hint);
+            assert!(app.test_activation_trace.is_empty());
+
+            let notes_editor_rect = app
+                .notes_dialog
+                .test_edit_text_rect()
+                .expect("Quick Notes keeps the actual draft editor open");
+            let query_after_typing = app.query.clone();
+            notes_query_mouse_click(&mut app, &ctx, screen_size, notes_editor_rect);
+            notes_query_mouse_type(&mut app, &ctx, screen_size, "続");
+            assert_eq!(app.query, query_after_typing);
+            assert!(app.notes_dialog.test_edit_draft().contains("続"));
+            assert!(app.query_focus_session.is_none());
+
+            notes_query_hint_start_leader(&mut app, &ctx, screen_size);
+            let fresh_query_hint = dialog_hint_for_label(&app, "Search query");
+            assert!(!fresh_query_hint.is_empty());
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![egui::Event::Text(fresh_query_hint)],
+                    ..launcher_show_owner_input(true, screen_size)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+            assert!(app.test_activation_trace.is_empty());
+            drop(app);
+            drop(_workspace);
+        }
+    }
+
+    #[test]
+    fn notes_query_hint_stales_after_overlap_and_does_not_expand_note_panel_targets() {
+        let query_id = egui::Id::new("query_input");
+        let screen_size = egui::vec2(1600.0, 1200.0);
+        {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "stale hint");
+            app.set_jump_mode_enabled(true);
+            app.notes_dialog
+                .test_set_edit_draft("unsaved stale hint draft");
+            let notes_layer = crate::gui::jump_mode::ui::notes_dialog_layer_id();
+            launcher_show_owner_seed_window_position(&ctx, notes_layer, "Quick Notes", screen_size);
+            launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen_size);
+            for _ in 0..2 {
+                notes_query_mouse_run_frame(&mut app, &ctx, screen_size, Vec::new());
+            }
+            let draft_before_stale_hint = app.notes_dialog.test_edit_draft().to_owned();
+            let editor_rect = app
+                .notes_dialog
+                .test_edit_text_rect()
+                .expect("Quick Notes renders the actual unsaved editor");
+            notes_query_mouse_click(&mut app, &ctx, screen_size, editor_rect);
+            assert_eq!(
+                crate::gui::jump_mode::ui::focused_response_layer(&ctx),
+                Some(notes_layer),
+                "the actual Notes editor is the focused owner for stale completion"
+            );
+            notes_query_hint_start_leader(&mut app, &ctx, screen_size);
+            let stale_hint = dialog_hint_for_label(&app, "Search query");
+            assert!(
+                app.jump_mode_ui
+                    .retained_notes_query_bridge_target()
+                    .is_some()
+            );
+
+            // Re-seed the actual Quick Notes area through egui's public Window
+            // placement API after the hint map has been assigned. The next
+            // actual Notes frame must invalidate its now-obstructed query.
+            launcher_show_owner_seed_window_position_at(
+                &ctx,
+                notes_layer,
+                "Quick Notes",
+                screen_size,
+                egui::Pos2::ZERO,
+            );
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                notes_query_hint_completion_events(&stale_hint),
+            );
+            assert!(
+                app.jump_mode_ui.active_session().is_none(),
+                "moving Notes over the query cancels the assigned stale hint"
+            );
+            assert!(
+                app.jump_mode_ui
+                    .retained_notes_query_bridge_target()
+                    .is_none(),
+                "an obstructed query is removed from the retained Notes registry"
+            );
+            assert!(!ctx.memory(|memory| memory.has_focus(query_id)));
+            assert!(app.query_focus_session.is_none());
+            assert_eq!(
+                app.notes_dialog.test_edit_draft(),
+                draft_before_stale_hint,
+                "the invalidating hint completion and paired text do not leak into the Notes draft"
+            );
+            assert!(app.test_activation_trace.is_empty());
+            assert!(!stale_hint.is_empty());
+            drop(app);
+            drop(_workspace);
+        }
+
+        {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "panel hint boundary");
+            app.set_jump_mode_enabled(true);
+            app.note_panel_default_size = (420.0, 320.0);
+            let mut panel = launcher_show_owner_note("hint-panel-boundary");
+            panel.open = true;
+            app.note_panels.push(panel);
+            let note_layer = app.note_panels[0].show_query_focus_layer();
+            launcher_show_owner_seed_window_position(
+                &ctx,
+                note_layer,
+                "Quick Notes Panel",
+                screen_size,
+            );
+            launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen_size);
+            for _ in 0..2 {
+                notes_query_mouse_run_frame(&mut app, &ctx, screen_size, Vec::new());
+            }
+            assert!(
+                app.jump_mode_ui
+                    .retained_notes_query_bridge_target()
+                    .is_none(),
+                "ordinary ROOT NotePanels do not receive the Quick Notes hint bridge"
+            );
+            drop(app);
+            drop(_workspace);
+        }
+
+        {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "blocked stale hint");
+            app.set_jump_mode_enabled(true);
+            app.notes_dialog
+                .test_set_edit_draft("protected-owner stale hint draft");
+            let notes_layer = crate::gui::jump_mode::ui::notes_dialog_layer_id();
+            launcher_show_owner_seed_window_position(&ctx, notes_layer, "Quick Notes", screen_size);
+            launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen_size);
+            for _ in 0..2 {
+                notes_query_mouse_run_frame(&mut app, &ctx, screen_size, Vec::new());
+            }
+
+            let draft_before_blocked_hint = app.notes_dialog.test_edit_draft().to_owned();
+            let editor_rect = app
+                .notes_dialog
+                .test_edit_text_rect()
+                .expect("Quick Notes renders the protected-owner fixture editor");
+            notes_query_mouse_click(&mut app, &ctx, screen_size, editor_rect);
+            assert_eq!(
+                crate::gui::jump_mode::ui::focused_response_layer(&ctx),
+                Some(notes_layer),
+                "the real Notes editor owns focus before the protected owner transition"
+            );
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![
+                        key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                        egui::Event::Text(" ".into()),
+                    ],
+                    ..launcher_show_owner_input(true, screen_size)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+            let stale_hint = dialog_hint_for_label(&app, "Search query");
+            assert!(app.jump_mode_ui.active_session().is_some());
+            assert!(!stale_hint.is_empty());
+
+            let query_before_blocked_hint = app.query.clone();
+            app.show_settings = true;
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                notes_query_hint_completion_events(&stale_hint),
+            );
+            assert!(
+                app.jump_mode_ui.active_session().is_none(),
+                "opening Settings invalidates the Notes-owned hint"
+            );
+            assert!(
+                app.show_settings,
+                "the stale Enter must not dismiss Settings"
+            );
+            assert_eq!(app.query, query_before_blocked_hint);
+            assert_eq!(
+                app.notes_dialog.test_edit_draft(),
+                draft_before_blocked_hint,
+                "the protected-owner invalidating frame must capture the stale hint text"
+            );
+            assert!(app.query_focus_session.is_none());
+            assert!(app.test_activation_trace.is_empty());
+
+            let stale_hint_key_events = notes_query_hint_completion_events(&stale_hint);
+            let (_, enter_modifiers) = stale_hint_key_events
+                .iter()
+                .find_map(|event| match event {
+                    egui::Event::Key {
+                        key: egui::Key::Enter,
+                        modifiers,
+                        ..
+                    } => Some((egui::Key::Enter, *modifiers)),
+                    _ => None,
+                })
+                .expect("the invalidating completion includes Enter");
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                vec![
+                    egui::Event::Key {
+                        key: egui::Key::Space,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: true,
+                        modifiers: egui::Modifiers::SHIFT,
+                    },
+                    egui::Event::Text(" ".into()),
+                    egui::Event::Key {
+                        key: egui::Key::Enter,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: true,
+                        modifiers: enter_modifiers,
+                    },
+                ],
+            );
+            assert_eq!(
+                app.notes_dialog.test_edit_draft(),
+                draft_before_blocked_hint
+            );
+            assert!(app.show_settings);
+            notes_query_mouse_run_frame(&mut app, &ctx, screen_size, {
+                let mut events = notes_query_hint_release_events(&stale_hint);
+                events.push(key_release(egui::Key::Space, egui::Modifiers::SHIFT));
+                events
+            });
+            assert_eq!(
+                app.notes_dialog.test_edit_draft(),
+                draft_before_blocked_hint
+            );
+
+            app.show_settings = false;
+            for _ in 0..3 {
+                notes_query_mouse_run_frame(&mut app, &ctx, screen_size, Vec::new());
+            }
+            notes_query_hint_start_leader(&mut app, &ctx, screen_size);
+            let fresh_hint = dialog_hint_for_label(&app, "Search query");
+            assert!(!fresh_hint.is_empty());
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                notes_query_hint_completion_events(&fresh_hint),
+            );
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+            assert_eq!(app.query, query_before_blocked_hint);
+            assert_eq!(
+                app.notes_dialog.test_edit_draft(),
+                draft_before_blocked_hint
+            );
+            assert!(app.test_activation_trace.is_empty());
             drop(app);
             drop(_workspace);
         }

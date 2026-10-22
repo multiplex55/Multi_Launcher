@@ -1241,6 +1241,20 @@ impl FocusDirective {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NotesQueryBridgeProvenance {
+    pub(crate) notes_instance: u64,
+    pub(crate) notes_generation: TargetGeneration,
+    pub(crate) root_response_id: egui::Id,
+    pub(crate) root_layer_id: egui::LayerId,
+    pub(crate) root_viewport: egui::ViewportId,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum TargetProvenance {
+    NotesQueryBridge(NotesQueryBridgeProvenance),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RegisteredTarget {
     metadata: TargetMetadata,
     viewport: egui::ViewportId,
@@ -1253,6 +1267,7 @@ pub(crate) struct RegisteredTarget {
     enabled: bool,
     eligible: bool,
     epoch: NavigationEpoch,
+    provenance: Option<TargetProvenance>,
 }
 
 impl RegisteredTarget {
@@ -1302,6 +1317,13 @@ impl RegisteredTarget {
 
     pub(crate) fn navigation_epoch(&self) -> NavigationEpoch {
         self.epoch
+    }
+
+    pub(crate) fn notes_query_bridge_provenance(&self) -> Option<&NotesQueryBridgeProvenance> {
+        match self.provenance.as_ref() {
+            Some(TargetProvenance::NotesQueryBridge(provenance)) => Some(provenance),
+            None => None,
+        }
     }
 }
 
@@ -1379,6 +1401,7 @@ impl TargetRegistry {
         ctx: &egui::Context,
         navigation_owner: NavigationOwner,
         root_targets_allowed: bool,
+        notes_query_bridge_allowed: bool,
         active_combo_popup: Option<&ComboPopupOwner>,
         viewport_binding: Option<NavigationViewportBinding>,
     ) {
@@ -1399,6 +1422,23 @@ impl TargetRegistry {
             let popup_target = is_popup_surface(target.id().surface());
             let surface_owned = navigation_owner.owns_surface(target.id().surface());
             let navigation_available = navigation_owner != NavigationOwner::Blocked;
+            let provenance_is_current = match target.notes_query_bridge_provenance() {
+                Some(provenance) => {
+                    notes_query_bridge_allowed
+                        && navigation_owner
+                            == (NavigationOwner::Notes {
+                                instance: provenance.notes_instance,
+                            })
+                        && target.id().surface()
+                            == &SurfaceId::dialog("notes", provenance.notes_instance)
+                        && target.id().generation() == provenance.notes_generation
+                        && target.response_id() == provenance.root_response_id
+                        && target.layer_id() == provenance.root_layer_id
+                        && target.viewport() == egui::ViewportId::ROOT
+                        && provenance.root_viewport == egui::ViewportId::ROOT
+                }
+                None => true,
+            };
             let popup_surface_owned = active_combo_popup
                 .as_ref()
                 .is_some_and(|popup| popup.popup_surface == *target.id().surface());
@@ -1408,6 +1448,7 @@ impl TargetRegistry {
                 && target.enabled
                 && navigation_available
                 && surface_owned
+                && provenance_is_current
                 && ctx.memory(|memory| memory.allows_interaction(target.layer_id))
                 && (!root_surface
                     || (navigation_owner == NavigationOwner::Root
@@ -1679,7 +1720,52 @@ impl JumpModeScope {
     ) -> RegistrationResult {
         let metadata =
             TargetMetadata::new(self.target_id(local_identity), label, kind, visual_order);
-        self.register_metadata_with_paint_label_rect(ui, response, metadata, None)
+        self.register_metadata_with_paint_label_rect(ui, response, metadata, None, None)
+    }
+
+    /// Register the one real ROOT query response on the exact Notes surface.
+    /// The target remains owned by Notes so it cannot unlock Dashboard or
+    /// launcher-result navigation while Notes is foreground.
+    pub(crate) fn register_notes_query_bridge(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        notes_instance: u64,
+        notes_generation: TargetGeneration,
+    ) -> RegistrationResult {
+        let expected_owner = NavigationOwner::Notes {
+            instance: notes_instance,
+        };
+        if self.navigation_owner != Some(expected_owner)
+            || self.surface != SurfaceId::dialog("notes", notes_instance)
+            || self.generation != notes_generation
+            || self.viewport != egui::ViewportId::ROOT
+            || response.id != egui::Id::new("query_input")
+        {
+            return RegistrationResult::Rejected(RegistrationRejection::IdentityOutsideScope);
+        }
+
+        let metadata = TargetMetadata::new(
+            self.target_id("query-focus-bridge"),
+            "Search query",
+            TargetKind::TextEntry,
+            0,
+        );
+        self.register_metadata_with_paint_label_rect(
+            ui,
+            response,
+            metadata,
+            None,
+            Some(TargetProvenance::NotesQueryBridge(
+                NotesQueryBridgeProvenance {
+                    notes_instance,
+                    notes_generation,
+                    root_response_id: response.id,
+                    root_layer_id: response.layer_id,
+                    root_viewport: response.ctx.viewport_id(),
+                },
+            )),
+        )
     }
 
     /// Register a target with the actual text rect painted beside its native
@@ -1697,7 +1783,13 @@ impl JumpModeScope {
     ) -> RegistrationResult {
         let metadata =
             TargetMetadata::new(self.target_id(local_identity), label, kind, visual_order);
-        self.register_metadata_with_paint_label_rect(ui, response, metadata, Some(paint_label_rect))
+        self.register_metadata_with_paint_label_rect(
+            ui,
+            response,
+            metadata,
+            Some(paint_label_rect),
+            None,
+        )
     }
 
     pub(crate) fn register_metadata(
@@ -1706,7 +1798,7 @@ impl JumpModeScope {
         response: &egui::Response,
         metadata: TargetMetadata,
     ) -> RegistrationResult {
-        self.register_metadata_with_paint_label_rect(ui, response, metadata, None)
+        self.register_metadata_with_paint_label_rect(ui, response, metadata, None, None)
     }
 
     fn register_metadata_with_paint_label_rect(
@@ -1715,6 +1807,7 @@ impl JumpModeScope {
         response: &egui::Response,
         metadata: TargetMetadata,
         paint_label_rect: Option<egui::Rect>,
+        provenance: Option<TargetProvenance>,
     ) -> RegistrationResult {
         if metadata.id().surface() != &self.surface || metadata.id().generation() != self.generation
         {
@@ -1779,6 +1872,7 @@ impl JumpModeScope {
             enabled: true,
             eligible: true,
             epoch: self.epoch,
+            provenance,
         };
 
         let Ok(mut collector) = self.collector.lock() else {
@@ -1945,6 +2039,9 @@ pub(crate) struct JumpModeUi {
     last_outcome: Option<MatchOutcome>,
     root_input_frame: RootInputFrame,
     held_captured_keys: HashSet<egui::Key>,
+    // Keys captured while retiring an invalid hint remain fenced across owner
+    // transitions until their physical release is observed.
+    invalidated_session_key_fence: HashSet<egui::Key>,
     pending_focus_intent: Option<FocusIntent>,
     collector: Option<Arc<Mutex<PassCollector>>>,
     pass_registry: Option<TargetRegistry>,
@@ -2347,6 +2444,7 @@ impl JumpModeUi {
             self.root_input_frame.viewport = viewport;
         }
         if !navigation_input_allowed {
+            self.capture_invalidated_session_key_events(ctx);
             self.root_input_frame.owner_blocked = true;
             if !ctx.input(|input| input.focused) && self.active_session.is_some() {
                 self.capture_unfocused_owner_loss_events(ctx);
@@ -2355,6 +2453,7 @@ impl JumpModeUi {
 
         if first_ui_pass {
             if !navigation_input_allowed {
+                self.capture_root_input_remainder(ctx);
                 self.cancel_for_owner_loss();
             } else if self.enabled && !self.root_input_frame.owner_blocked {
                 self.process_root_input_events(ctx);
@@ -2534,6 +2633,7 @@ impl JumpModeUi {
             root_visible,
             None,
             false,
+            false,
         )
     }
 
@@ -2545,6 +2645,25 @@ impl JumpModeUi {
         root_visible: bool,
         preserve_query_focus: bool,
     ) -> bool {
+        self.prepare_pass_for_navigation_owner_with_query_focus_and_notes_bridge(
+            ctx,
+            navigation_owner,
+            root_targets_allowed,
+            root_visible,
+            preserve_query_focus,
+            false,
+        )
+    }
+
+    pub(crate) fn prepare_pass_for_navigation_owner_with_query_focus_and_notes_bridge(
+        &mut self,
+        ctx: &egui::Context,
+        navigation_owner: NavigationOwner,
+        root_targets_allowed: bool,
+        root_visible: bool,
+        preserve_query_focus: bool,
+        notes_query_bridge_allowed: bool,
+    ) -> bool {
         self.prepare_pass_with_viewport_binding(
             ctx,
             navigation_owner,
@@ -2552,6 +2671,7 @@ impl JumpModeUi {
             root_visible,
             None,
             preserve_query_focus,
+            notes_query_bridge_allowed,
         )
     }
 
@@ -2573,6 +2693,7 @@ impl JumpModeUi {
             root_visible,
             Some(binding),
             false,
+            false,
         )
     }
 
@@ -2584,6 +2705,7 @@ impl JumpModeUi {
         root_visible: bool,
         viewport_binding: Option<NavigationViewportBinding>,
         preserve_query_focus: bool,
+        notes_query_bridge_allowed: bool,
     ) -> bool {
         let viewport_is_current = match viewport_binding {
             Some(binding) => {
@@ -2615,6 +2737,7 @@ impl JumpModeUi {
             root_targets_allowed,
             viewport_binding,
             preserve_query_focus,
+            notes_query_bridge_allowed,
         );
         self.pass_registry = Some(completed);
         true
@@ -2628,11 +2751,13 @@ impl JumpModeUi {
         root_targets_allowed: bool,
         viewport_binding: Option<NavigationViewportBinding>,
         preserve_query_focus: bool,
+        notes_query_bridge_allowed: bool,
     ) {
         registry.revalidate(
             ctx,
             navigation_owner,
             root_targets_allowed,
+            notes_query_bridge_allowed,
             self.active_combo_popup.as_ref(),
             viewport_binding,
         );
@@ -2741,6 +2866,7 @@ impl JumpModeUi {
             root_visible,
             None,
             false,
+            false,
         );
     }
 
@@ -2752,6 +2878,25 @@ impl JumpModeUi {
         root_visible: bool,
         preserve_query_focus: bool,
     ) {
+        self.complete_frame_for_navigation_owner_with_query_focus_and_notes_bridge(
+            ctx,
+            navigation_owner,
+            root_targets_allowed,
+            root_visible,
+            preserve_query_focus,
+            false,
+        );
+    }
+
+    pub(crate) fn complete_frame_for_navigation_owner_with_query_focus_and_notes_bridge(
+        &mut self,
+        ctx: &egui::Context,
+        navigation_owner: NavigationOwner,
+        root_targets_allowed: bool,
+        root_visible: bool,
+        preserve_query_focus: bool,
+        notes_query_bridge_allowed: bool,
+    ) {
         self.complete_frame_with_viewport_binding(
             ctx,
             navigation_owner,
@@ -2759,6 +2904,7 @@ impl JumpModeUi {
             root_visible,
             None,
             preserve_query_focus,
+            notes_query_bridge_allowed,
         );
     }
 
@@ -2776,6 +2922,7 @@ impl JumpModeUi {
             root_visible,
             Some(binding),
             false,
+            false,
         );
     }
 
@@ -2787,6 +2934,7 @@ impl JumpModeUi {
         root_visible: bool,
         viewport_binding: Option<NavigationViewportBinding>,
         preserve_query_focus: bool,
+        notes_query_bridge_allowed: bool,
     ) {
         if viewport_binding.is_some_and(|binding| ctx.viewport_id() != binding.viewport) {
             // A stale or misrouted callback must not surrender focus through a
@@ -2830,6 +2978,7 @@ impl JumpModeUi {
             root_targets_allowed,
             viewport_binding,
             preserve_query_focus,
+            notes_query_bridge_allowed,
         );
         let pending_intent = self.pending_focus_intent.take();
         let mut completed_focus_handoff = None;
@@ -2860,6 +3009,61 @@ impl JumpModeUi {
 
     pub(crate) fn retained_registry(&self) -> &TargetRegistry {
         &self.retained_registry
+    }
+
+    pub(crate) fn retained_notes_query_bridge_target(&self) -> Option<&RegisteredTarget> {
+        self.retained_registry
+            .targets()
+            .iter()
+            .find(|target| target.notes_query_bridge_provenance().is_some())
+    }
+
+    pub(crate) fn current_notes_query_bridge_target(&self) -> Option<&RegisteredTarget> {
+        self.pass_registry
+            .as_ref()
+            .and_then(|registry| {
+                registry
+                    .targets()
+                    .iter()
+                    .find(|target| target.notes_query_bridge_provenance().is_some())
+            })
+            .or_else(|| self.retained_notes_query_bridge_target())
+    }
+
+    pub(crate) fn retained_query_response_target(&self) -> Option<&RegisteredTarget> {
+        let query_id = egui::Id::new("query_input");
+        self.retained_registry.targets().iter().find(|target| {
+            target.response_id() == query_id && target.viewport() == egui::ViewportId::ROOT
+        })
+    }
+
+    /// Remove a stale query bridge before this frame's hint keys are matched.
+    /// Notes targets keep their ordinary owner and behavior.
+    pub(crate) fn prune_retained_notes_query_bridge(&mut self, eligible: bool) {
+        if eligible {
+            return;
+        }
+        self.retained_registry
+            .targets
+            .retain(|target| target.notes_query_bridge_provenance().is_none());
+        let population_changed = self.active_session.as_mut().is_some_and(|session| {
+            session
+                .reconcile_targets(
+                    self.retained_registry
+                        .targets()
+                        .iter()
+                        .map(|target| target.id().clone()),
+                )
+                .map(|change| change.requires_new_session())
+                .unwrap_or(true)
+        });
+        if population_changed {
+            self.cancel_active_session();
+            // This prune runs before the first root input pass. Keep the
+            // invalidating frame's remaining key/text events in Jump's
+            // existing capture path so a stale hint cannot spill into Notes.
+            self.root_input_frame.capture_text_remainder = true;
+        }
     }
 
     pub(crate) fn pass_registry(&self) -> Option<&TargetRegistry> {
@@ -2925,6 +3129,7 @@ impl JumpModeUi {
         self.last_outcome = None;
         self.root_input_frame = RootInputFrame::default();
         self.held_captured_keys.clear();
+        self.invalidated_session_key_fence.clear();
         self.pending_focus_intent = None;
         self.collector = None;
         self.pass_registry = None;
@@ -2980,12 +3185,17 @@ impl JumpModeUi {
             {
                 let paired_text_index = paired_text_indices.get(&event_index).copied();
                 if !pressed {
-                    if self.held_captured_keys.remove(key) {
+                    let was_held_by_session = self.held_captured_keys.remove(key);
+                    let was_fenced_by_invalidated_session =
+                        self.invalidated_session_key_fence.remove(key);
+                    if was_held_by_session || was_fenced_by_invalidated_session {
                         self.capture_event(event);
                     }
                     continue;
                 }
-                if self.held_captured_keys.contains(key) {
+                if self.held_captured_keys.contains(key)
+                    || self.invalidated_session_key_fence.contains(key)
+                {
                     self.capture_event(event);
                     if let Some(text_index) = paired_text_index {
                         captured_text_indices.insert(text_index);
@@ -3156,6 +3366,57 @@ impl JumpModeUi {
         let events = ctx.input(|input| input.events.clone());
         for event in events {
             self.capture_event(&event);
+        }
+    }
+
+    fn capture_root_input_remainder(&mut self, ctx: &egui::Context) {
+        if !self.root_input_frame.capture_text_remainder {
+            return;
+        }
+        self.invalidated_session_key_fence
+            .extend(self.held_captured_keys.iter().copied());
+        let events = ctx.input(|input| input.events.clone());
+        for event in events {
+            if let egui::Event::Key { key, pressed, .. } = &event {
+                if *pressed {
+                    self.invalidated_session_key_fence.insert(*key);
+                } else {
+                    self.invalidated_session_key_fence.remove(key);
+                }
+            }
+            self.capture_event(&event);
+        }
+    }
+
+    /// Keep only keys captured from the invalidated hint isolated until their
+    /// physical release, including while another navigation owner is active.
+    fn capture_invalidated_session_key_events(&mut self, ctx: &egui::Context) {
+        if self.invalidated_session_key_fence.is_empty() {
+            return;
+        }
+
+        let events = ctx.input(|input| input.events.clone());
+        let paired_text_indices = paired_text_indices(&events);
+        let mut captured_text_indices = HashSet::new();
+        for (event_index, event) in events.iter().enumerate() {
+            match event {
+                egui::Event::Key { key, pressed, .. }
+                    if self.invalidated_session_key_fence.contains(key) =>
+                {
+                    self.capture_event(event);
+                    if *pressed {
+                        if let Some(text_index) = paired_text_indices.get(&event_index) {
+                            captured_text_indices.insert(*text_index);
+                        }
+                    } else {
+                        self.invalidated_session_key_fence.remove(key);
+                    }
+                }
+                egui::Event::Text(_) if captured_text_indices.contains(&event_index) => {
+                    self.capture_event(event);
+                }
+                _ => {}
+            }
         }
     }
 

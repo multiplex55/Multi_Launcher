@@ -1006,6 +1006,7 @@ pub struct LauncherApp {
     focus_query: bool,
     pending_show_query_focus: Option<PendingShowQueryFocus>,
     query_focus_session: Option<QueryFocusSession>,
+    last_query_focus_geometry: Option<QueryFocusResponseGeometry>,
     move_cursor_end: bool,
     toasts: egui_toast::Toasts,
     #[cfg(test)]
@@ -1242,10 +1243,23 @@ struct QueryFocusSession {
     notes_context: QueryFocusNotesContext,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct QueryFocusResponseGeometry {
+    response_id: egui::Id,
+    viewport: egui::ViewportId,
+    rect: egui::Rect,
+    ui_clip_rect: egui::Rect,
+    layer_id: egui::LayerId,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QueryFocusOrigin {
     Show,
     Mouse,
+    Hint {
+        notes_instance: u64,
+        notes_generation: jump_mode::TargetGeneration,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -3105,6 +3119,7 @@ impl LauncherApp {
             focus_query: false,
             pending_show_query_focus: None,
             query_focus_session: None,
+            last_query_focus_geometry: None,
             move_cursor_end: false,
             toasts,
             #[cfg(test)]
