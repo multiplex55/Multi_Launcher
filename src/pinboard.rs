@@ -363,9 +363,13 @@ pub struct Pin {
     content: PinContent,
     display_bounds: ScreenRect,
     zoom: f32,
+    opacity_percent: u8,
     always_on_top: bool,
     click_through: bool,
 }
+
+pub const MIN_PIN_OPACITY_PERCENT: u8 = 10;
+pub const MAX_PIN_OPACITY_PERCENT: u8 = 100;
 
 impl Pin {
     pub const fn id(&self) -> PinId {
@@ -433,6 +437,12 @@ impl Pin {
         self.zoom
     }
 
+    /// Returns the pin's desired whole-window opacity. This is presentation
+    /// state only; it never modifies the captured image pixels.
+    pub const fn opacity_percent(&self) -> u8 {
+        self.opacity_percent
+    }
+
     pub const fn always_on_top(&self) -> bool {
         self.always_on_top
     }
@@ -452,6 +462,16 @@ impl Pin {
             ));
         }
         self.zoom = zoom;
+        Ok(())
+    }
+
+    pub fn set_opacity_percent(&mut self, opacity_percent: u8) -> Result<(), PinboardError> {
+        if !(MIN_PIN_OPACITY_PERCENT..=MAX_PIN_OPACITY_PERCENT).contains(&opacity_percent) {
+            return Err(PinboardError::InvalidLimits(
+                "pin opacity must be between 10 and 100 percent",
+            ));
+        }
+        self.opacity_percent = opacity_percent;
         Ok(())
     }
 
@@ -829,6 +849,7 @@ impl Pinboard {
                 content,
                 display_bounds: rect,
                 zoom: 1.0,
+                opacity_percent: MAX_PIN_OPACITY_PERCENT,
                 always_on_top: true,
                 click_through: false,
             },
@@ -1022,6 +1043,7 @@ mod tests {
             .unwrap()
             .image_handle();
         assert_eq!(retained_image.pixels().as_raw().len(), 16);
+        let retained_pixels_before = retained_image.pixels().as_raw().clone();
         assert_eq!(
             board
                 .get(first_id)
@@ -1042,6 +1064,7 @@ mod tests {
         );
         assert_eq!(board.get(first_id).unwrap().display_bounds(), first_rect);
         assert_eq!(board.get(first_id).unwrap().zoom(), 1.0);
+        assert_eq!(board.get(first_id).unwrap().opacity_percent(), 100);
         assert!(board.get(first_id).unwrap().always_on_top());
         assert!(!board.get(first_id).unwrap().click_through());
 
@@ -1059,7 +1082,36 @@ mod tests {
             )
             .unwrap();
         let second_id = board.commit_capture(second_capture).unwrap();
+        let second_pixels_before = board
+            .get(second_id)
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .image_handle()
+            .pixels()
+            .as_raw()
+            .clone();
         board.get_mut(second_id).unwrap().set_zoom(2.5).unwrap();
+        assert_eq!(board.get(second_id).unwrap().opacity_percent(), 100);
+        board
+            .get_mut(second_id)
+            .unwrap()
+            .set_opacity_percent(42)
+            .unwrap();
+        assert!(
+            board
+                .get_mut(second_id)
+                .unwrap()
+                .set_opacity_percent(9)
+                .is_err()
+        );
+        assert!(
+            board
+                .get_mut(second_id)
+                .unwrap()
+                .set_opacity_percent(101)
+                .is_err()
+        );
         board.get_mut(second_id).unwrap().set_always_on_top(false);
         board.get_mut(second_id).unwrap().set_click_through(true);
         board
@@ -1068,6 +1120,25 @@ mod tests {
             .set_display_bounds(ScreenRect::new(-100, 50, 4, 4));
         assert_ne!(first_id, second_id);
         assert_eq!(board.get(first_id).unwrap().zoom(), 1.0);
+        assert_eq!(board.get(first_id).unwrap().opacity_percent(), 100);
+        assert_eq!(board.get(second_id).unwrap().opacity_percent(), 42);
+        assert_eq!(
+            board
+                .get(second_id)
+                .unwrap()
+                .snapshot()
+                .unwrap()
+                .image_handle()
+                .pixels()
+                .as_raw(),
+            &second_pixels_before,
+            "opacity never mutates the image owned by the changed pin"
+        );
+        assert_eq!(
+            retained_image.pixels().as_raw(),
+            &retained_pixels_before,
+            "per-pin opacity never changes captured image pixels"
+        );
         assert!(board.get(first_id).unwrap().always_on_top());
         assert!(!board.get(first_id).unwrap().click_through());
         assert_eq!(board.image_bytes(), 20);
@@ -1221,6 +1292,31 @@ mod tests {
             .stage_live_capture(identity, binding, session)
             .unwrap();
         let pin_id = board.commit_capture(identity).unwrap();
+        assert_eq!(board.get(pin_id).unwrap().opacity_percent(), 100);
+        let live_frame_before_opacity = board
+            .get(pin_id)
+            .unwrap()
+            .current_image_handle()
+            .unwrap()
+            .pixels()
+            .as_raw()
+            .clone();
+        board
+            .get_mut(pin_id)
+            .unwrap()
+            .set_opacity_percent(37)
+            .unwrap();
+        assert_eq!(
+            board
+                .get(pin_id)
+                .unwrap()
+                .current_image_handle()
+                .unwrap()
+                .pixels()
+                .as_raw(),
+            &live_frame_before_opacity,
+            "live pin opacity leaves the published source frame pixels unchanged"
+        );
         assert_eq!(board.image_bytes(), 16);
         let static_pending = board.reserve_capture(operation_id(21)).unwrap();
         assert_eq!(board.pending_bytes(), 16);
@@ -1262,7 +1358,9 @@ mod tests {
         board
             .stage_live_capture(second_identity, binding, second_session)
             .unwrap();
-        board.commit_capture(second_identity).unwrap();
+        let second_live_pin = board.commit_capture(second_identity).unwrap();
+        assert_eq!(board.get(second_live_pin).unwrap().opacity_percent(), 100);
+        assert_eq!(board.get(pin_id).unwrap().opacity_percent(), 37);
         assert_eq!(board.image_bytes(), 32);
 
         // Close one worker while another remains active, then stage a third

@@ -525,6 +525,14 @@ struct PinWindowState {
     display_bounds: ScreenRect,
     always_on_top: bool,
     click_through: bool,
+    opacity_percent: u8,
+    /// The opacity known to be active on the current exact native binding.
+    applied_opacity: Option<AppliedPinOpacity>,
+    /// Most recent successful native opacity write, retained for diagnostics
+    /// when a style transition invalidates the current-binding receipt.
+    last_successful_opacity: Option<AppliedPinOpacity>,
+    opacity_sync_pending: bool,
+    opacity_layered_style_owned: bool,
     desired_visible: bool,
     root_registered: bool,
     callback_entered: bool,
@@ -539,10 +547,48 @@ struct PinWindowState {
     capture_visibility: Option<CaptureVisibilityState>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AppliedPinOpacity {
+    binding: NativeWindowBinding,
+    opacity_percent: u8,
+}
+
+#[derive(Debug)]
+struct NativeOpacityError {
+    message: String,
+    layered_style_owned: bool,
+    retry_when_ready: bool,
+}
+
+impl NativeOpacityError {
+    fn new(message: impl Into<String>, layered_style_owned: bool) -> Self {
+        Self {
+            message: message.into(),
+            layered_style_owned,
+            retry_when_ready: false,
+        }
+    }
+
+    fn unready(message: impl Into<String>, layered_style_owned: bool) -> Self {
+        Self {
+            message: message.into(),
+            layered_style_owned,
+            retry_when_ready: true,
+        }
+    }
+}
+
+impl AppliedPinOpacity {
+    fn matches(&self, binding: &NativeWindowBinding, opacity_percent: u8) -> bool {
+        self.binding == *binding && self.opacity_percent == opacity_percent
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct PinControlChange {
     always_on_top: Option<bool>,
     click_through: Option<bool>,
+    opacity_percent: Option<u8>,
 }
 
 #[derive(Clone)]
@@ -579,10 +625,12 @@ enum PinListAction {
     CloseAll,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct NativeWindowBinding {
     hwnd: usize,
     process_id: u32,
+    pin_id: PinId,
+    viewport_id: egui::ViewportId,
     title: String,
     lifetime: u64,
     root_hwnd: usize,
@@ -592,6 +640,8 @@ trait PinNativeApi: Send + Sync {
     fn lookup(
         &self,
         title: &str,
+        pin_id: PinId,
+        viewport_id: egui::ViewportId,
         lifetime: u64,
         existing: Option<&NativeWindowBinding>,
         root_hwnd: usize,
@@ -600,6 +650,18 @@ trait PinNativeApi: Send + Sync {
     fn is_visible(&self, binding: &NativeWindowBinding) -> Result<bool, String>;
 
     fn bounds(&self, binding: &NativeWindowBinding) -> Option<ScreenRect>;
+
+    /// Applies whole-window alpha to the validated pin HWND. The returned flag
+    /// reports whether this opacity owner added `WS_EX_LAYERED` and is therefore
+    /// permitted to remove that bit later when opacity returns to 100%.
+    fn set_opacity(
+        &self,
+        binding: &NativeWindowBinding,
+        opacity_percent: u8,
+        always_on_top: bool,
+        click_through: bool,
+        layered_style_owned: bool,
+    ) -> Result<bool, NativeOpacityError>;
 }
 
 struct SystemPinNativeApi;
@@ -608,11 +670,13 @@ impl PinNativeApi for SystemPinNativeApi {
     fn lookup(
         &self,
         title: &str,
+        pin_id: PinId,
+        viewport_id: egui::ViewportId,
         lifetime: u64,
         existing: Option<&NativeWindowBinding>,
         root_hwnd: usize,
     ) -> NativeLookup {
-        native_window_for_pin(title, lifetime, existing, root_hwnd)
+        native_window_for_pin(title, pin_id, viewport_id, lifetime, existing, root_hwnd)
     }
 
     fn is_visible(&self, binding: &NativeWindowBinding) -> Result<bool, String> {
@@ -621,6 +685,23 @@ impl PinNativeApi for SystemPinNativeApi {
 
     fn bounds(&self, binding: &NativeWindowBinding) -> Option<ScreenRect> {
         native_window_bounds(binding)
+    }
+
+    fn set_opacity(
+        &self,
+        binding: &NativeWindowBinding,
+        opacity_percent: u8,
+        always_on_top: bool,
+        click_through: bool,
+        layered_style_owned: bool,
+    ) -> Result<bool, NativeOpacityError> {
+        native_window_set_opacity(
+            binding,
+            opacity_percent,
+            always_on_top,
+            click_through,
+            layered_style_owned,
+        )
     }
 }
 
@@ -876,6 +957,11 @@ impl PinWindowPresenter {
                             display_bounds: pin.display_bounds(),
                             always_on_top: pin.always_on_top(),
                             click_through: pin.click_through(),
+                            opacity_percent: pin.opacity_percent(),
+                            applied_opacity: None,
+                            last_successful_opacity: None,
+                            opacity_sync_pending: true,
+                            opacity_layered_style_owned: false,
                             desired_visible: true,
                             root_registered: false,
                             callback_entered: false,
@@ -1173,6 +1259,7 @@ impl PinWindowPresenter {
                                                     change: PinControlChange {
                                                         always_on_top: Some(topmost),
                                                         click_through: None,
+                                                        opacity_percent: None,
                                                     },
                                                 });
                                             }
@@ -1193,6 +1280,7 @@ impl PinWindowPresenter {
                                                     change: PinControlChange {
                                                         always_on_top: None,
                                                         click_through: Some(click_through),
+                                                        opacity_percent: None,
                                                     },
                                                 });
                                             }
@@ -1213,6 +1301,7 @@ impl PinWindowPresenter {
                                                     change: PinControlChange {
                                                         always_on_top: None,
                                                         click_through: Some(false),
+                                                        opacity_percent: None,
                                                     },
                                                 });
                                             }
@@ -1272,6 +1361,7 @@ impl PinWindowPresenter {
                                 PinControlChange {
                                     always_on_top: None,
                                     click_through: Some(false),
+                                    opacity_percent: None,
                                 },
                                 native_api.as_ref(),
                                 root_hwnd,
@@ -1362,6 +1452,7 @@ impl PinWindowPresenter {
             PinControlChange {
                 always_on_top: None,
                 click_through: Some(enabled),
+                opacity_percent: None,
             },
             native_api.as_ref(),
             root_hwnd,
@@ -1501,8 +1592,17 @@ impl PinWindowPresenter {
                 NativeLookup::Found(binding) => {
                     let bounds = native_api.bounds(&binding);
                     if let Ok(mut state) = runtime.state.lock() {
+                        let binding_changed = state
+                            .native
+                            .as_ref()
+                            .is_none_or(|current| current != &binding);
+                        if binding_changed {
+                            state.opacity_layered_style_owned = false;
+                            state.opacity_sync_pending = true;
+                            state.applied_opacity = None;
+                            state.native_error = None;
+                        }
                         state.native = Some(binding);
-                        state.native_error = None;
                         state.native_destroyed = false;
                     }
                     if !closing && let Some(bounds) = bounds {
@@ -1512,6 +1612,7 @@ impl PinWindowPresenter {
                 NativeLookup::Destroyed => {
                     if let Ok(mut state) = runtime.state.lock() {
                         state.native = None;
+                        state.applied_opacity = None;
                         state.native_error = None;
                         state.native_destroyed = true;
                         state.close_requested = true;
@@ -1534,6 +1635,8 @@ impl PinWindowPresenter {
                     // identity was previously bound and Windows confirmed that HWND died.
                     if let Ok(mut state) = runtime.state.lock() {
                         state.native = None;
+                        state.opacity_sync_pending = true;
+                        state.applied_opacity = None;
                         state.native_error =
                             Some("waiting for the owned pin window to appear".into());
                     }
@@ -1541,6 +1644,7 @@ impl PinWindowPresenter {
                 NativeLookup::Unsupported => {
                     if let Ok(mut state) = runtime.state.lock() {
                         state.native = None;
+                        state.applied_opacity = None;
                         state.native_error =
                             Some("native pin-window controls are unavailable".into());
                     }
@@ -1548,6 +1652,7 @@ impl PinWindowPresenter {
                 NativeLookup::Failed(error) => {
                     if let Ok(mut state) = runtime.state.lock() {
                         state.native = None;
+                        state.applied_opacity = None;
                         state.native_error = Some(error.clone());
                     }
                     tracing::warn!(pin_id = runtime.pin_id.get(), %error, "pin native window lookup failed");
@@ -1591,6 +1696,7 @@ impl PinWindowPresenter {
             };
             if let Some(pin) = board.get_mut(runtime.pin_id) {
                 let _ = pin.set_zoom(state.zoom);
+                let _ = pin.set_opacity_percent(state.opacity_percent);
                 pin.set_always_on_top(state.always_on_top);
                 pin.set_click_through(state.click_through);
             }
@@ -1708,6 +1814,8 @@ impl PinWindowPresenter {
                     state.root_registered = false;
                     state.close_command_sent = true;
                     state.capture_visibility = None;
+                    state.applied_opacity = None;
+                    state.opacity_sync_pending = false;
                     state.native_error = None;
                     should_close.then_some(runtime.viewport_id)
                 })
@@ -1778,6 +1886,9 @@ fn retire_pin_runtime(
         state.desired_visible = false;
         state.root_registered = false;
         state.capture_visibility = None;
+        state.applied_opacity = None;
+        state.opacity_sync_pending = false;
+        state.native_error = None;
         if !state.native_destroyed && !state.close_command_sent {
             state.close_command_sent = true;
             should_close = true;
@@ -1814,6 +1925,21 @@ fn should_suppress_pin(
         .capture_visibility
         .filter(|ticket| ticket.identity == Some(identity))
         .is_none_or(|ticket| ticket.prior_visible != Some(true))
+}
+
+fn request_pin_visibility(ctx: &egui::Context, runtime: &PinWindowRuntime, visible: bool) {
+    if let Ok(mut state) = runtime.state.lock()
+        && state.root_registered
+        && !state.close_requested
+        && !state.native_destroyed
+    {
+        // winit rewrites the child EXSTYLE for visibility changes as well as
+        // topmost and click-through changes. Reapply desired opacity from the
+        // child callback after the new native style is observable.
+        state.opacity_sync_pending = true;
+        state.applied_opacity = None;
+    }
+    ctx.send_viewport_cmd_to(runtime.viewport_id, egui::ViewportCommand::Visible(visible));
 }
 
 fn registry_contains_retired(registry: &Arc<Mutex<PinWindowRegistry>>, pin_id: PinId) -> bool {
@@ -1902,10 +2028,7 @@ impl PinWindowVisibilityCoordinator for PinWindowVisibilityOwner {
                         let ctx = ctx.as_ref().ok_or_else(|| {
                             "pin viewport context is unavailable for capture exclusion".to_owned()
                         })?;
-                        ctx.send_viewport_cmd_to(
-                            runtime.viewport_id,
-                            egui::ViewportCommand::Visible(false),
-                        );
+                        request_pin_visibility(ctx, &runtime, false);
                         continue;
                     }
                     capture.prior_visible = Some(prior_visible);
@@ -1918,10 +2041,7 @@ impl PinWindowVisibilityCoordinator for PinWindowVisibilityOwner {
                     let ctx = ctx.as_ref().ok_or_else(|| {
                         "pin viewport context is unavailable for capture exclusion".to_owned()
                     })?;
-                    ctx.send_viewport_cmd_to(
-                        runtime.viewport_id,
-                        egui::ViewportCommand::Visible(false),
-                    );
+                    request_pin_visibility(ctx, &runtime, false);
                 }
                 NativeLookup::Missing if never_registered => {
                     // The owner proves no deferred child registration was requested.
@@ -2028,10 +2148,7 @@ impl PinWindowVisibilityCoordinator for PinWindowVisibilityOwner {
                                         .into(),
                                 );
                             };
-                            ctx.send_viewport_cmd_to(
-                                runtime.viewport_id,
-                                egui::ViewportCommand::Visible(false),
-                            );
+                            request_pin_visibility(ctx, &runtime, false);
                             pending = true;
                         }
                         continue;
@@ -2061,10 +2178,7 @@ impl PinWindowVisibilityCoordinator for PinWindowVisibilityOwner {
                                     "pin viewport context is unavailable for restoration".into(),
                                 );
                             };
-                            ctx.send_viewport_cmd_to(
-                                runtime.viewport_id,
-                                egui::ViewportCommand::Visible(target),
-                            );
+                            request_pin_visibility(ctx, &runtime, target);
                             pending = true;
                         }
                     } else if !ticket.hide_requested {
@@ -2082,10 +2196,7 @@ impl PinWindowVisibilityCoordinator for PinWindowVisibilityOwner {
                                 "pin viewport context is unavailable for capture exclusion".into(),
                             );
                         };
-                        ctx.send_viewport_cmd_to(
-                            runtime.viewport_id,
-                            egui::ViewportCommand::Visible(false),
-                        );
+                        request_pin_visibility(ctx, &runtime, false);
                         pending = true;
                     } else if !visible {
                         if let Ok(mut state) = runtime.state.lock() {
@@ -2212,10 +2323,7 @@ impl PinWindowVisibilityCoordinator for PinWindowVisibilityOwner {
                                 "pin viewport context is unavailable for restoration".into()
                             );
                         };
-                        ctx.send_viewport_cmd_to(
-                            runtime.viewport_id,
-                            egui::ViewportCommand::Visible(target),
-                        );
+                        request_pin_visibility(ctx, &runtime, target);
                     }
                 }
                 NativeLookup::Destroyed => {
@@ -2309,6 +2417,8 @@ impl PinWindowVisibilityCoordinator for PinWindowVisibilityOwner {
                                 ticket.restore_acknowledged = true;
                             } else if !ticket.restore_requested {
                                 ticket.restore_requested = true;
+                                state.opacity_sync_pending = true;
+                                state.applied_opacity = None;
                                 let Some(ctx) = ctx.as_ref() else {
                                     return PinVisibilityAck::Failed(
                                         "pin viewport context is unavailable for restoration"
@@ -2454,7 +2564,7 @@ fn apply_pin_control_change(
     if runtime.viewport_id != pin_viewport_id(runtime.pin_id, runtime.lifetime) {
         return Err("pin control viewport identity is stale".into());
     }
-    let (existing, current_topmost, current_click_through, root_registered) = {
+    let (existing, current_topmost, current_click_through, current_opacity, root_registered) = {
         let state = runtime
             .state
             .lock()
@@ -2466,9 +2576,16 @@ fn apply_pin_control_change(
             state.native.clone(),
             state.always_on_top,
             state.click_through,
+            state.opacity_percent,
             state.root_registered,
         )
     };
+    if change.opacity_percent.is_some_and(|opacity| {
+        !(crate::pinboard::MIN_PIN_OPACITY_PERCENT..=crate::pinboard::MAX_PIN_OPACITY_PERCENT)
+            .contains(&opacity)
+    }) {
+        return Err("pin opacity must be between 10 and 100 percent".into());
+    }
     if !root_registered {
         return Err("pin child is not registered by the launcher root".into());
     }
@@ -2486,6 +2603,8 @@ fn apply_pin_control_change(
     let next_click_through = change.click_through.unwrap_or(current_click_through);
     let topmost_changed = next_topmost != current_topmost;
     let click_through_changed = next_click_through != current_click_through;
+    let style_transition = topmost_changed || click_through_changed;
+    let next_opacity = change.opacity_percent.unwrap_or(current_opacity);
     {
         let mut state = runtime
             .state
@@ -2494,18 +2613,38 @@ fn apply_pin_control_change(
         if state.close_requested
             || state.native_destroyed
             || !state.root_registered
-            || state.native.as_ref().is_some_and(|current| {
-                current.hwnd != binding.hwnd
-                    || current.lifetime != runtime.lifetime
-                    || current.title != runtime.title
-            })
+            || state
+                .native
+                .as_ref()
+                .is_some_and(|current| current != &binding)
         {
             return Err("pin child binding changed while applying its control".into());
         }
-        state.native = Some(binding);
-        state.native_error = None;
+        let binding_changed = state
+            .native
+            .as_ref()
+            .is_none_or(|current| current != &binding);
+        if binding_changed {
+            state.opacity_layered_style_owned = false;
+            state.opacity_sync_pending = true;
+            state.applied_opacity = None;
+            state.native_error = None;
+        }
+        state.native = Some(binding.clone());
+        if change.opacity_percent.is_some() {
+            state.opacity_percent = next_opacity;
+            state.opacity_sync_pending = true;
+            state.native_error = None;
+        }
         state.always_on_top = next_topmost;
         state.click_through = next_click_through;
+        if style_transition {
+            // egui-winit rewrites the complete extended style for topmost and
+            // mouse-passthrough changes. Reapply on the next child callback,
+            // after that command has reached the native window.
+            state.opacity_sync_pending = true;
+            state.applied_opacity = None;
+        }
     }
     if topmost_changed {
         ctx.send_viewport_cmd_to(
@@ -2523,7 +2662,115 @@ fn apply_pin_control_change(
             egui::ViewportCommand::MousePassthrough(next_click_through),
         );
     }
+    if style_transition {
+        ctx.request_repaint_of(runtime.viewport_id);
+    } else if change.opacity_percent.is_some() {
+        apply_pending_pin_opacity(runtime, native_api, root_hwnd)?;
+    }
     ctx.request_repaint_of(egui::ViewportId::ROOT);
+    Ok(())
+}
+
+fn apply_pending_pin_opacity(
+    runtime: &PinWindowRuntime,
+    native_api: &dyn PinNativeApi,
+    root_hwnd: usize,
+) -> Result<(), String> {
+    let (
+        binding,
+        opacity_percent,
+        always_on_top,
+        click_through,
+        owns_layered_style,
+        root_registered,
+        pending,
+    ) = {
+        let state = runtime
+            .state
+            .lock()
+            .map_err(|_| "pin window state lock was poisoned".to_owned())?;
+        (
+            state.native.clone(),
+            state.opacity_percent,
+            state.always_on_top,
+            state.click_through,
+            state.opacity_layered_style_owned,
+            state.root_registered,
+            state.opacity_sync_pending,
+        )
+    };
+    if !pending || !root_registered {
+        return Ok(());
+    }
+    let Some(existing) = binding else {
+        return Ok(());
+    };
+    let binding = match lookup_owned_pin_window(native_api, runtime, Some(&existing), root_hwnd) {
+        NativeLookup::Found(binding) => binding,
+        NativeLookup::Missing | NativeLookup::Unsupported => return Ok(()),
+        NativeLookup::Destroyed => return Err("pin child window was destroyed".into()),
+        NativeLookup::Failed(error) => return Err(error),
+    };
+
+    let layered_style_owned = match native_api.set_opacity(
+        &binding,
+        opacity_percent,
+        always_on_top,
+        click_through,
+        owns_layered_style,
+    ) {
+        Ok(layered_style_owned) => layered_style_owned,
+        Err(error) => {
+            if let Ok(mut state) = runtime.state.lock()
+                && state
+                    .native
+                    .as_ref()
+                    .is_some_and(|current| current == &binding)
+            {
+                state.opacity_layered_style_owned = error.layered_style_owned;
+                if error.retry_when_ready {
+                    state.opacity_sync_pending = true;
+                } else {
+                    state.opacity_sync_pending = false;
+                    // A hard native error can follow a partial write or failed
+                    // rollback, so the prior value remains history only.
+                    state.applied_opacity = None;
+                    state.native_error = Some(error.message.clone());
+                }
+            }
+            if error.retry_when_ready {
+                return Ok(());
+            }
+            return Err(error.message);
+        }
+    };
+
+    let mut state = runtime
+        .state
+        .lock()
+        .map_err(|_| "pin window state lock was poisoned".to_owned())?;
+    if state.close_requested
+        || state.native_destroyed
+        || !state.root_registered
+        || state.opacity_percent != opacity_percent
+        || state.always_on_top != always_on_top
+        || state.click_through != click_through
+        || !state
+            .native
+            .as_ref()
+            .is_some_and(|current| current == &binding)
+    {
+        return Err("pin identity or opacity request changed while applying opacity".into());
+    }
+    state.opacity_layered_style_owned = layered_style_owned;
+    let receipt = AppliedPinOpacity {
+        binding: binding.clone(),
+        opacity_percent,
+    };
+    state.applied_opacity = Some(receipt.clone());
+    state.last_successful_opacity = Some(receipt);
+    state.opacity_sync_pending = false;
+    state.native_error = None;
     Ok(())
 }
 
@@ -2589,8 +2836,17 @@ fn render_pin_viewport(
     ) {
         NativeLookup::Found(binding) => {
             if let Ok(mut state) = runtime.state.lock() {
+                let binding_changed = state
+                    .native
+                    .as_ref()
+                    .is_none_or(|current| current != &binding);
+                if binding_changed {
+                    state.opacity_layered_style_owned = false;
+                    state.opacity_sync_pending = true;
+                    state.applied_opacity = None;
+                    state.native_error = None;
+                }
                 state.native = Some(binding);
-                state.native_error = None;
                 state.native_destroyed = false;
             }
             true
@@ -2599,6 +2855,7 @@ fn render_pin_viewport(
             native_destroyed = true;
             if let Ok(mut state) = runtime.state.lock() {
                 state.native = None;
+                state.applied_opacity = None;
                 state.native_error = None;
                 state.native_destroyed = true;
                 state.close_requested = true;
@@ -2609,6 +2866,7 @@ fn render_pin_viewport(
         NativeLookup::Failed(error) => {
             if let Ok(mut state) = runtime.state.lock() {
                 state.native = None;
+                state.applied_opacity = None;
                 state.native_error = Some(error.clone());
             }
             tracing::warn!(pin_id = runtime.pin_id.get(), %error, "pin child native identity validation failed");
@@ -2618,6 +2876,8 @@ fn render_pin_viewport(
         NativeLookup::Missing => {
             if let Ok(mut state) = runtime.state.lock() {
                 state.native = None;
+                state.opacity_sync_pending = true;
+                state.applied_opacity = None;
                 state.native_error = Some("waiting for the owned pin window to appear".into());
             }
             false
@@ -2625,6 +2885,7 @@ fn render_pin_viewport(
         NativeLookup::Unsupported => {
             if let Ok(mut state) = runtime.state.lock() {
                 state.native = None;
+                state.applied_opacity = None;
                 state.native_error = Some("native pin-window controls are unavailable".into());
             }
             false
@@ -2634,8 +2895,7 @@ fn render_pin_viewport(
         return;
     }
     if capture_suppressed || close_requested {
-        root_context
-            .send_viewport_cmd_to(runtime.viewport_id, egui::ViewportCommand::Visible(false));
+        request_pin_visibility(&root_context, runtime, false);
         if close_requested {
             if let Ok(mut state) = runtime.state.lock() {
                 state.close_command_sent = true;
@@ -2644,6 +2904,14 @@ fn render_pin_viewport(
             root_context.request_repaint_of(egui::ViewportId::ROOT);
         }
         return;
+    }
+
+    if native_ready
+        && let Err(error) =
+            apply_pending_pin_opacity(runtime, native_api.as_ref(), root_native_identity.0)
+        && let Ok(mut state) = runtime.state.lock()
+    {
+        state.native_error = Some(error);
     }
 
     let first_pass = ctx.current_pass_index() == 0;
@@ -2673,6 +2941,7 @@ fn render_pin_viewport(
             PinControlChange {
                 always_on_top: None,
                 click_through: Some(false),
+                opacity_percent: None,
             },
         )
         && let Ok(mut state) = runtime.state.lock()
@@ -3473,17 +3742,19 @@ fn clipboard_image_data(image: &image::RgbaImage) -> arboard::ImageData<'static>
 
 fn native_window_for_pin(
     title: &str,
+    pin_id: PinId,
+    viewport_id: egui::ViewportId,
     lifetime: u64,
     existing: Option<&NativeWindowBinding>,
     root_hwnd: usize,
 ) -> NativeLookup {
     #[cfg(windows)]
     {
-        native::lookup(title, lifetime, existing, root_hwnd)
+        native::lookup(title, pin_id, viewport_id, lifetime, existing, root_hwnd)
     }
     #[cfg(not(windows))]
     {
-        let _ = (title, lifetime, existing, root_hwnd);
+        let _ = (title, pin_id, viewport_id, lifetime, existing, root_hwnd);
         NativeLookup::Unsupported
     }
 }
@@ -3509,6 +3780,39 @@ fn native_window_bounds(binding: &NativeWindowBinding) -> Option<ScreenRect> {
     {
         let _ = binding;
         None
+    }
+}
+
+fn native_window_set_opacity(
+    binding: &NativeWindowBinding,
+    opacity_percent: u8,
+    always_on_top: bool,
+    click_through: bool,
+    layered_style_owned: bool,
+) -> Result<bool, NativeOpacityError> {
+    #[cfg(windows)]
+    {
+        native::set_opacity(
+            binding,
+            opacity_percent,
+            always_on_top,
+            click_through,
+            layered_style_owned,
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (
+            binding,
+            opacity_percent,
+            always_on_top,
+            click_through,
+            layered_style_owned,
+        );
+        Err(NativeOpacityError::new(
+            "native pin opacity is unavailable on this platform",
+            layered_style_owned,
+        ))
     }
 }
 
@@ -3538,18 +3842,29 @@ fn lookup_owned_pin_window(
         binding.hwnd == 0
             || binding.hwnd == root_hwnd
             || binding.process_id != runtime.process_id
+            || binding.pin_id != runtime.pin_id
+            || binding.viewport_id != runtime.viewport_id
             || binding.title != runtime.title
             || binding.lifetime != runtime.lifetime
             || binding.root_hwnd != root_hwnd
     }) {
         return NativeLookup::Failed("stored native pin binding is stale or foreign".into());
     }
-    match native_api.lookup(&runtime.title, runtime.lifetime, existing, root_hwnd) {
+    match native_api.lookup(
+        &runtime.title,
+        runtime.pin_id,
+        runtime.viewport_id,
+        runtime.lifetime,
+        existing,
+        root_hwnd,
+    ) {
         NativeLookup::Found(binding)
             if binding.hwnd != 0
                 && binding.hwnd != root_hwnd
                 && binding.process_id == runtime.process_id
                 && binding.process_id == std::process::id()
+                && binding.pin_id == runtime.pin_id
+                && binding.viewport_id == runtime.viewport_id
                 && binding.title == runtime.title
                 && binding.lifetime == runtime.lifetime
                 && binding.root_hwnd == root_hwnd
@@ -3566,11 +3881,15 @@ fn lookup_owned_pin_window(
 
 #[cfg(windows)]
 mod native {
-    use super::{NativeLookup, NativeWindowBinding, PinPickerCancellation, ScreenRect};
+    use super::{
+        NativeLookup, NativeOpacityError, NativeWindowBinding, PinId, PinPickerCancellation,
+        ScreenRect, pin_viewport_id,
+    };
+    use eframe::egui;
     use std::path::PathBuf;
     use windows::Win32::Foundation::{
         BOOL, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT,
-        WPARAM,
+        SetLastError, WIN32_ERROR, WPARAM,
     };
     use windows::Win32::System::Com::{
         CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
@@ -3583,10 +3902,14 @@ mod native {
         IFileSaveDialog, SIGDN_FILESYSPATH,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, EnumWindows,
-        GWLP_USERDATA, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-        GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW, RegisterClassW,
-        SetWindowLongPtrW, WM_APP, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+        CS_CLASSDC, CS_HREDRAW, CS_OWNDC, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
+        DestroyWindow, EnumWindows, GCL_STYLE, GWL_EXSTYLE, GWLP_USERDATA, GetClassLongPtrW,
+        GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+        GetWindowThreadProcessId, IsWindow, IsWindowVisible, LWA_ALPHA, PostMessageW,
+        RegisterClassW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, WM_APP, WNDCLASSW,
+        WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+        WS_POPUP,
     };
     use windows::core::{HRESULT, PCWSTR, w};
 
@@ -3785,14 +4108,54 @@ mod native {
         BOOL(1)
     }
 
+    fn exact_window_matches(
+        title: &str,
+        process_id: u32,
+        root_hwnd: usize,
+    ) -> Result<Vec<usize>, String> {
+        let mut title_wide = title.encode_utf16().collect::<Vec<_>>();
+        title_wide.push(0);
+        let mut search = Search {
+            title: &title_wide[..title_wide.len() - 1],
+            process_id,
+            root_hwnd,
+            matches: Vec::new(),
+        };
+        unsafe {
+            EnumWindows(
+                Some(find_exact_window),
+                LPARAM((&mut search as *mut Search<'_>) as isize),
+            )
+        }
+        .map_err(|error| format!("could not enumerate pin windows: {error}"))?;
+        Ok(search.matches)
+    }
+
     pub(super) fn lookup(
         title: &str,
+        pin_id: PinId,
+        viewport_id: egui::ViewportId,
         lifetime: u64,
         existing: Option<&NativeWindowBinding>,
         root_hwnd: usize,
     ) -> NativeLookup {
+        if root_hwnd == 0
+            || lifetime == 0
+            || viewport_id == egui::ViewportId::ROOT
+            || viewport_id != pin_viewport_id(pin_id, lifetime)
+        {
+            return NativeLookup::Failed(
+                "pin native lookup has a stale or root owner identity".into(),
+            );
+        }
         if let Some(existing) = existing {
-            if existing.title != title || existing.lifetime != lifetime {
+            if existing.title != title
+                || existing.pin_id != pin_id
+                || existing.viewport_id != viewport_id
+                || existing.lifetime != lifetime
+                || existing.root_hwnd != root_hwnd
+                || existing.process_id != std::process::id()
+            {
                 return NativeLookup::Failed(
                     "a registered pin HWND was presented for another pin lifetime".into(),
                 );
@@ -3809,6 +4172,16 @@ mod native {
                 root_hwnd,
             ) {
                 Ok(true) => {
+                    let matches = match exact_window_matches(title, existing.process_id, root_hwnd)
+                    {
+                        Ok(matches) => matches,
+                        Err(error) => return NativeLookup::Failed(error),
+                    };
+                    if matches.len() != 1 || matches[0] != existing.hwnd {
+                        return NativeLookup::Failed(
+                            "the registered pin title no longer identifies one exact HWND".into(),
+                        );
+                    }
                     let mut binding = existing.clone();
                     binding.root_hwnd = root_hwnd;
                     return NativeLookup::Found(binding);
@@ -3821,28 +4194,17 @@ mod native {
                 Err(error) => return NativeLookup::Failed(error),
             }
         }
-        let mut title_wide = title.encode_utf16().collect::<Vec<_>>();
-        title_wide.push(0);
-        let mut search = Search {
-            title: &title_wide[..title_wide.len() - 1],
-            process_id: std::process::id(),
-            root_hwnd,
-            matches: Vec::new(),
+        let matches = match exact_window_matches(title, std::process::id(), root_hwnd) {
+            Ok(matches) => matches,
+            Err(error) => return NativeLookup::Failed(error),
         };
-        let result = unsafe {
-            EnumWindows(
-                Some(find_exact_window),
-                LPARAM((&mut search as *mut Search<'_>) as isize),
-            )
-        };
-        if let Err(error) = result {
-            return NativeLookup::Failed(format!("could not enumerate pin windows: {error}"));
-        }
-        match search.matches.as_slice() {
+        match matches.as_slice() {
             [] => NativeLookup::Missing,
             [hwnd] => NativeLookup::Found(NativeWindowBinding {
                 hwnd: *hwnd,
-                process_id: search.process_id,
+                process_id: std::process::id(),
+                pin_id,
+                viewport_id,
                 title: title.to_owned(),
                 lifetime,
                 root_hwnd,
@@ -3925,6 +4287,395 @@ mod native {
         }
         Ok(ScreenRect::new(rect.left, rect.top, width, height))
     }
+
+    pub(super) fn set_opacity(
+        binding: &NativeWindowBinding,
+        opacity_percent: u8,
+        always_on_top: bool,
+        click_through: bool,
+        layered_style_owned: bool,
+    ) -> Result<bool, NativeOpacityError> {
+        if !(crate::pinboard::MIN_PIN_OPACITY_PERCENT..=crate::pinboard::MAX_PIN_OPACITY_PERCENT)
+            .contains(&opacity_percent)
+        {
+            return Err(NativeOpacityError::new(
+                "pin opacity is outside the supported 10–100% range",
+                layered_style_owned,
+            ));
+        }
+        let hwnd = HWND(binding.hwnd as *mut _);
+        let ex_style = validate_requested_opacity_style(
+            binding,
+            hwnd,
+            always_on_top,
+            click_through,
+            layered_style_owned,
+        )?;
+        let has_layered_style = ex_style & WS_EX_LAYERED.0 != 0;
+        if click_through && !has_layered_style {
+            return Err(NativeOpacityError::unready(
+                "pin click-through style has not reached its layered-window state",
+                layered_style_owned,
+            ));
+        }
+        if opacity_percent == crate::pinboard::MAX_PIN_OPACITY_PERCENT {
+            if !has_layered_style {
+                return Ok(false);
+            }
+            if layered_style_owned && !click_through {
+                set_layered_style(
+                    binding,
+                    hwnd,
+                    ex_style,
+                    ex_style & !WS_EX_LAYERED.0,
+                    layered_style_owned,
+                    false,
+                    always_on_top,
+                    click_through,
+                )?;
+                return Ok(false);
+            }
+            if !click_through && !layered_style_owned {
+                return Err(NativeOpacityError::new(
+                    "pin HWND has a layered style without click-through or opacity ownership",
+                    layered_style_owned,
+                ));
+            }
+        }
+
+        let class_style = class_style_for_opacity(hwnd)
+            .map_err(|error| NativeOpacityError::new(error, layered_style_owned))?;
+        if class_style & (CS_OWNDC.0 | CS_CLASSDC.0) != 0 {
+            return Err(NativeOpacityError::new(
+                format!(
+                    "pin window class style 0x{class_style:X} is incompatible with layered opacity"
+                ),
+                layered_style_owned,
+            ));
+        }
+
+        let mut owns_layered_style = layered_style_owned;
+        let added_layered_this_call =
+            !has_layered_style && opacity_percent < crate::pinboard::MAX_PIN_OPACITY_PERCENT;
+        if !has_layered_style {
+            if opacity_percent == crate::pinboard::MAX_PIN_OPACITY_PERCENT {
+                return Ok(false);
+            }
+            set_layered_style(
+                binding,
+                hwnd,
+                ex_style,
+                ex_style | WS_EX_LAYERED.0,
+                layered_style_owned,
+                true,
+                always_on_top,
+                click_through,
+            )?;
+            owns_layered_style = true;
+        } else if !click_through && !layered_style_owned {
+            return Err(NativeOpacityError::new(
+                "pin HWND has a layered style without click-through or opacity ownership",
+                layered_style_owned,
+            ));
+        }
+
+        let alpha = ((u16::from(opacity_percent) * 255 + 50) / 100) as u8;
+        let current_ex_style = validate_requested_opacity_style(
+            binding,
+            hwnd,
+            always_on_top,
+            click_through,
+            owns_layered_style,
+        )?;
+        if current_ex_style & WS_EX_LAYERED.0 == 0 {
+            return Err(NativeOpacityError::new(
+                "pin layered style changed before applying opacity",
+                owns_layered_style,
+            ));
+        }
+        if let Err(error) = unsafe {
+            SetLayeredWindowAttributes(
+                hwnd,
+                windows::Win32::Foundation::COLORREF(0),
+                alpha,
+                LWA_ALPHA,
+            )
+        } {
+            let rollback = if added_layered_this_call && !click_through {
+                let current = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+                set_layered_style(
+                    binding,
+                    hwnd,
+                    current,
+                    current & !WS_EX_LAYERED.0,
+                    owns_layered_style,
+                    false,
+                    always_on_top,
+                    click_through,
+                )
+            } else {
+                Ok(())
+            };
+            return match rollback {
+                Ok(()) => {
+                    let still_owned = if added_layered_this_call && !click_through {
+                        false
+                    } else {
+                        owns_layered_style
+                    };
+                    Err(NativeOpacityError::new(
+                        format!("could not set pin window opacity: {error}"),
+                        still_owned,
+                    ))
+                }
+                Err(rollback_error) => Err(NativeOpacityError::new(
+                    format!(
+                        "could not set pin window opacity: {error}; could not restore the opacity-owned layered style: {}",
+                        rollback_error.message
+                    ),
+                    rollback_error.layered_style_owned,
+                )),
+            };
+        }
+        validate_requested_opacity_style(
+            binding,
+            hwnd,
+            always_on_top,
+            click_through,
+            owns_layered_style,
+        )?;
+        Ok(owns_layered_style)
+    }
+
+    fn validate_requested_opacity_style(
+        binding: &NativeWindowBinding,
+        hwnd: HWND,
+        always_on_top: bool,
+        click_through: bool,
+        layered_style_owned: bool,
+    ) -> Result<u32, NativeOpacityError> {
+        validate_opacity_binding(binding, hwnd)
+            .map_err(|error| NativeOpacityError::new(error, layered_style_owned))?;
+        let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+        if (ex_style & WS_EX_TOPMOST.0 != 0) != always_on_top
+            || (ex_style & WS_EX_TRANSPARENT.0 != 0) != click_through
+        {
+            return Err(NativeOpacityError::unready(
+                "pin native style has not reached the requested topmost/click-through state",
+                layered_style_owned,
+            ));
+        }
+        Ok(ex_style)
+    }
+
+    fn validate_opacity_binding(binding: &NativeWindowBinding, hwnd: HWND) -> Result<(), String> {
+        if hwnd.0 as usize == 0
+            || hwnd.0 as usize != binding.hwnd
+            || hwnd.0 as usize == binding.root_hwnd
+            || binding.root_hwnd == 0
+            || binding.process_id != std::process::id()
+            || binding.lifetime == 0
+            || binding.viewport_id == egui::ViewportId::ROOT
+            || binding.viewport_id != pin_viewport_id(binding.pin_id, binding.lifetime)
+        {
+            return Err("pin opacity cannot target the launcher root or a null HWND".into());
+        }
+        if !unsafe { IsWindow(hwnd).as_bool() } {
+            return Err("registered pin HWND was destroyed before opacity update".into());
+        }
+        if !validate(
+            hwnd,
+            binding.process_id,
+            &binding.title,
+            binding.lifetime,
+            binding.root_hwnd,
+        )? {
+            return Err("registered pin HWND no longer belongs to this pin lifetime".into());
+        }
+        let matches = exact_window_matches(&binding.title, binding.process_id, binding.root_hwnd)?;
+        if matches.len() != 1 || matches[0] != binding.hwnd {
+            return Err("registered pin title no longer identifies one exact HWND".into());
+        }
+        Ok(())
+    }
+
+    fn class_style_for_opacity(hwnd: HWND) -> Result<u32, String> {
+        unsafe { SetLastError(WIN32_ERROR(0)) };
+        let style = unsafe { GetClassLongPtrW(hwnd, GCL_STYLE) } as u32;
+        let error = unsafe { GetLastError() };
+        if style == 0 && error != WIN32_ERROR(0) {
+            return Err(format!(
+                "could not inspect the pin window class style: {error:?}"
+            ));
+        }
+        Ok(style)
+    }
+
+    fn set_layered_style(
+        binding: &NativeWindowBinding,
+        hwnd: HWND,
+        previous_style: u32,
+        extended_style: u32,
+        owned_before: bool,
+        owned_after: bool,
+        always_on_top: bool,
+        click_through: bool,
+    ) -> Result<(), NativeOpacityError> {
+        let current_style = validate_requested_opacity_style(
+            binding,
+            hwnd,
+            always_on_top,
+            click_through,
+            owned_before,
+        )?;
+        if (current_style & WS_EX_LAYERED.0) != (previous_style & WS_EX_LAYERED.0) {
+            return Err(NativeOpacityError::unready(
+                "pin layered style changed before opacity could update it",
+                owned_before && current_style & WS_EX_LAYERED.0 != 0,
+            ));
+        }
+        let updated_style = (current_style & !WS_EX_LAYERED.0) | (extended_style & WS_EX_LAYERED.0);
+        validate_requested_opacity_style(
+            binding,
+            hwnd,
+            always_on_top,
+            click_through,
+            owned_before,
+        )?;
+        unsafe { SetLastError(WIN32_ERROR(0)) };
+        let previous = unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, updated_style as isize) };
+        let error = unsafe { GetLastError() };
+        if previous == 0 && error != WIN32_ERROR(0) {
+            return Err(NativeOpacityError::new(
+                format!("could not update the pin layered style: {error:?}"),
+                owned_before,
+            ));
+        }
+        if let Err(error) = validate_requested_opacity_style(
+            binding,
+            hwnd,
+            always_on_top,
+            click_through,
+            owned_before || owned_after,
+        ) {
+            let current = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+            let mut error = error;
+            error.layered_style_owned =
+                (owned_before || owned_after) && current & WS_EX_LAYERED.0 != 0;
+            return Err(error);
+        }
+        let refreshed = unsafe {
+            SetWindowPos(
+                hwnd,
+                HWND(std::ptr::null_mut()),
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+            )
+        };
+        if let Err(error) = refreshed {
+            let rollback = restore_extended_style(
+                binding,
+                hwnd,
+                previous_style & WS_EX_LAYERED.0 != 0,
+                owned_before || owned_after,
+                always_on_top,
+                click_through,
+            );
+            return match rollback {
+                Ok(()) => Err(NativeOpacityError::new(
+                    format!("could not refresh the pin layered style: {error}"),
+                    owned_before,
+                )),
+                Err(rollback_error) => Err(NativeOpacityError::new(
+                    format!(
+                        "could not refresh the pin layered style: {error}; could not restore the prior style: {}",
+                        rollback_error.message
+                    ),
+                    rollback_error.layered_style_owned,
+                )),
+            };
+        }
+        validate_requested_opacity_style(
+            binding,
+            hwnd,
+            always_on_top,
+            click_through,
+            owned_before || owned_after,
+        )
+        .map(|_| ())
+    }
+
+    fn restore_extended_style(
+        binding: &NativeWindowBinding,
+        hwnd: HWND,
+        prior_layered: bool,
+        opacity_owned: bool,
+        always_on_top: bool,
+        click_through: bool,
+    ) -> Result<(), NativeOpacityError> {
+        let current_style = validate_requested_opacity_style(
+            binding,
+            hwnd,
+            always_on_top,
+            click_through,
+            opacity_owned,
+        )?;
+        let current_layered = current_style & WS_EX_LAYERED.0 != 0;
+        if current_layered == prior_layered {
+            return Ok(());
+        }
+        let restored_style = if prior_layered {
+            current_style | WS_EX_LAYERED.0
+        } else {
+            current_style & !WS_EX_LAYERED.0
+        };
+        validate_requested_opacity_style(
+            binding,
+            hwnd,
+            always_on_top,
+            click_through,
+            opacity_owned && current_layered,
+        )?;
+        unsafe { SetLastError(WIN32_ERROR(0)) };
+        let previous = unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, restored_style as isize) };
+        let error = unsafe { GetLastError() };
+        if previous == 0 && error != WIN32_ERROR(0) {
+            return Err(NativeOpacityError::new(
+                format!("could not restore the prior pin window style: {error:?}"),
+                opacity_owned && current_layered,
+            ));
+        }
+        validate_requested_opacity_style(
+            binding,
+            hwnd,
+            always_on_top,
+            click_through,
+            opacity_owned,
+        )?;
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                HWND(std::ptr::null_mut()),
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+            )
+        }
+        .map_err(|error| {
+            let current = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+            NativeOpacityError::new(
+                format!("could not refresh the restored pin window style: {error}"),
+                opacity_owned && current & WS_EX_LAYERED.0 != 0,
+            )
+        })?;
+        validate_requested_opacity_style(binding, hwnd, always_on_top, click_through, opacity_owned)
+            .map(|_| ())
+    }
 }
 
 #[cfg(test)]
@@ -3945,11 +4696,27 @@ mod tests {
         bounds: ScreenRect,
         visible: bool,
         alive: bool,
+        always_on_top: bool,
+        click_through: bool,
+        layered_style: bool,
+        opacity_percent: u8,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct FakeOpacityAttempt {
+        hwnd: usize,
+        lifetime: u64,
+        opacity_percent: u8,
+        always_on_top: bool,
+        click_through: bool,
+        layered_style_owned: bool,
     }
 
     #[derive(Default)]
     struct FakePinNativeApi {
         windows: Mutex<BTreeMap<usize, FakeNativeWindow>>,
+        opacity_attempts: Mutex<Vec<FakeOpacityAttempt>>,
+        opacity_failure: Mutex<Option<String>>,
     }
 
     struct FixturePinSavePicker {
@@ -4025,12 +4792,15 @@ mod tests {
             visible: bool,
             bounds: ScreenRect,
         ) {
+            let state = runtime.state.lock().unwrap();
             self.windows.lock().unwrap().insert(
                 hwnd,
                 FakeNativeWindow {
                     binding: NativeWindowBinding {
                         hwnd,
                         process_id: std::process::id(),
+                        pin_id: runtime.pin_id,
+                        viewport_id: runtime.viewport_id,
                         title: runtime.title.clone(),
                         lifetime: runtime.lifetime,
                         root_hwnd: ROOT_HWND,
@@ -4038,20 +4808,79 @@ mod tests {
                     bounds,
                     visible,
                     alive: true,
+                    always_on_top: state.always_on_top,
+                    click_through: state.click_through,
+                    layered_style: state.click_through || state.opacity_layered_style_owned,
+                    opacity_percent: 100,
                 },
             );
         }
 
         fn set_visible(&self, hwnd: usize, visible: bool) {
-            self.windows.lock().unwrap().get_mut(&hwnd).unwrap().visible = visible;
+            let mut windows = self.windows.lock().unwrap();
+            let window = windows.get_mut(&hwnd).unwrap();
+            if window.visible != visible {
+                window.visible = visible;
+                // winit 0.30 rewrites the full EXSTYLE for a visibility change;
+                // click-through remains the only backend-owned layered style.
+                window.layered_style = window.click_through;
+            }
         }
 
         fn destroy(&self, hwnd: usize) {
             self.windows.lock().unwrap().get_mut(&hwnd).unwrap().alive = false;
         }
 
+        fn set_styles(&self, hwnd: usize, always_on_top: bool, click_through: bool) {
+            let mut windows = self.windows.lock().unwrap();
+            let window = windows.get_mut(&hwnd).unwrap();
+            window.always_on_top = always_on_top;
+            window.click_through = click_through;
+            window.layered_style = click_through;
+        }
+
+        fn reuse_window_for_pin(&self, hwnd: usize, runtime: &PinWindowRuntime) {
+            let mut windows = self.windows.lock().unwrap();
+            let window = windows.get_mut(&hwnd).unwrap();
+            window.binding = NativeWindowBinding {
+                hwnd,
+                process_id: runtime.process_id,
+                pin_id: runtime.pin_id,
+                viewport_id: runtime.viewport_id,
+                title: runtime.title.clone(),
+                lifetime: runtime.lifetime,
+                root_hwnd: ROOT_HWND,
+            };
+        }
+
+        fn restore_binding(&self, hwnd: usize, binding: &NativeWindowBinding) {
+            self.windows.lock().unwrap().get_mut(&hwnd).unwrap().binding = binding.clone();
+        }
+
         fn is_visible_for_test(&self, hwnd: usize) -> bool {
             self.windows.lock().unwrap().get(&hwnd).unwrap().visible
+        }
+
+        fn opacity_attempts(&self) -> Vec<FakeOpacityAttempt> {
+            self.opacity_attempts.lock().unwrap().clone()
+        }
+
+        fn opacity_for_test(&self, hwnd: usize) -> u8 {
+            self.windows
+                .lock()
+                .unwrap()
+                .get(&hwnd)
+                .unwrap()
+                .opacity_percent
+        }
+
+        fn layered_style_for_test(&self, hwnd: usize) -> bool {
+            self.windows
+                .lock()
+                .unwrap()
+                .get(&hwnd)
+                .unwrap()
+                .layered_style
         }
     }
 
@@ -4059,31 +4888,66 @@ mod tests {
         fn lookup(
             &self,
             title: &str,
+            pin_id: PinId,
+            viewport_id: egui::ViewportId,
             lifetime: u64,
             existing: Option<&NativeWindowBinding>,
             root_hwnd: usize,
         ) -> NativeLookup {
+            if root_hwnd == 0
+                || lifetime == 0
+                || viewport_id == egui::ViewportId::ROOT
+                || viewport_id != pin_viewport_id(pin_id, lifetime)
+            {
+                return NativeLookup::Failed("fake pin owner identity is stale or root".into());
+            }
             if let Some(existing) = existing {
                 if existing.hwnd == root_hwnd
                     || existing.title != title
+                    || existing.pin_id != pin_id
+                    || existing.viewport_id != viewport_id
                     || existing.lifetime != lifetime
+                    || existing.root_hwnd != root_hwnd
                     || existing.process_id != std::process::id()
                 {
                     return NativeLookup::Failed("fake native identity mismatch".into());
                 }
-                return match self.windows.lock().unwrap().get(&existing.hwnd) {
-                    Some(window) if !window.alive => NativeLookup::Destroyed,
-                    Some(window)
-                        if window.binding.title == title
-                            && window.binding.lifetime == lifetime
-                            && window.binding.process_id == std::process::id() =>
+                let windows = self.windows.lock().unwrap();
+                if let Some(window) = windows.get(&existing.hwnd) {
+                    if !window.alive {
+                        return NativeLookup::Destroyed;
+                    }
+                    if window.binding.hwnd != existing.hwnd
+                        || window.binding.title != title
+                        || window.binding.pin_id != pin_id
+                        || window.binding.viewport_id != viewport_id
+                        || window.binding.lifetime != lifetime
+                        || window.binding.process_id != std::process::id()
+                        || window.binding.root_hwnd != root_hwnd
                     {
+                        return NativeLookup::Failed("fake native window was reused".into());
+                    }
+                }
+                let mut matches = windows.values().filter(|window| {
+                    window.alive
+                        && window.binding.hwnd != root_hwnd
+                        && window.binding.title == title
+                        && window.binding.pin_id == pin_id
+                        && window.binding.viewport_id == viewport_id
+                        && window.binding.lifetime == lifetime
+                        && window.binding.process_id == std::process::id()
+                });
+                return match (matches.next(), matches.next()) {
+                    (Some(window), None) if window.binding.hwnd == existing.hwnd => {
                         let mut binding = window.binding.clone();
                         binding.root_hwnd = root_hwnd;
                         NativeLookup::Found(binding)
                     }
-                    Some(_) => NativeLookup::Failed("fake native window was reused".into()),
-                    None => NativeLookup::Destroyed,
+                    (None, _) => NativeLookup::Destroyed,
+                    (Some(_), Some(_)) => {
+                        NativeLookup::Failed("fake native pin title is ambiguous".into())
+                    }
+                    _ => NativeLookup::Failed("fake native window was reused".into()),
                 };
             }
 
@@ -4093,6 +4957,8 @@ mod tests {
                     && window.binding.hwnd != root_hwnd
                     && window.binding.process_id == std::process::id()
                     && window.binding.title == title
+                    && window.binding.pin_id == pin_id
+                    && window.binding.viewport_id == viewport_id
                     && window.binding.lifetime == lifetime
             });
             match (matches.next(), matches.next()) {
@@ -4135,6 +5001,148 @@ mod tests {
                         && window.binding.lifetime == binding.lifetime
                 })
                 .map(|window| window.bounds)
+        }
+
+        fn set_opacity(
+            &self,
+            binding: &NativeWindowBinding,
+            opacity_percent: u8,
+            always_on_top: bool,
+            click_through: bool,
+            layered_style_owned: bool,
+        ) -> Result<bool, NativeOpacityError> {
+            if binding.hwnd == 0
+                || binding.hwnd == binding.root_hwnd
+                || binding.root_hwnd == 0
+                || binding.process_id != std::process::id()
+                || binding.lifetime == 0
+                || binding.viewport_id == egui::ViewportId::ROOT
+                || binding.viewport_id != pin_viewport_id(binding.pin_id, binding.lifetime)
+                || !(crate::pinboard::MIN_PIN_OPACITY_PERCENT
+                    ..=crate::pinboard::MAX_PIN_OPACITY_PERCENT)
+                    .contains(&opacity_percent)
+            {
+                return Err(NativeOpacityError::new(
+                    "fake opacity binding is invalid",
+                    layered_style_owned,
+                ));
+            }
+            let mut windows = self.windows.lock().map_err(|_| {
+                NativeOpacityError::new("fake windows were poisoned", layered_style_owned)
+            })?;
+            let Some(window) = windows.get_mut(&binding.hwnd) else {
+                return Err(NativeOpacityError::new(
+                    "fake opacity target is not registered",
+                    layered_style_owned,
+                ));
+            };
+            if !window.alive
+                || window.binding.hwnd != binding.hwnd
+                || window.binding.title != binding.title
+                || window.binding.pin_id != binding.pin_id
+                || window.binding.viewport_id != binding.viewport_id
+                || window.binding.lifetime != binding.lifetime
+                || window.binding.process_id != binding.process_id
+                || window.binding.root_hwnd != binding.root_hwnd
+            {
+                return Err(NativeOpacityError::new(
+                    "fake opacity target identity changed",
+                    layered_style_owned,
+                ));
+            }
+            if window.always_on_top != always_on_top || window.click_through != click_through {
+                return Err(NativeOpacityError::unready(
+                    "fake native style has not reached the requested topmost/click-through state",
+                    layered_style_owned,
+                ));
+            }
+            if click_through && !window.layered_style {
+                return Err(NativeOpacityError::unready(
+                    "fake click-through style has not reached its layered-window state",
+                    layered_style_owned,
+                ));
+            }
+            if opacity_percent == crate::pinboard::MAX_PIN_OPACITY_PERCENT
+                && !window.layered_style
+                && !click_through
+            {
+                return Ok(false);
+            }
+            if opacity_percent == crate::pinboard::MAX_PIN_OPACITY_PERCENT
+                && layered_style_owned
+                && !click_through
+            {
+                if let Some(message) = self
+                    .opacity_failure
+                    .lock()
+                    .map_err(|_| {
+                        NativeOpacityError::new(
+                            "fake opacity failure state was poisoned",
+                            layered_style_owned,
+                        )
+                    })?
+                    .clone()
+                {
+                    return Err(NativeOpacityError::new(message, layered_style_owned));
+                }
+                self.opacity_attempts
+                    .lock()
+                    .map_err(|_| {
+                        NativeOpacityError::new(
+                            "fake opacity log was poisoned",
+                            layered_style_owned,
+                        )
+                    })?
+                    .push(FakeOpacityAttempt {
+                        hwnd: binding.hwnd,
+                        lifetime: binding.lifetime,
+                        opacity_percent,
+                        always_on_top,
+                        click_through,
+                        layered_style_owned,
+                    });
+                window.layered_style = false;
+                window.opacity_percent = opacity_percent;
+                return Ok(false);
+            }
+            if window.layered_style && !click_through && !layered_style_owned {
+                return Err(NativeOpacityError::new(
+                    "fake layered style is not owned by opacity or click-through",
+                    layered_style_owned,
+                ));
+            }
+            self.opacity_attempts
+                .lock()
+                .map_err(|_| {
+                    NativeOpacityError::new("fake opacity log was poisoned", layered_style_owned)
+                })?
+                .push(FakeOpacityAttempt {
+                    hwnd: binding.hwnd,
+                    lifetime: binding.lifetime,
+                    opacity_percent,
+                    always_on_top,
+                    click_through,
+                    layered_style_owned,
+                });
+            if let Some(message) = self
+                .opacity_failure
+                .lock()
+                .map_err(|_| {
+                    NativeOpacityError::new(
+                        "fake opacity failure state was poisoned",
+                        layered_style_owned,
+                    )
+                })?
+                .clone()
+            {
+                return Err(NativeOpacityError::new(message, layered_style_owned));
+            }
+            let owns_layered_style = layered_style_owned || !window.layered_style;
+            if !window.layered_style {
+                window.layered_style = true;
+            }
+            window.opacity_percent = opacity_percent;
+            Ok(owns_layered_style)
         }
     }
 
@@ -4806,7 +5814,6 @@ mod tests {
         let native_api: Arc<dyn PinNativeApi> = fake_native.clone();
         let mut presenter = PinWindowPresenter::with_native_api(native_api);
         let callbacks = pin_callbacks(&ctx, &mut presenter, &board);
-        drop(callbacks);
 
         let (first_runtime, second_runtime) = {
             let registry = presenter.registry.lock().unwrap();
@@ -4845,6 +5852,7 @@ mod tests {
                 PinControlChange {
                     always_on_top: Some(false),
                     click_through: Some(true),
+                    opacity_percent: Some(42),
                 },
             ));
         });
@@ -4888,6 +5896,248 @@ mod tests {
         drop(second_state);
         output.drop_without_applying_deltas();
 
+        assert!(
+            fake_native.opacity_attempts().is_empty(),
+            "opacity waits for the child callback after winit applies style changes"
+        );
+        let before_winit_style = ctx.run_ui(child_input(first_runtime.viewport_id, 1.0), |child| {
+            callbacks[&first](child)
+        });
+        assert!(
+            fake_native.opacity_attempts().is_empty(),
+            "an unready winit style is not mutated or acknowledged"
+        );
+        assert_eq!(fake_native.opacity_for_test(0x201), 100);
+        {
+            let state = first_runtime.state.lock().unwrap();
+            assert!(state.opacity_sync_pending);
+            assert!(state.applied_opacity.is_none());
+            assert!(state.native_error.is_none());
+        }
+        before_winit_style.drop_without_applying_deltas();
+
+        fake_native.set_styles(0x201, false, true);
+        let first_child = ctx.run_ui(child_input(first_runtime.viewport_id, 1.0), |child| {
+            callbacks[&first](child)
+        });
+        assert_eq!(fake_native.opacity_for_test(0x201), 42);
+        assert_eq!(fake_native.opacity_for_test(0x202), 100);
+        assert_eq!(
+            fake_native.opacity_attempts(),
+            vec![FakeOpacityAttempt {
+                hwnd: 0x201,
+                lifetime: first_runtime.lifetime,
+                opacity_percent: 42,
+                always_on_top: false,
+                click_through: true,
+                layered_style_owned: false,
+            }],
+            "the exact child binding receives the deferred desired value"
+        );
+        {
+            let state = first_runtime.state.lock().unwrap();
+            let binding = state.native.as_ref().unwrap();
+            assert!(
+                state
+                    .applied_opacity
+                    .as_ref()
+                    .is_some_and(|applied| applied.matches(binding, 42))
+            );
+            assert!(!state.opacity_sync_pending);
+        }
+        first_child.drop_without_applying_deltas();
+
+        let opacity_only_result = std::cell::RefCell::new(None);
+        let opacity_only = ctx.run_ui(child_input(first_runtime.viewport_id, 1.0), |child| {
+            *opacity_only_result.borrow_mut() = Some(apply_pin_control_change(
+                child.ctx(),
+                &first_runtime,
+                fake_native.as_ref(),
+                ROOT_HWND,
+                PinControlChange {
+                    always_on_top: None,
+                    click_through: None,
+                    opacity_percent: Some(44),
+                },
+            ));
+        });
+        assert_eq!(*opacity_only_result.borrow(), Some(Ok(())));
+        assert_eq!(fake_native.opacity_for_test(0x201), 44);
+        assert_no_pin_control_commands(&opacity_only, "opacity-only control");
+        opacity_only.drop_without_applying_deltas();
+
+        *fake_native.opacity_failure.lock().unwrap() =
+            Some("injected native opacity failure".into());
+        let failure_result = std::cell::RefCell::new(None);
+        let failed_opacity = ctx.run_ui(child_input(first_runtime.viewport_id, 1.0), |child| {
+            *failure_result.borrow_mut() = Some(apply_pin_control_change(
+                child.ctx(),
+                &first_runtime,
+                fake_native.as_ref(),
+                ROOT_HWND,
+                PinControlChange {
+                    always_on_top: None,
+                    click_through: None,
+                    opacity_percent: Some(55),
+                },
+            ));
+        });
+        assert_eq!(
+            failure_result
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap_err(),
+            "injected native opacity failure"
+        );
+        assert_eq!(fake_native.opacity_for_test(0x201), 44);
+        {
+            let state = first_runtime.state.lock().unwrap();
+            let binding = state.native.as_ref().unwrap();
+            assert_eq!(
+                state.opacity_percent, 55,
+                "failed desire remains visible to its owner"
+            );
+            assert!(
+                state.applied_opacity.is_none(),
+                "a native failure invalidates the current-binding receipt"
+            );
+            assert!(
+                state
+                    .last_successful_opacity
+                    .as_ref()
+                    .is_some_and(|applied| applied.matches(binding, 44)),
+                "the historical last-success value survives a native failure"
+            );
+            assert_eq!(
+                state.native_error.as_deref(),
+                Some("injected native opacity failure")
+            );
+            assert!(
+                !state.opacity_sync_pending,
+                "failed requests are not retried every frame"
+            );
+        }
+        assert_no_pin_control_commands(&failed_opacity, "failed opacity control");
+        failed_opacity.drop_without_applying_deltas();
+        presenter.poll(&ctx, &mut board);
+        assert_eq!(
+            first_runtime.state.lock().unwrap().native_error.as_deref(),
+            Some("injected native opacity failure"),
+            "a routine successful native lookup does not erase an opacity failure"
+        );
+        assert_eq!(
+            fake_native.opacity_attempts().len(),
+            3,
+            "an idle owner refresh does not retry a failed opacity request"
+        );
+        let last_successful_binding = first_runtime
+            .state
+            .lock()
+            .unwrap()
+            .native
+            .clone()
+            .expect("the failed request retains its prior native owner");
+
+        *fake_native.opacity_failure.lock().unwrap() = None;
+        fake_native.destroy(0x201);
+        first_runtime.state.lock().unwrap().native = None;
+        let while_missing = ctx.run_ui(child_input(first_runtime.viewport_id, 1.0), |child| {
+            callbacks[&first](child)
+        });
+        assert_eq!(fake_native.opacity_attempts().len(), 3);
+        assert_eq!(fake_native.opacity_for_test(0x201), 44);
+        {
+            let state = first_runtime.state.lock().unwrap();
+            assert_eq!(state.opacity_percent, 55);
+            assert!(state.opacity_sync_pending);
+            assert!(state.native.is_none());
+            assert!(state.applied_opacity.is_none());
+            assert!(
+                state
+                    .last_successful_opacity
+                    .as_ref()
+                    .is_some_and(|applied| { applied.matches(&last_successful_binding, 44) })
+            );
+        }
+        while_missing.drop_without_applying_deltas();
+
+        fake_native.add_window(
+            &first_runtime,
+            0x203,
+            true,
+            ScreenRect::new(-1600, -100, 400, 300),
+        );
+        let rebound = ctx.run_ui(child_input(first_runtime.viewport_id, 1.0), |child| {
+            callbacks[&first](child)
+        });
+        assert_eq!(fake_native.opacity_for_test(0x203), 55);
+        assert_eq!(
+            fake_native.opacity_attempts().last().unwrap().hwnd,
+            0x203,
+            "a new exact native binding receives the retained desired value"
+        );
+        {
+            let state = first_runtime.state.lock().unwrap();
+            let binding = state.native.as_ref().unwrap();
+            assert_eq!(binding.hwnd, 0x203);
+            assert!(
+                state
+                    .applied_opacity
+                    .as_ref()
+                    .is_some_and(|applied| applied.matches(binding, 55))
+            );
+            assert!(!state.opacity_sync_pending);
+            assert!(state.native_error.is_none());
+        }
+        rebound.drop_without_applying_deltas();
+
+        let valid_binding = first_runtime
+            .state
+            .lock()
+            .unwrap()
+            .native
+            .clone()
+            .expect("the replacement HWND is bound to this pin lifetime");
+        fake_native.add_window(
+            &first_runtime,
+            0x204,
+            true,
+            ScreenRect::new(-1200, 100, 400, 300),
+        );
+        let ambiguous_result = std::cell::RefCell::new(None);
+        let ambiguous_output = ctx.run_ui(child_input(first_runtime.viewport_id, 1.0), |child| {
+            *ambiguous_result.borrow_mut() = Some(apply_pin_control_change(
+                child.ctx(),
+                &first_runtime,
+                fake_native.as_ref(),
+                ROOT_HWND,
+                PinControlChange {
+                    always_on_top: None,
+                    click_through: None,
+                    opacity_percent: Some(60),
+                },
+            ));
+        });
+        assert!(ambiguous_result.borrow().as_ref().unwrap().is_err());
+        assert_no_pin_control_commands(&ambiguous_output, "ambiguous native title");
+        assert_eq!(fake_native.opacity_for_test(0x203), 55);
+        assert_eq!(fake_native.opacity_for_test(0x204), 100);
+        assert_eq!(fake_native.opacity_attempts().len(), 4);
+        {
+            let state = first_runtime.state.lock().unwrap();
+            assert_eq!(state.opacity_percent, 55);
+            assert!(
+                state
+                    .applied_opacity
+                    .as_ref()
+                    .is_some_and(|applied| applied.matches(&valid_binding, 55))
+            );
+        }
+        ambiguous_output.drop_without_applying_deltas();
+        fake_native.destroy(0x204);
+
         let embedded = egui::Context::default();
         embedded.set_embed_viewports(true);
         assert!(
@@ -4899,6 +6149,7 @@ mod tests {
                 PinControlChange {
                     always_on_top: None,
                     click_through: Some(false),
+                    opacity_percent: Some(60),
                 },
             )
             .is_err()
@@ -4915,6 +6166,7 @@ mod tests {
                 PinControlChange {
                     always_on_top: None,
                     click_through: Some(false),
+                    opacity_percent: None,
                 },
             ));
         });
@@ -4939,15 +6191,16 @@ mod tests {
         stale_binding.hwnd = ROOT_HWND;
         first_runtime.state.lock().unwrap().native = Some(stale_binding);
         let mut stale_result = None;
-        let stale_output = ctx.run_ui(root_input(Vec::new()), |root| {
+        let stale_output = ctx.run_ui(child_input(first_runtime.viewport_id, 1.0), |child| {
             stale_result = Some(apply_pin_control_change(
-                root.ctx(),
+                child.ctx(),
                 &first_runtime,
                 fake_native.as_ref(),
                 ROOT_HWND,
                 PinControlChange {
                     always_on_top: None,
                     click_through: Some(false),
+                    opacity_percent: None,
                 },
             ));
         });
@@ -4961,7 +6214,171 @@ mod tests {
             "a stale native binding cannot receive commands"
         );
         assert!(first_runtime.state.lock().unwrap().click_through);
+        assert_eq!(fake_native.opacity_for_test(0x203), 55);
+        assert_eq!(
+            fake_native.opacity_attempts(),
+            vec![
+                FakeOpacityAttempt {
+                    hwnd: 0x201,
+                    lifetime: first_runtime.lifetime,
+                    opacity_percent: 42,
+                    always_on_top: false,
+                    click_through: true,
+                    layered_style_owned: false,
+                },
+                FakeOpacityAttempt {
+                    hwnd: 0x201,
+                    lifetime: first_runtime.lifetime,
+                    opacity_percent: 44,
+                    always_on_top: false,
+                    click_through: true,
+                    layered_style_owned: false,
+                },
+                FakeOpacityAttempt {
+                    hwnd: 0x201,
+                    lifetime: first_runtime.lifetime,
+                    opacity_percent: 55,
+                    always_on_top: false,
+                    click_through: true,
+                    layered_style_owned: false,
+                },
+                FakeOpacityAttempt {
+                    hwnd: 0x203,
+                    lifetime: first_runtime.lifetime,
+                    opacity_percent: 55,
+                    always_on_top: false,
+                    click_through: true,
+                    layered_style_owned: false,
+                },
+            ],
+            "native writes stay on the exact current pin HWND and exclude the other pin"
+        );
         stale_output.drop_without_applying_deltas();
+
+        for (opacity_percent, expected_layered) in [(42, true), (100, false)] {
+            if opacity_percent == 100 {
+                *fake_native.opacity_failure.lock().unwrap() =
+                    Some("injected owned-layer opacity failure".into());
+                let failed_owned_result = std::cell::RefCell::new(None);
+                let failed_owned_output =
+                    ctx.run_ui(child_input(second_runtime.viewport_id, 1.0), |child| {
+                        *failed_owned_result.borrow_mut() = Some(apply_pin_control_change(
+                            child.ctx(),
+                            &second_runtime,
+                            fake_native.as_ref(),
+                            ROOT_HWND,
+                            PinControlChange {
+                                always_on_top: None,
+                                click_through: None,
+                                opacity_percent: Some(55),
+                            },
+                        ));
+                    });
+                assert_eq!(
+                    failed_owned_result
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap_err(),
+                    "injected owned-layer opacity failure"
+                );
+                assert_eq!(fake_native.opacity_for_test(0x202), 42);
+                assert!(fake_native.layered_style_for_test(0x202));
+                {
+                    let state = second_runtime.state.lock().unwrap();
+                    let binding = state.native.as_ref().unwrap();
+                    assert_eq!(state.opacity_percent, 55);
+                    assert!(state.opacity_layered_style_owned);
+                    assert!(!state.opacity_sync_pending);
+                    assert_eq!(
+                        state.native_error.as_deref(),
+                        Some("injected owned-layer opacity failure")
+                    );
+                    assert!(state.applied_opacity.is_none());
+                    assert!(
+                        state
+                            .last_successful_opacity
+                            .as_ref()
+                            .is_some_and(|applied| { applied.matches(binding, 42) })
+                    );
+                }
+                assert_no_pin_control_commands(&failed_owned_output, "owned-layer failure");
+                failed_owned_output.drop_without_applying_deltas();
+                *fake_native.opacity_failure.lock().unwrap() = None;
+            }
+            let result = std::cell::RefCell::new(None);
+            let output = ctx.run_ui(child_input(second_runtime.viewport_id, 1.0), |child| {
+                *result.borrow_mut() = Some(apply_pin_control_change(
+                    child.ctx(),
+                    &second_runtime,
+                    fake_native.as_ref(),
+                    ROOT_HWND,
+                    PinControlChange {
+                        always_on_top: None,
+                        click_through: None,
+                        opacity_percent: Some(opacity_percent),
+                    },
+                ));
+            });
+            assert_eq!(*result.borrow(), Some(Ok(())));
+            assert_eq!(fake_native.opacity_for_test(0x202), opacity_percent);
+            assert_eq!(fake_native.layered_style_for_test(0x202), expected_layered);
+            let state = second_runtime.state.lock().unwrap();
+            assert!(state.always_on_top, "opacity leaves topmost unchanged");
+            assert!(
+                !state.click_through,
+                "opacity leaves click-through unchanged"
+            );
+            assert_eq!(state.opacity_layered_style_owned, expected_layered);
+            let binding = state.native.as_ref().unwrap();
+            assert!(
+                state
+                    .applied_opacity
+                    .as_ref()
+                    .is_some_and(|applied| applied.matches(binding, opacity_percent))
+            );
+            assert!(!state.opacity_sync_pending);
+            assert!(state.native_error.is_none());
+            drop(state);
+            assert_no_pin_control_commands(&output, "second-pin opacity control");
+            output.drop_without_applying_deltas();
+        }
+        let second_pin_attempts = fake_native.opacity_attempts();
+        assert_eq!(second_pin_attempts.len(), 7);
+        assert!(
+            second_pin_attempts[4..]
+                .iter()
+                .all(|attempt| attempt.hwnd == 0x202)
+        );
+
+        let opacity_attempt_count_before_reuse = fake_native.opacity_attempts().len();
+        first_runtime.state.lock().unwrap().native = Some(valid_binding.clone());
+        fake_native.reuse_window_for_pin(0x203, &second_runtime);
+        let mut reused_result = None;
+        let reused_output = ctx.run_ui(child_input(first_runtime.viewport_id, 1.0), |child| {
+            reused_result = Some(apply_pin_control_change(
+                child.ctx(),
+                &first_runtime,
+                fake_native.as_ref(),
+                ROOT_HWND,
+                PinControlChange {
+                    always_on_top: None,
+                    click_through: None,
+                    opacity_percent: Some(60),
+                },
+            ));
+        });
+        assert!(reused_result.unwrap().is_err());
+        assert_no_pin_control_commands(&reused_output, "reused native HWND");
+        assert_eq!(fake_native.opacity_for_test(0x203), 55);
+        assert_eq!(
+            fake_native.opacity_attempts().len(),
+            opacity_attempt_count_before_reuse,
+            "reused-HWND refusal does not reach the opacity API"
+        );
+        reused_output.drop_without_applying_deltas();
+        fake_native.restore_binding(0x203, &valid_binding);
         presenter.shutdown().unwrap();
     }
 
@@ -5341,6 +6758,7 @@ mod tests {
                 PinControlChange {
                     always_on_top: None,
                     click_through: Some(false),
+                    opacity_percent: None,
                 },
                 fake_native.as_ref(),
                 ROOT_HWND,
@@ -5535,7 +6953,11 @@ mod tests {
         let mut presenter =
             PinWindowPresenter::with_native_api_and_save_picker(native_api, save_picker);
         presenter.set_root_native_identity((ROOT_HWND, 1));
-        let _callbacks = pin_callbacks(&ctx, &mut presenter, &board);
+        let mut callbacks = pin_callbacks(&ctx, &mut presenter, &board);
+        // This test only invokes the second pin's child callback. Do not retain
+        // the first callback's runtime after closing that pin: its image
+        // reservation must be released when the worker finishes.
+        drop(callbacks.remove(&first));
         {
             let registry = presenter.registry.lock().unwrap();
             fake_native.add_window(
@@ -5546,7 +6968,24 @@ mod tests {
             );
         }
         presenter.poll(&ctx, &mut board);
-        drop(_callbacks);
+        let second_runtime = presenter.registry.lock().unwrap().pins[&second].clone();
+        let opacity_result = std::cell::RefCell::new(None);
+        let opacity_frame = ctx.run_ui(child_input(second_runtime.viewport_id, 1.0), |child| {
+            *opacity_result.borrow_mut() = Some(apply_pin_control_change(
+                child.ctx(),
+                &second_runtime,
+                fake_native.as_ref(),
+                ROOT_HWND,
+                PinControlChange {
+                    opacity_percent: Some(42),
+                    ..Default::default()
+                },
+            ));
+        });
+        assert_eq!(*opacity_result.borrow(), Some(Ok(())));
+        assert_eq!(fake_native.opacity_for_test(0x202), 42);
+        assert!(fake_native.layered_style_for_test(0x202));
+        opacity_frame.drop_without_applying_deltas();
         let identity = board
             .reserve_capture(PinCaptureOperationId::new(99).unwrap())
             .unwrap();
@@ -5583,6 +7022,21 @@ mod tests {
             visibility.poll_hidden(identity),
             PinVisibilityAck::Acknowledged
         );
+        assert!(
+            !fake_native.layered_style_for_test(0x202),
+            "winit visibility changes clear the opacity-owned EXSTYLE bit"
+        );
+        {
+            let state = second_runtime.state.lock().unwrap();
+            assert!(state.opacity_sync_pending);
+            assert!(state.applied_opacity.is_none());
+            assert!(
+                state
+                    .last_successful_opacity
+                    .as_ref()
+                    .is_some_and(|applied| { applied.matches(state.native.as_ref().unwrap(), 42) })
+            );
+        }
 
         let fixture = fixture_directory();
         let save_path = fixture.path().join("explicit-save.png");
@@ -5648,6 +7102,35 @@ mod tests {
             visibility.poll_restored(identity),
             PinVisibilityAck::Acknowledged
         );
+        assert!(
+            !fake_native.layered_style_for_test(0x202),
+            "restored visibility still waits for the child callback to reapply opacity"
+        );
+        let restored_callback = ctx.run_ui(child_input(second_runtime.viewport_id, 1.0), |child| {
+            callbacks[&second](child)
+        });
+        assert_eq!(fake_native.opacity_for_test(0x202), 42);
+        assert!(fake_native.layered_style_for_test(0x202));
+        {
+            let state = second_runtime.state.lock().unwrap();
+            let binding = state.native.as_ref().unwrap();
+            assert!(!state.opacity_sync_pending);
+            assert!(
+                state
+                    .applied_opacity
+                    .as_ref()
+                    .is_some_and(|applied| applied.matches(binding, 42))
+            );
+            assert!(
+                state
+                    .last_successful_opacity
+                    .as_ref()
+                    .is_some_and(|applied| { applied.matches(binding, 42) })
+            );
+        }
+        restored_callback.drop_without_applying_deltas();
+        drop(callbacks);
+        drop(second_runtime);
 
         let cancel_before_ack = board
             .reserve_capture(PinCaptureOperationId::new(100).unwrap())
