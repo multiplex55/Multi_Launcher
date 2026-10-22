@@ -29,6 +29,7 @@ It’s designed to be “one hotkey away” from:
 - [Clipboard Modify](#clipboard-modify)
 - [Clipboard Snippets](#clipboard-snippets)
 - [Paste Sequences](#paste-sequences)
+- [Hotkey Directory](#hotkey-directory)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
 - [XML Toolkit](#xml-toolkit)
 - [Hash Generator](#hash-generator)
@@ -782,6 +783,19 @@ Automatic and Manual advance remain available.
 
 Early cancellation restores the original clipboard only while the session still
 owns it; newer clipboard contents are preserved.
+
+## Hotkey Directory
+
+Open **Settings > Hotkeys > Hotkey Directory** to search configured shortcuts
+and actions by text such as `End`, `paste`, or `macro`. The directory reports
+the current route status separately from its configured chord. **Active** means
+the runtime acknowledged the route; **Pending** means it is still being applied,
+and **Unknown** means no reliable acknowledgement is available. Other statuses
+include **Disabled**, **Invalid**, **Conflict**, **Unsupported**, **Omitted by
+precedence**, and **Unavailable**. Conflict details identify competing actions.
+Entries marked **Not configurable** have no current editor. **Edit** opens the
+owning settings section or editor; use that owner's existing **Save** or
+**Cancel** controls to apply or discard changes.
 
 ## JSON and screen color utilities
 

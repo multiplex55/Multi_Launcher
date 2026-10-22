@@ -46479,6 +46479,143 @@ mod tests {
     }
 
     #[test]
+    fn hotkey_directory_accepted_source_updates_without_retargeting_selection() {
+        use crate::hotkey::directory::{
+            Candidate, CandidateState, EditDestination, EntryId, MainSetting, Owner, RouteKind,
+            Scope, Snapshot, Source, SourceSnapshot,
+        };
+
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.test_skip_history_persistence = true;
+        app.set_jump_mode_enabled(false);
+        prepare_settings_cross_owner_root(&ctx, &mut app);
+
+        let make_row = |index: usize, owner_revision: u64| Candidate {
+            id: EntryId::new(format!("main.launcher.{index}")),
+            owner: Owner::Launcher,
+            owner_label: "Application".into(),
+            action_label: format!("Launcher action {index:02}"),
+            chord: Some(format!("Ctrl+F{}", index % 12 + 1)),
+            route: RouteKind::LegacyPolling,
+            scope: Scope::ProcessWide,
+            source_revision: owner_revision,
+            expected_runtime_generation: Some(owner_revision),
+            state: CandidateState::Unknown,
+            reason: Some(crate::hotkey::directory::Reason::RouteNotAcknowledged),
+            edit: Some(EditDestination::MainSettings(MainSetting::Launcher)),
+        };
+        let mut initial_rows = (0..50).map(|index| make_row(index, 1)).collect::<Vec<_>>();
+        let selected_id = EntryId::new("main.launcher.20");
+        app.hotkey_directory = Some(Arc::new(Snapshot::from_sources(
+            1,
+            vec![SourceSnapshot::new(
+                Source::MainSettings,
+                1,
+                initial_rows.clone(),
+                Vec::new(),
+            )],
+        )));
+        app.request_hotkey_directory_open();
+        for _ in 0..3 {
+            run_hotkey_directory_test_frame(&ctx, &mut app, Vec::new());
+        }
+        assert!(app.hotkey_directory_dialog.open);
+        assert!(app.hotkey_directory_native_ui_owner_current(&ctx, true));
+        app.hotkey_directory_dialog
+            .test_set_filter("launcher action");
+        run_hotkey_directory_test_frame(&ctx, &mut app, Vec::new());
+        let (rows_id, _) = app
+            .hotkey_directory_dialog
+            .test_last_rows_scroll()
+            .expect("the directory renders its stable rows scroller");
+        let mut rows_state = egui::containers::scroll_area::State::load(&ctx, rows_id)
+            .expect("the rows scroller has retained state");
+        rows_state.offset.y = 260.0;
+        rows_state.store(&ctx, rows_id);
+        run_hotkey_directory_test_frame(&ctx, &mut app, Vec::new());
+        let (_, select_rect, select_clip) = app
+            .hotkey_directory_dialog
+            .test_select_response(Source::MainSettings, &selected_id)
+            .expect("the selected stable identity has an actual row Response");
+        assert!(select_rect.intersects(select_clip));
+        click_hotkey_directory_response(&ctx, &mut app, select_rect.center());
+        assert_eq!(
+            app.hotkey_directory_dialog.test_selected_identity(),
+            Some((Source::MainSettings, selected_id.clone()))
+        );
+        let (retained_scroll_id, retained_scroll) = app
+            .hotkey_directory_dialog
+            .test_last_rows_scroll()
+            .expect("the selected row leaves the scroller alive");
+        assert_eq!(retained_scroll_id, rows_id);
+        assert!(retained_scroll.y > 0.0);
+        assert_eq!(app.hotkey_directory_dialog.test_filter(), "launcher action");
+
+        let selected_row = initial_rows
+            .iter_mut()
+            .find(|candidate| candidate.id == selected_id)
+            .unwrap();
+        selected_row.chord = Some("Ctrl+F12".into());
+        selected_row.source_revision = 2;
+        selected_row.expected_runtime_generation = Some(2);
+        app.event_tx
+            .send(crate::gui::WatchEvent::HotkeyDirectorySource(
+                SourceSnapshot::new(Source::MainSettings, 2, initial_rows.clone(), Vec::new()),
+            ))
+            .expect("the accepted Main Settings source is delivered to the GUI owner");
+        app.process_watch_events();
+        run_hotkey_directory_test_frame(&ctx, &mut app, Vec::new());
+        let updated = app.hotkey_directory.as_ref().unwrap();
+        let updated_row = updated
+            .entries()
+            .iter()
+            .find(|entry| entry.source == Source::MainSettings && entry.id == selected_id)
+            .expect("the accepted replacement keeps the selected source identity");
+        assert_eq!(updated_row.chord.as_deref(), Some("Ctrl+F12"));
+        assert_eq!(updated_row.source_revision, 2);
+        assert_eq!(
+            app.hotkey_directory_dialog.test_selected_identity(),
+            Some((Source::MainSettings, selected_id.clone()))
+        );
+        assert_eq!(app.hotkey_directory_dialog.test_filter(), "launcher action");
+        let (updated_scroll_id, updated_scroll) =
+            app.hotkey_directory_dialog.test_last_rows_scroll().unwrap();
+        assert_eq!(updated_scroll_id, rows_id);
+        assert_eq!(updated_scroll.y, retained_scroll.y);
+
+        initial_rows.retain(|candidate| candidate.id != selected_id);
+        app.event_tx
+            .send(crate::gui::WatchEvent::HotkeyDirectorySource(
+                SourceSnapshot::new(Source::MainSettings, 3, initial_rows, Vec::new()),
+            ))
+            .expect("the accepted removal is delivered through the existing GUI event path");
+        app.process_watch_events();
+        run_hotkey_directory_test_frame(&ctx, &mut app, Vec::new());
+        let removed = app.hotkey_directory.as_ref().unwrap();
+        assert!(
+            !removed
+                .entries()
+                .iter()
+                .any(|entry| entry.source == Source::MainSettings && entry.id == selected_id)
+        );
+        assert_eq!(
+            app.hotkey_directory_dialog.test_selected_identity(),
+            Some((Source::MainSettings, selected_id.clone())),
+            "removal leaves the old stable selection unresolved rather than selecting a neighbor"
+        );
+        assert!(app.hotkey_directory_dialog.take_edit_request().is_none());
+        assert_eq!(app.hotkey_directory_dialog.test_filter(), "launcher action");
+        let (removed_scroll_id, removed_scroll) =
+            app.hotkey_directory_dialog.test_last_rows_scroll().unwrap();
+        assert_eq!(removed_scroll_id, rows_id);
+        assert_eq!(removed_scroll.y, updated_scroll.y);
+
+        drop(workspace);
+    }
+
+    #[test]
     #[ignore = "opt-in C3-A ready-catalog/restricted-Omni first CPU frame benchmark"]
     fn track_c3a_benchmark_ready_catalog_restricted_omni_first_cpu_frame() {
         use crate::performance::track_c_workloads::BenchmarkMode;

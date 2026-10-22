@@ -2126,6 +2126,10 @@ fn hotkey_directory_source_snapshots(
 
     let mut macro_candidates = Vec::new();
     let macro_receipts = Vec::new();
+    let mkmacro_enabled = settings
+        .enabled_plugins
+        .as_ref()
+        .is_none_or(|plugins| plugins.contains("mkmacro"));
     if let Some(document) = macro_document {
         let mut reserved = reserved_launcher_hotkeys_with_sequences(settings, sequence_routes);
         if settings.radial.enabled {
@@ -2155,6 +2159,9 @@ fn hotkey_directory_source_snapshots(
             let has_conflict = !diagnostics.is_empty();
             let (state, reason) = match chord.as_deref() {
                 None => (CandidateState::Disabled, None),
+                Some(_) if !mkmacro_enabled => {
+                    (CandidateState::Unavailable, Some(Reason::OwnerDisabled))
+                }
                 Some(_) if !entry.enabled => {
                     (CandidateState::Disabled, Some(Reason::OwnerDisabled))
                 }
@@ -2212,7 +2219,9 @@ fn hotkey_directory_source_snapshots(
                 chord
                     .as_deref()
                     .map_or((CandidateState::Disabled, None), |chord| {
-                        if parse_hotkey(chord).is_some() {
+                        if !mkmacro_enabled {
+                            (CandidateState::Unavailable, Some(Reason::OwnerDisabled))
+                        } else if parse_hotkey(chord).is_some() {
                             (CandidateState::Unknown, Some(Reason::RouteNotAcknowledged))
                         } else {
                             (CandidateState::Invalid, Some(Reason::InvalidChord))
@@ -9060,7 +9069,7 @@ mod tests {
     }
 
     #[test]
-    fn main_hotkey_preparation_is_dormant_and_does_not_write_settings_or_disk() {
+    fn hotkey_directory_runtime_cancelled_save_keeps_the_accepted_route_visible() {
         let (wake_tx, wake_rx) = channel();
         let receiver =
             multi_launcher::hotkey::reconfiguration::install_main_runtime(wake_tx.clone()).unwrap();
@@ -9086,6 +9095,52 @@ mod tests {
         let mut existing_listener =
             HotkeyTrigger::start_listener(vec![existing_trigger], "existing-test", old_wake_tx);
         assert!(existing_listener.is_active());
+        let directory_macros = multi_launcher::mkmacro::MkMacroDocument::default();
+        let directory_source = |settings: &Settings,
+                                generation: u64,
+                                active: &[multi_launcher::hotkey::Hotkey],
+                                pending: bool,
+                                source_revision: u64| {
+            hotkey_directory_source_snapshots(
+                settings,
+                &radial_document,
+                None,
+                &[],
+                None,
+                &[],
+                Some(&directory_macros),
+                1,
+                active,
+                None,
+                generation,
+                false,
+                pending,
+                source_revision,
+            )
+            .into_iter()
+            .find(|source| source.source == multi_launcher::hotkey::directory::Source::MainSettings)
+            .expect("the main Settings directory source exists")
+        };
+        let before_cancel = multi_launcher::hotkey::directory::Snapshot::from_sources(
+            1,
+            vec![directory_source(
+                &settings,
+                4,
+                &legacy_listener_hotkeys(&existing_listener),
+                false,
+                1,
+            )],
+        );
+        let prior_launcher = before_cancel
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .unwrap();
+        assert_eq!(prior_launcher.chord.as_deref(), Some("Ctrl+F2"));
+        assert_eq!(
+            prior_launcher.status,
+            multi_launcher::hotkey::directory::Status::Active { generation: 4 }
+        );
 
         let policy_before = physical_paste_bridge().route_availability();
         let revision_before = physical_paste_bridge().route_revision();
@@ -9135,7 +9190,7 @@ mod tests {
             b"keep persisted bytes"
         );
 
-        ticket.apply(candidate).unwrap();
+        ticket.apply(candidate.clone()).unwrap();
         assert_eq!(wake_rx.try_recv(), Ok(()));
         let multi_launcher::hotkey::reconfiguration::HotkeyRuntimeMessage::Apply(request) =
             receiver.try_recv().unwrap().unwrap()
@@ -9166,6 +9221,40 @@ mod tests {
         assert_eq!(settings.hotkey, Some("Ctrl+F2".into()));
         assert!(pending_launcher_route.is_some());
         assert_eq!(ticket.try_terminal_disposition(), None);
+        let pending_application = pending_launcher_route
+            .as_ref()
+            .and_then(|pending| match &pending.completion {
+                PendingLauncherRouteCompletion::Hotkey(application) => Some(application),
+                _ => None,
+            })
+            .expect("the draft replacement is still pending owner acknowledgement");
+        let pending_source = directory_source(
+            &pending_application.prepared.settings,
+            pending_application.candidate_generation,
+            &legacy_listener_hotkeys(&existing_listener),
+            true,
+            2,
+        );
+        let pending_snapshot = before_cancel
+            .replacing_source(2, pending_source)
+            .expect("pending settings publish a newer directory source");
+        let pending_launcher = pending_snapshot
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .unwrap();
+        assert_eq!(pending_launcher.chord.as_deref(), Some("Ctrl+F3"));
+        assert_eq!(
+            pending_launcher.status,
+            multi_launcher::hotkey::directory::Status::Pending { generation: 5 }
+        );
+        assert_eq!(
+            pending_launcher
+                .last_applied
+                .as_ref()
+                .map(|receipt| receipt.chord.as_str()),
+            Some("Ctrl+F2")
+        );
 
         ticket.cancel().unwrap();
         assert_eq!(wake_rx.try_recv(), Ok(()));
@@ -9210,12 +9299,39 @@ mod tests {
         assert_eq!(settings.hotkey, Some("Ctrl+F2".into()));
         assert!(pending_launcher_route.is_none());
         assert!(prepared_routes.is_empty());
+        let restored_source = directory_source(
+            &settings,
+            settings_generation,
+            &legacy_listener_hotkeys(&existing_listener),
+            false,
+            3,
+        );
+        let restored_snapshot = pending_snapshot
+            .replacing_source(3, restored_source)
+            .expect("cancellation publishes the restored owner state");
+        let restored_launcher = restored_snapshot
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .unwrap();
+        assert_eq!(restored_launcher.chord.as_deref(), Some("Ctrl+F2"));
+        assert_eq!(
+            restored_launcher.status,
+            multi_launcher::hotkey::directory::Status::Active { generation: 4 }
+        );
+        assert_eq!(
+            restored_launcher
+                .last_applied
+                .as_ref()
+                .map(|receipt| receipt.chord.as_str()),
+            Some("Ctrl+F2")
+        );
         existing_listener.stop();
         drop(old_wake_rx);
     }
 
     #[test]
-    fn main_hotkey_apply_publishes_runtime_before_applied_receipt() {
+    fn hotkey_directory_runtime_main_save_publishes_only_accepted_route_state() {
         let (presentation_tx, presentation_rx) = channel();
         let _presentation_registration =
             multi_launcher::gui::register_event_sender(presentation_tx);
@@ -9244,6 +9360,52 @@ mod tests {
             vec![Arc::clone(&old_trigger)],
             "hotkey-apply-old",
             wake_tx.clone(),
+        );
+        let directory_macros = multi_launcher::mkmacro::MkMacroDocument::default();
+        let directory_main_source = |settings: &Settings,
+                                     generation: u64,
+                                     active: &[multi_launcher::hotkey::Hotkey],
+                                     pending: bool,
+                                     source_revision: u64| {
+            hotkey_directory_source_snapshots(
+                settings,
+                &radial_document,
+                None,
+                &[],
+                None,
+                &[],
+                Some(&directory_macros),
+                1,
+                active,
+                None,
+                generation,
+                false,
+                pending,
+                source_revision,
+            )
+            .into_iter()
+            .find(|source| source.source == multi_launcher::hotkey::directory::Source::MainSettings)
+            .expect("the main Settings source is published")
+        };
+        let old_directory_snapshot = multi_launcher::hotkey::directory::Snapshot::from_sources(
+            1,
+            vec![directory_main_source(
+                &old_settings,
+                12,
+                &legacy_listener_hotkeys(&listener),
+                false,
+                1,
+            )],
+        );
+        let old_launcher = old_directory_snapshot
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .expect("the acknowledged old launcher row is visible");
+        assert_eq!(old_launcher.chord.as_deref(), Some("Ctrl+F2"));
+        assert_eq!(
+            old_launcher.status,
+            multi_launcher::hotkey::directory::Status::Active { generation: 12 }
         );
         let mut ticket = multi_launcher::hotkey::reconfiguration::prepare_hotkey_reconfiguration(
             candidate.clone(),
@@ -9304,6 +9466,52 @@ mod tests {
         assert_eq!(trigger._key, parse_hotkey("Ctrl+F2").unwrap().key);
         assert!(listener.is_active());
         assert_eq!(ticket.try_terminal_disposition(), None);
+        let pending_application = pending_launcher_route
+            .as_ref()
+            .and_then(|pending| match &pending.completion {
+                PendingLauncherRouteCompletion::Hotkey(application) => Some(application),
+                _ => None,
+            })
+            .expect("the prepared candidate remains owned by the pending route");
+        let pending_source = directory_main_source(
+            &pending_application.prepared.settings,
+            pending_application.candidate_generation,
+            &legacy_listener_hotkeys(&listener),
+            true,
+            2,
+        );
+        let pending_directory_snapshot = old_directory_snapshot
+            .replacing_source(2, pending_source)
+            .expect("the pending candidate publishes a newer Main Settings source");
+        let pending_launcher = pending_directory_snapshot
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .expect("the pending launcher row remains visible");
+        assert_eq!(pending_launcher.chord.as_deref(), Some("Ctrl+F3"));
+        assert_eq!(
+            pending_launcher.status,
+            multi_launcher::hotkey::directory::Status::Pending { generation: 13 }
+        );
+        assert_eq!(
+            pending_launcher
+                .last_applied
+                .as_ref()
+                .map(|receipt| receipt.chord.as_str()),
+            Some("Ctrl+F2"),
+            "the candidate does not erase the previously acknowledged route"
+        );
+        assert_eq!(
+            old_directory_snapshot
+                .entries()
+                .iter()
+                .find(|entry| entry.id.as_str() == "main.launcher")
+                .unwrap()
+                .chord
+                .as_deref(),
+            Some("Ctrl+F2"),
+            "the retained displayed snapshot stays on A until the owner accepts B"
+        );
         let settings_document_before = serde_json::to_value(radial_document.as_ref()).unwrap();
         let (control_client, radial_control_endpoint) =
             radial_control_service_with_wake(false, None);
@@ -9396,6 +9604,34 @@ mod tests {
         assert_eq!(settings.hotkey, candidate.hotkey);
         assert_eq!(settings.radial_designer.zoom, 1.25);
         assert_eq!(settings_generation, 13);
+        let accepted_source = directory_main_source(
+            &settings,
+            settings_generation,
+            &legacy_listener_hotkeys(&listener),
+            false,
+            3,
+        );
+        let accepted_directory_snapshot = pending_directory_snapshot
+            .replacing_source(3, accepted_source)
+            .expect("only the accepted runtime publication replaces the pending row");
+        let accepted_launcher = accepted_directory_snapshot
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .expect("the accepted launcher row remains visible");
+        assert_eq!(accepted_launcher.chord.as_deref(), Some("Ctrl+F3"));
+        assert_eq!(
+            accepted_launcher.status,
+            multi_launcher::hotkey::directory::Status::Active { generation: 13 }
+        );
+        assert_eq!(
+            accepted_launcher
+                .last_applied
+                .as_ref()
+                .map(|receipt| (receipt.chord.as_str(), receipt.generation)),
+            Some(("Ctrl+F3", 13)),
+            "the displayed replacement is active only after its exact runtime receipt"
+        );
         let published = presentation_rx
             .try_iter()
             .find_map(|event| match event {
@@ -9510,7 +9746,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_hotkey_owner_restores_old_route_before_reporting_candidate_failure() {
+    fn hotkey_directory_runtime_shared_owner_restores_route_before_candidate_failure() {
         use multi_launcher::hotkey::reconfiguration::HotkeyRuntimeMessage;
 
         let (wake_tx, wake_rx) = channel();
@@ -9550,6 +9786,58 @@ mod tests {
             wake_tx.clone(),
             19,
         );
+        let directory_macros = multi_launcher::mkmacro::MkMacroDocument::default();
+        let directory_source =
+            |settings: &Settings,
+             generation: u64,
+             route_pending: bool,
+             publication_revision: u64,
+             applied: Option<&AppliedSharedRouteEvidence>| {
+                hotkey_directory_source_snapshots(
+                    settings,
+                    &radial_document,
+                    None,
+                    &[],
+                    None,
+                    &[],
+                    Some(&directory_macros),
+                    1,
+                    &[],
+                    applied,
+                    generation,
+                    false,
+                    route_pending,
+                    publication_revision,
+                )
+                .into_iter()
+                .find(|source| {
+                    source.source == multi_launcher::hotkey::directory::Source::MainSettings
+                })
+                .expect("the main Settings source is published")
+            };
+        let old_applied =
+            applied_shared_route_after_successful_install(&old_settings, &radial_document, &[], 19)
+                .expect("the prior shared route has an exact applied receipt");
+        let old_directory = multi_launcher::hotkey::directory::Snapshot::from_sources(
+            1,
+            vec![directory_source(
+                &old_settings,
+                19,
+                false,
+                1,
+                Some(&old_applied),
+            )],
+        );
+        let old_directory_launcher = old_directory
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .expect("the previously applied launcher route is visible");
+        assert_eq!(old_directory_launcher.chord.as_deref(), Some("Ctrl+F2"));
+        assert_eq!(
+            old_directory_launcher.status,
+            multi_launcher::hotkey::directory::Status::Active { generation: 19 }
+        );
 
         let mut ticket = multi_launcher::hotkey::reconfiguration::prepare_hotkey_reconfiguration(
             candidate.clone(),
@@ -9571,11 +9859,35 @@ mod tests {
         );
         let prepared = ticket.wait_prepared(Duration::from_secs(1)).unwrap();
         assert!(prepared.shared_invocation);
-        ticket.apply(candidate).unwrap();
+        ticket.apply(candidate.clone()).unwrap();
         assert_eq!(wake_rx.try_recv(), Ok(()));
         let HotkeyRuntimeMessage::Apply(request) = receiver.try_recv().unwrap().unwrap() else {
             panic!("expected apply request")
         };
+        let pending_directory = old_directory
+            .replacing_source(
+                2,
+                directory_source(&candidate, 20, true, 2, Some(&old_applied)),
+            )
+            .expect("the pending candidate is a newer Settings publication");
+        let pending_launcher = pending_directory
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .expect("the candidate launcher route remains visible during apply");
+        assert_eq!(pending_launcher.chord.as_deref(), Some("Ctrl+F3"));
+        assert_eq!(
+            pending_launcher.status,
+            multi_launcher::hotkey::directory::Status::Pending { generation: 20 }
+        );
+        assert_eq!(
+            pending_launcher
+                .last_applied
+                .as_ref()
+                .map(|receipt| (receipt.chord.as_str(), receipt.generation)),
+            Some(("Ctrl+F2", 19)),
+            "a failed candidate does not replace the previous applied receipt"
+        );
         let prepared_route = prepared_routes.remove(&prepared.request_id).unwrap();
         let fallback_listener = HotkeyTrigger::prepare_listener(
             fixture.listener.triggers().to_vec(),
@@ -9737,6 +10049,34 @@ mod tests {
                             RuntimeTransition("candidate hook failed".into()),
                     ),
             ))
+        );
+        let restored_directory = multi_launcher::hotkey::directory::Snapshot::from_sources(
+            3,
+            vec![directory_source(
+                &fixture.settings,
+                fixture.settings_generation,
+                false,
+                3,
+                fixture.applied_shared_route.as_ref(),
+            )],
+        );
+        let restored_launcher = restored_directory
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .expect("the restored launcher route is visible");
+        assert_eq!(restored_launcher.chord.as_deref(), Some("Ctrl+F2"));
+        assert_eq!(
+            restored_launcher.status,
+            multi_launcher::hotkey::directory::Status::Active { generation: 21 }
+        );
+        assert_eq!(
+            restored_launcher
+                .last_applied
+                .as_ref()
+                .map(|receipt| (receipt.chord.as_str(), receipt.generation)),
+            Some(("Ctrl+F2", 21)),
+            "rollback publishes only the exact restored route receipt"
         );
         assert_eq!(issuer.issued, 2);
         let restored_policy = &issuer.policies[1];
@@ -10516,6 +10856,8 @@ mod hotkey_directory_runtime_tests {
 
     #[test]
     fn hotkey_directory_runtime_shared_route_requires_exact_applied_evidence() {
+        use multi_launcher::hotkey::parse_hotkey;
+
         let mut settings = Settings::default();
         settings.radial.enabled = true;
         settings.radial.shared_tap_hold = true;
@@ -10585,6 +10927,350 @@ mod hotkey_directory_runtime_tests {
             .unwrap();
         assert_eq!(launcher.status, Status::Unknown);
         assert!(launcher.last_applied.is_none());
+
+        let legacy_generation = generation + 1;
+        let mut legacy_settings = settings.clone();
+        legacy_settings.radial.enabled = false;
+        legacy_settings.radial.shared_tap_hold = false;
+        let legacy_triggers = [
+            legacy_settings
+                .hotkey
+                .as_deref()
+                .and_then(parse_hotkey)
+                .unwrap(),
+            legacy_settings
+                .help_hotkey
+                .as_deref()
+                .and_then(parse_hotkey)
+                .unwrap(),
+        ];
+        let legacy = Snapshot::from_sources(
+            4,
+            vec![main_source_with_shared_evidence(
+                &legacy_settings,
+                &radial,
+                &macros,
+                legacy_generation,
+                false,
+                &legacy_triggers,
+                None,
+            )],
+        );
+        let launcher = legacy
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .unwrap();
+        assert_eq!(
+            launcher.status,
+            Status::Active {
+                generation: legacy_generation
+            },
+            "a published transition to the legacy listener reports its current acknowledgement"
+        );
+
+        let reenabled_generation = legacy_generation + 1;
+        let reenabled_without_fresh_receipt = Snapshot::from_sources(
+            5,
+            vec![main_source_with_shared_evidence(
+                &settings,
+                &radial,
+                &macros,
+                reenabled_generation,
+                false,
+                &[],
+                Some(&evidence),
+            )],
+        );
+        let launcher = reenabled_without_fresh_receipt
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .unwrap();
+        assert_eq!(launcher.status, Status::Unknown);
+        assert!(launcher.last_applied.is_none());
+
+        let fresh_evidence = applied_shared_route_after_successful_install(
+            &settings,
+            &radial,
+            &[],
+            reenabled_generation,
+        )
+        .expect("re-enabled shared route receives new exact runtime evidence");
+        let reenabled = Snapshot::from_sources(
+            6,
+            vec![main_source_with_shared_evidence(
+                &settings,
+                &radial,
+                &macros,
+                reenabled_generation,
+                false,
+                &[],
+                Some(&fresh_evidence),
+            )],
+        );
+        let launcher = reenabled
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .unwrap();
+        assert_eq!(
+            launcher.status,
+            Status::Active {
+                generation: reenabled_generation
+            }
+        );
+        assert_eq!(
+            launcher
+                .last_applied
+                .as_ref()
+                .map(|receipt| receipt.generation),
+            Some(reenabled_generation)
+        );
+    }
+
+    #[test]
+    fn hotkey_directory_runtime_accepted_radial_and_macro_publications_refresh_rows() {
+        use multi_launcher::hotkey::directory::{Reason, Snapshot, Source, Status};
+        use multi_launcher::mkmacro::{
+            DocumentPublicationObserver, MkHotkey, MkHotkeyScope, MkKey, MkMacro, MkMacroDocument,
+            MkMacroStore,
+        };
+        use multi_launcher::radial::model::{TriggerDefinition, TriggerId, TriggerScope};
+        use multi_launcher::radial::store::{ExternalReloadOutcome, RadialStore};
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let mut settings = Settings::default();
+        settings.radial.enabled = true;
+        settings.radial.shared_tap_hold = true;
+        let macros = MkMacroDocument::default();
+        let starter = RadialDocument::starter();
+        let radial_directory = tempfile::tempdir().unwrap();
+        let radial_path = radial_directory.path().join("radial.json");
+        let runtime_store = RadialStore::at_path(&radial_path, starter.clone()).unwrap();
+        let authoring_store = RadialStore::at_path(&radial_path, starter.clone()).unwrap();
+        let mut radial_a = starter;
+        radial_a.custom_triggers.push(TriggerDefinition {
+            id: TriggerId::new("directory-reload"),
+            chord: "Ctrl+F2".into(),
+            menu_id: radial_a.default_menu_id.clone(),
+            scope: TriggerScope::Global,
+        });
+        authoring_store
+            .save(authoring_store.snapshot().unwrap().revision, radial_a)
+            .unwrap();
+        let ExternalReloadOutcome::Published(radial_a) =
+            runtime_store.reload_external_with(|_| Ok(())).unwrap()
+        else {
+            panic!("the initial external Radial document is accepted")
+        };
+        let radial_sources = hotkey_directory_source_snapshots(
+            &settings,
+            &radial_a,
+            None,
+            &[],
+            None,
+            &[],
+            Some(&macros),
+            1,
+            &[],
+            None,
+            7,
+            false,
+            false,
+            1,
+        );
+        let radial_source_a = radial_sources
+            .into_iter()
+            .find(|source| source.source == Source::Radial)
+            .unwrap();
+        let radial_a_snapshot = Snapshot::from_sources(1, vec![radial_source_a.clone()]);
+        let radial_entry_a = radial_a_snapshot
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "radial.trigger.directory-reload")
+            .unwrap();
+        assert_eq!(radial_entry_a.chord.as_deref(), Some("Ctrl+F2"));
+        assert_eq!(radial_entry_a.status, Status::Unknown);
+
+        let mut radial_b = (*radial_a).clone();
+        radial_b.custom_triggers[0].chord = "Ctrl+F3".into();
+        authoring_store
+            .save(authoring_store.snapshot().unwrap().revision, radial_b)
+            .unwrap();
+        let ExternalReloadOutcome::Published(radial_b) =
+            runtime_store.reload_external_with(|_| Ok(())).unwrap()
+        else {
+            panic!("the changed external Radial document is accepted")
+        };
+        let radial_sources = hotkey_directory_source_snapshots(
+            &settings,
+            &radial_b,
+            None,
+            &[],
+            None,
+            &[],
+            Some(&macros),
+            1,
+            &[],
+            None,
+            7,
+            false,
+            false,
+            2,
+        );
+        let radial_source_b = radial_sources
+            .into_iter()
+            .find(|source| source.source == Source::Radial)
+            .unwrap();
+        let radial_b_snapshot = radial_a_snapshot
+            .replacing_source(2, radial_source_b)
+            .expect("an accepted Radial revision replaces the displayed source");
+        let radial_entry_b = radial_b_snapshot
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "radial.trigger.directory-reload")
+            .unwrap();
+        assert_eq!(radial_entry_b.id, radial_entry_a.id);
+        assert_eq!(radial_entry_b.source_revision, radial_b.revision.0);
+        assert_eq!(radial_entry_b.chord.as_deref(), Some("Ctrl+F3"));
+        assert_eq!(radial_entry_b.status, Status::Unknown);
+        assert!(
+            radial_b_snapshot
+                .replacing_source(3, radial_source_a)
+                .is_none(),
+            "a delayed lower Radial revision cannot roll back the accepted reload"
+        );
+
+        let macro_directory = tempfile::tempdir().unwrap();
+        let (macro_store, _) = MkMacroStore::open(macro_directory.path()).unwrap();
+        let macro_revision = Arc::new(AtomicU64::new(0));
+        let after_revision = Arc::clone(&macro_revision);
+        macro_store.set_publication_observer(Arc::new(DocumentPublicationObserver {
+            before: Arc::new(|| {}),
+            after: Arc::new(move || {
+                after_revision.fetch_add(1, Ordering::SeqCst);
+            }),
+        }));
+        let revision_before_save = macro_revision.load(Ordering::SeqCst);
+        let mut macro_document = MkMacroDocument::default();
+        macro_document.macros.push(MkMacro {
+            id: 901,
+            name: "Directory publication test".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: Some(MkHotkey {
+                key: MkKey::Function(8),
+                modifiers: Vec::new(),
+            }),
+            hotkey_scope: MkHotkeyScope::AnyWindow,
+            folder_id: None,
+            playback: Default::default(),
+            signature: Default::default(),
+            steps: Vec::new(),
+        });
+        let accepted_macro_document = macro_store.save(macro_document).unwrap();
+        let accepted_macro_revision = macro_revision.load(Ordering::SeqCst);
+        assert!(accepted_macro_revision > revision_before_save);
+        let macro_sources = hotkey_directory_source_snapshots(
+            &settings,
+            &radial_b,
+            None,
+            &[],
+            None,
+            &[],
+            Some(&accepted_macro_document),
+            accepted_macro_revision,
+            &[],
+            None,
+            7,
+            false,
+            false,
+            3,
+        );
+        let macro_source = macro_sources
+            .into_iter()
+            .find(|source| source.source == Source::Macros)
+            .unwrap();
+        let macro_snapshot = radial_b_snapshot
+            .replacing_source(3, macro_source)
+            .expect("the accepted macro publication advances its source");
+        let macro_entry = macro_snapshot
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "macro.playback.901")
+            .unwrap();
+        assert_eq!(macro_entry.source_revision, accepted_macro_revision);
+        assert_eq!(macro_entry.action_label, "Directory publication test");
+        assert_eq!(macro_entry.status, Status::Unknown);
+        assert!(macro_entry.last_applied.is_none());
+
+        let mut disabled_settings = settings.clone();
+        disabled_settings.enabled_plugins = Some(std::collections::HashSet::new());
+        let disabled_macro_source = hotkey_directory_source_snapshots(
+            &disabled_settings,
+            &radial_b,
+            None,
+            &[],
+            None,
+            &[],
+            Some(&accepted_macro_document),
+            accepted_macro_revision,
+            &[],
+            None,
+            7,
+            false,
+            false,
+            4,
+        )
+        .into_iter()
+        .find(|source| source.source == Source::Macros)
+        .unwrap();
+        let disabled_snapshot = macro_snapshot
+            .replacing_source(4, disabled_macro_source)
+            .expect("the disabled owner selection is a new source publication");
+        let disabled_entry = disabled_snapshot
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "macro.playback.901")
+            .unwrap();
+        assert_eq!(disabled_entry.status, Status::Unavailable);
+        assert_eq!(disabled_entry.reason, Some(Reason::OwnerDisabled));
+        assert!(disabled_entry.last_applied.is_none());
+
+        let mut reenabled_settings = disabled_settings;
+        reenabled_settings.enabled_plugins =
+            Some(std::collections::HashSet::from(["mkmacro".to_owned()]));
+        let reenabled_macro_source = hotkey_directory_source_snapshots(
+            &reenabled_settings,
+            &radial_b,
+            None,
+            &[],
+            None,
+            &[],
+            Some(&accepted_macro_document),
+            accepted_macro_revision,
+            &[],
+            None,
+            7,
+            false,
+            false,
+            5,
+        )
+        .into_iter()
+        .find(|source| source.source == Source::Macros)
+        .unwrap();
+        let reenabled_snapshot = disabled_snapshot
+            .replacing_source(5, reenabled_macro_source)
+            .expect("re-enabling publishes the current owner state");
+        let reenabled_entry = reenabled_snapshot
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "macro.playback.901")
+            .unwrap();
+        assert_eq!(reenabled_entry.status, Status::Unknown);
+        assert_eq!(reenabled_entry.reason, Some(Reason::RouteNotAcknowledged));
+        assert!(reenabled_entry.last_applied.is_none());
     }
 
     #[test]

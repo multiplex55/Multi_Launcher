@@ -41,6 +41,10 @@ pub(crate) struct HotkeyDirectoryDialog {
     pending_edit: Option<HotkeyDirectoryEditRequest>,
     #[cfg(test)]
     last_edit_response: Option<(Source, EntryId, egui::Id, egui::Rect)>,
+    #[cfg(test)]
+    last_select_responses: Vec<(Source, EntryId, egui::Id, egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    last_rows_scroll: Option<(egui::Id, egui::Vec2)>,
 }
 
 impl HotkeyDirectoryDialog {
@@ -63,6 +67,42 @@ impl HotkeyDirectoryDialog {
         self.last_edit_response.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_select_response(
+        &self,
+        source: Source,
+        id: &EntryId,
+    ) -> Option<(egui::Id, egui::Rect, egui::Rect)> {
+        self.last_select_responses
+            .iter()
+            .find(|(candidate_source, candidate_id, _, _, _)| {
+                *candidate_source == source && candidate_id == id
+            })
+            .map(|(_, _, id, rect, clip_rect)| (*id, *rect, *clip_rect))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_selected_identity(&self) -> Option<(Source, EntryId)> {
+        self.selected
+            .as_ref()
+            .map(|selected| (selected.source, selected.id.clone()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_filter(&mut self, filter: impl Into<String>) {
+        self.filter = filter.into();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_filter(&self) -> &str {
+        &self.filter
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_last_rows_scroll(&self) -> Option<(egui::Id, egui::Vec2)> {
+        self.last_rows_scroll
+    }
+
     pub(crate) fn show(
         &mut self,
         ctx: &egui::Context,
@@ -77,6 +117,8 @@ impl HotkeyDirectoryDialog {
         #[cfg(test)]
         {
             self.last_edit_response = None;
+            self.last_select_responses.clear();
+            self.last_rows_scroll = None;
         }
 
         let mut open = self.open;
@@ -164,7 +206,7 @@ impl HotkeyDirectoryDialog {
                 rows.sort_by(|left, right| compare_entries(left, right, self.sort));
 
                 let no_matches = rows.is_empty();
-                egui::ScrollArea::both()
+                let _rows_output = egui::ScrollArea::both()
                     .id_salt("hotkey-directory/rows")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -189,6 +231,14 @@ impl HotkeyDirectoryDialog {
                                         [260.0, ui.spacing().interact_size.y],
                                         egui::Button::selectable(is_selected, &entry.action_label),
                                     );
+                                    #[cfg(test)]
+                                    self.last_select_responses.push((
+                                        entry.source,
+                                        entry.id.clone(),
+                                        action.id,
+                                        action.rect,
+                                        ui.clip_rect(),
+                                    ));
                                     if action.clicked() && interaction_allowed {
                                         self.selected = Some(SelectedEntry {
                                             source: entry.source,
@@ -294,6 +344,10 @@ impl HotkeyDirectoryDialog {
                             ui.weak("No shortcuts match this search.");
                         }
                     });
+                #[cfg(test)]
+                {
+                    self.last_rows_scroll = Some((_rows_output.id, _rows_output.state.offset));
+                }
             });
         self.open = open;
     }

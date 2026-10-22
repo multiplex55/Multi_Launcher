@@ -72,6 +72,10 @@ impl HelpWindow {
                             if let Some(hk) = &app.help_hotkey_str {
                                 ui.label(format!("Help overlay: {hk}"));
                             }
+                            ui.label(egui::RichText::new("Hotkey Directory").strong());
+                            ui.label(
+                                "Open Settings > Hotkeys > Hotkey Directory to search configured shortcuts and actions, such as End, paste, or macro. Active means the runtime acknowledged the route; Pending is still being applied, and Unknown means no reliable acknowledgement is available. Other statuses include Disabled, Invalid, Conflict, Unsupported, Omitted by precedence, and Unavailable. Conflict details name competing routes. Not configurable entries have no current editor. Edit opens the owning settings or editor, where its existing Save and Cancel controls apply.",
+                            );
                             ui.label("Older query: Ctrl+Up");
                             ui.label("Newer query / restore draft: Ctrl+Down");
                             ui.label(egui::RichText::new("Experimental Jump Mode").strong());
