@@ -32,6 +32,7 @@ pub(super) struct RootFrameLogic {
     should_be_visible: bool,
     ui_passes: u32,
     show_query_focus_attempted_revision: Option<u64>,
+    query_autocomplete_tab_pending: bool,
     trace_root_hwnd: Option<windows::Win32::Foundation::HWND>,
 }
 
@@ -47,6 +48,7 @@ impl Default for RootFrameLogic {
             should_be_visible: false,
             ui_passes: 0,
             show_query_focus_attempted_revision: None,
+            query_autocomplete_tab_pending: false,
             trace_root_hwnd: None,
         }
     }
@@ -2250,6 +2252,7 @@ impl LauncherApp {
                 ctx,
                 session.origin,
                 accepted_mouse_interaction,
+                self.query_autocomplete_tab_is_pending(ctx),
             )
     }
 
@@ -2315,8 +2318,27 @@ impl LauncherApp {
         ctx: &egui::Context,
         origin: super::QueryFocusOrigin,
         accepted_mouse_interaction: bool,
+        accepted_autocomplete_tab: bool,
     ) -> bool {
         if !Self::launcher_show_focus_has_user_transfer(ctx) {
+            return false;
+        }
+        if accepted_autocomplete_tab
+            && !ctx.input(|input| {
+                input.events.iter().any(|event| {
+                    matches!(event, egui::Event::PointerButton { pressed: true, .. })
+                        || matches!(
+                            event,
+                            egui::Event::Key {
+                                key: egui::Key::Space,
+                                pressed: true,
+                                modifiers,
+                                ..
+                            } if modifiers.shift
+                        )
+                })
+            })
+        {
             return false;
         }
         if origin == super::QueryFocusOrigin::Mouse
@@ -2327,6 +2349,33 @@ impl LauncherApp {
             return false;
         }
         true
+    }
+
+    fn query_autocomplete_tab_is_pending(&self, ctx: &egui::Context) -> bool {
+        let query_id = egui::Id::new("query_input");
+        ctx.memory(|memory| memory.has_focus(query_id))
+            && Self::query_autocomplete_tab_key_pressed(ctx)
+            && self.query_autocomplete
+            && self
+                .suggestions
+                .get(self.autocomplete_index)
+                .is_some_and(|suggestion| suggestion != &self.query.to_lowercase())
+    }
+
+    fn query_autocomplete_tab_key_pressed(ctx: &egui::Context) -> bool {
+        ctx.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::Tab,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if *modifiers == egui::Modifiers::NONE
+                )
+            })
+        })
     }
 
     fn pending_show_query_focus_preserves_query_owner(
@@ -2533,6 +2582,7 @@ impl LauncherApp {
                 ctx,
                 session.origin,
                 accepted_mouse_interaction,
+                self.query_autocomplete_tab_is_pending(ctx),
             )
         });
         let user_transfer = pending_show_transfer || session_transfer;
@@ -3244,6 +3294,7 @@ fn show_root_query_editor(
     input_id: egui::Id,
     query_scale: f32,
     interactive: bool,
+    retain_focus_on_enter: bool,
 ) -> RootQueryEditorPresentation {
     let scale = if query_scale.is_finite() {
         query_scale.max(0.0).min(5.0)
@@ -3274,6 +3325,12 @@ fn show_root_query_editor(
                 .hint_text("Search…")
                 .margin(margin)
                 .interactive(interactive)
+                .return_key(
+                    (!retain_focus_on_enter).then_some(egui::KeyboardShortcut::new(
+                        egui::Modifiers::NONE,
+                        egui::Key::Enter,
+                    )),
+                )
                 .desired_width(f32::INFINITY)
                 .show(ui)
         })
@@ -3816,6 +3873,7 @@ impl LauncherApp {
             should_be_visible,
             ui_passes: 0,
             show_query_focus_attempted_revision: None,
+            query_autocomplete_tab_pending: false,
             trace_root_hwnd,
         });
     }
@@ -5114,13 +5172,54 @@ impl LauncherApp {
                     geometry,
                 )
             });
+        let query_autocomplete_tab_eligible = first_ui_pass
+            && !owner_transition_pending
+            && self.query_autocomplete_tab_is_pending(&ctx)
+            && self.query_focus_session.as_ref().is_some_and(|session| {
+                previous_query_geometry.is_some_and(|geometry| {
+                    self.query_focus_session_is_eligible(&ctx, session, geometry, false)
+                })
+            });
+        if query_autocomplete_tab_eligible {
+            frame_logic.query_autocomplete_tab_pending = true;
+            if let Some(logic) = self.root_frame_logic.as_mut() {
+                logic.query_autocomplete_tab_pending = true;
+            }
+        }
+        let query_autocomplete_tab_consumed = frame_logic.query_autocomplete_tab_pending
+            && Self::query_autocomplete_tab_key_pressed(&ctx);
+        if query_autocomplete_tab_consumed {
+            // egui's focus manager observes Tab before the query TextEdit is
+            // built. Keep this exact, already-authorized autocomplete action
+            // from becoming focus traversal on every pass of a discarded UI
+            // frame, while leaving Shift+Tab and other transfers untouched.
+            ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+            ctx.input_mut(|input| {
+                input.events.retain(|event| {
+                    !matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::Tab,
+                            pressed: true,
+                            modifiers,
+                            ..
+                        } if *modifiers == egui::Modifiers::NONE
+                    )
+                });
+            });
+        }
         let mouse_query_focus_candidate =
             self.query_mouse_focus_candidate_is_eligible(&ctx, previous_query_geometry);
         let mouse_query_session_transfer_pending = self
             .query_focus_session
             .as_ref()
             .is_some_and(|session| session.origin == super::QueryFocusOrigin::Mouse)
-            && Self::launcher_show_focus_has_user_transfer(&ctx);
+            && Self::query_focus_has_unaccepted_transfer(
+                &ctx,
+                super::QueryFocusOrigin::Mouse,
+                false,
+                self.query_autocomplete_tab_is_pending(&ctx),
+            );
         let mouse_candidate_revision = self.visibility_revision.current();
         let mouse_candidate_root = self.published_root_identity_for_query_focus();
         let mouse_candidate_notes_context = self.query_focus_notes_context();
@@ -5133,10 +5232,16 @@ impl LauncherApp {
             self.pending_show_query_focus = None;
             self.query_focus_session = None;
         }
-        if self.query_focus_session.is_some()
-            && (Self::launcher_show_focus_has_user_transfer(&ctx)
-                || self.jump_mode_ui.active_session().is_some())
-        {
+        let query_session_transfer_pending =
+            self.query_focus_session.as_ref().is_some_and(|session| {
+                Self::query_focus_has_unaccepted_transfer(
+                    &ctx,
+                    session.origin,
+                    false,
+                    self.query_autocomplete_tab_is_pending(&ctx),
+                )
+            });
+        if query_session_transfer_pending || self.jump_mode_ui.active_session().is_some() {
             self.query_focus_session = None;
         }
         let preserve_query_focus_for_jump =
@@ -5561,6 +5666,8 @@ impl LauncherApp {
 
             scale_ui(ui, self.query_scale, |ui| {
                 let input_id = query_input_id;
+            let ordinary_root_query_allowed = root_navigation_allowed
+                && !self.query_focus_owner_blocks(&ctx, false);
                 let query_focus_session_active = self
                     .query_focus_session
                     .as_ref()
@@ -5577,20 +5684,22 @@ impl LauncherApp {
                 if self.query_focus_session.is_some() && !query_focus_session_active {
                     self.query_focus_session = None;
                 }
+            let query_navigation_allowed =
+                (ordinary_root_query_allowed && self.query_focus_notes_context().is_none())
+                        || query_focus_session_active;
                 let pending_show_can_enable_query = !root_navigation_allowed
                     && self.pending_show_query_focus_can_enable_query(
                         &ctx,
                         previous_query_geometry,
                     );
-                let query_editor_interactive = root_navigation_allowed
+            let query_editor_interactive = ordinary_root_query_allowed
                     || query_focus_session_active
                     || pending_show_can_enable_query
                     || notes_query_bridge_candidate
-                    || (!root_navigation_allowed
-                        && self.query_mouse_focus_available(&ctx, previous_query_geometry));
-                let query_owned_focus = root_navigation_allowed
+                    || self.query_mouse_focus_available(&ctx, previous_query_geometry);
+                let query_owned_focus = query_navigation_allowed
                     && ui.ctx().memory(|memory| memory.has_focus(input_id));
-                let numpad_navigation = if first_ui_pass && root_navigation_allowed {
+                let numpad_navigation = if first_ui_pass && query_navigation_allowed {
                     ui.ctx().input_mut(|input| {
                         consume_physical_numpad_navigation(
                             query_owned_focus,
@@ -5625,6 +5734,7 @@ impl LauncherApp {
                     input_id,
                     self.query_scale,
                     !action_sheet_blocks_launcher_input && query_editor_interactive,
+                    query_owned_focus,
                 )
                 .output;
                 let query_text_edited = query_output.response.changed();
@@ -5652,7 +5762,7 @@ impl LauncherApp {
                 let move_cursor_end_requested = self.move_cursor_end;
                 if self.move_cursor_end
                     && !action_sheet_blocks_launcher_input
-                    && root_navigation_allowed
+                    && query_navigation_allowed
                     && query_output.response.enabled()
                     && query_output.response.has_focus()
                 {
@@ -5683,8 +5793,7 @@ impl LauncherApp {
                 ctx.data_mut(|data| {
                     data.insert_temp(egui::Id::new("launcher-query-response-rect"), query_response.rect)
                 });
-                if !root_navigation_allowed
-                    && mouse_query_focus_candidate
+                if mouse_query_focus_candidate
                     && query_response.enabled()
                     && Self::query_response_has_primary_mouse_interaction(&ctx, &query_response)
                     && query_response.has_focus()
@@ -5733,7 +5842,7 @@ impl LauncherApp {
                         self.file_search_dialog.open,
                     )
                     && !action_sheet_blocks_launcher_input
-                    && root_navigation_allowed
+                    && query_navigation_allowed
                 ;
                 let show_query_focus_revision = self
                     .pending_show_query_focus_is_eligible(
@@ -5750,7 +5859,6 @@ impl LauncherApp {
                     query_response.request_focus();
                 }
                 if show_query_focus_revision.is_some()
-                    && !root_navigation_allowed
                     && let (Some(root_identity), Some(notes_context)) = (
                         self.published_root_identity_for_query_focus(),
                         self.query_focus_notes_context(),
@@ -5787,7 +5895,29 @@ impl LauncherApp {
                 {
                     frame_logic.show_query_focus_attempted_revision = Some(revision);
                 }
-                let query_has_focus = root_navigation_allowed && query_response.has_focus();
+                let query_focus_session_valid = query_response.id == input_id
+                    && query_response.enabled()
+                    && query_response.has_focus()
+                    && self.query_focus_session.as_ref().is_some_and(|session| {
+                        self.query_focus_session_is_eligible(
+                            &ctx,
+                            session,
+                            QueryShowGeometry {
+                                rect: query_response.rect,
+                                clip_rect: query_clip_rect,
+                                layer_id: query_response.layer_id,
+                            },
+                            current_query_mouse_focus_accepted,
+                        )
+                    });
+                let query_workflow_allowed = if self.query_focus_notes_context().is_some() {
+                    query_focus_session_valid
+                } else {
+                    ordinary_root_query_allowed
+                };
+                let query_has_focus = query_workflow_allowed
+                    && query_response.enabled()
+                    && query_response.has_focus();
 
                 self.query_history.synchronize(&self.query);
                 if first_ui_pass && query_response.changed() {
@@ -5801,7 +5931,7 @@ impl LauncherApp {
 
                 let history_direction = if !first_ui_pass
                     || action_sheet_blocks_launcher_input
-                    || !root_navigation_allowed
+                    || !query_workflow_allowed
                 {
                     None
                 } else {
@@ -5817,7 +5947,7 @@ impl LauncherApp {
 
                 if first_ui_pass
                     && !action_sheet_blocks_launcher_input
-                    && root_navigation_allowed
+                    && query_workflow_allowed
                 {
                     for direction in numpad_navigation {
                         self.handle_key(direction.navigation_key());
@@ -5928,7 +6058,7 @@ impl LauncherApp {
 
                 if first_ui_pass
                     && !action_sheet_blocks_launcher_input
-                    && root_navigation_allowed
+                    && query_workflow_allowed
                     && history_direction.is_none()
                     && Self::launcher_query_keyboard_enabled(query_has_focus)
                 {
@@ -5946,11 +6076,12 @@ impl LauncherApp {
                     }
                 }
 
-                let tab = ctx.input(|i| i.key_pressed(egui::Key::Tab));
+                let tab = query_autocomplete_tab_consumed
+                    || ctx.input(|i| i.key_pressed(egui::Key::Tab));
                 #[cfg(feature = "qa-framebuffer-capture")]
                 if first_ui_pass
                     && !action_sheet_blocks_launcher_input
-                    && root_navigation_allowed
+                    && query_workflow_allowed
                     && tab
                 {
                     self.qa_framebuffer_record_tab_processed();
@@ -5959,7 +6090,7 @@ impl LauncherApp {
                 let mut accepted_suggestion = false;
                 if first_ui_pass
                     && !action_sheet_blocks_launcher_input
-                    && root_navigation_allowed
+                    && query_workflow_allowed
                     && Self::launcher_query_keyboard_enabled(query_has_focus)
                     && (tab || (enter && self.selected.is_none()))
                 {
@@ -5979,7 +6110,7 @@ impl LauncherApp {
                 let mut launch_idx: Option<usize> = None;
                 if first_ui_pass
                     && !action_sheet_blocks_launcher_input
-                    && root_navigation_allowed
+                    && query_workflow_allowed
                     && !accepted_suggestion
                     && enter
                     && Self::launcher_enter_activation_enabled(
@@ -5990,12 +6121,12 @@ impl LauncherApp {
                     && !self.tempfile_alias_dialog.open
                     && !self.tempfile_dialog.open
                     && !self.shell_cmd_dialog.open
-                    && !self.notes_dialog.open
+                    && (!self.notes_dialog.open || query_focus_session_valid)
                     && !self.todo_dialog.open
                     && !self.timer_dialog.open
                     && !self.paste_sequence_dialog.open
                     && !self.todo_view_dialog.open
-                    && self.note_panels.is_empty()
+                    && (self.note_panels.is_empty() || query_focus_session_valid)
                     && self.image_panels.is_empty()
                 {
                     #[cfg(feature = "qa-framebuffer-capture")]
@@ -37986,8 +38117,9 @@ mod tests {
                     style.override_font_id = Some(override_font.clone());
                     style.override_text_style = Some(egui::TextStyle::Heading);
                     ui.set_style(style);
-                    presentation =
-                        Some(show_root_query_editor(ui, &mut query, query_id, 1.75, true));
+                    presentation = Some(show_root_query_editor(
+                        ui, &mut query, query_id, 1.75, true, false,
+                    ));
                     expected_galley_height = Some(
                         ui.fonts_mut(|fonts| fonts.row_height(&override_font))
                             + ui.spacing().extra_text_line_spacing,
@@ -38056,6 +38188,7 @@ mod tests {
                             query_id,
                             QUERY_SCALE,
                             true,
+                            false,
                         ));
                     });
                 },
@@ -39564,6 +39697,373 @@ mod tests {
             drop(app);
             drop(_workspace);
         }
+    }
+
+    fn install_notes_query_activation_fixture_actions(app: &mut LauncherApp) {
+        let actions = (0..2)
+            .map(|index| Action {
+                label: format!("café 🧭 Result {index}"),
+                desc: "Notes query activation fixture".into(),
+                action: format!("test:{index}"),
+                args: None,
+            })
+            .collect::<Vec<_>>();
+        app.actions = Arc::new(actions.clone());
+        app.update_action_cache();
+        app.query = "app café".into();
+        app.last_search_query.clear();
+        app.last_results_valid = false;
+        app.test_skip_history_persistence = true;
+        app.search();
+        assert_eq!(app.results.len(), 2, "the fixture starts with two actions");
+    }
+
+    #[test]
+    fn notes_query_activation_mouse_workflow_runs_current_result_beside_notes() {
+        let query_id = egui::Id::new("query_input");
+        let screen_size = egui::vec2(1600.0, 1200.0);
+        for (jump_mode, grid, navigation_key, expected_index) in [
+            (false, false, egui::Key::ArrowDown, 0),
+            (true, true, egui::Key::ArrowRight, 1),
+        ] {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "app café");
+            install_notes_query_activation_fixture_actions(&mut app);
+            let _history_guard =
+                crate::history::replace_history_for_test(std::collections::VecDeque::from([
+                    crate::history::HistoryEntry {
+                        query: "older query 🧭".into(),
+                        query_lc: "older query 🧭".to_lowercase(),
+                        action: app.actions[0].clone(),
+                        source: None,
+                        timestamp: 0,
+                    },
+                ]));
+            app.set_jump_mode_enabled(jump_mode);
+            app.query_results_layout.enabled = grid;
+            app.query_results_layout.cols = 2;
+            app.query_results_layout.respect_plugin_capability = false;
+            app.recompute_query_results_layout();
+            app.notes_dialog
+                .test_set_edit_draft("unsaved Notes draft before activation");
+            let notes_layer = crate::gui::jump_mode::ui::notes_dialog_layer_id();
+            launcher_show_owner_seed_window_position(&ctx, notes_layer, "Quick Notes", screen_size);
+            launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen_size);
+            for _ in 0..2 {
+                notes_query_mouse_run_frame(&mut app, &ctx, screen_size, Vec::new());
+            }
+
+            assert_eq!(app.results.len(), 2);
+            app.selected = Some(0);
+            let editor_rect = app
+                .notes_dialog
+                .test_edit_text_rect()
+                .expect("Quick Notes renders its actual draft editor");
+            notes_query_mouse_click(&mut app, &ctx, screen_size, editor_rect);
+            assert_eq!(
+                crate::gui::jump_mode::ui::focused_response_layer(&ctx),
+                Some(notes_layer),
+                "the Notes editor owns Enter before query handoff (Jump Mode {jump_mode})"
+            );
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            assert!(
+                app.test_activation_trace.is_empty(),
+                "Notes editor Enter cannot activate a root result (Jump Mode {jump_mode})"
+            );
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            let draft_before_query = app.notes_dialog.test_edit_draft().to_owned();
+
+            notes_query_mouse_prepare_interactive(&mut app, &ctx, screen_size, jump_mode);
+            let query_rect = ctx
+                .read_response(query_id)
+                .expect("the actual query response remains beside Notes")
+                .rect;
+            notes_query_mouse_click(&mut app, &ctx, screen_size, query_rect);
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+            assert!(app.query_focus_session.as_ref().is_some_and(|session| {
+                session.origin == super::super::QueryFocusOrigin::Mouse
+            }));
+
+            let draft_before_history = app.notes_dialog.test_edit_draft().to_owned();
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                vec![key_press(egui::Key::ArrowUp, egui::Modifiers::CTRL)],
+            );
+            assert_eq!(
+                app.query, "older query 🧭",
+                "a Notes-owned Ctrl+Up recalls query history (Jump Mode {jump_mode})"
+            );
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+            assert_eq!(app.notes_dialog.test_edit_draft(), draft_before_history);
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                vec![key_release(egui::Key::ArrowUp, egui::Modifiers::CTRL)],
+            );
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                vec![key_press(egui::Key::ArrowDown, egui::Modifiers::CTRL)],
+            );
+            assert_eq!(
+                app.query, "app café",
+                "Ctrl+Down restores the Notes-owned query draft (Jump Mode {jump_mode})"
+            );
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+            assert_eq!(app.notes_dialog.test_edit_draft(), draft_before_history);
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                vec![key_release(egui::Key::ArrowDown, egui::Modifiers::CTRL)],
+            );
+
+            set_query_cursor(&ctx, app.query.chars().count(), app.query.chars().count());
+            notes_query_mouse_type(&mut app, &ctx, screen_size, " 🧭");
+            assert_eq!(app.query, "app café 🧭");
+            assert_eq!(app.results.len(), 2, "Unicode typing refreshes the results");
+            assert_eq!(app.notes_dialog.test_edit_draft(), draft_before_query);
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                vec![key_press(navigation_key, egui::Modifiers::NONE)],
+            );
+            if grid {
+                notes_query_mouse_run_frame(
+                    &mut app,
+                    &ctx,
+                    screen_size,
+                    vec![key_press(navigation_key, egui::Modifiers::NONE)],
+                );
+            }
+            assert_eq!(app.selected, Some(expected_index));
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                vec![key_release(navigation_key, egui::Modifiers::NONE)],
+            );
+            let expected_action = app.results[expected_index].clone();
+
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            assert_eq!(app.test_activation_trace.len(), 1);
+            assert_eq!(app.test_activation_trace[0].0, expected_action);
+            assert_eq!(
+                app.test_activation_trace[0].1,
+                ActivationSource::Enter,
+                "a fresh Enter activates the current selection (Jump Mode {jump_mode})"
+            );
+            assert_eq!(app.query, "app café 🧭");
+            assert_eq!(app.notes_dialog.test_edit_draft(), draft_before_query);
+            assert!(app.notes_dialog.open);
+            assert_eq!(
+                app.test_activation_trace.len(),
+                1,
+                "one fresh Enter routes through the existing deferred action path"
+            );
+            drop(app);
+            drop(_workspace);
+        }
+    }
+
+    #[test]
+    fn notes_query_activation_jumpoff_settings_blocks_retained_query_enter() {
+        let query_id = egui::Id::new("query_input");
+        let screen_size = egui::vec2(1600.0, 1200.0);
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "app café");
+        install_notes_query_activation_fixture_actions(&mut app);
+        app.set_jump_mode_enabled(false);
+        launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen_size);
+        for _ in 0..2 {
+            notes_query_mouse_run_frame(&mut app, &ctx, screen_size, Vec::new());
+        }
+
+        let query_rect = ctx
+            .read_response(query_id)
+            .expect("the ordinary root query has a real response")
+            .rect;
+        notes_query_mouse_click(&mut app, &ctx, screen_size, query_rect);
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        app.selected = Some(0);
+        assert!(app.test_activation_trace.is_empty());
+
+        app.show_settings = true;
+        notes_query_mouse_run_frame(&mut app, &ctx, screen_size, Vec::new());
+        notes_query_mouse_run_frame(
+            &mut app,
+            &ctx,
+            screen_size,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+
+        assert!(app.show_settings, "Settings remains open after Enter");
+        assert!(
+            app.test_activation_trace.is_empty(),
+            "a retained ordinary query cannot activate behind Settings"
+        );
+        drop(app);
+        drop(_workspace);
+    }
+
+    #[test]
+    fn notes_query_activation_hint_completion_needs_release_before_fresh_enter() {
+        let query_id = egui::Id::new("query_input");
+        let screen_size = egui::vec2(1600.0, 1200.0);
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "app café");
+        install_notes_query_activation_fixture_actions(&mut app);
+        app.set_jump_mode_enabled(true);
+        app.selected = Some(1);
+        app.notes_dialog
+            .test_set_edit_draft("unsaved hint activation draft");
+        let notes_layer = crate::gui::jump_mode::ui::notes_dialog_layer_id();
+        launcher_show_owner_seed_window_position(&ctx, notes_layer, "Quick Notes", screen_size);
+        launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen_size);
+        for _ in 0..2 {
+            notes_query_mouse_run_frame(&mut app, &ctx, screen_size, Vec::new());
+        }
+
+        let expected_action = app.results[1].clone();
+        let draft_before_hint = app.notes_dialog.test_edit_draft().to_owned();
+        let editor_rect = app
+            .notes_dialog
+            .test_edit_text_rect()
+            .expect("Quick Notes renders its actual editor");
+        notes_query_mouse_click(&mut app, &ctx, screen_size, editor_rect);
+        notes_query_hint_start_leader(&mut app, &ctx, screen_size);
+        let hint = dialog_hint_for_label(&app, "Search query");
+        assert!(!hint.is_empty());
+        let (completion_output, passes) = app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: notes_query_hint_completion_events(&hint),
+                ..launcher_show_owner_input(true, screen_size)
+            },
+            true,
+        );
+        completion_output.drop_without_applying_deltas();
+        assert!(passes >= 2, "the hint completion includes a discarded pass");
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        assert_eq!(app.query, "app café");
+        assert_eq!(app.selected, Some(1));
+        assert!(app.test_activation_trace.is_empty());
+        assert_eq!(app.notes_dialog.test_edit_draft(), draft_before_hint);
+
+        notes_query_mouse_run_frame(
+            &mut app,
+            &ctx,
+            screen_size,
+            notes_query_hint_release_events(&hint),
+        );
+        notes_query_mouse_run_frame(&mut app, &ctx, screen_size, Vec::new());
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        notes_query_mouse_run_frame(
+            &mut app,
+            &ctx,
+            screen_size,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(app.test_activation_trace.len(), 1);
+        assert_eq!(app.test_activation_trace[0].0, expected_action);
+        assert_eq!(app.test_activation_trace[0].1, ActivationSource::Enter);
+        assert_eq!(app.query, "app café");
+        assert_eq!(app.notes_dialog.test_edit_draft(), draft_before_hint);
+        drop(app);
+        drop(_workspace);
+    }
+
+    #[test]
+    fn notes_query_activation_autocomplete_tab_keeps_focus_through_discarded_pass() {
+        let query_id = egui::Id::new("query_input");
+        let screen_size = egui::vec2(1600.0, 1200.0);
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "app café");
+        install_notes_query_activation_fixture_actions(&mut app);
+        app.set_jump_mode_enabled(true);
+        app.query_autocomplete = true;
+        app.suggestions = vec!["app café 🧭".into()];
+        app.autocomplete_index = 0;
+        app.notes_dialog
+            .test_set_edit_draft("unsaved autocomplete draft");
+        let notes_layer = crate::gui::jump_mode::ui::notes_dialog_layer_id();
+        launcher_show_owner_seed_window_position(&ctx, notes_layer, "Quick Notes", screen_size);
+        launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen_size);
+        for _ in 0..2 {
+            notes_query_mouse_run_frame(&mut app, &ctx, screen_size, Vec::new());
+        }
+        let editor_rect = app
+            .notes_dialog
+            .test_edit_text_rect()
+            .expect("Quick Notes renders its actual editor");
+        notes_query_mouse_click(&mut app, &ctx, screen_size, editor_rect);
+        let query_rect = ctx
+            .read_response(query_id)
+            .expect("the real query response is available beside Notes")
+            .rect;
+        notes_query_mouse_prepare_interactive(&mut app, &ctx, screen_size, true);
+        notes_query_mouse_click(&mut app, &ctx, screen_size, query_rect);
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        let draft_before_tab = app.notes_dialog.test_edit_draft().to_owned();
+
+        let (output, passes) = app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Tab, egui::Modifiers::NONE)],
+                ..launcher_show_owner_input(true, screen_size)
+            },
+            true,
+        );
+        output.drop_without_applying_deltas();
+        assert!(passes >= 2, "the autocomplete Tab frame is discarded once");
+        assert_eq!(app.query, "app café 🧭");
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        assert!(app.query_focus_session.is_some());
+        assert_eq!(app.notes_dialog.test_edit_draft(), draft_before_tab);
+        assert!(app.test_activation_trace.is_empty());
+
+        notes_query_mouse_run_frame(
+            &mut app,
+            &ctx,
+            screen_size,
+            vec![key_release(egui::Key::Tab, egui::Modifiers::NONE)],
+        );
+        notes_query_mouse_run_frame(
+            &mut app,
+            &ctx,
+            screen_size,
+            vec![key_press(egui::Key::Tab, egui::Modifiers::SHIFT)],
+        );
+        assert!(
+            app.query_focus_session.is_none(),
+            "Shift+Tab remains a deliberate focus transfer"
+        );
+        assert!(app.test_activation_trace.is_empty());
+        drop(app);
+        drop(_workspace);
     }
 
     #[test]
