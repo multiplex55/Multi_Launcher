@@ -5,6 +5,7 @@ use crate::gui::LauncherApp;
 use eframe::egui::{
     self, Color32, PointerButton, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
 };
+use egui::emath::GuiRounding as _;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 use image::RgbaImage;
 use std::path::PathBuf;
@@ -253,6 +254,43 @@ pub struct ScreenshotEditor {
     text_size: f32,
     #[cfg(test)]
     test_content_clip: Option<Rect>,
+    #[cfg(test)]
+    test_window_width: Option<f32>,
+    #[cfg(test)]
+    test_slider_response_and_slot: Option<[(Rect, Rect, Rect); 2]>,
+    #[cfg(test)]
+    test_slider_sizing: Option<[f32; 5]>,
+    #[cfg(test)]
+    test_tool_row_rect: Option<Rect>,
+}
+
+fn screenshot_editor_window<'a>(test_width: Option<f32>) -> egui::Window<'a> {
+    let window = egui::Window::new("Screenshot Editor");
+    if let Some(width) = test_width {
+        window
+            .default_width(width)
+            .min_width(width)
+            .max_width(width)
+    } else {
+        window
+    }
+}
+
+fn add_sized_with_layout_bounds(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    widget: impl egui::Widget,
+) -> (egui::Response, Rect, Rect) {
+    let layout = egui::Layout::centered_and_justified(ui.layout().main_dir());
+    let allocation = ui.allocate_ui_with_layout(size, layout, |ui| {
+        let requested_slot = ui.max_rect();
+        (ui.add(widget), requested_slot)
+    });
+    (
+        allocation.inner.0,
+        allocation.inner.1,
+        allocation.response.rect,
+    )
 }
 
 impl ScreenshotEditor {
@@ -288,6 +326,14 @@ impl ScreenshotEditor {
             text_size: 18.0,
             #[cfg(test)]
             test_content_clip: None,
+            #[cfg(test)]
+            test_window_width: None,
+            #[cfg(test)]
+            test_slider_response_and_slot: None,
+            #[cfg(test)]
+            test_slider_sizing: None,
+            #[cfg(test)]
+            test_tool_row_rect: None,
         }
     }
 
@@ -376,7 +422,11 @@ impl ScreenshotEditor {
             return;
         }
         let mut open = self.open;
-        egui::Window::new("Screenshot Editor")
+        #[cfg(test)]
+        let test_width = self.test_window_width;
+        #[cfg(not(test))]
+        let test_width = None;
+        screenshot_editor_window(test_width)
             .open(&mut open)
             .resizable(true)
             .show(ctx, |ui| {
@@ -457,21 +507,122 @@ impl ScreenshotEditor {
                         }
                     }
                 });
-                let slider_row_height = ui
-                    .spacing()
-                    .interact_size
-                    .y
-                    .max(ui.text_style_height(&egui::TextStyle::Body));
-                ui.add_sized(
-                    egui::vec2(ui.available_width(), slider_row_height),
-                    egui::Slider::new(&mut self.zoom, 0.1..=4.0).text("Zoom"),
-                );
-                ui.add_sized(
-                    egui::vec2(ui.available_width(), slider_row_height),
-                    egui::Slider::new(&mut self.text_size, 6.0..=48.0).text("Text Size"),
-                );
-                let prev_tool = self.tool;
+                let style = ui.style();
+                let label_font = style
+                    .override_font_id
+                    .clone()
+                    .or_else(|| {
+                        style
+                            .override_text_style
+                            .as_ref()
+                            .map(|text_style| text_style.resolve(style))
+                    })
+                    .unwrap_or_else(|| egui::TextStyle::Body.resolve(style));
+                let value_display_font = style
+                    .override_font_id
+                    .clone()
+                    .unwrap_or_else(|| style.drag_value_text_style.resolve(style));
+                let value_edit_font = style.drag_value_text_style.resolve(style);
+                let text_color = ui.visuals().text_color();
+                let extra_line_spacing = ui.spacing().extra_text_line_spacing;
+                let (label_width, value_text_width, text_height) = ui.fonts_mut(|fonts| {
+                    let label_width = ["Zoom", "Text Size"]
+                        .into_iter()
+                        .map(|text| {
+                            fonts
+                                .layout_no_wrap(text.to_owned(), label_font.clone(), text_color)
+                                .size()
+                                .x
+                        })
+                        .fold(0.0_f32, f32::max);
+                    // The slider's DragValue adapts precision to its track size. Six decimal
+                    // places covers the precision available at the minimum track width below.
+                    // Display text honors override_font_id, while the edit field uses the
+                    // configured DragValue style, so reserve the larger of both.
+                    let mut value_text_width = 0.0_f32;
+                    for font in [&value_display_font, &value_edit_font] {
+                        for text in ["4.888888", "48.888888"] {
+                            value_text_width = value_text_width.max(
+                                fonts
+                                    .layout_no_wrap(text.to_owned(), font.clone(), text_color)
+                                    .size()
+                                    .x,
+                            );
+                        }
+                    }
+                    let text_height = fonts
+                        .row_height(&label_font)
+                        .max(fonts.row_height(&value_display_font))
+                        .max(fonts.row_height(&value_edit_font))
+                        + extra_line_spacing;
+                    (label_width, value_text_width, text_height)
+                });
+                let slider_row_height = ui.spacing().interact_size.y.max(text_height);
+                let spacing = ui.spacing().item_spacing.x;
+                let value_width = (value_text_width + ui.spacing().button_padding.x * 2.0)
+                    .max(ui.spacing().interact_size.x);
+                let fixed_slider_width = label_width + value_width + spacing * 2.0;
+                let minimum_track_width = (slider_row_height * 1.25).max(40.0);
+                #[cfg(test)]
+                let parent_available_width = ui.available_width().max(0.0);
+                // `horizontal_wrapped` allocates from the available rect, which is rounded to
+                // UI points. Use that same width for the two-up threshold and slot calculation.
+                let available_width = ui.available_size_before_wrap().x.max(0.0);
+                let minimum_inline_width =
+                    (fixed_slider_width + minimum_track_width) * 2.0 + spacing;
+                let slider_slot_width = if available_width >= minimum_inline_width {
+                    ((available_width - spacing) / 2.0).floor_ui()
+                } else {
+                    available_width
+                };
+                let track_width = (slider_slot_width - fixed_slider_width).max(minimum_track_width);
+                let previous_slider_width = ui.spacing().slider_width;
+                ui.spacing_mut().slider_width = track_width;
+                #[cfg(test)]
+                let mut actual_slider_row_width = None;
                 ui.horizontal_wrapped(|ui| {
+                    #[cfg(test)]
+                    {
+                        actual_slider_row_width = Some(ui.max_rect().width());
+                    }
+                    let slider_size = egui::vec2(slider_slot_width, slider_row_height);
+                    let (_zoom_response, _zoom_requested_slot, _zoom_layout_rect) =
+                        add_sized_with_layout_bounds(
+                            ui,
+                            slider_size,
+                            egui::Slider::new(&mut self.zoom, 0.1..=4.0).text("Zoom"),
+                        );
+                    let (_text_size_response, _text_size_requested_slot, _text_size_layout_rect) =
+                        add_sized_with_layout_bounds(
+                            ui,
+                            slider_size,
+                            egui::Slider::new(&mut self.text_size, 6.0..=48.0).text("Text Size"),
+                        );
+                    #[cfg(test)]
+                    {
+                        self.test_slider_response_and_slot = Some([
+                            (_zoom_response.rect, _zoom_requested_slot, _zoom_layout_rect),
+                            (
+                                _text_size_response.rect,
+                                _text_size_requested_slot,
+                                _text_size_layout_rect,
+                            ),
+                        ]);
+                    }
+                });
+                ui.spacing_mut().slider_width = previous_slider_width;
+                #[cfg(test)]
+                {
+                    self.test_slider_sizing = Some([
+                        parent_available_width,
+                        available_width,
+                        actual_slider_row_width.unwrap_or_default(),
+                        minimum_inline_width,
+                        slider_slot_width,
+                    ]);
+                }
+                let prev_tool = self.tool;
+                let _tool_row = ui.horizontal_wrapped(|ui| {
                     ui.label("Tool");
                     ui.selectable_value(&mut self.tool, MarkupTool::Pen, "Pen");
                     ui.selectable_value(&mut self.tool, MarkupTool::Arrow, "Arrow");
@@ -479,6 +630,10 @@ impl ScreenshotEditor {
                     ui.selectable_value(&mut self.tool, MarkupTool::Highlight, "Highlight");
                     ui.selectable_value(&mut self.tool, MarkupTool::Text, "Text");
                 });
+                #[cfg(test)]
+                {
+                    self.test_tool_row_rect = Some(_tool_row.response.rect);
+                }
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Color");
@@ -841,6 +996,37 @@ mod tests {
     use super::*;
     use std::sync::{Arc, atomic::AtomicBool};
 
+    const CONTROLS: [&str; 18] = [
+        "Save",
+        "Copy",
+        "Pen",
+        "Arrow",
+        "Rect",
+        "Highlight",
+        "Text",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "−",
+        "+",
+        "Undo",
+        "Redo",
+        "Zoom",
+        "Text Size",
+    ];
+
+    #[derive(Clone, Copy, Debug)]
+    struct SliderLayoutBounds {
+        response: Rect,
+        requested_slot: Rect,
+        allocated: Rect,
+        track: Rect,
+        label: Rect,
+        value: Rect,
+    }
+
     fn control_bounds(
         output: &egui::FullOutput,
         label: &str,
@@ -866,29 +1052,172 @@ mod tests {
             })
     }
 
+    fn slider_accessibility_bounds(
+        output: &egui::FullOutput,
+        expected_label: &str,
+    ) -> Option<(Rect, Rect, Rect)> {
+        let nodes = &output.platform_output.accesskit_update.as_ref()?.nodes;
+        let (_, slider) = nodes.iter().find(|(_, node)| {
+            node.role() == egui::accesskit::Role::Slider && node.label() == Some(expected_label)
+        })?;
+        let label_id = slider.labelled_by().iter().find(|label_id| {
+            nodes.iter().any(|(id, node)| {
+                id == *label_id
+                    && node.role() == egui::accesskit::Role::Label
+                    && node.value() == Some(expected_label)
+            })
+        })?;
+        let track = slider.bounds()?;
+        let label = nodes.iter().find(|(id, _)| *id == *label_id)?.1.bounds()?;
+        let value = nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::accesskit::Role::SpinButton
+                    && node.labelled_by().contains(label_id)
+            })?
+            .1
+            .bounds()?;
+        let to_rect = |bounds: egui::accesskit::Rect| {
+            Rect::from_min_max(
+                Pos2::new(bounds.x0 as f32, bounds.y0 as f32),
+                Pos2::new(bounds.x1 as f32, bounds.y1 as f32),
+            )
+        };
+        Some((to_rect(track), to_rect(label), to_rect(value)))
+    }
+
+    fn settled_toolbar_controls(
+        context: &egui::Context,
+        editor: &mut ScreenshotEditor,
+        app: &mut LauncherApp,
+        screen: Rect,
+    ) -> (
+        [Option<(egui::accesskit::Role, Rect)>; CONTROLS.len()],
+        Rect,
+        [Option<SliderLayoutBounds>; 2],
+        Rect,
+    ) {
+        let mut settled_controls = [None; CONTROLS.len()];
+        let mut settled_content_clip = None;
+        let mut settled_slider_layout = [None; 2];
+        let mut settled_tool_row = None;
+        for _ in 0..3 {
+            let output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| editor.ui(ctx, app),
+            );
+            let controls = CONTROLS.map(|label| control_bounds(&output, label));
+            let slider_accessibility = [
+                slider_accessibility_bounds(&output, "Zoom"),
+                slider_accessibility_bounds(&output, "Text Size"),
+            ];
+            let slider_layout = editor.test_slider_response_and_slot.map(|layout| {
+                [
+                    slider_accessibility[0].map(|(track, label, value)| SliderLayoutBounds {
+                        response: layout[0].0,
+                        requested_slot: layout[0].1,
+                        allocated: layout[0].2,
+                        track,
+                        label,
+                        value,
+                    }),
+                    slider_accessibility[1].map(|(track, label, value)| SliderLayoutBounds {
+                        response: layout[1].0,
+                        requested_slot: layout[1].1,
+                        allocated: layout[1].2,
+                        track,
+                        label,
+                        value,
+                    }),
+                ]
+            });
+            let content_clip = editor.test_content_clip;
+            let tool_row = editor.test_tool_row_rect;
+            output.drop_without_applying_deltas();
+            settled_content_clip = content_clip.or(settled_content_clip);
+            settled_tool_row = tool_row.or(settled_tool_row);
+            for (settled, observed) in settled_controls.iter_mut().zip(controls) {
+                *settled = observed.or(*settled);
+            }
+            if let Some(slider_layout) = slider_layout {
+                for (settled, observed) in settled_slider_layout.iter_mut().zip(slider_layout) {
+                    *settled = observed.or(*settled);
+                }
+            }
+        }
+        (
+            settled_controls,
+            settled_content_clip.expect("the Screenshot Editor exposes its clip"),
+            settled_slider_layout,
+            settled_tool_row.expect("the Tool row exposes its Response rectangle"),
+        )
+    }
+
+    fn assert_toolbar_controls_reachable(
+        controls: &[Option<(egui::accesskit::Role, Rect)>; CONTROLS.len()],
+        screen: Rect,
+        content_clip: Rect,
+    ) {
+        for (label, observation) in CONTROLS.into_iter().zip(controls.iter().copied()) {
+            let (role, bounds) = observation.unwrap_or_else(|| {
+                panic!(
+                    "{label} has no native bound; input screen {screen:?}; window content clip {content_clip:?}"
+                )
+            });
+            let diagnostic = format!(
+                "{label} ({role:?}) bounds {bounds:?}; input screen {screen:?}; window content clip {content_clip:?}"
+            );
+            assert!(bounds.is_positive(), "{diagnostic}");
+            assert!(screen.contains_rect(bounds), "{diagnostic}");
+            assert!(content_clip.contains_rect(bounds), "{diagnostic}");
+        }
+    }
+
+    fn slider_full_bounds(slider: SliderLayoutBounds) -> Rect {
+        slider
+            .response
+            .union(slider.track)
+            .union(slider.label)
+            .union(slider.value)
+    }
+
+    fn assert_slider_layout_reachable(
+        sliders: [Option<SliderLayoutBounds>; 2],
+        content_clip: Rect,
+    ) -> [SliderLayoutBounds; 2] {
+        let [zoom, text_size] = sliders
+            .map(|bounds| bounds.expect("slider response, label, and value bounds are available"));
+        for (name, slider) in [("Zoom", zoom), ("Text Size", text_size)] {
+            let full_bounds = slider_full_bounds(slider);
+            for (part, bounds) in [
+                ("full widget", full_bounds),
+                ("Response.rect", slider.response),
+                ("track", slider.track),
+                ("label", slider.label),
+                ("value", slider.value),
+                ("post-layout allocation", slider.allocated),
+            ] {
+                let diagnostic = format!(
+                    "{name} {part} {bounds:?}; requested slot {:?}; post-layout allocation {:?}; window content clip {content_clip:?}",
+                    slider.requested_slot, slider.allocated
+                );
+                assert!(bounds.is_positive(), "{diagnostic}");
+                assert!(content_clip.contains_rect(bounds), "{diagnostic}");
+            }
+            assert!(slider.allocated.contains_rect(full_bounds));
+            assert!(slider.requested_slot.left() <= full_bounds.left());
+            assert!(full_bounds.right() <= slider.requested_slot.right());
+            assert!(slider.response.contains_rect(slider.track));
+        }
+        [zoom, text_size]
+    }
+
     #[test]
     fn screenshot_chrome_scaled_toolbar_controls_remain_reachable_without_editing_image() {
-        const CONTROLS: [&str; 18] = [
-            "Save",
-            "Copy",
-            "Pen",
-            "Arrow",
-            "Rect",
-            "Highlight",
-            "Text",
-            "1",
-            "2",
-            "3",
-            "4",
-            "5",
-            "−",
-            "+",
-            "Undo",
-            "Redo",
-            "Zoom",
-            "Text Size",
-        ];
-
         let context = egui::Context::default();
         context.enable_accesskit();
         let root = tempfile::tempdir().unwrap();
@@ -900,6 +1229,8 @@ mod tests {
         settings.show_inline_errors = false;
         settings.show_error_toasts = false;
         settings.dashboard.enabled = false;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         let mut app = LauncherApp::new(
             &context,
             Arc::new(Vec::new()),
@@ -936,6 +1267,7 @@ mod tests {
             false,
             MarkupTool::Pen,
         );
+        editor.test_window_width = Some(640.0);
         let history_layers = editor.history.layers.clone();
         let redo_layers = editor.history.redo_stack.clone();
         let initial_tool = editor.tool;
@@ -943,50 +1275,102 @@ mod tests {
         let initial_thickness = editor.thickness;
         let initial_zoom = editor.zoom;
         let initial_text_size = editor.text_size;
-        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(440.0, 620.0));
-        let mut settled_controls = [None; CONTROLS.len()];
-        let mut settled_content_clip = None;
+        let initial_crop_start = editor.crop_start;
+        let initial_crop_rect = editor.crop_rect;
+        let initial_active_start = editor.active_start;
+        let initial_active_end = editor.active_end;
+        let initial_active_stroke = editor.active_stroke.clone();
+        let initial_active_text = editor.active_text.clone();
+        let wide_screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 620.0));
+        let (wide_controls, wide_content_clip, wide_slider_layout, wide_tool_row) =
+            settled_toolbar_controls(&context, &mut editor, &mut app, wide_screen);
+        assert_toolbar_controls_reachable(&wide_controls, wide_screen, wide_content_clip);
+        assert!(wide_tool_row.is_positive());
+        assert!(wide_content_clip.contains_rect(wide_tool_row));
+        let [wide_zoom, wide_text_size] =
+            assert_slider_layout_reachable(wide_slider_layout, wide_content_clip);
+        let wide_zoom_bounds = slider_full_bounds(wide_zoom);
+        let wide_text_size_bounds = slider_full_bounds(wide_text_size);
+        let wide_slider_sizing = editor.test_slider_sizing.unwrap();
+        assert!(
+            (wide_zoom_bounds.top()..=wide_zoom_bounds.bottom())
+                .contains(&wide_text_size_bounds.center().y)
+                && (wide_text_size_bounds.top()..=wide_text_size_bounds.bottom())
+                    .contains(&wide_zoom_bounds.center().y),
+            "wide sliders do not share a vertical band: parent/rounded-row/actual-row/min-inline/slot widths {wide_slider_sizing:?}; Zoom {wide_zoom:?}; Text Size {wide_text_size:?}"
+        );
+        assert!(!wide_zoom_bounds.intersects(wide_text_size_bounds));
+        assert!(wide_zoom_bounds.bottom() < wide_tool_row.top());
+        assert!(wide_text_size_bounds.bottom() < wide_tool_row.top());
 
-        for _ in 0..3 {
-            let output = context.run_ui(
+        let point = Pos2::new(wide_zoom.track.right() - 3.0, wide_zoom.track.center().y);
+        context
+            .run_ui(
                 egui::RawInput {
-                    screen_rect: Some(screen),
+                    screen_rect: Some(wide_screen),
                     focused: true,
+                    events: vec![
+                        egui::Event::PointerMoved(point),
+                        egui::Event::PointerButton {
+                            pos: point,
+                            button: egui::PointerButton::Primary,
+                            pressed: true,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
                     ..Default::default()
                 },
                 |ctx| editor.ui(ctx, &mut app),
-            );
-            let controls = CONTROLS.map(|label| control_bounds(&output, label));
-            let content_clip = editor.test_content_clip;
-            output.drop_without_applying_deltas();
-            settled_content_clip = content_clip.or(settled_content_clip);
-            for (settled, observed) in settled_controls.iter_mut().zip(controls) {
-                *settled = observed.or(*settled);
-            }
-        }
+            )
+            .drop_without_applying_deltas();
+        context
+            .run_ui(
+                egui::RawInput {
+                    screen_rect: Some(wide_screen),
+                    focused: true,
+                    events: vec![egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::default(),
+                    }],
+                    ..Default::default()
+                },
+                |ctx| editor.ui(ctx, &mut app),
+            )
+            .drop_without_applying_deltas();
+        assert!(editor.zoom > initial_zoom);
+        assert_eq!(editor.text_size, initial_text_size);
 
-        let content_clip = settled_content_clip.expect("the Screenshot Editor exposes its clip");
-        for (label, observation) in CONTROLS.into_iter().zip(settled_controls) {
-            let (role, bounds) = observation.unwrap_or_else(|| {
-                panic!(
-                    "{label} has no native bound; input screen {screen:?}; window content clip {content_clip:?}"
-                )
-            });
-            let diagnostic = format!(
-                "{label} ({role:?}) bounds {bounds:?}; input screen {screen:?}; window content clip {content_clip:?}"
-            );
-            assert!(bounds.is_positive(), "{diagnostic}");
-            assert!(screen.contains_rect(bounds), "{diagnostic}");
-            assert!(content_clip.contains_rect(bounds), "{diagnostic}");
-        }
+        editor.test_window_width = Some(420.0);
+        let narrow_screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(440.0, 620.0));
+        let (narrow_controls, narrow_content_clip, narrow_slider_layout, narrow_tool_row) =
+            settled_toolbar_controls(&context, &mut editor, &mut app, narrow_screen);
+        assert!(wide_content_clip.width() > narrow_content_clip.width());
+        assert_toolbar_controls_reachable(&narrow_controls, narrow_screen, narrow_content_clip);
+        assert!(narrow_tool_row.is_positive());
+        assert!(narrow_content_clip.contains_rect(narrow_tool_row));
+        let [narrow_zoom, narrow_text_size] =
+            assert_slider_layout_reachable(narrow_slider_layout, narrow_content_clip);
+        let narrow_zoom_bounds = slider_full_bounds(narrow_zoom);
+        let narrow_text_size_bounds = slider_full_bounds(narrow_text_size);
+        assert!(narrow_zoom_bounds.bottom() < narrow_text_size_bounds.top());
+        assert!(narrow_zoom_bounds.bottom() < narrow_tool_row.top());
+        assert!(narrow_text_size_bounds.bottom() < narrow_tool_row.top());
         assert!(editor.open);
         assert_eq!(editor.image.as_raw(), &source_pixels);
         assert_eq!(editor.history.layers, history_layers);
         assert_eq!(editor.history.redo_stack, redo_layers);
+        assert_eq!(editor.crop_start, initial_crop_start);
+        assert_eq!(editor.crop_rect, initial_crop_rect);
+        assert_eq!(editor.active_start, initial_active_start);
+        assert_eq!(editor.active_end, initial_active_end);
+        assert_eq!(editor.active_stroke, initial_active_stroke);
+        assert_eq!(editor.active_text, initial_active_text);
         assert_eq!(editor.tool, initial_tool);
         assert_eq!(editor.color_index, initial_color);
         assert_eq!(editor.thickness, initial_thickness);
-        assert_eq!(editor.zoom, initial_zoom);
+        assert!(editor.zoom > initial_zoom);
         assert_eq!(editor.text_size, initial_text_size);
     }
 }
