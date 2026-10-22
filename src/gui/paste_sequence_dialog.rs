@@ -10,6 +10,8 @@ use std::path::PathBuf;
 const SNIPPETS_FILE: &str = crate::plugins::snippets::SNIPPETS_FILE;
 const CLIPBOARD_FILE: &str = crate::plugins::clipboard::CLIPBOARD_FILE;
 const MAX_PICKER_PREVIEW_CHARS: usize = 16_384;
+const MAX_PICKER_PREVIEW_HEIGHT: f32 = 112.0;
+const MAX_PICKER_PREVIEW_SCROLL_HEIGHT: f32 = 80.0;
 
 fn bounded_picker_text(text: &str, max_chars: usize) -> String {
     let mut chars = text.chars();
@@ -265,6 +267,15 @@ struct SourcePickerState {
     selected: Option<SourcePickerIdentity>,
     needs_reveal: bool,
     message: Option<String>,
+    refresh_failed: bool,
+    insert_attempted_frame: Option<u64>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct TestPickerSourceRefresh {
+    snippets: Option<Result<Vec<SnippetEntry>, String>>,
+    history: Option<Result<Vec<String>, String>>,
 }
 
 pub(crate) struct PasteSequenceDialog {
@@ -274,6 +285,8 @@ pub(crate) struct PasteSequenceDialog {
     layout: DialogLayout,
     #[cfg(test)]
     sources_are_test_owned: bool,
+    #[cfg(test)]
+    test_picker_source_refresh: Option<TestPickerSourceRefresh>,
     store_path: PathBuf,
     snapshot: Option<SequenceSnapshot>,
     draft: SequenceDraft,
@@ -286,6 +299,7 @@ pub(crate) struct PasteSequenceDialog {
     history: Vec<String>,
     source_generation: u64,
     source_picker: Option<SourcePickerState>,
+    source_picker_scope_to_retire: Option<(SourcePickerKind, u64)>,
     context: Option<SequenceInvocationContext>,
     hotkey_text: String,
     inline_error: Option<String>,
@@ -317,6 +331,8 @@ impl Default for PasteSequenceDialog {
             layout: DialogLayout::default(),
             #[cfg(test)]
             sources_are_test_owned: false,
+            #[cfg(test)]
+            test_picker_source_refresh: None,
             store_path: PathBuf::from(PASTE_SEQUENCES_FILE),
             snapshot: None,
             draft: SequenceDraft::new("New sequence", Vec::new()),
@@ -329,6 +345,7 @@ impl Default for PasteSequenceDialog {
             history: Vec::new(),
             source_generation: 0,
             source_picker: None,
+            source_picker_scope_to_retire: None,
             context: None,
             hotkey_text: String::new(),
             inline_error: None,
@@ -472,8 +489,66 @@ impl PasteSequenceDialog {
     }
 
     fn invalidate_source_picker(&mut self) {
+        if let Some(picker) = self.source_picker.take() {
+            self.retire_source_picker_identity(picker.kind, picker.generation);
+        } else {
+            self.source_generation = self.source_generation.wrapping_add(1);
+        }
+    }
+
+    fn retire_source_picker_identity(&mut self, kind: SourcePickerKind, generation: u64) {
+        self.source_picker_scope_to_retire = Some((kind, generation));
         self.source_generation = self.source_generation.wrapping_add(1);
-        self.source_picker = None;
+    }
+
+    fn read_snippets_for_insert(&self) -> Result<Vec<SnippetEntry>, ()> {
+        #[cfg(test)]
+        if self.sources_are_test_owned {
+            return self
+                .test_picker_source_refresh
+                .as_ref()
+                .and_then(|refresh| refresh.snippets.clone())
+                .unwrap_or_else(|| Ok(self.snippets.clone()))
+                .map_err(|_| ());
+        }
+
+        match crate::plugins::snippets::load_snippets_for_reload(SNIPPETS_FILE).map_err(|_| ())? {
+            crate::common::persistence::LoadState::Missing
+            | crate::common::persistence::LoadState::Empty => Ok(Vec::new()),
+            crate::common::persistence::LoadState::Loaded(entries) => Ok(entries),
+        }
+    }
+
+    fn read_history_for_insert(&self) -> Result<Vec<String>, ()> {
+        #[cfg(test)]
+        if self.sources_are_test_owned {
+            return self
+                .test_picker_source_refresh
+                .as_ref()
+                .and_then(|refresh| refresh.history.clone())
+                .unwrap_or_else(|| Ok(self.history.clone()))
+                .map_err(|_| ());
+        }
+
+        crate::plugins::clipboard::load_history(CLIPBOARD_FILE)
+            .map(|history| history.into_iter().collect())
+            .map_err(|_| ())
+    }
+
+    pub(crate) fn source_picker_is_open(&self) -> bool {
+        self.source_picker.is_some() && self.remove_confirmation.is_none()
+    }
+
+    pub(crate) fn close_source_picker_for_root_escape(&mut self) -> bool {
+        if self.source_picker.is_none() {
+            return false;
+        }
+        self.invalidate_source_picker();
+        #[cfg(test)]
+        {
+            self.layout.source_picker = None;
+        }
+        true
     }
 
     pub(crate) fn suspend_for_playback(&mut self) {
@@ -523,6 +598,10 @@ impl PasteSequenceDialog {
     }
 
     pub(crate) fn note_playback_started(&mut self) {
+        // Playback owns the source snapshot even when its window stays open.
+        if self.source_picker.is_some() {
+            self.invalidate_source_picker();
+        }
         if self.open {
             self.status = Some(if self.saved_run.is_some() {
                 "Saved sequence started.".into()
@@ -555,6 +634,14 @@ impl PasteSequenceDialog {
         self.poll_hotkey_update(ctx);
         let mut jump_visual_order = 0;
         let initial_confirmation_id = self.remove_confirmation;
+        let initial_picker_identity = self
+            .source_picker
+            .as_ref()
+            .map(|picker| (picker.kind, picker.generation));
+        let retired_picker_identity = self.source_picker_scope_to_retire.take();
+        let initial_picker_scope = initial_picker_identity.and_then(|(kind, generation)| {
+            source_picker_jump_scope(jump_scope.as_ref(), kind, generation)
+        });
         let initial_dialog_scope = self.current_dialog_jump_scope(jump_scope.as_ref());
         let initial_confirmation_scope = self.current_confirmation_jump_scope(jump_scope.as_ref());
         let mut body_dialog_scope_for_footer = None;
@@ -647,15 +734,26 @@ impl PasteSequenceDialog {
                         // the remainder of this same UI pass belongs only to
                         // its actual foreground surface.
                         let dialog_scope = self.current_dialog_jump_scope(jump_scope.as_ref());
-                        body_dialog_scope_for_footer = dialog_scope.clone();
+                        let picker_blocks_parent_targets =
+                            retired_picker_identity.is_some() || self.source_picker.is_some();
+                        let content_scope = (!picker_blocks_parent_targets)
+                            .then_some(dialog_scope.as_ref())
+                            .flatten();
+                        body_dialog_scope_for_footer = if picker_blocks_parent_targets {
+                            None
+                        } else {
+                            dialog_scope.clone()
+                        };
                         let confirmation_scope =
                             self.current_confirmation_jump_scope(jump_scope.as_ref());
-                        self.saved_sequence_list(ui, dialog_scope.as_ref(), &mut jump_visual_order);
+                        self.saved_sequence_list(ui, content_scope, &mut jump_visual_order);
                         self.saved_sequence_remove_confirmation(
                             ui,
                             ctx,
                             app,
-                            confirmation_scope.as_ref(),
+                            (!picker_blocks_parent_targets)
+                                .then_some(confirmation_scope.as_ref())
+                                .flatten(),
                             &mut jump_visual_order,
                         );
                         ui.separator();
@@ -666,6 +764,12 @@ impl PasteSequenceDialog {
                             dialog_scope.as_ref(),
                             &mut jump_visual_order,
                         );
+                        if picker_blocks_parent_targets || self.source_picker.is_some() {
+                            if let Some(scope) = dialog_scope.as_ref() {
+                                scope.discard_registered_targets();
+                            }
+                            body_dialog_scope_for_footer = None;
+                        }
                     });
                 #[cfg(test)]
                 {
@@ -709,6 +813,20 @@ impl PasteSequenceDialog {
             && let Some(scope) = initial_confirmation_scope.as_ref()
         {
             scope.discard_registered_targets();
+        }
+        let current_picker_identity = self
+            .source_picker
+            .as_ref()
+            .map(|picker| (picker.kind, picker.generation));
+        if initial_picker_identity != current_picker_identity
+            && let Some(scope) = initial_picker_scope.as_ref()
+        {
+            scope.discard_registered_namespace();
+        }
+        if let Some((kind, generation)) = retired_picker_identity
+            && let Some(scope) = source_picker_jump_scope(jump_scope.as_ref(), kind, generation)
+        {
+            scope.discard_registered_namespace();
         }
     }
 
@@ -913,6 +1031,12 @@ impl PasteSequenceDialog {
         jump_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         jump_visual_order: &mut u64,
     ) {
+        let parent_jump_scope = jump_scope;
+        let jump_scope = if self.source_picker.is_some() {
+            None
+        } else {
+            jump_scope
+        };
         if let Some(origin) = self
             .context
             .as_ref()
@@ -1100,7 +1224,7 @@ impl PasteSequenceDialog {
                 self.draft.steps.remove(index);
             }
         });
-        self.source_picker_ui(ui);
+        self.source_picker_ui(ui, parent_jump_scope);
         ui.label("Ordered steps");
         self.step_editor(ui, step_height);
 
@@ -1121,9 +1245,13 @@ impl PasteSequenceDialog {
             .as_ref()
             .is_some_and(|picker| picker.kind == kind)
         {
-            self.source_picker = None;
+            self.invalidate_source_picker();
             return;
         }
+        // Each open gets a fresh target namespace even when the source data did
+        // not change. This prevents a copied Jump directive from an earlier
+        // picker instance from binding to a same-index row after reopen.
+        self.invalidate_source_picker();
         self.source_picker = Some(SourcePickerState {
             kind,
             generation: self.source_generation,
@@ -1131,6 +1259,8 @@ impl PasteSequenceDialog {
             selected: None,
             needs_reveal: true,
             message: None,
+            refresh_failed: false,
+            insert_attempted_frame: None,
         });
     }
 
@@ -1138,6 +1268,11 @@ impl PasteSequenceDialog {
         &self,
         picker: &SourcePickerState,
     ) -> Result<SourcePickerIdentity, &'static str> {
+        if picker.refresh_failed {
+            return Err(
+                "The source could not be refreshed. Close and reopen Paste Sequences to retry.",
+            );
+        }
         let identity = picker
             .selected
             .ok_or("Select a source item before inserting it.")?;
@@ -1179,7 +1314,11 @@ impl PasteSequenceDialog {
         Ok(identity)
     }
 
-    fn source_picker_ui(&mut self, ui: &mut egui::Ui) {
+    fn source_picker_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        parent_jump_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ) {
         let Some(mut picker) = self.source_picker.take() else {
             #[cfg(test)]
             {
@@ -1237,11 +1376,16 @@ impl PasteSequenceDialog {
             insert_enabled: false,
             cancel: egui::Rect::NOTHING,
         };
-        let insert_block_reason = self
+        let picker_jump_scope =
+            source_picker_jump_scope(parent_jump_scope, picker.kind, picker.generation);
+        let mut picker_visual_order = 0;
+        let mut discard_after_insert = false;
+        let mut insert_block_reason = self
             .source_picker_insert_selection(&picker)
             .as_ref()
             .err()
             .copied();
+        let mut insertion_succeeded = false;
         let panel = ui.group(|ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -1251,7 +1395,7 @@ impl PasteSequenceDialog {
                 });
                 ui.add_space(8.0);
                 let search_width = ui.available_width().max(120.0);
-                ui.add(
+                let search = ui.add(
                     egui::TextEdit::singleline(&mut picker.query)
                         .id_salt(("paste-source-picker-search", picker.kind))
                         .desired_width(search_width)
@@ -1259,6 +1403,15 @@ impl PasteSequenceDialog {
                             SourcePickerKind::Snippets => "Search aliases, tags, and visible text",
                             SourcePickerKind::ClipboardHistory => "Search this history snapshot",
                         }),
+                );
+                register_visible_paste_picker_jump_target(
+                    picker_jump_scope.as_ref(),
+                    ui,
+                    &search,
+                    "search",
+                    "Search source items",
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                    &mut picker_visual_order,
                 );
             });
 
@@ -1318,6 +1471,24 @@ impl PasteSequenceDialog {
                                 |ui| ui.selectable_label(selected, label),
                             )
                             .inner;
+                        let jump_label = match picker.kind {
+                            SourcePickerKind::Snippets => format!(
+                                "Snippet {}",
+                                bounded_picker_excerpt(&self.snippets[source_index].alias, 64)
+                            ),
+                            SourcePickerKind::ClipboardHistory => {
+                                format!("History item {}", source_index + 1)
+                            }
+                        };
+                        register_visible_paste_picker_jump_target(
+                            picker_jump_scope.as_ref(),
+                            ui,
+                            &response,
+                            format!("row-{}", identity.source_index),
+                            jump_label,
+                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut picker_visual_order,
+                        );
                         if response.clicked() {
                             selected_from_list = Some(identity);
                         }
@@ -1332,83 +1503,17 @@ impl PasteSequenceDialog {
             #[cfg(not(test))]
             let _ = list;
 
-            if let Some(identity) = picker.selected {
-                ui.separator();
-                let preview = ui.group(|ui| {
-                    ui.set_max_height(112.0);
-                    ui.set_width(ui.available_width());
-                    match picker.kind {
-                        SourcePickerKind::Snippets
-                            if identity.generation == self.source_generation
-                                && let Some(snippet) = self.snippets.get(identity.source_index) =>
-                        {
-                            ui.strong(format!(
-                                "{} · selected preview",
-                                bounded_picker_excerpt(&snippet.alias, 64)
-                            ));
-                            if snippet.hide_contents {
-                                // Do not inspect hidden text here: even preview geometry and
-                                // labels are intentionally independent of the concealed body.
-                                ui.weak("Contents are hidden for this snippet.");
-                            } else {
-                                egui::ScrollArea::vertical()
-                                    .id_salt((
-                                        "paste-source-picker-preview",
-                                        picker.kind,
-                                        identity.generation,
-                                        identity.source_index,
-                                    ))
-                                    .max_height(80.0)
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            egui::RichText::new(bounded_picker_text(
-                                                &snippet.text,
-                                                MAX_PICKER_PREVIEW_CHARS,
-                                            ))
-                                            .code(),
-                                        );
-                                    });
-                            }
-                        }
-                        SourcePickerKind::ClipboardHistory
-                            if identity.generation == self.source_generation
-                                && let Some(text) = self.history.get(identity.source_index) =>
-                        {
-                            ui.strong(format!(
-                                "History item {} · selected preview",
-                                identity.source_index + 1
-                            ));
-                            egui::ScrollArea::vertical()
-                                .id_salt((
-                                    "paste-source-picker-preview",
-                                    picker.kind,
-                                    identity.generation,
-                                    identity.source_index,
-                                ))
-                                .max_height(80.0)
-                                .show(ui, |ui| {
-                                    ui.label(
-                                        egui::RichText::new(bounded_picker_text(
-                                            text,
-                                            MAX_PICKER_PREVIEW_CHARS,
-                                        ))
-                                        .code(),
-                                    );
-                                });
-                        }
-                        _ => {
-                            ui.weak("The selected source item is no longer available.");
-                        }
-                    }
-                });
-                #[cfg(test)]
-                {
-                    layout.preview = preview.response.rect;
-                }
-                #[cfg(not(test))]
-                let _ = preview;
+            if let Some(identity) = selected_from_list.take() {
+                picker.selected = Some(identity);
+                picker.needs_reveal = true;
+                picker.message = None;
             }
 
+            insert_block_reason = self
+                .source_picker_insert_selection(&picker)
+                .as_ref()
+                .err()
+                .copied();
             if let Some(message) = &picker.message {
                 ui.colored_label(ui.visuals().error_fg_color, message);
             }
@@ -1432,14 +1537,134 @@ impl PasteSequenceDialog {
                 } else {
                     insert
                 };
-                insert_clicked = insert.clicked();
+                register_visible_paste_picker_jump_target(
+                    picker_jump_scope.as_ref(),
+                    ui,
+                    &insert,
+                    "insert",
+                    "Insert selected source item",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    &mut picker_visual_order,
+                );
+                let insert_frame = ui.ctx().cumulative_frame_nr();
+                insert_clicked =
+                    insert.clicked() && picker.insert_attempted_frame != Some(insert_frame);
+                if insert_clicked {
+                    picker.insert_attempted_frame = Some(insert_frame);
+                    insertion_succeeded =
+                        self.refresh_and_insert_source_picker_selection(&mut picker);
+                    insert_block_reason = self
+                        .source_picker_insert_selection(&picker)
+                        .as_ref()
+                        .err()
+                        .copied();
+                    discard_after_insert = true;
+                }
                 let cancel = ui.button("Cancel");
                 #[cfg(test)]
                 {
                     layout.cancel = cancel.rect;
                 }
+                register_visible_paste_picker_jump_target(
+                    picker_jump_scope.as_ref(),
+                    ui,
+                    &cancel,
+                    "cancel",
+                    "Cancel source picker",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    &mut picker_visual_order,
+                );
                 cancel_clicked = cancel.clicked();
             });
+
+            // Refresh and validate before painting a selected preview. If the
+            // item became hidden, stale, or unavailable on Insert, its prior
+            // plaintext never survives in this frame's rendered output.
+            if !insertion_succeeded && let Some(identity) = picker.selected {
+                ui.separator();
+                let preview_frame = egui::Frame::group(ui.style());
+                let frame_vertical_margin = preview_frame.total_margin().sum().y;
+                let preview = preview_frame.show(ui, |ui| {
+                    ui.set_max_height((MAX_PICKER_PREVIEW_HEIGHT - frame_vertical_margin).max(0.0));
+                    ui.set_width(ui.available_width());
+                    let scroll_height = |header_height: f32, ui: &egui::Ui| {
+                        (MAX_PICKER_PREVIEW_HEIGHT
+                            - frame_vertical_margin
+                            - header_height
+                            - ui.spacing().item_spacing.y)
+                            .clamp(0.0, MAX_PICKER_PREVIEW_SCROLL_HEIGHT)
+                    };
+                    match picker.kind {
+                        SourcePickerKind::Snippets
+                            if identity.generation == self.source_generation
+                                && let Some(snippet) = self.snippets.get(identity.source_index) =>
+                        {
+                            let header = ui.strong(format!(
+                                "{} · selected preview",
+                                bounded_picker_excerpt(&snippet.alias, 64)
+                            ));
+                            if snippet.hide_contents {
+                                ui.weak("Contents are hidden for this snippet.");
+                            } else {
+                                egui::ScrollArea::vertical()
+                                    .id_salt((
+                                        "paste-source-picker-preview",
+                                        picker.kind,
+                                        identity.generation,
+                                        identity.source_index,
+                                    ))
+                                    .min_scrolled_height(0.0)
+                                    .max_height(scroll_height(header.rect.height(), ui))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(bounded_picker_text(
+                                                &snippet.text,
+                                                MAX_PICKER_PREVIEW_CHARS,
+                                            ))
+                                            .code(),
+                                        );
+                                    });
+                            }
+                        }
+                        SourcePickerKind::ClipboardHistory
+                            if identity.generation == self.source_generation
+                                && let Some(text) = self.history.get(identity.source_index) =>
+                        {
+                            let header = ui.strong(format!(
+                                "History item {} · selected preview",
+                                identity.source_index + 1
+                            ));
+                            egui::ScrollArea::vertical()
+                                .id_salt((
+                                    "paste-source-picker-preview",
+                                    picker.kind,
+                                    identity.generation,
+                                    identity.source_index,
+                                ))
+                                .min_scrolled_height(0.0)
+                                .max_height(scroll_height(header.rect.height(), ui))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new(bounded_picker_text(
+                                            text,
+                                            MAX_PICKER_PREVIEW_CHARS,
+                                        ))
+                                        .code(),
+                                    );
+                                });
+                        }
+                        _ => {
+                            ui.weak("The selected source item is no longer available.");
+                        }
+                    }
+                });
+                #[cfg(test)]
+                {
+                    layout.preview = preview.response.rect;
+                }
+                #[cfg(not(test))]
+                let _ = preview;
+            }
         });
         #[cfg(test)]
         {
@@ -1455,19 +1680,10 @@ impl PasteSequenceDialog {
             picker.needs_reveal = false;
         }
 
-        if let Some(identity) = selected_from_list {
-            picker.selected = Some(identity);
-            picker.needs_reveal = true;
-            picker.message = None;
-        }
         if cancel_clicked {
-            self.source_picker = None;
-        } else if insert_clicked {
-            if self.insert_source_picker_selection(&mut picker) {
-                self.source_picker = None;
-            } else {
-                self.source_picker = Some(picker);
-            }
+            self.retire_source_picker_identity(picker.kind, picker.generation);
+        } else if insert_clicked && insertion_succeeded {
+            self.retire_source_picker_identity(picker.kind, picker.generation);
         } else {
             self.source_picker = Some(picker);
         }
@@ -1478,9 +1694,30 @@ impl PasteSequenceDialog {
                 self.layout.source_picker = None;
             }
         }
+        if discard_after_insert {
+            // The list, query, and possibly a private preview were painted from
+            // the old snapshot earlier in this pass. Rebuild the retained pass
+            // from the refreshed state before egui presents it. Raw input is
+            // consumed by the first pass, and the picker frame marker protects
+            // against any repeated activation within the same frame.
+            ui.ctx()
+                .request_discard("paste source picker refreshed before Insert result");
+        }
     }
 
-    fn insert_source_picker_selection(&mut self, picker: &mut SourcePickerState) -> bool {
+    #[cfg(test)]
+    fn test_set_picker_source_refresh(
+        &mut self,
+        snippets: Option<Result<Vec<SnippetEntry>, String>>,
+        history: Option<Result<Vec<String>, String>>,
+    ) {
+        self.test_picker_source_refresh = Some(TestPickerSourceRefresh { snippets, history });
+    }
+
+    fn refresh_and_insert_source_picker_selection(
+        &mut self,
+        picker: &mut SourcePickerState,
+    ) -> bool {
         let identity = match self.source_picker_insert_selection(picker) {
             Ok(identity) => identity,
             Err(reason) => {
@@ -1489,6 +1726,143 @@ impl PasteSequenceDialog {
             }
         };
 
+        let previous_snippet = match picker.kind {
+            SourcePickerKind::Snippets => self.snippets.get(identity.source_index).cloned(),
+            SourcePickerKind::ClipboardHistory => None,
+        };
+        let previous_history_payload = match picker.kind {
+            SourcePickerKind::Snippets => None,
+            SourcePickerKind::ClipboardHistory => self.history.get(identity.source_index).cloned(),
+        };
+
+        match picker.kind {
+            SourcePickerKind::Snippets => {
+                let refreshed = match self.read_snippets_for_insert() {
+                    Ok(snippets) => snippets,
+                    Err(()) => {
+                        // Do not keep a previously visible body in the picker
+                        // after the authoritative source can no longer be read.
+                        self.snippets.clear();
+                        self.snippets_error =
+                            Some("The saved snippet catalog could not be refreshed.".into());
+                        self.source_generation = self.source_generation.wrapping_add(1);
+                        picker.generation = self.source_generation;
+                        picker.selected = None;
+                        picker.query.clear();
+                        picker.needs_reveal = true;
+                        picker.refresh_failed = true;
+                        picker.message = Some(
+                            "The saved snippet catalog could not be refreshed. Close and reopen Paste Sequences to retry."
+                                .into(),
+                        );
+                        return false;
+                    }
+                };
+                let Some(previous_snippet) = previous_snippet else {
+                    picker.selected = None;
+                    picker.message = Some(
+                        "This snippet is no longer available. Choose it again from the refreshed list."
+                            .into(),
+                    );
+                    return false;
+                };
+                let alias = previous_snippet.alias.as_str();
+                let mut matches = refreshed
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, candidate)| candidate.alias == alias);
+                let first_match = matches.next().map(|(index, _)| index);
+                let has_duplicate = matches.next().is_some();
+                let source_changed =
+                    first_match.is_none_or(|index| Some(&previous_snippet) != refreshed.get(index));
+                self.snippets = refreshed;
+                self.snippets_error = None;
+                self.source_generation = self.source_generation.wrapping_add(1);
+                picker.generation = self.source_generation;
+                picker.refresh_failed = false;
+                if has_duplicate {
+                    picker.selected = None;
+                    picker.query.clear();
+                    picker.needs_reveal = true;
+                    picker.message = Some(
+                        "This alias is ambiguous in the current snippet catalog. Choose another item."
+                            .into(),
+                    );
+                    return false;
+                }
+                let Some(source_index) = first_match.filter(|_| !source_changed) else {
+                    picker.selected = None;
+                    picker.query.clear();
+                    picker.needs_reveal = true;
+                    picker.message = Some(
+                        "This snippet changed or was removed. Choose it again from the refreshed list."
+                            .into(),
+                    );
+                    return false;
+                };
+                picker.selected = Some(SourcePickerIdentity {
+                    generation: self.source_generation,
+                    source_index,
+                });
+                picker.message = None;
+            }
+            SourcePickerKind::ClipboardHistory => {
+                let refreshed = match self.read_history_for_insert() {
+                    Ok(history) => history,
+                    Err(()) => {
+                        // History text is private input too: never leave its old
+                        // search result or preview visible after a failed refresh.
+                        self.history.clear();
+                        self.history_error =
+                            Some("Clipboard history could not be refreshed.".into());
+                        self.source_generation = self.source_generation.wrapping_add(1);
+                        picker.generation = self.source_generation;
+                        picker.selected = None;
+                        picker.query.clear();
+                        picker.needs_reveal = true;
+                        picker.refresh_failed = true;
+                        picker.message = Some(
+                            "Clipboard history could not be refreshed. Close and reopen Paste Sequences to retry."
+                                .into(),
+                        );
+                        return false;
+                    }
+                };
+                let selected_reference = previous_history_payload
+                    .as_deref()
+                    .map(Step::clipboard_history_reference);
+                let source_index = selected_reference.as_ref().and_then(|selected| {
+                    refreshed
+                        .iter()
+                        .position(|payload| Step::clipboard_history_reference(payload) == *selected)
+                });
+                self.history = refreshed;
+                self.history_error = None;
+                self.source_generation = self.source_generation.wrapping_add(1);
+                picker.generation = self.source_generation;
+                picker.refresh_failed = false;
+                let Some(source_index) = source_index else {
+                    picker.selected = None;
+                    picker.query.clear();
+                    picker.needs_reveal = true;
+                    picker.message = Some(
+                        "This history item is no longer available. Choose an item from the refreshed list."
+                            .into(),
+                    );
+                    return false;
+                };
+                picker.selected = Some(SourcePickerIdentity {
+                    generation: self.source_generation,
+                    source_index,
+                });
+                picker.message = None;
+            }
+        }
+
+        let Some(identity) = picker.selected else {
+            picker.message = Some("Choose a current source item before inserting it.".into());
+            return false;
+        };
         let step = match picker.kind {
             SourcePickerKind::Snippets => {
                 let snippet = &self.snippets[identity.source_index];
@@ -1596,7 +1970,7 @@ impl PasteSequenceDialog {
             if start.clicked() {
                 match app.start_sequence_playback() {
                     Ok(()) => {
-                        self.status = Some("Sequence started.".into());
+                        self.note_playback_started();
                         // Rendering temporarily takes the dialog out of LauncherApp.
                         if !app.should_keep_paste_sequence_dialog_visible_during_playback() {
                             self.suspend_for_playback();
@@ -1863,7 +2237,7 @@ impl PasteSequenceDialog {
                     self.autostart_when_ready = false;
                     match start(app) {
                         Ok(()) => {
-                            self.status = Some("Sequence started.".into());
+                            self.note_playback_started();
                             // Rendering temporarily takes the dialog out of LauncherApp.
                             if !app.should_keep_paste_sequence_dialog_visible_during_playback() {
                                 self.suspend_for_playback();
@@ -1899,6 +2273,31 @@ impl PasteSequenceDialog {
     pub(crate) fn use_test_data_sources(&mut self, store_path: PathBuf) {
         self.store_path = store_path;
         self.sources_are_test_owned = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_open_source_picker_with_snippets(&mut self, snippets: Vec<SnippetEntry>) {
+        self.sources_are_test_owned = true;
+        self.snippets = snippets;
+        self.snippets_error = None;
+        self.toggle_source_picker(SourcePickerKind::Snippets);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_source_picker_selected_index(&self) -> Option<usize> {
+        self.source_picker
+            .as_ref()
+            .and_then(|picker| picker.selected.map(|identity| identity.source_index))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_body_scroll_offsets(&self) -> (f32, f32) {
+        (self.layout.body_offset, self.layout.body_painted_offset)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_draft_steps(&self) -> &[Step] {
+        &self.draft.steps
     }
 
     #[cfg(test)]
@@ -2169,6 +2568,48 @@ fn register_paste_sequence_jump_target(
     {
         directive.apply_to_response(response);
     }
+}
+
+fn source_picker_jump_scope(
+    parent: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    kind: SourcePickerKind,
+    generation: u64,
+) -> Option<crate::gui::jump_mode::ui::JumpModeScope> {
+    let kind_name = match kind {
+        SourcePickerKind::Snippets => "snippets",
+        SourcePickerKind::ClipboardHistory => "clipboard-history",
+    };
+    Some(
+        parent?
+            .child_popup_scope("paste-sequence-source-picker")
+            .child_namespace(format!("{kind_name}-{generation}")),
+    )
+}
+
+fn register_visible_paste_picker_jump_target(
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    local_identity: impl AsRef<str>,
+    label: impl Into<String>,
+    kind: crate::gui::jump_mode::TargetKind,
+    visual_order: &mut u64,
+) {
+    if !response.enabled()
+        || !response.rect.is_positive()
+        || ui.clip_rect().intersect(response.rect) != response.rect
+    {
+        return;
+    }
+    register_paste_sequence_jump_target(
+        scope,
+        ui,
+        response,
+        local_identity,
+        label,
+        kind,
+        visual_order,
+    );
 }
 
 fn commit_sequence_editor_update(
@@ -3080,6 +3521,33 @@ mod tests {
         });
         dialog.ui(ctx, app);
         let output = ctx.end_pass();
+        let text = editor_painted_text(&output);
+        output.drop_without_applying_deltas();
+        text
+    }
+
+    fn editor_event_frame_with_discard(
+        dialog: &mut PasteSequenceDialog,
+        ctx: &egui::Context,
+        app: &mut super::super::LauncherApp,
+        size: egui::Vec2,
+        events: Vec<egui::Event>,
+    ) -> (Vec<(String, egui::Rect)>, usize) {
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                events,
+                ..Default::default()
+            },
+            |_ui| dialog.ui(ctx, app),
+        );
+        let completed_passes = output.platform_output.num_completed_passes;
+        let text = editor_painted_text(&output);
+        output.drop_without_applying_deltas();
+        (text, completed_passes)
+    }
+
+    fn editor_painted_text(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
         fn collect(
             shape: &egui::epaint::Shape,
             clip: egui::Rect,
@@ -3108,7 +3576,6 @@ mod tests {
         for shape in &output.shapes {
             collect(&shape.shape, shape.clip_rect, &mut text);
         }
-        output.drop_without_applying_deltas();
         text
     }
 
@@ -3118,7 +3585,7 @@ mod tests {
         app: &mut super::super::LauncherApp,
         size: egui::Vec2,
         label: &str,
-    ) {
+    ) -> (Vec<(String, egui::Rect)>, usize) {
         const MAX_PAINT_STABILITY_PASSES: usize = 4;
         const PAINT_OFFSET_TOLERANCE: f32 = 1.0;
         let mut text = Vec::new();
@@ -3226,7 +3693,7 @@ mod tests {
             pressed_rect.is_some_and(|rect| rect.contains(pos)),
             "click target {label:?} moved before pointer-down: initial={initial_rect:?}, moved={current_rect:?}, down={pressed_rect:?}"
         );
-        editor_event_frame(
+        let (completed_output, completed_passes) = editor_event_frame_with_discard(
             dialog,
             ctx,
             app,
@@ -3241,6 +3708,7 @@ mod tests {
         for _ in 0..2 {
             editor_event_frame(dialog, ctx, app, size, Vec::new());
         }
+        (completed_output, completed_passes)
     }
 
     fn editor_reveal_toolbar(
@@ -3256,6 +3724,79 @@ mod tests {
         for _ in 0..2 {
             editor_event_frame(dialog, ctx, app, size, Vec::new());
         }
+    }
+
+    fn editor_reveal_source_picker_actions(
+        dialog: &mut PasteSequenceDialog,
+        ctx: &egui::Context,
+        app: &mut super::super::LauncherApp,
+        size: egui::Vec2,
+        expected_row: &str,
+    ) -> Vec<(String, egui::Rect)> {
+        const MAX_REVEAL_PASSES: usize = 4;
+        let layout = dialog.layout;
+        let picker = layout
+            .source_picker
+            .expect("the source picker has rendered");
+        let body_id = layout.body_id.expect("the editor body has rendered");
+        let mut body = egui::scroll_area::State::load(ctx, body_id).unwrap();
+        let max_body_offset = (layout.body_content.y - layout.body.height()).max(0.0);
+        let action_delta = picker.insert.center().y - layout.body.center().y;
+        body.offset.y = (layout.body_offset + action_delta).clamp(0.0, max_body_offset);
+        body.store(ctx, body_id);
+        let mut list = egui::scroll_area::State::load(ctx, picker.list_id).unwrap();
+        list.offset.y = (picker.list_content.y - picker.list.height()).max(0.0);
+        list.store(ctx, picker.list_id);
+
+        let mut last_text = Vec::new();
+        let mut previous_layout: Option<(f32, egui::Rect, egui::Rect, egui::Rect)> = None;
+        for _ in 0..MAX_REVEAL_PASSES {
+            last_text = editor_event_frame(dialog, ctx, app, size, Vec::new());
+            let layout = dialog.layout;
+            let Some(picker) = layout.source_picker else {
+                break;
+            };
+            let paint_agrees = (layout.body_offset - layout.body_painted_offset).abs() <= 1.0;
+            let actions_reachable = layout.body.intersect(picker.insert) == picker.insert
+                && layout.body.intersect(picker.cancel) == picker.cancel;
+            let footer_reachable = layout.footer.is_positive()
+                && layout.footer.top() >= layout.body.bottom()
+                && layout.footer.bottom() <= layout.window.bottom() + 1.0
+                && layout.footer.bottom() <= size.y + 1.0;
+            let row_visible = last_text
+                .iter()
+                .any(|(text, rect)| text == expected_row && rect.is_positive());
+            if paint_agrees && actions_reachable && footer_reachable && row_visible {
+                let row_rect = last_text
+                    .iter()
+                    .find(|(text, _)| text == expected_row)
+                    .map(|(_, rect)| *rect)
+                    .unwrap();
+                let stable = previous_layout.is_some_and(
+                    |(previous_offset, previous_row, previous_insert, previous_cancel)| {
+                        (previous_offset - layout.body_offset).abs() <= 1.0
+                            && row_rect.contains(previous_row.center())
+                            && previous_row.contains(row_rect.center())
+                            && picker.insert.contains(previous_insert.center())
+                            && previous_insert.contains(picker.insert.center())
+                            && picker.cancel.contains(previous_cancel.center())
+                            && previous_cancel.contains(picker.cancel.center())
+                    },
+                );
+                if stable {
+                    return last_text;
+                }
+                previous_layout =
+                    Some((layout.body_offset, row_rect, picker.insert, picker.cancel));
+            } else {
+                previous_layout = None;
+            }
+        }
+        panic!(
+            "picker end did not become visibly reachable in {MAX_REVEAL_PASSES} measured passes for {expected_row:?}: layout={:?}, painted_row={:?}",
+            dialog.layout,
+            last_text.iter().find(|(text, _)| text == expected_row)
+        );
     }
 
     fn picker_snippet(
@@ -3279,17 +3820,28 @@ mod tests {
     }
 
     #[test]
-    fn paste_source_picker_large_collections_keep_the_footer_reachable() {
+    fn paste_source_picker_integration_small_window_keeps_footer_reachable() {
         let ctx = egui::Context::default();
         let directory = tempfile::tempdir().unwrap();
         let mut app = layout_app(&ctx, directory.path());
-        let size = egui::vec2(900.0, 760.0);
+        let size = egui::vec2(600.0, 420.0);
         let mut dialog = PasteSequenceDialog {
             open: true,
             sources_are_test_owned: true,
             ..Default::default()
         };
-        dialog.snippets = (0..128)
+        dialog.draft.steps = (0..14)
+            .map(|index| Step::LiteralText {
+                text: format!(
+                    "existing step {index}: {}",
+                    "retained inner scroll ".repeat(5)
+                ),
+            })
+            .collect();
+        dialog.selected_step = Some(13);
+        let long_alias = format!("🧪{}", "long-alias-長い名前-".repeat(18));
+        let long_template = format!("Visible template 🧪 {}", "long-template-長い文-".repeat(48));
+        dialog.snippets = (0..127)
             .map(|index| {
                 picker_snippet(
                     &format!("entry-{index:03}"),
@@ -3299,15 +3851,47 @@ mod tests {
                     &[],
                 )
             })
+            .chain(std::iter::once(picker_snippet(
+                &long_alias,
+                &long_template,
+                false,
+                &["unicode", "long"],
+                &[],
+            )))
             .collect();
-        dialog.history = (0..128)
+        let long_history = format!("🧾 {}", "history-payload-長い履歴-".repeat(48));
+        dialog.history = (0..127)
             .map(|index| format!("history-payload-{index:03}"))
+            .chain(std::iter::once(long_history.clone()))
             .collect();
         let draft_before = dialog.draft.clone();
         dialog.toggle_source_picker(SourcePickerKind::Snippets);
         for _ in 0..3 {
             editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
         }
+        let initial_steps = dialog.layout;
+        let steps_id = initial_steps
+            .steps_id
+            .expect("the nested step list renders");
+        let mut steps = egui::scroll_area::State::load(&ctx, steps_id).unwrap();
+        steps.offset.y = (initial_steps.steps_content.y - initial_steps.steps.height()).max(0.0);
+        steps.store(&ctx, steps_id);
+        for _ in 0..2 {
+            editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        }
+        let initial_steps_offset = dialog.layout.steps_offset;
+        assert!(
+            initial_steps_offset > 0.0,
+            "the nested step list is scrolled"
+        );
+        let long_alias_label = snippet_picker_row_label(dialog.snippets.last().unwrap());
+        let snippet_bottom = editor_reveal_source_picker_actions(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            &long_alias_label,
+        );
         let layout = dialog.layout;
         let picker = layout.source_picker.expect("the inline picker is laid out");
         assert!(
@@ -3319,55 +3903,170 @@ mod tests {
             "{picker:?}"
         );
         assert!(picker.panel.intersects(layout.body), "{layout:?}");
-        assert!(layout.body.contains(picker.insert.center()), "{layout:?}");
-        assert!(layout.body.contains(picker.cancel.center()), "{layout:?}");
+        assert_eq!(
+            layout.body.intersect(picker.insert),
+            picker.insert,
+            "{layout:?}"
+        );
+        assert_eq!(
+            layout.body.intersect(picker.cancel),
+            picker.cancel,
+            "{layout:?}"
+        );
+        assert!(layout.footer.bottom() <= size.y + 1.0, "{layout:?}");
+        assert!(
+            snippet_bottom
+                .iter()
+                .any(|(text, _)| text == &long_alias_label)
+        );
+        assert!(
+            !snippet_bottom.iter().any(|(text, _)| text == &long_alias),
+            "row labels expose only the bounded alias excerpt"
+        );
         assert!(
             picker.insert.is_positive() && picker.cancel.is_positive(),
             "{picker:?}"
         );
-
-        let mut scroll = egui::scroll_area::State::load(&ctx, picker.list_id).unwrap();
-        scroll.offset.y = picker.list_content.y - picker.list.height();
-        scroll.store(&ctx, picker.list_id);
-        let bottom = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
-        assert!(
-            bottom.iter().any(|(text, _)| text.contains("entry-127")),
-            "the final source row is reachable through the bounded list: {bottom:?}"
-        );
-        let after_scroll = dialog.layout.source_picker.unwrap();
-        assert!(layout.body.contains(after_scroll.insert.center()));
-        assert!(layout.body.contains(after_scroll.cancel.center()));
-        editor_click(&mut dialog, &ctx, &mut app, size, "Cancel");
-        assert!(dialog.source_picker.is_none());
+        assert!(picker.list.height() <= 156.0 + 1.0, "{picker:?}");
+        editor_click(&mut dialog, &ctx, &mut app, size, &long_alias_label);
+        assert_eq!(dialog.test_source_picker_selected_index(), Some(127));
         assert_eq!(
             dialog.draft, draft_before,
-            "browsing and cancel do not edit the draft"
+            "browsing does not edit the draft"
         );
-        assert_eq!(dialog.history.len(), 128);
+        assert_eq!(dialog.selected_step, Some(13));
+        assert!((dialog.layout.steps_offset - initial_steps_offset).abs() <= 1.0);
+        let selected_snippet_text = editor_reveal_source_picker_actions(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            &long_alias_label,
+        );
+        let selected_layout = dialog.layout;
+        let selected_picker = selected_layout.source_picker.unwrap();
+        assert!(
+            selected_layout.body.intersect(selected_picker.insert) == selected_picker.insert
+                && selected_layout.body.intersect(selected_picker.cancel) == selected_picker.cancel,
+            "actions and the separate parent footer remain reachable beside a long preview: {selected_layout:?}"
+        );
+        assert!(
+            selected_picker.preview.height() <= 112.0 + 1.0,
+            "{selected_picker:?}"
+        );
+        assert!(selected_picker.preview.intersects(selected_layout.body));
+        assert!(
+            selected_layout.footer.bottom() <= size.y + 1.0,
+            "{selected_layout:?}"
+        );
+        assert!(
+            selected_snippet_text
+                .iter()
+                .any(|(text, _)| text.contains("Visible template 🧪"))
+        );
+        editor_click(&mut dialog, &ctx, &mut app, size, "Insert selected");
+        let mut expected_draft_steps = draft_before.steps.clone();
+        expected_draft_steps.push(Step::SnippetRef {
+            alias: long_alias.clone(),
+        });
+        assert_eq!(dialog.draft.steps, expected_draft_steps);
+        assert_eq!(dialog.selected_step, Some(14));
+        assert!(dialog.source_picker.is_none());
 
+        for _ in 0..3 {
+            editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        }
+        let draft_before_history = dialog.draft.clone();
+        let steps_offset_before_history = dialog.layout.steps_offset;
         dialog.toggle_source_picker(SourcePickerKind::ClipboardHistory);
         for _ in 0..3 {
             editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
         }
-        let history_layout = dialog.layout.source_picker.unwrap();
-        assert!(history_layout.list_content.y > history_layout.list.height() + 500.0);
-        assert!(layout.body.contains(history_layout.insert.center()));
-        assert!(layout.body.contains(history_layout.cancel.center()));
-        let mut history_scroll =
-            egui::scroll_area::State::load(&ctx, history_layout.list_id).unwrap();
-        history_scroll.offset.y = history_layout.list_content.y - history_layout.list.height();
-        history_scroll.store(&ctx, history_layout.list_id);
-        let history_bottom = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        let history_label = format!(
+            "History item 128 · {}",
+            bounded_picker_excerpt(&long_history, 72)
+        );
+        let history_bottom =
+            editor_reveal_source_picker_actions(&mut dialog, &ctx, &mut app, size, &history_label);
+        let history_layout = dialog.layout;
+        let history_picker = history_layout.source_picker.unwrap();
+        assert!(history_picker.list_content.y > history_picker.list.height() + 500.0);
+        assert_eq!(
+            history_layout.body.intersect(history_picker.insert),
+            history_picker.insert
+        );
+        assert_eq!(
+            history_layout.body.intersect(history_picker.cancel),
+            history_picker.cancel
+        );
+        assert!(history_layout.footer.bottom() <= size.y + 1.0);
         assert!(
             history_bottom
                 .iter()
-                .any(|(text, _)| text.contains("history-payload-127"))
+                .any(|(text, _)| text == &history_label),
+            "the final long Unicode history row is visible in the bounded list"
         );
-        let history_after_scroll = dialog.layout.source_picker.unwrap();
-        assert!(layout.body.contains(history_after_scroll.insert.center()));
-        assert!(layout.body.contains(history_after_scroll.cancel.center()));
+        editor_click(&mut dialog, &ctx, &mut app, size, &history_label);
+        assert_eq!(dialog.test_source_picker_selected_index(), Some(127));
+        assert_eq!(dialog.selected_step, Some(14));
+        assert!((dialog.layout.steps_offset - steps_offset_before_history).abs() <= 1.0);
+        let selected_history_text =
+            editor_reveal_source_picker_actions(&mut dialog, &ctx, &mut app, size, &history_label);
+        let selected_history_layout = dialog.layout;
+        let selected_history_picker = selected_history_layout.source_picker.unwrap();
+        assert!(selected_history_picker.preview.height() <= 112.0 + 1.0);
+        assert!(
+            selected_history_picker
+                .preview
+                .intersects(selected_history_layout.body)
+        );
+        assert_eq!(
+            selected_history_layout
+                .body
+                .intersect(selected_history_picker.insert),
+            selected_history_picker.insert
+        );
+        assert_eq!(
+            selected_history_layout
+                .body
+                .intersect(selected_history_picker.cancel),
+            selected_history_picker.cancel
+        );
+        assert!(selected_history_layout.footer.bottom() <= size.y + 1.0);
+        assert!(
+            selected_history_text
+                .iter()
+                .any(|(text, _)| text.contains("🧾 history-payload-"))
+        );
+        let closed_picker_generation = dialog
+            .source_picker
+            .as_ref()
+            .expect("the history picker remains open before Cancel")
+            .generation;
         editor_click(&mut dialog, &ctx, &mut app, size, "Cancel");
-        assert_eq!(dialog.draft, draft_before);
+        assert!(dialog.source_picker.is_none());
+        assert_eq!(dialog.selected_step, Some(14));
+        assert!((dialog.layout.steps_offset - steps_offset_before_history).abs() <= 1.0);
+        assert_eq!(
+            dialog.draft, draft_before_history,
+            "Cancel preserves the mixed draft"
+        );
+        dialog.toggle_source_picker(SourcePickerKind::ClipboardHistory);
+        assert_ne!(
+            dialog.source_picker.as_ref().unwrap().generation,
+            closed_picker_generation,
+            "reopening the same source creates a fresh target identity"
+        );
+        for _ in 0..3 {
+            editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        }
+        editor_reveal_source_picker_actions(&mut dialog, &ctx, &mut app, size, &history_label);
+        assert_eq!(dialog.test_source_picker_selected_index(), None);
+        assert_eq!(dialog.selected_step, Some(14));
+        assert!((dialog.layout.steps_offset - steps_offset_before_history).abs() <= 1.0);
+        editor_click(&mut dialog, &ctx, &mut app, size, "Cancel");
+        assert_eq!(dialog.draft, draft_before_history);
+        assert_eq!(dialog.history.len(), 128);
     }
 
     #[test]
@@ -3640,6 +4339,349 @@ mod tests {
     }
 
     #[test]
+    fn paste_source_picker_integration_refresh_masks_changed_or_unavailable_private_text() {
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = layout_app(&ctx, directory.path());
+        let size = egui::vec2(900.0, 760.0);
+        let mut dialog = PasteSequenceDialog {
+            open: true,
+            sources_are_test_owned: true,
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        }
+        dialog.draft.steps.push(Step::LiteralText {
+            text: "unrelated unsaved draft".into(),
+        });
+        let draft_before = dialog.draft.clone();
+        let stale_body = "old visible template search phrase";
+        dialog.snippets = vec![picker_snippet(
+            "private-after-refresh",
+            stale_body,
+            false,
+            &[],
+            &[],
+        )];
+        dialog.toggle_source_picker(SourcePickerKind::Snippets);
+        dialog.source_picker.as_mut().unwrap().query = stale_body.into();
+        editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "private-after-refresh · tags: none · fields: 0",
+        );
+        assert!(dialog.source_picker.as_ref().unwrap().selected.is_some());
+
+        let newly_hidden_body = "HIDDEN_AFTER_REFRESH_81AD";
+        dialog.test_set_picker_source_refresh(
+            Some(Ok(vec![picker_snippet(
+                "private-after-refresh",
+                newly_hidden_body,
+                true,
+                &[],
+                &[],
+            )])),
+            None,
+        );
+        let (hidden_refusal, hidden_refusal_passes) =
+            editor_click(&mut dialog, &ctx, &mut app, size, "Insert selected");
+        assert!(
+            hidden_refusal_passes > 1,
+            "the activation frame must be rebuilt from the refreshed hidden-source state"
+        );
+        let picker = dialog.source_picker.as_ref().unwrap();
+        assert!(picker.selected.is_none());
+        assert!(picker.query.is_empty());
+        assert!(!dialog.layout.source_picker.unwrap().insert_enabled);
+        assert!(!dialog.layout.source_picker.unwrap().preview.is_positive());
+        assert_eq!(dialog.draft, draft_before);
+        assert!(
+            !hidden_refusal
+                .iter()
+                .any(|(text, _)| { text.contains(stale_body) || text.contains(newly_hidden_body) }),
+            "a source that became hidden cannot leave its old search or preview text visible"
+        );
+
+        dialog.source_picker = None;
+        dialog.snippets = vec![picker_snippet(
+            "unavailable-after-refresh",
+            "TEMPORARY_PRIVATE_BODY_21AF",
+            false,
+            &[],
+            &[],
+        )];
+        dialog.source_generation = dialog.source_generation.wrapping_add(1);
+        dialog.toggle_source_picker(SourcePickerKind::Snippets);
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "unavailable-after-refresh · tags: none · fields: 0",
+        );
+        dialog.source_picker.as_mut().unwrap().query = "TEMPORARY_PRIVATE_BODY_21AF".into();
+        editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        dialog.test_set_picker_source_refresh(Some(Err("private path detail".into())), None);
+        let (unavailable_refusal, unavailable_refusal_passes) =
+            editor_click(&mut dialog, &ctx, &mut app, size, "Insert selected");
+        assert!(
+            unavailable_refusal_passes > 1,
+            "the activation frame must be rebuilt after an unavailable-source refresh"
+        );
+        let picker = dialog.source_picker.as_ref().unwrap();
+        assert!(picker.selected.is_none());
+        assert!(picker.query.is_empty());
+        assert!(picker.refresh_failed);
+        assert!(dialog.snippets.is_empty());
+        assert!(!dialog.layout.source_picker.unwrap().insert_enabled);
+        assert_eq!(dialog.draft, draft_before);
+        assert!(unavailable_refusal.iter().any(|(text, _)| {
+            text == "The saved snippet catalog could not be refreshed. Close and reopen Paste Sequences to retry."
+        }));
+        assert!(!unavailable_refusal.iter().any(|(text, _)| {
+            text.contains("TEMPORARY_PRIVATE_BODY_21AF") || text.contains("private path detail")
+        }));
+    }
+
+    #[test]
+    fn paste_source_picker_integration_revalidates_history_by_payload_across_reordering() {
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = layout_app(&ctx, directory.path());
+        let size = egui::vec2(900.0, 760.0);
+        let mut dialog = PasteSequenceDialog {
+            open: true,
+            sources_are_test_owned: true,
+            history: vec![
+                "first item".into(),
+                "intended payload".into(),
+                "last item".into(),
+            ],
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        }
+        dialog.toggle_source_picker(SourcePickerKind::ClipboardHistory);
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "History item 2 · intended payload",
+        );
+        dialog.test_set_picker_source_refresh(
+            None,
+            Some(Ok(vec![
+                "last item".into(),
+                "first item".into(),
+                "intended payload".into(),
+            ])),
+        );
+        editor_click(&mut dialog, &ctx, &mut app, size, "Insert selected");
+        assert_eq!(
+            dialog
+                .history
+                .iter()
+                .position(|item| item == "intended payload"),
+            Some(2),
+            "the selected payload moved to a different source index before Insert"
+        );
+        assert_eq!(
+            dialog.draft.steps,
+            vec![Step::clipboard_history_reference("intended payload")],
+            "history reordering preserves the selected payload identity"
+        );
+
+        dialog.toggle_source_picker(SourcePickerKind::ClipboardHistory);
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "History item 3 · intended payload",
+        );
+        dialog.source_picker.as_mut().unwrap().query = "intended payload".into();
+        editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        let draft_before_removed = dialog.draft.clone();
+        dialog.test_set_picker_source_refresh(None, Some(Ok(vec!["replacement only".into()])));
+        let (removed_refusal, removed_refusal_passes) =
+            editor_click(&mut dialog, &ctx, &mut app, size, "Insert selected");
+        assert!(
+            removed_refusal_passes > 1,
+            "the history-removal activation must repaint from the refreshed source"
+        );
+        assert_eq!(dialog.draft, draft_before_removed);
+        assert!(dialog.source_picker.as_ref().unwrap().selected.is_none());
+        assert!(dialog.source_picker.as_ref().unwrap().query.is_empty());
+        assert!(!dialog.layout.source_picker.unwrap().insert_enabled);
+        assert!(removed_refusal.iter().any(|(text, _)| {
+            text == "This history item is no longer available. Choose an item from the refreshed list."
+        }));
+        assert!(
+            !removed_refusal
+                .iter()
+                .any(|(text, _)| text.contains("intended payload")),
+            "the retained refusal output must not show the removed history query or excerpt"
+        );
+    }
+
+    #[test]
+    fn paste_source_picker_integration_mixed_references_preflight_and_fake_playback() {
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = layout_app(&ctx, directory.path());
+        app.settings_editor
+            .baseline_settings
+            .paste_sequence
+            .keep_dialog_visible_during_playback = true;
+        let size = egui::vec2(900.0, 760.0);
+        let store_path = directory.path().join(PASTE_SEQUENCES_FILE);
+        let saved_bytes = b"picker test never saves the parent sequence file";
+        std::fs::write(&store_path, saved_bytes).unwrap();
+        let mut dialog = PasteSequenceDialog {
+            open: true,
+            store_path: store_path.clone(),
+            sources_are_test_owned: true,
+            context: Some(owned_editor_context()),
+            ..Default::default()
+        };
+        dialog.snippets = vec![picker_snippet(
+            "picker-snippet",
+            "Resolved snippet text",
+            false,
+            &["safe"],
+            &[],
+        )];
+        dialog.history = vec!["picker history text".into()];
+        for _ in 0..2 {
+            editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        }
+
+        dialog.toggle_source_picker(SourcePickerKind::Snippets);
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "picker-snippet · tags: safe · fields: 0",
+        );
+        editor_click(&mut dialog, &ctx, &mut app, size, "Insert selected");
+        dialog.toggle_source_picker(SourcePickerKind::ClipboardHistory);
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "History item 1 · picker history text",
+        );
+        editor_click(&mut dialog, &ctx, &mut app, size, "Insert selected");
+        editor_reveal_toolbar(&mut dialog, &ctx, &mut app, size);
+        editor_click(&mut dialog, &ctx, &mut app, size, "Add Temporary Text");
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "Text pasted when this step runs",
+        );
+        editor_event_frame(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            vec![egui::Event::Text("temporary draft text".into())],
+        );
+
+        let expected_steps = vec![
+            Step::SnippetRef {
+                alias: "picker-snippet".into(),
+            },
+            Step::clipboard_history_reference("picker history text"),
+            Step::LiteralText {
+                text: "temporary draft text".into(),
+            },
+        ];
+        assert_eq!(dialog.draft.steps, expected_steps);
+        assert_eq!(std::fs::read(&store_path).unwrap(), saved_bytes);
+
+        let serialized_sequence = crate::paste_sequence::Sequence {
+            id: crate::paste_sequence::SequenceId::from_raw(101).unwrap(),
+            name: dialog.draft.name.clone(),
+            hotkey: dialog.draft.hotkey.clone(),
+            mode: dialog.draft.mode,
+            delay_ms: dialog.draft.delay_ms,
+            steps: dialog.draft.steps.clone(),
+        };
+        let encoded_sequence = serde_json::to_vec(&serialized_sequence).unwrap();
+        let decoded_sequence: crate::paste_sequence::Sequence =
+            serde_json::from_slice(&encoded_sequence).unwrap();
+        assert_eq!(decoded_sequence, serialized_sequence);
+        assert_eq!(decoded_sequence.steps, expected_steps);
+
+        app.begin_paste_sequence_draft_preflight_with_context(
+            dialog.current_draft(),
+            &dialog.snippets,
+            &dialog.history,
+            dialog.context.clone().unwrap(),
+        )
+        .unwrap();
+        let prepared_preview = app
+            .sequence_playback
+            .prepared_preview()
+            .expect("the mixed draft is resolved before fake playback starts");
+        assert_eq!(
+            prepared_preview
+                .steps
+                .iter()
+                .map(|step| step.text.as_deref())
+                .collect::<Vec<_>>(),
+            [
+                Some("Resolved snippet text"),
+                Some("picker history text"),
+                Some("temporary draft text"),
+            ],
+            "preflight preserves picker-created resolved text order"
+        );
+        let picker_snippets = dialog.snippets.clone();
+        dialog.test_open_source_picker_with_snippets(picker_snippets);
+        assert!(dialog.source_picker_is_open());
+        app.paste_sequence_dialog = dialog;
+        let target = crate::paste_sequence::SequenceTarget::from_external_window(
+            crate::active_window::ExternalForegroundWindow {
+                hwnd: 91,
+                process_id: 92,
+                thread_id: 93,
+                title: None,
+            },
+            std::process::id(),
+        )
+        .unwrap();
+        let mut platform = super::super::command_host::tests::AppPastePlatform::new(target);
+        app.start_sequence_playback_using(&mut platform).unwrap();
+        app.paste_sequence_dialog.note_playback_started();
+        let run = app
+            .sequence_playback
+            .started_run()
+            .expect("picker-created steps enter the existing fake playback owner");
+        assert_eq!(run.mode, crate::paste_sequence::PlaybackMode::Automatic);
+        assert!(
+            app.paste_sequence_dialog.open,
+            "keep-visible playback remains open"
+        );
+        assert!(
+            !app.paste_sequence_dialog.source_picker_is_open(),
+            "the shared playback-start receipt retires picker targets even when visible"
+        );
+        assert_eq!(app.paste_sequence_dialog.draft.steps, expected_steps);
+        assert_eq!(std::fs::read(&store_path).unwrap(), saved_bytes);
+    }
+
+    #[test]
     fn paste_source_picker_resets_on_source_reload_close_and_playback_suspend() {
         let mut dialog = PasteSequenceDialog {
             open: true,
@@ -3796,6 +4838,7 @@ mod tests {
             open: true,
             store_path,
             snapshot: Some(snapshot),
+            sources_are_test_owned: true,
             ..Default::default()
         };
         dialog.snippets = vec![SnippetEntry {

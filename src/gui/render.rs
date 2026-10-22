@@ -6325,7 +6325,54 @@ impl LauncherApp {
                     }
                 }
 
-                if first_ui_pass
+                let paste_picker_escape_handled = if first_ui_pass
+                    && !action_sheet_blocks_launcher_input
+                    && !owner_transition_pending
+                    && !jump_session_escape_preempted
+                    && self.jump_mode_ui.active_session().is_none()
+                    && self.paste_sequence_dialog.open
+                    && self.paste_sequence_dialog.source_picker_is_open()
+                    && !egui::Popup::is_any_open(&ctx)
+                    && ctx.input(|input| input.key_pressed(egui::Key::Escape))
+                {
+                    let paste_layer = crate::gui::jump_mode::ui::paste_sequence_dialog_layer_id();
+                    let exact_paste_owner =
+                        crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx)
+                            == Some(paste_layer)
+                            && crate::gui::jump_mode::ui::focused_response_layer(&ctx)
+                                .is_none_or(|layer| layer == paste_layer);
+                    if exact_paste_owner
+                        && self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible)
+                        && self
+                            .paste_sequence_dialog
+                            .close_source_picker_for_root_escape()
+                    {
+                        let modifiers = ctx.input(|input| {
+                            input.events.iter().rev().find_map(|event| match event {
+                                egui::Event::Key {
+                                    key: egui::Key::Escape,
+                                    pressed: true,
+                                    modifiers,
+                                    ..
+                                } => Some(*modifiers),
+                                _ => None,
+                            })
+                        });
+                        if let Some(modifiers) = modifiers {
+                            ctx.input_mut(|input| {
+                                input.consume_key(modifiers, egui::Key::Escape)
+                            });
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if !paste_picker_escape_handled
+                    && first_ui_pass
                     && !action_sheet_blocks_launcher_input
                     && Self::launcher_escape_handling_enabled(
                         self.file_search_dialog.open,
@@ -6373,7 +6420,7 @@ impl LauncherApp {
                                 &ctx,
                                 self.jump_mode_ui.settings_instance(),
                             );
-                    if !search_escape_handled {
+                    if !search_escape_handled && !jump_session_escape_preempted {
                         if self.any_panel_open() {
                             if self.close_front_dialog() {
                                 ctx.input_mut(|i| {
@@ -32978,6 +33025,379 @@ mod tests {
             assert!(!app.show_settings);
             drop(workspace);
         }
+    }
+
+    #[test]
+    fn paste_source_picker_integration_jump_scope_is_nested_and_escapes_before_parent() {
+        use crate::gui::jump_mode::SurfaceId;
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        let (store_path, _) = seed_safe_saved_sequence(workspace.root(), "Picker Jump owner");
+        app.paste_sequence_dialog.use_test_data_sources(store_path);
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.paste_sequence_dialog
+            .open_with_context(Ok(safe_sequence_invocation_context()));
+        let offscreen_alias = "offscreen-picker-row-31";
+        let mut jump_snippets = vec![crate::plugins::snippets::SnippetEntry {
+            alias: "jump-picker-item".into(),
+            text: "safe picker payload".into(),
+            hide_contents: false,
+            prompt_for_fields: false,
+            fields: Vec::new(),
+            tags: vec!["jump".into()],
+        }];
+        jump_snippets.extend((0..32).map(|index| crate::plugins::snippets::SnippetEntry {
+            alias: format!("offscreen-picker-row-{index:02}"),
+            text: "safe offscreen payload".into(),
+            hide_contents: false,
+            prompt_for_fields: false,
+            fields: Vec::new(),
+            tags: Vec::new(),
+        }));
+        app.paste_sequence_dialog
+            .test_open_source_picker_with_snippets(jump_snippets);
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        let initial = app.jump_mode_ui.retained_registry();
+        assert!(!initial.is_empty());
+        assert!(
+            initial.targets().iter().all(|target| {
+                matches!(
+                    target.id().surface(),
+                    SurfaceId::Popup { kind, .. } if kind == "paste-sequence-source-picker"
+                )
+            }),
+            "the active picker owns the hint scope and excludes parent Run/Save targets"
+        );
+        let offscreen_label = format!("Snippet {offscreen_alias}");
+        assert!(
+            !initial
+                .targets()
+                .iter()
+                .any(|target| target.metadata().label() == offscreen_label.as_str()),
+            "rows clipped by the picker list are not offered as hint targets"
+        );
+        let search_target = initial
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Search source items")
+            .expect("the actual picker search Response is a child target");
+        let search_response = search_target.response_id();
+        let search_identity = search_target.id().clone();
+        let draft_before = app.paste_sequence_dialog.test_draft_steps().to_vec();
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let search_hint = app
+            .jump_mode_ui
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(&search_identity)
+            .unwrap()
+            .as_str()
+            .to_owned();
+        press_dialog_hint_with_enter(&ctx, &mut app, &search_hint);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(search_response),
+            "hint completion focuses the real Search Response"
+        );
+        assert_eq!(app.paste_sequence_dialog.test_draft_steps(), draft_before);
+        assert!(app.paste_sequence_dialog.source_picker_is_open());
+        release_dialog_hint_enter(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.paste_sequence_dialog.source_picker_is_open());
+        assert_eq!(app.paste_sequence_dialog.test_draft_steps(), draft_before);
+
+        let row_registry = app.jump_mode_ui.retained_registry();
+        let row_target = row_registry
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Snippet jump-picker-item")
+            .expect("the visible snippet has a real row Response");
+        let row_response = row_target.response_id();
+        let row_identity = row_target.id().clone();
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let row_hint = app
+            .jump_mode_ui
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(&row_identity)
+            .unwrap()
+            .as_str()
+            .to_owned();
+        press_dialog_hint_with_enter(&ctx, &mut app, &row_hint);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(row_response));
+        assert_eq!(
+            app.paste_sequence_dialog
+                .test_source_picker_selected_index(),
+            None
+        );
+        assert_eq!(app.paste_sequence_dialog.test_draft_steps(), draft_before);
+        release_dialog_hint_enter(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.paste_sequence_dialog
+                .test_source_picker_selected_index(),
+            Some(0)
+        );
+        assert_eq!(app.paste_sequence_dialog.test_draft_steps(), draft_before);
+
+        let insert_registry = app.jump_mode_ui.retained_registry();
+        let insert_target = insert_registry
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Insert selected source item")
+            .expect("selection enables the real Insert Response");
+        let insert_response = insert_target.response_id();
+        let insert_identity = insert_target.id().clone();
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let insert_hint = app
+            .jump_mode_ui
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .hint_for(&insert_identity)
+            .unwrap()
+            .as_str()
+            .to_owned();
+        press_dialog_hint_with_enter(&ctx, &mut app, &insert_hint);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(insert_response));
+        assert_eq!(app.paste_sequence_dialog.test_draft_steps(), draft_before);
+        assert!(app.paste_sequence_dialog.source_picker_is_open());
+        release_dialog_hint_enter(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.paste_sequence_dialog.test_draft_steps(),
+            &[crate::paste_sequence::Step::SnippetRef {
+                alias: "jump-picker-item".into()
+            }],
+            "only a fresh activation of the actual Insert Response appends"
+        );
+        assert!(!app.paste_sequence_dialog.source_picker_is_open());
+        assert!(app.paste_sequence_dialog.open);
+        assert!(app.sequence_playback.started_run().is_none());
+        assert!(app.test_activation_trace.is_empty());
+
+        app.paste_sequence_dialog
+            .test_open_source_picker_with_snippets(vec![crate::plugins::snippets::SnippetEntry {
+                alias: "escape-item".into(),
+                text: "escape-safe".into(),
+                hide_contents: false,
+                prompt_for_fields: false,
+                fields: Vec::new(),
+                tags: Vec::new(),
+            }]);
+        let paste_instance = app.jump_mode_ui.paste_sequence_instance();
+        let expected_owner = NavigationOwner::PasteSequence {
+            instance: paste_instance,
+        };
+        let picker_surface = SurfaceId::popup(
+            "paste-sequence-source-picker",
+            paste_instance,
+            SurfaceId::dialog("paste-sequence", paste_instance),
+        );
+        let mut previous_ready_observation: Option<(
+            std::collections::BTreeSet<crate::gui::jump_mode::TargetId>,
+            f32,
+        )> = None;
+        let mut ready_observation: Option<(
+            std::collections::BTreeSet<crate::gui::jump_mode::TargetId>,
+            (f32, f32),
+        )> = None;
+        for observation_index in 0..6 {
+            let owner = app.jump_mode_ui.frame_navigation_owner();
+            let retained_ids = app
+                .jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .map(|target| target.id().clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            let body_offsets = app.paste_sequence_dialog.test_body_scroll_offsets();
+            let picker_namespace_is_current = !retained_ids.is_empty()
+                && retained_ids
+                    .iter()
+                    .all(|target| target.surface() == &picker_surface);
+            let owner_is_current = owner == expected_owner
+                && app.paste_sequence_dialog.open
+                && app.paste_sequence_dialog.source_picker_is_open();
+            let paint_matches_layout = (body_offsets.0 - body_offsets.1).abs() <= 1.0;
+
+            if owner_is_current && picker_namespace_is_current && paint_matches_layout {
+                if let Some((previous_ids, previous_offset)) = &previous_ready_observation
+                    && *previous_ids == retained_ids
+                    && (body_offsets.0 - *previous_offset).abs() <= 1.0
+                {
+                    ready_observation = Some((retained_ids, body_offsets));
+                    break;
+                }
+                previous_ready_observation = Some((retained_ids, body_offsets.0));
+            } else {
+                previous_ready_observation = None;
+            }
+
+            if observation_index + 1 < 6 {
+                run_dialog_frame(&ctx, &mut app);
+            }
+        }
+        let (stable_picker_ids, stable_body_offsets) = ready_observation.expect(
+            "the reopened picker settles to the current Paste owner, painted scroll offset, and a stable target namespace within six frames",
+        );
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let session_target_ids = app
+            .jump_mode_ui
+            .active_session()
+            .expect("the leader starts Jump on the settled picker")
+            .hint_map()
+            .assignments()
+            .iter()
+            .map(|assignment| assignment.target().id().clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            session_target_ids, stable_picker_ids,
+            "Jump starts from the complete stable picker target population"
+        );
+        assert!(
+            app.jump_mode_ui.active_session().is_some(),
+            "Jump should survive leader release after stable readiness; owner={:?}, outcome={:?}, offsets={stable_body_offsets:?}",
+            app.jump_mode_ui.frame_navigation_owner(),
+            app.jump_mode_ui.last_outcome()
+        );
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(app.paste_sequence_dialog.source_picker_is_open());
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.paste_sequence_dialog.source_picker_is_open());
+        assert!(app.paste_sequence_dialog.open);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+
+        app.set_jump_mode_enabled(false);
+        run_dialog_frame(&ctx, &mut app);
+        app.paste_sequence_dialog
+            .test_open_source_picker_with_snippets(vec![crate::plugins::snippets::SnippetEntry {
+                alias: "jump-off-escape".into(),
+                text: "safe".into(),
+                hide_contents: false,
+                prompt_for_fields: false,
+                fields: Vec::new(),
+                tags: Vec::new(),
+            }]);
+        run_dialog_frame(&ctx, &mut app);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.paste_sequence_dialog.source_picker_is_open());
+        assert!(app.paste_sequence_dialog.open);
+        assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
     }
 
     #[test]
