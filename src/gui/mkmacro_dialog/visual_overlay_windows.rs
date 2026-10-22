@@ -278,6 +278,120 @@ struct ShieldStageObservations {
     shown: Option<ShieldStageSnapshot>,
 }
 
+#[derive(Debug)]
+struct ShieldRecoveryFailure {
+    initial_probe: ShieldProbe,
+    failed_probe: ShieldProbe,
+    reasons: Vec<ShieldFailure>,
+    set_window_pos_error: Option<i32>,
+    reassertion_attempted: bool,
+}
+
+fn probe_shield_with_bounded_topmost_reassert(
+    expected: ScreenRect,
+    dimensions: (i32, i32),
+    mut probe: impl FnMut() -> ShieldProbe,
+    mut reassert: impl FnMut(ScreenRect, (i32, i32)) -> Result<(), i32>,
+) -> Result<ShieldProbe, ShieldRecoveryFailure> {
+    let initial_probe = probe();
+    let initial_reasons = initial_probe.failures(expected);
+    if initial_reasons.is_empty() {
+        return Ok(initial_probe);
+    }
+    if initial_reasons.as_slice() != [ShieldFailure::TopmostMissing] {
+        return Err(ShieldRecoveryFailure {
+            initial_probe,
+            failed_probe: initial_probe,
+            reasons: initial_reasons,
+            set_window_pos_error: None,
+            reassertion_attempted: false,
+        });
+    }
+    if let Err(error) = reassert(expected, dimensions) {
+        return Err(ShieldRecoveryFailure {
+            initial_probe,
+            failed_probe: initial_probe,
+            reasons: initial_reasons,
+            set_window_pos_error: Some(error),
+            reassertion_attempted: true,
+        });
+    }
+
+    let failed_probe = probe();
+    let reasons = failed_probe.failures(expected);
+    if reasons.is_empty() {
+        Ok(failed_probe)
+    } else {
+        Err(ShieldRecoveryFailure {
+            initial_probe,
+            failed_probe,
+            reasons,
+            set_window_pos_error: None,
+            reassertion_attempted: true,
+        })
+    }
+}
+
+fn recover_existing_shield_coverage<T>(
+    bounds: &[ScreenRect],
+    candidates: &[T],
+    candidate_bounds: impl Fn(&T) -> ScreenRect,
+    mut recover: impl FnMut(&T, ScreenRect, usize) -> Result<(), VisualOverlayError>,
+) -> Result<Vec<(usize, ScreenRect)>, VisualOverlayError> {
+    let mut uncovered = Vec::new();
+    for (monitor, expected) in bounds.iter().copied().enumerate() {
+        let mut found_candidate = false;
+        let mut covered = false;
+        let mut first_failure = None;
+        for candidate in candidates
+            .iter()
+            .filter(|candidate| candidate_bounds(candidate) == expected)
+        {
+            found_candidate = true;
+            match recover(candidate, expected, monitor + 1) {
+                Ok(()) => {
+                    covered = true;
+                    break;
+                }
+                Err(error) => {
+                    if first_failure.is_none() {
+                        first_failure = Some(error);
+                    }
+                }
+            }
+        }
+        if covered {
+            continue;
+        }
+        if let Some(error) = first_failure {
+            return Err(error);
+        }
+        if !found_candidate {
+            uncovered.push((monitor, expected));
+        }
+    }
+    Ok(uncovered)
+}
+
+fn reassert_input_shield_topmost(
+    hwnd: HWND,
+    bounds: ScreenRect,
+    dimensions: (i32, i32),
+) -> Result<(), i32> {
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            bounds.x,
+            bounds.y,
+            dimensions.0,
+            dimensions.1,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        )
+    }
+    .map_err(|error| error.code().0)
+}
+
 impl ShieldProbe {
     fn failures(&self, expected: ScreenRect) -> Vec<ShieldFailure> {
         let mut reasons = Vec::new();
@@ -323,6 +437,7 @@ fn log_shield_probe_failure(
     set_window_pos_error: Option<i32>,
     closing: bool,
     earlier: Option<&ShieldStageObservations>,
+    recovery: Option<&ShieldRecoveryFailure>,
 ) {
     let hwnd_valid = unsafe { IsWindow(window.hwnd) }.as_bool();
     let positioned = earlier.and_then(|stages| stages.positioned);
@@ -352,6 +467,9 @@ fn log_shield_probe_failure(
         shown_probe=?shown.map(|snapshot| snapshot.probe),
         shown_set_window_pos_error=?shown.and_then(|snapshot| snapshot.set_window_pos_error),
         shown_elapsed_after_create=?shown.map(|snapshot| snapshot.elapsed_after_create),
+        recovery_initial_probe=?recovery.map(|failure| failure.initial_probe),
+        recovery_attempted=?recovery.map(|failure| failure.reassertion_attempted),
+        recovery_set_window_pos_error=?recovery.and_then(|failure| failure.set_window_pos_error),
         ?reasons,
         "rectangle shield stage probe failed"
     );
@@ -813,17 +931,15 @@ impl NativeOverlayRenderer {
                 "No active monitor remains for rectangle input coverage",
             ));
         }
-        let missing: Vec<_> = physical
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(|(_, bounds)| {
-                !self.input_shields.iter().any(|window| {
-                    window.state.bounds == *bounds
-                        && probe_shield(window.hwnd).failures(*bounds).is_empty()
-                })
-            })
-            .collect();
+        // Give existing shields their one bounded recovery attempt before
+        // adding replacements for monitors they still fail to cover.
+        let existing_shield_count = self.input_shields.len();
+        let missing = self.recover_shield_coverage(
+            &physical,
+            "display_change_recovery",
+            0,
+            existing_shield_count,
+        )?;
         if !missing.is_empty() {
             let module = unsafe { GetModuleHandleW(None) }
                 .map_err(|e| platform(format!("shield repair module lookup failed: {e}")))?;
@@ -836,6 +952,17 @@ impl NativeOverlayRenderer {
                 windows::core::w!("MultiLauncherVisualOverlayInputShield"),
                 operation_id,
                 &missing,
+            )?;
+        }
+        let new_shield_count = self.input_shields.len();
+        if new_shield_count > existing_shield_count {
+            // New shields were created after the existing-shield recovery
+            // pass, so give only those HWNDs the same bounded verification.
+            let _uncovered_new_shields = self.recover_shield_coverage(
+                &physical,
+                "display_change_recovery",
+                existing_shield_count,
+                new_shield_count,
             )?;
         }
         self.verify_shield_coverage(&physical, "display_change")?;
@@ -887,8 +1014,70 @@ impl NativeOverlayRenderer {
                 set_window_pos_error,
                 self.closing,
                 window.shield_stages.as_ref(),
+                None,
             );
         }
+    }
+    fn verify_shield_with_recovery(
+        &self,
+        hwnd: HWND,
+        expected: ScreenRect,
+        dimensions: (i32, i32),
+        monitor: usize,
+        stage: &'static str,
+    ) -> Result<(), VisualOverlayError> {
+        let Some(window) = self.input_shields.iter().find(|window| window.hwnd == hwnd) else {
+            return Err(platform(format!(
+                "Rectangle input shield monitor {monitor}: missing shield"
+            )));
+        };
+        match probe_shield_with_bounded_topmost_reassert(
+            expected,
+            dimensions,
+            || probe_shield(hwnd),
+            |bounds, dimensions| reassert_input_shield_topmost(hwnd, bounds, dimensions),
+        ) {
+            Ok(_) => Ok(()),
+            Err(failure) => {
+                log_shield_probe_failure(
+                    window.state.operation_id,
+                    stage,
+                    monitor,
+                    window,
+                    expected,
+                    &failure.failed_probe,
+                    &failure.reasons,
+                    failure.set_window_pos_error,
+                    self.closing,
+                    window.shield_stages.as_ref(),
+                    Some(&failure),
+                );
+                Err(platform(format!(
+                    "Rectangle input shield monitor {monitor}: {}",
+                    failure.reasons[0].description()
+                )))
+            }
+        }
+    }
+    fn recover_shield_coverage(
+        &self,
+        bounds: &[ScreenRect],
+        stage: &'static str,
+        first_shield: usize,
+        end_shield: usize,
+    ) -> Result<Vec<(usize, ScreenRect)>, VisualOverlayError> {
+        let end_shield = end_shield.min(self.input_shields.len());
+        let first_shield = first_shield.min(end_shield);
+        let candidates = &self.input_shields[first_shield..end_shield];
+        recover_existing_shield_coverage(
+            bounds,
+            candidates,
+            |window| window.state.bounds,
+            |window, expected, monitor| {
+                let dimensions = win32_dimensions(expected, "input shield")?;
+                self.verify_shield_with_recovery(window.hwnd, expected, dimensions, monitor, stage)
+            },
+        )
     }
     fn verify_shield_coverage(
         &self,
@@ -934,6 +1123,7 @@ impl NativeOverlayRenderer {
                 None,
                 self.closing,
                 window.shield_stages.as_ref(),
+                None,
             );
             return Err(platform(format!(
                 "Rectangle input shield monitor {}: {}",
@@ -969,7 +1159,7 @@ impl NativeOverlayRenderer {
             });
             let hwnd = unsafe {
                 CreateWindowExW(
-                    WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                    WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
                     class,
                     PCWSTR::null(),
                     WS_POPUP,
@@ -1480,6 +1670,15 @@ impl OverlayRenderer for NativeOverlayRenderer {
                     self.input_shields.len()
                 ));
             }
+            let _uncovered = match self.recover_shield_coverage(
+                &input_shield_bounds,
+                "final_ready_recovery",
+                0,
+                self.input_shields.len(),
+            ) {
+                Ok(uncovered) => uncovered,
+                Err(error) => return self.fail(error.message),
+            };
             if let Err(error) = self.verify_shield_coverage(&input_shield_bounds, "final_ready") {
                 return self.fail(error.message);
             }
@@ -1759,6 +1958,248 @@ impl Drop for NativeOverlayRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shield_probe_for(bounds: ScreenRect, ex: u32) -> ShieldProbe {
+        ShieldProbe {
+            actual: Some(bounds),
+            rect_error: None,
+            visible: true,
+            ex,
+            style_error: None,
+            thread_dpi_context: 0,
+            window_dpi_context: 0,
+            window_dpi: 96,
+        }
+    }
+
+    fn valid_shield_exstyle() -> u32 {
+        (WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOPMOST).0
+    }
+
+    #[test]
+    fn rectangle_shield_topmost_recovery_is_single_and_strict() {
+        let bounds = ScreenRect::new(-1920, -200, 1920, 1080);
+        let valid = shield_probe_for(bounds, valid_shield_exstyle());
+        let topmost_missing = shield_probe_for(bounds, valid.ex & !WS_EX_TOPMOST.0);
+
+        let mut probe_calls = 0;
+        let mut repair_calls = 0;
+        assert!(
+            probe_shield_with_bounded_topmost_reassert(
+                bounds,
+                (1920, 1080),
+                || {
+                    probe_calls += 1;
+                    valid
+                },
+                |target, dimensions| {
+                    repair_calls += 1;
+                    assert_eq!(target, bounds);
+                    assert_eq!(dimensions, (1920, 1080));
+                    Ok(())
+                },
+            )
+            .is_ok()
+        );
+        assert_eq!(probe_calls, 1, "an already-valid shield needs one probe");
+        assert_eq!(
+            repair_calls, 0,
+            "an already-valid shield is not repositioned"
+        );
+
+        let mut scripted = [topmost_missing, valid].into_iter();
+        probe_calls = 0;
+        repair_calls = 0;
+        let recovery_order = std::cell::RefCell::new(Vec::new());
+        assert!(
+            probe_shield_with_bounded_topmost_reassert(
+                bounds,
+                (1920, 1080),
+                || {
+                    recovery_order.borrow_mut().push("probe");
+                    probe_calls += 1;
+                    scripted
+                        .next()
+                        .expect("one initial and one complete reprobe")
+                },
+                |target, dimensions| {
+                    recovery_order.borrow_mut().push("reassert");
+                    repair_calls += 1;
+                    assert_eq!(target, bounds);
+                    assert_eq!(dimensions, (1920, 1080));
+                    Ok(())
+                },
+            )
+            .is_ok()
+        );
+        assert_eq!(probe_calls, 2);
+        assert_eq!(repair_calls, 1);
+        assert_eq!(
+            recovery_order.into_inner(),
+            vec!["probe", "reassert", "probe"]
+        );
+
+        probe_calls = 0;
+        repair_calls = 0;
+        let native_error = probe_shield_with_bounded_topmost_reassert(
+            bounds,
+            (1920, 1080),
+            || {
+                probe_calls += 1;
+                topmost_missing
+            },
+            |_, _| {
+                repair_calls += 1;
+                Err(5)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(native_error.set_window_pos_error, Some(5));
+        assert!(native_error.reassertion_attempted);
+        assert_eq!(
+            probe_calls, 1,
+            "a native error does not trigger a second probe"
+        );
+        assert_eq!(repair_calls, 1);
+
+        let mut scripted = [topmost_missing, topmost_missing].into_iter();
+        probe_calls = 0;
+        repair_calls = 0;
+        let unchanged = probe_shield_with_bounded_topmost_reassert(
+            bounds,
+            (1920, 1080),
+            || {
+                probe_calls += 1;
+                scripted
+                    .next()
+                    .expect("one initial and one complete reprobe")
+            },
+            |_, _| {
+                repair_calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(unchanged.reasons, [ShieldFailure::TopmostMissing]);
+        assert!(unchanged.reassertion_attempted);
+        assert_eq!(probe_calls, 2);
+        assert_eq!(repair_calls, 1, "a persistent loss is never retried");
+
+        let other_unsafe = shield_probe_for(bounds, topmost_missing.ex | WS_EX_TRANSPARENT.0);
+        let mut scripted = [topmost_missing, other_unsafe].into_iter();
+        repair_calls = 0;
+        let postprobe_failure = probe_shield_with_bounded_topmost_reassert(
+            bounds,
+            (1920, 1080),
+            || {
+                scripted
+                    .next()
+                    .expect("one initial and one complete reprobe")
+            },
+            |_, _| {
+                repair_calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(
+            postprobe_failure
+                .reasons
+                .contains(&ShieldFailure::UnexpectedTransparent)
+        );
+        assert_eq!(repair_calls, 1);
+
+        let initially_unsafe = shield_probe_for(bounds, valid.ex & !WS_EX_LAYERED.0);
+        probe_calls = 0;
+        repair_calls = 0;
+        let rejected = probe_shield_with_bounded_topmost_reassert(
+            bounds,
+            (1920, 1080),
+            || {
+                probe_calls += 1;
+                initially_unsafe
+            },
+            |_, _| {
+                repair_calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(rejected.reasons, [ShieldFailure::LayeredMissing]);
+        assert!(!rejected.reassertion_attempted);
+        assert_eq!(probe_calls, 1);
+        assert_eq!(repair_calls, 0, "other unsafe states are not repaired");
+    }
+
+    #[test]
+    fn rectangle_shield_topmost_recovery_propagates_failed_existing_before_new_coverage() {
+        let bounds = ScreenRect::new(-1920, -200, 1920, 1080);
+        let candidates = [bounds];
+        let mut recovery_calls = 0;
+        let rejected = recover_existing_shield_coverage(
+            &[bounds],
+            &candidates,
+            |candidate| *candidate,
+            |_, _, _| {
+                recovery_calls += 1;
+                Err(platform("persistent topmost loss"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(rejected.message, "persistent topmost loss");
+        assert_eq!(recovery_calls, 1, "a rejected HWND is never retried");
+
+        let mut unexpected_recoveries = 0;
+        let missing = recover_existing_shield_coverage(
+            &[bounds],
+            &[] as &[ScreenRect],
+            |candidate| *candidate,
+            |_, _, _| {
+                unexpected_recoveries += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(missing, vec![(0, bounds)]);
+        assert_eq!(unexpected_recoveries, 0, "an absent HWND is not probed");
+    }
+
+    #[test]
+    fn rectangle_shield_topmost_recovery_targets_each_signed_monitor_once() {
+        let monitors = [
+            ScreenRect::new(-1920, -200, 1920, 1080),
+            ScreenRect::new(0, 0, 2560, 1440),
+            ScreenRect::new(3000, -900, 1200, 800),
+        ];
+        let mut targets = Vec::new();
+        for bounds in monitors {
+            let valid = shield_probe_for(bounds, valid_shield_exstyle());
+            let missing = shield_probe_for(bounds, valid.ex & !WS_EX_TOPMOST.0);
+            let mut scripted = [missing, valid].into_iter();
+            assert!(
+                probe_shield_with_bounded_topmost_reassert(
+                    bounds,
+                    (bounds.width as i32, bounds.height as i32),
+                    || scripted
+                        .next()
+                        .expect("one initial and one complete reprobe"),
+                    |target, dimensions| {
+                        targets.push((target, dimensions));
+                        Ok(())
+                    },
+                )
+                .is_ok()
+            );
+        }
+        assert_eq!(
+            targets,
+            vec![
+                (monitors[0], (1920, 1080)),
+                (monitors[1], (2560, 1440)),
+                (monitors[2], (1200, 800)),
+            ]
+        );
+    }
 
     #[test]
     fn rectangle_shield_native_events_preserve_rapid_transaction_and_signed_positions() {
