@@ -9,6 +9,72 @@ use std::path::PathBuf;
 
 const SNIPPETS_FILE: &str = crate::plugins::snippets::SNIPPETS_FILE;
 const CLIPBOARD_FILE: &str = crate::plugins::clipboard::CLIPBOARD_FILE;
+const MAX_PICKER_PREVIEW_CHARS: usize = 16_384;
+
+fn bounded_picker_text(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let mut bounded = String::new();
+    for _ in 0..max_chars {
+        let Some(character) = chars.next() else {
+            return bounded;
+        };
+        bounded.push(character);
+    }
+    if chars.next().is_some() {
+        bounded.push('…');
+    }
+    bounded
+}
+
+fn bounded_picker_excerpt(text: &str, max_chars: usize) -> String {
+    let mut excerpt = String::new();
+    let mut count = 0;
+    let mut pending_space = false;
+    let mut truncated = false;
+    for character in text.chars() {
+        if character.is_control() || character.is_whitespace() {
+            pending_space |= count > 0;
+            continue;
+        }
+        if pending_space {
+            if count == max_chars {
+                truncated = true;
+                break;
+            }
+            excerpt.push(' ');
+            count += 1;
+            pending_space = false;
+        }
+        if count == max_chars {
+            truncated = true;
+            break;
+        }
+        excerpt.push(character);
+        count += 1;
+    }
+    if truncated {
+        excerpt.push('…');
+    }
+    excerpt
+}
+
+fn snippet_picker_row_label(snippet: &SnippetEntry) -> String {
+    let tags = if snippet.tags.is_empty() {
+        "none".to_owned()
+    } else {
+        bounded_picker_excerpt(&snippet.tags.join(", "), 56)
+    };
+    let visibility = if snippet.hide_contents {
+        " · hidden"
+    } else {
+        ""
+    };
+    format!(
+        "{} · tags: {tags} · fields: {}{visibility}",
+        bounded_picker_excerpt(&snippet.alias, 64),
+        snippet.fields.len()
+    )
+}
 
 fn playback_mode_label(mode: PlaybackMode) -> &'static str {
     match mode {
@@ -75,11 +141,26 @@ struct DialogLayout {
     body_content: egui::Vec2,
     body_id: Option<egui::Id>,
     body_offset: f32,
+    body_painted_offset: f32,
     steps: egui::Rect,
     steps_content: egui::Vec2,
     steps_id: Option<egui::Id>,
     steps_offset: f32,
+    source_picker: Option<SourcePickerLayout>,
     footer: egui::Rect,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+struct SourcePickerLayout {
+    panel: egui::Rect,
+    list: egui::Rect,
+    list_content: egui::Vec2,
+    list_id: egui::Id,
+    preview: egui::Rect,
+    insert: egui::Rect,
+    insert_enabled: bool,
+    cancel: egui::Rect,
 }
 
 #[cfg(test)]
@@ -91,10 +172,12 @@ impl Default for DialogLayout {
             body_content: egui::Vec2::ZERO,
             body_id: None,
             body_offset: 0.0,
+            body_painted_offset: 0.0,
             steps: egui::Rect::NOTHING,
             steps_content: egui::Vec2::ZERO,
             steps_id: None,
             steps_offset: 0.0,
+            source_picker: None,
             footer: egui::Rect::NOTHING,
         }
     }
@@ -163,6 +246,27 @@ struct SavedRunPresentation {
     name: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum SourcePickerKind {
+    Snippets,
+    ClipboardHistory,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourcePickerIdentity {
+    generation: u64,
+    source_index: usize,
+}
+
+struct SourcePickerState {
+    kind: SourcePickerKind,
+    generation: u64,
+    query: String,
+    selected: Option<SourcePickerIdentity>,
+    needs_reveal: bool,
+    message: Option<String>,
+}
+
 pub(crate) struct PasteSequenceDialog {
     suspended_for_playback: bool,
     pub(crate) open: bool,
@@ -180,6 +284,8 @@ pub(crate) struct PasteSequenceDialog {
     remove_confirmation: Option<SequenceId>,
     snippets: Vec<SnippetEntry>,
     history: Vec<String>,
+    source_generation: u64,
+    source_picker: Option<SourcePickerState>,
     context: Option<SequenceInvocationContext>,
     hotkey_text: String,
     inline_error: Option<String>,
@@ -221,6 +327,8 @@ impl Default for PasteSequenceDialog {
             remove_confirmation: None,
             snippets: Vec::new(),
             history: Vec::new(),
+            source_generation: 0,
+            source_picker: None,
             context: None,
             hotkey_text: String::new(),
             inline_error: None,
@@ -332,6 +440,7 @@ impl PasteSequenceDialog {
     }
 
     fn load_sources(&mut self) {
+        self.invalidate_source_picker();
         // UI tests exercise real preparation with an owned catalog, never the
         // user's snippet/history files or native clipboard/input.
         #[cfg(test)]
@@ -362,7 +471,13 @@ impl PasteSequenceDialog {
         }
     }
 
+    fn invalidate_source_picker(&mut self) {
+        self.source_generation = self.source_generation.wrapping_add(1);
+        self.source_picker = None;
+    }
+
     pub(crate) fn suspend_for_playback(&mut self) {
+        self.invalidate_source_picker();
         if self.open {
             self.open = false;
             self.suspended_for_playback = true;
@@ -371,6 +486,7 @@ impl PasteSequenceDialog {
     }
 
     pub(crate) fn end_session(&mut self) {
+        self.invalidate_source_picker();
         self.suspended_for_playback = false;
         self.open = false;
         self.snapshot = None;
@@ -460,12 +576,18 @@ impl PasteSequenceDialog {
                 let footer_height = row_height * 3.0 + ui.spacing().item_spacing.y * 4.0;
                 let body_height = (ui.available_height() - footer_height).max(0.0);
                 let step_height = (body_height * 0.6).min(260.0);
+                #[cfg(test)]
+                let mut body_content_origin_y = None;
                 let body = egui::ScrollArea::vertical()
                     .id_salt("paste_sequence_body")
                     .min_scrolled_height(0.0)
                     .max_height(body_height)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        #[cfg(test)]
+                        {
+                            body_content_origin_y = Some(ui.cursor().min.y);
+                        }
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Saved sequences");
@@ -551,6 +673,8 @@ impl PasteSequenceDialog {
                     self.layout.body_content = body.content_size;
                     self.layout.body_id = Some(body.id);
                     self.layout.body_offset = body.state.offset.y;
+                    self.layout.body_painted_offset = body.inner_rect.top()
+                        - body_content_origin_y.unwrap_or(body.inner_rect.top());
                 }
                 #[cfg(not(test))]
                 let _ = body;
@@ -899,52 +1023,12 @@ impl PasteSequenceDialog {
         }
 
         ui.horizontal_wrapped(|ui| {
-            ui.menu_button("Add Snippet", |ui| {
-                if let Some(error) = &self.snippets_error {
-                    ui.label(format!("Snippet catalog unavailable: {error}"));
-                } else if self.snippets.is_empty() {
-                    ui.weak("No saved snippets are available.");
-                }
-                for snippet in &self.snippets {
-                    let label = if snippet.hide_contents {
-                        format!("{}  ·  hidden", snippet.alias)
-                    } else {
-                        snippet.alias.clone()
-                    };
-                    if ui.button(label).clicked() {
-                        self.draft.steps.push(Step::SnippetRef {
-                            alias: snippet.alias.clone(),
-                        });
-                        self.selected_step = self.draft.steps.len().checked_sub(1);
-                        self.reveal_step = self.selected_step;
-                        ui.close();
-                    }
-                }
-            });
-            ui.menu_button("Add Clipboard Item", |ui| {
-                if let Some(error) = &self.history_error {
-                    ui.label(format!("Clipboard history unavailable: {error}"));
-                }
-                if self.history.is_empty() {
-                    ui.weak("Clipboard history items can expire or be removed.");
-                }
-                for index in 0..self.history.len() {
-                    if ui.button(format!("History item {}", index + 1)).clicked() {
-                        self.draft.steps.push(Step::clipboard_history_reference(
-                            self.history
-                                .get(index)
-                                .map(String::as_str)
-                                .unwrap_or_default(),
-                        ));
-                        self.status = Some(
-                            "Clipboard steps refer to history and can expire before a run.".into(),
-                        );
-                        self.selected_step = self.draft.steps.len().checked_sub(1);
-                        self.reveal_step = self.selected_step;
-                        ui.close();
-                    }
-                }
-            });
+            if ui.button("Add Snippet").clicked() {
+                self.toggle_source_picker(SourcePickerKind::Snippets);
+            }
+            if ui.button("Add Clipboard Item").clicked() {
+                self.toggle_source_picker(SourcePickerKind::ClipboardHistory);
+            }
             let add_temporary_text = ui.button("Add Temporary Text");
             register_paste_sequence_jump_target(
                 jump_scope,
@@ -1016,6 +1100,7 @@ impl PasteSequenceDialog {
                 self.draft.steps.remove(index);
             }
         });
+        self.source_picker_ui(ui);
         ui.label("Ordered steps");
         self.step_editor(ui, step_height);
 
@@ -1028,6 +1113,402 @@ impl PasteSequenceDialog {
         if let Some(preview) = app.sequence_playback.prepared_preview() {
             self.show_preview(ui, &preview);
         }
+    }
+
+    fn toggle_source_picker(&mut self, kind: SourcePickerKind) {
+        if self
+            .source_picker
+            .as_ref()
+            .is_some_and(|picker| picker.kind == kind)
+        {
+            self.source_picker = None;
+            return;
+        }
+        self.source_picker = Some(SourcePickerState {
+            kind,
+            generation: self.source_generation,
+            query: String::new(),
+            selected: None,
+            needs_reveal: true,
+            message: None,
+        });
+    }
+
+    fn source_picker_insert_selection(
+        &self,
+        picker: &SourcePickerState,
+    ) -> Result<SourcePickerIdentity, &'static str> {
+        let identity = picker
+            .selected
+            .ok_or("Select a source item before inserting it.")?;
+        if identity.generation != self.source_generation
+            || picker.generation != self.source_generation
+        {
+            return Err("The source list changed. Reopen the picker to choose again.");
+        }
+        match picker.kind {
+            SourcePickerKind::Snippets => {
+                if self.snippets_error.is_some() {
+                    return Err("The saved snippet catalog is unavailable.");
+                }
+                let snippet = self
+                    .snippets
+                    .get(identity.source_index)
+                    .ok_or("That snippet is no longer available.")?;
+                let alias_matches = self
+                    .snippets
+                    .iter()
+                    .filter(|candidate| candidate.alias == snippet.alias)
+                    .take(2)
+                    .count();
+                if alias_matches != 1 {
+                    return Err(
+                        "This alias is ambiguous. Resolve duplicate aliases before inserting it.",
+                    );
+                }
+            }
+            SourcePickerKind::ClipboardHistory => {
+                if self.history_error.is_some() {
+                    return Err("Clipboard history is unavailable.");
+                }
+                if self.history.get(identity.source_index).is_none() {
+                    return Err("That history item is no longer available.");
+                }
+            }
+        }
+        Ok(identity)
+    }
+
+    fn source_picker_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(mut picker) = self.source_picker.take() else {
+            #[cfg(test)]
+            {
+                self.layout.source_picker = None;
+            }
+            return;
+        };
+        if picker.generation != self.source_generation {
+            #[cfg(test)]
+            {
+                self.layout.source_picker = None;
+            }
+            return;
+        }
+
+        let query = picker.query.to_lowercase();
+        let matching_indices = match picker.kind {
+            SourcePickerKind::Snippets if self.snippets_error.is_none() => self
+                .snippets
+                .iter()
+                .enumerate()
+                .filter_map(|(index, snippet)| {
+                    let matches = query.is_empty()
+                        || snippet.alias.to_lowercase().contains(&query)
+                        || snippet
+                            .tags
+                            .iter()
+                            .any(|tag| tag.to_lowercase().contains(&query))
+                        || (!snippet.hide_contents && snippet.text.to_lowercase().contains(&query));
+                    matches.then_some(index)
+                })
+                .collect::<Vec<_>>(),
+            SourcePickerKind::ClipboardHistory if self.history_error.is_none() => self
+                .history
+                .iter()
+                .enumerate()
+                .filter_map(|(index, text)| {
+                    (query.is_empty() || text.to_lowercase().contains(&query)).then_some(index)
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+
+        let mut selected_from_list = None;
+        let mut insert_clicked = false;
+        let mut cancel_clicked = false;
+        #[cfg(test)]
+        let mut layout = SourcePickerLayout {
+            panel: egui::Rect::NOTHING,
+            list: egui::Rect::NOTHING,
+            list_content: egui::Vec2::ZERO,
+            list_id: egui::Id::new(("paste-source-picker-list", picker.kind)),
+            preview: egui::Rect::NOTHING,
+            insert: egui::Rect::NOTHING,
+            insert_enabled: false,
+            cancel: egui::Rect::NOTHING,
+        };
+        let insert_block_reason = self
+            .source_picker_insert_selection(&picker)
+            .as_ref()
+            .err()
+            .copied();
+        let panel = ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.strong(match picker.kind {
+                    SourcePickerKind::Snippets => "Choose a snippet",
+                    SourcePickerKind::ClipboardHistory => "Choose a clipboard history item",
+                });
+                ui.add_space(8.0);
+                let search_width = ui.available_width().max(120.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut picker.query)
+                        .id_salt(("paste-source-picker-search", picker.kind))
+                        .desired_width(search_width)
+                        .hint_text(match picker.kind {
+                            SourcePickerKind::Snippets => "Search aliases, tags, and visible text",
+                            SourcePickerKind::ClipboardHistory => "Search this history snapshot",
+                        }),
+                );
+            });
+
+            let list = egui::ScrollArea::vertical()
+                .id_salt(("paste-source-picker-list", picker.kind))
+                .max_height(156.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if matches!(picker.kind, SourcePickerKind::Snippets)
+                        && self.snippets_error.is_some()
+                    {
+                        ui.weak("The saved snippet catalog is unavailable.");
+                    } else if matches!(picker.kind, SourcePickerKind::ClipboardHistory)
+                        && self.history_error.is_some()
+                    {
+                        ui.weak("Clipboard history is unavailable.");
+                    } else if matching_indices.is_empty() {
+                        let text = match (picker.kind, picker.query.is_empty()) {
+                            (SourcePickerKind::Snippets, true) => {
+                                "No saved snippets are available."
+                            }
+                            (SourcePickerKind::Snippets, false) => "No snippets match this search.",
+                            (SourcePickerKind::ClipboardHistory, true) => {
+                                "Clipboard history is empty."
+                            }
+                            (SourcePickerKind::ClipboardHistory, false) => {
+                                "No history items match this search."
+                            }
+                        };
+                        ui.weak(text);
+                    }
+
+                    for &source_index in &matching_indices {
+                        let identity = SourcePickerIdentity {
+                            generation: picker.generation,
+                            source_index,
+                        };
+                        let selected = picker.selected == Some(identity);
+                        let label = match picker.kind {
+                            SourcePickerKind::Snippets => {
+                                snippet_picker_row_label(&self.snippets[source_index])
+                            }
+                            SourcePickerKind::ClipboardHistory => format!(
+                                "History item {} · {}",
+                                source_index + 1,
+                                bounded_picker_excerpt(&self.history[source_index], 72)
+                            ),
+                        };
+                        let response = ui
+                            .push_id(
+                                (
+                                    "paste-source-picker-row",
+                                    picker.kind,
+                                    identity.generation,
+                                    identity.source_index,
+                                ),
+                                |ui| ui.selectable_label(selected, label),
+                            )
+                            .inner;
+                        if response.clicked() {
+                            selected_from_list = Some(identity);
+                        }
+                    }
+                });
+            #[cfg(test)]
+            {
+                layout.list = list.inner_rect;
+                layout.list_content = list.content_size;
+                layout.list_id = list.id;
+            }
+            #[cfg(not(test))]
+            let _ = list;
+
+            if let Some(identity) = picker.selected {
+                ui.separator();
+                let preview = ui.group(|ui| {
+                    ui.set_max_height(112.0);
+                    ui.set_width(ui.available_width());
+                    match picker.kind {
+                        SourcePickerKind::Snippets
+                            if identity.generation == self.source_generation
+                                && let Some(snippet) = self.snippets.get(identity.source_index) =>
+                        {
+                            ui.strong(format!(
+                                "{} · selected preview",
+                                bounded_picker_excerpt(&snippet.alias, 64)
+                            ));
+                            if snippet.hide_contents {
+                                // Do not inspect hidden text here: even preview geometry and
+                                // labels are intentionally independent of the concealed body.
+                                ui.weak("Contents are hidden for this snippet.");
+                            } else {
+                                egui::ScrollArea::vertical()
+                                    .id_salt((
+                                        "paste-source-picker-preview",
+                                        picker.kind,
+                                        identity.generation,
+                                        identity.source_index,
+                                    ))
+                                    .max_height(80.0)
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(bounded_picker_text(
+                                                &snippet.text,
+                                                MAX_PICKER_PREVIEW_CHARS,
+                                            ))
+                                            .code(),
+                                        );
+                                    });
+                            }
+                        }
+                        SourcePickerKind::ClipboardHistory
+                            if identity.generation == self.source_generation
+                                && let Some(text) = self.history.get(identity.source_index) =>
+                        {
+                            ui.strong(format!(
+                                "History item {} · selected preview",
+                                identity.source_index + 1
+                            ));
+                            egui::ScrollArea::vertical()
+                                .id_salt((
+                                    "paste-source-picker-preview",
+                                    picker.kind,
+                                    identity.generation,
+                                    identity.source_index,
+                                ))
+                                .max_height(80.0)
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new(bounded_picker_text(
+                                            text,
+                                            MAX_PICKER_PREVIEW_CHARS,
+                                        ))
+                                        .code(),
+                                    );
+                                });
+                        }
+                        _ => {
+                            ui.weak("The selected source item is no longer available.");
+                        }
+                    }
+                });
+                #[cfg(test)]
+                {
+                    layout.preview = preview.response.rect;
+                }
+                #[cfg(not(test))]
+                let _ = preview;
+            }
+
+            if let Some(message) = &picker.message {
+                ui.colored_label(ui.visuals().error_fg_color, message);
+            }
+            if let Some(reason) = insert_block_reason
+                && picker.message.as_deref() != Some(reason)
+            {
+                ui.weak(reason);
+            }
+            ui.horizontal(|ui| {
+                let insert = ui.add_enabled(
+                    insert_block_reason.is_none(),
+                    egui::Button::new("Insert selected"),
+                );
+                #[cfg(test)]
+                {
+                    layout.insert = insert.rect;
+                    layout.insert_enabled = insert.enabled();
+                }
+                let insert = if let Some(reason) = insert_block_reason {
+                    insert.on_hover_text(reason)
+                } else {
+                    insert
+                };
+                insert_clicked = insert.clicked();
+                let cancel = ui.button("Cancel");
+                #[cfg(test)]
+                {
+                    layout.cancel = cancel.rect;
+                }
+                cancel_clicked = cancel.clicked();
+            });
+        });
+        #[cfg(test)]
+        {
+            layout.panel = panel.response.rect;
+        }
+
+        if picker.needs_reveal {
+            ui.scroll_to_rect_animation(
+                panel.response.rect,
+                Some(egui::Align::BOTTOM),
+                egui::style::ScrollAnimation::none(),
+            );
+            picker.needs_reveal = false;
+        }
+
+        if let Some(identity) = selected_from_list {
+            picker.selected = Some(identity);
+            picker.needs_reveal = true;
+            picker.message = None;
+        }
+        if cancel_clicked {
+            self.source_picker = None;
+        } else if insert_clicked {
+            if self.insert_source_picker_selection(&mut picker) {
+                self.source_picker = None;
+            } else {
+                self.source_picker = Some(picker);
+            }
+        } else {
+            self.source_picker = Some(picker);
+        }
+        #[cfg(test)]
+        {
+            self.layout.source_picker = self.source_picker.as_ref().map(|_| layout);
+            if self.source_picker.is_none() {
+                self.layout.source_picker = None;
+            }
+        }
+    }
+
+    fn insert_source_picker_selection(&mut self, picker: &mut SourcePickerState) -> bool {
+        let identity = match self.source_picker_insert_selection(picker) {
+            Ok(identity) => identity,
+            Err(reason) => {
+                picker.message = Some(reason.to_owned());
+                return false;
+            }
+        };
+
+        let step = match picker.kind {
+            SourcePickerKind::Snippets => {
+                let snippet = &self.snippets[identity.source_index];
+                Step::SnippetRef {
+                    alias: snippet.alias.clone(),
+                }
+            }
+            SourcePickerKind::ClipboardHistory => {
+                Step::clipboard_history_reference(&self.history[identity.source_index])
+            }
+        };
+
+        self.draft.steps.push(step);
+        self.selected_step = self.draft.steps.len().checked_sub(1);
+        self.reveal_step = self.selected_step;
+        if matches!(picker.kind, SourcePickerKind::ClipboardHistory) {
+            self.status =
+                Some("Clipboard steps refer to history and can expire before a run.".into());
+        }
+        true
     }
 
     fn editor_footer(
@@ -1980,6 +2461,8 @@ mod tests {
         settings.hotkey = None;
         settings.quit_hotkey = None;
         settings.help_hotkey = None;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         settings.dashboard.enabled = false;
         settings.enable_toasts = false;
         super::super::LauncherApp::new(
@@ -2636,15 +3119,86 @@ mod tests {
         size: egui::Vec2,
         label: &str,
     ) {
-        let text = editor_event_frame(dialog, ctx, app, size, Vec::new());
-        let rect = text
+        const MAX_PAINT_STABILITY_PASSES: usize = 4;
+        const PAINT_OFFSET_TOLERANCE: f32 = 1.0;
+        let mut text = Vec::new();
+        let mut layout = dialog.layout;
+        let mut previous_stable_target: Option<(f32, egui::Rect)> = None;
+        let mut target_geometry_stable = false;
+        for _ in 0..MAX_PAINT_STABILITY_PASSES {
+            text = editor_event_frame(dialog, ctx, app, size, Vec::new());
+            layout = dialog.layout;
+            let offsets_agree =
+                (layout.body_offset - layout.body_painted_offset).abs() <= PAINT_OFFSET_TOLERANCE;
+            let target_rect = text
+                .iter()
+                .find(|(painted, _)| painted == label)
+                .map(|(_, rect)| *rect);
+            if offsets_agree {
+                if let Some(current_rect) = target_rect {
+                    if previous_stable_target.is_some_and(|(previous_offset, previous_rect)| {
+                        (previous_offset - layout.body_offset).abs() <= PAINT_OFFSET_TOLERANCE
+                            && current_rect.contains(previous_rect.center())
+                            && previous_rect.contains(current_rect.center())
+                    }) {
+                        target_geometry_stable = true;
+                        break;
+                    }
+                    previous_stable_target = Some((layout.body_offset, current_rect));
+                } else {
+                    previous_stable_target = None;
+                }
+            } else {
+                previous_stable_target = None;
+            }
+        }
+        assert!(
+            target_geometry_stable,
+            "body paint and target geometry did not settle within {MAX_PAINT_STABILITY_PASSES} measured passes for {label:?}: state offset={}, painted offset={}, target={:?}",
+            layout.body_offset,
+            layout.body_painted_offset,
+            text.iter()
+                .find(|(painted, _)| painted == label)
+                .map(|(_, rect)| rect),
+        );
+        let initial_rect = text
             .iter()
             .find(|(text, _)| text == label)
             .unwrap_or_else(|| panic!("missing visible {label:?}: {text:?}"))
             .1;
-        let pos = rect.center();
-        editor_event_frame(dialog, ctx, app, size, vec![egui::Event::PointerMoved(pos)]);
-        editor_event_frame(
+        let moved = editor_event_frame(
+            dialog,
+            ctx,
+            app,
+            size,
+            vec![egui::Event::PointerMoved(initial_rect.center())],
+        );
+        let moved_layout = dialog.layout;
+        assert!(
+            (moved_layout.body_offset - moved_layout.body_painted_offset).abs()
+                <= PAINT_OFFSET_TOLERANCE,
+            "body paint geometry changed during pointer movement: state offset={}, painted offset={}",
+            moved_layout.body_offset,
+            moved_layout.body_painted_offset,
+        );
+        let current_rect = moved
+            .iter()
+            .find(|(text, _)| text == label)
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| {
+                panic!(
+                    "click target {label:?} was visible at {initial_rect:?} but not after pointer movement: {moved:?}"
+                )
+            });
+        let pos = current_rect.center();
+        let layout = dialog.layout;
+        assert!(
+            layout.body.contains(pos) || layout.footer.contains(pos),
+            "current painted click target {label:?} is outside the body and footer: target={current_rect:?}, body={:?}, footer={:?}",
+            layout.body,
+            layout.footer,
+        );
+        let pressed = editor_event_frame(
             dialog,
             ctx,
             app,
@@ -2655,6 +3209,22 @@ mod tests {
                 pressed: true,
                 modifiers: egui::Modifiers::NONE,
             }],
+        );
+        let pressed_layout = dialog.layout;
+        assert!(
+            (pressed_layout.body_offset - pressed_layout.body_painted_offset).abs()
+                <= PAINT_OFFSET_TOLERANCE,
+            "body paint geometry changed before pointer-down: state offset={}, painted offset={}",
+            pressed_layout.body_offset,
+            pressed_layout.body_painted_offset,
+        );
+        let pressed_rect = pressed
+            .iter()
+            .find(|(text, _)| text == label)
+            .map(|(_, rect)| *rect);
+        assert!(
+            pressed_rect.is_some_and(|rect| rect.contains(pos)),
+            "click target {label:?} moved before pointer-down: initial={initial_rect:?}, moved={current_rect:?}, down={pressed_rect:?}"
         );
         editor_event_frame(
             dialog,
@@ -2686,6 +3256,522 @@ mod tests {
         for _ in 0..2 {
             editor_event_frame(dialog, ctx, app, size, Vec::new());
         }
+    }
+
+    fn picker_snippet(
+        alias: &str,
+        text: &str,
+        hide_contents: bool,
+        tags: &[&str],
+        fields: &[&str],
+    ) -> SnippetEntry {
+        SnippetEntry {
+            alias: alias.into(),
+            text: text.into(),
+            hide_contents,
+            prompt_for_fields: !fields.is_empty(),
+            fields: fields
+                .iter()
+                .map(|name| crate::plugins::snippets::SnippetFieldDefinition::new(*name))
+                .collect(),
+            tags: tags.iter().map(|tag| (*tag).into()).collect(),
+        }
+    }
+
+    #[test]
+    fn paste_source_picker_large_collections_keep_the_footer_reachable() {
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = layout_app(&ctx, directory.path());
+        let size = egui::vec2(900.0, 760.0);
+        let mut dialog = PasteSequenceDialog {
+            open: true,
+            sources_are_test_owned: true,
+            ..Default::default()
+        };
+        dialog.snippets = (0..128)
+            .map(|index| {
+                picker_snippet(
+                    &format!("entry-{index:03}"),
+                    "visible example body",
+                    false,
+                    &["sample"],
+                    &[],
+                )
+            })
+            .collect();
+        dialog.history = (0..128)
+            .map(|index| format!("history-payload-{index:03}"))
+            .collect();
+        let draft_before = dialog.draft.clone();
+        dialog.toggle_source_picker(SourcePickerKind::Snippets);
+        for _ in 0..3 {
+            editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        }
+        let layout = dialog.layout;
+        let picker = layout.source_picker.expect("the inline picker is laid out");
+        assert!(
+            !picker.insert_enabled,
+            "insertion requires an explicit selection"
+        );
+        assert!(
+            picker.list_content.y > picker.list.height() + 500.0,
+            "{picker:?}"
+        );
+        assert!(picker.panel.intersects(layout.body), "{layout:?}");
+        assert!(layout.body.contains(picker.insert.center()), "{layout:?}");
+        assert!(layout.body.contains(picker.cancel.center()), "{layout:?}");
+        assert!(
+            picker.insert.is_positive() && picker.cancel.is_positive(),
+            "{picker:?}"
+        );
+
+        let mut scroll = egui::scroll_area::State::load(&ctx, picker.list_id).unwrap();
+        scroll.offset.y = picker.list_content.y - picker.list.height();
+        scroll.store(&ctx, picker.list_id);
+        let bottom = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(
+            bottom.iter().any(|(text, _)| text.contains("entry-127")),
+            "the final source row is reachable through the bounded list: {bottom:?}"
+        );
+        let after_scroll = dialog.layout.source_picker.unwrap();
+        assert!(layout.body.contains(after_scroll.insert.center()));
+        assert!(layout.body.contains(after_scroll.cancel.center()));
+        editor_click(&mut dialog, &ctx, &mut app, size, "Cancel");
+        assert!(dialog.source_picker.is_none());
+        assert_eq!(
+            dialog.draft, draft_before,
+            "browsing and cancel do not edit the draft"
+        );
+        assert_eq!(dialog.history.len(), 128);
+
+        dialog.toggle_source_picker(SourcePickerKind::ClipboardHistory);
+        for _ in 0..3 {
+            editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        }
+        let history_layout = dialog.layout.source_picker.unwrap();
+        assert!(history_layout.list_content.y > history_layout.list.height() + 500.0);
+        assert!(layout.body.contains(history_layout.insert.center()));
+        assert!(layout.body.contains(history_layout.cancel.center()));
+        let mut history_scroll =
+            egui::scroll_area::State::load(&ctx, history_layout.list_id).unwrap();
+        history_scroll.offset.y = history_layout.list_content.y - history_layout.list.height();
+        history_scroll.store(&ctx, history_layout.list_id);
+        let history_bottom = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(
+            history_bottom
+                .iter()
+                .any(|(text, _)| text.contains("history-payload-127"))
+        );
+        let history_after_scroll = dialog.layout.source_picker.unwrap();
+        assert!(layout.body.contains(history_after_scroll.insert.center()));
+        assert!(layout.body.contains(history_after_scroll.cancel.center()));
+        editor_click(&mut dialog, &ctx, &mut app, size, "Cancel");
+        assert_eq!(dialog.draft, draft_before);
+    }
+
+    #[test]
+    fn paste_source_picker_filters_visible_snippet_metadata_and_masks_hidden_bodies() {
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = layout_app(&ctx, directory.path());
+        let size = egui::vec2(900.0, 760.0);
+        let mut dialog = PasteSequenceDialog {
+            open: true,
+            sources_are_test_owned: true,
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        }
+        dialog.snippets = vec![
+            picker_snippet(
+                "private-template",
+                "HIDDEN_SENTINEL_7C29 must never be searched or shown",
+                true,
+                &["private-tag"],
+                &[],
+            ),
+            picker_snippet(
+                "visible-prompt",
+                "Dear {{name}}, visibleBodyNeedle\nsecond raw line",
+                false,
+                &["letter"],
+                &["name"],
+            ),
+            picker_snippet(&"L".repeat(100), "bounded alias preview", false, &[], &[]),
+        ];
+        dialog.toggle_source_picker(SourcePickerKind::Snippets);
+
+        dialog.source_picker.as_mut().unwrap().query = "private-template".into();
+        for _ in 0..2 {
+            editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        }
+        let alias_match = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(
+            alias_match
+                .iter()
+                .any(|(text, _)| text.contains("private-template"))
+        );
+
+        dialog.source_picker.as_mut().unwrap().query = "HIDDEN_SENTINEL_7C29".into();
+        let hidden_body_search = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(dialog.source_picker.as_ref().unwrap().selected.is_none());
+        assert!(
+            !hidden_body_search
+                .iter()
+                .any(|(text, _)| text.contains("private-template")),
+            "hidden body text must not produce a result: {hidden_body_search:?}"
+        );
+        assert!(
+            hidden_body_search
+                .iter()
+                .any(|(text, _)| text == "No snippets match this search.")
+        );
+
+        dialog.source_picker.as_mut().unwrap().query = "visibleBodyNeedle".into();
+        let visible_match = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(
+            visible_match
+                .iter()
+                .any(|(text, _)| text.contains("visible-prompt"))
+        );
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "visible-prompt · tags: letter · fields: 1",
+        );
+        assert!(dialog.layout.source_picker.unwrap().insert_enabled);
+        let visible_preview = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(dialog.layout.source_picker.unwrap().preview.is_positive());
+        assert!(
+            visible_preview
+                .iter()
+                .any(|(text, _)| text.contains("Dear {{name}}"))
+        );
+        assert!(
+            visible_preview
+                .iter()
+                .any(|(text, _)| text.contains("visibleBodyNeedle"))
+        );
+        assert_eq!(
+            dialog.draft.steps.len(),
+            0,
+            "previewing never evaluates or inserts a template"
+        );
+
+        dialog.source_picker.as_mut().unwrap().query = "private-tag".into();
+        let tag_match = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(
+            tag_match
+                .iter()
+                .any(|(text, _)| text.contains("private-template"))
+        );
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "private-template · tags: private-tag · fields: 0 · hidden",
+        );
+        let hidden_preview = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(dialog.layout.source_picker.unwrap().preview.is_positive());
+        assert!(
+            hidden_preview
+                .iter()
+                .any(|(text, _)| text == "Contents are hidden for this snippet.")
+        );
+        assert!(
+            !hidden_preview
+                .iter()
+                .any(|(text, _)| text.contains("HIDDEN_SENTINEL_7C29")),
+            "the selected hidden preview is fixed and independent of its body"
+        );
+
+        dialog.source_picker.as_mut().unwrap().query = "L".repeat(100);
+        editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        let long_alias_row = snippet_picker_row_label(&dialog.snippets[2]);
+        editor_click(&mut dialog, &ctx, &mut app, size, &long_alias_row);
+        let bounded_alias_preview =
+            editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        let expected_header = format!("{}… · selected preview", "L".repeat(64));
+        let preview_rect = dialog.layout.source_picker.unwrap().preview;
+        assert!(
+            bounded_alias_preview
+                .iter()
+                .any(|(text, _)| text == &expected_header)
+        );
+        assert!(
+            !bounded_alias_preview
+                .iter()
+                .any(|(text, rect)| preview_rect.intersects(*rect)
+                    && text.contains(&"L".repeat(100)))
+        );
+    }
+
+    #[test]
+    fn paste_source_picker_insert_is_explicit_and_ambiguous_aliases_refuse() {
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = layout_app(&ctx, directory.path());
+        let size = egui::vec2(900.0, 760.0);
+        let mut dialog = PasteSequenceDialog {
+            open: true,
+            sources_are_test_owned: true,
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        }
+        dialog.snippets = vec![
+            picker_snippet("duplicate", "first", false, &[], &[]),
+            picker_snippet("duplicate", "second", false, &[], &[]),
+        ];
+        dialog.history = vec!["same history payload".into(), "same history payload".into()];
+        let draft_before = dialog.draft.clone();
+        dialog.toggle_source_picker(SourcePickerKind::Snippets);
+        editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "duplicate · tags: none · fields: 0",
+        );
+        let ambiguous = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(!dialog.layout.source_picker.unwrap().insert_enabled);
+        assert_eq!(
+            dialog.draft, draft_before,
+            "duplicate aliases are never inserted"
+        );
+        assert!(
+            dialog.source_picker.is_some(),
+            "refusal keeps the picker open"
+        );
+        assert!(ambiguous.iter().any(|(text, _)| {
+            text == "This alias is ambiguous. Resolve duplicate aliases before inserting it."
+        }));
+
+        dialog.source_picker = None;
+        dialog.snippets = vec![
+            picker_snippet("first", "first body", false, &[], &[]),
+            picker_snippet("second", "second body", false, &[], &[]),
+        ];
+        dialog.source_generation = dialog.source_generation.wrapping_add(1);
+        dialog.toggle_source_picker(SourcePickerKind::Snippets);
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "second · tags: none · fields: 0",
+        );
+        assert_eq!(
+            dialog.source_picker.as_ref().unwrap().selected,
+            Some(SourcePickerIdentity {
+                generation: dialog.source_generation,
+                source_index: 1,
+            }),
+            "the real click on the second row must select its original source index"
+        );
+        dialog.source_picker.as_mut().unwrap().query = "first".into();
+        editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert_eq!(
+            dialog.source_picker.as_ref().unwrap().selected,
+            Some(SourcePickerIdentity {
+                generation: dialog.source_generation,
+                source_index: 1,
+            }),
+            "filtering does not retarget selection by the visible row index"
+        );
+        assert!(dialog.layout.source_picker.unwrap().insert_enabled);
+        editor_click(&mut dialog, &ctx, &mut app, size, "Insert selected");
+        assert_eq!(
+            dialog.draft.steps,
+            vec![Step::SnippetRef {
+                alias: "second".into()
+            }]
+        );
+        assert!(dialog.source_picker.is_none());
+
+        dialog.toggle_source_picker(SourcePickerKind::ClipboardHistory);
+        dialog.source_picker.as_mut().unwrap().query = "same history payload".into();
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "History item 1 · same history payload",
+        );
+        let history_preview = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(
+            history_preview
+                .iter()
+                .any(|(text, _)| text == "same history payload")
+        );
+        editor_click(&mut dialog, &ctx, &mut app, size, "Insert selected");
+        assert_eq!(
+            dialog.draft.steps.last(),
+            Some(&Step::clipboard_history_reference("same history payload"))
+        );
+        assert_eq!(
+            dialog.draft.steps.len(),
+            2,
+            "one explicit insert adds one reference"
+        );
+
+        let draft_before_cancel = dialog.draft.clone();
+        dialog.toggle_source_picker(SourcePickerKind::ClipboardHistory);
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "History item 2 · same history payload",
+        );
+        editor_click(&mut dialog, &ctx, &mut app, size, "Cancel");
+        assert_eq!(
+            dialog.draft, draft_before_cancel,
+            "selection and cancel are non-mutating"
+        );
+        assert_eq!(dialog.history.len(), 2);
+    }
+
+    #[test]
+    fn paste_source_picker_resets_on_source_reload_close_and_playback_suspend() {
+        let mut dialog = PasteSequenceDialog {
+            open: true,
+            sources_are_test_owned: true,
+            snippets: vec![picker_snippet("owned", "body", false, &[], &[])],
+            history: vec!["history payload".into()],
+            ..Default::default()
+        };
+        dialog.toggle_source_picker(SourcePickerKind::Snippets);
+        dialog.source_picker.as_mut().unwrap().query = "owned".into();
+        let initial_generation = dialog.source_generation;
+        dialog.load_sources();
+        assert!(dialog.source_picker.is_none());
+        assert!(dialog.source_generation > initial_generation);
+
+        dialog.toggle_source_picker(SourcePickerKind::ClipboardHistory);
+        dialog.source_picker.as_mut().unwrap().query = "history".into();
+        dialog.suspend_for_playback();
+        assert!(dialog.source_picker.is_none());
+        assert!(!dialog.open);
+
+        dialog.open = true;
+        dialog.toggle_source_picker(SourcePickerKind::Snippets);
+        dialog.source_picker.as_mut().unwrap().query = "owned".into();
+        dialog.end_session();
+        assert!(dialog.source_picker.is_none());
+        assert!(dialog.snippets.is_empty());
+        assert!(dialog.history.is_empty());
+    }
+
+    #[test]
+    fn paste_source_picker_distinguishes_empty_unavailable_and_stale_sources() {
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = layout_app(&ctx, directory.path());
+        let size = egui::vec2(900.0, 760.0);
+        let mut dialog = PasteSequenceDialog {
+            open: true,
+            sources_are_test_owned: true,
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        }
+        let draft_before = dialog.draft.clone();
+        dialog.toggle_source_picker(SourcePickerKind::Snippets);
+        let empty = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(!dialog.layout.source_picker.unwrap().insert_enabled);
+        assert!(
+            empty
+                .iter()
+                .any(|(text, _)| text == "No saved snippets are available.")
+        );
+        dialog.snippets_error = Some("test unavailable".into());
+        dialog.source_picker.as_mut().unwrap().selected = Some(SourcePickerIdentity {
+            generation: dialog.source_generation,
+            source_index: 0,
+        });
+        let unavailable = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(!dialog.layout.source_picker.unwrap().insert_enabled);
+        assert!(
+            unavailable
+                .iter()
+                .any(|(text, _)| text == "The saved snippet catalog is unavailable.")
+        );
+        assert_eq!(dialog.draft, draft_before);
+
+        dialog.snippets_error = None;
+        dialog.snippets = vec![picker_snippet("stale", "body", false, &[], &[])];
+        dialog.source_picker.as_mut().unwrap().selected = Some(SourcePickerIdentity {
+            generation: dialog.source_generation.wrapping_sub(1),
+            source_index: 0,
+        });
+        dialog.source_picker.as_mut().unwrap().needs_reveal = true;
+        editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        let stale = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(!dialog.layout.source_picker.unwrap().insert_enabled);
+        assert!(dialog.draft.steps.is_empty());
+        assert!(stale.iter().any(|(text, _)| {
+            text == "The source list changed. Reopen the picker to choose again."
+        }));
+        assert_eq!(dialog.draft, draft_before);
+        dialog.source_picker.as_mut().unwrap().selected = Some(SourcePickerIdentity {
+            generation: dialog.source_generation,
+            source_index: 0,
+        });
+        dialog.snippets.clear();
+        let missing = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(!dialog.layout.source_picker.unwrap().insert_enabled);
+        assert!(
+            missing
+                .iter()
+                .any(|(text, _)| text == "That snippet is no longer available.")
+        );
+        assert_eq!(dialog.draft, draft_before);
+
+        dialog.toggle_source_picker(SourcePickerKind::ClipboardHistory);
+        dialog.history_error = Some("test unavailable".into());
+        dialog.source_picker.as_mut().unwrap().selected = Some(SourcePickerIdentity {
+            generation: dialog.source_generation,
+            source_index: 0,
+        });
+        let history_unavailable = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(!dialog.layout.source_picker.unwrap().insert_enabled);
+        assert!(
+            history_unavailable
+                .iter()
+                .any(|(text, _)| { text == "Clipboard history is unavailable." })
+        );
+        assert_eq!(dialog.draft, draft_before);
+        dialog.history_error = None;
+        dialog.history.clear();
+        let missing_history = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(!dialog.layout.source_picker.unwrap().insert_enabled);
+        assert!(
+            missing_history
+                .iter()
+                .any(|(text, _)| { text == "That history item is no longer available." })
+        );
+        assert_eq!(dialog.draft, draft_before);
+        assert_eq!(
+            bounded_picker_excerpt("  alpha \t beta \n", 20),
+            "alpha beta"
+        );
+        assert_eq!(bounded_picker_excerpt("  alpha \t beta \n", 5), "alpha…");
+        assert_eq!(bounded_picker_excerpt("alpha  \n", 5), "alpha");
+        let unicode = bounded_picker_text(
+            &"🧪".repeat(MAX_PICKER_PREVIEW_CHARS + 10),
+            MAX_PICKER_PREVIEW_CHARS,
+        );
+        assert_eq!(unicode.chars().count(), MAX_PICKER_PREVIEW_CHARS + 1);
+        assert!(unicode.ends_with('…'));
     }
 
     #[test]
@@ -2795,14 +3881,26 @@ mod tests {
                 text: "fixture 49".into()
             }
         );
-        for (menu, item) in [
-            ("Add Snippet", "fixture_snippet  \u{00b7}  hidden"),
-            ("Add Clipboard Item", "History item 1"),
-        ] {
-            editor_reveal_toolbar(&mut dialog, &ctx, &mut app, size);
-            editor_click(&mut dialog, &ctx, &mut app, size, menu);
-            editor_click(&mut dialog, &ctx, &mut app, size, item);
-        }
+        editor_reveal_toolbar(&mut dialog, &ctx, &mut app, size);
+        editor_click(&mut dialog, &ctx, &mut app, size, "Add Snippet");
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "fixture_snippet · tags: none · fields: 0 · hidden",
+        );
+        editor_click(&mut dialog, &ctx, &mut app, size, "Insert selected");
+        editor_reveal_toolbar(&mut dialog, &ctx, &mut app, size);
+        editor_click(&mut dialog, &ctx, &mut app, size, "Add Clipboard Item");
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "History item 1 · owned dummy history",
+        );
+        editor_click(&mut dialog, &ctx, &mut app, size, "Insert selected");
         assert_eq!(dialog.selected_step, Some(51));
         assert_eq!(
             dialog.draft.steps[50],
