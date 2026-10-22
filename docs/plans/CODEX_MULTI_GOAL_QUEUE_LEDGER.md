@@ -6,7 +6,7 @@ Execute G1 → G2 → G3. Each gets one fresh branch and distinct baseline. G2 b
 
 | Goal | Contract | Branch | Base | Baseline | Current checkpoint | Status | Verification / push |
 |---|---|---|---|---|---|---|---|
-| G1 | CODEX_GOAL_LAUNCHER_QUERY_FOCUS.md | fix/launcher-query-focus-jump-notes | bfc3ae52a8826fdf223cbc14c8c21dbb580215c2 | 8e3c740671e3e60a3ad3b5bca5913a928cc8d816 | M1-A verified; checkpoint commit pending | IN_PROGRESS (B0 COMPLETE) | Initial push succeeded; 14 composed unique passes; all reported M1-A review findings resolved; full evidence in G1 ledger |
+| G1 | CODEX_GOAL_LAUNCHER_QUERY_FOCUS.md | fix/launcher-query-focus-jump-notes | bfc3ae52a8826fdf223cbc14c8c21dbb580215c2 | 8e3c740671e3e60a3ad3b5bca5913a928cc8d816 | M1-B commit / M2-A next | IN_PROGRESS (B0/M1-A/M1-B verified) | M1-A `d9eba5f5` pushed; M1-B seven direct + two adjacent composed passes; no full Nextest/Clippy yet; full evidence in G1 ledger |
 | G2 | CODEX_GOAL_CAPTURE_AND_PRODUCTIVITY_EXPANSION.md | not created | verified G1 final required | — | B0 | NOT_STARTED | One full Nextest required near end; Clippy last |
 | G3 | CODEX_GOAL_PRODUCTIVITY_TOOLS.md | not created | verified G2 final required | — | M0-A | NOT_STARTED | Selected tests only; Clippy last |
 

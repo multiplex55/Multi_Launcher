@@ -14,6 +14,13 @@ type SourceStateBeforeFrame = (
     Option<usize>,
 );
 
+#[derive(Clone, Copy)]
+struct QueryShowGeometry {
+    rect: egui::Rect,
+    clip_rect: egui::Rect,
+    layer_id: egui::LayerId,
+}
+
 #[derive(Clone)]
 pub(super) struct RootFrameLogic {
     track_c_enabled: bool,
@@ -1823,7 +1830,16 @@ impl LauncherApp {
     ) {
         if self.visibility_revision.current() != visibility_revision || !should_be_visible {
             self.pending_show_query_focus = None;
+            self.show_query_focus_grant = None;
             return;
+        }
+
+        if self
+            .show_query_focus_grant
+            .as_ref()
+            .is_some_and(|grant| grant.visibility_revision != visibility_revision)
+        {
+            self.show_query_focus_grant = None;
         }
 
         if self
@@ -1834,6 +1850,7 @@ impl LauncherApp {
         }
 
         if just_became_visible {
+            self.show_query_focus_grant = None;
             self.pending_show_query_focus = (focus_intent
                 == crate::visibility::RootFocusIntent::ActivateRoot)
                 .then_some(super::PendingShowQueryFocus {
@@ -1849,11 +1866,29 @@ impl LauncherApp {
         ctx: &egui::Context,
         query_layer: Option<egui::LayerId>,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{focused_response_layer, notes_dialog_layer_id};
+        self.pending_show_query_focus_owner_blocks_with_capture(
+            ctx,
+            query_layer,
+            crate::mouse_gestures::service::gesture_capture_active(),
+        )
+    }
+
+    fn pending_show_query_focus_owner_blocks_with_capture(
+        &self,
+        ctx: &egui::Context,
+        query_layer: Option<egui::LayerId>,
+        gesture_capture_active: bool,
+    ) -> bool {
+        use crate::gui::jump_mode::ui::{
+            focused_response_layer, notes_dialog_layer_id, visible_top_middle_layer,
+        };
 
         if ctx.viewport_id() != egui::ViewportId::ROOT
             || ctx.memory(|memory| memory.top_modal_layer().is_some())
             || egui::Popup::is_any_open(ctx)
+            || self.pin_list_open
+            || self.show_editor
+            || self.show_settings
             || self.file_search_dialog.open
             || self.confirm_modal.is_open()
             || self.action_sheet.is_open()
@@ -1865,35 +1900,243 @@ impl LauncherApp {
             || self.color_pick_owns_root()
             || self.ocr_owns_root()
             || self.coordinate_capture_parking.is_some()
+            || !self.native_ui_application_input_allowed_with_gesture_capture(
+                false,
+                gesture_capture_active,
+            )
             || self.notes_dialog.jump_mode_unsupported_nested_owner_open()
+            || self.unused_assets_dialog.open
+            || self
+                .radial_editor
+                .lock()
+                .map(|editor| editor.open)
+                .unwrap_or(true)
             || self
                 .note_panels
                 .iter()
-                .any(|panel| panel.owns_keyboard_layer(ctx))
+                .any(|panel| panel.blocks_show_query_focus(ctx))
         {
+            return true;
+        }
+
+        let passive_note_layer = |layer| {
+            (self.notes_dialog.open && layer == notes_dialog_layer_id())
+                || self
+                    .note_panels
+                    .iter()
+                    .any(|panel| panel.open && panel.show_query_focus_layer() == layer)
+        };
+        if visible_top_middle_layer(ctx).is_some_and(|layer| !passive_note_layer(layer)) {
             return true;
         }
 
         let focused_id = ctx.memory(|memory| memory.focused());
         let focused_layer = focused_response_layer(ctx);
-        if focused_layer == Some(notes_dialog_layer_id()) {
-            return true;
-        }
-        if focused_id.is_some_and(|focused_id| {
-            focused_id != egui::Id::new("query_input")
-                && (focused_layer.is_none()
-                    || query_layer.is_some_and(|query_layer| focused_layer != Some(query_layer)))
-        }) {
+        if focused_layer.is_some_and(|focused_layer| Some(focused_layer) != query_layer)
+            || (focused_layer.is_none()
+                && focused_id.is_some_and(|focused_id| focused_id != egui::Id::new("query_input")))
+            || (focused_layer == Some(notes_dialog_layer_id())
+                && focused_id != Some(egui::Id::new("query_input")))
+        {
             return true;
         }
 
         false
     }
 
+    fn show_query_notes_context(&self) -> Option<super::ShowQueryNotesContext> {
+        let note_panel_layers = self
+            .note_panels
+            .iter()
+            .filter(|panel| panel.open)
+            .map(|panel| panel.show_query_focus_layer())
+            .collect::<std::collections::HashSet<_>>();
+        (self.notes_dialog.open || !note_panel_layers.is_empty()).then_some(
+            super::ShowQueryNotesContext {
+                notes_dialog_open: self.notes_dialog.open,
+                note_panel_layers,
+            },
+        )
+    }
+
+    fn query_show_geometry_is_eligible(
+        &self,
+        ctx: &egui::Context,
+        geometry: QueryShowGeometry,
+    ) -> Option<bool> {
+        let clipped = geometry
+            .rect
+            .intersect(geometry.clip_rect)
+            .intersect(ctx.content_rect());
+        if !clipped.is_positive()
+            || !clipped.min.x.is_finite()
+            || !clipped.min.y.is_finite()
+            || !clipped.max.x.is_finite()
+            || !clipped.max.y.is_finite()
+        {
+            return Some(false);
+        }
+
+        let notes_context = self.show_query_notes_context();
+        let Some((layers, query_index, upper_rects)) = ctx.memory(|memory| {
+            let layers = memory.layer_ids().collect::<Vec<_>>();
+            let query_index = layers
+                .iter()
+                .rposition(|layer| *layer == geometry.layer_id)?;
+            let open_note_layers = notes_context.as_ref().map(|notes| {
+                notes
+                    .note_panel_layers
+                    .iter()
+                    .copied()
+                    .chain(
+                        notes
+                            .notes_dialog_open
+                            .then_some(crate::gui::jump_mode::ui::notes_dialog_layer_id()),
+                    )
+                    .collect::<std::collections::HashSet<_>>()
+            });
+            let mut upper_rects = Vec::new();
+            for layer in layers.iter().skip(query_index.saturating_add(1)) {
+                let is_open_note = open_note_layers
+                    .as_ref()
+                    .is_some_and(|open_layers| open_layers.contains(layer));
+                let visible = memory.areas().visible_last_frame(layer) || is_open_note;
+                if !visible {
+                    continue;
+                }
+                let Some(rect) = memory.area_rect(layer.id) else {
+                    // The layer is known to be visible, but its current
+                    // geometry has not been published yet. Defer this show
+                    // pass until the overlap check can be made precisely.
+                    return None;
+                };
+                upper_rects.push(rect);
+            }
+            Some((layers, query_index, upper_rects))
+        }) else {
+            // The query layer or an upper visible area has not published its
+            // geometry yet. Retry on a later eligible pass without granting
+            // focus on incomplete occlusion information.
+            return None;
+        };
+
+        let is_above_query = |layer: egui::LayerId| {
+            layers
+                .iter()
+                .position(|candidate| *candidate == layer)
+                .is_some_and(|index| index > query_index)
+        };
+        if ctx
+            .layer_id_at(clipped.center())
+            .is_some_and(|hit| hit != geometry.layer_id && is_above_query(hit))
+            || upper_rects.into_iter().any(|rect| rect.intersects(clipped))
+        {
+            return Some(false);
+        }
+
+        Some(true)
+    }
+
+    fn show_query_focus_grant_is_eligible(
+        &self,
+        ctx: &egui::Context,
+        grant: &super::ShowQueryFocusGrant,
+        geometry: QueryShowGeometry,
+    ) -> bool {
+        let query_id = egui::Id::new("query_input");
+        self.show_query_notes_context().as_ref() == Some(&grant.notes_context)
+            && self.visibility_revision.current() == grant.visibility_revision
+            && self.visible_flag.load(Ordering::Relaxed)
+            && self.published_root_identity_for_show_focus() == Some(grant.root_identity)
+            && self
+                .root_window_bridge
+                .is_current(grant.root_identity.0, grant.root_identity.1)
+            && ctx.viewport_id() == egui::ViewportId::ROOT
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.has_focus(query_id))
+            && !self.pending_show_query_focus_owner_blocks(ctx, Some(geometry.layer_id))
+            && !Self::launcher_show_focus_has_user_transfer(ctx)
+            && self.jump_mode_ui.active_session().is_none()
+            && self.query_show_geometry_is_eligible(ctx, geometry) == Some(true)
+    }
+
+    fn pending_show_query_focus_preserves_query_owner(
+        &self,
+        ctx: &egui::Context,
+        geometry: Option<QueryShowGeometry>,
+    ) -> bool {
+        let query_id = egui::Id::new("query_input");
+        let Some(geometry) = geometry else {
+            return false;
+        };
+        if !ctx.memory(|memory| memory.has_focus(query_id))
+            || !ctx.input(|input| input.focused)
+            || self.pending_show_query_focus_owner_blocks(ctx, Some(geometry.layer_id))
+            || Self::launcher_show_focus_has_user_transfer(ctx)
+            || self.jump_mode_ui.active_session().is_some()
+            || self.query_show_geometry_is_eligible(ctx, geometry) != Some(true)
+        {
+            return false;
+        }
+        let Some(notes_context) = self.show_query_notes_context() else {
+            return false;
+        };
+        let Some(pending) = self.pending_show_query_focus else {
+            return self.show_query_focus_grant.as_ref().is_some_and(|grant| {
+                grant.notes_context == notes_context
+                    && self.show_query_focus_grant_is_eligible(ctx, grant, geometry)
+            });
+        };
+        if pending.visibility_revision != self.visibility_revision.current()
+            || !self.visible_flag.load(Ordering::Relaxed)
+        {
+            return false;
+        }
+        let Some(identity) = self.published_root_identity_for_show_focus() else {
+            return false;
+        };
+        pending
+            .root_identity
+            .is_none_or(|(hwnd, generation)| self.root_window_bridge.is_current(hwnd, generation))
+            && self.root_window_bridge.is_current(identity.0, identity.1)
+    }
+
+    fn pending_show_query_focus_can_enable_query(
+        &self,
+        ctx: &egui::Context,
+        geometry: Option<QueryShowGeometry>,
+    ) -> bool {
+        let (Some(pending), Some(geometry), Some(notes_context)) = (
+            self.pending_show_query_focus,
+            geometry,
+            self.show_query_notes_context(),
+        ) else {
+            return false;
+        };
+        if pending.visibility_revision != self.visibility_revision.current()
+            || !self.visible_flag.load(Ordering::Relaxed)
+            || Self::launcher_show_focus_has_user_transfer(ctx)
+            || self.jump_mode_ui.active_session().is_some()
+            || self.pending_show_query_focus_owner_blocks(ctx, Some(geometry.layer_id))
+            || self.query_show_geometry_is_eligible(ctx, geometry) != Some(true)
+        {
+            return false;
+        }
+        let Some(identity) = self.published_root_identity_for_show_focus() else {
+            return false;
+        };
+        pending
+            .root_identity
+            .is_none_or(|(hwnd, generation)| self.root_window_bridge.is_current(hwnd, generation))
+            && self.root_window_bridge.is_current(identity.0, identity.1)
+            && (notes_context.notes_dialog_open || !notes_context.note_panel_layers.is_empty())
+    }
+
     fn pending_show_query_focus_is_eligible(
         &mut self,
         ctx: &egui::Context,
         query_response: &egui::Response,
+        query_clip_rect: egui::Rect,
     ) -> Option<u64> {
         let pending = self.pending_show_query_focus?;
         let current_revision = self.visibility_revision.current();
@@ -1901,6 +2144,7 @@ impl LauncherApp {
             || !self.visible_flag.load(Ordering::Relaxed)
         {
             self.pending_show_query_focus = None;
+            self.show_query_focus_grant = None;
             return None;
         }
 
@@ -1913,6 +2157,7 @@ impl LauncherApp {
             || self.jump_mode_ui.active_session().is_some()
         {
             self.pending_show_query_focus = None;
+            self.show_query_focus_grant = None;
             return None;
         }
         if !query_response.enabled() {
@@ -1920,6 +2165,21 @@ impl LauncherApp {
             // ROOT has not acknowledged native focus yet. That is a wait
             // state, not a transfer to another input owner.
             return None;
+        }
+
+        let geometry = QueryShowGeometry {
+            rect: query_response.rect,
+            clip_rect: query_clip_rect,
+            layer_id: query_response.layer_id,
+        };
+        match self.query_show_geometry_is_eligible(ctx, geometry) {
+            Some(true) => {}
+            Some(false) => {
+                self.pending_show_query_focus = None;
+                self.show_query_focus_grant = None;
+                return None;
+            }
+            None => return None,
         }
 
         let Some(current_identity) = self.published_root_identity_for_show_focus() else {
@@ -1931,6 +2191,7 @@ impl LauncherApp {
         match pending.root_identity {
             Some((hwnd, generation)) if !self.root_window_bridge.is_current(hwnd, generation) => {
                 self.pending_show_query_focus = None;
+                self.show_query_focus_grant = None;
                 return None;
             }
             Some(_) => {}
@@ -1945,6 +2206,7 @@ impl LauncherApp {
             .is_current(current_identity.0, current_identity.1)
         {
             self.pending_show_query_focus = None;
+            self.show_query_focus_grant = None;
             return None;
         }
 
@@ -1960,6 +2222,7 @@ impl LauncherApp {
                 .is_current(current_identity.0, current_identity.1)
         {
             self.pending_show_query_focus = None;
+            self.show_query_focus_grant = None;
             return None;
         }
 
@@ -1971,6 +2234,83 @@ impl LauncherApp {
             .read_response(egui::Id::new("query_input"))
             .map(|response| response.layer_id);
         self.pending_show_query_focus_owner_blocks(ctx, query_layer)
+    }
+
+    fn revalidate_show_query_focus_after_dialogs(
+        &mut self,
+        ctx: &egui::Context,
+        geometry: Option<QueryShowGeometry>,
+    ) {
+        if self.pending_show_query_focus.is_none() && self.show_query_focus_grant.is_none() {
+            return;
+        }
+        let query_layer = geometry.map(|geometry| geometry.layer_id);
+        let show_focus_owner_exists =
+            self.pending_show_query_focus.is_some() || self.show_query_focus_grant.is_some();
+        let user_transfer = Self::launcher_show_focus_has_user_transfer(ctx);
+        let jump_mode_active = self.jump_mode_ui.active_session().is_some();
+        let owner_blocks = self.pending_show_query_focus_owner_blocks(ctx, query_layer);
+        if owner_blocks || user_transfer || jump_mode_active {
+            self.pending_show_query_focus = None;
+            self.show_query_focus_grant = None;
+            if owner_blocks
+                && show_focus_owner_exists
+                && !user_transfer
+                && !jump_mode_active
+                && ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input")))
+            {
+                // A blocker can first become visible after the query response
+                // has requested focus in this pass. Undo that pending request
+                // before egui retains the pass so a late Notes/popup layer
+                // cannot inherit a show-origin focus grant.
+                ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("query_input")));
+            }
+            return;
+        }
+        if let Some(pending) = self.pending_show_query_focus {
+            if pending.visibility_revision != self.visibility_revision.current()
+                || !self.visible_flag.load(Ordering::Relaxed)
+                || pending.root_identity.is_some_and(|(hwnd, generation)| {
+                    !self.root_window_bridge.is_current(hwnd, generation)
+                })
+            {
+                self.pending_show_query_focus = None;
+                self.show_query_focus_grant = None;
+                if show_focus_owner_exists
+                    && ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input")))
+                {
+                    ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("query_input")));
+                }
+                return;
+            }
+        }
+        if let Some(geometry) = geometry {
+            if self.query_show_geometry_is_eligible(ctx, geometry) == Some(false) {
+                self.pending_show_query_focus = None;
+                self.show_query_focus_grant = None;
+                if show_focus_owner_exists
+                    && ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input")))
+                {
+                    ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("query_input")));
+                }
+                return;
+            }
+            if self
+                .show_query_focus_grant
+                .as_ref()
+                .is_some_and(|grant| !self.show_query_focus_grant_is_eligible(ctx, grant, geometry))
+            {
+                self.show_query_focus_grant = None;
+                if ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))) {
+                    ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("query_input")));
+                }
+            }
+        } else if self.show_query_focus_grant.is_some() {
+            // Missing geometry may be retried on a later eligible frame, but
+            // a retained grant must never outlive the surface it was checked
+            // against.
+            self.show_query_focus_grant = None;
+        }
     }
 
     fn launcher_show_focus_has_user_transfer(ctx: &egui::Context) -> bool {
@@ -4242,12 +4582,15 @@ impl LauncherApp {
     ) -> crate::gui::jump_mode::ui::NavigationOwner {
         let (candidate, settings_visibility_changed, combo_popup) =
             self.jump_mode_navigation_owner_candidate(ctx, root_visible);
-        self.jump_mode_ui.update_navigation_owner_with_combo_popup(
-            ctx,
-            candidate,
-            settings_visibility_changed,
-            combo_popup,
-        )
+        let preserve_query_focus = self.show_query_focus_preservation_for_jump(ctx);
+        self.jump_mode_ui
+            .update_navigation_owner_with_combo_popup_for_show_focus(
+                ctx,
+                candidate,
+                settings_visibility_changed,
+                combo_popup,
+                preserve_query_focus,
+            )
     }
 
     fn jump_mode_root_scope_for_current_results(
@@ -4307,12 +4650,26 @@ impl LauncherApp {
         let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
         let root_targets_allowed = self.jump_mode_root_targets_allowed(ctx, root_visible)
             && navigation_owner == crate::gui::jump_mode::ui::NavigationOwner::Root;
-        self.jump_mode_ui.complete_frame_for_navigation_owner(
-            ctx,
-            navigation_owner,
-            root_targets_allowed,
-            root_visible,
-        );
+        let preserve_query_focus = self.show_query_focus_preservation_for_jump(ctx);
+        self.jump_mode_ui
+            .complete_frame_for_navigation_owner_with_show_query_focus(
+                ctx,
+                navigation_owner,
+                root_targets_allowed,
+                root_visible,
+                preserve_query_focus,
+            );
+    }
+
+    fn show_query_focus_preservation_for_jump(&self, ctx: &egui::Context) -> bool {
+        let geometry = ctx
+            .read_response(egui::Id::new("query_input"))
+            .map(|response| QueryShowGeometry {
+                rect: response.rect,
+                clip_rect: ctx.content_rect(),
+                layer_id: response.layer_id,
+            });
+        self.pending_show_query_focus_preserves_query_owner(ctx, geometry)
     }
 
     fn finish_and_paint_jump_mode_ui_pass(&mut self, ctx: &egui::Context, root_visible: bool) {
@@ -4321,12 +4678,17 @@ impl LauncherApp {
         let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
         let root_targets_allowed = self.jump_mode_root_targets_allowed(ctx, root_visible)
             && navigation_owner == crate::gui::jump_mode::ui::NavigationOwner::Root;
-        if self.jump_mode_ui.prepare_pass_for_navigation_owner(
-            ctx,
-            navigation_owner,
-            root_targets_allowed,
-            root_visible,
-        ) {
+        let preserve_query_focus = self.show_query_focus_preservation_for_jump(ctx);
+        if self
+            .jump_mode_ui
+            .prepare_pass_for_navigation_owner_with_show_query_focus(
+                ctx,
+                navigation_owner,
+                root_targets_allowed,
+                root_visible,
+                preserve_query_focus,
+            )
+        {
             crate::gui::jump_mode::paint::paint(ctx, &self.jump_mode_ui);
         }
     }
@@ -4358,7 +4720,23 @@ impl LauncherApp {
             // Capture deliberate transfers before Jump Mode consumes leader,
             // hint, or handoff keys from egui's event stream.
             self.pending_show_query_focus = None;
+            self.show_query_focus_grant = None;
         }
+        if self.show_query_focus_grant.is_some()
+            && (Self::launcher_show_focus_has_user_transfer(&ctx)
+                || self.jump_mode_ui.active_session().is_some())
+        {
+            self.show_query_focus_grant = None;
+        }
+        let previous_query_geometry =
+            ctx.read_response(egui::Id::new("query_input"))
+                .map(|response| QueryShowGeometry {
+                    rect: response.rect,
+                    clip_rect: ctx.content_rect(),
+                    layer_id: response.layer_id,
+                });
+        let preserve_query_focus_for_show =
+            self.pending_show_query_focus_preserves_query_owner(&ctx, previous_query_geometry);
         let navigation_input_allowed = !owner_transition_pending
             && self.jump_mode_navigation_input_allowed(
                 &ctx,
@@ -4367,16 +4745,19 @@ impl LauncherApp {
             );
         self.jump_mode_ui
             .handle_root_input(&ctx, navigation_input_allowed, first_ui_pass);
-        self.jump_mode_ui.update_navigation_owner_with_combo_popup(
-            &ctx,
-            navigation_owner_candidate,
-            supported_dialog_visibility_changed,
-            combo_popup_candidate,
-        );
+        self.jump_mode_ui
+            .update_navigation_owner_with_combo_popup_for_show_focus(
+                &ctx,
+                navigation_owner_candidate,
+                supported_dialog_visibility_changed,
+                combo_popup_candidate,
+                preserve_query_focus_for_show,
+            );
         if self.pending_show_query_focus.is_some()
             && self.pending_show_query_focus_owner_blocks_before_query(&ctx)
         {
             self.pending_show_query_focus = None;
+            self.show_query_focus_grant = None;
         }
         if first_ui_pass
             && self.snippet_prompt_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
@@ -4653,6 +5034,7 @@ impl LauncherApp {
         // navigation paths see it. Opening is also resolved before rendering,
         // so the filter can take focus in the same frame as Ctrl+Enter.
         let query_input_id = egui::Id::new("query_input");
+        let mut current_query_geometry = None;
         // Latch ownership for this entire frame, including a dismissal frame,
         // so input cannot fall through to the underlying query after Close.
         let ocr_blocks_launcher_input = self.ocr_surface_visible();
@@ -4772,6 +5154,25 @@ impl LauncherApp {
 
             scale_ui(ui, self.query_scale, |ui| {
                 let input_id = query_input_id;
+                let show_query_grant_active = self
+                    .show_query_focus_grant
+                    .as_ref()
+                    .is_some_and(|grant| {
+                        previous_query_geometry.is_some_and(|geometry| {
+                            self.show_query_focus_grant_is_eligible(&ctx, grant, geometry)
+                        })
+                    });
+                if self.show_query_focus_grant.is_some() && !show_query_grant_active {
+                    self.show_query_focus_grant = None;
+                }
+                let pending_show_can_enable_query = !root_navigation_allowed
+                    && self.pending_show_query_focus_can_enable_query(
+                        &ctx,
+                        previous_query_geometry,
+                    );
+                let query_editor_interactive = root_navigation_allowed
+                    || show_query_grant_active
+                    || pending_show_can_enable_query;
                 let query_owned_focus = root_navigation_allowed
                     && ui.ctx().memory(|memory| memory.has_focus(input_id));
                 let numpad_navigation = if first_ui_pass && root_navigation_allowed {
@@ -4802,15 +5203,21 @@ impl LauncherApp {
                     pending.query_cursor_range.get_or_insert(cursor_range);
                 }
                 let text_edit_started = self.track_c_query_observer.tentative_start();
+                let query_clip_rect = ui.clip_rect();
                 let mut query_output = show_root_query_editor(
                     ui,
                     &mut self.query,
                     input_id,
                     self.query_scale,
-                    !action_sheet_blocks_launcher_input && root_navigation_allowed,
+                    !action_sheet_blocks_launcher_input && query_editor_interactive,
                 )
                 .output;
                 let query_text_edited = query_output.response.changed();
+                current_query_geometry = Some(QueryShowGeometry {
+                    rect: query_output.response.rect,
+                    clip_rect: query_clip_rect,
+                    layer_id: query_output.response.layer_id,
+                });
                 let query_cursor_navigated = self.pending_show_query_focus.is_some()
                     && query_output.response.enabled()
                     && query_output.response.has_focus()
@@ -4864,7 +5271,11 @@ impl LauncherApp {
                     && root_navigation_allowed
                 ;
                 let show_query_focus_revision = self
-                    .pending_show_query_focus_is_eligible(&ctx, &query_response);
+                    .pending_show_query_focus_is_eligible(
+                        &ctx,
+                        &query_response,
+                        query_clip_rect,
+                    );
                 if programmatic_query_focus_requested {
                     self.focus_query = false;
                 }
@@ -4872,6 +5283,20 @@ impl LauncherApp {
                     && !query_response.has_focus();
                 if programmatic_query_focus_requested || show_focus_requested {
                     query_response.request_focus();
+                }
+                if show_query_focus_revision.is_some()
+                    && !root_navigation_allowed
+                    && let (Some(root_identity), Some(notes_context)) = (
+                        self.published_root_identity_for_show_focus(),
+                        self.show_query_notes_context(),
+                    )
+                    && self.root_window_bridge.is_current(root_identity.0, root_identity.1)
+                {
+                    self.show_query_focus_grant = Some(super::ShowQueryFocusGrant {
+                        visibility_revision: self.visibility_revision.current(),
+                        root_identity,
+                        notes_context,
+                    });
                 }
                 let show_focus_cursor_range = self
                     .pending_show_query_focus
@@ -5806,6 +6231,7 @@ impl LauncherApp {
             self.enforce_pinned();
             self.update_panel_stack();
             self.show_ocr_surface(&ctx);
+            self.revalidate_show_query_focus_after_dialogs(&ctx, current_query_geometry);
             self.stage_ui_frame_receipt(
                 &frame_logic,
                 painted_root_generation,
@@ -7168,6 +7594,8 @@ impl LauncherApp {
             self.poll_radial_query_observation(&ctx, note_close_snapshot);
         }
         self.show_ocr_surface(&ctx);
+
+        self.revalidate_show_query_focus_after_dialogs(&ctx, current_query_geometry);
 
         self.stage_ui_frame_receipt(
             &frame_logic,
@@ -37186,6 +37614,545 @@ mod tests {
         app.move_cursor_end = false;
         install_owned_root_for_test(&mut app);
         (workspace, app)
+    }
+
+    fn launcher_show_owner_input(focused: bool, size: egui::Vec2) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            focused,
+            ..Default::default()
+        }
+    }
+
+    fn launcher_show_owner_prime_visible_layout(
+        app: &mut LauncherApp,
+        ctx: &egui::Context,
+        screen_size: egui::Vec2,
+    ) {
+        app.visibility_revision.request_with_focus_intent(
+            crate::visibility::RootFocusIntent::PreserveForeground,
+            || {
+                app.visible_flag.store(true, Ordering::SeqCst);
+                app.restore_flag.store(false, Ordering::SeqCst);
+            },
+        );
+        app.last_visible = false;
+        app.run_root_frame_for_test(ctx, launcher_show_owner_input(true, screen_size), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.pending_show_query_focus.is_none());
+    }
+
+    fn launcher_show_owner_seed_window_position(
+        ctx: &egui::Context,
+        layer: egui::LayerId,
+        title: &str,
+        screen_size: egui::Vec2,
+    ) {
+        ctx.run_ui(launcher_show_owner_input(false, screen_size), |ctx| {
+            egui::Window::new(title)
+                .id(layer.id)
+                .fixed_pos(egui::pos2(600.0, 400.0))
+                .show(ctx, |ui| ui.label("Notes placement fixture"));
+        })
+        .drop_without_applying_deltas();
+    }
+
+    fn launcher_show_owner_note(slug: &str) -> crate::gui::note_panel::NotePanel {
+        crate::gui::note_panel::NotePanel::from_note(crate::plugins::note::Note {
+            title: format!("Show owner {slug}"),
+            path: std::path::PathBuf::new(),
+            content: format!("# Show owner {slug}\n\nNote body"),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: slug.to_owned(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn launcher_show_owner_passive_note_panel_keeps_query_focus_and_accepts_unicode_in_both_jump_modes()
+     {
+        let query_id = egui::Id::new("query_input");
+        let screen_size = egui::vec2(1600.0, 1200.0);
+        for jump_mode in [false, true] {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "passive note");
+            app.set_jump_mode_enabled(jump_mode);
+            app.note_panel_default_size = (420.0, 320.0);
+            let mut panel = launcher_show_owner_note("passive-panel");
+            panel.open = true;
+            app.note_panels.push(panel);
+            let note_layer = app.note_panels[0].show_query_focus_layer();
+            launcher_show_owner_seed_window_position(
+                &ctx,
+                note_layer,
+                "Show owner passive-panel",
+                screen_size,
+            );
+            launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen_size);
+            let note_rect = ctx
+                .memory(|memory| memory.area_rect(note_layer.id))
+                .expect("the passive NotePanel should publish its seeded area geometry");
+            let initial_query_rect = ctx
+                .read_response(query_id)
+                .expect("the actual launcher query response should render during layout setup")
+                .rect;
+            assert!(!note_rect.intersects(initial_query_rect));
+
+            app.request_launcher_visibility(false);
+            app.run_root_frame_for_test(&ctx, launcher_show_owner_input(false, screen_size), false)
+                .0
+                .drop_without_applying_deltas();
+            let revision = app.request_launcher_state(Some(true), Some(true));
+            for _ in 0..3 {
+                app.run_root_frame_for_test(
+                    &ctx,
+                    launcher_show_owner_input(true, screen_size),
+                    false,
+                )
+                .0
+                .drop_without_applying_deltas();
+                if ctx.memory(|memory| memory.has_focus(query_id)) {
+                    break;
+                }
+            }
+
+            let query_response = ctx
+                .read_response(query_id)
+                .expect("the actual launcher query response should be retained");
+            assert!(
+                ctx.memory(|memory| memory.has_focus(query_id)),
+                "passive NotePanel should permit the actual query to receive show focus; Jump Mode: {jump_mode}"
+            );
+            assert_eq!(app.visibility_revision.current(), revision);
+            assert!(app.pending_show_query_focus.is_none());
+            assert_eq!(
+                app.note_panels[0].note_content(),
+                "# Show owner passive-panel\n\nNote body"
+            );
+            assert!(app.note_panels[0].open);
+            assert!(
+                !note_rect.intersects(query_response.rect),
+                "this fixture keeps the passive panel beside the actual query response"
+            );
+
+            let query_before_typing = app.query.clone();
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![egui::Event::Text("λ🙂".into())],
+                    ..launcher_show_owner_input(true, screen_size)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+            assert_eq!(app.query, format!("{query_before_typing}λ🙂"));
+            assert_eq!(
+                app.note_panels[0].note_content(),
+                "# Show owner passive-panel\n\nNote body"
+            );
+            drop(app);
+            drop(_workspace);
+        }
+    }
+
+    #[test]
+    fn launcher_show_owner_passive_quick_notes_keeps_query_focus_and_accepts_unicode() {
+        let query_id = egui::Id::new("query_input");
+        let screen_size = egui::vec2(1600.0, 1200.0);
+        for jump_mode in [false, true] {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "passive quick notes");
+            app.set_jump_mode_enabled(jump_mode);
+            app.notes_dialog.open();
+            let notes_layer = crate::gui::jump_mode::ui::notes_dialog_layer_id();
+            launcher_show_owner_seed_window_position(&ctx, notes_layer, "Quick Notes", screen_size);
+            launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen_size);
+            let notes_rect = ctx
+                .memory(|memory| memory.area_rect(notes_layer.id))
+                .expect("Quick Notes should publish its seeded area geometry");
+            let initial_query_rect = ctx
+                .read_response(query_id)
+                .expect("the actual launcher query response should render during layout setup")
+                .rect;
+            assert!(!notes_rect.intersects(initial_query_rect));
+
+            app.request_launcher_visibility(false);
+            app.run_root_frame_for_test(&ctx, launcher_show_owner_input(false, screen_size), false)
+                .0
+                .drop_without_applying_deltas();
+            let revision = app.request_launcher_state(Some(true), Some(true));
+            for _ in 0..3 {
+                app.run_root_frame_for_test(
+                    &ctx,
+                    launcher_show_owner_input(true, screen_size),
+                    false,
+                )
+                .0
+                .drop_without_applying_deltas();
+                if ctx.memory(|memory| memory.has_focus(query_id)) {
+                    break;
+                }
+            }
+
+            let query_response = ctx
+                .read_response(query_id)
+                .expect("the actual launcher query response should be retained");
+            assert!(
+                ctx.memory(|memory| memory.has_focus(query_id)),
+                "inactive Quick Notes should permit the actual launcher query to receive show focus; Jump Mode: {jump_mode}"
+            );
+            assert_eq!(app.visibility_revision.current(), revision);
+            assert!(app.pending_show_query_focus.is_none());
+            assert!(app.notes_dialog.open);
+            assert!(!notes_rect.intersects(query_response.rect));
+
+            let query_before_typing = app.query.clone();
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![egui::Event::Text("λ🙂".into())],
+                    ..launcher_show_owner_input(true, screen_size)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+            assert_eq!(app.query, format!("{query_before_typing}λ🙂"));
+            assert!(app.notes_dialog.open);
+            drop(app);
+            drop(_workspace);
+        }
+    }
+
+    #[test]
+    fn launcher_show_owner_focused_note_editor_and_find_keep_input_and_cancel_show_intent() {
+        use crate::gui::jump_mode::ui::focused_response_layer;
+        use crate::visibility::RootFocusIntent;
+
+        let query_id = egui::Id::new("query_input");
+        let screen_size = egui::vec2(1600.0, 1200.0);
+        for active_find in [false, true] {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "must remain unchanged");
+            app.set_jump_mode_enabled(true);
+            let mut panel = launcher_show_owner_note(if active_find {
+                "active-find"
+            } else {
+                "active-editor"
+            });
+            panel.open = true;
+            if active_find {
+                panel.open_find();
+            } else {
+                panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+            }
+            app.note_panels.push(panel);
+            app.visibility_revision.request_with_focus_intent(
+                RootFocusIntent::PreserveForeground,
+                || {
+                    app.visible_flag.store(true, Ordering::SeqCst);
+                    app.restore_flag.store(false, Ordering::SeqCst);
+                },
+            );
+            app.last_visible = true;
+            app.run_root_frame_for_test(&ctx, launcher_show_owner_input(true, screen_size), false)
+                .0
+                .drop_without_applying_deltas();
+
+            if !active_find {
+                let editor_id = app.note_panels[0]
+                    .test_editor_widget_id()
+                    .expect("the actual NotePanel editor should have rendered");
+                ctx.memory_mut(|memory| memory.request_focus(editor_id));
+            }
+            for _ in 0..2 {
+                app.run_root_frame_for_test(
+                    &ctx,
+                    launcher_show_owner_input(true, screen_size),
+                    false,
+                )
+                .0
+                .drop_without_applying_deltas();
+            }
+            let active_owner_id = if active_find {
+                app.note_panels[0]
+                    .test_find_query_widget_id()
+                    .expect("the actual NotePanel find field should have rendered")
+            } else {
+                app.note_panels[0].test_editor_widget_id().unwrap()
+            };
+            let note_layer = app.note_panels[0].show_query_focus_layer();
+            assert!(ctx.memory(|memory| memory.has_focus(active_owner_id)));
+            assert_eq!(focused_response_layer(&ctx), Some(note_layer));
+
+            app.request_launcher_visibility(false);
+            // The hidden lifecycle does not run this viewport's egui widgets,
+            // so keep the focused Notes response retained in Context memory.
+            app.last_visible = false;
+            assert!(ctx.memory(|memory| memory.has_focus(active_owner_id)));
+            app.request_launcher_state(Some(true), Some(true));
+            app.run_root_frame_for_test(&ctx, launcher_show_owner_input(true, screen_size), false)
+                .0
+                .drop_without_applying_deltas();
+
+            assert!(app.pending_show_query_focus.is_none());
+            assert!(!ctx.memory(|memory| memory.has_focus(query_id)));
+            assert!(ctx.memory(|memory| memory.has_focus(active_owner_id)));
+            let query_before_typing = app.query.clone();
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![egui::Event::Text("λ🙂".into())],
+                    ..launcher_show_owner_input(true, screen_size)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+            assert_eq!(app.query, query_before_typing);
+            if active_find {
+                assert_eq!(app.note_panels[0].find_query(), "λ🙂");
+            } else {
+                assert!(app.note_panels[0].note_content().contains("λ🙂"));
+            }
+            drop(app);
+            drop(_workspace);
+        }
+    }
+
+    #[test]
+    fn launcher_show_owner_panel_activation_and_nested_prompt_cancel_without_revival() {
+        let query_id = egui::Id::new("query_input");
+        let screen_size = egui::vec2(1600.0, 1200.0);
+        {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "activation owner");
+            let mut panel = launcher_show_owner_note("activation-owner");
+            panel.open = true;
+            panel.request_activation_handoff();
+            app.note_panels.push(panel);
+            app.request_launcher_state(Some(true), Some(true));
+            app.run_root_frame_for_test(&ctx, launcher_show_owner_input(true, screen_size), false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(app.pending_show_query_focus.is_none());
+            assert!(!ctx.memory(|memory| memory.has_focus(query_id)));
+
+            app.note_panels[0].open = false;
+            app.run_root_frame_for_test(&ctx, launcher_show_owner_input(true, screen_size), false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(!ctx.memory(|memory| memory.has_focus(query_id)));
+            drop(app);
+            drop(_workspace);
+        }
+
+        {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "prompt owner");
+            app.note_save_on_close = false;
+            app.note_confirm_discard_unsaved_changes = true;
+            let mut panel = launcher_show_owner_note("prompt-owner");
+            panel.open = true;
+            panel.replace_content_from_mutation("# Prompt owner\n\nunsaved change".into(), 1.0);
+            panel.request_close(&mut app);
+            app.note_panels.push(panel);
+            app.request_launcher_state(Some(true), Some(true));
+            app.run_root_frame_for_test(&ctx, launcher_show_owner_input(true, screen_size), false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(app.pending_show_query_focus.is_none());
+            assert!(!ctx.memory(|memory| memory.has_focus(query_id)));
+
+            app.note_panels[0].open = false;
+            app.run_root_frame_for_test(&ctx, launcher_show_owner_input(true, screen_size), false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(!ctx.memory(|memory| memory.has_focus(query_id)));
+            drop(app);
+            drop(_workspace);
+        }
+    }
+
+    #[test]
+    fn launcher_show_owner_overlapping_quick_notes_cancel_without_revival() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "overlap guard");
+        let screen_size = egui::vec2(500.0, 300.0);
+        app.notes_dialog.open();
+        app.request_launcher_state(Some(true), Some(true));
+        app.run_root_frame_for_test(&ctx, launcher_show_owner_input(true, screen_size), false)
+            .0
+            .drop_without_applying_deltas();
+
+        let notes_layer = crate::gui::jump_mode::ui::notes_dialog_layer_id();
+        let notes_rect = ctx
+            .memory(|memory| memory.area_rect(notes_layer.id))
+            .expect("Quick Notes should publish area geometry when ROOT first renders it");
+        let query_id = egui::Id::new("query_input");
+        let query_response = ctx.read_response(query_id).unwrap();
+        assert!(notes_rect.intersects(query_response.rect));
+        assert_eq!(
+            app.query_show_geometry_is_eligible(
+                &ctx,
+                QueryShowGeometry {
+                    rect: query_response.rect,
+                    clip_rect: ctx.content_rect(),
+                    layer_id: query_response.layer_id,
+                }
+            ),
+            Some(false),
+            "an upper visible Notes window that overlaps the query blocks show focus"
+        );
+        assert!(app.pending_show_query_focus.is_none());
+        assert!(!ctx.memory(|memory| memory.has_focus(query_id)));
+
+        app.notes_dialog.open = false;
+        app.run_root_frame_for_test(&ctx, launcher_show_owner_input(true, screen_size), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!ctx.memory(|memory| memory.has_focus(query_id)));
+        drop(app);
+        drop(_workspace);
+    }
+
+    #[test]
+    fn launcher_show_owner_settings_and_foreign_windows_block_show_focus() {
+        let query_id = egui::Id::new("query_input");
+        let screen_size = egui::vec2(1600.0, 1200.0);
+        {
+            use crate::gui::jump_mode::ui::focused_response_layer;
+
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "root row owner");
+            launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen_size);
+            let row_id = app
+                .test_root_rendered_row_ids
+                .first()
+                .map(|(_, id)| *id)
+                .expect("the actual ROOT result row should be rendered");
+            let query_layer = ctx
+                .read_response(query_id)
+                .expect("the actual query response should be rendered")
+                .layer_id;
+            assert_eq!(
+                ctx.read_response(row_id)
+                    .expect("the actual ROOT row response should be retained")
+                    .layer_id,
+                query_layer
+            );
+            ctx.memory_mut(|memory| memory.request_focus(row_id));
+            assert_eq!(focused_response_layer(&ctx), Some(query_layer));
+
+            app.request_launcher_visibility(false);
+            app.last_visible = false;
+            app.request_launcher_state(Some(true), Some(true));
+            app.run_root_frame_for_test(&ctx, launcher_show_owner_input(true, screen_size), false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(
+                ctx.memory(|memory| memory.has_focus(query_id)),
+                "fresh show focus should override a retained focus id on the same ROOT layer"
+            );
+            drop(app);
+            drop(_workspace);
+        }
+
+        {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "settings owner");
+            app.show_settings = true;
+            app.request_launcher_state(Some(true), Some(true));
+            for _ in 0..2 {
+                app.run_root_frame_for_test(
+                    &ctx,
+                    launcher_show_owner_input(true, screen_size),
+                    false,
+                )
+                .0
+                .drop_without_applying_deltas();
+            }
+            assert!(app.pending_show_query_focus.is_none());
+            assert!(!ctx.memory(|memory| memory.has_focus(query_id)));
+
+            app.show_settings = false;
+            app.run_root_frame_for_test(&ctx, launcher_show_owner_input(true, screen_size), false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(!ctx.memory(|memory| memory.has_focus(query_id)));
+            drop(app);
+            drop(_workspace);
+        }
+
+        {
+            let ctx = egui::Context::default();
+            let (_workspace, app) = root_list_test_app(&ctx, two_results());
+            let foreign_layer = egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::new("launcher-show-owner-foreign-window"),
+            );
+            ctx.run_ui(launcher_show_owner_input(true, screen_size), |ctx| {
+                egui::Window::new("Unsupported foreground owner")
+                    .id(foreign_layer.id)
+                    .fixed_pos(egui::pos2(500.0, 400.0))
+                    .show(ctx, |ui| ui.label("Protected owner"));
+            })
+            .drop_without_applying_deltas();
+            assert!(app.pending_show_query_focus_owner_blocks(&ctx, None));
+            drop(app);
+            drop(_workspace);
+        }
+    }
+
+    #[test]
+    fn launcher_show_owner_native_capture_states_block_focus_permission() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.screen_draw_controller.request_start().unwrap();
+        assert!(!app.screen_draw_controller.toolbar_open());
+        assert!(app.pending_show_query_focus_owner_blocks(&ctx, None));
+        app.screen_draw_controller.close();
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (outcomes_tx, outcomes_rx) = std::sync::mpsc::channel();
+        let runtime = Arc::new(CoordinateCaptureFixture {
+            started: started_tx,
+            outcomes: Mutex::new(outcomes_rx),
+        });
+        app.coordinate_tool =
+            crate::gui::coordinate_tool::CoordinateToolGui::with_backends_and_capture(
+                "settings.json".into(),
+                crate::coordinate_tool::CoordinateToolPreferences::default(),
+                Arc::new(crate::coordinate_tool::NativeCoordinateRuntimeFactory),
+                Box::new(CoordinateClipboardFixture(Arc::new(Mutex::new(Vec::new())))),
+                runtime,
+            );
+        app.coordinate_tool.begin_pick().unwrap();
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the coordinate capture fixture should become the active native owner");
+        assert!(app.coordinate_tool.capture_pending());
+        assert!(app.pending_show_query_focus_owner_blocks(&ctx, None));
+
+        app.coordinate_tool.cancel_pick();
+        outcomes_tx
+            .send(crate::coordinate_tool::CaptureOutcome::Cancelled)
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while app.coordinate_tool.capture_pending() && std::time::Instant::now() < deadline {
+            app.coordinate_tool.poll_capture();
+            std::thread::yield_now();
+        }
+        assert!(!app.coordinate_tool.capture_pending());
+        app.coordinate_tool.shutdown().unwrap();
+        assert!(app.pending_show_query_focus_owner_blocks_with_capture(&ctx, None, true));
+        drop(app);
+        drop(_workspace);
     }
 
     #[test]

@@ -1005,6 +1005,7 @@ pub struct LauncherApp {
     pub window_pos: (i32, i32),
     focus_query: bool,
     pending_show_query_focus: Option<PendingShowQueryFocus>,
+    show_query_focus_grant: Option<ShowQueryFocusGrant>,
     move_cursor_end: bool,
     toasts: egui_toast::Toasts,
     #[cfg(test)]
@@ -1225,6 +1226,19 @@ struct PendingShowQueryFocus {
     visibility_revision: u64,
     root_identity: Option<(usize, u64)>,
     query_cursor_range: Option<egui::text::CCursorRange>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ShowQueryNotesContext {
+    notes_dialog_open: bool,
+    note_panel_layers: std::collections::HashSet<egui::LayerId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ShowQueryFocusGrant {
+    visibility_revision: u64,
+    root_identity: (usize, u64),
+    notes_context: ShowQueryNotesContext,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -3083,6 +3097,7 @@ impl LauncherApp {
             window_pos: (0, 0),
             focus_query: false,
             pending_show_query_focus: None,
+            show_query_focus_grant: None,
             move_cursor_end: false,
             toasts,
             #[cfg(test)]
@@ -4792,6 +4807,7 @@ impl LauncherApp {
         // window has rendered, so later deliberate focus changes remain intact.
         self.focus_query = false;
         self.pending_show_query_focus = None;
+        self.show_query_focus_grant = None;
         if let Some(existing_idx) = self
             .note_panels
             .iter()

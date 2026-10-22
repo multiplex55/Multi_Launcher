@@ -2082,6 +2082,27 @@ impl NotePanel {
         }
     }
 
+    pub(crate) fn show_query_focus_layer(&self) -> egui::LayerId {
+        egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(("note_panel_window", self.note.slug.clone())),
+        )
+    }
+
+    pub(crate) fn blocks_show_query_focus(&self, ctx: &egui::Context) -> bool {
+        if !self.open {
+            return false;
+        }
+        self.activation_handoff_pending
+            || self.discard_unsaved_prompt
+            || self.overwrite_prompt
+            || self.link_dialog_open
+            || self.link_new_dialog_open
+            || self.pending_plain_link_conversion.is_some()
+            || crate::gui::jump_mode::ui::focused_response_layer(ctx)
+                == Some(self.show_query_focus_layer())
+    }
+
     pub(crate) fn find_query(&self) -> &str {
         self.note_find.query()
     }
@@ -2132,10 +2153,7 @@ impl NotePanel {
             return false;
         }
 
-        let window_layer = egui::LayerId::new(
-            egui::Order::Middle,
-            egui::Id::new(("note_panel_window", self.note.slug.clone())),
-        );
+        let window_layer = self.show_query_focus_layer();
         if ctx
             .memory(|memory| memory.top_modal_layer())
             .is_some_and(|modal_layer| modal_layer != window_layer)

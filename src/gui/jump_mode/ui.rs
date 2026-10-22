@@ -2142,6 +2142,25 @@ impl JumpModeUi {
             supported_dialog_visibility_changed,
             combo_popup,
             true,
+            false,
+        )
+    }
+
+    pub(crate) fn update_navigation_owner_with_combo_popup_for_show_focus(
+        &mut self,
+        ctx: &egui::Context,
+        candidate: NavigationOwner,
+        supported_dialog_visibility_changed: bool,
+        combo_popup: Option<ComboPopupOwner>,
+        preserve_query_focus: bool,
+    ) -> NavigationOwner {
+        self.update_navigation_owner_with_combo_popup_internal(
+            ctx,
+            candidate,
+            supported_dialog_visibility_changed,
+            combo_popup,
+            true,
+            preserve_query_focus,
         )
     }
 
@@ -2161,7 +2180,20 @@ impl JumpModeUi {
         } else {
             NavigationOwner::Blocked
         };
-        self.update_navigation_owner_with_combo_popup_internal(ctx, candidate, false, popup, false)
+        self.update_navigation_owner_with_combo_popup_internal(
+            ctx, candidate, false, popup, false, false,
+        )
+    }
+
+    fn surrender_focus_unless_show_query(
+        ctx: &egui::Context,
+        focus_id: egui::Id,
+        preserve_query_focus: bool,
+    ) {
+        if preserve_query_focus && focus_id == egui::Id::new("query_input") {
+            return;
+        }
+        ctx.memory_mut(|memory| memory.surrender_focus(focus_id));
     }
 
     fn update_navigation_owner_with_combo_popup_internal(
@@ -2171,6 +2203,7 @@ impl JumpModeUi {
         supported_dialog_visibility_changed: bool,
         combo_popup: Option<ComboPopupOwner>,
         root_owner: bool,
+        preserve_query_focus: bool,
     ) -> NavigationOwner {
         let owner_changed =
             supported_dialog_visibility_changed || candidate != self.navigation_owner;
@@ -2188,6 +2221,7 @@ impl JumpModeUi {
                                 || self.paste_sequence_open
                                 || self.mkmacro_open
                                 || self.observed_dialogs.iter().any(|dialog| dialog.open))))
+                    && !preserve_query_focus
                 {
                     // A supported native dialog deliberately takes ownership
                     // from the launcher query. `surrender_focus` is conditional
@@ -2195,10 +2229,18 @@ impl JumpModeUi {
                     ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("query_input")));
                 }
                 if owner_changed && let Some(focus) = self.last_completed_focus_handoff.as_ref() {
-                    ctx.memory_mut(|memory| memory.surrender_focus(focus.focus_owner_id()));
+                    Self::surrender_focus_unless_show_query(
+                        ctx,
+                        focus.focus_owner_id(),
+                        preserve_query_focus,
+                    );
                 }
                 if owner_changed && let Some(focus) = self.frame_consumed_focus_intent.as_ref() {
-                    ctx.memory_mut(|memory| memory.surrender_focus(focus.focus_owner_id()));
+                    Self::surrender_focus_unless_show_query(
+                        ctx,
+                        focus.focus_owner_id(),
+                        preserve_query_focus,
+                    );
                 }
             }
             self.cancel_all();
@@ -2491,6 +2533,25 @@ impl JumpModeUi {
             root_targets_allowed,
             root_visible,
             None,
+            false,
+        )
+    }
+
+    pub(crate) fn prepare_pass_for_navigation_owner_with_show_query_focus(
+        &mut self,
+        ctx: &egui::Context,
+        navigation_owner: NavigationOwner,
+        root_targets_allowed: bool,
+        root_visible: bool,
+        preserve_query_focus: bool,
+    ) -> bool {
+        self.prepare_pass_with_viewport_binding(
+            ctx,
+            navigation_owner,
+            root_targets_allowed,
+            root_visible,
+            None,
+            preserve_query_focus,
         )
     }
 
@@ -2511,6 +2572,7 @@ impl JumpModeUi {
             false,
             root_visible,
             Some(binding),
+            false,
         )
     }
 
@@ -2521,6 +2583,7 @@ impl JumpModeUi {
         root_targets_allowed: bool,
         root_visible: bool,
         viewport_binding: Option<NavigationViewportBinding>,
+        preserve_query_focus: bool,
     ) -> bool {
         let viewport_is_current = match viewport_binding {
             Some(binding) => {
@@ -2551,6 +2614,7 @@ impl JumpModeUi {
             navigation_owner,
             root_targets_allowed,
             viewport_binding,
+            preserve_query_focus,
         );
         self.pass_registry = Some(completed);
         true
@@ -2563,6 +2627,7 @@ impl JumpModeUi {
         navigation_owner: NavigationOwner,
         root_targets_allowed: bool,
         viewport_binding: Option<NavigationViewportBinding>,
+        preserve_query_focus: bool,
     ) {
         registry.revalidate(
             ctx,
@@ -2603,7 +2668,11 @@ impl JumpModeUi {
             .is_some_and(|handoff| registry.get(&handoff.intent.target).is_none())
             && let Some(handoff) = self.last_completed_focus_handoff.take()
         {
-            ctx.memory_mut(|memory| memory.surrender_focus(handoff.focus_owner_id()));
+            Self::surrender_focus_unless_show_query(
+                ctx,
+                handoff.focus_owner_id(),
+                preserve_query_focus,
+            );
         }
         let navigation_allowed = match navigation_owner {
             NavigationOwner::Root => root_targets_allowed,
@@ -2671,6 +2740,25 @@ impl JumpModeUi {
             root_targets_allowed,
             root_visible,
             None,
+            false,
+        );
+    }
+
+    pub(crate) fn complete_frame_for_navigation_owner_with_show_query_focus(
+        &mut self,
+        ctx: &egui::Context,
+        navigation_owner: NavigationOwner,
+        root_targets_allowed: bool,
+        root_visible: bool,
+        preserve_query_focus: bool,
+    ) {
+        self.complete_frame_with_viewport_binding(
+            ctx,
+            navigation_owner,
+            root_targets_allowed,
+            root_visible,
+            None,
+            preserve_query_focus,
         );
     }
 
@@ -2687,6 +2775,7 @@ impl JumpModeUi {
             false,
             root_visible,
             Some(binding),
+            false,
         );
     }
 
@@ -2697,6 +2786,7 @@ impl JumpModeUi {
         root_targets_allowed: bool,
         root_visible: bool,
         viewport_binding: Option<NavigationViewportBinding>,
+        preserve_query_focus: bool,
     ) {
         if viewport_binding.is_some_and(|binding| ctx.viewport_id() != binding.viewport) {
             // A stale or misrouted callback must not surrender focus through a
@@ -2716,7 +2806,11 @@ impl JumpModeUi {
         };
         if !self.enabled || !root_visible || !viewport_is_current {
             if let Some(consumed) = self.frame_consumed_focus_intent.as_ref() {
-                ctx.memory_mut(|memory| memory.surrender_focus(consumed.focus_owner_id()));
+                Self::surrender_focus_unless_show_query(
+                    ctx,
+                    consumed.focus_owner_id(),
+                    preserve_query_focus,
+                );
             }
             self.clear();
             return;
@@ -2735,6 +2829,7 @@ impl JumpModeUi {
             navigation_owner,
             root_targets_allowed,
             viewport_binding,
+            preserve_query_focus,
         );
         let pending_intent = self.pending_focus_intent.take();
         let mut completed_focus_handoff = None;
@@ -2746,7 +2841,11 @@ impl JumpModeUi {
                         && target.epoch == consumed.intent.epoch
                 });
             if !still_matches {
-                ctx.memory_mut(|memory| memory.surrender_focus(consumed.focus_owner_id()));
+                Self::surrender_focus_unless_show_query(
+                    ctx,
+                    consumed.focus_owner_id(),
+                    preserve_query_focus,
+                );
             } else {
                 completed_focus_handoff = Some(consumed.clone());
             }
