@@ -1721,17 +1721,9 @@ const SEEDS: &[Seed] = &[
         "plugin.file_search.ripgrep",
         BuiltinPlugin("file_search"),
         S::Plugin,
-        "Ripgrep search provider",
+        "Ripgrep executable",
         "Configure the ripgrep executable used for file content searches.",
         &["rg", "text search"]
-    ),
-    seed!(
-        "plugin.file_search.ripgrep_executable",
-        BuiltinPlugin("file_search"),
-        S::Plugin,
-        "Ripgrep executable",
-        "Configure the ripgrep executable location. The configured path is not indexed.",
-        &["rg path", "text search"]
     ),
     seed!(
         "plugin.file_search.preferred_editor_command",
@@ -2679,7 +2671,6 @@ mod tests {
             "plugin.file_search.everything_enabled",
             "plugin.file_search.everything_executable",
             "plugin.file_search.ripgrep",
-            "plugin.file_search.ripgrep_executable",
             "plugin.file_search.preferred_editor_command",
             "plugin.file_search.preferred_editor_arguments",
             "plugin.file_search.preferred_terminal_command",
@@ -2790,6 +2781,7 @@ mod tests {
             "theme.active_preset",
             "mouse.cursor_offset",
             "mouse.session_effects",
+            "plugin.file_search.ripgrep_executable",
         ] {
             assert!(
                 catalog.entry(phantom_id).is_none(),
@@ -2869,6 +2861,135 @@ mod tests {
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
             vec!["Brightness"]
+        );
+
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum ResponseAdapter {
+            InlinePluginSettingsUi,
+            DedicatedMouseGestureSettings,
+        }
+
+        let seeded_builtin_ids = SEEDS
+            .iter()
+            .filter_map(|seed| match seed.owner {
+                SeedOwner::BuiltinPlugin(_) => Some(seed.id),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let expected_builtin_ids = expected_ids
+            .iter()
+            .copied()
+            .filter(|id| {
+                (id.starts_with("plugin.") && *id != "plugin.notes.external_open")
+                    || id.starts_with("mouse_gestures.")
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            seeded_builtin_ids, expected_builtin_ids,
+            "the seeded builtin control inventory must match the explicit response-adapter census"
+        );
+
+        // Keep this binding list independent of SEEDS: a newly indexed field
+        // must not pass the census just because another field for its owner is
+        // already routed through the same renderer.
+        let inline_response_ids = [
+            "plugin.browser_tabs.recalculate_each_query",
+            "plugin.clipboard.max_entries",
+            "plugin.clipboard_modify.hide_after_apply",
+            "plugin.clipboard_modify.dialog_width",
+            "plugin.clipboard_modify.dialog_height",
+            "plugin.clipboard_modify.navigation_width",
+            "plugin.clipboard_modify.source_preview_split",
+            "plugin.clipboard_modify.template_filter",
+            "plugin.clipboard_modify.pipeline_filter",
+            "plugin.clipboard_modify.management_sort",
+            "plugin.clipboard_modify.management_sort_ascending",
+            "plugin.color_picker.color",
+            "plugin.diff.wrap_text",
+            "plugin.diff.syntax_highlighting",
+            "plugin.diff.ignore_whitespace",
+            "plugin.diff.case_sensitive",
+            "plugin.diff.pane_split",
+            "plugin.file_search.global_roots",
+            "plugin.file_search.excluded_directory_names",
+            "plugin.file_search.max_results",
+            "plugin.file_search.max_matches",
+            "plugin.file_search.max_content_file_size",
+            "plugin.file_search.max_full_preview_size",
+            "plugin.file_search.include_hidden",
+            "plugin.file_search.case_sensitive",
+            "plugin.file_search.everything_enabled",
+            "plugin.file_search.everything_executable",
+            "plugin.file_search.ripgrep",
+            "plugin.file_search.preferred_editor_command",
+            "plugin.file_search.preferred_editor_arguments",
+            "plugin.file_search.preferred_terminal_command",
+            "plugin.file_search.preferred_terminal_arguments",
+            "plugin.history.max_entries",
+            "plugin.mkmacro.enabled",
+            "plugin.network.refresh_rate",
+            "plugin.network.units",
+            "plugin.omni_search.included_categories",
+            "plugin.screenshot.directory",
+            "plugin.screenshot.save_file",
+            "plugin.screenshot.use_editor",
+            "plugin.screenshot.auto_save",
+            "plugin.shell.open_in_wezterm",
+            "plugin.stopwatch.precision",
+            "plugin.stopwatch.refresh_rate",
+            "plugin.virtual_desktop.launch_timeout",
+            "plugin.virtual_desktop.rule.enabled",
+            "plugin.virtual_desktop.rule.executable",
+            "plugin.virtual_desktop.rule.process_path",
+            "plugin.virtual_desktop.rule.window_title",
+            "plugin.virtual_desktop.rule.window_class",
+            "plugin.virtual_desktop.rule.target_desktop",
+        ];
+        let dedicated_response_ids = [
+            "mouse_gestures.enabled",
+            "mouse_gestures.debug_logging",
+            "mouse_gestures.show_trail",
+            "mouse_gestures.trail_color",
+            "mouse_gestures.trail_width",
+            "mouse_gestures.trail_interval",
+            "mouse_gestures.recognition_interval",
+            "mouse_gestures.show_hint",
+            "mouse_gestures.hint_offset_x",
+            "mouse_gestures.hint_offset_y",
+            "mouse_gestures.wheel_cycle_gate",
+            "mouse_gestures.cancel_behavior",
+            "mouse_gestures.no_match_behavior",
+            "mouse_gestures.ignore_window_titles",
+        ];
+        let response_adapters = inline_response_ids
+            .into_iter()
+            .map(|id| (id, ResponseAdapter::InlinePluginSettingsUi))
+            .chain(
+                dedicated_response_ids
+                    .into_iter()
+                    .map(|id| (id, ResponseAdapter::DedicatedMouseGestureSettings)),
+            )
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let bound_response_ids = response_adapters.keys().copied().collect::<BTreeSet<_>>();
+        assert_eq!(
+            bound_response_ids, seeded_builtin_ids,
+            "every seeded builtin control has an explicit response binding, and no new field inherits one by owner"
+        );
+        assert_eq!(
+            response_adapters.len(),
+            seeded_builtin_ids.len(),
+            "each safely focusable builtin control maps to one real-response adapter"
+        );
+        assert!(
+            response_adapters.iter().all(|(id, adapter)| match adapter {
+                ResponseAdapter::InlinePluginSettingsUi => {
+                    id.starts_with("plugin.") && *id != "plugin.notes.external_open"
+                }
+                ResponseAdapter::DedicatedMouseGestureSettings => {
+                    id.starts_with("mouse_gestures.")
+                }
+            }),
+            "the adapter census follows the current inline and dedicated response owners"
         );
     }
 

@@ -11,9 +11,42 @@ pub struct BrightnessDialog {
     pub open: bool,
     value: u8,
     value_loaded: bool,
+    #[cfg(test)]
+    test_fake_hardware_value: Option<u8>,
+    #[cfg(test)]
+    test_hardware_queries: usize,
+    #[cfg(test)]
+    test_set_actions: usize,
+    #[cfg(test)]
+    test_level_response: Option<egui::Response>,
 }
 
 impl BrightnessDialog {
+    #[cfg(test)]
+    pub(crate) fn test_seed_fake_hardware_value(&mut self, value: u8) {
+        self.test_fake_hardware_value = Some(value);
+        self.value = value;
+        self.value_loaded = false;
+        self.test_hardware_queries = 0;
+        self.test_set_actions = 0;
+        self.test_level_response = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_level_response(&self) -> Option<&egui::Response> {
+        self.test_level_response.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_hardware_query_count(&self) -> usize {
+        self.test_hardware_queries
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_action_count(&self) -> usize {
+        self.test_set_actions
+    }
+
     pub fn open(&mut self) {
         self.open = true;
         self.value_loaded = false;
@@ -24,7 +57,19 @@ impl BrightnessDialog {
             return;
         }
         if !self.value_loaded {
-            self.value = get_main_display_brightness().unwrap_or(50);
+            #[cfg(test)]
+            {
+                if let Some(value) = self.test_fake_hardware_value {
+                    self.value = value;
+                } else {
+                    self.test_hardware_queries = self.test_hardware_queries.saturating_add(1);
+                    self.value = get_main_display_brightness().unwrap_or(50);
+                }
+            }
+            #[cfg(not(test))]
+            {
+                self.value = get_main_display_brightness().unwrap_or(50);
+            }
             self.value_loaded = true;
         }
         let mut close = false;
@@ -32,15 +77,41 @@ impl BrightnessDialog {
             .resizable(false)
             .open(&mut self.open)
             .show(ctx, |ui| {
-                ui.add(egui::Slider::new(&mut self.value, 0..=100).text("Level"));
+                let response = ui.add(egui::Slider::new(&mut self.value, 0..=100).text("Level"));
+                #[cfg(test)]
+                {
+                    self.test_level_response = Some(response.clone());
+                }
+                crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                    ui,
+                    &response,
+                    "brightness.level",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                );
                 ui.horizontal(|ui| {
                     if ui.button("Set").clicked() {
-                        let _ = launch_action(&Action {
-                            label: String::new(),
-                            desc: "Brightness".into(),
-                            action: format!("brightness:set:{}", self.value),
-                            args: None,
-                        });
+                        #[cfg(test)]
+                        {
+                            if self.test_fake_hardware_value.is_some() {
+                                self.test_set_actions = self.test_set_actions.saturating_add(1);
+                            } else {
+                                let _ = launch_action(&Action {
+                                    label: String::new(),
+                                    desc: "Brightness".into(),
+                                    action: format!("brightness:set:{}", self.value),
+                                    args: None,
+                                });
+                            }
+                        }
+                        #[cfg(not(test))]
+                        {
+                            let _ = launch_action(&Action {
+                                label: String::new(),
+                                desc: "Brightness".into(),
+                                action: format!("brightness:set:{}", self.value),
+                                args: None,
+                            });
+                        }
                         close = true;
                         app.focus_input();
                     }

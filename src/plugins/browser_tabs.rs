@@ -894,9 +894,15 @@ impl Plugin for BrowserTabsPlugin {
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
         let mut cfg: BrowserTabsPluginSettings =
             serde_json::from_value(value.clone()).unwrap_or_default();
-        ui.checkbox(
+        let response = ui.checkbox(
             &mut cfg.recalc_each_query,
             "Recalculate cache on each query",
+        );
+        crate::settings_editor::render::observe_scoped_settings_navigation_response(
+            ui,
+            &response,
+            "plugin.browser_tabs.recalculate_each_query",
+            crate::gui::jump_mode::TargetKind::Checkbox,
         );
         ui.label(
             "If UI Automation can't activate a tab, a mouse click is simulated and the cursor may briefly move",

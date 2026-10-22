@@ -88,31 +88,73 @@ impl Plugin for FileSearchPlugin {
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
         let mut cfg: FileSearchSettings = serde_json::from_value(value.clone()).unwrap_or_default();
         ui.heading("File Search");
-        path_list_editor(ui, "Global search roots", &mut cfg.global_search_roots);
+        path_list_editor(
+            ui,
+            "Global search roots",
+            &mut cfg.global_search_roots,
+            "plugin.file_search.global_roots",
+        );
         string_list_editor(
             ui,
             "Excluded directory names",
             &mut cfg.excluded_directory_names,
+            "plugin.file_search.excluded_directory_names",
         );
-        ui.add(
+        let response = ui.add(
             egui::Slider::new(&mut cfg.max_search_results, 1..=10_000).text("Max search results"),
         );
-        ui.add(
+        observe_file_search_response(
+            ui,
+            &response,
+            "plugin.file_search.max_results",
+            crate::gui::jump_mode::TargetKind::Slider,
+        );
+        let response = ui.add(
             egui::Slider::new(&mut cfg.max_matches_per_content_file, 1..=1_000)
                 .text("Max matches per content file"),
         );
+        observe_file_search_response(
+            ui,
+            &response,
+            "plugin.file_search.max_matches",
+            crate::gui::jump_mode::TargetKind::Slider,
+        );
         ui.label("Max content-search file size (bytes)");
-        ui.add(
+        let response = ui.add(
             egui::DragValue::new(&mut cfg.max_content_search_file_size_bytes)
                 .speed(1024.0)
                 .range(1..=u64::MAX),
         );
+        observe_file_search_response(
+            ui,
+            &response,
+            "plugin.file_search.max_content_file_size",
+            crate::gui::jump_mode::TargetKind::Slider,
+        );
         full_preview_limit_mib_editor(ui, &mut cfg.max_full_preview_file_size_bytes);
-        ui.checkbox(&mut cfg.include_hidden_files, "Include hidden by default");
-        ui.checkbox(&mut cfg.case_sensitive, "Case-sensitive by default");
-        ui.checkbox(
+        let response = ui.checkbox(&mut cfg.include_hidden_files, "Include hidden by default");
+        observe_file_search_response(
+            ui,
+            &response,
+            "plugin.file_search.include_hidden",
+            crate::gui::jump_mode::TargetKind::Checkbox,
+        );
+        let response = ui.checkbox(&mut cfg.case_sensitive, "Case-sensitive by default");
+        observe_file_search_response(
+            ui,
+            &response,
+            "plugin.file_search.case_sensitive",
+            crate::gui::jump_mode::TargetKind::Checkbox,
+        );
+        let response = ui.checkbox(
             &mut cfg.everything_enabled,
             "Use Everything ES CLI for global filename search",
+        );
+        observe_file_search_response(
+            ui,
+            &response,
+            "plugin.file_search.everything_enabled",
+            crate::gui::jump_mode::TargetKind::Checkbox,
         );
         ui.add(
             egui::Label::new(
@@ -124,23 +166,42 @@ impl Plugin for FileSearchPlugin {
             ui,
             "Everything ES CLI executable path (es.exe)",
             &mut cfg.everything_executable_path,
+            "plugin.file_search.everything_executable",
         );
         ripgrep_settings_ui(ui, &mut cfg.ripgrep_executable_path, &mut self.ripgrep_ui);
         ui.label("Preferred editor command");
-        ui.add(
+        let response = ui.add(
             egui::TextEdit::singleline(&mut cfg.preferred_editor_command)
                 .desired_width(ui.available_width()),
         );
-        string_list_editor(ui, "Preferred editor args", &mut cfg.preferred_editor_args);
+        observe_file_search_response(
+            ui,
+            &response,
+            "plugin.file_search.preferred_editor_command",
+            crate::gui::jump_mode::TargetKind::TextEntry,
+        );
+        string_list_editor(
+            ui,
+            "Preferred editor args",
+            &mut cfg.preferred_editor_args,
+            "plugin.file_search.preferred_editor_arguments",
+        );
         ui.label("Preferred terminal command");
-        ui.add(
+        let response = ui.add(
             egui::TextEdit::singleline(&mut cfg.preferred_terminal_command)
                 .desired_width(ui.available_width()),
+        );
+        observe_file_search_response(
+            ui,
+            &response,
+            "plugin.file_search.preferred_terminal_command",
+            crate::gui::jump_mode::TargetKind::TextEntry,
         );
         string_list_editor(
             ui,
             "Preferred terminal args",
             &mut cfg.preferred_terminal_args,
+            "plugin.file_search.preferred_terminal_arguments",
         );
         for diagnostic in cfg.validate() {
             let diagnostic = diagnostic.to_string();
@@ -182,10 +243,14 @@ fn full_preview_limit_mib_editor(ui: &mut egui::Ui, bytes: &mut u64) {
     let max_mib = u64::MAX / BYTES_PER_MIB;
     let mut mib = (*bytes / BYTES_PER_MIB).max(1);
     ui.label("Full-file preview limit (MiB)");
-    if ui
-        .add(egui::DragValue::new(&mut mib).speed(1.0).range(1..=max_mib))
-        .changed()
-    {
+    let response = ui.add(egui::DragValue::new(&mut mib).speed(1.0).range(1..=max_mib));
+    observe_file_search_response(
+        ui,
+        &response,
+        "plugin.file_search.max_full_preview_size",
+        crate::gui::jump_mode::TargetKind::Slider,
+    );
+    if response.changed() {
         *bytes = mib
             .max(1)
             .checked_mul(BYTES_PER_MIB)
@@ -213,10 +278,15 @@ fn ripgrep_settings_ui_with_probe(
     ui.label("ripgrep executable");
     let mut text = path.display().to_string();
     ui.label("Absolute path");
-    if ui
-        .add(egui::TextEdit::singleline(&mut text).desired_width(ui.available_width()))
-        .changed()
-    {
+    let response =
+        ui.add(egui::TextEdit::singleline(&mut text).desired_width(ui.available_width()));
+    observe_file_search_response(
+        ui,
+        &response,
+        "plugin.file_search.ripgrep",
+        crate::gui::jump_mode::TargetKind::TextEntry,
+    );
+    if response.changed() {
         *path = PathBuf::from(text.trim());
     }
     ui.horizontal_wrapped(|ui| {
@@ -444,57 +514,148 @@ fn resolution_source_label(source: &ExecutableResolutionSource) -> &'static str 
     }
 }
 
-fn path_field(ui: &mut egui::Ui, label: &str, path: &mut PathBuf) {
+fn observe_file_search_response(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    control_id: &str,
+    kind: crate::gui::jump_mode::TargetKind,
+) {
+    crate::settings_editor::render::observe_scoped_settings_navigation_response(
+        ui, response, control_id, kind,
+    );
+}
+
+fn path_field(ui: &mut egui::Ui, label: &str, path: &mut PathBuf, control_id: &str) {
+    let response = edit_path_field(ui, label, path);
+    observe_file_search_response(
+        ui,
+        &response,
+        control_id,
+        crate::gui::jump_mode::TargetKind::TextEntry,
+    );
+}
+
+fn edit_path_field(ui: &mut egui::Ui, label: &str, path: &mut PathBuf) -> egui::Response {
     let mut text = path.display().to_string();
     if !label.is_empty() {
         ui.add(egui::Label::new(label).wrap_mode(egui::TextWrapMode::Wrap));
     }
-    if ui
-        .add(egui::TextEdit::singleline(&mut text).desired_width(ui.available_width()))
-        .changed()
-    {
+    let response =
+        ui.add(egui::TextEdit::singleline(&mut text).desired_width(ui.available_width()));
+    if response.changed() {
         *path = PathBuf::from(text.trim());
     }
+    response
 }
 
-fn path_list_editor(ui: &mut egui::Ui, label: &str, paths: &mut Vec<PathBuf>) {
-    ui.collapsing(label, |ui| {
-        let mut remove = None;
-        for (idx, path) in paths.iter_mut().enumerate() {
-            path_field(ui, "", path);
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("Remove").clicked() {
-                    remove = Some(idx);
-                }
-            });
-        }
-        if let Some(idx) = remove {
-            paths.remove(idx);
-        }
-        if ui.button("Add root").clicked() {
-            paths.push(PathBuf::new());
-        }
-    });
+fn file_search_control_requested(ui: &egui::Ui, control_id: &str) -> bool {
+    crate::settings_editor::render::scoped_settings_navigation_request(ui.ctx())
+        .is_some_and(|request| request.control_id == control_id)
 }
 
-fn string_list_editor(ui: &mut egui::Ui, label: &str, items: &mut Vec<String>) {
-    ui.collapsing(label, |ui| {
-        let mut remove = None;
-        for (idx, item) in items.iter_mut().enumerate() {
-            ui.add(egui::TextEdit::singleline(item).desired_width(ui.available_width()));
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("Remove").clicked() {
-                    remove = Some(idx);
-                }
-            });
-        }
-        if let Some(idx) = remove {
-            items.remove(idx);
-        }
-        if ui.button("Add").clicked() {
-            items.push(String::new());
-        }
-    });
+fn path_list_editor(ui: &mut egui::Ui, label: &str, paths: &mut Vec<PathBuf>, control_id: &str) {
+    let force_open = file_search_control_requested(ui, control_id);
+    let response = egui::CollapsingHeader::new(label)
+        .open(force_open.then_some(true))
+        .show(ui, |ui| {
+            let mut remove = None;
+            for (idx, path) in paths.iter_mut().enumerate() {
+                let response = edit_path_field(ui, "", path);
+                let observer_id = format!("{control_id}/path/{idx}");
+                observe_file_search_response(
+                    ui,
+                    &response,
+                    &observer_id,
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                );
+                ui.horizontal_wrapped(|ui| {
+                    let response = ui.button("Remove");
+                    let observer_id = format!("{control_id}/remove/{idx}");
+                    observe_file_search_response(
+                        ui,
+                        &response,
+                        &observer_id,
+                        crate::gui::jump_mode::TargetKind::Button,
+                    );
+                    if response.clicked() {
+                        remove = Some(idx);
+                    }
+                });
+            }
+            if let Some(idx) = remove {
+                paths.remove(idx);
+            }
+            let response = ui.button("Add root");
+            let observer_id = format!("{control_id}/add");
+            observe_file_search_response(
+                ui,
+                &response,
+                &observer_id,
+                crate::gui::jump_mode::TargetKind::Button,
+            );
+            if response.clicked() {
+                paths.push(PathBuf::new());
+            }
+        });
+    observe_file_search_response(
+        ui,
+        &response.header_response,
+        control_id,
+        crate::gui::jump_mode::TargetKind::Button,
+    );
+}
+
+fn string_list_editor(ui: &mut egui::Ui, label: &str, items: &mut Vec<String>, control_id: &str) {
+    let force_open = file_search_control_requested(ui, control_id);
+    let response = egui::CollapsingHeader::new(label)
+        .open(force_open.then_some(true))
+        .show(ui, |ui| {
+            let mut remove = None;
+            for (idx, item) in items.iter_mut().enumerate() {
+                let response =
+                    ui.add(egui::TextEdit::singleline(item).desired_width(ui.available_width()));
+                let observer_id = format!("{control_id}/item/{idx}");
+                observe_file_search_response(
+                    ui,
+                    &response,
+                    &observer_id,
+                    crate::gui::jump_mode::TargetKind::TextEntry,
+                );
+                ui.horizontal_wrapped(|ui| {
+                    let response = ui.button("Remove");
+                    let observer_id = format!("{control_id}/remove/{idx}");
+                    observe_file_search_response(
+                        ui,
+                        &response,
+                        &observer_id,
+                        crate::gui::jump_mode::TargetKind::Button,
+                    );
+                    if response.clicked() {
+                        remove = Some(idx);
+                    }
+                });
+            }
+            if let Some(idx) = remove {
+                items.remove(idx);
+            }
+            let response = ui.button("Add");
+            let observer_id = format!("{control_id}/add");
+            observe_file_search_response(
+                ui,
+                &response,
+                &observer_id,
+                crate::gui::jump_mode::TargetKind::Button,
+            );
+            if response.clicked() {
+                items.push(String::new());
+            }
+        });
+    observe_file_search_response(
+        ui,
+        &response.header_response,
+        control_id,
+        crate::gui::jump_mode::TargetKind::Button,
+    );
 }
 
 fn open_action() -> Action {

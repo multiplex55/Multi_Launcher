@@ -92,7 +92,13 @@ impl Plugin for HistoryPlugin {
             serde_json::from_value(value.clone()).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.label("History limit");
-            ui.add(egui::Slider::new(&mut cfg.max_entries, 10..=500).text(""));
+            let response = ui.add(egui::Slider::new(&mut cfg.max_entries, 10..=500).text(""));
+            crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                ui,
+                &response,
+                "plugin.history.max_entries",
+                crate::gui::jump_mode::TargetKind::Slider,
+            );
         });
         match serde_json::to_value(&cfg) {
             Ok(v) => *value = v,

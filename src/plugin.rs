@@ -640,6 +640,13 @@ impl PluginManager {
         self.inert_for_test
     }
 
+    /// Register a real built-in provider in an inert test manager while
+    /// preserving the Builtin catalog origin and its normal settings path.
+    #[cfg(test)]
+    pub(crate) fn register_builtin_for_settings_test<P: Plugin + 'static>(&mut self, plugin: P) {
+        self.register_with_settings(plugin, &std::collections::HashMap::new());
+    }
+
     fn from_macro_store(store: Arc<crate::mkmacro::MkMacroStore>) -> Self {
         let search_updates = Arc::new(PluginSearchUpdates::default());
         let window_catalog = WindowCatalog::production(Arc::clone(&search_updates));

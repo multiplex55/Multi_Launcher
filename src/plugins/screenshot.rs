@@ -192,8 +192,14 @@ impl Plugin for ScreenshotPlugin {
         let mut cfg: ScreenshotPluginSettings =
             serde_json::from_value(value.clone()).unwrap_or_default();
         ui.label("Screenshot directory");
-        ui.add(
+        let response = ui.add(
             egui::TextEdit::singleline(&mut cfg.screenshot_dir).desired_width(ui.available_width()),
+        );
+        crate::settings_editor::render::observe_scoped_settings_navigation_response(
+            ui,
+            &response,
+            "plugin.screenshot.directory",
+            crate::gui::jump_mode::TargetKind::TextEntry,
         );
         ui.horizontal_wrapped(|ui| {
             if ui.button("Browse").clicked()
@@ -202,12 +208,30 @@ impl Plugin for ScreenshotPlugin {
                 cfg.screenshot_dir = dir.display().to_string();
             }
         });
-        ui.checkbox(
+        let response = ui.checkbox(
             &mut cfg.screenshot_save_file,
             "Save file when copying screenshot",
         );
-        ui.checkbox(&mut cfg.screenshot_use_editor, "Enable screenshot editor");
-        ui.checkbox(&mut cfg.screenshot_auto_save, "Auto-save after editing");
+        crate::settings_editor::render::observe_scoped_settings_navigation_response(
+            ui,
+            &response,
+            "plugin.screenshot.save_file",
+            crate::gui::jump_mode::TargetKind::Checkbox,
+        );
+        let response = ui.checkbox(&mut cfg.screenshot_use_editor, "Enable screenshot editor");
+        crate::settings_editor::render::observe_scoped_settings_navigation_response(
+            ui,
+            &response,
+            "plugin.screenshot.use_editor",
+            crate::gui::jump_mode::TargetKind::Checkbox,
+        );
+        let response = ui.checkbox(&mut cfg.screenshot_auto_save, "Auto-save after editing");
+        crate::settings_editor::render::observe_scoped_settings_navigation_response(
+            ui,
+            &response,
+            "plugin.screenshot.auto_save",
+            crate::gui::jump_mode::TargetKind::Checkbox,
+        );
         if let Ok(v) = serde_json::to_value(&cfg) {
             *value = v;
         }

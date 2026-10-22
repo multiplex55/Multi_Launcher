@@ -4350,12 +4350,131 @@ impl LauncherApp {
                 .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
     }
 
-    fn settings_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+    pub(crate) fn settings_native_ui_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
         self.show_settings
             && self.native_ui_host_input_allowed(ctx, root_visible)
             && !egui::Popup::is_any_open(ctx)
             && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx)
                 == Some(crate::gui::jump_mode::ui::settings_layer_id())
+    }
+
+    fn dedicated_settings_native_ui_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        section: &crate::settings_editor::catalog::SettingsSection,
+    ) -> bool {
+        use crate::settings_editor::catalog::SettingsSection;
+        let (is_open, title) = match section {
+            SettingsSection::Theme => (self.theme_settings_dialog_open, "Theme settings"),
+            SettingsSection::PluginEditor => (self.show_plugins, "Plugin Settings"),
+            SettingsSection::Brightness => (self.brightness_dialog.open, "Brightness"),
+            SettingsSection::Mouse => {
+                return self.mouse_settings_native_ui_owner_current(ctx, root_visible);
+            }
+            SettingsSection::MouseGestures => {
+                return self.mouse_gesture_settings_native_ui_owner_current(ctx, root_visible);
+            }
+            _ => return false,
+        };
+        is_open
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && !egui::Popup::is_any_open(ctx)
+            && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx)
+                == Some(crate::gui::jump_mode::ui::root_window_layer_id(title))
+    }
+
+    fn dedicated_settings_navigation_protected_takeover(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        section: &crate::settings_editor::catalog::SettingsSection,
+    ) -> bool {
+        use crate::gui::jump_mode::ui::{
+            NavigationDialogKind, settings_layer_id, visible_top_middle_layer,
+        };
+        use crate::settings_editor::catalog::SettingsSection;
+
+        if !self.native_ui_host_input_allowed(ctx, root_visible)
+            || egui::Popup::is_any_open(ctx)
+            || (section == &SettingsSection::MouseGestures
+                && self.mouse_gesture_settings_dialog.window_picker_is_open())
+        {
+            return true;
+        }
+
+        let destination_layer = match section {
+            SettingsSection::Theme => Some(crate::gui::jump_mode::ui::root_window_layer_id(
+                "Theme settings",
+            )),
+            SettingsSection::Mouse => NavigationDialogKind::MouseSettings.layer_id(),
+            SettingsSection::MouseGestures => NavigationDialogKind::MouseGestureSettings.layer_id(),
+            SettingsSection::PluginEditor => Some(crate::gui::jump_mode::ui::root_window_layer_id(
+                "Plugin Settings",
+            )),
+            SettingsSection::Brightness => Some(crate::gui::jump_mode::ui::root_window_layer_id(
+                "Brightness",
+            )),
+            SettingsSection::Main(_) | SettingsSection::Notes | SettingsSection::Plugin { .. } => {
+                return true;
+            }
+        };
+        let settings_layer = settings_layer_id();
+        visible_top_middle_layer(ctx).is_some_and(|top_layer| {
+            top_layer != settings_layer && Some(top_layer) != destination_layer
+        })
+    }
+
+    fn dedicated_settings_navigation_observer(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        section: &crate::settings_editor::catalog::SettingsSection,
+        owner_current: bool,
+        first_ui_pass: bool,
+    ) -> Option<crate::settings_editor::render::SettingsNavigationFrameObserver> {
+        if self.plugins.settings_catalog_revision()
+            != self.settings_editor.search_catalog.plugin_revision()
+        {
+            if self
+                .settings_editor
+                .pending_settings_navigation
+                .as_ref()
+                .is_some_and(|pending| &pending.section == section)
+            {
+                self.settings_editor.pending_settings_navigation = None;
+            }
+            return None;
+        }
+        let owner_open =
+            crate::settings_editor::render::settings_destination_owner_open(self, section);
+        let protected_takeover =
+            self.dedicated_settings_navigation_protected_takeover(ctx, root_visible, section);
+        self.settings_editor.dedicated_navigation_observer(
+            section,
+            owner_open,
+            owner_current,
+            protected_takeover,
+            first_ui_pass,
+        )
+    }
+
+    fn finish_dedicated_settings_navigation_frame(
+        &mut self,
+        observer: &crate::settings_editor::render::SettingsNavigationFrameObserver,
+        owner_current: bool,
+        first_ui_pass: bool,
+    ) {
+        self.settings_editor.finish_dedicated_navigation_frame(
+            observer,
+            owner_current,
+            first_ui_pass,
+        );
     }
 
     fn mouse_gesture_settings_native_ui_owner_current(
@@ -7010,9 +7129,38 @@ impl LauncherApp {
         }
         let show_plugin = self.show_plugins;
         if show_plugin {
+            let section = crate::settings_editor::catalog::SettingsSection::PluginEditor;
+            let owner_current = self.dedicated_settings_native_ui_owner_current(
+                &ctx,
+                frame_logic.should_be_visible,
+                &section,
+            );
+            let navigation_observer = self.dedicated_settings_navigation_observer(
+                &ctx,
+                frame_logic.should_be_visible,
+                &section,
+                owner_current,
+                first_ui_pass,
+            );
+            let _navigation_scope = navigation_observer
+                .as_ref()
+                .map(|observer| observer.install(&ctx));
             let mut ed = std::mem::take(&mut self.plugin_editor);
             ed.ui(&ctx, self);
             self.plugin_editor = ed;
+            drop(_navigation_scope);
+            if let Some(observer) = navigation_observer.as_ref() {
+                let owner_current = self.dedicated_settings_native_ui_owner_current(
+                    &ctx,
+                    frame_logic.should_be_visible,
+                    &section,
+                );
+                self.finish_dedicated_settings_navigation_frame(
+                    observer,
+                    owner_current,
+                    first_ui_pass,
+                );
+            }
         }
         let radial_navigation_instance = self
             .jump_mode_ui
@@ -7604,6 +7752,18 @@ impl LauncherApp {
         let mouse_gesture_settings_instance = self
             .jump_mode_ui
             .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::MouseGestureSettings);
+        let mouse_gesture_settings_section =
+            crate::settings_editor::catalog::SettingsSection::MouseGestures;
+        let mouse_gesture_settings_navigation = self.dedicated_settings_navigation_observer(
+            &ctx,
+            frame_logic.should_be_visible,
+            &mouse_gesture_settings_section,
+            mouse_gesture_settings_native_owner,
+            first_ui_pass,
+        );
+        let _mouse_gesture_settings_navigation_scope = mouse_gesture_settings_navigation
+            .as_ref()
+            .map(|observer| observer.install(&ctx));
         let mut mg_settings_dlg = std::mem::take(&mut self.mouse_gesture_settings_dialog);
         mg_settings_dlg.ui_with_jump_mode(
             &ctx,
@@ -7615,6 +7775,15 @@ impl LauncherApp {
             first_ui_pass,
         );
         self.mouse_gesture_settings_dialog = mg_settings_dlg;
+        drop(_mouse_gesture_settings_navigation_scope);
+        if let Some(observer) = mouse_gesture_settings_navigation.as_ref() {
+            let owner_current = self.dedicated_settings_native_ui_owner_current(
+                &ctx,
+                frame_logic.should_be_visible,
+                &mouse_gesture_settings_section,
+            );
+            self.finish_dedicated_settings_navigation_frame(observer, owner_current, first_ui_pass);
+        }
         let mouse_settings_owner =
             self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
         let mouse_settings_scope = match mouse_settings_owner {
@@ -7633,6 +7802,17 @@ impl LauncherApp {
         };
         let mouse_settings_native_owner =
             self.mouse_settings_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
+        let mouse_settings_section = crate::settings_editor::catalog::SettingsSection::Mouse;
+        let mouse_settings_navigation = self.dedicated_settings_navigation_observer(
+            &ctx,
+            frame_logic.should_be_visible,
+            &mouse_settings_section,
+            mouse_settings_native_owner,
+            first_ui_pass,
+        );
+        let _mouse_settings_navigation_scope = mouse_settings_navigation
+            .as_ref()
+            .map(|observer| observer.install(&ctx));
         let mut mouse_settings_dlg = std::mem::take(&mut self.mouse_settings_dialog);
         mouse_settings_dlg.ui_with_jump_mode(
             &ctx,
@@ -7642,11 +7822,49 @@ impl LauncherApp {
             first_ui_pass,
         );
         self.mouse_settings_dialog = mouse_settings_dlg;
+        drop(_mouse_settings_navigation_scope);
+        if let Some(observer) = mouse_settings_navigation.as_ref() {
+            let owner_current = self.dedicated_settings_native_ui_owner_current(
+                &ctx,
+                frame_logic.should_be_visible,
+                &mouse_settings_section,
+            );
+            self.finish_dedicated_settings_navigation_frame(observer, owner_current, first_ui_pass);
+        }
         if self.theme_settings_dialog_open {
+            let theme_settings_section = crate::settings_editor::catalog::SettingsSection::Theme;
+            let theme_settings_native_owner = self.dedicated_settings_native_ui_owner_current(
+                &ctx,
+                frame_logic.should_be_visible,
+                &theme_settings_section,
+            );
+            let theme_settings_navigation = self.dedicated_settings_navigation_observer(
+                &ctx,
+                frame_logic.should_be_visible,
+                &theme_settings_section,
+                theme_settings_native_owner,
+                first_ui_pass,
+            );
+            let _theme_settings_navigation_scope = theme_settings_navigation
+                .as_ref()
+                .map(|observer| observer.install(&ctx));
             let mut theme_state = std::mem::take(&mut self.theme_settings_dialog);
             let mut theme_open = self.theme_settings_dialog_open;
             crate::gui::theme_settings_dialog::ui(&ctx, self, &mut theme_open, &mut theme_state);
             self.finish_theme_settings_dialog_ui(theme_open, theme_state);
+            drop(_theme_settings_navigation_scope);
+            if let Some(observer) = theme_settings_navigation.as_ref() {
+                let owner_current = self.dedicated_settings_native_ui_owner_current(
+                    &ctx,
+                    frame_logic.should_be_visible,
+                    &theme_settings_section,
+                );
+                self.finish_dedicated_settings_navigation_frame(
+                    observer,
+                    owner_current,
+                    first_ui_pass,
+                );
+            }
         }
         let mut fav_dlg = std::mem::take(&mut self.fav_dialog);
         fav_dlg.ui(&ctx, self);
@@ -8180,9 +8398,34 @@ impl LauncherApp {
         let mut vol_dlg = std::mem::take(&mut self.volume_dialog);
         vol_dlg.ui(&ctx, self);
         self.volume_dialog = vol_dlg;
+        let brightness_section = crate::settings_editor::catalog::SettingsSection::Brightness;
+        let brightness_owner_current = self.dedicated_settings_native_ui_owner_current(
+            &ctx,
+            frame_logic.should_be_visible,
+            &brightness_section,
+        );
+        let brightness_navigation = self.dedicated_settings_navigation_observer(
+            &ctx,
+            frame_logic.should_be_visible,
+            &brightness_section,
+            brightness_owner_current,
+            first_ui_pass,
+        );
+        let _brightness_navigation_scope = brightness_navigation
+            .as_ref()
+            .map(|observer| observer.install(&ctx));
         let mut bright_dlg = std::mem::take(&mut self.brightness_dialog);
         bright_dlg.ui(&ctx, self);
         self.brightness_dialog = bright_dlg;
+        drop(_brightness_navigation_scope);
+        if let Some(observer) = brightness_navigation.as_ref() {
+            let owner_current = self.dedicated_settings_native_ui_owner_current(
+                &ctx,
+                frame_logic.should_be_visible,
+                &brightness_section,
+            );
+            self.finish_dedicated_settings_navigation_frame(observer, owner_current, first_ui_pass);
+        }
         let mut cpu_dlg = std::mem::take(&mut self.cpu_list_dialog);
         cpu_dlg.ui(&ctx, self);
         self.cpu_list_dialog = cpu_dlg;
@@ -37318,6 +37561,753 @@ mod tests {
         );
         assert!(app.settings_editor.pending_settings_navigation.is_none());
         assert!(!app.settings_editor.paste_next_enabled);
+        drop(workspace);
+    }
+
+    fn settings_cross_owner_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1600.0, 1200.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn run_settings_cross_owner_frame(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        events: Vec<egui::Event>,
+    ) -> usize {
+        let (output, passes) =
+            app.run_root_frame_for_test(ctx, settings_cross_owner_input(events), false);
+        output.drop_without_applying_deltas();
+        passes
+    }
+
+    fn cross_owner_test_settings() -> Settings {
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        settings
+    }
+
+    fn persist_cross_owner_test_settings(path: &str) -> Vec<u8> {
+        let bytes = serde_json::to_vec(&cross_owner_test_settings()).unwrap();
+        std::fs::write(path, &bytes).unwrap();
+        bytes
+    }
+
+    fn prepare_settings_cross_owner_root(ctx: &egui::Context, app: &mut LauncherApp) {
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = false;
+        app.follow_mouse = false;
+        focus_launcher_query(ctx, app);
+        run_settings_cross_owner_frame(ctx, app, Vec::new());
+    }
+
+    fn queue_settings_cross_owner_destination(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        query: &str,
+        control_id: &str,
+    ) -> egui::Id {
+        app.show_settings = true;
+        app.settings_editor.settings_search_query = query.to_owned();
+        app.settings_editor.settings_search_selected_id = Some(control_id.to_owned());
+        for _ in 0..3 {
+            run_settings_cross_owner_frame(ctx, app, Vec::new());
+        }
+        assert!(
+            app.settings_editor
+                .test_search_result_responses
+                .iter()
+                .any(|(id, _, _)| id == control_id),
+            "the real Settings search renders {control_id}"
+        );
+        let (query_id, _) = app
+            .settings_editor
+            .test_search_query_response
+            .expect("the real Settings search query response is rendered");
+        ctx.memory_mut(|memory| memory.request_focus(query_id));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(query_id));
+        run_settings_cross_owner_frame(
+            ctx,
+            app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        query_id
+    }
+
+    fn open_settings_cross_owner_destination(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        query: &str,
+        control_id: &str,
+    ) -> egui::Id {
+        let query_id = queue_settings_cross_owner_destination(ctx, app, query, control_id);
+        run_settings_cross_owner_frame(
+            ctx,
+            app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        query_id
+    }
+
+    fn wait_for_settings_cross_owner_focus(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        control_id: &str,
+    ) -> Option<egui::Id> {
+        for _ in 0..8 {
+            if let Some((id, response_id)) = app.settings_editor.test_last_navigation_focus.as_ref()
+                && id == control_id
+                && ctx.memory(|memory| memory.focused()) == Some(*response_id)
+            {
+                return Some(*response_id);
+            }
+            if let Some((id, response_id)) = app
+                .settings_editor
+                .test_last_dedicated_navigation_focus
+                .as_ref()
+                && id == control_id
+                && ctx.memory(|memory| memory.focused()) == Some(*response_id)
+            {
+                return Some(*response_id);
+            }
+            run_settings_cross_owner_frame(ctx, app, Vec::new());
+        }
+        None
+    }
+
+    struct SettingsNavigationProbePlugin;
+
+    impl Plugin for SettingsNavigationProbePlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            Vec::new()
+        }
+
+        fn name(&self) -> &str {
+            "cross_owner_probe"
+        }
+
+        fn description(&self) -> &str {
+            "Settings navigation fixture"
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &["probe_capability"]
+        }
+
+        fn default_settings(&self) -> Option<serde_json::Value> {
+            Some(serde_json::json!({"unchanged": true}))
+        }
+    }
+
+    #[test]
+    fn settings_search_cross_owner_theme_waits_through_window_sizing_before_focusing_response() {
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.test_skip_history_persistence = true;
+        prepare_settings_cross_owner_root(&ctx, &mut app);
+
+        // Keep a deliberately unsaved Main Settings draft while the local
+        // editor is taken for the root render and restored around the
+        // dedicated Theme window.
+        app.settings_editor.toast_duration = 9.25;
+        let main_settings_draft = app.settings_editor.toast_duration;
+        let committed_settings = persist_cross_owner_test_settings(&app.settings_path);
+
+        open_settings_cross_owner_destination(
+            &ctx,
+            &mut app,
+            "typography scale",
+            "theme.typography_scale",
+        );
+        let (query_id, _) = app
+            .settings_editor
+            .test_search_query_response
+            .expect("the real Settings search query response is rendered");
+        assert!(
+            app.settings_editor
+                .test_search_result_responses
+                .iter()
+                .any(|(id, _, _)| id == "theme.typography_scale")
+        );
+        ctx.memory_mut(|memory| memory.request_focus(query_id));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(query_id));
+
+        assert!(app.is_theme_settings_dialog_open());
+        assert!(
+            app.settings_editor
+                .pending_settings_navigation
+                .as_ref()
+                .is_some_and(|pending| {
+                    pending.control_id == "theme.typography_scale"
+                        && pending.section
+                            == crate::settings_editor::catalog::SettingsSection::Theme
+                }),
+            "opening Theme leaves a typed request for its real dedicated response; history={:?}",
+            app.settings_editor.test_search_navigation_history
+        );
+        let dedicated_navigation_budget = app
+            .settings_editor
+            .pending_settings_navigation
+            .as_ref()
+            .expect("the destination request remains pending before its owner renders")
+            .frames_remaining as usize;
+
+        let mut actual_response = None;
+        let mut saw_open_before_owner_eligibility = false;
+        let mut saw_noninteractive_sizing_pass =
+            app.theme_settings_dialog.saw_noninteractive_window_pass;
+        for _ in 0..dedicated_navigation_budget {
+            run_settings_cross_owner_frame(&ctx, &mut app, Vec::new());
+            saw_noninteractive_sizing_pass |=
+                app.theme_settings_dialog.saw_noninteractive_window_pass;
+            saw_open_before_owner_eligibility |= app
+                .settings_editor
+                .test_search_navigation_history
+                .iter()
+                .any(|event| {
+                    event.starts_with(
+                        "dedicated owner waiting control=theme.typography_scale eligible=false",
+                    )
+                });
+            if let Some((control_id, response_id)) = app
+                .settings_editor
+                .test_last_dedicated_navigation_focus
+                .as_ref()
+                && control_id == "theme.typography_scale"
+                && ctx.memory(|memory| memory.focused()) == Some(*response_id)
+            {
+                actual_response = Some(*response_id);
+                break;
+            }
+        }
+        assert!(
+            saw_open_before_owner_eligibility,
+            "the root lifecycle observed the destination open during its sizing pass before native-owner eligibility; history={:?}",
+            app.settings_editor.test_search_navigation_history
+        );
+        assert!(
+            saw_noninteractive_sizing_pass,
+            "the actual Theme Window reported a noninteractive egui sizing/visibility pass; window_pass={:?}, scroll={:?}",
+            app.theme_settings_dialog.last_window_pass_state,
+            app.theme_settings_dialog.test_scroll_area_history
+        );
+        let actual_response = actual_response.unwrap_or_else(|| {
+            panic!(
+                "the real Theme typography Slider response eventually owns focus after sizing; history={:?}, scroll={:?}",
+                app.settings_editor.test_search_navigation_history,
+                app.theme_settings_dialog.test_scroll_area_history,
+            )
+        });
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(actual_response));
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert_eq!(app.settings_editor.toast_duration, main_settings_draft);
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            committed_settings
+        );
+
+        let original_typography_scale =
+            app.theme_settings_dialog.draft.preferences.typography_scale;
+        run_settings_cross_owner_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+        );
+        assert!(
+            app.theme_settings_dialog.draft.preferences.typography_scale
+                > original_typography_scale,
+            "a deliberate arrow after actual response focus edits only the Theme draft"
+        );
+        run_settings_cross_owner_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+        );
+        app.close_theme_settings_dialog();
+        assert!(!app.is_theme_settings_dialog_open());
+        assert_eq!(app.settings_editor.toast_duration, main_settings_draft);
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            committed_settings
+        );
+        drop(workspace);
+    }
+
+    #[test]
+    fn settings_search_cross_owner_gesture_interval_focuses_with_jump_on_and_off() {
+        for jump_enabled in [false, true] {
+            let ctx = egui::Context::default();
+            ctx.global_style_mut(|style| style.animation_time = 0.0);
+            let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+            app.plugins.register_builtin_for_settings_test(
+                crate::plugins::mouse_gestures::MouseGesturesPlugin::default(),
+            );
+            let mut enabled_plugins = app.enabled_plugins.clone().unwrap_or_default();
+            enabled_plugins.insert("mouse_gestures".to_owned());
+            app.enabled_plugins = Some(enabled_plugins);
+            app.plugins
+                .sync_enabled_plugins(app.enabled_plugins.as_ref());
+            assert!(
+                app.plugins
+                    .settings_catalog_snapshot_if_changed(None)
+                    .is_some_and(|snapshot| {
+                        snapshot.plugins.iter().any(|plugin| {
+                            plugin.name == "mouse_gestures" && plugin.has_settings && plugin.enabled
+                        })
+                    })
+            );
+            app.test_skip_history_persistence = true;
+            app.set_jump_mode_enabled(jump_enabled);
+            prepare_settings_cross_owner_root(&ctx, &mut app);
+            let committed_settings = persist_cross_owner_test_settings(&app.settings_path);
+
+            open_settings_cross_owner_destination(
+                &ctx,
+                &mut app,
+                "gesture trail refresh interval",
+                "mouse_gestures.trail_interval",
+            );
+            assert!(app.is_mouse_gesture_settings_dialog_open());
+            let actual_response = wait_for_settings_cross_owner_focus(
+                &ctx,
+                &mut app,
+                "mouse_gestures.trail_interval",
+            )
+            .unwrap_or_else(|| {
+                panic!(
+                    "the real Gesture interval response receives focus with Jump {jump_enabled}; history={:?}",
+                    app.settings_editor.test_search_navigation_history
+                )
+            });
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(actual_response));
+            assert_eq!(
+                app.mouse_gesture_settings_dialog
+                    .test_settings()
+                    .trail_interval_ms,
+                crate::plugins::mouse_gestures::MouseGestureSettings::default().trail_interval_ms
+            );
+            assert!(!app.mouse_gesture_settings_dialog.test_dirty());
+            assert!(app.settings_editor.pending_settings_navigation.is_none());
+            assert_eq!(
+                std::fs::read(&app.settings_path).unwrap(),
+                committed_settings
+            );
+            drop(workspace);
+        }
+    }
+
+    #[test]
+    fn settings_search_cross_owner_mouse_settings_focuses_real_response() {
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.test_skip_history_persistence = true;
+        prepare_settings_cross_owner_root(&ctx, &mut app);
+        let committed_settings = persist_cross_owner_test_settings(&app.settings_path);
+
+        open_settings_cross_owner_destination(
+            &ctx,
+            &mut app,
+            "click opacity",
+            "mouse.click.opacity",
+        );
+        assert!(app.is_mouse_settings_dialog_open());
+        let actual_response =
+            wait_for_settings_cross_owner_focus(&ctx, &mut app, "mouse.click.opacity")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the actual Mouse Settings opacity response receives focus; history={:?}",
+                        app.settings_editor.test_search_navigation_history
+                    )
+                });
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(actual_response));
+        assert_eq!(
+            app.mouse_settings_dialog.test_draft().click.opacity,
+            crate::coordinate_tool::ClickEffectPreferences::default().opacity
+        );
+        assert!(!app.settings_save_pending());
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            committed_settings
+        );
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        drop(workspace);
+    }
+
+    #[test]
+    fn settings_search_cross_owner_protected_takeover_cancels_before_first_eligible_frame() {
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.test_skip_history_persistence = true;
+        prepare_settings_cross_owner_root(&ctx, &mut app);
+
+        let query_id = queue_settings_cross_owner_destination(
+            &ctx,
+            &mut app,
+            "typography scale",
+            "theme.typography_scale",
+        );
+        assert!(app.is_theme_settings_dialog_open());
+        assert!(app.settings_editor.pending_settings_navigation.is_some());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(query_id));
+
+        // Take ownership with the real confirmation modal before Theme has
+        // become an eligible native owner. This must retire the one-shot
+        // request rather than leave it waiting to focus after the modal closes.
+        app.confirm_modal
+            .open_custom("Protected owner fixture", "The request stays cancelled.");
+        run_settings_cross_owner_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(
+            app.settings_editor
+                .test_last_dedicated_navigation_focus
+                .is_none()
+        );
+        assert!(
+            app.settings_editor
+                .test_search_navigation_history
+                .iter()
+                .any(|event| event.contains("reason=protected-takeover"))
+        );
+
+        app.confirm_modal.close();
+        for _ in 0..4 {
+            run_settings_cross_owner_frame(&ctx, &mut app, Vec::new());
+        }
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(
+            app.settings_editor
+                .test_last_dedicated_navigation_focus
+                .is_none()
+        );
+        drop(workspace);
+    }
+
+    #[test]
+    fn settings_search_cross_owner_builtin_provider_focuses_its_actual_response() {
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.test_skip_history_persistence = true;
+        app.plugins
+            .register_builtin_for_settings_test(crate::plugins::history::HistoryPlugin);
+        app.enabled_plugins = Some(std::collections::HashSet::from(["history".to_owned()]));
+        app.plugins
+            .sync_enabled_plugins(app.enabled_plugins.as_ref());
+        assert!(
+            app.plugins
+                .settings_catalog_snapshot_if_changed(None)
+                .is_some_and(|snapshot| {
+                    snapshot.plugins.iter().any(|plugin| {
+                        plugin.name == "history"
+                            && plugin.origin == crate::plugin::PluginCatalogOrigin::Builtin
+                            && plugin.has_settings
+                    })
+                })
+        );
+        prepare_settings_cross_owner_root(&ctx, &mut app);
+        let committed_settings = persist_cross_owner_test_settings(&app.settings_path);
+
+        open_settings_cross_owner_destination(
+            &ctx,
+            &mut app,
+            "search history limit",
+            "plugin.history.max_entries",
+        );
+        let actual_response = wait_for_settings_cross_owner_focus(
+            &ctx,
+            &mut app,
+            "plugin.history.max_entries",
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "the real Builtin HistoryPlugin settings_ui Slider receives focus; history={:?}",
+                app.settings_editor.test_search_navigation_history
+            )
+        });
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(actual_response));
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(!app.settings_save_pending());
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            committed_settings
+        );
+        drop(workspace);
+    }
+
+    #[test]
+    fn settings_search_cross_owner_file_search_focuses_collection_header_and_ripgrep_field() {
+        for (query, control_id) in [
+            ("global search roots", "plugin.file_search.global_roots"),
+            ("ripgrep executable", "plugin.file_search.ripgrep"),
+        ] {
+            let ctx = egui::Context::default();
+            ctx.global_style_mut(|style| style.animation_time = 0.0);
+            let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+            app.test_skip_history_persistence = true;
+            app.plugins.register_builtin_for_settings_test(
+                crate::plugins::file_search::FileSearchPlugin::default(),
+            );
+            app.enabled_plugins = Some(std::collections::HashSet::from(["file_search".into()]));
+            app.plugins
+                .sync_enabled_plugins(app.enabled_plugins.as_ref());
+            prepare_settings_cross_owner_root(&ctx, &mut app);
+            let committed_settings = persist_cross_owner_test_settings(&app.settings_path);
+
+            open_settings_cross_owner_destination(&ctx, &mut app, query, control_id);
+            let actual_response = wait_for_settings_cross_owner_focus(&ctx, &mut app, control_id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "File Search exposes the actual {control_id} response for {query:?}; history={:?}",
+                        app.settings_editor.test_search_navigation_history
+                    )
+                });
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(actual_response));
+            assert!(app.settings_editor.pending_settings_navigation.is_none());
+            assert!(!app.settings_save_pending());
+            assert_eq!(
+                std::fs::read(&app.settings_path).unwrap(),
+                committed_settings,
+                "navigation focuses the collection or executable field without editing it"
+            );
+            drop(workspace);
+        }
+    }
+
+    #[test]
+    fn settings_search_cross_owner_plugin_editor_focuses_current_capability_and_rejects_stale_ambiguous_rows()
+     {
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.test_skip_history_persistence = true;
+        prepare_settings_cross_owner_root(&ctx, &mut app);
+        app.plugins
+            .register(Box::new(SettingsNavigationProbePlugin));
+        let mut enabled_plugins = app.enabled_plugins.clone().unwrap_or_default();
+        enabled_plugins.insert("cross_owner_probe".to_owned());
+        app.enabled_plugins = Some(enabled_plugins);
+        app.plugins
+            .sync_enabled_plugins(app.enabled_plugins.as_ref());
+        assert!(
+            app.plugins
+                .settings_catalog_snapshot_if_changed(None)
+                .is_some_and(|snapshot| {
+                    snapshot.plugins.iter().any(|plugin| {
+                        plugin.name == "cross_owner_probe"
+                            && plugin.origin == crate::plugin::PluginCatalogOrigin::Registered
+                            && plugin.has_settings
+                            && plugin.enabled
+                    })
+                })
+        );
+        let plugin_epoch = app
+            .plugins
+            .settings_catalog_snapshot_if_changed(None)
+            .and_then(|snapshot| {
+                snapshot
+                    .plugins
+                    .into_iter()
+                    .find(|plugin| plugin.name == "cross_owner_probe")
+                    .map(|plugin| plugin.epoch)
+            })
+            .expect("the registered test plugin has a current catalog identity");
+        let capability_id = format!(
+            "plugin_editor.registered.cross_owner_probe.{plugin_epoch}.capability.probe_capability"
+        );
+        let plugin_infos = app.plugins.plugin_infos();
+        let test_settings = cross_owner_test_settings();
+        app.plugin_editor
+            .sync_committed_settings(&test_settings, plugin_infos);
+        let committed_settings = persist_cross_owner_test_settings(&app.settings_path);
+        app.plugin_editor.set_test_filter("cross_owner_probe");
+
+        open_settings_cross_owner_destination(&ctx, &mut app, "probe capability", &capability_id);
+        assert!(app.show_plugins);
+        assert_eq!(app.plugin_editor.test_filter(), "cross_owner_probe");
+        let actual_response = wait_for_settings_cross_owner_focus(&ctx, &mut app, &capability_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the exact current PluginEditor capability checkbox receives focus; history={:?}",
+                    app.settings_editor.test_search_navigation_history
+                )
+            });
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(actual_response));
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(!app.settings_save_pending());
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            committed_settings
+        );
+
+        let return_to_settings_owner = |app: &mut LauncherApp| {
+            assert!(
+                app.close_front_dialog(),
+                "the real PluginEditor panel closes through the normal front-dialog path"
+            );
+            run_settings_cross_owner_frame(&ctx, app, Vec::new());
+            assert!(!app.show_plugins);
+            assert_eq!(
+                crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
+                Some(crate::gui::jump_mode::ui::settings_layer_id()),
+                "the real Settings window is again the foreground owner before the next search"
+            );
+        };
+
+        // An obstructing transient filter is cleared only for this exact
+        // current target. A real pointer press on the Filter response then
+        // supersedes the pending target before its row can steal focus.
+        return_to_settings_owner(&mut app);
+        app.plugin_editor.set_test_filter("no matching plugin");
+        queue_settings_cross_owner_destination(&ctx, &mut app, "probe capability", &capability_id);
+        assert!(app.settings_editor.pending_settings_navigation.is_some());
+        let (filter_id, filter_rect) = app
+            .plugin_editor
+            .test_filter_response()
+            .expect("the newly opened PluginEditor rendered its actual Filter response");
+        assert_eq!(
+            crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
+            Some(crate::gui::jump_mode::ui::root_window_layer_id(
+                "Plugin Settings"
+            )),
+            "the filter interaction is sent only after the real destination window is current"
+        );
+        let pointer = filter_rect.center();
+        run_settings_cross_owner_frame(
+            &ctx,
+            &mut app,
+            vec![
+                key_release(egui::Key::Enter, egui::Modifiers::NONE),
+                egui::Event::PointerMoved(pointer),
+                egui::Event::PointerButton {
+                    pos: pointer,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert_eq!(
+            app.plugin_editor.test_filter(),
+            "",
+            "the exact eligible request clears only an obstructing transient filter before the real click"
+        );
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        run_settings_cross_owner_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(filter_id));
+        assert!(!app.settings_save_pending());
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            committed_settings
+        );
+
+        // Queue another request from the real Settings owner, then change the
+        // registration snapshot before the next eligible PluginEditor pass.
+        // The old row cannot consume the stale request, even though it still
+        // exists in the editor's local list.
+        return_to_settings_owner(&mut app);
+        queue_settings_cross_owner_destination(&ctx, &mut app, "probe capability", &capability_id);
+        assert!(app.settings_editor.pending_settings_navigation.is_some());
+        assert!(app.show_plugins);
+        app.plugins
+            .register(Box::new(SettingsNavigationProbePlugin));
+        run_settings_cross_owner_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..3 {
+            run_settings_cross_owner_frame(&ctx, &mut app, Vec::new());
+        }
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert_ne!(ctx.memory(|memory| memory.focused()), Some(actual_response));
+        assert!(!app.settings_save_pending());
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            committed_settings
+        );
+
+        // The duplicate exact name makes both catalog rows unavailable; a
+        // fresh search activation must remain a reveal refusal with no save.
+        return_to_settings_owner(&mut app);
+        open_settings_cross_owner_destination(&ctx, &mut app, "probe capability", &capability_id);
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(!app.settings_save_pending());
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            committed_settings
+        );
+        drop(workspace);
+    }
+
+    #[test]
+    fn settings_search_cross_owner_brightness_focuses_fake_level_without_query_or_set() {
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.test_skip_history_persistence = true;
+        app.brightness_dialog.test_seed_fake_hardware_value(37);
+        prepare_settings_cross_owner_root(&ctx, &mut app);
+        let committed_settings = persist_cross_owner_test_settings(&app.settings_path);
+
+        open_settings_cross_owner_destination(
+            &ctx,
+            &mut app,
+            "brightness level",
+            "brightness.level",
+        );
+        assert!(app.is_brightness_dialog_open());
+        let actual_response = wait_for_settings_cross_owner_focus(
+            &ctx,
+            &mut app,
+            "brightness.level",
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "the real fake-backed Brightness Level response receives focus; history={:?}",
+                app.settings_editor.test_search_navigation_history
+            )
+        });
+        let level_response = app
+            .brightness_dialog
+            .test_level_response()
+            .expect("Brightness recorded its real Level Slider response");
+        assert_eq!(level_response.id, actual_response);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(level_response.id)
+        );
+        assert_eq!(app.brightness_dialog.test_hardware_query_count(), 0);
+        assert_eq!(app.brightness_dialog.test_set_action_count(), 0);
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            committed_settings
+        );
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
         drop(workspace);
     }
 

@@ -674,7 +674,11 @@ impl NavigationOwner {
 pub(crate) fn settings_layer_id() -> egui::LayerId {
     // `Window::new` hashes the optional title (`Some("Settings")`) as its
     // default area ID. Keep this aligned so owner checks match the real window.
-    egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some("Settings")))
+    root_window_layer_id("Settings")
+}
+
+pub(crate) fn root_window_layer_id(title: &'static str) -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some(title)))
 }
 
 pub(crate) fn notes_dialog_layer_id() -> egui::LayerId {

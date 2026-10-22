@@ -139,10 +139,14 @@ impl Plugin for MkMacroPlugin {
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
         let mut s: MkMacroPluginSettings =
             serde_json::from_value(value.clone()).unwrap_or_default();
-        if ui
-            .checkbox(&mut s.enabled, "Enable mouse/keyboard macros")
-            .changed()
-        {
+        let response = ui.checkbox(&mut s.enabled, "Enable mouse/keyboard macros");
+        crate::settings_editor::render::observe_scoped_settings_navigation_response(
+            ui,
+            &response,
+            "plugin.mkmacro.enabled",
+            crate::gui::jump_mode::TargetKind::Checkbox,
+        );
+        if response.changed() {
             *value = serde_json::to_value(s).unwrap();
         }
     }

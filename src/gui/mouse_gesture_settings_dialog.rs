@@ -20,6 +20,7 @@ fn register_mouse_gesture_settings_target(
     kind: crate::gui::jump_mode::TargetKind,
     visual_order: &mut u64,
 ) {
+    let identity = identity.as_ref();
     let _ = crate::gui::jump_mode::ui::register_and_apply_target(
         scope,
         ui,
@@ -29,6 +30,33 @@ fn register_mouse_gesture_settings_target(
         kind,
         visual_order,
     );
+    if let Some(control_id) = mouse_gesture_catalog_control_id(identity) {
+        crate::settings_editor::render::observe_scoped_settings_navigation_response(
+            ui, response, control_id, kind,
+        );
+    }
+}
+
+fn mouse_gesture_catalog_control_id(identity: &str) -> Option<&'static str> {
+    Some(match identity {
+        "enabled" => "mouse_gestures.enabled",
+        "debug-logging" => "mouse_gestures.debug_logging",
+        "show-trail" => "mouse_gestures.show_trail",
+        "trail-color" => "mouse_gestures.trail_color",
+        "trail-width" => "mouse_gestures.trail_width",
+        "trail-refresh-interval" => "mouse_gestures.trail_interval",
+        "recognition-interval" => "mouse_gestures.recognition_interval",
+        "show-hint" => "mouse_gestures.show_hint",
+        "hint-offset/x" => "mouse_gestures.hint_offset_x",
+        "hint-offset/y" => "mouse_gestures.hint_offset_y",
+        "wheel-cycle-gate" => "mouse_gestures.wheel_cycle_gate",
+        "cancel-behavior" => "mouse_gestures.cancel_behavior",
+        "no-match-behavior" => "mouse_gestures.no_match_behavior",
+        "ignore-input" | "mouse_gesture_settings_ignore_row" => {
+            "mouse_gestures.ignore_window_titles"
+        }
+        _ => return None,
+    })
 }
 
 pub(crate) fn window_picker_layer_id() -> egui::LayerId {

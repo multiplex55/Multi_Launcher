@@ -192,7 +192,15 @@ impl Plugin for OmniSearchPlugin {
             }
         };
 
-        ui.checkbox(&mut settings.include_apps, "Search apps");
+        // The catalog entry describes the editable category group; bind its
+        // canonical destination to the first concrete member control.
+        let response = ui.checkbox(&mut settings.include_apps, "Search apps");
+        crate::settings_editor::render::observe_scoped_settings_navigation_response(
+            ui,
+            &response,
+            "plugin.omni_search.included_categories",
+            crate::gui::jump_mode::TargetKind::Checkbox,
+        );
         ui.checkbox(&mut settings.include_notes, "Search notes");
         ui.checkbox(&mut settings.include_todos, "Search todos");
         ui.checkbox(&mut settings.include_calendar, "Search calendar events");

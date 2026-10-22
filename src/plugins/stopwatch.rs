@@ -451,14 +451,26 @@ impl Plugin for StopwatchPlugin {
             serde_json::from_value(value.clone()).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.label("Precision");
-            ui.add(egui::Slider::new(&mut cfg.precision, 0..=9));
+            let response = ui.add(egui::Slider::new(&mut cfg.precision, 0..=9));
+            crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                ui,
+                &response,
+                "plugin.stopwatch.precision",
+                crate::gui::jump_mode::TargetKind::Slider,
+            );
         });
         ui.horizontal(|ui| {
             ui.label("Refresh (s)");
-            ui.add(
+            let response = ui.add(
                 egui::DragValue::new(&mut cfg.refresh_rate)
                     .range(0.0..=5.0)
                     .speed(0.1),
+            );
+            crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                ui,
+                &response,
+                "plugin.stopwatch.refresh_rate",
+                crate::gui::jump_mode::TargetKind::Slider,
             );
         });
         match serde_json::to_value(&cfg) {

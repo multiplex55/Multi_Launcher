@@ -22,6 +22,12 @@ pub struct ThemeSettingsDialogState {
     save_palette_name: String,
     #[cfg(test)]
     palette_card_rects: Vec<egui::Rect>,
+    #[cfg(test)]
+    pub(crate) last_window_pass_state: Option<(bool, bool, bool)>,
+    #[cfg(test)]
+    pub(crate) saw_noninteractive_window_pass: bool,
+    #[cfg(test)]
+    pub(crate) test_scroll_area_history: Vec<String>,
 }
 
 impl Default for ThemeSettingsDialogState {
@@ -37,6 +43,12 @@ impl Default for ThemeSettingsDialogState {
             save_palette_name: String::new(),
             #[cfg(test)]
             palette_card_rects: Vec::new(),
+            #[cfg(test)]
+            last_window_pass_state: None,
+            #[cfg(test)]
+            saw_noninteractive_window_pass: false,
+            #[cfg(test)]
+            test_scroll_area_history: Vec::new(),
         }
     }
 }
@@ -49,6 +61,12 @@ impl ThemeSettingsDialogState {
         self.last_error = None;
         self.palette_update_target = None;
         self.save_palette_name.clear();
+        #[cfg(test)]
+        {
+            self.last_window_pass_state = None;
+            self.saw_noninteractive_window_pass = false;
+            self.test_scroll_area_history.clear();
+        }
         self.reload_from_path(ctx, settings_path);
     }
 
@@ -392,6 +410,13 @@ pub fn ui(
         .default_width(980.0)
         .default_height(theme_window_initial_height(ctx.content_rect().height()))
         .show(ctx, |ui| {
+            #[cfg(test)]
+            {
+                let pass_state = (ui.is_sizing_pass(), ui.is_visible(), ui.is_enabled());
+                state.last_window_pass_state = Some(pass_state);
+                state.saw_noninteractive_window_pass |=
+                    pass_state.0 || !pass_state.1 || !pass_state.2;
+            }
             if !state.can_edit() {
                 if let Some(err) = &state.last_error {
                     widgets::semantic_status(ui, StatusTone::Error, "Error", Some(err));
@@ -427,7 +452,7 @@ pub fn ui(
             let body_max_height =
                 theme_content_height(ui.available_height(), footer_layout.reserved_height);
             let mut changed = false;
-            egui::ScrollArea::vertical()
+            let _scroll_output = egui::ScrollArea::vertical()
                 .min_scrolled_height(0.0)
                 .max_height(body_max_height)
                 .auto_shrink([false, false])
@@ -437,6 +462,16 @@ pub fn ui(
                     changed = body_changed;
                     reload_requested = body_reload_requested;
                 });
+            #[cfg(test)]
+            if state.test_scroll_area_history.len() < 16 {
+                state.test_scroll_area_history.push(format!(
+                    "id={:?} state={:?} content_size={:?} inner_rect={:?}",
+                    _scroll_output.id,
+                    _scroll_output.state,
+                    _scroll_output.content_size,
+                    _scroll_output.inner_rect,
+                ));
+            }
 
             if changed {
                 state.dirty = true;
@@ -851,9 +886,14 @@ fn section_base_mode(ui: &mut egui::Ui, mode: &mut ThemeMode) -> bool {
         Some("Follow the system setting or choose a fixed appearance."),
     );
     ui.horizontal_wrapped(|ui| {
-        changed |= ui
-            .selectable_value(mode, ThemeMode::System, "System")
-            .changed();
+        let response = ui.selectable_value(mode, ThemeMode::System, "System");
+        observe_theme_control(
+            ui,
+            &response,
+            "theme.mode",
+            crate::gui::jump_mode::TargetKind::ComboBox,
+        );
+        changed |= response.changed();
         changed |= ui.selectable_value(mode, ThemeMode::Dark, "Dark").changed();
         changed |= ui
             .selectable_value(mode, ThemeMode::Light, "Light")
@@ -890,7 +930,7 @@ fn section_presets(ui: &mut egui::Ui, state: &mut ThemeSettingsDialogState) -> b
     });
     let mut changed = false;
 
-    egui::ComboBox::from_label("Saved palette")
+    let saved_palette = egui::ComboBox::from_label("Saved palette")
         .selected_text(selected_text)
         .show_ui(ui, |ui| {
             let custom_selected = state.draft.mode == ThemeMode::Custom && active_name.is_none();
@@ -914,6 +954,12 @@ fn section_presets(ui: &mut egui::Ui, state: &mut ThemeSettingsDialogState) -> b
                 changed |= state.select_saved_preset(&name);
             }
         });
+    observe_theme_control(
+        ui,
+        &saved_palette.response,
+        "theme.saved_palette",
+        crate::gui::jump_mode::TargetKind::ComboBox,
+    );
 
     if let Some(target) = state.palette_update_target.clone() {
         ui.horizontal_wrapped(|ui| {
@@ -1034,12 +1080,19 @@ fn section_accent(
     let mut changed = false;
     ui.horizontal_wrapped(|ui| {
         let mut enabled = accent.is_some();
-        if ui.checkbox(&mut enabled, "Override accent").changed() {
+        let response = ui.checkbox(&mut enabled, "Override accent");
+        observe_theme_control(
+            ui,
+            &response,
+            "theme.accent",
+            crate::gui::jump_mode::TargetKind::Checkbox,
+        );
+        if response.changed() {
             *accent = enabled.then_some(palette_accent);
             changed = true;
         }
         if let Some(accent) = accent.as_mut() {
-            changed |= color_row(ui, "Accent color", accent);
+            changed |= color_row(ui, "Accent color", accent, Some("theme.accent.color"));
         }
     });
     changed
@@ -1048,8 +1101,18 @@ fn section_accent(
 fn section_core_surfaces(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode) -> bool {
     let mut changed = false;
     section_heading(ui, "Core surfaces", None);
-    changed |= color_row(ui, "Window background", &mut scheme.window_fill);
-    changed |= color_row(ui, "Panel background", &mut scheme.panel_fill);
+    changed |= color_row(
+        ui,
+        "Window background",
+        &mut scheme.window_fill,
+        Some("theme.window_background"),
+    );
+    changed |= color_row(
+        ui,
+        "Panel background",
+        &mut scheme.panel_fill,
+        Some("theme.panel_background"),
+    );
     if chrome_small_icon_button(
         ui,
         ChromeIcon::Reset,
@@ -1072,8 +1135,13 @@ fn section_text_and_links(
 ) -> (bool, bool) {
     let mut scheme_changed = false;
     section_heading(ui, "Text and links", None);
-    scheme_changed |= color_row(ui, "Text", &mut scheme.text);
-    scheme_changed |= color_row(ui, "Hyperlink", &mut scheme.hyperlink);
+    scheme_changed |= color_row(ui, "Text", &mut scheme.text, Some("theme.text_color"));
+    scheme_changed |= color_row(
+        ui,
+        "Hyperlink",
+        &mut scheme.hyperlink,
+        Some("theme.hyperlink_color"),
+    );
     let mut scale_changed = typography_scale_controls(ui, typography_scale).0;
     if chrome_small_icon_button(
         ui,
@@ -1112,6 +1180,12 @@ fn typography_scale_controls(
         .step_by(0.05)
         .show_value(false),
     );
+    observe_theme_control(
+        ui,
+        &slider,
+        "theme.typography_scale",
+        crate::gui::jump_mode::TargetKind::Slider,
+    );
     rects[0] = slider.rect;
     changed |= slider.changed();
     ui.horizontal_wrapped(|ui| {
@@ -1140,12 +1214,42 @@ fn reset_draft_preserving_saved_palettes(state: &mut ThemeSettingsDialogState) {
 fn section_widgets(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode) -> bool {
     let mut changed = false;
     section_heading(ui, "Interactive widgets", None);
-    changed |= color_row(ui, "Inactive fill", &mut scheme.widget_inactive_fill);
-    changed |= color_row(ui, "Inactive stroke", &mut scheme.widget_inactive_stroke);
-    changed |= color_row(ui, "Hovered fill", &mut scheme.widget_hovered_fill);
-    changed |= color_row(ui, "Hovered stroke", &mut scheme.widget_hovered_stroke);
-    changed |= color_row(ui, "Active fill", &mut scheme.widget_active_fill);
-    changed |= color_row(ui, "Active stroke", &mut scheme.widget_active_stroke);
+    changed |= color_row(
+        ui,
+        "Inactive fill",
+        &mut scheme.widget_inactive_fill,
+        Some("theme.widget.inactive_fill"),
+    );
+    changed |= color_row(
+        ui,
+        "Inactive stroke",
+        &mut scheme.widget_inactive_stroke,
+        Some("theme.widget.inactive_stroke"),
+    );
+    changed |= color_row(
+        ui,
+        "Hovered fill",
+        &mut scheme.widget_hovered_fill,
+        Some("theme.widget.hovered_fill"),
+    );
+    changed |= color_row(
+        ui,
+        "Hovered stroke",
+        &mut scheme.widget_hovered_stroke,
+        Some("theme.widget.hovered_stroke"),
+    );
+    changed |= color_row(
+        ui,
+        "Active fill",
+        &mut scheme.widget_active_fill,
+        Some("theme.widget.active_fill"),
+    );
+    changed |= color_row(
+        ui,
+        "Active stroke",
+        &mut scheme.widget_active_stroke,
+        Some("theme.widget.active_stroke"),
+    );
     if chrome_small_icon_button(
         ui,
         ChromeIcon::Reset,
@@ -1163,8 +1267,18 @@ fn section_widgets(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode)
 fn section_selection(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode) -> bool {
     let mut changed = false;
     section_heading(ui, "Selection and highlight", None);
-    changed |= color_row(ui, "Selection background", &mut scheme.selection_bg);
-    changed |= color_row(ui, "Selection stroke", &mut scheme.selection_stroke);
+    changed |= color_row(
+        ui,
+        "Selection background",
+        &mut scheme.selection_bg,
+        Some("theme.selection_background"),
+    );
+    changed |= color_row(
+        ui,
+        "Selection stroke",
+        &mut scheme.selection_stroke,
+        Some("theme.selection_stroke"),
+    );
     if chrome_small_icon_button(
         ui,
         ChromeIcon::Reset,
@@ -1182,9 +1296,24 @@ fn section_selection(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMod
 fn section_semantic(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode) -> bool {
     let mut changed = false;
     section_heading(ui, "Semantic accents", None);
-    changed |= color_row(ui, "Success", &mut scheme.success_accent);
-    changed |= color_row(ui, "Warning", &mut scheme.warn_accent);
-    changed |= color_row(ui, "Error", &mut scheme.error_accent);
+    changed |= color_row(
+        ui,
+        "Success",
+        &mut scheme.success_accent,
+        Some("theme.status.success"),
+    );
+    changed |= color_row(
+        ui,
+        "Warning",
+        &mut scheme.warn_accent,
+        Some("theme.status.warning"),
+    );
+    changed |= color_row(
+        ui,
+        "Error",
+        &mut scheme.error_accent,
+        Some("theme.status.error"),
+    );
     if chrome_small_icon_button(
         ui,
         ChromeIcon::Reset,
@@ -1199,7 +1328,12 @@ fn section_semantic(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode
     changed
 }
 
-fn color_row(ui: &mut egui::Ui, label: &str, color: &mut ThemeColor) -> bool {
+fn color_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    color: &mut ThemeColor,
+    control_id: Option<&'static str>,
+) -> bool {
     let label_width = (ui.available_width() * 0.42).clamp(92.0, 150.0);
     let mut changed = false;
     ui.horizontal(|ui| {
@@ -1207,12 +1341,32 @@ fn color_row(ui: &mut egui::Ui, label: &str, color: &mut ThemeColor) -> bool {
         ui.add_sized([label_width, 0.0], egui::Label::new(label));
         ui.spacing_mut().item_spacing.x = 6.0;
         let mut rgba = [color.r, color.g, color.b, color.a];
-        if ui.color_edit_button_srgba_unmultiplied(&mut rgba).changed() {
+        let response = ui.color_edit_button_srgba_unmultiplied(&mut rgba);
+        if let Some(control_id) = control_id {
+            observe_theme_control(
+                ui,
+                &response,
+                control_id,
+                crate::gui::jump_mode::TargetKind::Button,
+            );
+        }
+        if response.changed() {
             [color.r, color.g, color.b, color.a] = rgba;
             changed = true;
         }
     });
     changed
+}
+
+fn observe_theme_control(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    control_id: &str,
+    kind: crate::gui::jump_mode::TargetKind,
+) {
+    crate::settings_editor::render::observe_scoped_settings_navigation_response(
+        ui, response, control_id, kind,
+    );
 }
 
 fn reset_core_surfaces_to_mode_defaults(scheme: &mut ColorScheme, mode: ThemeMode) {
@@ -1900,7 +2054,7 @@ mod tests {
         let original = rgba(173, 71, 219, 83);
         let mut color = original;
         let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            assert!(!color_row(ui, "Translucent color", &mut color));
+            assert!(!color_row(ui, "Translucent color", &mut color, None));
         });
         output.drop_without_applying_deltas();
         assert_eq!(color, original);

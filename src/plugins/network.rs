@@ -224,15 +224,21 @@ impl Plugin for NetworkPlugin {
             serde_json::from_value(value.clone()).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.label("Refresh rate (s)");
-            ui.add(
+            let response = ui.add(
                 egui::DragValue::new(&mut cfg.refresh_rate)
                     .range(0.1..=60.0)
                     .speed(0.1),
             );
+            crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                ui,
+                &response,
+                "plugin.network.refresh_rate",
+                crate::gui::jump_mode::TargetKind::Slider,
+            );
         });
         ui.horizontal(|ui| {
             ui.label("Units");
-            egui::ComboBox::from_id_salt("net_units")
+            let response = egui::ComboBox::from_id_salt("net_units")
                 .selected_text(cfg.unit.to_string())
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut cfg.unit, NetUnit::Auto, "Auto");
@@ -240,6 +246,12 @@ impl Plugin for NetworkPlugin {
                     ui.selectable_value(&mut cfg.unit, NetUnit::Kb, "kB/s");
                     ui.selectable_value(&mut cfg.unit, NetUnit::Mb, "MB/s");
                 });
+            crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                ui,
+                &response.response,
+                "plugin.network.units",
+                crate::gui::jump_mode::TargetKind::ComboBox,
+            );
         });
         self.unit = cfg.unit;
         if let Ok(mut r) = self.refresh_rate.lock() {

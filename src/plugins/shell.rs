@@ -307,7 +307,13 @@ impl Plugin for ShellPlugin {
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
         let mut cfg: ShellPluginSettings =
             serde_json::from_value(value.clone()).unwrap_or_default();
-        ui.checkbox(&mut cfg.open_in_wezterm, "Open commands in WezTerm");
+        let response = ui.checkbox(&mut cfg.open_in_wezterm, "Open commands in WezTerm");
+        crate::settings_editor::render::observe_scoped_settings_navigation_response(
+            ui,
+            &response,
+            "plugin.shell.open_in_wezterm",
+            crate::gui::jump_mode::TargetKind::Checkbox,
+        );
         USE_WEZTERM.store(cfg.open_in_wezterm, Ordering::Relaxed);
         match serde_json::to_value(&cfg) {
             Ok(v) => *value = v,

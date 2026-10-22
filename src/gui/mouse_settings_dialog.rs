@@ -42,6 +42,51 @@ fn register_mouse_settings_target(
         kind,
         visual_order,
     );
+    if let Some(control_id) = mouse_settings_catalog_control_id(identity) {
+        crate::settings_editor::render::observe_scoped_settings_navigation_response(
+            ui, response, control_id, kind,
+        );
+    }
+}
+
+fn mouse_settings_catalog_control_id(identity: &str) -> Option<&'static str> {
+    Some(match identity {
+        "hud/coordinate-space" => "mouse.coordinate_space",
+        "hud/detail-compact" | "hud/detail-detailed" => "mouse.hud_detail",
+        "hud/cursor-offset-x" => "mouse.cursor_offset.x",
+        "hud/cursor-offset-y" => "mouse.cursor_offset.y",
+        "click/style" | "style/circle" | "style/flash" | "style/ripple" => "mouse.click.style",
+        "click/color" => "mouse.click.color",
+        "click/size" => "mouse.click.size",
+        "click/opacity" => "mouse.click.opacity",
+        "click/duration" => "mouse.click.duration",
+        "crosshair/color" => "mouse.crosshair.color",
+        "crosshair/thickness" => "mouse.crosshair.thickness",
+        "crosshair/arm-length" => "mouse.crosshair.arm_length",
+        "crosshair/center-gap" => "mouse.crosshair.center_gap",
+        "crosshair/opacity" => "mouse.crosshair.opacity",
+        "crosshair/virtual-desktop-guides" => "mouse.crosshair.virtual_desktop_guides",
+        "crosshair/high-contrast-outline" => "mouse.crosshair.high_contrast_outline",
+        "halo/radius" => "mouse.halo.radius",
+        "halo/inversion-strength" => "mouse.halo.inversion_strength",
+        "halo/outline-enabled" => "mouse.halo.outline_enabled",
+        "halo/outline-color" => "mouse.halo.outline_color",
+        "halo/outline-thickness" => "mouse.halo.outline_thickness",
+        "magnifier/destination-mode" | "mode/centered" | "mode/offset" => "mouse.magnifier.mode",
+        "magnifier/factor" => "mouse.magnifier.zoom_factor",
+        "magnifier/diameter" => "mouse.magnifier.diameter",
+        "magnifier/destination-x" => "mouse.magnifier.offset_x",
+        "magnifier/destination-y" => "mouse.magnifier.offset_y",
+        "magnifier/outline-enabled" => "mouse.magnifier.outline_enabled",
+        "magnifier/outline-color" => "mouse.magnifier.outline_color",
+        "magnifier/outline-thickness" => "mouse.magnifier.outline_thickness",
+        "click/session-enabled" => "mouse.click.session_enabled",
+        "crosshair/session-enabled" => "mouse.crosshair.session_enabled",
+        "halo/session-enabled" => "mouse.halo.session_enabled",
+        "magnifier/session-enabled" => "mouse.magnifier.session_enabled",
+        "hud/session-enabled" => "mouse.hud.session_enabled",
+        _ => return None,
+    })
 }
 
 impl MouseSettingsDialog {

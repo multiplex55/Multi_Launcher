@@ -57,6 +57,7 @@ impl SettingsEditor {
             settings_search_query_response_id: None,
             settings_search_result_response_ids: Vec::new(),
             pending_settings_navigation: None,
+            next_settings_navigation_token: 1,
             search_enter_consumption_pending: false,
             baseline_settings: settings.clone(),
             paste_sequence: settings.paste_sequence.clone(),
@@ -198,6 +199,8 @@ impl SettingsEditor {
             #[cfg(test)]
             test_last_navigation_focus: None,
             #[cfg(test)]
+            test_last_dedicated_navigation_focus: None,
+            #[cfg(test)]
             test_last_navigation_diagnostic: None,
             #[cfg(test)]
             test_root_escape_preflight: None,
@@ -205,6 +208,8 @@ impl SettingsEditor {
             test_search_navigation_history: Vec::new(),
             #[cfg(test)]
             test_search_navigation_trace_started: false,
+            #[cfg(test)]
+            test_notes_external_open_response: None,
         };
         s.plugin_settings
             .entry("screenshot".into())

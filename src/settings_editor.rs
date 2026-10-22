@@ -2,7 +2,7 @@ pub mod catalog;
 #[path = "settings_editor/mapping.rs"]
 mod mapping;
 #[path = "settings_editor/render.rs"]
-mod render;
+pub(crate) mod render;
 #[path = "settings_editor/save.rs"]
 mod save;
 #[path = "settings_editor/state.rs"]

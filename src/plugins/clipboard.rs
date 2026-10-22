@@ -368,9 +368,15 @@ impl Plugin for ClipboardPlugin {
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
         let mut cfg: ClipboardPluginSettings =
             serde_json::from_value(value.clone()).unwrap_or_default();
-        labeled_form_row(ui, "Clipboard limit", |ui| {
+        let response = labeled_form_row(ui, "Clipboard limit", |ui| {
             ui.add(egui::DragValue::new(&mut cfg.max_entries).range(1..=200))
         });
+        crate::settings_editor::render::observe_scoped_settings_navigation_response(
+            ui,
+            &response,
+            "plugin.clipboard.max_entries",
+            crate::gui::jump_mode::TargetKind::TextEntry,
+        );
         match serde_json::to_value(&cfg) {
             Ok(v) => *value = v,
             Err(e) => tracing::error!("failed to serialize clipboard settings: {e}"),

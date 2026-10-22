@@ -2363,6 +2363,14 @@ impl LauncherApp {
         self.theme_settings_dialog_open
     }
 
+    pub(crate) fn theme_accent_override_is_set(&self) -> bool {
+        self.theme_settings_dialog
+            .draft
+            .preferences
+            .accent
+            .is_some()
+    }
+
     pub fn close_theme_settings_dialog(&mut self) {
         if self.pinned_panels.contains(&Panel::ThemeSettingsDialog) {
             self.theme_settings_dialog_open = true;
@@ -3852,6 +3860,13 @@ impl LauncherApp {
 
     pub fn restore_flag_state(&self) -> bool {
         self.restore_flag.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_visible_root_for_test(&mut self) {
+        self.visible_flag.store(true, Ordering::SeqCst);
+        self.restore_flag.store(false, Ordering::SeqCst);
+        self.last_visible = true;
     }
 
     pub fn install_visibility_revision(&mut self, revision: crate::visibility::VisibilityRevision) {

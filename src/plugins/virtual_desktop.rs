@@ -745,7 +745,14 @@ impl Plugin for VirtualDesktopPlugin {
         let mut settings: VirtualDesktopPluginSettings =
             serde_json::from_value(value.clone()).unwrap_or_default();
         ui.label("Launch window discovery timeout");
-        ui.add(egui::Slider::new(&mut settings.launch_timeout_ms, 1_000..=30_000).suffix(" ms"));
+        let response = ui
+            .add(egui::Slider::new(&mut settings.launch_timeout_ms, 1_000..=30_000).suffix(" ms"));
+        crate::settings_editor::render::observe_scoped_settings_navigation_response(
+            ui,
+            &response,
+            "plugin.virtual_desktop.launch_timeout",
+            crate::gui::jump_mode::TargetKind::Slider,
+        );
         ui.separator();
         ui.heading("Application auto-switch rules");
         ui.small("Rules are opt-in and react only when a matching application becomes foreground. Empty or fully disabled rules start no background runtime.");
@@ -767,30 +774,60 @@ impl Plugin for VirtualDesktopPlugin {
             ui.push_id((index, &rule.id), |ui| {
                 ui.group(|ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.checkbox(&mut rule.enabled, "Enabled");
+                        let response = ui.checkbox(&mut rule.enabled, "Enabled");
+                        crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                            ui,
+                            &response,
+                            "plugin.virtual_desktop.rule.enabled",
+                            crate::gui::jump_mode::TargetKind::Checkbox,
+                        );
                         if ui.button("Remove").clicked() {
                             remove = Some(index);
                         }
                     });
                     ui.label("Application/process");
-                    ui.add(
+                    let response = ui.add(
                         egui::TextEdit::singleline(&mut rule.executable)
                             .desired_width(ui.available_width()),
                     );
+                    crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                        ui,
+                        &response,
+                        "plugin.virtual_desktop.rule.executable",
+                        crate::gui::jump_mode::TargetKind::TextEntry,
+                    );
                     ui.label("Process path (optional)");
-                    ui.add(
+                    let response = ui.add(
                         egui::TextEdit::singleline(&mut rule.process_path)
                             .desired_width(ui.available_width()),
                     );
+                    crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                        ui,
+                        &response,
+                        "plugin.virtual_desktop.rule.process_path",
+                        crate::gui::jump_mode::TargetKind::TextEntry,
+                    );
                     ui.label("Window title contains (optional)");
-                    ui.add(
+                    let response = ui.add(
                         egui::TextEdit::singleline(&mut rule.title)
                             .desired_width(ui.available_width()),
                     );
+                    crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                        ui,
+                        &response,
+                        "plugin.virtual_desktop.rule.window_title",
+                        crate::gui::jump_mode::TargetKind::TextEntry,
+                    );
                     ui.label("Window class (optional)");
-                    ui.add(
+                    let response = ui.add(
                         egui::TextEdit::singleline(&mut rule.class_name)
                             .desired_width(ui.available_width()),
+                    );
+                    crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                        ui,
+                        &response,
+                        "plugin.virtual_desktop.rule.window_class",
+                        crate::gui::jump_mode::TargetKind::TextEntry,
                     );
                     let selected = rule
                         .target
@@ -803,7 +840,7 @@ impl Plugin for VirtualDesktopPlugin {
                         })
                         .unwrap_or_else(|| "Select desktop".into());
                     let target_label = ui.label("Target desktop");
-                    egui::ComboBox::from_id_salt("Target desktop")
+                    let combo = egui::ComboBox::from_id_salt("Target desktop")
                         .selected_text(selected)
                         .show_ui(ui, |ui| {
                             if let Ok(snapshot) = &desktop_snapshot {
@@ -834,6 +871,12 @@ impl Plugin for VirtualDesktopPlugin {
                         })
                         .response
                         .labelled_by(target_label.id);
+                    crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                        ui,
+                        &combo,
+                        "plugin.virtual_desktop.rule.target_desktop",
+                        crate::gui::jump_mode::TargetKind::ComboBox,
+                    );
                     match (&rule.target, &desktop_snapshot) {
                         (None, _) => {
                             ui.colored_label(

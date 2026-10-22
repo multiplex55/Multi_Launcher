@@ -14,6 +14,7 @@ pub(crate) enum SettingsNavigationStage {
 /// It deliberately contains no widget response, geometry, or setting value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PendingSettingsNavigation {
+    pub(crate) request_token: u64,
     pub(crate) control_id: String,
     pub(crate) owner: super::catalog::SettingsOwner,
     pub(crate) section: super::catalog::SettingsSection,
@@ -22,7 +23,26 @@ pub(crate) struct PendingSettingsNavigation {
     pub(crate) stage: SettingsNavigationStage,
     pub(crate) frames_remaining: u8,
     pub(crate) scroll_requested: bool,
+    /// The dedicated window was opened by the navigation request.
     pub(crate) destination_observed: bool,
+    /// Its exact native owner passed the current-owner guard at least once.
+    /// A window can be open during egui's non-interactive sizing passes before
+    /// it becomes the active native owner, so this is distinct from
+    /// `destination_observed`.
+    pub(crate) destination_owner_eligible: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TestNotesControlResponse {
+    pub(crate) id: egui::Id,
+    pub(crate) rect: egui::Rect,
+    pub(crate) clip_rect: egui::Rect,
+    pub(crate) visible: bool,
+    pub(crate) ui_enabled: bool,
+    pub(crate) response_enabled: bool,
+    pub(crate) interaction_allowed: bool,
+    pub(crate) has_focus: bool,
 }
 
 #[derive(Default)]
@@ -39,6 +59,7 @@ pub struct SettingsEditor {
     pub(crate) settings_search_query_response_id: Option<egui::Id>,
     pub(crate) settings_search_result_response_ids: Vec<egui::Id>,
     pub(crate) pending_settings_navigation: Option<PendingSettingsNavigation>,
+    pub(crate) next_settings_navigation_token: u64,
     /// Keeps a locally handled search Enter from reaching controls on a
     /// retained egui pass after the search result has requested focus.
     pub(crate) search_enter_consumption_pending: bool,
@@ -162,6 +183,8 @@ pub struct SettingsEditor {
     #[cfg(test)]
     pub(crate) test_last_navigation_focus: Option<(String, egui::Id)>,
     #[cfg(test)]
+    pub(crate) test_last_dedicated_navigation_focus: Option<(String, egui::Id)>,
+    #[cfg(test)]
     pub(crate) test_last_navigation_diagnostic: Option<String>,
     #[cfg(test)]
     pub(crate) test_root_escape_preflight: Option<String>,
@@ -169,6 +192,8 @@ pub struct SettingsEditor {
     pub(crate) test_search_navigation_history: Vec<String>,
     #[cfg(test)]
     pub(crate) test_search_navigation_trace_started: bool,
+    #[cfg(test)]
+    pub(crate) test_notes_external_open_response: Option<TestNotesControlResponse>,
 }
 
 impl SettingsEditor {

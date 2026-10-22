@@ -99,33 +99,96 @@ impl Plugin for ClipboardModifyPlugin {
         let mut cfg = serde_json::from_value::<ClipboardModifyPluginSettings>(value.clone())
             .unwrap_or_default();
         ui.small("Clipboard Modify stores only UI preferences here; templates, pipelines, source text, previews, and undo text are not stored in settings.");
-        ui.checkbox(
+        let response = ui.checkbox(
             &mut cfg.hide_launcher_after_apply,
             "Hide Launcher after applying template or pipeline",
         );
+        crate::settings_editor::render::observe_scoped_settings_navigation_response(
+            ui,
+            &response,
+            "plugin.clipboard_modify.hide_after_apply",
+            crate::gui::jump_mode::TargetKind::Checkbox,
+        );
         labeled_form_row(ui, "Dialog size", |ui| {
-            ui.add(eframe::egui::DragValue::new(&mut cfg.dialog_width).range(320.0..=2400.0));
-            ui.add(eframe::egui::DragValue::new(&mut cfg.dialog_height).range(240.0..=1600.0))
+            let width =
+                ui.add(eframe::egui::DragValue::new(&mut cfg.dialog_width).range(320.0..=2400.0));
+            crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                ui,
+                &width,
+                "plugin.clipboard_modify.dialog_width",
+                crate::gui::jump_mode::TargetKind::Slider,
+            );
+            let height =
+                ui.add(eframe::egui::DragValue::new(&mut cfg.dialog_height).range(240.0..=1600.0));
+            crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                ui,
+                &height,
+                "plugin.clipboard_modify.dialog_height",
+                crate::gui::jump_mode::TargetKind::Slider,
+            );
+            height
         });
         labeled_form_row(ui, "Navigation width", |ui| {
-            ui.add(eframe::egui::DragValue::new(&mut cfg.navigation_width).range(80.0..=500.0))
+            let response =
+                ui.add(eframe::egui::DragValue::new(&mut cfg.navigation_width).range(80.0..=500.0));
+            crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                ui,
+                &response,
+                "plugin.clipboard_modify.navigation_width",
+                crate::gui::jump_mode::TargetKind::Slider,
+            );
+            response
         });
         labeled_form_row(ui, "Source/preview split", |ui| {
-            ui.add(eframe::egui::Slider::new(
+            let response = ui.add(eframe::egui::Slider::new(
                 &mut cfg.source_preview_split_ratio,
                 0.1..=0.9,
-            ))
+            ));
+            crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                ui,
+                &response,
+                "plugin.clipboard_modify.source_preview_split",
+                crate::gui::jump_mode::TargetKind::Slider,
+            );
+            response
         });
         labeled_form_row(ui, "Template filter", |ui| {
-            ui.text_edit_singleline(&mut cfg.template_filter)
+            let response = ui.text_edit_singleline(&mut cfg.template_filter);
+            crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                ui,
+                &response,
+                "plugin.clipboard_modify.template_filter",
+                crate::gui::jump_mode::TargetKind::TextEntry,
+            );
+            response
         });
         labeled_form_row(ui, "Pipeline filter", |ui| {
-            ui.text_edit_singleline(&mut cfg.pipeline_filter)
+            let response = ui.text_edit_singleline(&mut cfg.pipeline_filter);
+            crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                ui,
+                &response,
+                "plugin.clipboard_modify.pipeline_filter",
+                crate::gui::jump_mode::TargetKind::TextEntry,
+            );
+            response
         });
         labeled_form_row(ui, "Management sort", |ui| {
-            ui.text_edit_singleline(&mut cfg.management_sort_field)
+            let response = ui.text_edit_singleline(&mut cfg.management_sort_field);
+            crate::settings_editor::render::observe_scoped_settings_navigation_response(
+                ui,
+                &response,
+                "plugin.clipboard_modify.management_sort",
+                crate::gui::jump_mode::TargetKind::TextEntry,
+            );
+            response
         });
-        ui.checkbox(&mut cfg.management_sort_ascending, "Sort ascending");
+        let response = ui.checkbox(&mut cfg.management_sort_ascending, "Sort ascending");
+        crate::settings_editor::render::observe_scoped_settings_navigation_response(
+            ui,
+            &response,
+            "plugin.clipboard_modify.management_sort_ascending",
+            crate::gui::jump_mode::TargetKind::Checkbox,
+        );
         *value = serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null);
     }
 }

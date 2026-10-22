@@ -121,7 +121,14 @@ impl Plugin for ColorPickerPlugin {
             });
         let mut col =
             Color32::from_rgba_unmultiplied(cfg.color[0], cfg.color[1], cfg.color[2], cfg.color[3]);
-        if ui.color_edit_button_srgba(&mut col).changed() {
+        let response = ui.color_edit_button_srgba(&mut col);
+        crate::settings_editor::render::observe_scoped_settings_navigation_response(
+            ui,
+            &response,
+            "plugin.color_picker.color",
+            crate::gui::jump_mode::TargetKind::Button,
+        );
+        if response.changed() {
             cfg.color = [col.r(), col.g(), col.b(), col.a()];
             self.color = col;
         }
