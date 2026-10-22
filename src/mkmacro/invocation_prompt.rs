@@ -312,6 +312,7 @@ mod tests {
                             name: "input".into(),
                             description: "Input description".into(),
                             value_type: MkValueType::String,
+                            input_kind: Default::default(),
                             default_value: default,
                         }],
                         outputs: vec![],

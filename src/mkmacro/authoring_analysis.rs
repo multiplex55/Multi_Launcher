@@ -1605,6 +1605,7 @@ mod tests {
             id: MkSignatureId(7),
             name: "input".into(),
             value_type: MkValueType::Number,
+            input_kind: Default::default(),
             description: String::new(),
             default_value: None,
         });

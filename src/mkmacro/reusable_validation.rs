@@ -49,6 +49,20 @@ pub(crate) fn signature_parts(
         }
     }
     for parameter in parameters {
+        if parameter.value_type != MkValueType::String
+            && !matches!(parameter.input_kind, MkParameterInputKind::Text)
+        {
+            push(
+                out,
+                owner_id,
+                None,
+                "invalid_parameter_input_kind",
+                format!(
+                    "Input control for parameter '{}' is only valid for String parameters",
+                    parameter.name
+                ),
+            );
+        }
         if parameter
             .default_value
             .as_ref()
@@ -66,6 +80,104 @@ pub(crate) fn signature_parts(
                 ),
             );
         }
+        if let MkParameterInputKind::Choice(options) = &parameter.input_kind {
+            if let Some(reason) = choice_options_error(options) {
+                push(
+                    out,
+                    owner_id,
+                    None,
+                    "invalid_parameter_choice_options",
+                    format!(
+                        "Choice options for parameter '{}' are invalid: {reason}",
+                        parameter.name
+                    ),
+                );
+            } else if let Some(MkValue::String(default)) = &parameter.default_value
+                && !options.iter().any(|option| option == default)
+            {
+                push(
+                    out,
+                    owner_id,
+                    None,
+                    "invalid_parameter_choice_default",
+                    format!(
+                        "Default for choice parameter '{}' must exactly match one of its options",
+                        parameter.name
+                    ),
+                );
+            }
+        }
+    }
+}
+
+fn choice_options_error(options: &[String]) -> Option<&'static str> {
+    if options.is_empty() {
+        return Some("at least one option is required");
+    }
+    if options.len() > MK_PARAMETER_CHOICE_MAX_OPTIONS {
+        return Some("the option count exceeds the configured limit");
+    }
+    let mut total_bytes = 0usize;
+    let mut distinct = HashSet::with_capacity(options.len());
+    for option in options {
+        if option.trim().is_empty() {
+            return Some("options cannot be empty or whitespace-only");
+        }
+        if option.len() > MK_PARAMETER_CHOICE_MAX_OPTION_BYTES {
+            return Some("an option exceeds the UTF-8 byte limit");
+        }
+        total_bytes = total_bytes.saturating_add(option.len());
+        if total_bytes > MK_PARAMETER_CHOICE_MAX_TOTAL_BYTES {
+            return Some("the combined UTF-8 byte length exceeds the configured limit");
+        }
+        if !distinct.insert(option.as_str()) {
+            return Some("options must be distinct exact strings");
+        }
+    }
+    None
+}
+
+/// Returns the parser-decoded string only when a literal interpolation
+/// template is independent of runtime variables. Escaped references are
+/// literal text (and therefore can be checked statically); real references
+/// are validated after `prepare_call` resolves them.
+fn static_interpolated_string(template: &str) -> Option<String> {
+    let mut value = String::with_capacity(template.len());
+    for part in super::interpolation::scan_template(template) {
+        match part.ok()? {
+            super::TemplatePart::Text(text) => value.push_str(text),
+            super::TemplatePart::EscapedReference(name) => {
+                value.push_str("${");
+                value.push_str(name);
+                value.push('}');
+            }
+            super::TemplatePart::Reference(_) => return None,
+        }
+    }
+    Some(value)
+}
+
+/// Returns a metadata-specific input error after the ordinary value type check.
+/// Choice comparisons are exact; file/folder paths are not probed on disk.
+pub(crate) fn parameter_value_error(
+    parameter: &MkMacroParameter,
+    value: &MkValue,
+) -> Option<&'static str> {
+    let MkValue::String(text) = value else {
+        return None;
+    };
+    match &parameter.input_kind {
+        MkParameterInputKind::Text => None,
+        MkParameterInputKind::File | MkParameterInputKind::Folder
+            if parameter.default_value.is_none() && text.trim().is_empty() =>
+        {
+            Some("a required file or folder path cannot be blank")
+        }
+        MkParameterInputKind::File | MkParameterInputKind::Folder => None,
+        MkParameterInputKind::Choice(options) if !options.iter().any(|option| option == text) => {
+            Some("the value is not one of the configured choices")
+        }
+        MkParameterInputKind::Choice(_) => None,
     }
 }
 
@@ -78,6 +190,7 @@ pub(crate) fn signature_is_valid(owner: &MkMacro) -> bool {
 fn source(
     source: &MkValueSource,
     expected: Option<MkValueType>,
+    parameter: Option<&MkMacroParameter>,
     catalog: &VariableCatalog,
     owner: u64,
     step: u64,
@@ -93,6 +206,28 @@ fn source(
                     "binding_type_mismatch",
                     format!("Binding literal must be {}", expected.unwrap().label()),
                 );
+            }
+            if let Some(parameter) = parameter {
+                let value_error = match (&parameter.input_kind, value) {
+                    (MkParameterInputKind::Choice(_), MkValue::String(template)) => {
+                        static_interpolated_string(template).and_then(|value| {
+                            parameter_value_error(parameter, &MkValue::String(value))
+                        })
+                    }
+                    _ => parameter_value_error(parameter, value),
+                };
+                if let Some(reason) = value_error {
+                    push(
+                        out,
+                        owner,
+                        Some(step),
+                        "invalid_parameter_binding_value",
+                        format!(
+                            "Binding for parameter '{}' is invalid: {reason}",
+                            parameter.name
+                        ),
+                    );
+                }
             }
             if let MkValue::String(template) = value
                 && let Err(reason) = super::validation::interpolation_syntax(template)
@@ -198,7 +333,7 @@ pub(crate) fn bindings(
                         ),
                     );
                 }
-                let parameter = parameters.get(&argument.parameter_id);
+                let parameter = parameters.get(&argument.parameter_id).copied();
                 if target.is_some() && parameter.is_none() {
                     push(
                         out,
@@ -214,6 +349,7 @@ pub(crate) fn bindings(
                 source(
                     &argument.source,
                     parameter.map(|p| p.value_type),
+                    parameter,
                     catalog,
                     owner.id,
                     step.id,
@@ -320,6 +456,7 @@ pub(crate) fn bindings(
                 source(
                     &binding.source,
                     output.map(|o| o.value_type),
+                    None,
                     catalog,
                     owner.id,
                     step.id,

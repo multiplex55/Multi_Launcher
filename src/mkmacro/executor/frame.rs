@@ -990,6 +990,7 @@ mod tests {
             id: MkSignatureId(id),
             name: name.into(),
             value_type: MkValueType::String,
+            input_kind: Default::default(),
             description: String::new(),
             default_value,
         };
@@ -1286,6 +1287,7 @@ mod tests {
             id: MkSignatureId(1),
             name: "x".into(),
             value_type: MkValueType::String,
+            input_kind: Default::default(),
             description: String::new(),
             default_value: Some(MkValue::String("fresh".into())),
         });

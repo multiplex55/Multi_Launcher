@@ -60,8 +60,8 @@ pub enum DirtyDecision {
 mod recording_preview_document_tests {
     use super::*;
     use crate::mkmacro::{
-        MkMacroOutput, MkMacroParameter, MkMacroSignature, MkSignatureId, MkValueType,
-        RecordingPlan, RecordingTarget,
+        MkMacroOutput, MkMacroParameter, MkMacroSignature, MkParameterInputKind, MkSignatureId,
+        MkValueType, RecordingPlan, RecordingTarget,
     };
 
     #[test]
@@ -71,6 +71,7 @@ mod recording_preview_document_tests {
                 id: MkSignatureId(1),
                 name: "required".into(),
                 value_type: MkValueType::String,
+                input_kind: MkParameterInputKind::Text,
                 description: String::new(),
                 default_value: None,
             }],

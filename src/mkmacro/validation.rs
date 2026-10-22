@@ -1245,6 +1245,7 @@ mod reusable_tests {
             id: MkSignatureId(id),
             name: name.into(),
             value_type: kind,
+            input_kind: Default::default(),
             description: String::new(),
             default_value,
         }
@@ -1271,6 +1272,179 @@ mod reusable_tests {
                 && d.severity == severity
                 && d.scope == DiagnosticScope::Macro
         })
+    }
+
+    #[test]
+    fn parameter_input_metadata_reports_incompatible_and_bounded_choice_definitions() {
+        let mut parameters = Vec::new();
+        let mut incompatible = parameter(1, "file_number", MkValueType::Number, None);
+        incompatible.input_kind = MkParameterInputKind::File;
+        parameters.push(incompatible);
+
+        let mut empty = parameter(2, "empty", MkValueType::String, None);
+        empty.input_kind = MkParameterInputKind::Choice(Vec::new());
+        parameters.push(empty);
+
+        let mut whitespace = parameter(3, "whitespace", MkValueType::String, None);
+        whitespace.input_kind = MkParameterInputKind::Choice(vec![" \t".into()]);
+        parameters.push(whitespace);
+
+        let mut duplicate = parameter(4, "duplicate", MkValueType::String, None);
+        duplicate.input_kind = MkParameterInputKind::Choice(vec!["same".into(), "same".into()]);
+        parameters.push(duplicate);
+
+        let mut too_many = parameter(5, "too_many", MkValueType::String, None);
+        too_many.input_kind = MkParameterInputKind::Choice(
+            (0..=MK_PARAMETER_CHOICE_MAX_OPTIONS)
+                .map(|index| format!("option-{index}"))
+                .collect(),
+        );
+        parameters.push(too_many);
+
+        let mut too_long = parameter(6, "too_long", MkValueType::String, None);
+        too_long.input_kind = MkParameterInputKind::Choice(vec![
+            "x".repeat(MK_PARAMETER_CHOICE_MAX_OPTION_BYTES + 1),
+        ]);
+        parameters.push(too_long);
+
+        let mut too_large_total = parameter(7, "too_large_total", MkValueType::String, None);
+        too_large_total.input_kind = MkParameterInputKind::Choice(
+            (0..17)
+                .map(|index| format!("{index:02}{}", "x".repeat(126)))
+                .collect(),
+        );
+        parameters.push(too_large_total);
+
+        let mut wrong_default = parameter(
+            8,
+            "wrong_default",
+            MkValueType::String,
+            Some(MkValue::String("outside".into())),
+        );
+        wrong_default.input_kind =
+            MkParameterInputKind::Choice(vec!["inside".into(), "also inside".into()]);
+        parameters.push(wrong_default);
+
+        let mut target = owner(2, vec![]);
+        target.signature.parameters = parameters;
+        let diagnostics = diagnostics(&document(vec![target]));
+        for code in [
+            "invalid_parameter_input_kind",
+            "invalid_parameter_choice_options",
+            "invalid_parameter_choice_default",
+        ] {
+            assert!(
+                has(&diagnostics, code, 2, None, DiagnosticSeverity::Fatal),
+                "{code}: {diagnostics:?}"
+            );
+        }
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "invalid_parameter_choice_options")
+                .count(),
+            6,
+            "empty, whitespace, duplicate, count, individual, and aggregate limits are covered"
+        );
+    }
+
+    #[test]
+    fn parameter_input_metadata_accepts_the_documented_choice_limits() {
+        let mut max_count = parameter(1, "max_count", MkValueType::String, None);
+        max_count.input_kind = MkParameterInputKind::Choice(
+            (0..MK_PARAMETER_CHOICE_MAX_OPTIONS)
+                .map(|index| format!("option-{index}"))
+                .collect(),
+        );
+
+        let mut max_bytes = parameter(2, "max_bytes", MkValueType::String, None);
+        max_bytes.input_kind = MkParameterInputKind::Choice(
+            (0..16)
+                .map(|index| format!("{index:02}{}", "x".repeat(126)))
+                .collect(),
+        );
+
+        let mut target = owner(2, vec![]);
+        target.signature.parameters = vec![max_count, max_bytes];
+        let diagnostics = diagnostics(&document(vec![target]));
+        assert!(
+            !diagnostics.iter().any(|diagnostic| {
+                matches!(
+                    diagnostic.code,
+                    "invalid_parameter_choice_options" | "invalid_parameter_choice_default"
+                )
+            }),
+            "choices at the documented limits ({} aggregate bytes) should validate: {diagnostics:?}",
+            MK_PARAMETER_CHOICE_MAX_TOTAL_BYTES
+        );
+    }
+
+    #[test]
+    fn parameter_input_metadata_callmacro_literal_choices_are_exact() {
+        let call = |value: &str| {
+            MkAction::CallMacro(MkCallMacroPayload {
+                macro_id: 2,
+                arguments: vec![MkCallArgumentBinding {
+                    parameter_id: MkSignatureId(9),
+                    source: MkValueSource::Literal(MkValue::String(value.into())),
+                }],
+                ..Default::default()
+            })
+        };
+        let mut target = owner(2, vec![]);
+        let mut choice = parameter(9, "mode", MkValueType::String, None);
+        choice.input_kind = MkParameterInputKind::Choice(vec![
+            "Exact".into(),
+            "Second".into(),
+            "${literal}".into(),
+        ]);
+        target.signature.parameters.push(choice);
+
+        let valid = document(vec![owner(1, vec![call("Exact")]), target.clone()]);
+        assert!(
+            !diagnostics(&valid)
+                .iter()
+                .any(|diagnostic| diagnostic.code == "invalid_parameter_binding_value")
+        );
+
+        let invalid = document(vec![owner(1, vec![call("exact")]), target.clone()]);
+        assert!(has(
+            &diagnostics(&invalid),
+            "invalid_parameter_binding_value",
+            1,
+            Some(1),
+            DiagnosticSeverity::Fatal
+        ));
+
+        let mut caller = owner(1, vec![call("${choice_value}")]);
+        caller
+            .signature
+            .parameters
+            .push(parameter(10, "choice_value", MkValueType::String, None));
+        let dynamic = document(vec![caller, target.clone()]);
+        assert!(
+            !diagnostics(&dynamic)
+                .iter()
+                .any(|diagnostic| diagnostic.code == "invalid_parameter_binding_value"),
+            "a runtime interpolation is checked after it resolves, not against its raw template"
+        );
+
+        let escaped_valid = document(vec![owner(1, vec![call("$${literal}")]), target.clone()]);
+        assert!(
+            !diagnostics(&escaped_valid)
+                .iter()
+                .any(|diagnostic| diagnostic.code == "invalid_parameter_binding_value"),
+            "escaped references are statically checked as their decoded literal"
+        );
+
+        let escaped_invalid = document(vec![owner(1, vec![call("$${outside}")]), target]);
+        assert!(has(
+            &diagnostics(&escaped_invalid),
+            "invalid_parameter_binding_value",
+            1,
+            Some(1),
+            DiagnosticSeverity::Fatal
+        ));
     }
 
     #[test]

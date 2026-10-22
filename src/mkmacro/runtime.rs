@@ -2632,6 +2632,7 @@ mod run_mode_tests {
                 id: MkSignatureId(1),
                 name: "which".into(),
                 value_type: MkValueType::String,
+                input_kind: Default::default(),
                 description: String::new(),
                 default_value: Some(MkValue::String("leaf".into())),
             });
@@ -3137,6 +3138,7 @@ mod run_mode_tests {
                 id: MkSignatureId(1),
                 name: "parameter".into(),
                 value_type: MkValueType::String,
+                input_kind: Default::default(),
                 description: String::new(),
                 default_value: None,
             },
@@ -3144,6 +3146,7 @@ mod run_mode_tests {
                 id: MkSignatureId(2),
                 name: "defaulted".into(),
                 value_type: MkValueType::String,
+                input_kind: Default::default(),
                 description: String::new(),
                 default_value: Some(MkValue::String("literal ${missing}".into())),
             },

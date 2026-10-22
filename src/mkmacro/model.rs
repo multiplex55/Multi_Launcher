@@ -392,12 +392,41 @@ pub struct MkMacroSignature {
     pub outputs: Vec<MkMacroOutput>,
 }
 
+/// Bounded presentation metadata for String-valued macro parameters.
+///
+/// Choice values are literal strings: the displayed option and supplied value
+/// are the same authored text. They are never evaluated as expressions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "options", rename_all = "snake_case")]
+pub enum MkParameterInputKind {
+    #[default]
+    Text,
+    File,
+    Folder,
+    Choice(Vec<String>),
+}
+
+impl MkParameterInputKind {
+    fn is_text(&self) -> bool {
+        matches!(self, Self::Text)
+    }
+}
+
+/// Maximum number of literal choices attached to one macro parameter.
+pub const MK_PARAMETER_CHOICE_MAX_OPTIONS: usize = 32;
+/// Maximum UTF-8 byte length of one literal choice.
+pub const MK_PARAMETER_CHOICE_MAX_OPTION_BYTES: usize = 128;
+/// Maximum combined UTF-8 byte length of all choices on one parameter.
+pub const MK_PARAMETER_CHOICE_MAX_TOTAL_BYTES: usize = 2048;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkMacroParameter {
     #[serde(default)]
     pub id: MkSignatureId,
     pub name: String,
     pub value_type: MkValueType,
+    #[serde(default, skip_serializing_if = "MkParameterInputKind::is_text")]
+    pub input_kind: MkParameterInputKind,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
@@ -1683,6 +1712,7 @@ mod reusable_model_tests {
             id: MkSignatureId(0),
             name: "broken".into(),
             value_type: MkValueType::String,
+            input_kind: Default::default(),
             description: String::new(),
             default_value: None,
         });
@@ -1698,6 +1728,53 @@ mod reusable_model_tests {
             2
         );
         assert!(!super::super::validation::can_run(&diagnostics));
+    }
+}
+
+#[cfg(test)]
+mod parameter_input_metadata_model_tests {
+    use super::*;
+
+    #[test]
+    fn parameter_input_metadata_legacy_text_is_implicit_and_choice_order_round_trips() {
+        let legacy: MkMacroParameter = serde_json::from_value(serde_json::json!({
+            "id": 7,
+            "name": "path",
+            "value_type": "string"
+        }))
+        .unwrap();
+        assert_eq!(legacy.input_kind, MkParameterInputKind::Text);
+        assert!(
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("input_kind")
+                .is_none()
+        );
+
+        let choice = MkMacroParameter {
+            id: MkSignatureId(8),
+            name: "mode".into(),
+            value_type: MkValueType::String,
+            input_kind: MkParameterInputKind::Choice(vec![
+                "First option".into(),
+                "選択肢二".into(),
+                "Third".into(),
+            ]),
+            description: String::new(),
+            default_value: Some(MkValue::String("選択肢二".into())),
+        };
+        let encoded = serde_json::to_value(&choice).unwrap();
+        assert_eq!(
+            encoded["input_kind"],
+            serde_json::json!({
+                "kind": "choice",
+                "options": ["First option", "選択肢二", "Third"]
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<MkMacroParameter>(encoded).unwrap(),
+            choice
+        );
     }
 }
 

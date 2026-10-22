@@ -92,6 +92,14 @@ pub fn prepare_parameters(
             .or(parameter.default_value.as_ref())
         {
             require_type(parameter.value_type, value, &parameter.name)?;
+            if let Some(reason) =
+                super::reusable_validation::parameter_value_error(parameter, value)
+            {
+                return Err(binding_error(format!(
+                    "Parameter '{}' is invalid: {reason}",
+                    parameter.name
+                )));
+            }
             values.insert(parameter.id, value.clone());
         } else {
             missing.push(parameter.clone());
@@ -274,8 +282,8 @@ pub(crate) fn compile_invocation_program(
     Ok(program)
 }
 
-/// Names, descriptions and ordering are presentation. IDs, types and default
-/// assumptions are the contract the user saw when input was requested.
+/// Names, descriptions and ordering are presentation. IDs, types, defaults,
+/// and input metadata are the contract the user saw when input was requested.
 pub(crate) fn validate_parameter_assumptions(
     previous: &[MkMacroParameter],
     current: &[MkMacroParameter],
@@ -284,7 +292,9 @@ pub(crate) fn validate_parameter_assumptions(
     if previous.len() != current.len()
         || previous.iter().any(|old| {
             current.get(&old.id).is_none_or(|new| {
-                new.value_type != old.value_type || new.default_value != old.default_value
+                new.value_type != old.value_type
+                    || new.default_value != old.default_value
+                    || new.input_kind != old.input_kind
             })
         })
     {
@@ -375,6 +385,7 @@ mod tests {
             id: MkSignatureId(id),
             name: name.into(),
             value_type: MkValueType::String,
+            input_kind: Default::default(),
             description: String::new(),
             default_value,
         }
@@ -418,6 +429,139 @@ mod tests {
         let mut duplicate = parameters.clone();
         duplicate[1].id = duplicate[0].id;
         assert!(prepare_parameters(&duplicate, &[], &values).is_err());
+    }
+
+    #[test]
+    fn parameter_input_metadata_prepares_exact_choices_and_portable_paths() {
+        let mut choice = parameter(21, "mode", None);
+        choice.input_kind = MkParameterInputKind::Choice(vec!["First".into(), "選択肢二".into()]);
+        let choice_value = [(choice.id, MkValue::String("選択肢二".into()))]
+            .into_iter()
+            .collect();
+        assert!(prepare_parameters(&[choice.clone()], &[], &choice_value).is_ok());
+        let wrong_choice = [(choice.id, MkValue::String("選択肢二 ".into()))]
+            .into_iter()
+            .collect();
+        assert!(
+            prepare_parameters(&[choice], &[], &wrong_choice)
+                .unwrap_err()
+                .message
+                .contains("not one of the configured choices")
+        );
+
+        for (id, input_kind) in [
+            (22, MkParameterInputKind::File),
+            (23, MkParameterInputKind::Folder),
+        ] {
+            let mut path = parameter(id, "path", None);
+            path.input_kind = input_kind;
+            let portable = [(
+                path.id,
+                MkValue::String(r"Z:\portable\future folder\missing.txt".into()),
+            )]
+            .into_iter()
+            .collect();
+            assert!(prepare_parameters(&[path.clone()], &[], &portable).is_ok());
+            let blank = [(path.id, MkValue::String(" \t".into()))]
+                .into_iter()
+                .collect();
+            assert!(
+                prepare_parameters(&[path], &[], &blank)
+                    .unwrap_err()
+                    .message
+                    .contains("required file or folder path cannot be blank")
+            );
+        }
+
+        let legacy_text = parameter(24, "legacy", None);
+        let blank = [(legacy_text.id, MkValue::String(String::new()))]
+            .into_iter()
+            .collect();
+        assert!(prepare_parameters(&[legacy_text], &[], &blank).is_ok());
+    }
+
+    #[test]
+    fn parameter_input_metadata_validates_interpolated_choices_after_resolution() {
+        let mut mode = parameter(9, "mode", None);
+        mode.input_kind = MkParameterInputKind::Choice(vec!["safe".into(), "other".into()]);
+        let callee = MkMacro {
+            id: 2,
+            name: "Choice target".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: Default::default(),
+            signature: MkMacroSignature {
+                parameters: vec![mode],
+                outputs: Vec::new(),
+            },
+            steps: Vec::new(),
+        };
+        let signature = super::super::compile(&callee).unwrap().signature;
+        let call = MkCallMacroPayload {
+            macro_id: callee.id,
+            arguments: vec![MkCallArgumentBinding {
+                parameter_id: MkSignatureId(9),
+                source: MkValueSource::Literal(MkValue::String("${selected}".into())),
+            }],
+            ..Default::default()
+        };
+        let variables = [("selected".into(), MkValue::String("safe".into()))]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            prepare_call(&signature, &call, &variables).unwrap()["mode"],
+            MkValue::String("safe".into())
+        );
+
+        let invalid_variables = [("selected".into(), MkValue::String("unsafe".into()))]
+            .into_iter()
+            .collect();
+        assert!(
+            prepare_call(&signature, &call, &invalid_variables)
+                .unwrap_err()
+                .message
+                .contains("not one of the configured choices"),
+            "the resolved value, not the template, must satisfy exact choice membership"
+        );
+    }
+
+    #[test]
+    fn parameter_input_metadata_changes_invalidate_pending_assumptions_but_reorder_does_not() {
+        let mut choice = parameter(31, "mode", None);
+        choice.input_kind = MkParameterInputKind::Choice(vec!["A".into(), "B".into()]);
+        let text = parameter(32, "note", None);
+        let previous = vec![choice.clone(), text.clone()];
+
+        let mut renamed_text = text;
+        renamed_text.name = "renamed_note".into();
+        let mut renamed_choice = choice.clone();
+        renamed_choice.name = "renamed_mode".into();
+        assert!(
+            validate_parameter_assumptions(
+                &previous,
+                &[renamed_text.clone(), renamed_choice.clone()]
+            )
+            .is_ok()
+        );
+
+        renamed_choice.input_kind = MkParameterInputKind::Choice(vec!["A".into(), "C".into()]);
+        assert!(
+            validate_parameter_assumptions(&previous, &[renamed_text.clone(), renamed_choice])
+                .is_err()
+        );
+
+        let mut changed_control = choice;
+        changed_control.input_kind = MkParameterInputKind::File;
+        assert!(
+            validate_parameter_assumptions(
+                &previous,
+                &[changed_control, parameter(32, "note", None)]
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -468,6 +612,7 @@ mod tests {
                     id,
                     name: format!("value_{index}"),
                     value_type,
+                    input_kind: Default::default(),
                     description: String::new(),
                     default_value: None,
                 },

@@ -1,5 +1,7 @@
 use super::{MkMacroDialog, typed_value};
-use crate::mkmacro::{MkMacroOutput, MkMacroParameter, MkSignatureId, MkValueType};
+use crate::mkmacro::{
+    MkMacroOutput, MkMacroParameter, MkParameterInputKind, MkSignatureId, MkValueType,
+};
 use eframe::egui;
 
 #[derive(Clone, Copy)]
@@ -165,6 +167,7 @@ fn apply_structural(dialog: &mut MkMacroDialog, macro_id: u64, edit: StructuralE
                 id,
                 name: format!("parameter_{}", id.0),
                 value_type: MkValueType::String,
+                input_kind: MkParameterInputKind::Text,
                 description: String::new(),
                 default_value: None,
             }),
@@ -258,6 +261,9 @@ pub(super) fn show(ui: &mut egui::Ui, dialog: &mut MkMacroDialog, macro_id: u64)
                     | "invalid_signature_name"
                     | "duplicate_signature_name"
                     | "invalid_parameter_default"
+                    | "invalid_parameter_input_kind"
+                    | "invalid_parameter_choice_options"
+                    | "invalid_parameter_choice_default"
             )
     }) {
         ui.colored_label(ui.visuals().error_fg_color, &diagnostic.message);
@@ -300,6 +306,7 @@ mod tests {
                 id: MkSignatureId(4),
                 name: "a".into(),
                 value_type: MkValueType::String,
+                input_kind: MkParameterInputKind::Text,
                 description: String::new(),
                 default_value: Some(MkValue::String("preserve".into())),
             },
@@ -307,6 +314,7 @@ mod tests {
                 id: MkSignatureId(8),
                 name: "b".into(),
                 value_type: MkValueType::Number,
+                input_kind: MkParameterInputKind::Text,
                 description: String::new(),
                 default_value: None,
             },
