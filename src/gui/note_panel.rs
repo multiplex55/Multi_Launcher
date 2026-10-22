@@ -2089,7 +2089,7 @@ impl NotePanel {
         )
     }
 
-    pub(crate) fn blocks_show_query_focus(&self, ctx: &egui::Context) -> bool {
+    pub(crate) fn query_focus_protected_state_blocks(&self) -> bool {
         if !self.open {
             return false;
         }
@@ -2099,7 +2099,11 @@ impl NotePanel {
             || self.link_dialog_open
             || self.link_new_dialog_open
             || self.pending_plain_link_conversion.is_some()
-            || crate::gui::jump_mode::ui::focused_response_layer(ctx)
+    }
+
+    pub(crate) fn owns_query_focus_layer(&self, ctx: &egui::Context) -> bool {
+        self.open
+            && crate::gui::jump_mode::ui::focused_response_layer(ctx)
                 == Some(self.show_query_focus_layer())
     }
 

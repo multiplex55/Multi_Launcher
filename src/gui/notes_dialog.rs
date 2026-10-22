@@ -1145,6 +1145,11 @@ impl NotesDialog {
         self.edit_idx.is_some()
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_edit_text_rect(&self) -> Option<egui::Rect> {
+        self.test_edit_text_rect
+    }
+
     fn capture_note_snapshot(&mut self) -> anyhow::Result<(u64, Vec<Note>)> {
         #[cfg(test)]
         let _phase = c2f_observation::Timer::start(c2f_observation::Phase::Snapshot);

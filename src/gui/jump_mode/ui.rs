@@ -2146,7 +2146,7 @@ impl JumpModeUi {
         )
     }
 
-    pub(crate) fn update_navigation_owner_with_combo_popup_for_show_focus(
+    pub(crate) fn update_navigation_owner_with_combo_popup_for_query_focus(
         &mut self,
         ctx: &egui::Context,
         candidate: NavigationOwner,
@@ -2537,7 +2537,7 @@ impl JumpModeUi {
         )
     }
 
-    pub(crate) fn prepare_pass_for_navigation_owner_with_show_query_focus(
+    pub(crate) fn prepare_pass_for_navigation_owner_with_query_focus(
         &mut self,
         ctx: &egui::Context,
         navigation_owner: NavigationOwner,
@@ -2744,7 +2744,7 @@ impl JumpModeUi {
         );
     }
 
-    pub(crate) fn complete_frame_for_navigation_owner_with_show_query_focus(
+    pub(crate) fn complete_frame_for_navigation_owner_with_query_focus(
         &mut self,
         ctx: &egui::Context,
         navigation_owner: NavigationOwner,
