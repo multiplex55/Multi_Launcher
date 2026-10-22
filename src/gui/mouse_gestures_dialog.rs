@@ -743,6 +743,16 @@ impl MgGesturesDialog {
     pub fn open(&mut self) {
         self.canvas_drag_active = false;
         self.reload_from(GESTURES_FILE);
+        self.finish_opening();
+    }
+
+    fn open_with_loaded_database(&mut self, database: GestureDb) {
+        self.canvas_drag_active = false;
+        self.install_loaded_database(database);
+        self.finish_opening();
+    }
+
+    fn finish_opening(&mut self) {
         self.open = true;
         self.selected_idx = self.sorted_gesture_indices().into_iter().next();
         self.rename_idx = None;
@@ -755,19 +765,28 @@ impl MgGesturesDialog {
         self.ensure_selection();
     }
 
-    fn reload_from(&mut self, path: impl AsRef<std::path::Path>) {
+    fn reset_database_editor_state(&mut self) {
         self.pending_delete = None;
         self.delete_confirm_modal.close();
         self.binding_dialog.open = false;
         self.binding_dialog.editor.reset();
+    }
+
+    fn install_loaded_database(&mut self, db: GestureDb) {
+        self.reset_database_editor_state();
+        self.committed_db = db.clone();
+        self.db = db;
+        self.load_error = None;
+        self.reset_identity_tokens();
+    }
+
+    fn reload_from(&mut self, path: impl AsRef<std::path::Path>) {
         match load_gestures(path) {
             Ok(db) => {
-                self.committed_db = db.clone();
-                self.db = db;
-                self.load_error = None;
-                self.reset_identity_tokens();
+                self.install_loaded_database(db);
             }
             Err(error) => {
+                self.reset_database_editor_state();
                 self.db = self.committed_db.clone();
                 self.load_error = Some(format!("Failed to load mouse gestures: {error}"));
                 self.reset_identity_tokens();
@@ -809,6 +828,132 @@ impl MgGesturesDialog {
             let next_idx = self.db.gestures[idx].bindings.len();
             self.binding_dialog.open_new(idx, next_idx, false);
         }
+    }
+
+    /// Reveals an existing binding from the Hotkey Directory while retaining
+    /// an open gesture draft. This never creates a gesture or binding.
+    pub(crate) fn reveal_binding_for_hotkey_directory(
+        &mut self,
+        publication: u64,
+        entry_id: &crate::hotkey::directory::EntryId,
+        gesture_index: usize,
+        binding_index: usize,
+    ) -> Result<(), &'static str> {
+        self.reveal_binding_with_hotkey_directory_source(
+            publication,
+            entry_id,
+            gesture_index,
+            binding_index,
+            crate::plugins::mouse_gestures::hotkey_directory_source,
+            crate::plugins::mouse_gestures::hotkey_directory_binding_matches_committed,
+            || {
+                load_gestures(GESTURES_FILE)
+                    .map_err(|_| "Mouse Gestures could not load the current database.")
+            },
+        )
+    }
+
+    fn reveal_binding_with_hotkey_directory_source(
+        &mut self,
+        publication: u64,
+        entry_id: &crate::hotkey::directory::EntryId,
+        gesture_index: usize,
+        binding_index: usize,
+        mut current_source: impl FnMut() -> crate::hotkey::directory::SourceSnapshot,
+        mut current_owner_database_matches: impl FnMut(
+            u64,
+            &crate::hotkey::directory::EntryId,
+            usize,
+            usize,
+            &GestureDb,
+        ) -> bool,
+        mut load_closed_database: impl FnMut() -> Result<GestureDb, &'static str>,
+    ) -> Result<(), &'static str> {
+        if !hotkey_directory_binding_is_current(
+            current_source(),
+            publication,
+            entry_id,
+            gesture_index,
+            binding_index,
+        ) {
+            return Err("The requested gesture binding changed after this snapshot.");
+        }
+
+        // A closed dialog will reload its file on open. Validate that exact
+        // prospective baseline against the runtime owner before changing any
+        // dialog state, since the file watcher may not have published it yet.
+        let closed_database = if self.open {
+            None
+        } else {
+            Some(load_closed_database()?)
+        };
+        let database_baseline = closed_database.as_ref().unwrap_or(&self.committed_db);
+        if !current_owner_database_matches(
+            publication,
+            entry_id,
+            gesture_index,
+            binding_index,
+            database_baseline,
+        ) {
+            return Err("The requested gesture binding changed in the current owner database.");
+        }
+        if let Some(database) = closed_database {
+            self.open_with_loaded_database(database);
+        }
+
+        // Confirm the same owner publication and committed target again after
+        // any validated closed-dialog load, before opening the child editor.
+        if !hotkey_directory_binding_is_current(
+            current_source(),
+            publication,
+            entry_id,
+            gesture_index,
+            binding_index,
+        ) {
+            return Err("The requested gesture binding changed after this snapshot.");
+        }
+        if !current_owner_database_matches(
+            publication,
+            entry_id,
+            gesture_index,
+            binding_index,
+            &self.committed_db,
+        ) {
+            return Err("The requested gesture binding changed in the current owner database.");
+        }
+        if self.load_error.is_some() {
+            return Err("Mouse Gestures could not load its current settings.");
+        }
+        if self.binding_dialog.open {
+            return Err(
+                "Finish or close the current binding editor before opening another binding.",
+            );
+        }
+        if self.pending_delete.is_some() || self.delete_confirm_modal.is_open() {
+            return Err("Resolve the pending gesture deletion before opening a binding.");
+        }
+        if self.rename_idx.is_some() {
+            return Err("Finish the current gesture rename before opening a binding.");
+        }
+        let Some(gesture) = self.db.gestures.get(gesture_index) else {
+            return Err("The requested gesture is no longer present.");
+        };
+        let Some(binding) = gesture.bindings.get(binding_index) else {
+            return Err("The requested gesture binding is no longer present.");
+        };
+        if self
+            .committed_db
+            .gestures
+            .get(gesture_index)
+            .and_then(|gesture| gesture.bindings.get(binding_index))
+            != Some(binding)
+        {
+            return Err("The requested gesture binding changed in the current draft.");
+        }
+        let binding = binding.clone();
+        self.binding_dialog
+            .open_edit(gesture_index, &binding, binding_index, false);
+        Ok(())
     }
 
     fn ensure_selection(&mut self) {
@@ -2284,9 +2429,96 @@ impl MgGesturesDialog {
     }
 }
 
+fn hotkey_directory_binding_is_current(
+    source: crate::hotkey::directory::SourceSnapshot,
+    publication: u64,
+    entry_id: &crate::hotkey::directory::EntryId,
+    gesture_index: usize,
+    binding_index: usize,
+) -> bool {
+    use crate::hotkey::directory::{EditDestination, Source};
+
+    let (Ok(gesture_index), Ok(binding_index)) =
+        (u32::try_from(gesture_index), u32::try_from(binding_index))
+    else {
+        return false;
+    };
+    source.source == Source::MouseGestures
+        && source.revision == publication
+        && source.candidates.iter().any(|candidate| {
+            candidate.owner == crate::hotkey::directory::Owner::MouseGestures
+                && candidate.id == *entry_id
+                && candidate.edit.as_ref()
+                    == Some(&EditDestination::GestureBinding {
+                        publication,
+                        gesture_index,
+                        binding_index,
+                    })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn published_hotkey_binding(
+        publication: u64,
+        gesture_index: u32,
+        binding_index: u32,
+    ) -> crate::hotkey::directory::SourceSnapshot {
+        use crate::hotkey::directory::{
+            Candidate, CandidateState, EditDestination, EntryId, Owner, RouteKind, Scope, Source,
+            SourceSnapshot,
+        };
+
+        SourceSnapshot::new(
+            Source::MouseGestures,
+            publication,
+            vec![Candidate {
+                id: EntryId::new(format!(
+                    "gesture:{publication}:{gesture_index}:{binding_index}"
+                )),
+                owner: Owner::MouseGestures,
+                owner_label: "Mouse Gestures".into(),
+                action_label: "Launch — binding 1".into(),
+                chord: None,
+                route: RouteKind::Gesture,
+                scope: Scope::Gesture,
+                source_revision: publication,
+                expected_runtime_generation: None,
+                state: CandidateState::Configured,
+                reason: None,
+                edit: Some(EditDestination::GestureBinding {
+                    publication,
+                    gesture_index,
+                    binding_index,
+                }),
+            }],
+            Vec::new(),
+        )
+    }
+
+    fn owner_database_matches(
+        live_publication: u64,
+        live_database: &GestureDb,
+        publication: u64,
+        entry_id: &crate::hotkey::directory::EntryId,
+        gesture_index: usize,
+        binding_index: usize,
+        committed_database: &GestureDb,
+    ) -> bool {
+        let expected_id = format!("gesture:{publication}:{gesture_index}:{binding_index}");
+        if live_publication != publication || entry_id.as_str() != expected_id.as_str() {
+            return false;
+        }
+        let (Some(live_gesture), Some(committed_gesture)) = (
+            live_database.gestures.get(gesture_index),
+            committed_database.gestures.get(gesture_index),
+        ) else {
+            return false;
+        };
+        live_gesture == committed_gesture && live_gesture.bindings.get(binding_index).is_some()
+    }
 
     fn gesture(label: &str, tokens: &str) -> GestureEntry {
         GestureEntry {
@@ -2308,6 +2540,247 @@ mod tests {
         assert!(dlg.queue_gesture_delete(0, false));
         assert_eq!(dlg.db.gestures.len(), 1);
         assert!(dlg.pending_delete.is_some());
+    }
+
+    #[test]
+    fn hotkey_directory_ui_reveals_existing_gesture_binding_without_replacing_draft() {
+        let committed = GestureDb {
+            schema_version: crate::mouse_gestures::db::SCHEMA_VERSION,
+            gestures: vec![
+                GestureEntry {
+                    bindings: vec![BindingEntry {
+                        label: "Launch current query".into(),
+                        kind: BindingKind::Execute,
+                        action: "launcher:show".into(),
+                        args: None,
+                        enabled: true,
+                    }],
+                    ..gesture("Launch", "R")
+                },
+                gesture("Working draft", "L"),
+            ],
+        };
+        let mut draft = committed.clone();
+        draft.gestures[1].label = "Unsaved gesture label".into();
+
+        let mut dialog = MgGesturesDialog::default();
+        dialog.open = true;
+        dialog.db = draft.clone();
+        dialog.committed_db = committed.clone();
+        dialog.selected_idx = Some(1);
+        dialog.token_buffer = "unfinished token draft".into();
+
+        let publication = 17;
+        let entry_id = crate::hotkey::directory::EntryId::new("gesture:17:0:0");
+        let live_source = published_hotkey_binding(publication, 0, 0);
+        let live_database = committed.clone();
+        dialog
+            .reveal_binding_with_hotkey_directory_source(
+                publication,
+                &entry_id,
+                0,
+                0,
+                || live_source.clone(),
+                |publication, entry_id, gesture_index, binding_index, baseline| {
+                    owner_database_matches(
+                        publication,
+                        &live_database,
+                        publication,
+                        entry_id,
+                        gesture_index,
+                        binding_index,
+                        baseline,
+                    )
+                },
+                || unreachable!("an already-open editor does not reload its file"),
+            )
+            .expect("the exact unchanged binding remains a safe destination");
+
+        assert!(dialog.binding_dialog.open);
+        assert_eq!(dialog.binding_dialog.gesture_idx, Some(0));
+        assert_eq!(dialog.binding_dialog.editor.edit_idx, Some(0));
+        assert_eq!(dialog.binding_dialog.editor.label, "Launch current query");
+        assert_eq!(dialog.db, draft, "the unsaved database draft is retained");
+        assert_eq!(dialog.committed_db, committed);
+        assert_eq!(dialog.selected_idx, Some(1));
+        assert_eq!(dialog.token_buffer, "unfinished token draft");
+
+        let mut changed_target_draft = draft.clone();
+        changed_target_draft.gestures[0].bindings[0].label = "Changed target draft".into();
+        let mut stale_dialog = MgGesturesDialog::default();
+        stale_dialog.open = true;
+        stale_dialog.db = changed_target_draft.clone();
+        stale_dialog.committed_db = committed.clone();
+        stale_dialog.selected_idx = Some(1);
+        stale_dialog.token_buffer = "keep this draft".into();
+        assert_eq!(
+            stale_dialog.reveal_binding_with_hotkey_directory_source(
+                publication,
+                &entry_id,
+                0,
+                0,
+                || live_source.clone(),
+                |publication, entry_id, gesture_index, binding_index, baseline| {
+                    owner_database_matches(
+                        publication,
+                        &committed,
+                        publication,
+                        entry_id,
+                        gesture_index,
+                        binding_index,
+                        baseline,
+                    )
+                },
+                || unreachable!("an already-open editor does not reload its file"),
+            ),
+            Err("The requested gesture binding changed in the current draft.")
+        );
+        assert!(!stale_dialog.binding_dialog.open);
+        assert_eq!(stale_dialog.db, changed_target_draft);
+        assert_eq!(stale_dialog.selected_idx, Some(1));
+        assert_eq!(stale_dialog.token_buffer, "keep this draft");
+
+        let newer_publication = published_hotkey_binding(publication + 1, 0, 0);
+        let mut publication_stale_dialog = MgGesturesDialog::default();
+        publication_stale_dialog.open = true;
+        publication_stale_dialog.db = draft.clone();
+        publication_stale_dialog.committed_db = committed.clone();
+        publication_stale_dialog.selected_idx = Some(1);
+        publication_stale_dialog.token_buffer = "preserve on publication change".into();
+        assert_eq!(
+            publication_stale_dialog.reveal_binding_with_hotkey_directory_source(
+                publication,
+                &entry_id,
+                0,
+                0,
+                || newer_publication.clone(),
+                |publication, entry_id, gesture_index, binding_index, baseline| {
+                    owner_database_matches(
+                        publication,
+                        &committed,
+                        publication,
+                        entry_id,
+                        gesture_index,
+                        binding_index,
+                        baseline,
+                    )
+                },
+                || unreachable!("an already-open editor does not reload its file"),
+            ),
+            Err("The requested gesture binding changed after this snapshot.")
+        );
+        assert!(!publication_stale_dialog.binding_dialog.open);
+        assert_eq!(publication_stale_dialog.db, draft);
+        assert_eq!(publication_stale_dialog.committed_db, committed);
+        assert_eq!(publication_stale_dialog.selected_idx, Some(1));
+        assert_eq!(
+            publication_stale_dialog.token_buffer,
+            "preserve on publication change"
+        );
+
+        let mut changed_live_database = committed.clone();
+        changed_live_database.gestures[0].bindings[0].label = "Current runtime binding".into();
+        let mut stale_baseline_dialog = MgGesturesDialog::default();
+        stale_baseline_dialog.open = true;
+        stale_baseline_dialog.db = draft.clone();
+        stale_baseline_dialog.committed_db = committed.clone();
+        stale_baseline_dialog.selected_idx = Some(1);
+        stale_baseline_dialog.token_buffer = "preserve stale-baseline draft".into();
+        assert_eq!(
+            stale_baseline_dialog.reveal_binding_with_hotkey_directory_source(
+                publication,
+                &entry_id,
+                0,
+                0,
+                || live_source.clone(),
+                |publication, entry_id, gesture_index, binding_index, baseline| {
+                    owner_database_matches(
+                        publication,
+                        &changed_live_database,
+                        publication,
+                        entry_id,
+                        gesture_index,
+                        binding_index,
+                        baseline,
+                    )
+                },
+                || unreachable!("an already-open editor does not reload its file"),
+            ),
+            Err("The requested gesture binding changed in the current owner database.")
+        );
+        assert!(!stale_baseline_dialog.binding_dialog.open);
+        assert_eq!(stale_baseline_dialog.db, draft);
+        assert_eq!(stale_baseline_dialog.committed_db, committed);
+        assert_eq!(stale_baseline_dialog.selected_idx, Some(1));
+        assert_eq!(
+            stale_baseline_dialog.token_buffer,
+            "preserve stale-baseline draft"
+        );
+
+        let mut closed_stale_dialog = MgGesturesDialog::default();
+        closed_stale_dialog.db = draft.clone();
+        closed_stale_dialog.committed_db = committed.clone();
+        closed_stale_dialog.selected_idx = Some(1);
+        closed_stale_dialog.token_buffer = "preserve closed draft state".into();
+        assert_eq!(
+            closed_stale_dialog.reveal_binding_with_hotkey_directory_source(
+                publication,
+                &entry_id,
+                0,
+                0,
+                || live_source.clone(),
+                |publication, entry_id, gesture_index, binding_index, database| {
+                    owner_database_matches(
+                        publication,
+                        &committed,
+                        publication,
+                        entry_id,
+                        gesture_index,
+                        binding_index,
+                        database,
+                    )
+                },
+                || Ok(changed_live_database.clone()),
+            ),
+            Err("The requested gesture binding changed in the current owner database.")
+        );
+        assert!(!closed_stale_dialog.open);
+        assert_eq!(closed_stale_dialog.db, draft);
+        assert_eq!(closed_stale_dialog.committed_db, committed);
+        assert_eq!(closed_stale_dialog.selected_idx, Some(1));
+        assert_eq!(
+            closed_stale_dialog.token_buffer,
+            "preserve closed draft state"
+        );
+
+        let mut closed_current_dialog = MgGesturesDialog::default();
+        closed_current_dialog.db = draft;
+        closed_current_dialog.committed_db = committed.clone();
+        assert_eq!(
+            closed_current_dialog.reveal_binding_with_hotkey_directory_source(
+                publication,
+                &entry_id,
+                0,
+                0,
+                || live_source.clone(),
+                |publication, entry_id, gesture_index, binding_index, database| {
+                    owner_database_matches(
+                        publication,
+                        &committed,
+                        publication,
+                        entry_id,
+                        gesture_index,
+                        binding_index,
+                        database,
+                    )
+                },
+                || Ok(committed.clone()),
+            ),
+            Ok(())
+        );
+        assert!(closed_current_dialog.open);
+        assert!(closed_current_dialog.binding_dialog.open);
+        assert_eq!(closed_current_dialog.db, committed);
     }
 
     #[test]

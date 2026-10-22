@@ -2,6 +2,7 @@
 use super::qa_framebuffer::{RootListDiagnostic, VisibleRowDiagnostic};
 use super::*;
 
+use crate::gui::jump_mode::ui::NavigationOwner;
 use crate::radial::acceptance_trace::{
     self, Correlation, RestoreEdge, RootMenuControl, RootResultKind, VisibilitySource,
 };
@@ -3957,7 +3958,7 @@ impl LauncherApp {
     }
 
     fn show_regex_tester(&mut self, ctx: &egui::Context, root_visible: bool) {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        use crate::gui::jump_mode::ui::NavigationDialogKind;
 
         let instance = self
             .jump_mode_ui
@@ -3998,7 +3999,7 @@ impl LauncherApp {
     }
 
     fn show_xml_toolkit(&mut self, ctx: &egui::Context, root_visible: bool) {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        use crate::gui::jump_mode::ui::NavigationDialogKind;
 
         let instance = self
             .jump_mode_ui
@@ -4054,6 +4055,181 @@ impl LauncherApp {
         self.jump_mode_enabled()
             && self.native_ui_host_input_allowed(ctx, root_visible)
             && !self.mouse_gestures_dialog.recorder_canvas_active()
+    }
+
+    fn hotkey_directory_native_ui_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        use crate::gui::jump_mode::ui::NavigationDialogKind;
+
+        let kind = NavigationDialogKind::HotkeyDirectory;
+        if self.jump_mode_ui.dialog_instance(kind).is_none() {
+            return false;
+        }
+        self.hotkey_directory_dialog.open
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && !egui::Popup::is_any_open(ctx)
+            && kind.layer_id().is_some_and(|layer| {
+                crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+            })
+    }
+
+    fn dispatch_hotkey_directory_edit(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        request: &super::hotkey_directory_dialog::HotkeyDirectoryEditRequest,
+    ) -> Result<(), &'static str> {
+        use crate::hotkey::directory::{EditDestination, MainSetting, PasteSetting};
+
+        if !self.hotkey_directory_native_ui_owner_current(ctx, root_visible) {
+            return Err("The Hotkey Directory no longer owns the foreground window.");
+        }
+        let destination = super::hotkey_directory_dialog::validate_edit_request(
+            request,
+            self.hotkey_directory.as_deref(),
+        )?;
+        match destination {
+            EditDestination::MainSettings(setting) => {
+                let control_id = match setting {
+                    MainSetting::Launcher => "hotkeys.launcher",
+                    MainSetting::Quit => "hotkeys.quit.value",
+                    MainSetting::Help => "hotkeys.help.value",
+                };
+                let settings_was_open = self.show_settings;
+                let settings_instance = self.jump_mode_ui.settings_instance();
+                self.open_settings_dialog();
+                self.settings_editor.request_control_navigation(
+                    control_id,
+                    settings_was_open.then_some(settings_instance),
+                    &self.plugins,
+                );
+            }
+            EditDestination::PasteSequence {
+                sequence_id: Some(sequence_id),
+                setting: PasteSetting::Start,
+            } => {
+                self.paste_sequence_dialog
+                    .reveal_saved_sequence_for_hotkey_directory(sequence_id)?;
+            }
+            EditDestination::PasteSequence {
+                sequence_id: None,
+                setting,
+            } => {
+                let control_id = match setting {
+                    PasteSetting::Next => "paste.next.hotkey",
+                    PasteSetting::Cancel => "paste.cancel.hotkey",
+                    PasteSetting::Start => {
+                        return Err("This saved sequence has no current editable owner.");
+                    }
+                };
+                let settings_was_open = self.show_settings;
+                let settings_instance = self.jump_mode_ui.settings_instance();
+                self.open_settings_dialog();
+                self.settings_editor.request_control_navigation(
+                    control_id,
+                    settings_was_open.then_some(settings_instance),
+                    &self.plugins,
+                );
+            }
+            EditDestination::PasteSequence {
+                sequence_id: Some(_),
+                setting: PasteSetting::Next | PasteSetting::Cancel,
+            } => {
+                return Err("The Paste shortcut destination is no longer valid.");
+            }
+            EditDestination::MacroPlayback { macro_id } => {
+                self.mkmacro_dialog.open();
+                if !self
+                    .mkmacro_dialog
+                    .draft
+                    .macros
+                    .iter()
+                    .any(|macro_| macro_.id == macro_id)
+                {
+                    return Err("The requested macro is no longer present.");
+                }
+                self.mkmacro_dialog.set_selected_macro(Some(macro_id));
+                self.mkmacro_dialog
+                    .mkmacro_properties_preferences
+                    .master_open = true;
+                self.mkmacro_dialog
+                    .mkmacro_properties_preferences
+                    .activation_open = true;
+                self.mkmacro_dialog.queue_macro_properties_preferences();
+            }
+            EditDestination::MacroRecorder(_) => {
+                self.mkmacro_dialog.open();
+                self.mkmacro_dialog
+                    .mkmacro_properties_preferences
+                    .master_open = true;
+                self.mkmacro_dialog
+                    .mkmacro_properties_preferences
+                    .recording_open = true;
+                self.mkmacro_dialog.queue_macro_properties_preferences();
+            }
+            EditDestination::RadialTrigger {
+                trigger_id,
+                menu_id,
+            } => {
+                crate::commands::RadialCommandHost::open_radial_editor(self, false);
+                let Ok(mut editor) = self.radial_editor.lock() else {
+                    return Err("The Radial editor is unavailable.");
+                };
+                let target = super::radial_editor::HotkeyDirectoryRadialTarget::Trigger {
+                    source_revision: request.source_revision,
+                    trigger_id,
+                    menu_id,
+                };
+                if !editor.request_hotkey_directory_navigation(target) {
+                    return Err("The Radial editor could not accept this destination.");
+                }
+            }
+            EditDestination::RadialShortcut {
+                menu_id,
+                cell_id,
+                shortcut_id,
+            } => {
+                crate::commands::RadialCommandHost::open_radial_editor(self, false);
+                let Ok(mut editor) = self.radial_editor.lock() else {
+                    return Err("The Radial editor is unavailable.");
+                };
+                let target = super::radial_editor::HotkeyDirectoryRadialTarget::Shortcut {
+                    source_revision: request.source_revision,
+                    menu_id,
+                    cell_id,
+                    shortcut_id,
+                };
+                if !editor.request_hotkey_directory_navigation(target) {
+                    return Err("The Radial editor could not accept this destination.");
+                }
+            }
+            EditDestination::GestureBinding {
+                publication,
+                gesture_index,
+                binding_index,
+            } => {
+                if publication != request.source_revision
+                    || publication != request.source_publication_revision
+                {
+                    return Err("The Mouse Gesture destination changed after this snapshot.");
+                }
+                self.mouse_gestures_dialog
+                    .reveal_binding_for_hotkey_directory(
+                        publication,
+                        &request.entry_id,
+                        gesture_index as usize,
+                        binding_index as usize,
+                    )?;
+            }
+            EditDestination::ScreenDraw(_) => {
+                return Err("Not configurable — no current editor.");
+            }
+        }
+        Ok(())
     }
 
     fn native_ui_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
@@ -4782,6 +4958,10 @@ impl LauncherApp {
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::RadialDesigner,
                 radial_designer_open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::HotkeyDirectory,
+                self.hotkey_directory_dialog.open,
             ),
         ]);
         let supported_dialog_visibility_changed = settings_visibility_changed
@@ -7127,6 +7307,43 @@ impl LauncherApp {
             );
             self.settings_editor = ed;
         }
+        if self.hotkey_directory_dialog.take_open_request() {
+            self.focus_panel(super::Panel::HotkeyDirectoryDialog);
+            self.hotkey_directory_dialog.clear_message();
+            ctx.request_repaint();
+        }
+        let hotkey_directory_kind =
+            crate::gui::jump_mode::ui::NavigationDialogKind::HotkeyDirectory;
+        let hotkey_directory_instance = self.jump_mode_ui.dialog_instance(hotkey_directory_kind);
+        let hotkey_directory_owner = self.jump_mode_ui.frame_navigation_owner();
+        let hotkey_directory_native_owner =
+            self.hotkey_directory_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
+        let hotkey_directory_scope = match (hotkey_directory_owner, hotkey_directory_instance) {
+            (
+                crate::gui::jump_mode::ui::NavigationOwner::Dialog { kind, instance },
+                Some(current_instance),
+            ) if kind == hotkey_directory_kind
+                && instance == current_instance
+                && self.jump_mode_enabled()
+                && hotkey_directory_native_owner =>
+            {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("hotkey-directory", instance),
+                    crate::gui::jump_mode::TargetGeneration(instance),
+                    "hotkey-directory",
+                    ctx.viewport_id(),
+                    hotkey_directory_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        self.hotkey_directory_dialog.show(
+            &ctx,
+            self.hotkey_directory.as_deref(),
+            hotkey_directory_scope.as_ref(),
+            hotkey_directory_native_owner,
+        );
         let show_plugin = self.show_plugins;
         if show_plugin {
             let section = crate::settings_editor::catalog::SettingsSection::PluginEditor;
@@ -8560,6 +8777,17 @@ impl LauncherApp {
             current_query_geometry,
             current_query_mouse_focus_accepted,
         );
+
+        if let Some(request) = self.hotkey_directory_dialog.take_edit_request() {
+            match self.dispatch_hotkey_directory_edit(&ctx, frame_logic.should_be_visible, &request)
+            {
+                Ok(()) => {
+                    self.hotkey_directory_dialog.open = false;
+                    ctx.request_repaint();
+                }
+                Err(message) => self.hotkey_directory_dialog.set_message(message),
+            }
+        }
 
         self.stage_ui_frame_receipt(
             &frame_logic,
@@ -35495,7 +35723,7 @@ mod tests {
                     timer: None,
                     paste_sequence: None,
                     mkmacro: None,
-                    dialogs: [None; 13],
+                    dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 },
             ),
             NavigationOwner::Settings { instance: 1 },
@@ -37271,7 +37499,7 @@ mod tests {
                     timer: None,
                     paste_sequence: None,
                     mkmacro: None,
-                    dialogs: [None; 13],
+                    dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 }
             ),
         );
@@ -39001,7 +39229,7 @@ mod tests {
                     timer: None,
                     paste_sequence: None,
                     mkmacro: None,
-                    dialogs: [None; 13],
+                    dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 }
             ),
             app.confirm_modal.is_open(),
@@ -45818,6 +46046,436 @@ mod tests {
         assert!(sample.elapsed_ns > 0);
         assert_eq!(sample.phase_ns.iter().sum::<u64>(), sample.elapsed_ns);
         assert!(sample.handler_lifecycle["complete"].as_bool().unwrap());
+    }
+
+    fn hotkey_directory_test_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_600.0, 1_000.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn run_hotkey_directory_test_frame(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        events: Vec<egui::Event>,
+    ) {
+        app.run_root_frame_for_test(ctx, hotkey_directory_test_input(events), false)
+            .0
+            .drop_without_applying_deltas();
+    }
+
+    fn click_hotkey_directory_response(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        position: egui::Pos2,
+    ) {
+        run_hotkey_directory_test_frame(ctx, app, vec![egui::Event::PointerMoved(position)]);
+        run_hotkey_directory_test_frame(
+            ctx,
+            app,
+            vec![egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        run_hotkey_directory_test_frame(
+            ctx,
+            app,
+            vec![egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+
+    fn start_hotkey_directory_jump_mode(ctx: &egui::Context, app: &mut LauncherApp) {
+        run_hotkey_directory_test_frame(
+            ctx,
+            app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        assert!(app.jump_mode_ui.active_session().is_some());
+        run_hotkey_directory_test_frame(
+            ctx,
+            app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+        );
+    }
+
+    fn press_hotkey_directory_hint(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        target: &crate::gui::jump_mode::TargetId,
+    ) {
+        let hint = app
+            .jump_mode_ui
+            .active_session()
+            .expect("Jump Mode session is active")
+            .hint_map()
+            .hint_for(target)
+            .expect("the current Hotkey Directory target has a hint")
+            .as_str()
+            .to_ascii_lowercase();
+        run_hotkey_directory_test_frame(
+            ctx,
+            app,
+            vec![
+                egui::Event::Text(hint),
+                key_press(egui::Key::Enter, egui::Modifiers::NONE),
+            ],
+        );
+    }
+
+    #[test]
+    fn hotkey_directory_ui_opens_from_settings_and_edits_only_after_fresh_activation() {
+        use crate::hotkey::directory::{
+            Candidate, CandidateState, EditDestination, MainSetting, Owner, RouteKind, Scope,
+            Snapshot, Source, SourceSnapshot,
+        };
+
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.test_skip_history_persistence = true;
+        app.set_jump_mode_enabled(true);
+        prepare_settings_cross_owner_root(&ctx, &mut app);
+
+        let persisted_before = persist_cross_owner_test_settings(&app.settings_path);
+        let candidate = Candidate {
+            id: crate::hotkey::directory::EntryId::new("launcher"),
+            owner: Owner::Launcher,
+            owner_label: "Application".into(),
+            action_label: "Open launcher settings".into(),
+            chord: Some("Ctrl+Space".into()),
+            route: RouteKind::SharedHook,
+            scope: Scope::ProcessWide,
+            source_revision: 7,
+            expected_runtime_generation: None,
+            state: CandidateState::Unknown,
+            reason: Some(crate::hotkey::directory::Reason::RouteNotAcknowledged),
+            edit: Some(EditDestination::MainSettings(MainSetting::Launcher)),
+        };
+        app.hotkey_directory = Some(Arc::new(Snapshot::from_sources(
+            9,
+            vec![SourceSnapshot::new(
+                Source::MainSettings,
+                7,
+                vec![candidate],
+                Vec::new(),
+            )],
+        )));
+
+        // Enter Settings and expand its actual Hotkeys section through the
+        // existing one-shot control-navigation owner.
+        app.show_settings = true;
+        for _ in 0..3 {
+            run_hotkey_directory_test_frame(&ctx, &mut app, Vec::new());
+        }
+        let settings_instance = app.jump_mode_ui.settings_instance();
+        app.settings_editor.request_control_navigation(
+            "hotkeys.launcher",
+            Some(settings_instance),
+            &app.plugins,
+        );
+        let mut hotkeys_response = None;
+        for _ in 0..4 {
+            run_hotkey_directory_test_frame(&ctx, &mut app, Vec::new());
+            if let Some((control, response)) =
+                app.settings_editor.test_last_navigation_focus.as_ref()
+                && control == "hotkeys.launcher"
+                && ctx.memory(|memory| memory.focused()) == Some(*response)
+            {
+                hotkeys_response = Some(*response);
+                break;
+            }
+        }
+        let native_settings_owner_current = app.settings_native_ui_owner_current(&ctx, true);
+        assert!(
+            hotkeys_response.is_some_and(|response| {
+                ctx.memory(|memory| memory.focused()) == Some(response)
+            }),
+            "the real Hotkeys section is open before the directory button is used; \
+             latched_response={hotkeys_response:?} \
+             settings_instance={settings_instance} frame_owner={:?} native_settings_owner_current={native_settings_owner_current} \
+             focused={:?} pending={:?} window={:?} last_focus={:?} navigation={:?} history={:?}",
+            app.jump_mode_ui.frame_navigation_owner(),
+            ctx.memory(|memory| memory.focused()),
+            app.settings_editor
+                .pending_settings_navigation
+                .as_ref()
+                .map(|pending| (
+                    pending.control_id.as_str(),
+                    pending.request_token,
+                    pending.stage,
+                    pending.frames_remaining,
+                )),
+            app.settings_editor.test_settings_window_state,
+            app.settings_editor.test_last_navigation_focus,
+            app.settings_editor.test_last_navigation_diagnostic,
+            app.settings_editor.test_search_navigation_history,
+        );
+
+        start_hotkey_directory_jump_mode(&ctx, &mut app);
+        let open_directory = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Open Hotkey Directory")
+            .expect("Settings registers the actual directory button");
+        assert!(open_directory.eligible());
+        let open_response = open_directory.response_id();
+        let open_id = open_directory.id().clone();
+        press_hotkey_directory_hint(&ctx, &mut app, &open_id);
+        assert!(
+            !app.hotkey_directory_dialog.open,
+            "completing a hint does not activate the Settings button in the same frame"
+        );
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(open_response));
+        run_hotkey_directory_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        run_hotkey_directory_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(app.hotkey_directory_dialog.open);
+        run_hotkey_directory_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..3 {
+            run_hotkey_directory_test_frame(&ctx, &mut app, Vec::new());
+        }
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::HotkeyDirectory,
+                instance: app
+                    .jump_mode_ui
+                    .dialog_instance(
+                        crate::gui::jump_mode::ui::NavigationDialogKind::HotkeyDirectory
+                    )
+                    .expect("the actual directory window has a current instance"),
+            }
+        );
+        assert!(!app.settings_save_pending());
+        assert!(app.test_activation_trace.is_empty());
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            persisted_before,
+            "opening and browsing the directory leave persisted settings unchanged"
+        );
+
+        start_hotkey_directory_jump_mode(&ctx, &mut app);
+        let edit = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Edit Open launcher settings")
+            .expect("the current row exposes its real Edit response");
+        assert!(edit.eligible());
+        let edit_response = edit.response_id();
+        let edit_id = edit.id().clone();
+        press_hotkey_directory_hint(&ctx, &mut app, &edit_id);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(edit_response));
+        assert!(app.hotkey_directory_dialog.open);
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(app.test_activation_trace.is_empty());
+
+        run_hotkey_directory_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        let token_before_activation = app.settings_editor.next_settings_navigation_token;
+        run_hotkey_directory_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(
+            !app.hotkey_directory_dialog.open,
+            "a fresh Enter activates exactly the current Edit row and closes the directory"
+        );
+        let pending = app
+            .settings_editor
+            .pending_settings_navigation
+            .as_ref()
+            .expect("Edit queues the existing Settings owner handoff");
+        assert_eq!(pending.control_id, "hotkeys.launcher");
+        assert_eq!(pending.request_token, token_before_activation);
+        assert!(app.test_activation_trace.is_empty());
+        assert!(!app.settings_save_pending());
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            persisted_before,
+            "opening the owner does not modify settings or save the field"
+        );
+
+        run_hotkey_directory_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..4 {
+            run_hotkey_directory_test_frame(&ctx, &mut app, Vec::new());
+        }
+
+        // The directory remains independently usable when Jump Mode is off.
+        app.set_jump_mode_enabled(false);
+        app.request_hotkey_directory_open();
+        run_hotkey_directory_test_frame(&ctx, &mut app, Vec::new());
+        for _ in 0..3 {
+            run_hotkey_directory_test_frame(&ctx, &mut app, Vec::new());
+        }
+        assert!(app.hotkey_directory_dialog.open);
+        assert!(app.hotkey_directory_native_ui_owner_current(&ctx, true));
+        let (_, _, _edit_response, edit_rect) = app
+            .hotkey_directory_dialog
+            .test_last_edit_response()
+            .expect("Jump-off browsing exposes the actual Edit Response");
+        assert!(edit_rect.is_positive());
+        click_hotkey_directory_response(&ctx, &mut app, edit_rect.center());
+        assert!(
+            !app.hotkey_directory_dialog.open,
+            "a real Jump-off click dispatches the exact current Edit Response"
+        );
+        assert_eq!(
+            app.settings_editor
+                .pending_settings_navigation
+                .as_ref()
+                .map(|request| request.control_id.as_str()),
+            Some("hotkeys.launcher")
+        );
+
+        for _ in 0..4 {
+            run_hotkey_directory_test_frame(&ctx, &mut app, Vec::new());
+        }
+        app.request_hotkey_directory_open();
+        run_hotkey_directory_test_frame(&ctx, &mut app, Vec::new());
+        for _ in 0..3 {
+            run_hotkey_directory_test_frame(&ctx, &mut app, Vec::new());
+        }
+        assert!(app.hotkey_directory_dialog.open);
+        app.set_jump_mode_enabled(true);
+        let directory_instance = app
+            .jump_mode_ui
+            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::HotkeyDirectory)
+            .expect("the open directory retains its current instance");
+        let directory_owner = crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+            kind: crate::gui::jump_mode::ui::NavigationDialogKind::HotkeyDirectory,
+            instance: directory_instance,
+        };
+        // Re-enable through ordinary root frames before sending leader input:
+        // an owner transition blocks input, and a later pass must collect the
+        // current Directory responses for the next leader key.
+        run_hotkey_directory_test_frame(&ctx, &mut app, Vec::new());
+        let directory_layer =
+            crate::gui::jump_mode::ui::NavigationDialogKind::HotkeyDirectory.layer_id();
+        let visible_layer = crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx);
+        let settings_pending = app
+            .settings_editor
+            .pending_settings_navigation
+            .as_ref()
+            .map(|pending| {
+                (
+                    pending.control_id.as_str(),
+                    pending.request_token,
+                    pending.stage,
+                    pending.frames_remaining,
+                )
+            });
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked,
+            "Jump re-enable readiness: enabled={} visible={} directory_open={} directory_instance={:?} \
+             native_host={} directory_native_owner={} expected_layer={directory_layer:?} visible_layer={visible_layer:?} \
+             focused={:?} focused_layer={:?} modal={:?} popup_open={} show_settings={} settings_native_owner={} settings_pending={settings_pending:?}",
+            app.jump_mode_enabled(),
+            app.visible_flag.load(Ordering::Relaxed),
+            app.hotkey_directory_dialog.open,
+            app.jump_mode_ui
+                .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::HotkeyDirectory),
+            app.native_ui_host_input_allowed(&ctx, true),
+            app.hotkey_directory_native_ui_owner_current(&ctx, true),
+            ctx.memory(|memory| memory.focused()),
+            crate::gui::jump_mode::ui::focused_response_layer(&ctx),
+            ctx.memory(|memory| memory.top_modal_layer()),
+            egui::Popup::is_any_open(&ctx),
+            app.show_settings,
+            app.settings_native_ui_owner_current(&ctx, true),
+        );
+        assert!(app.hotkey_directory_dialog.open);
+        assert_eq!(
+            app.jump_mode_ui
+                .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::HotkeyDirectory),
+            Some(directory_instance),
+            "the first transition frame preserves the same Directory instance"
+        );
+        assert!(app.hotkey_directory_native_ui_owner_current(&ctx, true));
+        run_hotkey_directory_test_frame(&ctx, &mut app, Vec::new());
+        assert_eq!(app.jump_mode_ui.frame_navigation_owner(), directory_owner);
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| {
+                    target.metadata().label() == "Edit Open launcher settings" && target.eligible()
+                }),
+            "Jump Mode is ready with the actual current Directory Edit response"
+        );
+        start_hotkey_directory_jump_mode(&ctx, &mut app);
+        run_hotkey_directory_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(app.hotkey_directory_dialog.open);
+        assert!(
+            app.jump_mode_ui.active_session().is_none(),
+            "the first Escape cancels Jump Mode before closing the directory"
+        );
+        run_hotkey_directory_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        run_hotkey_directory_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(
+            !app.hotkey_directory_dialog.open,
+            "a fresh Escape closes the directory through the panel stack"
+        );
+        assert!(
+            app.show_settings,
+            "closing the directory keeps Settings open"
+        );
+        assert!(app.test_activation_trace.is_empty());
+        assert!(!app.settings_save_pending());
+        drop(workspace);
     }
 
     #[test]

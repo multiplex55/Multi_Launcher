@@ -1131,7 +1131,7 @@ impl SettingsEditor {
                                 reveal_section.as_ref(),
                             ),
                             &mut jump_targets,
-                            |ui, targets| self.render_hotkey_section(ui, targets),
+                            |ui, targets| self.render_hotkey_section(ui, app, targets),
                         );
                         show_settings_section(
                             ui,
@@ -2069,7 +2069,12 @@ impl SettingsEditor {
         );
     }
 
-    fn render_hotkey_section(&mut self, ui: &mut egui::Ui, targets: &mut SettingsJumpTargets) {
+    fn render_hotkey_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        targets: &mut SettingsJumpTargets,
+    ) {
         crate::gui::theme::widgets::labeled_form_row(ui, "Launcher hotkey", |ui| {
             let resp = targets.text_edit_singleline(
                 ui,
@@ -2100,6 +2105,14 @@ impl SettingsEditor {
             "Help hotkey",
             HotkeyKind::Help,
         );
+        let directory = targets.button(ui, "hotkeys.open_directory", "Open Hotkey Directory");
+        crate::gui::theme::widgets::secondary_help(
+            ui,
+            "Search configured shortcuts, see reported status and conflicts, and open the current owning editor.",
+        );
+        if targets.clicked(&directory) {
+            app.request_hotkey_directory_open();
+        }
     }
 
     fn render_radial_section(
@@ -4055,7 +4068,8 @@ mod settings_shell_tests {
         let mut settings = crate::settings::Settings::default();
         settings.enable_toasts = false;
         settings.dashboard.enabled = false;
-        settings.paste_sequence.cancel_hotkey = Some("Ctrl+F10".into());
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         settings.save(path.to_str().unwrap()).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         let ctx = egui::Context::default();
@@ -4080,6 +4094,7 @@ mod settings_shell_tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         );
+        app.mark_visible_root_for_test();
         app.open_paste_sequence_settings_dialog();
         assert!(app.show_settings);
         assert_eq!(
@@ -4090,15 +4105,48 @@ mod settings_shell_tests {
             Some("paste.next.enabled")
         );
         app.settings_editor.paste_sequence.next_hotkey = Some("Ctrl+F9".into());
+        app.settings_editor.paste_cancel_enabled = true;
+        app.settings_editor.paste_sequence.cancel_hotkey = Some("Ctrl+F10".into());
         app.open_paste_sequence_settings_dialog();
         assert_eq!(
             app.settings_editor.paste_sequence.next_hotkey.as_deref(),
             Some("Ctrl+F9")
         );
-        for _ in 0..3 {
+        let mut next_response_id = None;
+        for _ in 0..PENDING_SETTINGS_NAVIGATION_FRAME_BUDGET {
             paste_settings_frame(&ctx, &mut app, vec![]);
+            if let Some((control_id, response_id)) =
+                app.settings_editor.test_last_navigation_focus.as_ref()
+                && control_id == "paste.next.enabled"
+                && ctx.memory(|memory| memory.focused()) == Some(*response_id)
+            {
+                next_response_id = Some(*response_id);
+                break;
+            }
         }
-        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(
+            next_response_id.is_some(),
+            "Paste Next navigation focuses its actual response within the bounded request lifetime; {}; history={:?}",
+            app.settings_editor
+                .test_last_navigation_diagnostic
+                .as_deref()
+                .unwrap_or("no Settings navigation frame was recorded"),
+            app.settings_editor.test_search_navigation_history
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            next_response_id,
+            "the focused egui ID belongs to the actual Paste Next response"
+        );
+        assert!(
+            app.settings_editor.pending_settings_navigation.is_none(),
+            "the one-shot Paste Next request is consumed after actual focus handoff; {}; history={:?}",
+            app.settings_editor
+                .test_last_navigation_diagnostic
+                .as_deref()
+                .unwrap_or("no Settings navigation frame was recorded"),
+            app.settings_editor.test_search_navigation_history
+        );
         paste_settings_click(&ctx, &mut app, "Enable Cancel shortcut");
         assert!(!app.settings_editor.paste_cancel_enabled);
         assert!(

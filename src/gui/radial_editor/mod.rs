@@ -66,6 +66,27 @@ pub(crate) fn radial_designer_viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("radial-designer")
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum HotkeyDirectoryRadialTarget {
+    Trigger {
+        source_revision: u64,
+        trigger_id: String,
+        menu_id: String,
+    },
+    Shortcut {
+        source_revision: u64,
+        menu_id: String,
+        cell_id: String,
+        shortcut_id: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct PendingHotkeyDirectoryNavigation {
+    target: HotkeyDirectoryRadialTarget,
+    frames_remaining: u8,
+}
+
 fn trace_viewport_class(class: egui::ViewportClass) -> ViewportClass {
     match class {
         egui::ViewportClass::Root => ViewportClass::Root,
@@ -1897,6 +1918,7 @@ pub(crate) struct RadialEditorState {
     next_ring_proposal_nonce: u64,
     properties_handoff_prompt: bool,
     pending_scope_change: Option<PendingScopeChange>,
+    pending_hotkey_directory_navigation: Option<PendingHotkeyDirectoryNavigation>,
     tree_filter: String,
     bulk_label_value: String,
     bulk_edit_stage_scope: Option<BulkEditStageScope>,
@@ -1990,6 +2012,7 @@ impl Default for RadialEditorState {
             next_ring_proposal_nonce: 1,
             properties_handoff_prompt: false,
             pending_scope_change: None,
+            pending_hotkey_directory_navigation: None,
             tree_filter: String::new(),
             bulk_label_value: String::new(),
             bulk_edit_stage_scope: None,
@@ -3207,6 +3230,21 @@ impl RadialEditorState {
         });
     }
 
+    pub(crate) fn request_hotkey_directory_navigation(
+        &mut self,
+        target: HotkeyDirectoryRadialTarget,
+    ) -> bool {
+        if !self.open || self.close_intent != CloseIntent::None {
+            return false;
+        }
+        self.pending_hotkey_directory_navigation = Some(PendingHotkeyDirectoryNavigation {
+            target,
+            frames_remaining: 8,
+        });
+        self.apply_pending_hotkey_directory_navigation();
+        true
+    }
+
     #[cfg(test)]
     pub(crate) fn is_showing_resources(&self) -> bool {
         self.show_resources
@@ -4356,10 +4394,109 @@ impl RadialEditorState {
             session.is_closed()
         };
         if session_closed {
+            self.pending_hotkey_directory_navigation = None;
             self.finish_close();
         } else {
             self.maybe_finish_close();
+            self.apply_pending_hotkey_directory_navigation();
         }
+    }
+
+    fn apply_pending_hotkey_directory_navigation(&mut self) {
+        let Some(pending) = self.pending_hotkey_directory_navigation.as_mut() else {
+            return;
+        };
+        if !self.open || self.close_intent != CloseIntent::None {
+            self.pending_hotkey_directory_navigation = None;
+            return;
+        }
+        let Some(session) = self.session.as_ref() else {
+            pending.frames_remaining = pending.frames_remaining.saturating_sub(1);
+            return;
+        };
+        if session.is_initial_snapshot_pending() {
+            if pending.frames_remaining == 0 {
+                self.pending_hotkey_directory_navigation = None;
+                self.resource_notice = Some(ResourceNotice::warning(
+                    "The radial destination did not finish loading; no selection was changed.",
+                ));
+            } else {
+                pending.frames_remaining -= 1;
+            }
+            return;
+        }
+
+        let expected_revision = match &pending.target {
+            HotkeyDirectoryRadialTarget::Trigger {
+                source_revision, ..
+            }
+            | HotkeyDirectoryRadialTarget::Shortcut {
+                source_revision, ..
+            } => *source_revision,
+        };
+        if session.baseline.revision.0 != expected_revision {
+            self.pending_hotkey_directory_navigation = None;
+            self.resource_notice = Some(ResourceNotice::warning(
+                "The radial configuration changed before its destination opened.",
+            ));
+            return;
+        }
+        let selection = match &pending.target {
+            HotkeyDirectoryRadialTarget::Trigger {
+                trigger_id,
+                menu_id,
+                ..
+            } => session
+                .draft
+                .custom_triggers
+                .iter()
+                .any(|trigger| {
+                    trigger.id.as_str() == trigger_id && trigger.menu_id.as_str() == menu_id
+                })
+                .then(|| StableSelection::Menu(MenuId::new(menu_id.clone()))),
+            HotkeyDirectoryRadialTarget::Shortcut {
+                menu_id,
+                cell_id,
+                shortcut_id,
+                ..
+            } => session
+                .draft
+                .menus
+                .iter()
+                .find(|menu| menu.id.as_str() == menu_id)
+                .and_then(|menu| {
+                    menu.rings.iter().find_map(|ring| {
+                        ring.cells
+                            .iter()
+                            .find(|cell| cell.id.as_str() == cell_id)
+                            .filter(|cell| {
+                                cell.shortcuts
+                                    .iter()
+                                    .any(|shortcut| shortcut.id.as_str() == shortcut_id)
+                            })
+                            .map(|cell| StableSelection::Cell {
+                                menu_id: menu.id.clone(),
+                                ring_id: ring.id.clone(),
+                                cell_id: cell.id.clone(),
+                            })
+                    })
+                }),
+        };
+        let Some(selection) = selection else {
+            self.pending_hotkey_directory_navigation = None;
+            self.resource_notice = Some(ResourceNotice::warning(
+                "The radial destination is no longer present; no selection was changed.",
+            ));
+            return;
+        };
+        self.pending_hotkey_directory_navigation = None;
+        self.queue_navigation_intent(DesignerNavigationIntent::Select {
+            target: selection,
+            control: false,
+            shift: false,
+            force_history: false,
+            open_properties: false,
+        });
     }
 
     fn release_authoring_resources(&mut self) {

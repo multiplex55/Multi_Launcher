@@ -174,6 +174,7 @@ pub(crate) struct PasteSequenceDialog {
     snapshot: Option<SequenceSnapshot>,
     draft: SequenceDraft,
     selected_id: Option<SequenceId>,
+    pending_directory_reveal: Option<SequenceId>,
     selected_step: Option<usize>,
     reveal_step: Option<usize>,
     remove_confirmation: Option<SequenceId>,
@@ -214,6 +215,7 @@ impl Default for PasteSequenceDialog {
             snapshot: None,
             draft: SequenceDraft::new("New sequence", Vec::new()),
             selected_id: None,
+            pending_directory_reveal: None,
             selected_step: None,
             reveal_step: None,
             remove_confirmation: None,
@@ -316,6 +318,7 @@ impl PasteSequenceDialog {
         self.load_sources();
         self.draft = SequenceDraft::new("New sequence", Vec::new());
         self.selected_id = None;
+        self.pending_directory_reveal = None;
         self.selected_step = None;
         self.reveal_step = None;
         self.remove_confirmation = None;
@@ -375,6 +378,7 @@ impl PasteSequenceDialog {
         self.selected_id = None;
         self.selected_step = None;
         self.reveal_step = None;
+        self.pending_directory_reveal = None;
         self.remove_confirmation = None;
         self.snippets.clear();
         self.history.clear();
@@ -634,6 +638,10 @@ impl PasteSequenceDialog {
                         )
                     });
                     let response = response.inner;
+                    if self.pending_directory_reveal == Some(sequence.id) {
+                        ui.scroll_to_rect(response.rect, Some(egui::Align::Center));
+                        self.pending_directory_reveal = None;
+                    }
                     register_paste_sequence_jump_target(
                         jump_scope,
                         ui,
@@ -662,6 +670,33 @@ impl PasteSequenceDialog {
             .as_ref()
             .map(|chord| chord.as_str().to_owned())
             .unwrap_or_default();
+    }
+
+    /// Opens the saved-sequence owner at an exact stable ID without selecting
+    /// the sequence into the editable draft. An already-open draft is retained.
+    pub(crate) fn reveal_saved_sequence_for_hotkey_directory(
+        &mut self,
+        raw_id: u64,
+    ) -> Result<(), &'static str> {
+        if self.suspended_for_playback {
+            return Err("Paste Sequences is suspended during playback.");
+        }
+        let id = SequenceId::from_raw(raw_id).ok_or("The saved sequence ID is invalid.")?;
+        if !self.open {
+            self.begin_session();
+        }
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return Err("Saved sequences could not be loaded.");
+        };
+        if !snapshot
+            .sequences()
+            .iter()
+            .any(|sequence| sequence.id == id)
+        {
+            return Err("The saved sequence no longer exists.");
+        }
+        self.pending_directory_reveal = Some(id);
+        Ok(())
     }
 
     fn saved_sequence_remove_confirmation(
@@ -1871,6 +1906,72 @@ mod tests {
         assert_eq!(loaded.revision(), committed_revision);
         assert_eq!(revision.load(Ordering::Acquire), committed_revision);
         assert!(main_wake_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn hotkey_directory_ui_reveals_saved_sequence_without_replacing_open_draft() {
+        use crate::paste_sequence::Step;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(PASTE_SEQUENCES_FILE);
+        let store = SequenceStore::new(&path);
+        let mut stored = store.load().unwrap();
+        let selected_id = stored
+            .upsert(SequenceDraft::new(
+                "Selected saved sequence",
+                vec![Step::LiteralText {
+                    text: "first saved body".into(),
+                }],
+            ))
+            .unwrap();
+        let target_id = stored
+            .upsert(SequenceDraft::new(
+                "Directory destination",
+                vec![Step::LiteralText {
+                    text: "second saved body".into(),
+                }],
+            ))
+            .unwrap();
+        store.commit(&mut stored).unwrap();
+
+        let mut dialog = PasteSequenceDialog::default();
+        dialog.use_test_data_sources(path);
+        dialog.begin_session();
+        let selected_sequence = dialog
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.sequence(selected_id))
+            .expect("the isolated saved sequence is loaded")
+            .clone();
+        dialog.select_saved_sequence(&selected_sequence);
+        dialog.draft.name = "Uncommitted open draft".into();
+        dialog.hotkey_text = "Ctrl+Alt+P".into();
+        let draft_before = dialog.draft.clone();
+        let selected_before = dialog.selected_id;
+        let hotkey_before = dialog.hotkey_text.clone();
+
+        dialog
+            .reveal_saved_sequence_for_hotkey_directory(target_id.get())
+            .expect("the current saved sequence is a valid reveal target");
+
+        assert_eq!(dialog.draft, draft_before);
+        assert_eq!(dialog.selected_id, selected_before);
+        assert_eq!(dialog.hotkey_text, hotkey_before);
+        assert_eq!(dialog.pending_directory_reveal, Some(target_id));
+
+        dialog.pending_directory_reveal = None;
+        assert_eq!(
+            dialog.reveal_saved_sequence_for_hotkey_directory(u64::MAX),
+            Err("The saved sequence no longer exists.")
+        );
+        assert_eq!(
+            dialog.draft, draft_before,
+            "a stale row keeps the open draft"
+        );
+        assert_eq!(dialog.selected_id, selected_before);
+        assert_eq!(dialog.hotkey_text, hotkey_before);
+        dialog.end_session();
+        assert!(dialog.pending_directory_reveal.is_none());
     }
 
     fn layout_app(ctx: &egui::Context, root: &std::path::Path) -> super::super::LauncherApp {

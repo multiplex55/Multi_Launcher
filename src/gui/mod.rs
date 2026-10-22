@@ -30,6 +30,7 @@ mod hash_generator_dialog;
 pub(crate) mod hotfolder_dialog;
 pub(crate) mod hotfolder_dispatch;
 pub(crate) mod hotfolder_runtime;
+mod hotkey_directory_dialog;
 #[cfg(feature = "perf-harness")]
 pub use hotfolder_runtime::HotFolderIdleFixture;
 pub mod image_crop_editor;
@@ -681,6 +682,7 @@ pub enum Panel {
     MouseGestureSettingsDialog,
     MouseSettingsDialog,
     ThemeSettingsDialog,
+    HotkeyDirectoryDialog,
     FavDialog,
     FileSearchDialog,
     NotesDialog,
@@ -740,6 +742,7 @@ impl Panel {
             Self::MouseGestureSettingsDialog => "Mouse Gesture Settings",
             Self::MouseSettingsDialog => "Mouse Settings",
             Self::ThemeSettingsDialog => "Theme Settings",
+            Self::HotkeyDirectoryDialog => "Hotkey Directory",
             Self::FavDialog => "Favorites",
             Self::FileSearchDialog => "File Search",
             Self::NotesDialog => "Quick Notes",
@@ -800,6 +803,7 @@ struct PanelStates {
     mouse_gesture_settings_dialog: bool,
     mouse_settings_dialog: bool,
     theme_settings_dialog: bool,
+    hotkey_directory_dialog: bool,
     fav_dialog: bool,
     file_search_dialog: bool,
     notes_dialog: bool,
@@ -1017,6 +1021,7 @@ pub struct LauncherApp {
     pub(crate) sequence_routes: Option<crate::paste_sequence::SequenceRoutePresentation>,
     /// Latest immutable hotkey directory assembled from owner publications.
     pub(crate) hotkey_directory: Option<Arc<crate::hotkey::directory::Snapshot>>,
+    pub(crate) hotkey_directory_dialog: hotkey_directory_dialog::HotkeyDirectoryDialog,
     paste_sequence_document_revision: Arc<AtomicU64>,
     hotkey_directory_main_wake: Option<Sender<()>>,
     visible_flag: Arc<AtomicBool>,
@@ -1315,6 +1320,10 @@ impl LauncherApp {
     ) {
         self.paste_sequence_document_revision = revision;
         self.hotkey_directory_main_wake = Some(main_wake);
+    }
+
+    pub(crate) fn request_hotkey_directory_open(&mut self) {
+        self.hotkey_directory_dialog.request_open();
     }
 
     pub(crate) fn paste_sequence_document_revision_notifier(
@@ -3193,6 +3202,7 @@ impl LauncherApp {
             sequence_exit_requested: false,
             sequence_routes: None,
             hotkey_directory: None,
+            hotkey_directory_dialog: hotkey_directory_dialog::HotkeyDirectoryDialog::default(),
             paste_sequence_document_revision: Arc::new(AtomicU64::new(0)),
             hotkey_directory_main_wake: None,
             visible_flag: visible_flag.clone(),
@@ -3966,7 +3976,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 54] = [
+    const TRACKED_PANELS: [Panel; 55] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -3987,6 +3997,7 @@ impl LauncherApp {
         Panel::MouseGestureSettingsDialog,
         Panel::MouseSettingsDialog,
         Panel::ThemeSettingsDialog,
+        Panel::HotkeyDirectoryDialog,
         Panel::FavDialog,
         Panel::FileSearchDialog,
         Panel::NotesDialog,
@@ -4045,6 +4056,7 @@ impl LauncherApp {
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open,
             Panel::MouseSettingsDialog => self.mouse_settings_dialog.open,
             Panel::ThemeSettingsDialog => self.theme_settings_dialog_open,
+            Panel::HotkeyDirectoryDialog => self.hotkey_directory_dialog.open,
             Panel::FavDialog => self.fav_dialog.open,
             Panel::FileSearchDialog => self.file_search_dialog.open,
             Panel::NotesDialog => self.notes_dialog.open,
@@ -4226,6 +4238,11 @@ impl LauncherApp {
             }
             Panel::ThemeSettingsDialog => {
                 self.close_theme_settings_dialog();
+            }
+            Panel::HotkeyDirectoryDialog => {
+                self.hotkey_directory_dialog.open = false;
+                self.hotkey_directory_dialog.clear_message();
+                self.panel_states.hotkey_directory_dialog = false;
             }
             Panel::FavDialog => {
                 self.fav_dialog.open = false;
@@ -4471,6 +4488,11 @@ impl LauncherApp {
                 self.mouse_settings_dialog.open = false;
                 self.panel_states.mouse_settings_dialog = false;
             }
+            Panel::HotkeyDirectoryDialog => {
+                self.hotkey_directory_dialog.open = false;
+                self.hotkey_directory_dialog.clear_message();
+                self.panel_states.hotkey_directory_dialog = false;
+            }
             Panel::ThemeSettingsDialog => {
                 self.close_theme_settings_dialog();
             }
@@ -4650,6 +4672,7 @@ impl LauncherApp {
             Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open = true,
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open(),
             Panel::MouseSettingsDialog => self.open_mouse_settings_dialog(),
+            Panel::HotkeyDirectoryDialog => self.hotkey_directory_dialog.open = true,
             Panel::ThemeSettingsDialog => self.open_theme_settings_dialog(),
             Panel::FavDialog => self.fav_dialog.ensure_open(),
             Panel::FileSearchDialog => self.file_search_dialog.open(),
@@ -4808,6 +4831,7 @@ impl LauncherApp {
         );
         check!(mouse_settings_dialog, Panel::MouseSettingsDialog);
         check!(theme_settings_dialog, Panel::ThemeSettingsDialog);
+        check!(hotkey_directory_dialog, Panel::HotkeyDirectoryDialog);
         check!(fav_dialog, Panel::FavDialog);
         check!(file_search_dialog, Panel::FileSearchDialog);
         check!(notes_dialog, Panel::NotesDialog);

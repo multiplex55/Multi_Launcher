@@ -31,6 +31,12 @@ impl EntryId {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConflictTarget {
+    pub source: Source,
+    pub id: EntryId,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Owner {
     Launcher,
@@ -232,7 +238,7 @@ pub struct Entry {
     pub source_revision: u64,
     pub status: Status,
     pub reason: Option<Reason>,
-    pub conflicts: Arc<[EntryId]>,
+    pub conflicts: Arc<[ConflictTarget]>,
     /// Retained separately from a candidate so a pending replacement never
     /// erases the last acknowledged route from the read model.
     pub last_applied: Option<AppliedRouteReceipt>,
@@ -487,7 +493,7 @@ fn status_for(
 
 fn find_conflicts(
     candidates: &[(Source, Candidate)],
-) -> std::collections::BTreeMap<(Source, EntryId), Vec<EntryId>> {
+) -> std::collections::BTreeMap<(Source, EntryId), Vec<ConflictTarget>> {
     let mut conflicts = std::collections::BTreeMap::new();
     for left_index in 0..candidates.len() {
         let (left_source, left) = &candidates[left_index];
@@ -524,11 +530,17 @@ fn find_conflicts(
             conflicts
                 .entry((*left_source, left.id.clone()))
                 .or_insert_with(Vec::new)
-                .push(right.id.clone());
+                .push(ConflictTarget {
+                    source: *right_source,
+                    id: right.id.clone(),
+                });
             conflicts
                 .entry((*right_source, right.id.clone()))
                 .or_insert_with(Vec::new)
-                .push(left.id.clone());
+                .push(ConflictTarget {
+                    source: *left_source,
+                    id: left.id.clone(),
+                });
         }
     }
     conflicts
@@ -605,12 +617,9 @@ mod tests {
             .find(|entry| entry.id.as_str() == "launcher:end")
             .unwrap();
         assert_eq!(end_entry.status, Status::Conflict);
-        assert!(
-            end_entry
-                .conflicts
-                .iter()
-                .any(|id| id.as_str() == "quit:end")
-        );
+        assert!(end_entry.conflicts.iter().any(|conflict| {
+            conflict.source == Source::MainSettings && conflict.id.as_str() == "quit:end"
+        }));
         assert!(!snapshot.entries().iter().any(|entry| {
             (entry.id.as_str() == "caps:bare" || entry.id.as_str() == "caps:ctrl")
                 && entry.status == Status::Conflict

@@ -310,6 +310,33 @@ impl MouseGestureRuntime {
         self.directory_revision = self.directory_revision.checked_add(1).unwrap_or(1);
     }
 
+    fn hotkey_directory_binding_matches_committed(
+        &self,
+        publication: u64,
+        entry_id: &crate::hotkey::directory::EntryId,
+        gesture_index: usize,
+        binding_index: usize,
+        committed_database: &GestureDb,
+    ) -> bool {
+        if self.directory_revision != publication
+            || entry_id != &hotkey_directory_binding_id(publication, gesture_index, binding_index)
+        {
+            return false;
+        }
+
+        let Ok(database) = self.db.lock() else {
+            return false;
+        };
+        let (Some(current_gesture), Some(committed_gesture)) = (
+            database.gestures.get(gesture_index),
+            committed_database.gestures.get(gesture_index),
+        ) else {
+            return false;
+        };
+        current_gesture == committed_gesture
+            && current_gesture.bindings.get(binding_index).is_some()
+    }
+
     fn apply(&self) {
         let config = settings_to_config(&self.settings, self.plugin_enabled);
         with_gesture_service(|svc| {
@@ -317,6 +344,38 @@ impl MouseGestureRuntime {
             svc.update_db(Some(self.db.clone()));
         });
     }
+}
+
+fn hotkey_directory_binding_id(
+    publication: u64,
+    gesture_index: usize,
+    binding_index: usize,
+) -> crate::hotkey::directory::EntryId {
+    crate::hotkey::directory::EntryId::new(format!(
+        "gesture:{publication}:{gesture_index}:{binding_index}"
+    ))
+}
+
+/// Confirms a directory request against the exact current gesture publication
+/// and owner database before the editor reloads or reveals a positional row.
+pub(crate) fn hotkey_directory_binding_matches_committed(
+    publication: u64,
+    entry_id: &crate::hotkey::directory::EntryId,
+    gesture_index: usize,
+    binding_index: usize,
+    committed_database: &GestureDb,
+) -> bool {
+    let mut matches = false;
+    with_service(|runtime| {
+        matches = runtime.hotkey_directory_binding_matches_committed(
+            publication,
+            entry_id,
+            gesture_index,
+            binding_index,
+            committed_database,
+        );
+    });
+    matches
 }
 
 fn settings_to_config(settings: &MouseGestureSettings, plugin_enabled: bool) -> MouseGestureConfig {
@@ -415,9 +474,8 @@ fn hotkey_directory_source_from_runtime(
     for (gesture_index, gesture) in database.gestures.iter().enumerate() {
         for (binding_index, binding) in gesture.bindings.iter().enumerate() {
             let enabled = plugin_enabled && gestures_enabled && gesture.enabled && binding.enabled;
-            let id = format!("gesture:{revision}:{gesture_index}:{binding_index}");
             candidates.push(Candidate {
-                id: EntryId::new(id),
+                id: hotkey_directory_binding_id(revision, gesture_index, binding_index),
                 owner: Owner::MouseGestures,
                 owner_label: "Mouse Gestures".into(),
                 action_label: format!("{} — binding {}", gesture.label, binding_index + 1),
@@ -1060,6 +1118,14 @@ mod persistence_tests {
         assert_eq!(before.revision, 7);
         assert!(before.candidates[0].id.as_str().contains(":7:"));
         assert_eq!(before.candidates[0].action_label, "before — binding 1");
+        let before_database = shared.lock().unwrap().clone();
+        assert!(runtime.hotkey_directory_binding_matches_committed(
+            before.revision,
+            &before.candidates[0].id,
+            0,
+            0,
+            &before_database,
+        ));
 
         crate::common::persistence::save_json_atomic(&path, &db_with_binding("after")).unwrap();
         assert!(reload_gesture_runtime_database(&mut runtime, &path, &shared).unwrap());
@@ -1067,6 +1133,24 @@ mod persistence_tests {
         assert_eq!(after.revision, 8);
         assert!(after.candidates[0].id.as_str().contains(":8:"));
         assert_eq!(after.candidates[0].action_label, "after — binding 1");
+        let after_database = shared.lock().unwrap().clone();
+        assert!(runtime.hotkey_directory_binding_matches_committed(
+            after.revision,
+            &after.candidates[0].id,
+            0,
+            0,
+            &after_database,
+        ));
+        assert!(
+            !runtime.hotkey_directory_binding_matches_committed(
+                after.revision,
+                &after.candidates[0].id,
+                0,
+                0,
+                &before_database,
+            ),
+            "a matching live revision cannot validate a stale committed gesture row"
+        );
 
         // A duplicate file notification is a no-op and cannot diverge the
         // immutable source from its owner revision.

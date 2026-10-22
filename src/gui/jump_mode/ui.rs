@@ -48,10 +48,11 @@ pub(crate) enum NavigationDialogKind {
     DashboardEditor,
     RadialDesigner,
     MouseGestureSettings,
+    HotkeyDirectory,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -65,6 +66,7 @@ impl NavigationDialogKind {
         Self::DashboardEditor,
         Self::RadialDesigner,
         Self::MouseGestureSettings,
+        Self::HotkeyDirectory,
     ];
 
     const fn index(self) -> usize {
@@ -82,6 +84,7 @@ impl NavigationDialogKind {
             Self::DashboardEditor => 10,
             Self::RadialDesigner => 11,
             Self::MouseGestureSettings => 12,
+            Self::HotkeyDirectory => 13,
         }
     }
 
@@ -100,6 +103,7 @@ impl NavigationDialogKind {
             Self::DashboardEditor => "dashboard-editor",
             Self::RadialDesigner => "radial-designer",
             Self::MouseGestureSettings => "mouse-gesture-settings",
+            Self::HotkeyDirectory => "hotkey-directory",
         }
     }
 
@@ -121,6 +125,7 @@ impl NavigationDialogKind {
             Self::DashboardEditor => egui::Id::new(Some("Dashboard Editor")),
             Self::RadialDesigner => return None,
             Self::MouseGestureSettings => egui::Id::new(Some("Mouse Gesture Settings")),
+            Self::HotkeyDirectory => egui::Id::new(Some("Hotkey Directory")),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -3930,6 +3935,11 @@ mod tests {
                         egui::Window::new("Dashboard Editor").show(ctx, |_| {});
                     }
                     NavigationDialogKind::RadialDesigner => {}
+                    NavigationDialogKind::HotkeyDirectory => {
+                        egui::Window::new("Hotkey Directory")
+                            .id(egui::Id::new(Some("Hotkey Directory")))
+                            .show(ctx, |_| {});
+                    }
                 }
             }
             if let Some(layer) = move_to_top {
