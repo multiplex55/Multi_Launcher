@@ -145,7 +145,7 @@ pub enum PasteSequenceHotkeyAction {
     Next,
     Cancel,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelatedBinding {
     pub hotkey: Hotkey,
     pub action: RelatedAction,

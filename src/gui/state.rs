@@ -53,6 +53,8 @@ pub enum WatchEvent {
     RadialRuntimeDiagnostic(String),
     PasteSequenceRuntimeDiagnostic(String),
     PasteSequenceRoutes(crate::paste_sequence::SequenceRoutePresentation),
+    /// Immutable source publication for the retained hotkey directory model.
+    HotkeyDirectorySource(crate::hotkey::directory::SourceSnapshot),
     RadialDiagnostic(crate::radial::diagnostics::RadialDiagnostic),
     RadialSubmenuPlacementFailure(RadialPlacementFailureNotice),
     RadialPlacementActionResult {
@@ -386,7 +388,8 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::RadialConfigDiagnostic(_) => TestWatchEvent::Actions,
             WatchEvent::RadialRuntimeDiagnostic(_)
             | WatchEvent::PasteSequenceRuntimeDiagnostic(_)
-            | WatchEvent::PasteSequenceRoutes(_) => TestWatchEvent::Actions,
+            | WatchEvent::PasteSequenceRoutes(_)
+            | WatchEvent::HotkeyDirectorySource(_) => TestWatchEvent::Actions,
             WatchEvent::RadialDiagnostic(_) => TestWatchEvent::Actions,
             WatchEvent::RadialSubmenuPlacementFailure(_) => TestWatchEvent::Actions,
             WatchEvent::RadialPlacementActionResult { .. } => TestWatchEvent::Actions,

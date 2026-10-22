@@ -54,7 +54,7 @@ use startup_catalog::{startup_indexed_actions, track_c_startup_phase_observer};
 use eframe::{egui, icon_data};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc::{Receiver, RecvError, Sender, channel},
 };
 use std::thread;
@@ -1263,6 +1263,1164 @@ fn publish_paste_sequence_route_presentation(
     ));
 }
 
+fn directory_candidate(
+    id: impl Into<String>,
+    owner: multi_launcher::hotkey::directory::Owner,
+    owner_label: &str,
+    action_label: impl Into<String>,
+    chord: Option<String>,
+    route: multi_launcher::hotkey::directory::RouteKind,
+    scope: multi_launcher::hotkey::directory::Scope,
+    source_revision: u64,
+    expected_runtime_generation: Option<u64>,
+    state: multi_launcher::hotkey::directory::CandidateState,
+    reason: Option<multi_launcher::hotkey::directory::Reason>,
+    edit: Option<multi_launcher::hotkey::directory::EditDestination>,
+) -> multi_launcher::hotkey::directory::Candidate {
+    use multi_launcher::hotkey::directory::{Candidate, EntryId};
+    Candidate {
+        id: EntryId::new(id),
+        owner,
+        owner_label: owner_label.into(),
+        action_label: action_label.into(),
+        chord,
+        route,
+        scope,
+        source_revision,
+        expected_runtime_generation,
+        state,
+        reason,
+        edit,
+    }
+}
+
+fn candidate_runtime_state(
+    chord: &str,
+    generation: u64,
+    route_pending: bool,
+) -> (
+    multi_launcher::hotkey::directory::CandidateState,
+    Option<multi_launcher::hotkey::directory::Reason>,
+) {
+    use multi_launcher::hotkey::directory::{CandidateState, Reason};
+    if parse_hotkey(chord).is_none() {
+        (CandidateState::Invalid, Some(Reason::InvalidChord))
+    } else if route_pending {
+        (CandidateState::Pending { generation }, None)
+    } else {
+        (CandidateState::Configured, None)
+    }
+}
+
+fn exact_legacy_trigger_active(
+    active_triggers: &[multi_launcher::hotkey::Hotkey],
+    chord: &str,
+) -> bool {
+    parse_hotkey(chord).is_some_and(|candidate| active_triggers.contains(&candidate))
+}
+
+fn legacy_listener_hotkeys(listener: &HotkeyListener) -> Vec<multi_launcher::hotkey::Hotkey> {
+    if !listener.is_active() {
+        return Vec::new();
+    }
+    listener
+        .triggers()
+        .iter()
+        .map(|trigger| multi_launcher::hotkey::Hotkey {
+            key: trigger._key,
+            ctrl: trigger._ctrl,
+            shift: trigger._shift,
+            alt: trigger._alt,
+            alt_gr: trigger._alt_gr,
+            win: trigger._win,
+        })
+        .collect()
+}
+
+/// Payload-free evidence retained only after a successful shared-route startup,
+/// handoff, or restoration. Service presence alone is deliberately insufficient.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AppliedSharedRouteEvidence {
+    runtime_generation: u64,
+    radial_revision: u64,
+    launcher_hotkey: multi_launcher::hotkey::Hotkey,
+    related: Vec<RelatedBinding>,
+}
+
+impl AppliedSharedRouteEvidence {
+    fn matches(
+        &self,
+        settings: &Settings,
+        radial_document: &RadialDocument,
+        sequence_routes: &[PasteSequenceHotkeyRoute],
+        runtime_generation: u64,
+    ) -> bool {
+        settings.radial.enabled
+            && settings.radial.shared_tap_hold
+            && self.runtime_generation == runtime_generation
+            && self.radial_revision == radial_document.revision.0
+            && self.launcher_hotkey == settings.hotkey()
+            && related_bindings_equal(
+                &self.related,
+                &related_launcher_bindings_with_sequences(
+                    settings,
+                    radial_document,
+                    true,
+                    sequence_routes,
+                ),
+            )
+    }
+}
+
+fn related_bindings_equal(left: &[RelatedBinding], right: &[RelatedBinding]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.hotkey == right.hotkey && left.action == right.action)
+}
+
+fn applied_shared_route_after_successful_install(
+    settings: &Settings,
+    radial_document: &RadialDocument,
+    sequence_routes: &[PasteSequenceHotkeyRoute],
+    runtime_generation: u64,
+) -> Option<AppliedSharedRouteEvidence> {
+    if !settings.radial.enabled || !settings.radial.shared_tap_hold {
+        return None;
+    }
+    Some(AppliedSharedRouteEvidence {
+        runtime_generation,
+        radial_revision: radial_document.revision.0,
+        launcher_hotkey: settings.hotkey(),
+        related: related_launcher_bindings_with_sequences(
+            settings,
+            radial_document,
+            true,
+            sequence_routes,
+        ),
+    })
+}
+
+fn directory_source_snapshot(
+    source: multi_launcher::hotkey::directory::Source,
+    revision: u64,
+    candidates: Vec<multi_launcher::hotkey::directory::Candidate>,
+    receipts: Vec<multi_launcher::hotkey::directory::AppliedRouteReceipt>,
+    pending_generation: Option<u64>,
+) -> multi_launcher::hotkey::directory::SourceSnapshot {
+    let snapshot = multi_launcher::hotkey::directory::SourceSnapshot::new(
+        source, revision, candidates, receipts,
+    );
+    match pending_generation {
+        Some(generation) => snapshot.with_pending_generation(generation),
+        None => snapshot,
+    }
+}
+
+fn hotkey_directory_source_snapshots(
+    settings: &Settings,
+    radial_document: &RadialDocument,
+    sequence_snapshot: Option<&multi_launcher::paste_sequence::SequenceSnapshot>,
+    sequence_routes: &[PasteSequenceHotkeyRoute],
+    sequence_presentation: Option<&multi_launcher::paste_sequence::SequenceRoutePresentation>,
+    sequence_omissions: &[PasteSequenceRouteOmission],
+    macro_document: Option<&multi_launcher::mkmacro::MkMacroDocument>,
+    macro_revision: u64,
+    active_legacy_triggers: &[multi_launcher::hotkey::Hotkey],
+    applied_shared_route: Option<&AppliedSharedRouteEvidence>,
+    runtime_generation: u64,
+    sequence_runtime_acknowledged: bool,
+    route_pending: bool,
+    source_publication_revision: u64,
+) -> Vec<multi_launcher::hotkey::directory::SourceSnapshot> {
+    use multi_launcher::hotkey::directory::{
+        AppliedRouteReceipt, CandidateState, EditDestination, MacroRecorderSetting, MainSetting,
+        Owner, PasteSetting, Reason, RouteKind, Scope, Source, SourceSnapshot,
+    };
+    use multi_launcher::hotkey::launcher_invocation::RelatedAction;
+    use multi_launcher::paste_sequence::SequenceShortcutPresentation;
+    let runtime_route_current = applied_shared_route.is_some_and(|evidence| {
+        !route_pending
+            && evidence.matches(
+                settings,
+                radial_document,
+                sequence_routes,
+                runtime_generation,
+            )
+    });
+    let shared_route_current =
+        runtime_route_current && settings.radial.enabled && settings.radial.shared_tap_hold;
+    let runtime_related_bindings = if runtime_route_current {
+        applied_shared_route.map_or(&[][..], |evidence| evidence.related.as_slice())
+    } else {
+        &[]
+    };
+    let shared_related_bindings = if shared_route_current {
+        runtime_related_bindings
+    } else {
+        &[]
+    };
+
+    let receipt = |id: &str, chord: &str, source_revision: u64| AppliedRouteReceipt {
+        id: multi_launcher::hotkey::directory::EntryId::new(id),
+        chord: chord.into(),
+        source_revision,
+        generation: runtime_generation,
+    };
+
+    let mut main_candidates = Vec::new();
+    let mut main_receipts = Vec::new();
+    for (id, action, configured, setting) in [
+        (
+            "main.launcher",
+            "Toggle launcher",
+            Some(settings.hotkey.as_deref().unwrap_or("F2")),
+            MainSetting::Launcher,
+        ),
+        (
+            "main.quit",
+            "Quit launcher",
+            settings.quit_hotkey.as_deref(),
+            MainSetting::Quit,
+        ),
+        (
+            "main.help",
+            "Open launcher help",
+            settings.help_hotkey.as_deref(),
+            MainSetting::Help,
+        ),
+    ] {
+        let state = configured.map_or((CandidateState::Disabled, None), |chord| {
+            candidate_runtime_state(chord, runtime_generation, route_pending)
+        });
+        let chord = configured.map(|chord| chord.trim().to_owned());
+        let route = if settings.radial.enabled && settings.radial.shared_tap_hold {
+            RouteKind::SharedHook
+        } else {
+            RouteKind::LegacyPolling
+        };
+        let candidate = directory_candidate(
+            id,
+            Owner::Launcher,
+            "Launcher",
+            action,
+            chord.clone(),
+            route,
+            Scope::ProcessWide,
+            runtime_generation,
+            configured.map(|_| runtime_generation),
+            state.0.clone(),
+            state.1,
+            Some(EditDestination::MainSettings(setting)),
+        );
+        let related_action = match setting {
+            MainSetting::Launcher => None,
+            MainSetting::Quit => Some(RelatedAction::Quit),
+            MainSetting::Help => Some(RelatedAction::Help),
+        };
+        let exact_shared = if setting == MainSetting::Launcher {
+            shared_route_current
+                && chord
+                    .as_deref()
+                    .and_then(parse_hotkey)
+                    .is_some_and(|hotkey| {
+                        applied_shared_route
+                            .is_some_and(|evidence| evidence.launcher_hotkey == hotkey)
+                    })
+        } else {
+            related_action.as_ref().is_some_and(|action| {
+                shared_related_bindings.iter().any(|binding| {
+                    Some(binding.hotkey) == chord.as_deref().and_then(parse_hotkey)
+                        && &binding.action == action
+                })
+            })
+        };
+        if !route_pending
+            && let Some(chord) = chord.as_deref()
+            && (exact_shared
+                || (!settings.radial.enabled || !settings.radial.shared_tap_hold)
+                    && exact_legacy_trigger_active(active_legacy_triggers, chord))
+        {
+            main_receipts.push(receipt(id, chord, runtime_generation));
+        }
+        main_candidates.push(candidate);
+    }
+    let main_source = directory_source_snapshot(
+        Source::MainSettings,
+        source_publication_revision,
+        main_candidates,
+        main_receipts,
+        route_pending.then_some(runtime_generation),
+    );
+
+    let mut screen_draw_candidates = Vec::new();
+    let mut screen_draw_receipts = Vec::new();
+    let screen_draw = match settings
+        .plugin_settings
+        .get("screen_draw")
+        .cloned()
+        .map(serde_json::from_value::<ScreenDrawSettings>)
+        .transpose()
+    {
+        Ok(screen_draw) => Some(screen_draw.unwrap_or_default()),
+        Err(_) => None,
+    };
+    let mut add_screen_route = |id: &str,
+                                label: &str,
+                                configured: Option<String>,
+                                action: RelatedAction| {
+        let parsed = configured.as_deref().and_then(parse_hotkey);
+        let (state, reason) = match configured.as_deref() {
+            None => (CandidateState::Disabled, None),
+            Some(chord) => candidate_runtime_state(chord, runtime_generation, route_pending),
+        };
+        let route = if settings.radial.enabled && settings.radial.shared_tap_hold {
+            RouteKind::SharedHook
+        } else {
+            RouteKind::LegacyPolling
+        };
+        let exact_shared = shared_related_bindings
+            .iter()
+            .any(|binding| binding.action == action && parsed == Some(binding.hotkey));
+        let shared_mode = settings.radial.enabled && settings.radial.shared_tap_hold;
+        let exact_legacy = !shared_mode
+            && configured
+                .as_deref()
+                .is_some_and(|chord| exact_legacy_trigger_active(active_legacy_triggers, chord));
+        let id_owned = id.to_owned();
+        let chord_owned = configured.as_ref().map(|chord| chord.trim().to_owned());
+        let expected_generation = configured.as_ref().map(|_| runtime_generation);
+        // Screen Draw has no current settings editor. Keep these as truthful
+        // inventory rows until a real editing owner exists.
+        let edit = None;
+        if !route_pending && chord_owned.is_some() && (exact_shared || exact_legacy) {
+            screen_draw_receipts.push(receipt(
+                &id_owned,
+                chord_owned.as_deref().unwrap(),
+                runtime_generation,
+            ));
+        }
+        screen_draw_candidates.push(directory_candidate(
+            id_owned,
+            Owner::ScreenDraw,
+            "Screen Draw",
+            label,
+            chord_owned,
+            route,
+            Scope::ProcessWide,
+            runtime_generation,
+            expected_generation,
+            state,
+            reason.or_else(|| {
+                (expected_generation.is_some() && !route_pending && !(exact_shared || exact_legacy))
+                    .then_some(Reason::RouteNotAcknowledged)
+            }),
+            edit,
+        ));
+    };
+    match screen_draw.as_ref() {
+        Some(screen_draw) => {
+            add_screen_route(
+                "screen_draw.launch",
+                "Launch Screen Draw",
+                screen_draw
+                    .launch_hotkey
+                    .as_ref()
+                    .map(|chord| chord.as_str().to_owned()),
+                RelatedAction::ScreenDrawLaunch,
+            );
+            add_screen_route(
+                "screen_draw.emergency",
+                "Emergency Screen Draw control",
+                Some(screen_draw.emergency_hotkey.as_str().to_owned()),
+                RelatedAction::ScreenDrawEmergency,
+            );
+            for (tool, chord) in &screen_draw.tool_hotkeys {
+                let raw = chord.as_str().to_owned();
+                let (state, reason) = if !chord.is_valid() {
+                    (CandidateState::Invalid, Some(Reason::InvalidChord))
+                } else if parse_hotkey(&raw).is_none() {
+                    (
+                        CandidateState::Unsupported,
+                        Some(Reason::UnsupportedByRoute),
+                    )
+                } else {
+                    (
+                        CandidateState::Unknown,
+                        Some(Reason::LocalRouteHasNoGlobalReceipt),
+                    )
+                };
+                screen_draw_candidates.push(directory_candidate(
+                    format!("screen_draw.tool.{tool:?}"),
+                    Owner::ScreenDraw,
+                    "Screen Draw",
+                    format!("{tool:?} tool"),
+                    Some(raw),
+                    RouteKind::Local,
+                    Scope::LocalSession,
+                    runtime_generation,
+                    None,
+                    state,
+                    reason,
+                    None,
+                ));
+            }
+            for (id, label, chord) in [
+                (
+                    "screen_draw.thickness.increase",
+                    "Increase thickness",
+                    screen_draw.increase_thickness_hotkey.as_ref(),
+                ),
+                (
+                    "screen_draw.thickness.decrease",
+                    "Decrease thickness",
+                    screen_draw.decrease_thickness_hotkey.as_ref(),
+                ),
+            ] {
+                let raw = chord.map(|chord| chord.as_str().to_owned());
+                let (state, reason) =
+                    raw.as_deref()
+                        .map_or((CandidateState::Disabled, None), |raw| {
+                            if !chord.is_some_and(|chord| chord.is_valid()) {
+                                (CandidateState::Invalid, Some(Reason::InvalidChord))
+                            } else if parse_hotkey(raw).is_none() {
+                                (
+                                    CandidateState::Unsupported,
+                                    Some(Reason::UnsupportedByRoute),
+                                )
+                            } else {
+                                (
+                                    CandidateState::Unknown,
+                                    Some(Reason::LocalRouteHasNoGlobalReceipt),
+                                )
+                            }
+                        });
+                screen_draw_candidates.push(directory_candidate(
+                    id,
+                    Owner::ScreenDraw,
+                    "Screen Draw",
+                    label,
+                    raw,
+                    RouteKind::Local,
+                    Scope::LocalSession,
+                    runtime_generation,
+                    None,
+                    state,
+                    reason,
+                    None,
+                ));
+            }
+            for (index, chord) in screen_draw.quick_color_hotkeys.iter().enumerate() {
+                let raw = chord.as_ref().map(|chord| chord.as_str().to_owned());
+                let (state, reason) =
+                    raw.as_deref()
+                        .map_or((CandidateState::Disabled, None), |raw| {
+                            if !chord.as_ref().is_some_and(|chord| chord.is_valid()) {
+                                (CandidateState::Invalid, Some(Reason::InvalidChord))
+                            } else if parse_hotkey(raw).is_none() {
+                                (
+                                    CandidateState::Unsupported,
+                                    Some(Reason::UnsupportedByRoute),
+                                )
+                            } else {
+                                (
+                                    CandidateState::Unknown,
+                                    Some(Reason::LocalRouteHasNoGlobalReceipt),
+                                )
+                            }
+                        });
+                screen_draw_candidates.push(directory_candidate(
+                    format!("screen_draw.quick_color.{index}"),
+                    Owner::ScreenDraw,
+                    "Screen Draw",
+                    format!("Select quick color {}", index + 1),
+                    raw,
+                    RouteKind::Local,
+                    Scope::LocalSession,
+                    runtime_generation,
+                    None,
+                    state,
+                    reason,
+                    None,
+                ));
+            }
+        }
+        None => {
+            for (id, label) in [
+                ("screen_draw.launch", "Launch Screen Draw"),
+                ("screen_draw.emergency", "Emergency Screen Draw control"),
+            ] {
+                screen_draw_candidates.push(directory_candidate(
+                    id,
+                    Owner::ScreenDraw,
+                    "Screen Draw",
+                    label,
+                    None,
+                    RouteKind::SharedHook,
+                    Scope::ProcessWide,
+                    runtime_generation,
+                    Some(runtime_generation),
+                    CandidateState::Unavailable,
+                    Some(Reason::OwnerUnavailable),
+                    None,
+                ));
+            }
+        }
+    }
+    let screen_draw_source = directory_source_snapshot(
+        Source::ScreenDraw,
+        source_publication_revision,
+        screen_draw_candidates,
+        screen_draw_receipts,
+        route_pending.then_some(runtime_generation),
+    );
+
+    let mut paste_candidates = Vec::new();
+    let mut paste_receipts = Vec::new();
+    let paste_enabled = settings
+        .enabled_plugins
+        .as_ref()
+        .is_none_or(|plugins| plugins.contains("paste_sequence"));
+    let paste_route_kind = if settings.radial.enabled && settings.radial.shared_tap_hold {
+        RouteKind::SharedHook
+    } else {
+        RouteKind::LegacyPolling
+    };
+    for (setting, id, label, configured, presentation, action) in [
+        (
+            PasteSetting::Next,
+            "paste.next",
+            "Advance to the next Paste Sequence step",
+            settings.paste_sequence.next_hotkey.as_deref(),
+            sequence_presentation.map(|presentation| &presentation.next),
+            PasteSequenceHotkeyAction::Next,
+        ),
+        (
+            PasteSetting::Cancel,
+            "paste.cancel",
+            "Cancel Paste Sequence playback",
+            settings.paste_sequence.cancel_hotkey.as_deref(),
+            sequence_presentation.map(|presentation| &presentation.cancel),
+            PasteSequenceHotkeyAction::Cancel,
+        ),
+    ] {
+        let (mut state, mut reason) = match configured {
+            None => (CandidateState::Disabled, None),
+            Some(_) if !paste_enabled => (CandidateState::Unavailable, Some(Reason::OwnerDisabled)),
+            Some(chord) => candidate_runtime_state(chord, runtime_generation, route_pending),
+        };
+        let mut acknowledged_chord = None;
+        if configured.is_some() && paste_enabled && !route_pending {
+            match presentation {
+                Some(SequenceShortcutPresentation::Active(chord))
+                    if configured.is_some_and(|configured| configured.trim() == chord.trim())
+                        && sequence_presentation.is_some_and(|presentation| {
+                            presentation.generation == runtime_generation
+                        })
+                        && sequence_runtime_acknowledged
+                        && if shared_route_current {
+                            runtime_related_bindings.iter().any(|binding| {
+                                binding.action == RelatedAction::PasteSequence(action.clone())
+                                    && parse_hotkey(chord) == Some(binding.hotkey)
+                            })
+                        } else {
+                            exact_legacy_trigger_active(active_legacy_triggers, chord)
+                        } =>
+                {
+                    state = CandidateState::Configured;
+                    reason = None;
+                    acknowledged_chord = Some(chord.as_str());
+                }
+                Some(SequenceShortcutPresentation::Inactive { reason: detail, .. }) => {
+                    if sequence_omissions
+                        .iter()
+                        .any(|omission| omission.action == action)
+                    {
+                        state = CandidateState::OmittedByPrecedence;
+                        reason = Some(Reason::OmittedByPrecedence);
+                    } else if detail.to_ascii_lowercase().contains("unsupported") {
+                        state = CandidateState::Unsupported;
+                        reason = Some(Reason::UnsupportedByRoute);
+                    } else if detail.to_ascii_lowercase().contains("disabled") {
+                        state = CandidateState::Unavailable;
+                        reason = Some(Reason::OwnerDisabled);
+                    }
+                }
+                _ => {}
+            }
+            if reason.is_none()
+                && sequence_runtime_acknowledged
+                && !route_pending
+                && !sequence_routes.iter().any(|route| route.action == action)
+            {
+                state = CandidateState::OmittedByPrecedence;
+                reason = Some(Reason::OmittedByPrecedence);
+            }
+        }
+        let chord = configured.map(|chord| chord.trim().to_owned());
+        let candidate = directory_candidate(
+            id,
+            Owner::PasteSequences,
+            "Paste Sequences",
+            label,
+            chord.clone(),
+            paste_route_kind,
+            Scope::ProcessWide,
+            runtime_generation,
+            configured.map(|_| runtime_generation),
+            state,
+            reason.or_else(|| {
+                (configured.is_some()
+                    && acknowledged_chord.is_none()
+                    && paste_enabled
+                    && !route_pending)
+                    .then_some(Reason::RouteNotAcknowledged)
+            }),
+            Some(EditDestination::PasteSequence {
+                sequence_id: None,
+                setting,
+            }),
+        );
+        if let (Some(chord), Some(acknowledged_chord)) = (chord.as_deref(), acknowledged_chord)
+            && chord == acknowledged_chord
+        {
+            paste_receipts.push(receipt(id, chord, runtime_generation));
+        }
+        paste_candidates.push(candidate);
+    }
+    if let Some(snapshot) = sequence_snapshot {
+        for sequence in snapshot.sequences() {
+            let id = format!("paste.sequence.{}.start", sequence.id.get());
+            let Some(hotkey) = sequence.hotkey.as_ref() else {
+                paste_candidates.push(directory_candidate(
+                    id,
+                    Owner::PasteSequences,
+                    "Paste Sequences",
+                    sequence.name.clone(),
+                    None,
+                    paste_route_kind,
+                    Scope::ProcessWide,
+                    runtime_generation,
+                    None,
+                    CandidateState::Disabled,
+                    None,
+                    Some(EditDestination::PasteSequence {
+                        sequence_id: Some(sequence.id.get()),
+                        setting: PasteSetting::Start,
+                    }),
+                ));
+                continue;
+            };
+            let chord = hotkey.as_str().trim().to_owned();
+            let presentation_chord = sequence_presentation
+                .filter(|presentation| presentation.generation == runtime_generation)
+                .and_then(|presentation| {
+                    presentation
+                        .starts
+                        .iter()
+                        .find(|(active_id, active_chord)| {
+                            *active_id == sequence.id && active_chord.trim() == chord
+                        })
+                        .map(|(_, chord)| chord.as_str())
+                });
+            let active_chord = presentation_chord.filter(|active_chord| {
+                sequence_runtime_acknowledged
+                    && if shared_route_current {
+                        runtime_related_bindings.iter().any(|binding| {
+                            binding.action
+                                == RelatedAction::PasteSequence(PasteSequenceHotkeyAction::Start(
+                                    sequence.id,
+                                ))
+                                && parse_hotkey(active_chord) == Some(binding.hotkey)
+                        })
+                    } else {
+                        exact_legacy_trigger_active(active_legacy_triggers, active_chord)
+                    }
+            });
+            let (state, reason) = if !paste_enabled {
+                (CandidateState::Unavailable, Some(Reason::OwnerDisabled))
+            } else if route_pending {
+                (
+                    CandidateState::Pending {
+                        generation: runtime_generation,
+                    },
+                    None,
+                )
+            } else if parse_hotkey(&chord).is_none() {
+                (CandidateState::Invalid, Some(Reason::InvalidChord))
+            } else {
+                (
+                    CandidateState::Configured,
+                    active_chord
+                        .is_none()
+                        .then_some(Reason::RouteNotAcknowledged),
+                )
+            };
+            if !route_pending && let Some(active_chord) = active_chord {
+                paste_receipts.push(receipt(&id, active_chord, runtime_generation));
+            }
+            paste_candidates.push(directory_candidate(
+                id,
+                Owner::PasteSequences,
+                "Paste Sequences",
+                sequence.name.clone(),
+                Some(chord),
+                paste_route_kind,
+                Scope::ProcessWide,
+                runtime_generation,
+                Some(runtime_generation),
+                state,
+                reason,
+                Some(EditDestination::PasteSequence {
+                    sequence_id: Some(sequence.id.get()),
+                    setting: PasteSetting::Start,
+                }),
+            ));
+        }
+    } else {
+        paste_candidates.push(directory_candidate(
+            "paste.sequence.document",
+            Owner::PasteSequences,
+            "Paste Sequences",
+            "Saved sequence start shortcuts unavailable",
+            None,
+            paste_route_kind,
+            Scope::ProcessWide,
+            runtime_generation,
+            None,
+            CandidateState::Unavailable,
+            Some(Reason::OwnerUnavailable),
+            None,
+        ));
+    }
+    let paste_source = directory_source_snapshot(
+        Source::PasteSequences,
+        source_publication_revision,
+        paste_candidates,
+        paste_receipts,
+        route_pending.then_some(runtime_generation),
+    );
+
+    let related_acknowledged = &runtime_related_bindings;
+    let mut radial_candidates = Vec::new();
+    let mut radial_receipts = Vec::new();
+    for trigger in &radial_document.custom_triggers {
+        let id = format!("radial.trigger.{}", trigger.id.as_str());
+        let chord = trigger.chord.trim().to_owned();
+        let local_scope = trigger.scope == multi_launcher::radial::model::TriggerScope::MenuLocal;
+        let (mut state, mut reason) = if !settings.radial.enabled {
+            (CandidateState::Disabled, Some(Reason::OwnerDisabled))
+        } else if parse_hotkey(&chord).is_none() {
+            (CandidateState::Invalid, Some(Reason::InvalidChord))
+        } else if route_pending {
+            (
+                CandidateState::Pending {
+                    generation: runtime_generation,
+                },
+                None,
+            )
+        } else {
+            (
+                CandidateState::Configured,
+                Some(if local_scope {
+                    Reason::LocalRouteHasNoGlobalReceipt
+                } else {
+                    Reason::RouteNotAcknowledged
+                }),
+            )
+        };
+        let exact_related = !local_scope
+            && related_acknowledged.iter().any(|binding| {
+                binding.action
+                    == RelatedAction::DirectMenu {
+                        trigger_id: trigger.id.as_str().to_owned(),
+                        menu_id: trigger.menu_id.clone(),
+                    }
+                    && parse_hotkey(&chord) == Some(binding.hotkey)
+            });
+        if exact_related && !route_pending {
+            state = CandidateState::Configured;
+            reason = None;
+            radial_receipts.push(receipt(&id, &chord, radial_document.revision.0));
+        }
+        let scope = if local_scope {
+            Scope::MenuLocal(trigger.menu_id.as_str().to_owned())
+        } else {
+            Scope::Global
+        };
+        radial_candidates.push(directory_candidate(
+            id,
+            Owner::Radial,
+            "Radial",
+            "Open radial menu",
+            Some(chord),
+            RouteKind::Radial,
+            scope,
+            radial_document.revision.0,
+            Some(runtime_generation),
+            state,
+            reason,
+            Some(EditDestination::RadialTrigger {
+                trigger_id: trigger.id.as_str().to_owned(),
+                menu_id: trigger.menu_id.as_str().to_owned(),
+            }),
+        ));
+    }
+    for menu in &radial_document.menus {
+        for cell in menu.rings.iter().flat_map(|ring| &ring.cells) {
+            for shortcut in &cell.shortcuts {
+                let chord = shortcut.chord.trim().to_owned();
+                let local_scope =
+                    shortcut.scope == multi_launcher::radial::model::TriggerScope::MenuLocal;
+                let (state, reason) = if !settings.radial.enabled {
+                    (CandidateState::Disabled, Some(Reason::OwnerDisabled))
+                } else if shortcut.scope == multi_launcher::radial::model::TriggerScope::Global
+                    && !settings.radial.global_item_inputs
+                {
+                    (CandidateState::Disabled, Some(Reason::OwnerDisabled))
+                } else if parse_hotkey(&chord).is_none() {
+                    (CandidateState::Invalid, Some(Reason::InvalidChord))
+                } else if route_pending {
+                    (
+                        CandidateState::Pending {
+                            generation: runtime_generation,
+                        },
+                        None,
+                    )
+                } else {
+                    (CandidateState::Unknown, Some(Reason::RouteNotAcknowledged))
+                };
+                radial_candidates.push(directory_candidate(
+                    format!("radial.shortcut.{}", shortcut.id.as_str()),
+                    Owner::Radial,
+                    "Radial",
+                    format!("Shortcut for {}", cell.label),
+                    Some(chord),
+                    RouteKind::Radial,
+                    if local_scope {
+                        Scope::MenuLocal(menu.id.as_str().to_owned())
+                    } else {
+                        Scope::Global
+                    },
+                    radial_document.revision.0,
+                    Some(runtime_generation),
+                    state,
+                    reason,
+                    Some(EditDestination::RadialShortcut {
+                        menu_id: menu.id.as_str().to_owned(),
+                        cell_id: cell.id.as_str().to_owned(),
+                        shortcut_id: shortcut.id.as_str().to_owned(),
+                    }),
+                ));
+            }
+        }
+    }
+    let radial_source = directory_source_snapshot(
+        Source::Radial,
+        source_publication_revision,
+        radial_candidates,
+        radial_receipts,
+        route_pending.then_some(runtime_generation),
+    );
+
+    let mut macro_candidates = Vec::new();
+    let macro_receipts = Vec::new();
+    if let Some(document) = macro_document {
+        let mut reserved = reserved_launcher_hotkeys_with_sequences(settings, sequence_routes);
+        if settings.radial.enabled {
+            reserved.extend(radial_global_hotkey_reservations(settings, radial_document));
+        }
+        let reserved_refs = reserved
+            .iter()
+            .map(|(name, chord)| (name.as_str(), chord.as_str()))
+            .collect::<Vec<_>>();
+        let macro_diagnostics =
+            multi_launcher::mkmacro::hotkeys::validate_hotkeys(document, &reserved_refs);
+        for entry in &document.macros {
+            let id = format!("macro.playback.{}", entry.id);
+            let chord = entry
+                .hotkey
+                .as_ref()
+                .map(multi_launcher::mkmacro::hotkeys::canonical_hotkey);
+            let diagnostics = macro_diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.macro_id == entry.id)
+                .collect::<Vec<_>>();
+            let invalid_scope = diagnostics.iter().any(|diagnostic| {
+                diagnostic
+                    .message
+                    .starts_with("Invalid active-window hotkey matcher:")
+            });
+            let has_conflict = !diagnostics.is_empty();
+            let (state, reason) = match chord.as_deref() {
+                None => (CandidateState::Disabled, None),
+                Some(_) if !entry.enabled => {
+                    (CandidateState::Disabled, Some(Reason::OwnerDisabled))
+                }
+                Some(chord) if parse_hotkey(chord).is_none() => {
+                    (CandidateState::Invalid, Some(Reason::InvalidChord))
+                }
+                Some(_) if invalid_scope => (CandidateState::Invalid, Some(Reason::InvalidScope)),
+                Some(_) if has_conflict => (
+                    CandidateState::Conflict,
+                    Some(Reason::ConflictsWithConfiguredRoute),
+                ),
+                Some(_) => (CandidateState::Unknown, Some(Reason::RouteNotAcknowledged)),
+            };
+            let scope = match &entry.hotkey_scope {
+                multi_launcher::mkmacro::MkHotkeyScope::AnyWindow => Scope::Global,
+                multi_launcher::mkmacro::MkHotkeyScope::ActiveWindow(_) => Scope::ActiveWindow,
+            };
+            macro_candidates.push(directory_candidate(
+                id,
+                Owner::MkMacro,
+                "MkMacro",
+                entry.name.clone(),
+                chord,
+                RouteKind::MacroPolling,
+                scope,
+                macro_revision,
+                None,
+                state,
+                reason,
+                Some(EditDestination::MacroPlayback { macro_id: entry.id }),
+            ));
+        }
+        for (id, label, hotkey, setting) in [
+            (
+                "macro.recorder.toggle",
+                "Toggle macro recording",
+                Some(&document.settings.record_toggle_hotkey),
+                MacroRecorderSetting::RecordToggle,
+            ),
+            (
+                "macro.recorder.pause_resume",
+                "Pause or resume recording",
+                document.settings.recorder.pause_resume_hotkey.as_ref(),
+                MacroRecorderSetting::PauseResume,
+            ),
+            (
+                "macro.recorder.marker",
+                "Insert recording marker",
+                document.settings.recorder.marker_hotkey.as_ref(),
+                MacroRecorderSetting::Marker,
+            ),
+        ] {
+            let chord = hotkey.map(multi_launcher::mkmacro::hotkeys::canonical_hotkey);
+            let (state, reason) =
+                chord
+                    .as_deref()
+                    .map_or((CandidateState::Disabled, None), |chord| {
+                        if parse_hotkey(chord).is_some() {
+                            (CandidateState::Unknown, Some(Reason::RouteNotAcknowledged))
+                        } else {
+                            (CandidateState::Invalid, Some(Reason::InvalidChord))
+                        }
+                    });
+            macro_candidates.push(directory_candidate(
+                id,
+                Owner::MkMacro,
+                "MkMacro recorder",
+                label,
+                chord,
+                RouteKind::MacroPolling,
+                Scope::Global,
+                macro_revision,
+                None,
+                state,
+                reason,
+                Some(EditDestination::MacroRecorder(setting)),
+            ));
+        }
+    } else {
+        macro_candidates.push(directory_candidate(
+            "macro.document",
+            Owner::MkMacro,
+            "MkMacro",
+            "Macro shortcuts unavailable",
+            None,
+            RouteKind::MacroPolling,
+            Scope::Global,
+            macro_revision,
+            None,
+            CandidateState::Unavailable,
+            Some(Reason::OwnerUnavailable),
+            None,
+        ));
+    }
+    let macro_source = SourceSnapshot::new(
+        Source::Macros,
+        source_publication_revision,
+        macro_candidates,
+        macro_receipts,
+    );
+
+    vec![
+        main_source,
+        screen_draw_source,
+        paste_source,
+        radial_source,
+        macro_source,
+    ]
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HotkeyDirectoryPublicationKey {
+    settings_generation: u64,
+    radial_revision: u64,
+    paste_document_revision: u64,
+    macro_revision: u64,
+    pending_route_generation: Option<u64>,
+    listener_active: bool,
+    shared_service_active: bool,
+    shared_route_acknowledged: bool,
+}
+
+fn hotkey_directory_publication_key(
+    settings_generation: u64,
+    radial_document: &RadialDocument,
+    paste_document_revision: u64,
+    macro_revision: u64,
+    pending_route: Option<&PendingLauncherRoute>,
+    listener: &HotkeyListener,
+    invocation_service: Option<&LauncherInvocationService>,
+    applied_shared_route: Option<&AppliedSharedRouteEvidence>,
+    settings: &Settings,
+    sequence_routes: &[PasteSequenceHotkeyRoute],
+) -> HotkeyDirectoryPublicationKey {
+    HotkeyDirectoryPublicationKey {
+        settings_generation,
+        radial_revision: radial_document.revision.0,
+        paste_document_revision,
+        macro_revision,
+        pending_route_generation: pending_route.map(|pending| pending.settings_generation),
+        listener_active: listener.is_active(),
+        shared_service_active: invocation_service.is_some(),
+        shared_route_acknowledged: applied_shared_route.is_some_and(|evidence| {
+            invocation_service.is_some()
+                && evidence.matches(
+                    settings,
+                    radial_document,
+                    sequence_routes,
+                    settings_generation,
+                )
+        }),
+    }
+}
+
+fn publish_hotkey_directory_if_changed(
+    last_publication: &mut Option<HotkeyDirectoryPublicationKey>,
+    source_publication_revision: &mut u64,
+    settings: &Settings,
+    settings_generation: u64,
+    radial_document: &RadialDocument,
+    paste_document_revision: u64,
+    sequence_routes: &[PasteSequenceHotkeyRoute],
+    sequence_omissions: &[PasteSequenceRouteOmission],
+    macro_revision: u64,
+    listener: &HotkeyListener,
+    invocation_service: Option<&LauncherInvocationService>,
+    applied_shared_route: Option<&AppliedSharedRouteEvidence>,
+    pending_route: Option<&PendingLauncherRoute>,
+) {
+    let (candidate_settings, candidate_generation, candidate_sequence_routes, candidate_omissions) =
+        match pending_route.map(|pending| &pending.completion) {
+            Some(PendingLauncherRouteCompletion::Hotkey(application)) => (
+                &application.prepared.settings,
+                application.candidate_generation,
+                application.prepared.sequence_routes.as_slice(),
+                application.prepared.sequence_omissions.as_slice(),
+            ),
+            _ => (
+                settings,
+                settings_generation,
+                sequence_routes,
+                sequence_omissions,
+            ),
+        };
+    let publication = hotkey_directory_publication_key(
+        candidate_generation,
+        radial_document,
+        paste_document_revision,
+        macro_revision,
+        pending_route,
+        listener,
+        invocation_service,
+        applied_shared_route,
+        candidate_settings,
+        candidate_sequence_routes,
+    );
+    if last_publication.as_ref() == Some(&publication) {
+        return;
+    }
+    let Some(next_source_publication_revision) = source_publication_revision.checked_add(1) else {
+        tracing::error!("hotkey directory source publication identity exhausted");
+        return;
+    };
+    *source_publication_revision = next_source_publication_revision;
+
+    let route_pending = pending_route.is_some();
+    let sequence_runtime_acknowledged = !route_pending
+        && if candidate_settings.radial.enabled && candidate_settings.radial.shared_tap_hold {
+            applied_shared_route.is_some_and(|evidence| {
+                invocation_service.is_some()
+                    && evidence.matches(
+                        candidate_settings,
+                        radial_document,
+                        candidate_sequence_routes,
+                        candidate_generation,
+                    )
+            })
+        } else {
+            listener.is_active()
+        };
+    let active_routes = if sequence_runtime_acknowledged {
+        candidate_sequence_routes
+    } else {
+        &[]
+    };
+    let sequence_presentation = paste_sequence_route_presentation(
+        candidate_settings,
+        candidate_generation,
+        active_routes,
+        candidate_omissions,
+        active_physical_paste_policy(candidate_settings, radial_document, active_routes),
+    );
+    let sequence_snapshot = multi_launcher::paste_sequence::SequenceStore::new(
+        multi_launcher::paste_sequence::PASTE_SEQUENCES_FILE,
+    )
+    .load()
+    .ok();
+    let macro_document = multi_launcher::mkmacro::runtime::shared_hotkey_document_snapshot()
+        .ok()
+        .flatten();
+    for source in hotkey_directory_source_snapshots(
+        candidate_settings,
+        radial_document,
+        sequence_snapshot.as_ref(),
+        candidate_sequence_routes,
+        sequence_runtime_acknowledged.then_some(&sequence_presentation),
+        candidate_omissions,
+        macro_document.as_deref(),
+        macro_revision,
+        &legacy_listener_hotkeys(listener),
+        applied_shared_route,
+        candidate_generation,
+        sequence_runtime_acknowledged,
+        route_pending,
+        next_source_publication_revision,
+    ) {
+        multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::HotkeyDirectorySource(
+            source,
+        ));
+    }
+    multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::HotkeyDirectorySource(
+        multi_launcher::plugins::mouse_gestures::hotkey_directory_source(),
+    ));
+    *last_publication = Some(publication);
+}
+
 fn report_paste_sequence_route_omissions(omissions: &[PasteSequenceRouteOmission]) {
     for omission in omissions {
         let message = format!(
@@ -2397,6 +3555,7 @@ fn finish_hotkey_candidate_activation(
 struct HotkeyRuntimeCommitContext<'a> {
     settings: &'a mut Settings,
     settings_generation: &'a mut u64,
+    applied_shared_route: &'a mut Option<AppliedSharedRouteEvidence>,
     trigger: &'a mut Arc<HotkeyTrigger>,
     quit_trigger: &'a mut Option<Arc<HotkeyTrigger>>,
     help_trigger: &'a mut Option<Arc<HotkeyTrigger>>,
@@ -2423,6 +3582,7 @@ impl HotkeyRuntimeCommitContext<'_> {
     ) {
         use multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError;
 
+        *self.applied_shared_route = None;
         let fallback = prepare_legacy_hotkey_fallback(
             &application.old_settings,
             self.radial_document,
@@ -2512,6 +3672,12 @@ impl HotkeyRuntimeCommitContext<'_> {
         } else if let Some(mut service) = self.invocation_service.take() {
             service.stop();
         }
+        *self.applied_shared_route = applied_shared_route_after_successful_install(
+            self.settings,
+            self.radial_document,
+            self.sequence_routes,
+            *self.settings_generation,
+        );
         self.radial_control_endpoint
             .set_enabled(self.settings.radial.enabled);
         self.radial_resources
@@ -2646,6 +3812,13 @@ fn complete_hotkey_route_step(
                     context.runtime.invocation_service,
                     false,
                 );
+                *context.runtime.applied_shared_route =
+                    applied_shared_route_after_successful_install(
+                        context.runtime.settings,
+                        context.runtime.radial_document,
+                        context.runtime.sequence_routes,
+                        *context.runtime.settings_generation,
+                    );
             }
             Err(restore_error) => {
                 *context.deferred_notices_follow_failure = true;
@@ -2665,6 +3838,7 @@ fn complete_hotkey_route_step(
                     context.runtime.invocation_service,
                     true,
                 );
+                *context.runtime.applied_shared_route = None;
             }
         }
         return true;
@@ -2835,6 +4009,7 @@ struct GuiStartupServices {
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     screen_draw_recovery_bridge: Arc<ScreenDrawRecoveryBridge>,
     visibility_revision: VisibilityRevision,
+    paste_sequence_document_revision: Arc<AtomicU64>,
     event_tx: Sender<()>,
     settings_save_workers: multi_launcher::gui::SettingsSaveWorkerRegistry,
 }
@@ -2869,6 +4044,7 @@ fn spawn_gui(
         enabled_capabilities,
         screen_draw_recovery_bridge,
         visibility_revision,
+        paste_sequence_document_revision,
         event_tx,
         settings_save_workers,
     } = startup_services;
@@ -2927,6 +4103,8 @@ fn spawn_gui(
     let actions_for_window = Arc::clone(&actions);
     let startup_indexing_for_window = startup_indexing;
     let settings_save_workers_for_window = settings_save_workers;
+    let paste_sequence_document_revision_for_window = Arc::clone(&paste_sequence_document_revision);
+    let hotkey_directory_main_wake = event_tx.clone();
     #[cfg(feature = "qa-framebuffer-capture")]
     let qa_framebuffer_request_for_window = qa_framebuffer_request;
 
@@ -2977,6 +4155,10 @@ fn spawn_gui(
                     flag_clone,
                     restore_clone,
                     help_clone,
+                );
+                app.install_hotkey_directory_document_revision(
+                    paste_sequence_document_revision_for_window,
+                    hotkey_directory_main_wake,
                 );
                 app.set_initial_snippet_origin_window(initial_snippet_origin);
                 app.install_settings_save_worker_registry(settings_save_workers_for_window);
@@ -3073,6 +4255,13 @@ fn main() -> anyhow::Result<()> {
     }
     actions_timer.finish("startup.action_load");
 
+    let initial_sequence_document_revision = multi_launcher::paste_sequence::SequenceStore::new(
+        multi_launcher::paste_sequence::PASTE_SEQUENCES_FILE,
+    )
+    .load()
+    .map_or(0, |snapshot| snapshot.revision());
+    let paste_sequence_document_revision =
+        Arc::new(AtomicU64::new(initial_sequence_document_revision));
     let (event_tx, event_rx) = channel::<()>();
     let mut hotkey_runtime_receiver =
         Some(multi_launcher::hotkey::reconfiguration::install_main_runtime(event_tx.clone())?);
@@ -3166,12 +4355,15 @@ fn main() -> anyhow::Result<()> {
     manager_timer.finish("startup.plugin_manager");
     let macro_policy_dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let macro_dirty = Arc::clone(&macro_policy_dirty);
+    let macro_directory_revision = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let macro_directory_revision_after = Arc::clone(&macro_directory_revision);
     let macro_wake = event_tx.clone();
     let observer = Arc::new(
         multi_launcher::mkmacro::store::DocumentPublicationObserver {
             before: Arc::new(|| physical_paste_bridge().begin_source_publication()),
             after: Arc::new(move || {
                 physical_paste_bridge().finish_source_publication();
+                macro_directory_revision_after.fetch_add(1, Ordering::AcqRel);
                 macro_dirty.store(true, Ordering::Release);
                 let _ = macro_wake.send(());
             }),
@@ -3296,6 +4488,7 @@ fn main() -> anyhow::Result<()> {
     radial_resources.reconcile(&mut radial_controller);
     let owner_bridge = Arc::clone(&screen_draw_recovery_bridge);
     let mut invocation_service = None;
+    let mut applied_shared_route = None;
     if invocation_service_needed(&settings) {
         match LauncherInvocationService::start(
             radial_invocation_config(
@@ -3322,7 +4515,15 @@ fn main() -> anyhow::Result<()> {
             }),
             event_tx.clone(),
         ) {
-            Ok(service) => invocation_service = Some(service),
+            Ok(service) => {
+                invocation_service = Some(service);
+                applied_shared_route = applied_shared_route_after_successful_install(
+                    &settings,
+                    &radial_document,
+                    &paste_sequence_routes,
+                    settings_generation,
+                );
+            }
             Err(error) => {
                 tracing::error!(%error, "shared radial invocation unavailable; disabling radial runtime and restoring legacy launcher hotkey");
                 fail_closed_radial_route(
@@ -3344,7 +4545,6 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
-
     // `visibility` holds whether the window is currently restored (true) or
     // minimized (false).
     let visibility_revision = VisibilityRevision::default();
@@ -3367,6 +4567,7 @@ fn main() -> anyhow::Result<()> {
         enabled_capabilities: settings.enabled_capabilities.clone(),
         screen_draw_recovery_bridge: Arc::clone(&screen_draw_recovery_bridge),
         visibility_revision: visibility_revision.clone(),
+        paste_sequence_document_revision: Arc::clone(&paste_sequence_document_revision),
         event_tx: event_tx.clone(),
         settings_save_workers: settings_save_workers.clone(),
     };
@@ -3390,6 +4591,23 @@ fn main() -> anyhow::Result<()> {
     let hotkey_service_owner = invocation_priority_owner(Arc::clone(&screen_draw_recovery_bridge));
     let mut external_radial_invocations: HashMap<InvocationId, ExternalRadialMetadata> =
         HashMap::new();
+    let mut last_hotkey_directory_publication = None;
+    let mut hotkey_directory_source_publication_revision = 0u64;
+    publish_hotkey_directory_if_changed(
+        &mut last_hotkey_directory_publication,
+        &mut hotkey_directory_source_publication_revision,
+        &settings,
+        settings_generation,
+        &radial_document,
+        paste_sequence_document_revision.load(Ordering::Acquire),
+        &paste_sequence_routes,
+        &[],
+        macro_directory_revision.load(Ordering::Acquire),
+        &listener,
+        invocation_service.as_ref(),
+        applied_shared_route.as_ref(),
+        pending_launcher_route.as_ref(),
+    );
 
     loop {
         let shutdown = match gui_worker.wait_for_event(&event_rx) {
@@ -3549,6 +4767,7 @@ fn main() -> anyhow::Result<()> {
                             }
                             Err(error) => {
                                 tracing::error!(%error, "radial trigger reload failed closed");
+                                applied_shared_route = None;
                                 fail_closed_radial_route(
                                     &mut settings,
                                     &radial_control_endpoint,
@@ -3581,9 +4800,19 @@ fn main() -> anyhow::Result<()> {
                             }),
                             event_tx.clone(),
                         ) {
-                            Ok(service) => invocation_service = Some(service),
+                            Ok(service) => {
+                                invocation_service = Some(service);
+                                applied_shared_route =
+                                    applied_shared_route_after_successful_install(
+                                        &settings,
+                                        &radial_document,
+                                        &paste_sequence_routes,
+                                        settings_generation,
+                                    );
+                            }
                             Err(error) => {
                                 tracing::error!(%error, "radial trigger service restart failed closed");
+                                applied_shared_route = None;
                                 fail_closed_radial_route(
                                     &mut settings,
                                     &radial_control_endpoint,
@@ -4023,6 +5252,7 @@ fn main() -> anyhow::Result<()> {
                                     }
                                     Err(error) => {
                                         tracing::error!(%error, "radial package replacement trigger refresh failed closed");
+                                        applied_shared_route = None;
                                         settings.radial.enabled = false;
                                         radial_control_endpoint.set_enabled(false);
                                         radial_controller.disable();
@@ -4218,6 +5448,7 @@ fn main() -> anyhow::Result<()> {
                                     }
                                     Err(error) => {
                                         tracing::error!(%error, "radial authoring trigger refresh failed closed");
+                                        applied_shared_route = None;
                                         settings.radial.enabled = false;
                                         radial_control_endpoint.set_enabled(false);
                                         radial_controller.disable();
@@ -4493,6 +5724,12 @@ fn main() -> anyhow::Result<()> {
                 &mut invocation_service,
                 false,
             );
+            applied_shared_route = applied_shared_route_after_successful_install(
+                &settings,
+                &radial_document,
+                &paste_sequence_routes,
+                settings_generation,
+            );
         }
 
         let handoff_result = pending_launcher_route.as_ref().and_then(|pending| {
@@ -4532,8 +5769,15 @@ fn main() -> anyhow::Result<()> {
                             );
                         }
                         publish_paste_sequence_route_presentation(paste_presentation);
+                        applied_shared_route = applied_shared_route_after_successful_install(
+                            &settings,
+                            &radial_document,
+                            &paste_sequence_routes,
+                            settings_generation,
+                        );
                     }
                     Err(error) => {
+                        applied_shared_route = None;
                         tracing::error!(%error, "launcher route handoff failed closed");
                         settings.radial.enabled = false;
                         radial_control_endpoint.set_enabled(false);
@@ -4599,6 +5843,7 @@ fn main() -> anyhow::Result<()> {
                             authoring_reply_tx: &authoring_endpoint.reply_tx,
                             event_tx: &event_tx,
                             sequence_routes: &mut paste_sequence_routes,
+                            applied_shared_route: &mut applied_shared_route,
                             sequence_triggers: &mut paste_sequence_triggers,
                         },
                         pending_route: &mut pending_launcher_route,
@@ -5175,6 +6420,7 @@ fn main() -> anyhow::Result<()> {
                 let mut runtime = HotkeyRuntimeCommitContext {
                     settings: &mut settings,
                     settings_generation: &mut settings_generation,
+                    applied_shared_route: &mut applied_shared_route,
                     trigger: &mut trigger,
                     quit_trigger: &mut quit_trigger,
                     help_trigger: &mut help_trigger,
@@ -5200,6 +6446,7 @@ fn main() -> anyhow::Result<()> {
                     ),
                 );
                 pending_launcher_route = None;
+                applied_shared_route = None;
                 fail_closed_radial_route(
                     &mut settings,
                     &radial_control_endpoint,
@@ -5426,6 +6673,22 @@ fn main() -> anyhow::Result<()> {
             ));
         }
 
+        publish_hotkey_directory_if_changed(
+            &mut last_hotkey_directory_publication,
+            &mut hotkey_directory_source_publication_revision,
+            &settings,
+            settings_generation,
+            &radial_document,
+            paste_sequence_document_revision.load(Ordering::Acquire),
+            &paste_sequence_routes,
+            &[],
+            macro_directory_revision.load(Ordering::Acquire),
+            &listener,
+            invocation_service.as_ref(),
+            applied_shared_route.as_ref(),
+            pending_launcher_route.as_ref(),
+        );
+
         // Consolidate every fail-closed path through the same demand owner.
         // This is idempotent, so repeated disable/error notifications cannot
         // construct or retire a resource set more than once.
@@ -5619,6 +6882,7 @@ mod tests {
         sequence_triggers: Vec<PasteSequenceHotkeyTrigger>,
         listener: HotkeyListener,
         invocation_service: Option<LauncherInvocationService>,
+        applied_shared_route: Option<AppliedSharedRouteEvidence>,
         radial_control_endpoint: RadialControlMainEndpoint,
         radial_resources: RadialRuntimeResources,
         radial_controller: RadialController,
@@ -5672,6 +6936,7 @@ mod tests {
                 sequence_triggers: Vec::new(),
                 listener,
                 invocation_service: None,
+                applied_shared_route: None,
                 radial_control_endpoint,
                 radial_resources,
                 radial_controller,
@@ -5691,6 +6956,7 @@ mod tests {
                 runtime: HotkeyRuntimeCommitContext {
                     settings: &mut self.settings,
                     settings_generation: &mut self.settings_generation,
+                    applied_shared_route: &mut self.applied_shared_route,
                     trigger: &mut self.trigger,
                     quit_trigger: &mut self.quit_trigger,
                     help_trigger: &mut self.help_trigger,
@@ -8079,9 +9345,11 @@ mod tests {
             );
         let mut sequence_routes = Vec::new();
         let mut sequence_triggers = Vec::new();
+        let mut applied_shared_route = None;
         let commit_context = HotkeyRuntimeCommitContext {
             settings: &mut settings,
             settings_generation: &mut settings_generation,
+            applied_shared_route: &mut applied_shared_route,
             trigger: &mut trigger,
             quit_trigger: &mut quit_trigger,
             help_trigger: &mut help_trigger,
@@ -9118,6 +10386,405 @@ mod tests {
                 InteractionMode::HoldAndClick,
                 42,
             ))
+        );
+    }
+}
+
+#[cfg(test)]
+mod hotkey_directory_runtime_tests {
+    use super::*;
+    use multi_launcher::hotkey::directory::{
+        CandidateState, Owner, Reason, RouteKind, Snapshot, Source, Status,
+    };
+
+    fn main_source(
+        settings: &Settings,
+        radial: &RadialDocument,
+        macro_document: &multi_launcher::mkmacro::MkMacroDocument,
+        generation: u64,
+        route_pending: bool,
+        active_triggers: &[multi_launcher::hotkey::Hotkey],
+    ) -> multi_launcher::hotkey::directory::SourceSnapshot {
+        hotkey_directory_source_snapshots(
+            settings,
+            radial,
+            None,
+            &[],
+            None,
+            &[],
+            Some(macro_document),
+            1,
+            active_triggers,
+            None,
+            generation,
+            false,
+            route_pending,
+            generation,
+        )
+        .into_iter()
+        .find(|source| source.source == Source::MainSettings)
+        .expect("main Settings source is always published")
+    }
+
+    fn main_source_with_shared_evidence(
+        settings: &Settings,
+        radial: &RadialDocument,
+        macro_document: &multi_launcher::mkmacro::MkMacroDocument,
+        generation: u64,
+        route_pending: bool,
+        active_triggers: &[multi_launcher::hotkey::Hotkey],
+        evidence: Option<&AppliedSharedRouteEvidence>,
+    ) -> multi_launcher::hotkey::directory::SourceSnapshot {
+        hotkey_directory_source_snapshots(
+            settings,
+            radial,
+            None,
+            &[],
+            None,
+            &[],
+            Some(macro_document),
+            1,
+            active_triggers,
+            evidence,
+            generation,
+            false,
+            route_pending,
+            generation,
+        )
+        .into_iter()
+        .find(|source| source.source == Source::MainSettings)
+        .expect("main Settings source is always published")
+    }
+
+    #[test]
+    fn hotkey_directory_runtime_requires_an_exact_applied_listener_receipt() {
+        use multi_launcher::hotkey::parse_hotkey;
+
+        let mut settings = Settings::default();
+        settings.hotkey = Some("F2".into());
+        settings.radial.enabled = false;
+        let radial = RadialDocument::default();
+        let macros = multi_launcher::mkmacro::MkMacroDocument::default();
+        let f2 = parse_hotkey("F2").expect("valid test chord");
+        let f3 = parse_hotkey("F3").expect("valid test chord");
+
+        let initial = Snapshot::from_sources(
+            1,
+            vec![main_source(&settings, &radial, &macros, 10, false, &[f2])],
+        );
+        let launcher = initial
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .expect("launcher candidate exists");
+        assert_eq!(launcher.status, Status::Active { generation: 10 });
+
+        settings.hotkey = Some("F3".into());
+        let unacknowledged = initial
+            .replacing_source(
+                2,
+                main_source(&settings, &radial, &macros, 11, false, &[f2]),
+            )
+            .expect("new source revision replaces the prior source");
+        let launcher = unacknowledged
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .expect("launcher candidate remains visible");
+        assert_eq!(launcher.status, Status::Unknown);
+        assert!(launcher.last_applied.is_none());
+
+        let pending = initial
+            .replacing_source(3, main_source(&settings, &radial, &macros, 12, true, &[f3]))
+            .expect("prepared source revision replaces the prior source");
+        let launcher = pending
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .expect("launcher candidate remains visible while pending");
+        assert_eq!(launcher.status, Status::Pending { generation: 12 });
+        assert_eq!(launcher.chord.as_deref(), Some("F3"));
+        assert_eq!(
+            launcher
+                .last_applied
+                .as_ref()
+                .map(|receipt| receipt.chord.as_str()),
+            Some("F2"),
+            "the prior applied chord remains evidence, not proof of the pending replacement"
+        );
+    }
+
+    #[test]
+    fn hotkey_directory_runtime_shared_route_requires_exact_applied_evidence() {
+        let mut settings = Settings::default();
+        settings.radial.enabled = true;
+        settings.radial.shared_tap_hold = true;
+        settings.help_hotkey = Some("Ctrl+F3".into());
+        let radial = RadialDocument::starter();
+        let macros = multi_launcher::mkmacro::MkMacroDocument::default();
+        let generation = 31;
+
+        let unacknowledged = Snapshot::from_sources(
+            1,
+            vec![main_source_with_shared_evidence(
+                &settings,
+                &radial,
+                &macros,
+                generation,
+                false,
+                &[],
+                None,
+            )],
+        );
+        let launcher = unacknowledged
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .unwrap();
+        assert_eq!(launcher.status, Status::Unknown);
+
+        let evidence =
+            applied_shared_route_after_successful_install(&settings, &radial, &[], generation)
+                .expect("successful shared route installation records exact evidence");
+        let acknowledged = Snapshot::from_sources(
+            2,
+            vec![main_source_with_shared_evidence(
+                &settings,
+                &radial,
+                &macros,
+                generation,
+                false,
+                &[],
+                Some(&evidence),
+            )],
+        );
+        let launcher = acknowledged
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .unwrap();
+        assert_eq!(launcher.status, Status::Active { generation });
+
+        settings.help_hotkey = Some("Ctrl+F4".into());
+        let stale = Snapshot::from_sources(
+            3,
+            vec![main_source_with_shared_evidence(
+                &settings,
+                &radial,
+                &macros,
+                generation,
+                false,
+                &[],
+                Some(&evidence),
+            )],
+        );
+        let launcher = stale
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "main.launcher")
+            .unwrap();
+        assert_eq!(launcher.status, Status::Unknown);
+        assert!(launcher.last_applied.is_none());
+    }
+
+    #[test]
+    fn hotkey_directory_runtime_macro_diagnostics_omit_private_matcher_payloads() {
+        use multi_launcher::mkmacro::{MkHotkey, MkHotkeyScope, MkKey, MkMacro, MkMacroDocument};
+
+        let mut settings = Settings::default();
+        settings.radial.enabled = false;
+        settings.hotkey = Some("F2".into());
+        let radial = RadialDocument::default();
+        let mut macros = MkMacroDocument::default();
+        let macro_with_hotkey =
+            |id: u64, name: &str, key: u8, hotkey_scope: MkHotkeyScope| MkMacro {
+                id,
+                name: name.into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: Some(MkHotkey {
+                    key: MkKey::Function(key),
+                    modifiers: Vec::new(),
+                }),
+                hotkey_scope,
+                folder_id: None,
+                playback: Default::default(),
+                signature: Default::default(),
+                steps: Vec::new(),
+            };
+        macros.macros = vec![
+            macro_with_hotkey(201, "Reserved macro", 2, MkHotkeyScope::AnyWindow),
+            macro_with_hotkey(
+                202,
+                "Invalid matcher",
+                3,
+                MkHotkeyScope::ActiveWindow(multi_launcher::mkmacro::MkWindowMatcher {
+                    title_regex: Some("private-window-pattern [".into()),
+                    ..Default::default()
+                }),
+            ),
+            macro_with_hotkey(203, "Duplicate macro one", 5, MkHotkeyScope::AnyWindow),
+            macro_with_hotkey(204, "Duplicate macro two", 5, MkHotkeyScope::AnyWindow),
+        ];
+        let sources = hotkey_directory_source_snapshots(
+            &settings,
+            &radial,
+            None,
+            &[],
+            None,
+            &[],
+            Some(&macros),
+            9,
+            &[],
+            None,
+            4,
+            false,
+            false,
+            9,
+        );
+        let macro_source = sources
+            .iter()
+            .find(|source| source.source == Source::Macros)
+            .unwrap();
+        let reserved = macro_source
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id.as_str() == "macro.playback.201")
+            .unwrap();
+        assert_eq!(reserved.owner, Owner::MkMacro);
+        assert_eq!(reserved.state, CandidateState::Conflict);
+        assert_eq!(reserved.reason, Some(Reason::ConflictsWithConfiguredRoute));
+        let duplicate = macro_source
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id.as_str() == "macro.playback.203")
+            .unwrap();
+        assert_eq!(duplicate.state, CandidateState::Conflict);
+        assert_eq!(duplicate.reason, Some(Reason::ConflictsWithConfiguredRoute));
+        let invalid_matcher = macro_source
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id.as_str() == "macro.playback.202")
+            .unwrap();
+        assert_eq!(invalid_matcher.state, CandidateState::Invalid);
+        assert_eq!(invalid_matcher.reason, Some(Reason::InvalidScope));
+        assert!(
+            !format!("{macro_source:?}").contains("private-window-pattern"),
+            "matcher text is private macro data and never enters the directory snapshot"
+        );
+    }
+
+    #[test]
+    fn hotkey_directory_runtime_paste_revision_and_route_metadata_are_current() {
+        let (wake, _events) = channel();
+        let listener = HotkeyTrigger::start_listener(Vec::new(), "hotkey-directory-test", wake);
+        let mut settings = Settings::default();
+        settings.radial.enabled = false;
+        settings.radial.shared_tap_hold = false;
+        let radial = RadialDocument::default();
+        let before = hotkey_directory_publication_key(
+            1,
+            &radial,
+            10,
+            2,
+            None,
+            &listener,
+            None,
+            None,
+            &settings,
+            &[],
+        );
+        let after = hotkey_directory_publication_key(
+            1,
+            &radial,
+            11,
+            2,
+            None,
+            &listener,
+            None,
+            None,
+            &settings,
+            &[],
+        );
+        assert_ne!(
+            before, after,
+            "accepted sequence edits trigger republishing"
+        );
+
+        let macros = multi_launcher::mkmacro::MkMacroDocument::default();
+        let legacy_sources = hotkey_directory_source_snapshots(
+            &settings,
+            &radial,
+            None,
+            &[],
+            None,
+            &[],
+            Some(&macros),
+            2,
+            &[],
+            None,
+            1,
+            false,
+            false,
+            1,
+        );
+        let screen_draw = legacy_sources
+            .iter()
+            .find(|source| source.source == Source::ScreenDraw)
+            .unwrap();
+        assert!(
+            screen_draw.candidates.iter().all(|candidate| {
+                candidate.owner == Owner::ScreenDraw && candidate.edit.is_none()
+            })
+        );
+        let paste_next = legacy_sources
+            .iter()
+            .find(|source| source.source == Source::PasteSequences)
+            .unwrap()
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id.as_str() == "paste.next")
+            .unwrap();
+        assert_eq!(paste_next.route, RouteKind::LegacyPolling);
+
+        let mut shared_settings = settings;
+        shared_settings.radial.enabled = true;
+        shared_settings.radial.shared_tap_hold = true;
+        let shared_sources = hotkey_directory_source_snapshots(
+            &shared_settings,
+            &radial,
+            None,
+            &[],
+            None,
+            &[],
+            Some(&macros),
+            2,
+            &[],
+            None,
+            1,
+            false,
+            false,
+            1,
+        );
+        let paste_next = shared_sources
+            .iter()
+            .find(|source| source.source == Source::PasteSequences)
+            .unwrap()
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id.as_str() == "paste.next")
+            .unwrap();
+        assert_eq!(paste_next.route, RouteKind::SharedHook);
+        assert_eq!(paste_next.state, CandidateState::Configured);
+        assert!(
+            !shared_sources
+                .iter()
+                .find(|source| source.source == Source::MainSettings)
+                .unwrap()
+                .applied_routes
+                .iter()
+                .any(|receipt| receipt.id.as_str() == "main.launcher"),
+            "shared mode without a receipt must not claim the hook is applied"
         );
     }
 }

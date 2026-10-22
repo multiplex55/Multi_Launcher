@@ -215,6 +215,7 @@ mod track_c3c_dispatch_receipt {
             WatchEvent::RadialRuntimeDiagnostic(_) => "radial_runtime_diagnostic",
             WatchEvent::PasteSequenceRuntimeDiagnostic(_) => "paste_sequence_runtime_diagnostic",
             WatchEvent::PasteSequenceRoutes(_) => "paste_sequence_routes",
+            WatchEvent::HotkeyDirectorySource(_) => "hotkey_directory_source",
             WatchEvent::RadialDiagnostic(_) => "radial_diagnostic",
             WatchEvent::RadialSubmenuPlacementFailure(_) => "radial_submenu_placement_failure",
             WatchEvent::RadialPlacementActionResult { .. } => "radial_placement_action_result",
@@ -306,6 +307,27 @@ fn track_c_gui_handler_release(
 }
 
 impl LauncherApp {
+    fn replace_hotkey_directory_source(
+        &mut self,
+        source: crate::hotkey::directory::SourceSnapshot,
+    ) {
+        let publication = self
+            .hotkey_directory
+            .as_ref()
+            .and_then(|snapshot| snapshot.publication().checked_add(1))
+            .unwrap_or(1);
+        let snapshot = match self.hotkey_directory.as_ref() {
+            Some(current) => current.replacing_source(publication, source),
+            None => Some(crate::hotkey::directory::Snapshot::from_sources(
+                publication,
+                vec![source],
+            )),
+        };
+        if let Some(snapshot) = snapshot {
+            self.hotkey_directory = Some(Arc::new(snapshot));
+        }
+    }
+
     pub fn process_watch_events(&mut self) {
         super::hotfolder_dispatch::pump_launcher_completions(self);
         #[cfg(test)]
@@ -364,6 +386,9 @@ impl LauncherApp {
                     {
                         self.sequence_routes = Some(presentation);
                     }
+                }
+                WatchEvent::HotkeyDirectorySource(source) => {
+                    self.replace_hotkey_directory_source(source);
                 }
                 WatchEvent::PasteSequenceRuntimeDiagnostic(diagnostic) => {
                     self.report_error_message("paste_sequence.hotkeys", diagnostic);
@@ -587,6 +612,9 @@ impl LauncherApp {
                 WatchEvent::Gestures => {
                     self.dashboard_data_cache
                         .request_refresh(DashboardRefreshRequest::Gestures);
+                    self.replace_hotkey_directory_source(
+                        crate::plugins::mouse_gestures::hotkey_directory_source(),
+                    );
                 }
                 WatchEvent::Dashboard(_) => {
                     self.dashboard.reload();

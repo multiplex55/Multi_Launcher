@@ -202,6 +202,7 @@ struct MouseGestureRuntime {
     settings: MouseGestureSettings,
     plugin_enabled: bool,
     db: SharedGestureDb,
+    directory_revision: u64,
     #[allow(dead_code)]
     watcher: Option<crate::common::json_watch::JsonWatcher>,
 }
@@ -222,11 +223,21 @@ impl Default for MouseGestureRuntime {
         let db_for_watcher = Arc::clone(&db);
 
         let watcher = watch_json(GESTURES_FILE, move || {
-            if let Err(error) = reload_shared_gesture_db(GESTURES_FILE, &db_for_watcher) {
-                tracing::error!(
+            let mut result: anyhow::Result<bool> = Ok(false);
+            with_service(|service| {
+                result = reload_gesture_runtime_database(service, GESTURES_FILE, &db_for_watcher);
+            });
+            match result {
+                Ok(true) => {
+                    crate::gui::send_event(crate::gui::WatchEvent::HotkeyDirectorySource(
+                        hotkey_directory_source(),
+                    ));
+                }
+                Ok(false) => {}
+                Err(error) => tracing::error!(
                     ?error,
                     "failed to reload mouse gestures; retaining last-good data"
-                );
+                ),
             }
         })
         .ok();
@@ -235,6 +246,7 @@ impl Default for MouseGestureRuntime {
             settings: MouseGestureSettings::default(),
             plugin_enabled: true,
             db,
+            directory_revision: 0,
             watcher,
         }
     }
@@ -262,15 +274,40 @@ fn reload_shared_gesture_db(
     Ok(true)
 }
 
+fn reload_gesture_runtime_database(
+    runtime: &mut MouseGestureRuntime,
+    path: impl AsRef<std::path::Path>,
+    expected_db: &SharedGestureDb,
+) -> anyhow::Result<bool> {
+    if !Arc::ptr_eq(&runtime.db, expected_db) {
+        return Ok(false);
+    }
+    let changed = reload_shared_gesture_db(path, &runtime.db)?;
+    if changed {
+        runtime.bump_directory_revision();
+    }
+    Ok(changed)
+}
+
 impl MouseGestureRuntime {
     fn update_settings(&mut self, settings: MouseGestureSettings) {
+        if self.settings != settings {
+            self.bump_directory_revision();
+        }
         self.settings = settings;
         self.apply();
     }
 
     fn set_plugin_enabled(&mut self, enabled: bool) {
+        if self.plugin_enabled != enabled {
+            self.bump_directory_revision();
+        }
         self.plugin_enabled = enabled;
         self.apply();
+    }
+
+    fn bump_directory_revision(&mut self) {
+        self.directory_revision = self.directory_revision.checked_add(1).unwrap_or(1);
     }
 
     fn apply(&self) {
@@ -327,12 +364,87 @@ fn gesture_db_snapshot() -> GestureDb {
 
 pub fn publish_committed_gesture_db(committed: GestureDb) {
     with_service(|service| {
-        if let Ok(mut db) = service.db.lock()
-            && *db != committed
-        {
-            *db = committed;
+        let changed = if let Ok(mut db) = service.db.lock() {
+            if *db != committed {
+                *db = committed;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if changed {
+            service.bump_directory_revision();
         }
     });
+}
+
+/// Returns a sanitized view of configured gesture bindings for the hotkey
+/// directory. Gesture labels, tokens, action text, arguments, and stroke data
+/// remain inside the gesture owner; stable identities are scoped to this
+/// immutable database publication.
+pub fn hotkey_directory_source() -> crate::hotkey::directory::SourceSnapshot {
+    let mut snapshot = None;
+    with_service(|service| {
+        snapshot = Some(hotkey_directory_source_from_runtime(service));
+    });
+    snapshot.unwrap_or_else(|| {
+        crate::hotkey::directory::SourceSnapshot::new(
+            crate::hotkey::directory::Source::MouseGestures,
+            0,
+            Vec::new(),
+            Vec::new(),
+        )
+    })
+}
+
+fn hotkey_directory_source_from_runtime(
+    service: &MouseGestureRuntime,
+) -> crate::hotkey::directory::SourceSnapshot {
+    use crate::hotkey::directory::{
+        Candidate, CandidateState, EditDestination, EntryId, Owner, Reason, RouteKind, Scope,
+        Source, SourceSnapshot,
+    };
+    let revision = service.directory_revision;
+    let plugin_enabled = service.plugin_enabled;
+    let gestures_enabled = service.settings.enabled;
+    let database = service.db.lock().map(|db| db.clone()).unwrap_or_default();
+
+    let mut candidates = Vec::new();
+    for (gesture_index, gesture) in database.gestures.iter().enumerate() {
+        for (binding_index, binding) in gesture.bindings.iter().enumerate() {
+            let enabled = plugin_enabled && gestures_enabled && gesture.enabled && binding.enabled;
+            let id = format!("gesture:{revision}:{gesture_index}:{binding_index}");
+            candidates.push(Candidate {
+                id: EntryId::new(id),
+                owner: Owner::MouseGestures,
+                owner_label: "Mouse Gestures".into(),
+                action_label: format!("{} — binding {}", gesture.label, binding_index + 1),
+                chord: None,
+                route: RouteKind::Gesture,
+                scope: Scope::Gesture,
+                source_revision: revision,
+                expected_runtime_generation: None,
+                state: if enabled {
+                    CandidateState::Unknown
+                } else {
+                    CandidateState::Disabled
+                },
+                reason: if enabled {
+                    Some(Reason::LocalRouteHasNoGlobalReceipt)
+                } else {
+                    Some(Reason::OwnerDisabled)
+                },
+                edit: Some(EditDestination::GestureBinding {
+                    publication: revision,
+                    gesture_index: gesture_index as u32,
+                    binding_index: binding_index as u32,
+                }),
+            });
+        }
+    }
+    SourceSnapshot::new(Source::MouseGestures, revision, candidates, Vec::new())
 }
 
 pub fn apply_runtime_settings(settings: MouseGestureSettings) {
@@ -829,7 +941,9 @@ fn no_match_behavior_label(value: NoMatchBehavior) -> &'static str {
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
-    use crate::mouse_gestures::db::{GestureDb, GestureEntry, SCHEMA_VERSION};
+    use crate::mouse_gestures::db::{
+        BindingEntry, BindingKind, GestureDb, GestureEntry, SCHEMA_VERSION,
+    };
     use crate::mouse_gestures::engine::DirMode;
 
     fn db(label: &str) -> GestureDb {
@@ -916,5 +1030,49 @@ mod persistence_tests {
         crate::common::persistence::save_json_atomic(&path, &recovered).unwrap();
         assert!(reload_shared_gesture_db(&path, &shared).unwrap());
         assert_eq!(*shared.lock().unwrap(), recovered);
+    }
+
+    #[test]
+    fn hotkey_directory_publication_pairs_revision_with_database_reload() {
+        fn db_with_binding(label: &str) -> GestureDb {
+            let mut database = db(label);
+            database.gestures[0].bindings.push(BindingEntry {
+                label: "Harmless test binding".into(),
+                kind: BindingKind::Execute,
+                action: "test:inert-binding".into(),
+                args: None,
+                enabled: true,
+            });
+            database
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mouse_gestures.json");
+        let shared = Arc::new(Mutex::new(db_with_binding("before")));
+        let mut runtime = MouseGestureRuntime {
+            settings: MouseGestureSettings::default(),
+            plugin_enabled: true,
+            db: Arc::clone(&shared),
+            directory_revision: 7,
+            watcher: None,
+        };
+        let before = hotkey_directory_source_from_runtime(&runtime);
+        assert_eq!(before.revision, 7);
+        assert!(before.candidates[0].id.as_str().contains(":7:"));
+        assert_eq!(before.candidates[0].action_label, "before — binding 1");
+
+        crate::common::persistence::save_json_atomic(&path, &db_with_binding("after")).unwrap();
+        assert!(reload_gesture_runtime_database(&mut runtime, &path, &shared).unwrap());
+        let after = hotkey_directory_source_from_runtime(&runtime);
+        assert_eq!(after.revision, 8);
+        assert!(after.candidates[0].id.as_str().contains(":8:"));
+        assert_eq!(after.candidates[0].action_label, "after — binding 1");
+
+        // A duplicate file notification is a no-op and cannot diverge the
+        // immutable source from its owner revision.
+        assert!(!reload_gesture_runtime_database(&mut runtime, &path, &shared).unwrap());
+        let duplicate = hotkey_directory_source_from_runtime(&runtime);
+        assert_eq!(duplicate.revision, after.revision);
+        assert_eq!(duplicate.candidates, after.candidates);
     }
 }

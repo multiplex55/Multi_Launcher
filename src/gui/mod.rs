@@ -851,6 +851,30 @@ pub(crate) struct MacroPromptUi {
     pub bootstrap_pending: bool,
 }
 
+#[derive(Clone)]
+pub(crate) struct PasteSequenceDocumentRevisionNotifier {
+    revision: Arc<AtomicU64>,
+    main_wake: Option<Sender<()>>,
+}
+
+impl PasteSequenceDocumentRevisionNotifier {
+    pub(crate) fn new(revision: Arc<AtomicU64>, main_wake: Option<Sender<()>>) -> Self {
+        Self {
+            revision,
+            main_wake,
+        }
+    }
+
+    pub(crate) fn note_revision(&self, revision: u64) {
+        let previous = self.revision.fetch_max(revision, Ordering::AcqRel);
+        if revision > previous
+            && let Some(main_wake) = self.main_wake.as_ref()
+        {
+            let _ = main_wake.send(());
+        }
+    }
+}
+
 pub struct LauncherApp {
     /// Shared list of all actions available to the launcher.
     ///
@@ -991,6 +1015,10 @@ pub struct LauncherApp {
     pub(crate) sequence_playback: crate::paste_sequence::SequencePlaybackController,
     sequence_exit_requested: bool,
     pub(crate) sequence_routes: Option<crate::paste_sequence::SequenceRoutePresentation>,
+    /// Latest immutable hotkey directory assembled from owner publications.
+    pub(crate) hotkey_directory: Option<Arc<crate::hotkey::directory::Snapshot>>,
+    paste_sequence_document_revision: Arc<AtomicU64>,
+    hotkey_directory_main_wake: Option<Sender<()>>,
     visible_flag: Arc<AtomicBool>,
     restore_flag: Arc<AtomicBool>,
     visibility_revision: crate::visibility::VisibilityRevision,
@@ -1280,6 +1308,24 @@ impl CachedSearchEntry {
 }
 
 impl LauncherApp {
+    pub fn install_hotkey_directory_document_revision(
+        &mut self,
+        revision: Arc<AtomicU64>,
+        main_wake: Sender<()>,
+    ) {
+        self.paste_sequence_document_revision = revision;
+        self.hotkey_directory_main_wake = Some(main_wake);
+    }
+
+    pub(crate) fn paste_sequence_document_revision_notifier(
+        &self,
+    ) -> PasteSequenceDocumentRevisionNotifier {
+        PasteSequenceDocumentRevisionNotifier::new(
+            Arc::clone(&self.paste_sequence_document_revision),
+            self.hotkey_directory_main_wake.clone(),
+        )
+    }
+
     pub(crate) fn settings_save_close_preferences(
         &self,
     ) -> crate::settings_save::LauncherClosePreferences {
@@ -3146,6 +3192,9 @@ impl LauncherApp {
             sequence_playback: crate::paste_sequence::SequencePlaybackController::default(),
             sequence_exit_requested: false,
             sequence_routes: None,
+            hotkey_directory: None,
+            paste_sequence_document_revision: Arc::new(AtomicU64::new(0)),
+            hotkey_directory_main_wake: None,
             visible_flag: visible_flag.clone(),
             restore_flag: restore_flag.clone(),
             visibility_revision: crate::visibility::VisibilityRevision::default(),
@@ -5173,6 +5222,7 @@ pub fn recv_test_event(rx: &EventReceiver) -> Option<TestWatchEvent> {
             | WatchEvent::RadialRuntimeDiagnostic(_)
             | WatchEvent::PasteSequenceRuntimeDiagnostic(_)
             | WatchEvent::PasteSequenceRoutes(_)
+            | WatchEvent::HotkeyDirectorySource(_)
             | WatchEvent::RadialDiagnostic(_)
             | WatchEvent::RadialSubmenuPlacementFailure(_)
             | WatchEvent::RadialPlacementActionResult { .. }

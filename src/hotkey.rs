@@ -1,3 +1,4 @@
+pub mod directory;
 pub mod launcher_invocation;
 pub mod parse;
 pub mod reconfiguration;

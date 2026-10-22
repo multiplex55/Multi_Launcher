@@ -28,6 +28,15 @@ fn saved_run_status_text(saved_run: Option<&SavedRunPresentation>, status: Strin
     })
 }
 
+fn load_sequence_snapshot_and_notify(
+    store: &SequenceStore,
+    notifier: &super::PasteSequenceDocumentRevisionNotifier,
+) -> Option<SequenceSnapshot> {
+    let snapshot = store.load().ok()?;
+    notifier.note_revision(snapshot.revision());
+    Some(snapshot)
+}
+
 fn run_status_text(
     status: crate::paste_sequence::SequencePlaybackStatus,
     progress: Option<(usize, usize)>,
@@ -1446,6 +1455,7 @@ impl PasteSequenceDialog {
         let settings_path = app.settings_path.clone();
         let store = SequenceStore::new(self.store_path.clone());
         let repaint = ctx.clone();
+        let revision_notifier = app.paste_sequence_document_revision_notifier();
         let (sender, receiver) = std::sync::mpsc::channel();
         let spawned = app.settings_save_workers.spawn(move || {
             let ticket = std::cell::RefCell::new(None);
@@ -1525,7 +1535,7 @@ impl PasteSequenceDialog {
                     let _ = staged.wait_terminal_disposition(Duration::from_secs(5));
                 }
             }
-            let snapshot = store.load().ok();
+            let snapshot = load_sequence_snapshot_and_notify(&store, &revision_notifier);
             let _ = sender.send(HotkeyUpdateCompletion {
                 result,
                 snapshot,
@@ -1819,6 +1829,49 @@ fn reconcile_editor_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hotkey_directory_paste_worker_notifies_revision_after_ui_receiver_closes() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+            mpsc::channel,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = SequenceStore::new(directory.path().join(PASTE_SEQUENCES_FILE));
+        let mut candidate = store.load().unwrap();
+        candidate
+            .upsert(SequenceDraft::new(
+                "Worker-owned commit",
+                vec![Step::LiteralText {
+                    text: "committed content".into(),
+                }],
+            ))
+            .unwrap();
+        store.commit(&mut candidate).unwrap();
+        let committed_revision = candidate.revision();
+
+        let revision = Arc::new(AtomicU64::new(0));
+        let (main_wake, main_wake_rx) = channel();
+        let notifier = super::super::PasteSequenceDocumentRevisionNotifier::new(
+            Arc::clone(&revision),
+            Some(main_wake),
+        );
+        let (completion_tx, completion_rx) = channel();
+        drop(completion_rx);
+
+        let worker = std::thread::spawn(move || {
+            let snapshot = load_sequence_snapshot_and_notify(&store, &notifier);
+            let _ = completion_tx.send(snapshot.is_some());
+            snapshot
+        });
+        let loaded = worker.join().unwrap().unwrap();
+
+        assert_eq!(loaded.revision(), committed_revision);
+        assert_eq!(revision.load(Ordering::Acquire), committed_revision);
+        assert!(main_wake_rx.try_recv().is_ok());
+    }
 
     fn layout_app(ctx: &egui::Context, root: &std::path::Path) -> super::super::LauncherApp {
         use std::sync::{Arc, atomic::AtomicBool};

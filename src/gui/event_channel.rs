@@ -162,6 +162,7 @@ fn class_of(event: &WatchEvent) -> EventClass {
         | WatchEvent::ScreenDrawEmergency(_) => EventClass::Recovery,
         WatchEvent::ClipboardModify(_) | WatchEvent::Recycle(_) => EventClass::Clipboard,
         WatchEvent::Dashboard(_) => EventClass::Dashboard,
+        WatchEvent::HotkeyDirectorySource(_) => EventClass::Other,
         WatchEvent::VirtualDesktop(_) => EventClass::Other,
     }
 }
