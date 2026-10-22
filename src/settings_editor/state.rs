@@ -3,15 +3,49 @@ use crate::plugin::PluginManager;
 use crate::settings::Settings;
 use eframe::egui;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SettingsNavigationStage {
+    MainControl,
+    DeferredControl,
+    DedicatedOwner,
+}
+
+/// A value-only one-shot handoff from the Settings search result to its owner.
+/// It deliberately contains no widget response, geometry, or setting value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PendingSettingsNavigation {
+    pub(crate) control_id: String,
+    pub(crate) owner: super::catalog::SettingsOwner,
+    pub(crate) section: super::catalog::SettingsSection,
+    pub(crate) catalog_revision: u64,
+    pub(crate) settings_instance: Option<u64>,
+    pub(crate) stage: SettingsNavigationStage,
+    pub(crate) frames_remaining: u8,
+    pub(crate) scroll_requested: bool,
+    pub(crate) destination_observed: bool,
+}
+
 #[derive(Default)]
 pub struct SettingsEditor {
     pub(crate) search_catalog: super::catalog::SettingsCatalog,
     pub(super) catalog_plugin_revision: Option<u64>,
+    pub(crate) settings_search_query: String,
+    pub(crate) settings_search_match_query: String,
+    pub(crate) settings_search_match_revision: Option<u64>,
+    pub(crate) settings_search_match_ids: Vec<String>,
+    pub(crate) settings_search_selected_id: Option<String>,
+    pub(crate) settings_search_page: usize,
+    pub(crate) settings_search_response_owner_instance: Option<u64>,
+    pub(crate) settings_search_query_response_id: Option<egui::Id>,
+    pub(crate) settings_search_result_response_ids: Vec<egui::Id>,
+    pub(crate) pending_settings_navigation: Option<PendingSettingsNavigation>,
+    /// Keeps a locally handled search Enter from reaching controls on a
+    /// retained egui pass after the search result has requested focus.
+    pub(crate) search_enter_consumption_pending: bool,
     pub(crate) baseline_settings: Settings,
     pub(crate) paste_sequence: crate::settings::PasteSequencePreferences,
     pub(crate) paste_next_enabled: bool,
     pub(crate) paste_cancel_enabled: bool,
-    pub(crate) reveal_paste_sequence: bool,
     pub(crate) hotkey: String,
     pub(crate) hotkey_valid: bool,
     pub(crate) last_valid_hotkey: String,
@@ -113,6 +147,28 @@ pub struct SettingsEditor {
     pub(crate) plugins_expanded: bool,
     pub(crate) expand_request: Option<bool>,
     pub(crate) confirm_clipboard_modify_factory_reset: bool,
+    #[cfg(test)]
+    pub(crate) test_search_query_response: Option<(egui::Id, egui::Rect)>,
+    #[cfg(test)]
+    pub(crate) test_search_query_clip_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    pub(crate) test_settings_window_state: Option<(bool, bool, bool)>,
+    #[cfg(test)]
+    pub(crate) test_search_result_responses: Vec<(String, egui::Id, egui::Rect)>,
+    #[cfg(test)]
+    pub(crate) test_search_page_responses: Vec<(String, egui::Id, egui::Rect)>,
+    #[cfg(test)]
+    pub(crate) test_fuzzy_weight_response_ids: Option<(egui::Id, egui::Id)>,
+    #[cfg(test)]
+    pub(crate) test_last_navigation_focus: Option<(String, egui::Id)>,
+    #[cfg(test)]
+    pub(crate) test_last_navigation_diagnostic: Option<String>,
+    #[cfg(test)]
+    pub(crate) test_root_escape_preflight: Option<String>,
+    #[cfg(test)]
+    pub(crate) test_search_navigation_history: Vec<String>,
+    #[cfg(test)]
+    pub(crate) test_search_navigation_trace_started: bool,
 }
 
 impl SettingsEditor {

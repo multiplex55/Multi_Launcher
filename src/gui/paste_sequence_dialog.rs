@@ -2313,7 +2313,14 @@ mod tests {
             egui::vec2(900.0, 760.0),
             "Playback Settings",
         );
-        assert!(app.show_settings && app.settings_editor.reveal_paste_sequence);
+        assert!(app.show_settings);
+        assert_eq!(
+            app.settings_editor
+                .pending_settings_navigation
+                .as_ref()
+                .map(|pending| pending.control_id.as_str()),
+            Some("paste.next.enabled")
+        );
         assert_eq!(
             app.settings_editor.paste_sequence.next_hotkey.as_deref(),
             Some("Ctrl+F9")

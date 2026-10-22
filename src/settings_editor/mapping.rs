@@ -47,11 +47,21 @@ impl SettingsEditor {
         let mut s = Self {
             search_catalog: super::catalog::SettingsCatalog::default(),
             catalog_plugin_revision: None,
+            settings_search_query: String::new(),
+            settings_search_match_query: String::new(),
+            settings_search_match_revision: None,
+            settings_search_match_ids: Vec::new(),
+            settings_search_selected_id: None,
+            settings_search_page: 0,
+            settings_search_response_owner_instance: None,
+            settings_search_query_response_id: None,
+            settings_search_result_response_ids: Vec::new(),
+            pending_settings_navigation: None,
+            search_enter_consumption_pending: false,
             baseline_settings: settings.clone(),
             paste_sequence: settings.paste_sequence.clone(),
             paste_next_enabled: settings.paste_sequence.next_hotkey.is_some(),
             paste_cancel_enabled: settings.paste_sequence.cancel_hotkey.is_some(),
-            reveal_paste_sequence: false,
             hotkey,
             hotkey_valid,
             last_valid_hotkey,
@@ -173,6 +183,28 @@ impl SettingsEditor {
             plugins_expanded: false,
             expand_request: None,
             confirm_clipboard_modify_factory_reset: false,
+            #[cfg(test)]
+            test_search_query_response: None,
+            #[cfg(test)]
+            test_search_query_clip_rect: None,
+            #[cfg(test)]
+            test_settings_window_state: None,
+            #[cfg(test)]
+            test_search_result_responses: Vec::new(),
+            #[cfg(test)]
+            test_search_page_responses: Vec::new(),
+            #[cfg(test)]
+            test_fuzzy_weight_response_ids: None,
+            #[cfg(test)]
+            test_last_navigation_focus: None,
+            #[cfg(test)]
+            test_last_navigation_diagnostic: None,
+            #[cfg(test)]
+            test_root_escape_preflight: None,
+            #[cfg(test)]
+            test_search_navigation_history: Vec::new(),
+            #[cfg(test)]
+            test_search_navigation_trace_started: false,
         };
         s.plugin_settings
             .entry("screenshot".into())

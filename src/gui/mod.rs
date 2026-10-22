@@ -1699,8 +1699,13 @@ impl LauncherApp {
 
     /// Opens the main settings at playback controls, preserving any open draft.
     pub(crate) fn open_paste_sequence_settings_dialog(&mut self) {
+        let settings_was_open = self.show_settings;
         self.open_settings_dialog();
-        self.settings_editor.reveal_paste_sequence = true;
+        self.settings_editor.request_control_navigation(
+            "paste.next.enabled",
+            settings_was_open.then(|| self.jump_mode_ui.settings_instance()),
+            &self.plugins,
+        );
     }
 
     pub(crate) fn paste_sequence_shortcut_summary(&self) -> String {
@@ -1726,6 +1731,14 @@ impl LauncherApp {
         self.jump_mode_ui.is_enabled()
     }
 
+    pub(crate) fn settings_navigation_owner_instance(&self) -> u64 {
+        self.jump_mode_ui.settings_instance()
+    }
+
+    pub(crate) fn jump_mode_session_active(&self) -> bool {
+        self.jump_mode_ui.active_session().is_some()
+    }
+
     pub(crate) fn set_jump_mode_enabled(&mut self, enabled: bool) {
         self.jump_mode_ui.set_enabled(enabled);
     }
@@ -1739,8 +1752,29 @@ impl LauncherApp {
     }
 
     pub(crate) fn open_mouse_settings_dialog(&mut self) {
-        let preferences = self.coordinate_tool.preferences().clone();
-        self.mouse_settings_dialog.open(&preferences);
+        if !self.mouse_settings_dialog.open {
+            let preferences = self.coordinate_tool.preferences().clone();
+            self.mouse_settings_dialog.open(&preferences);
+        }
+    }
+
+    pub(crate) fn is_mouse_settings_dialog_open(&self) -> bool {
+        self.mouse_settings_dialog.open
+    }
+
+    pub(crate) fn is_mouse_gesture_settings_dialog_open(&self) -> bool {
+        self.mouse_gesture_settings_dialog.open
+    }
+
+    pub(crate) fn is_brightness_dialog_open(&self) -> bool {
+        self.brightness_dialog.open
+    }
+
+    pub(crate) fn open_brightness_settings_dialog(&mut self) {
+        if !self.brightness_dialog.open {
+            self.brightness_dialog.open();
+        }
+        self.focus_panel(Panel::BrightnessDialog);
     }
 
     pub fn open_clipboard_modify_dialog(&mut self) {
@@ -4612,7 +4646,7 @@ impl LauncherApp {
         }
     }
 
-    fn focus_panel(&mut self, panel: Panel) {
+    pub(crate) fn focus_panel(&mut self, panel: Panel) {
         self.panel_stack.retain(|p| *p != panel);
         self.panel_stack.push(panel);
         self.ensure_open(panel);

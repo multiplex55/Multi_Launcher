@@ -4350,6 +4350,14 @@ impl LauncherApp {
                 .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
     }
 
+    fn settings_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        self.show_settings
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && !egui::Popup::is_any_open(ctx)
+            && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx)
+                == Some(crate::gui::jump_mode::ui::settings_layer_id())
+    }
+
     fn mouse_gesture_settings_native_ui_owner_current(
         &self,
         ctx: &egui::Context,
@@ -5253,6 +5261,8 @@ impl LauncherApp {
                 frame_logic.should_be_visible,
                 navigation_owner_candidate,
             );
+        let jump_session_escape_preempted = self.jump_mode_ui.active_session().is_some()
+            && ctx.input(|input| input.key_pressed(egui::Key::Escape));
         self.jump_mode_ui
             .handle_root_input(&ctx, navigation_input_allowed, first_ui_pass);
         self.jump_mode_ui
@@ -6024,14 +6034,56 @@ impl LauncherApp {
                     )
                     && ctx.input(|i| i.key_pressed(egui::Key::Escape))
                 {
-                    if self.any_panel_open() {
-                        if self.close_front_dialog() {
-                            ctx.input_mut(|i| {
-                                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
-                            });
+                    #[cfg(test)]
+                    {
+                        let focused = ctx.memory(|memory| memory.focused());
+                        let query_id = self.settings_editor.settings_search_query_response_id;
+                        let result_ids = self
+                            .settings_editor
+                            .settings_search_result_response_ids
+                            .clone();
+                        let query_had_focus = query_id.is_some_and(|id| {
+                            ctx.memory(|memory| memory.had_focus_last_frame(id))
+                        });
+                        let results_had_focus = result_ids
+                            .iter()
+                            .any(|id| ctx.memory(|memory| memory.had_focus_last_frame(*id)));
+                        self.settings_editor.test_root_escape_preflight = Some(format!(
+                            "candidate={navigation_owner_candidate:?} settings_open={} \
+                             owner_transition_pending={owner_transition_pending} \
+                             jump_escape_preempted={jump_session_escape_preempted} \
+                             jump_session_active={} focused={focused:?} query_id={query_id:?} \
+                             query_had_focus={query_had_focus} result_ids={result_ids:?} \
+                             results_had_focus={results_had_focus} response_owner={:?} query_nonempty={}",
+                            self.show_settings,
+                            self.jump_mode_ui.active_session().is_some(),
+                            self.settings_editor.settings_search_response_owner_instance,
+                            !self.settings_editor.settings_search_query.trim().is_empty(),
+                        ));
+                    }
+                    let search_escape_handled = !owner_transition_pending
+                        && !jump_session_escape_preempted
+                        && self.jump_mode_ui.active_session().is_none()
+                        && self.settings_native_ui_owner_current(
+                            &ctx,
+                            frame_logic.should_be_visible,
+                        )
+                        && self
+                            .settings_editor
+                            .handle_search_escape_before_container_close(
+                                &ctx,
+                                self.jump_mode_ui.settings_instance(),
+                            );
+                    if !search_escape_handled {
+                        if self.any_panel_open() {
+                            if self.close_front_dialog() {
+                                ctx.input_mut(|i| {
+                                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                });
+                            }
+                        } else {
+                            self.request_launcher_visibility(false);
                         }
-                    } else {
-                        self.request_launcher_visibility(false);
                     }
                 }
 
@@ -6906,6 +6958,9 @@ impl LauncherApp {
         if show_settings {
             let navigation_owner =
                 self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+            let settings_owner_instance = self
+                .settings_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                .then(|| self.jump_mode_ui.settings_instance());
             let settings_scope = match navigation_owner {
                 crate::gui::jump_mode::ui::NavigationOwner::Settings { instance } => {
                     self.jump_mode_ui.scope_for_navigation_owner(
@@ -6941,7 +6996,16 @@ impl LauncherApp {
                 | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
             };
             let mut ed = std::mem::take(&mut self.settings_editor);
-            ed.ui(&ctx, self, settings_scope, first_ui_pass);
+            let jump_mode_active =
+                self.jump_mode_ui.active_session().is_some() || jump_session_escape_preempted;
+            ed.ui(
+                &ctx,
+                self,
+                settings_scope,
+                settings_owner_instance,
+                jump_mode_active,
+                first_ui_pass,
+            );
             self.settings_editor = ed;
         }
         let show_plugin = self.show_plugins;
@@ -36994,6 +37058,266 @@ mod tests {
             app.test_activation_trace.is_empty(),
             "Enter cannot activate a root result"
         );
+        drop(workspace);
+    }
+
+    #[test]
+    fn settings_search_navigation_escape_dismisses_results_before_closing_settings() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.test_skip_history_persistence = true;
+        let release_escape = |app: &mut LauncherApp| {
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+        };
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.show_settings = true;
+        app.settings_editor.fuzzy_weight = 2.25;
+        for _ in 0..2 {
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+
+        let (query_id, _) = app
+            .settings_editor
+            .test_search_query_response
+            .expect("root rendered the real Settings search response");
+        ctx.memory_mut(|memory| memory.request_focus(query_id));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(query_id));
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text("fuzzy weight".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.settings_editor.settings_search_query, "fuzzy weight");
+        assert!(!app.settings_editor.settings_search_match_ids.is_empty());
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        release_escape(&mut app);
+        assert!(
+            app.show_settings,
+            "first Escape dismisses search results only; preflight={:?}; frame={}",
+            app.settings_editor.test_root_escape_preflight,
+            app.settings_editor
+                .test_last_navigation_diagnostic
+                .as_deref()
+                .unwrap_or("no Settings navigation frame was recorded")
+        );
+        assert!(app.settings_editor.settings_search_query.is_empty());
+        assert_eq!(app.settings_editor.fuzzy_weight, 2.25);
+
+        ctx.memory_mut(|memory| memory.request_focus(query_id));
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text("fuzzy weight".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        let settings_owner = app.settings_navigation_owner_instance();
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("query_input")));
+        assert!(
+            !app.settings_editor
+                .handle_search_escape_before_container_close(&ctx, settings_owner),
+            "a current root-query focus cannot fall back to stale Settings search focus"
+        );
+        assert_eq!(app.settings_editor.settings_search_query, "fuzzy weight");
+        let result_id = app
+            .settings_editor
+            .test_search_result_responses
+            .first()
+            .map(|(_, response_id, _)| *response_id)
+            .expect("the root Settings window rendered a real result button");
+        ctx.memory_mut(|memory| memory.request_focus(result_id));
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(result_id));
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        release_escape(&mut app);
+        assert!(
+            app.show_settings,
+            "Escape from the actual result response dismisses search before closing Settings; preflight={:?}; frame={}",
+            app.settings_editor.test_root_escape_preflight,
+            app.settings_editor
+                .test_last_navigation_diagnostic
+                .as_deref()
+                .unwrap_or("no Settings navigation frame was recorded")
+        );
+        assert!(app.settings_editor.settings_search_query.is_empty());
+        assert_eq!(app.settings_editor.fuzzy_weight, 2.25);
+
+        app.set_jump_mode_enabled(true);
+        ctx.memory_mut(|memory| memory.request_focus(query_id));
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text("fuzzy weight".into())],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        let jump_focus_id = app
+            .settings_editor
+            .test_search_result_responses
+            .first()
+            .map(|(_, response_id, _)| *response_id)
+            .expect("the Jump priority check retains an actual search result response");
+        ctx.memory_mut(|memory| memory.request_focus(jump_focus_id));
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(jump_focus_id));
+        start_actual_root_jump_mode(&ctx, &mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.show_settings);
+        assert_eq!(
+            app.settings_editor.settings_search_query, "fuzzy weight",
+            "the first Escape cancels Jump Mode without dismissing Settings search"
+        );
+        assert!(app.jump_mode_ui.active_session().is_none());
+        release_escape(&mut app);
+        ctx.memory_mut(|memory| memory.request_focus(query_id));
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        release_escape(&mut app);
+        assert!(app.show_settings);
+        assert!(app.settings_editor.settings_search_query.is_empty());
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        release_escape(&mut app);
+        assert!(
+            !app.show_settings,
+            "Escape with no search results keeps the container action"
+        );
+        drop(workspace);
+    }
+
+    #[test]
+    fn settings_search_navigation_paste_open_survives_discarded_sizing_pass() {
+        let ctx = egui::Context::default();
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let mut persisted_settings = Settings::default();
+        persisted_settings.paste_sequence.next_hotkey = None;
+        persisted_settings.paste_sequence.cancel_hotkey = None;
+        persisted_settings
+            .save(
+                workspace
+                    .root()
+                    .join("settings.json")
+                    .to_str()
+                    .expect("the isolated settings path is valid UTF-8"),
+            )
+            .unwrap();
+        let mut app = root_list_app_at(&ctx, two_results(), workspace.root());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.open_paste_sequence_settings_dialog();
+        assert_eq!(
+            app.settings_editor
+                .pending_settings_navigation
+                .as_ref()
+                .map(|pending| pending.control_id.as_str()),
+            Some("paste.next.enabled")
+        );
+
+        let mut target_response_id = None;
+        for frame in 0..6 {
+            let (output, passes) =
+                app.run_root_frame_for_test(&ctx, actual_query_input(true), frame == 0);
+            output.drop_without_applying_deltas();
+            if frame == 0 {
+                assert!(passes >= 2, "the first Settings window pass was discarded");
+            }
+            if let Some((id, response_id)) = app.settings_editor.test_last_navigation_focus.as_ref()
+                && id == "paste.next.enabled"
+                && ctx.memory(|memory| memory.focused()) == Some(*response_id)
+            {
+                target_response_id = Some(*response_id);
+                break;
+            }
+        }
+        let target_response_id = target_response_id.unwrap_or_else(|| {
+            panic!(
+                "a later visible Settings pass binds the real Paste checkbox response; {}",
+                app.settings_editor
+                    .test_last_navigation_diagnostic
+                    .as_deref()
+                    .unwrap_or("no Settings navigation frame was recorded")
+            )
+        });
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(target_response_id)
+        );
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(!app.settings_editor.paste_next_enabled);
         drop(workspace);
     }
 
