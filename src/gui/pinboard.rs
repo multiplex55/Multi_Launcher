@@ -1409,9 +1409,12 @@ fn restore_root_visibility_intent(
 mod tests {
     use super::*;
     use crate::gui::mkmacro_dialog::visual_capture_workflow::SharedVisualOverlayController;
-    use crate::gui::mkmacro_dialog::visual_overlay::RectanglePurpose;
+    use crate::gui::mkmacro_dialog::visual_overlay::{
+        OverlayErrorKind, RectanglePurpose, VisualOverlayError,
+    };
     use crate::mkmacro::{ExecResult, SearchRegion};
     use crate::visibility::VisibilityRevision;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{Mutex, mpsc};
     use std::time::{Duration, Instant};
 
@@ -1425,6 +1428,12 @@ mod tests {
         pin_hide_polls: usize,
         pin_restore_requests: usize,
         pin_restore_polls: usize,
+        parking_checks_by_generation: HashMap<PinCaptureGeneration, usize>,
+        parking_restores_by_generation: HashMap<PinCaptureGeneration, usize>,
+        pin_hide_requests_by_identity: HashMap<PinCaptureIdentity, usize>,
+        pin_hide_polls_by_identity: HashMap<PinCaptureIdentity, usize>,
+        pin_restore_requests_by_identity: HashMap<PinCaptureIdentity, usize>,
+        pin_restore_polls_by_identity: HashMap<PinCaptureIdentity, usize>,
         capture_rects: Vec<ScreenRect>,
     }
 
@@ -1436,13 +1445,15 @@ mod tests {
     impl LauncherCaptureParkingFactory for FakeParkingFactory {
         fn begin(
             &self,
-            _: PinCaptureGeneration,
+            generation: PinCaptureGeneration,
             _: usize,
             _: ScreenRect,
         ) -> Result<Box<dyn LauncherCaptureParking>, String> {
             Ok(Box::new(FakeParking {
                 log: Arc::clone(&self.log),
                 acknowledge_after: self.acknowledge_after,
+                generation,
+                checks: 0,
             }))
         }
     }
@@ -1450,19 +1461,29 @@ mod tests {
     struct FakeParking {
         log: Arc<Mutex<CaptureFlowLog>>,
         acknowledge_after: Option<usize>,
+        generation: PinCaptureGeneration,
+        checks: usize,
     }
 
     impl LauncherCaptureParking for FakeParking {
         fn verify_capture_safe(&mut self) -> Result<bool, String> {
+            self.checks += 1;
             let mut log = self.log.lock().unwrap();
             log.parking_checks += 1;
+            *log.parking_checks_by_generation
+                .entry(self.generation)
+                .or_default() += 1;
             Ok(self
                 .acknowledge_after
-                .is_some_and(|count| log.parking_checks >= count))
+                .is_some_and(|count| self.checks >= count))
         }
 
         fn restore(&mut self) -> Result<(), String> {
-            self.log.lock().unwrap().parking_restores += 1;
+            let mut log = self.log.lock().unwrap();
+            log.parking_restores += 1;
+            *log.parking_restores_by_generation
+                .entry(self.generation)
+                .or_default() += 1;
             Ok(())
         }
 
@@ -1484,41 +1505,60 @@ mod tests {
     }
 
     impl PinWindowVisibilityCoordinator for FakePinWindows {
-        fn request_hide_all(&mut self, _: PinCaptureIdentity) -> Result<(), String> {
-            self.log.lock().unwrap().pin_hide_requests += 1;
+        fn request_hide_all(&mut self, identity: PinCaptureIdentity) -> Result<(), String> {
+            let mut log = self.log.lock().unwrap();
+            log.pin_hide_requests += 1;
+            *log.pin_hide_requests_by_identity
+                .entry(identity)
+                .or_default() += 1;
             Ok(())
         }
 
-        fn poll_hidden(&mut self, _: PinCaptureIdentity) -> PinVisibilityAck {
+        fn poll_hidden(&mut self, identity: PinCaptureIdentity) -> PinVisibilityAck {
             if let Some(error) = self.hide_failure.take() {
                 return PinVisibilityAck::Failed(error.to_owned());
             }
             let mut log = self.log.lock().unwrap();
             log.pin_hide_polls += 1;
-            if log.pin_hide_polls >= self.hide_ack_after {
+            let polls = log.pin_hide_polls_by_identity.entry(identity).or_default();
+            *polls += 1;
+            if *polls >= self.hide_ack_after {
                 PinVisibilityAck::Acknowledged
             } else {
                 PinVisibilityAck::Pending
             }
         }
 
-        fn request_restore_all(&mut self, _: PinCaptureIdentity) -> Result<(), String> {
-            self.log.lock().unwrap().pin_restore_requests += 1;
+        fn request_restore_all(&mut self, identity: PinCaptureIdentity) -> Result<(), String> {
+            let mut log = self.log.lock().unwrap();
+            log.pin_restore_requests += 1;
+            *log.pin_restore_requests_by_identity
+                .entry(identity)
+                .or_default() += 1;
             Ok(())
         }
 
-        fn poll_restored(&mut self, _: PinCaptureIdentity) -> PinVisibilityAck {
+        fn poll_restored(&mut self, identity: PinCaptureIdentity) -> PinVisibilityAck {
             let mut log = self.log.lock().unwrap();
             log.pin_restore_polls += 1;
-            if log.pin_restore_polls >= self.restore_ack_after {
+            let polls = log
+                .pin_restore_polls_by_identity
+                .entry(identity)
+                .or_default();
+            *polls += 1;
+            if *polls >= self.restore_ack_after {
                 PinVisibilityAck::Acknowledged
             } else {
                 PinVisibilityAck::Pending
             }
         }
 
-        fn cancel_and_restore_all(&mut self, _: PinCaptureIdentity) -> Result<(), String> {
-            self.log.lock().unwrap().pin_restore_requests += 1;
+        fn cancel_and_restore_all(&mut self, identity: PinCaptureIdentity) -> Result<(), String> {
+            let mut log = self.log.lock().unwrap();
+            log.pin_restore_requests += 1;
+            *log.pin_restore_requests_by_identity
+                .entry(identity)
+                .or_default() += 1;
             Ok(())
         }
 
@@ -1613,6 +1653,362 @@ mod tests {
             })
             .drop_without_applying_deltas();
         error
+    }
+
+    #[derive(Clone)]
+    enum ExpectedPinContent {
+        Static {
+            capture_rect: ScreenRect,
+            pixels: RgbaImage,
+        },
+        Live {
+            sequence: u64,
+            source_content_size: (u32, u32),
+            pixels: RgbaImage,
+        },
+    }
+
+    #[derive(Clone)]
+    struct ExpectedPin {
+        id: crate::pinboard::PinId,
+        display_bounds: ScreenRect,
+        zoom: f32,
+        always_on_top: bool,
+        click_through: bool,
+        content: ExpectedPinContent,
+    }
+
+    fn expected_pin(pin: &crate::pinboard::Pin) -> ExpectedPin {
+        let content = if let Some(snapshot) = pin.snapshot() {
+            ExpectedPinContent::Static {
+                capture_rect: snapshot.capture_screen_rect(),
+                pixels: snapshot.pixels().clone(),
+            }
+        } else {
+            let frame = pin
+                .live_frame()
+                .expect("a committed live pin has its first frame");
+            ExpectedPinContent::Live {
+                sequence: frame.sequence,
+                source_content_size: frame.source_content_size,
+                pixels: frame.image.pixels().clone(),
+            }
+        };
+        ExpectedPin {
+            id: pin.id(),
+            display_bounds: pin.display_bounds(),
+            zoom: pin.zoom(),
+            always_on_top: pin.always_on_top(),
+            click_through: pin.click_through(),
+            content,
+        }
+    }
+
+    fn assert_pin_unchanged(lifecycle: &PinboardCaptureLifecycle, expected: &ExpectedPin) {
+        let pin = lifecycle
+            .pinboard()
+            .get(expected.id)
+            .expect("previously committed pin remains present");
+        assert_eq!(pin.display_bounds(), expected.display_bounds);
+        assert_eq!(pin.zoom(), expected.zoom);
+        assert_eq!(pin.always_on_top(), expected.always_on_top);
+        assert_eq!(pin.click_through(), expected.click_through);
+        match &expected.content {
+            ExpectedPinContent::Static {
+                capture_rect,
+                pixels,
+            } => {
+                let snapshot = pin
+                    .snapshot()
+                    .expect("a static pin remains backed by its original snapshot");
+                assert_eq!(snapshot.capture_screen_rect(), *capture_rect);
+                assert_eq!(snapshot.pixels(), pixels);
+            }
+            ExpectedPinContent::Live {
+                sequence,
+                source_content_size,
+                pixels,
+            } => {
+                assert!(pin.snapshot().is_none(), "a live pin remains live");
+                assert_eq!(
+                    pin.live_status(),
+                    Some(crate::pinboard::live::PinLiveStatus::Live)
+                );
+                let frame = pin
+                    .live_frame()
+                    .expect("the committed first live frame remains available");
+                assert_eq!(frame.sequence, *sequence);
+                assert_eq!(frame.source_content_size, *source_content_size);
+                assert_eq!(frame.image.pixels(), pixels);
+            }
+        }
+    }
+
+    fn begin_test_capture_attempt(
+        lifecycle: &mut PinboardCaptureLifecycle,
+        overlay_fixture: &crate::gui::mkmacro_dialog::visual_capture_workflow::TestOverlayServiceFixture,
+        visibility: &VisibilityRevision,
+        visible: &Arc<std::sync::atomic::AtomicBool>,
+        restore: &Arc<std::sync::atomic::AtomicBool>,
+        last_visible: &bool,
+        intent: PinCaptureIntent,
+        invocation_id: u64,
+        native_identity: (usize, u64),
+    ) -> (PinCaptureIdentity, OperationId) {
+        let visible_now = visible.load(Ordering::SeqCst);
+        assert_eq!(visible_now, *last_visible);
+        assert!(
+            lifecycle
+                .begin_with_intent(
+                    intent,
+                    restore.load(Ordering::SeqCst),
+                    visible_now,
+                    *last_visible,
+                    visibility.current(),
+                    RootFocusIntent::PreserveForeground,
+                    Some(invocation_id),
+                    Some(native_identity.0),
+                    native_identity,
+                )
+                .unwrap()
+        );
+        let session = lifecycle.session.as_ref().unwrap();
+        assert_eq!(session.intent, intent);
+        assert!(
+            overlay_fixture
+                .controller
+                .reserve_pinboard_rectangle_pick()
+                .is_err()
+        );
+        assert!(lifecycle.is_busy());
+        (session.identity, session.overlay_operation_id)
+    }
+
+    fn poll_capture_until_dispatched(
+        context: &eframe::egui::Context,
+        lifecycle: &mut PinboardCaptureLifecycle,
+        overlay_fixture: &crate::gui::mkmacro_dialog::visual_capture_workflow::TestOverlayServiceFixture,
+        log: &Arc<Mutex<CaptureFlowLog>>,
+        visibility: &VisibilityRevision,
+        visible: &Arc<std::sync::atomic::AtomicBool>,
+        restore: &Arc<std::sync::atomic::AtomicBool>,
+        last_visible: &mut bool,
+        native_identity: (usize, u64),
+        identity: PinCaptureIdentity,
+        expected_command_count: usize,
+        expected_capture_count: usize,
+    ) {
+        assert_eq!(
+            overlay_fixture.observer.commands.lock().unwrap().len(),
+            expected_command_count - 1
+        );
+        poll_lifecycle(
+            context,
+            lifecycle,
+            visibility,
+            visible,
+            restore,
+            last_visible,
+            native_identity,
+        );
+        assert_eq!(
+            log.lock()
+                .unwrap()
+                .parking_checks_by_generation
+                .get(&identity.generation),
+            Some(&1)
+        );
+        assert_eq!(
+            log.lock()
+                .unwrap()
+                .pin_hide_requests_by_identity
+                .get(&identity),
+            None,
+            "pin hiding cannot begin before ROOT parking is acknowledged"
+        );
+        assert_eq!(
+            overlay_fixture.observer.commands.lock().unwrap().len(),
+            expected_command_count - 1
+        );
+
+        poll_lifecycle(
+            context,
+            lifecycle,
+            visibility,
+            visible,
+            restore,
+            last_visible,
+            native_identity,
+        );
+        assert!(!visible.load(Ordering::SeqCst));
+        assert_eq!(
+            log.lock()
+                .unwrap()
+                .parking_checks_by_generation
+                .get(&identity.generation),
+            Some(&2)
+        );
+        assert_eq!(
+            log.lock()
+                .unwrap()
+                .pin_hide_requests_by_identity
+                .get(&identity),
+            None,
+            "selector dispatch waits for the ROOT hide request and pin acknowledgement"
+        );
+        assert_eq!(
+            overlay_fixture.observer.commands.lock().unwrap().len(),
+            expected_command_count - 1
+        );
+
+        poll_lifecycle(
+            context,
+            lifecycle,
+            visibility,
+            visible,
+            restore,
+            last_visible,
+            native_identity,
+        );
+        assert_eq!(
+            log.lock()
+                .unwrap()
+                .pin_hide_polls_by_identity
+                .get(&identity),
+            Some(&1)
+        );
+        assert_eq!(
+            log.lock().unwrap().capture_rects.len(),
+            expected_capture_count
+        );
+        assert_eq!(
+            overlay_fixture.observer.commands.lock().unwrap().len(),
+            expected_command_count - 1
+        );
+
+        poll_lifecycle(
+            context,
+            lifecycle,
+            visibility,
+            visible,
+            restore,
+            last_visible,
+            native_identity,
+        );
+        overlay_fixture
+            .observer
+            .wait_for_commands(expected_command_count);
+        assert_eq!(
+            log.lock()
+                .unwrap()
+                .pin_hide_polls_by_identity
+                .get(&identity),
+            Some(&2)
+        );
+        assert_eq!(
+            log.lock().unwrap().capture_rects.len(),
+            expected_capture_count
+        );
+        assert_eq!(
+            overlay_fixture.observer.commands.lock().unwrap().len(),
+            expected_command_count
+        );
+    }
+
+    fn poll_capture_until_first_restore_ack(
+        context: &eframe::egui::Context,
+        lifecycle: &mut PinboardCaptureLifecycle,
+        overlay_fixture: &crate::gui::mkmacro_dialog::visual_capture_workflow::TestOverlayServiceFixture,
+        log: &Arc<Mutex<CaptureFlowLog>>,
+        visibility: &VisibilityRevision,
+        visible: &Arc<std::sync::atomic::AtomicBool>,
+        restore: &Arc<std::sync::atomic::AtomicBool>,
+        last_visible: &mut bool,
+        native_identity: (usize, u64),
+        identity: PinCaptureIdentity,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while log
+            .lock()
+            .unwrap()
+            .pin_restore_polls_by_identity
+            .get(&identity)
+            .copied()
+            .unwrap_or_default()
+            == 0
+            && Instant::now() < deadline
+        {
+            poll_lifecycle(
+                context,
+                lifecycle,
+                visibility,
+                visible,
+                restore,
+                last_visible,
+                native_identity,
+            );
+            thread::yield_now();
+        }
+        assert_eq!(
+            log.lock()
+                .unwrap()
+                .pin_restore_polls_by_identity
+                .get(&identity),
+            Some(&1),
+            "the first restoration acknowledgement should be observed within two seconds"
+        );
+        assert!(lifecycle.is_busy());
+        assert!(
+            overlay_fixture
+                .controller
+                .reserve_pinboard_rectangle_pick()
+                .is_err()
+        );
+    }
+
+    fn finish_capture_restoration(
+        context: &eframe::egui::Context,
+        lifecycle: &mut PinboardCaptureLifecycle,
+        log: &Arc<Mutex<CaptureFlowLog>>,
+        visibility: &VisibilityRevision,
+        visible: &Arc<std::sync::atomic::AtomicBool>,
+        restore: &Arc<std::sync::atomic::AtomicBool>,
+        last_visible: &mut bool,
+        native_identity: (usize, u64),
+        identity: PinCaptureIdentity,
+    ) {
+        poll_lifecycle(
+            context,
+            lifecycle,
+            visibility,
+            visible,
+            restore,
+            last_visible,
+            native_identity,
+        );
+        assert!(!lifecycle.is_busy());
+        assert!(visible.load(Ordering::SeqCst));
+        assert_eq!(
+            log.lock()
+                .unwrap()
+                .pin_restore_polls_by_identity
+                .get(&identity),
+            Some(&2)
+        );
+        assert_eq!(
+            log.lock()
+                .unwrap()
+                .pin_restore_requests_by_identity
+                .get(&identity),
+            Some(&1)
+        );
+        assert_eq!(
+            log.lock()
+                .unwrap()
+                .parking_restores_by_generation
+                .get(&identity.generation),
+            Some(&1)
+        );
     }
 
     #[test]
@@ -1795,6 +2191,616 @@ mod tests {
         assert_eq!(completed.parking_restores, 1);
         assert_eq!(completed.pin_restore_polls, 2);
         assert_eq!(completed.pin_restore_requests, 1);
+        assert!(overlay_fixture.controller.poll().is_empty());
+        let next_operation = overlay_fixture
+            .controller
+            .reserve_pinboard_rectangle_pick()
+            .unwrap();
+        assert!(
+            overlay_fixture
+                .controller
+                .abort_reserved_pinboard_rectangle_pick(next_operation)
+        );
+    }
+
+    #[test]
+    fn pinboard_repeated_capture_static_live_sequence_preserves_content_and_controls() {
+        let overlay_fixture = SharedVisualOverlayController::test_fixture();
+        let log = Arc::new(Mutex::new(CaptureFlowLog::default()));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (completed_tx, completed_rx) = mpsc::channel();
+        let desktop = ScreenRect::new(-1_920, -240, 3_840, 1_320);
+        let backend: Arc<dyn ScreenCaptureBackend> = Arc::new(GatedCaptureBackend {
+            log: Arc::clone(&log),
+            started: started_tx,
+            release: Mutex::new(release_rx),
+            completed: completed_tx,
+            desktop,
+        });
+        let mut lifecycle =
+            PinboardCaptureLifecycle::new(overlay_fixture.controller.clone(), backend);
+        lifecycle.set_adapters_for_test(
+            Arc::new(FakeParkingFactory {
+                log: Arc::clone(&log),
+                acknowledge_after: Some(2),
+            }),
+            Box::new(FakePinWindows {
+                log: Arc::clone(&log),
+                hide_ack_after: 2,
+                restore_ack_after: 2,
+                hide_failure: None,
+            }),
+        );
+
+        let selections = Arc::new(Mutex::new(Vec::new()));
+        let source_bounds = ScreenRect::new(-200, 0, 800, 700);
+        let source_binding = PinSourceBinding {
+            window: crate::pinboard::source::PinSourceWindowIdentity {
+                hwnd: 501,
+                process_id: 502,
+                thread_id: 503,
+            },
+            captured_bounds: source_bounds,
+            crop: crate::pinboard::source::PinSourceCrop {
+                x: 100,
+                y: 100,
+                width: 300,
+                height: 200,
+            },
+        };
+        lifecycle.set_source_resolver_for_test(Arc::new(RecordingSourceResolver {
+            selections: Arc::clone(&selections),
+            binding: source_binding,
+        }));
+        let (first_frame_started_tx, first_frame_started_rx) = mpsc::sync_channel(1);
+        let (first_frame_release_tx, first_frame_release_rx) = mpsc::channel();
+        lifecycle.set_live_backend_for_test(Arc::new(
+            crate::pinboard::live::test_support::FakePinLiveCaptureBackend {
+                first_image: RgbaImage::from_pixel(300, 200, image::Rgba([17, 31, 47, 255])),
+                first_content_size: (800, 700),
+                stream: Mutex::new(None),
+                first_frame_gate: Some(Arc::new(
+                    crate::pinboard::live::test_support::FakeFirstFrameGate {
+                        started: first_frame_started_tx,
+                        release: Mutex::new(first_frame_release_rx),
+                    },
+                )),
+            },
+        ));
+
+        let visibility = VisibilityRevision::default();
+        let visible = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let restore = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut last_visible = true;
+        let native_identity = (42, 9);
+        let context = eframe::egui::Context::default();
+        let intents = [
+            PinCaptureIntent::Static,
+            PinCaptureIntent::Static,
+            PinCaptureIntent::Live,
+            PinCaptureIntent::Live,
+            PinCaptureIntent::Static,
+        ];
+        let selected_rects = [
+            ScreenRect::new(-1_800, -100, 1_200, 700),
+            ScreenRect::new(-450, 120, 640, 480),
+            ScreenRect::new(-100, 100, 300, 200),
+            ScreenRect::new(250, 180, 300, 200),
+            ScreenRect::new(500, -180, 420, 360),
+        ];
+        let mut seen_identities = HashSet::new();
+        let mut seen_generations = HashSet::new();
+        let mut expected_pins = Vec::new();
+        let mut previous_operation = None;
+        let mut static_capture_count = 0;
+
+        for (index, intent) in intents.into_iter().enumerate() {
+            let (identity, overlay_operation_id) = begin_test_capture_attempt(
+                &mut lifecycle,
+                &overlay_fixture,
+                &visibility,
+                &visible,
+                &restore,
+                &last_visible,
+                intent,
+                90 + index as u64,
+                native_identity,
+            );
+            assert!(seen_identities.insert(identity));
+            assert!(seen_generations.insert(identity.generation));
+            assert_eq!(identity.operation_id.get(), overlay_operation_id);
+            let capture_count_before = log.lock().unwrap().capture_rects.len();
+            poll_capture_until_dispatched(
+                &context,
+                &mut lifecycle,
+                &overlay_fixture,
+                &log,
+                &visibility,
+                &visible,
+                &restore,
+                &mut last_visible,
+                native_identity,
+                identity,
+                index + 1,
+                capture_count_before,
+            );
+
+            if let Some(stale_operation_id) = previous_operation {
+                for _ in 0..2 {
+                    overlay_fixture.controller.inject_pinboard_event_for_test(
+                        VisualOverlayEvent::RectangleConfirmed {
+                            operation_id: stale_operation_id,
+                            purpose: RectanglePurpose::PinboardCapture,
+                            rect: ScreenRect::new(20, 30, 40, 50),
+                        },
+                    );
+                }
+                assert!(overlay_fixture.controller.poll().is_empty());
+                poll_lifecycle(
+                    &context,
+                    &mut lifecycle,
+                    &visibility,
+                    &visible,
+                    &restore,
+                    &mut last_visible,
+                    native_identity,
+                );
+                assert_eq!(lifecycle.session.as_ref().unwrap().identity, identity);
+                assert_eq!(
+                    lifecycle.session.as_ref().unwrap().phase,
+                    PinCapturePhase::Selecting
+                );
+                assert_eq!(
+                    log.lock().unwrap().capture_rects.len(),
+                    capture_count_before,
+                    "stale and duplicate terminals must not confirm the new operation"
+                );
+            }
+
+            overlay_fixture.controller.inject_pinboard_event_for_test(
+                VisualOverlayEvent::RectangleConfirmed {
+                    operation_id: overlay_operation_id,
+                    purpose: RectanglePurpose::PinboardCapture,
+                    rect: selected_rects[index],
+                },
+            );
+            assert!(overlay_fixture.controller.poll().is_empty());
+            poll_lifecycle(
+                &context,
+                &mut lifecycle,
+                &visibility,
+                &visible,
+                &restore,
+                &mut last_visible,
+                native_identity,
+            );
+
+            match intent {
+                PinCaptureIntent::Static => {
+                    assert_eq!(
+                        started_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                        selected_rects[index]
+                    );
+                    static_capture_count += 1;
+                    assert_eq!(
+                        log.lock().unwrap().capture_rects.len(),
+                        static_capture_count
+                    );
+                    assert!(lifecycle.is_busy());
+                    assert!(
+                        overlay_fixture
+                            .controller
+                            .reserve_pinboard_rectangle_pick()
+                            .is_err()
+                    );
+                    release_tx.send(()).unwrap();
+                    completed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                }
+                PinCaptureIntent::Live => {
+                    first_frame_started_rx
+                        .recv_timeout(Duration::from_secs(2))
+                        .expect("the live attempt waits before publishing its first frame");
+                    assert_eq!(lifecycle.pinboard().len(), expected_pins.len());
+                    assert_eq!(
+                        log.lock()
+                            .unwrap()
+                            .pin_restore_requests_by_identity
+                            .get(&identity),
+                        None,
+                        "live restoration waits for the first frame"
+                    );
+                    first_frame_release_tx.send(()).unwrap();
+                }
+            }
+
+            poll_capture_until_first_restore_ack(
+                &context,
+                &mut lifecycle,
+                &overlay_fixture,
+                &log,
+                &visibility,
+                &visible,
+                &restore,
+                &mut last_visible,
+                native_identity,
+                identity,
+            );
+            finish_capture_restoration(
+                &context,
+                &mut lifecycle,
+                &log,
+                &visibility,
+                &visible,
+                &restore,
+                &mut last_visible,
+                native_identity,
+                identity,
+            );
+            assert!(last_visible);
+            assert!(restore.load(Ordering::SeqCst));
+            assert_eq!(lifecycle.pinboard().len(), expected_pins.len() + 1);
+            assert_eq!(lifecycle.pinboard().pending_bytes(), 0);
+            for expected in &expected_pins {
+                assert_pin_unchanged(&lifecycle, expected);
+            }
+
+            let new_pin_id = lifecycle
+                .pinboard()
+                .pins()
+                .map(crate::pinboard::Pin::id)
+                .find(|id| !expected_pins.iter().any(|pin| pin.id == *id))
+                .expect("the completed attempt commits one new pin");
+            let new_pin = lifecycle.pinboard().get(new_pin_id).unwrap();
+            match intent {
+                PinCaptureIntent::Static => {
+                    let snapshot = new_pin
+                        .snapshot()
+                        .expect("static attempt stores a snapshot");
+                    assert_eq!(snapshot.capture_screen_rect(), selected_rects[index]);
+                    assert_eq!(
+                        snapshot.physical_dimensions(),
+                        (selected_rects[index].width, selected_rects[index].height)
+                    );
+                    assert_eq!(
+                        snapshot.pixels().get_pixel(0, 0),
+                        &image::Rgba([17, 29, 43, 255])
+                    );
+                }
+                PinCaptureIntent::Live => {
+                    assert!(new_pin.snapshot().is_none());
+                    let frame = new_pin
+                        .live_frame()
+                        .expect("live pin commits its first frame");
+                    assert_eq!(frame.sequence, 1);
+                    assert_eq!(frame.source_content_size, (800, 700));
+                    assert_eq!(frame.image.pixels().dimensions(), (300, 200));
+                    assert_eq!(
+                        frame.image.pixels().get_pixel(0, 0),
+                        &image::Rgba([17, 31, 47, 255])
+                    );
+                    assert_eq!(
+                        new_pin.live_status(),
+                        Some(crate::pinboard::live::PinLiveStatus::Live)
+                    );
+                }
+            }
+            if index == 0 {
+                let first_pin = lifecycle.board.get_mut(new_pin_id).unwrap();
+                first_pin.set_zoom(1.75).unwrap();
+                first_pin.set_always_on_top(false);
+                first_pin.set_click_through(true);
+            }
+            expected_pins.push(expected_pin(lifecycle.pinboard().get(new_pin_id).unwrap()));
+            previous_operation = Some(overlay_operation_id);
+            assert!(overlay_fixture.controller.poll().is_empty());
+
+            let next_operation = overlay_fixture
+                .controller
+                .reserve_pinboard_rectangle_pick()
+                .unwrap();
+            assert!(
+                overlay_fixture
+                    .controller
+                    .abort_reserved_pinboard_rectangle_pick(next_operation)
+            );
+        }
+
+        assert_eq!(seen_identities.len(), 5);
+        assert_eq!(seen_generations.len(), 5);
+        assert_eq!(lifecycle.pinboard().len(), 5);
+        assert_eq!(
+            selections.lock().unwrap().as_slice(),
+            [selected_rects[2], selected_rects[3]]
+        );
+        let completed = log.lock().unwrap();
+        assert_eq!(completed.parking_checks, 10);
+        assert_eq!(completed.pin_hide_requests, 5);
+        assert_eq!(completed.pin_hide_polls, 10);
+        assert_eq!(completed.pin_restore_requests, 5);
+        assert_eq!(completed.pin_restore_polls, 10);
+        assert_eq!(completed.parking_restores, 5);
+        assert_eq!(
+            completed.capture_rects,
+            [selected_rects[0], selected_rects[1], selected_rects[4]]
+        );
+        drop(completed);
+        assert!(lifecycle.shutdown_pin_windows().is_ok());
+        assert!(lifecycle.board.shutdown_live_sessions_and_join().is_ok());
+    }
+
+    #[test]
+    fn pinboard_repeated_capture_selector_error_restores_once_and_allows_fresh_attempt() {
+        let overlay_fixture = SharedVisualOverlayController::test_fixture();
+        let log = Arc::new(Mutex::new(CaptureFlowLog::default()));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (completed_tx, completed_rx) = mpsc::channel();
+        let desktop = ScreenRect::new(-1_920, -240, 3_840, 1_320);
+        let backend: Arc<dyn ScreenCaptureBackend> = Arc::new(GatedCaptureBackend {
+            log: Arc::clone(&log),
+            started: started_tx,
+            release: Mutex::new(release_rx),
+            completed: completed_tx,
+            desktop,
+        });
+        let mut lifecycle =
+            PinboardCaptureLifecycle::new(overlay_fixture.controller.clone(), backend);
+        lifecycle.set_adapters_for_test(
+            Arc::new(FakeParkingFactory {
+                log: Arc::clone(&log),
+                acknowledge_after: Some(2),
+            }),
+            Box::new(FakePinWindows {
+                log: Arc::clone(&log),
+                hide_ack_after: 2,
+                restore_ack_after: 2,
+                hide_failure: None,
+            }),
+        );
+        let visibility = VisibilityRevision::default();
+        let visible = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let restore = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut last_visible = true;
+        let native_identity = (42, 10);
+        let context = eframe::egui::Context::default();
+
+        let (failed_identity, failed_operation) = begin_test_capture_attempt(
+            &mut lifecycle,
+            &overlay_fixture,
+            &visibility,
+            &visible,
+            &restore,
+            &last_visible,
+            PinCaptureIntent::Static,
+            101,
+            native_identity,
+        );
+        poll_capture_until_dispatched(
+            &context,
+            &mut lifecycle,
+            &overlay_fixture,
+            &log,
+            &visibility,
+            &visible,
+            &restore,
+            &mut last_visible,
+            native_identity,
+            failed_identity,
+            1,
+            0,
+        );
+        overlay_fixture
+            .controller
+            .inject_pinboard_event_for_test(VisualOverlayEvent::Error {
+                operation_id: failed_operation,
+                error: VisualOverlayError {
+                    kind: OverlayErrorKind::Platform,
+                    message: "controlled selector rejection".into(),
+                },
+            });
+        assert!(overlay_fixture.controller.poll().is_empty());
+        let first_error = poll_lifecycle(
+            &context,
+            &mut lifecycle,
+            &visibility,
+            &visible,
+            &restore,
+            &mut last_visible,
+            native_identity,
+        )
+        .expect("the selector terminal should produce one visible error");
+        assert!(first_error.contains("controlled selector rejection"));
+        assert!(lifecycle.is_busy());
+        assert!(lifecycle.pinboard().pins().next().is_none());
+        assert!(
+            lifecycle.pinboard().pending_bytes() > 0,
+            "capture budget remains reserved until pin and ROOT restoration finish"
+        );
+        assert!(log.lock().unwrap().capture_rects.is_empty());
+        assert!(started_rx.try_recv().is_err());
+
+        let restore_deadline = Instant::now() + Duration::from_secs(2);
+        while lifecycle.is_busy() && Instant::now() < restore_deadline {
+            assert!(
+                poll_lifecycle(
+                    &context,
+                    &mut lifecycle,
+                    &visibility,
+                    &visible,
+                    &restore,
+                    &mut last_visible,
+                    native_identity,
+                )
+                .is_none()
+            );
+            thread::yield_now();
+        }
+        assert!(
+            !lifecycle.is_busy(),
+            "rejected selection must restore and drain"
+        );
+        assert!(visible.load(Ordering::SeqCst));
+        assert_eq!(lifecycle.pinboard().len(), 0);
+        assert_eq!(lifecycle.pinboard().pending_bytes(), 0);
+        {
+            let completed = log.lock().unwrap();
+            assert_eq!(
+                completed
+                    .pin_hide_requests_by_identity
+                    .get(&failed_identity),
+                Some(&1)
+            );
+            assert_eq!(
+                completed.pin_hide_polls_by_identity.get(&failed_identity),
+                Some(&2)
+            );
+            assert_eq!(
+                completed
+                    .pin_restore_requests_by_identity
+                    .get(&failed_identity),
+                Some(&1)
+            );
+            assert_eq!(
+                completed
+                    .pin_restore_polls_by_identity
+                    .get(&failed_identity),
+                Some(&2)
+            );
+            assert_eq!(
+                completed
+                    .parking_restores_by_generation
+                    .get(&failed_identity.generation),
+                Some(&1)
+            );
+            assert!(completed.capture_rects.is_empty());
+        }
+        assert!(overlay_fixture.controller.poll().is_empty());
+        let available = overlay_fixture
+            .controller
+            .reserve_pinboard_rectangle_pick()
+            .unwrap();
+        assert!(
+            overlay_fixture
+                .controller
+                .abort_reserved_pinboard_rectangle_pick(available)
+        );
+
+        let (fresh_identity, fresh_operation) = begin_test_capture_attempt(
+            &mut lifecycle,
+            &overlay_fixture,
+            &visibility,
+            &visible,
+            &restore,
+            &last_visible,
+            PinCaptureIntent::Static,
+            102,
+            native_identity,
+        );
+        assert_ne!(fresh_identity.generation, failed_identity.generation);
+        assert_ne!(fresh_identity.operation_id, failed_identity.operation_id);
+        poll_capture_until_dispatched(
+            &context,
+            &mut lifecycle,
+            &overlay_fixture,
+            &log,
+            &visibility,
+            &visible,
+            &restore,
+            &mut last_visible,
+            native_identity,
+            fresh_identity,
+            2,
+            0,
+        );
+
+        for _ in 0..2 {
+            overlay_fixture
+                .controller
+                .inject_pinboard_event_for_test(VisualOverlayEvent::Error {
+                    operation_id: failed_operation,
+                    error: VisualOverlayError {
+                        kind: OverlayErrorKind::Platform,
+                        message: "duplicate retired selector rejection".into(),
+                    },
+                });
+        }
+        assert!(overlay_fixture.controller.poll().is_empty());
+        assert!(
+            poll_lifecycle(
+                &context,
+                &mut lifecycle,
+                &visibility,
+                &visible,
+                &restore,
+                &mut last_visible,
+                native_identity,
+            )
+            .is_none()
+        );
+        assert_eq!(lifecycle.session.as_ref().unwrap().identity, fresh_identity);
+        assert_eq!(
+            lifecycle.session.as_ref().unwrap().phase,
+            PinCapturePhase::Selecting
+        );
+        assert!(log.lock().unwrap().capture_rects.is_empty());
+        assert!(started_rx.try_recv().is_err());
+
+        let selected = ScreenRect::new(-800, 80, 480, 320);
+        overlay_fixture.controller.inject_pinboard_event_for_test(
+            VisualOverlayEvent::RectangleConfirmed {
+                operation_id: fresh_operation,
+                purpose: RectanglePurpose::PinboardCapture,
+                rect: selected,
+            },
+        );
+        assert!(overlay_fixture.controller.poll().is_empty());
+        poll_lifecycle(
+            &context,
+            &mut lifecycle,
+            &visibility,
+            &visible,
+            &restore,
+            &mut last_visible,
+            native_identity,
+        );
+        assert_eq!(
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            selected
+        );
+        release_tx.send(()).unwrap();
+        completed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        poll_capture_until_first_restore_ack(
+            &context,
+            &mut lifecycle,
+            &overlay_fixture,
+            &log,
+            &visibility,
+            &visible,
+            &restore,
+            &mut last_visible,
+            native_identity,
+            fresh_identity,
+        );
+        finish_capture_restoration(
+            &context,
+            &mut lifecycle,
+            &log,
+            &visibility,
+            &visible,
+            &restore,
+            &mut last_visible,
+            native_identity,
+            fresh_identity,
+        );
+        assert_eq!(lifecycle.pinboard().len(), 1);
+        let pin = lifecycle.pinboard().pins().next().unwrap();
+        assert_eq!(pin.snapshot().unwrap().capture_screen_rect(), selected);
+        assert_eq!(
+            pin.snapshot().unwrap().pixels().get_pixel(0, 0),
+            &image::Rgba([17, 29, 43, 255])
+        );
+        assert_eq!(log.lock().unwrap().capture_rects, [selected]);
         assert!(overlay_fixture.controller.poll().is_empty());
         let next_operation = overlay_fixture
             .controller
@@ -2133,7 +3139,7 @@ mod tests {
             Box::new(FakePinWindows {
                 log: Arc::clone(&log),
                 hide_ack_after: 1,
-                restore_ack_after: restore_polls_before_error + 2,
+                restore_ack_after: 2,
                 hide_failure: None,
             }),
         );
