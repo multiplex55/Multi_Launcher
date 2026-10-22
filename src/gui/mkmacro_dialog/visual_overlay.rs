@@ -2692,6 +2692,61 @@ mod tests {
     }
 
     #[test]
+    fn rectangle_shield_repeated_topmost_controller_rejects_later_operation_and_retries() {
+        let (mut controller, data, _) = controller();
+        let desktop = ScreenRect::new(-1920, -200, 4480, 1440);
+
+        let first = controller.begin_rectangle_pick(RectanglePurpose::PinboardCapture, desktop);
+        assert!(matches!(
+            controller.state(),
+            VisualOverlayState::PickingRectangle {
+                phase: RectangleInteractionPhase::Armed,
+                ..
+            }
+        ));
+        queue_drag(&data, first, point(10, 20), point(80, 90));
+        assert_eq!(
+            advance_and_drain(&mut controller),
+            vec![VisualOverlayEvent::RectangleConfirmed {
+                operation_id: first,
+                purpose: RectanglePurpose::PinboardCapture,
+                rect: ScreenRect::new(10, 20, 70, 70),
+            }]
+        );
+        assert_eq!(close_count(&data), 1);
+
+        let probe_failure = "Rectangle input shield monitor 2: topmost style missing";
+        data.lock().unwrap().show_error = Some(platform_error(probe_failure));
+        let rejected = controller.begin_rectangle_pick(RectanglePurpose::PinboardCapture, desktop);
+        assert_ne!(rejected, first);
+        assert_eq!(controller.state(), &VisualOverlayState::Idle);
+        assert_eq!(controller.operation_id(), None);
+        assert_eq!(controller.virtual_desktop, None);
+        assert_eq!(controller.picker_pointer, None);
+        assert_eq!(
+            controller.drain_events(),
+            vec![VisualOverlayEvent::Error {
+                operation_id: rejected,
+                error: platform_error(probe_failure),
+            }]
+        );
+        assert_eq!(close_count(&data), 2);
+        assert!(advance_and_drain(&mut controller).is_empty());
+
+        let retry = controller.begin_rectangle_pick(RectanglePurpose::PinboardCapture, desktop);
+        assert_ne!(retry, rejected);
+        assert_eq!(controller.operation_id(), Some(retry));
+        assert!(matches!(
+            controller.state(),
+            VisualOverlayState::PickingRectangle {
+                phase: RectangleInteractionPhase::Armed,
+                ..
+            }
+        ));
+        assert!(controller.drain_events().is_empty());
+    }
+
+    #[test]
     fn rectangle_startup_baseline_is_taken_after_coverage_acknowledgement() {
         for (before, after) in [(true, false), (false, true)] {
             let (mut controller, fake, _) = controller();

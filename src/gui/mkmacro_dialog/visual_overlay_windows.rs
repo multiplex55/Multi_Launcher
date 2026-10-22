@@ -6,7 +6,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use windows::{
     Win32::{
@@ -172,6 +172,7 @@ struct OverlayWindow {
     // The pointee address stays stable while wndproc reads it through GWLP_USERDATA.
     state: Box<WindowPaintState>,
     created_at: Instant,
+    shield_stages: Option<ShieldStageObservations>,
 }
 
 #[derive(Default)]
@@ -252,7 +253,7 @@ impl ShieldFailure {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct ShieldProbe {
     actual: Option<ScreenRect>,
     rect_error: Option<u32>,
@@ -263,6 +264,20 @@ struct ShieldProbe {
     window_dpi_context: isize,
     window_dpi: u32,
 }
+
+#[derive(Debug, Clone, Copy)]
+struct ShieldStageSnapshot {
+    probe: ShieldProbe,
+    set_window_pos_error: Option<i32>,
+    elapsed_after_create: Duration,
+}
+
+#[derive(Debug, Default)]
+struct ShieldStageObservations {
+    positioned: Option<ShieldStageSnapshot>,
+    shown: Option<ShieldStageSnapshot>,
+}
+
 impl ShieldProbe {
     fn failures(&self, expected: ScreenRect) -> Vec<ShieldFailure> {
         let mut reasons = Vec::new();
@@ -295,6 +310,51 @@ impl ShieldProbe {
         }
         reasons
     }
+}
+
+fn log_shield_probe_failure(
+    operation_id: OperationId,
+    stage: &'static str,
+    monitor: usize,
+    window: &OverlayWindow,
+    expected: ScreenRect,
+    probe: &ShieldProbe,
+    reasons: &[ShieldFailure],
+    set_window_pos_error: Option<i32>,
+    closing: bool,
+    earlier: Option<&ShieldStageObservations>,
+) {
+    let hwnd_valid = unsafe { IsWindow(window.hwnd) }.as_bool();
+    let positioned = earlier.and_then(|stages| stages.positioned);
+    let shown = earlier.and_then(|stages| stages.shown);
+    tracing::error!(
+        operation_id,
+        stage,
+        monitor,
+        hwnd=?window.hwnd,
+        hwnd_valid,
+        created=true,
+        show_state=probe.visible,
+        closing,
+        expected=?expected,
+        actual=?probe.actual,
+        get_window_rect_error=probe.rect_error,
+        get_window_long_ptr_error=probe.style_error,
+        set_window_pos_error=?set_window_pos_error,
+        raw_exstyle=probe.ex,
+        thread_dpi_context=probe.thread_dpi_context,
+        window_dpi_context=probe.window_dpi_context,
+        window_dpi=probe.window_dpi,
+        window_age=?Instant::now().duration_since(window.created_at),
+        positioned_probe=?positioned.map(|snapshot| snapshot.probe),
+        positioned_set_window_pos_error=?positioned.and_then(|snapshot| snapshot.set_window_pos_error),
+        positioned_elapsed_after_create=?positioned.map(|snapshot| snapshot.elapsed_after_create),
+        shown_probe=?shown.map(|snapshot| snapshot.probe),
+        shown_set_window_pos_error=?shown.and_then(|snapshot| snapshot.set_window_pos_error),
+        shown_elapsed_after_create=?shown.map(|snapshot| snapshot.elapsed_after_create),
+        ?reasons,
+        "rectangle shield stage probe failed"
+    );
 }
 
 fn probe_shield(hwnd: HWND) -> ShieldProbe {
@@ -756,7 +816,8 @@ impl NativeOverlayRenderer {
         let missing: Vec<_> = physical
             .iter()
             .copied()
-            .filter(|bounds| {
+            .enumerate()
+            .filter(|(_, bounds)| {
                 !self.input_shields.iter().any(|window| {
                     window.state.bounds == *bounds
                         && probe_shield(window.hwnd).failures(*bounds).is_empty()
@@ -781,6 +842,53 @@ impl NativeOverlayRenderer {
         // Retain old shields through release; never destroy the old capture
         // owner first while repairing coverage for a changed topology.
         Ok(())
+    }
+    fn observe_shield_stage(
+        &mut self,
+        hwnd: HWND,
+        expected: ScreenRect,
+        monitor: usize,
+        stage: &'static str,
+        set_window_pos_error: Option<i32>,
+    ) {
+        let Some(index) = self
+            .input_shields
+            .iter()
+            .position(|window| window.hwnd == hwnd)
+        else {
+            return;
+        };
+        let probe = probe_shield(hwnd);
+        let reasons = probe.failures(expected);
+        let elapsed_after_create =
+            Instant::now().duration_since(self.input_shields[index].created_at);
+        let snapshot = ShieldStageSnapshot {
+            probe,
+            set_window_pos_error,
+            elapsed_after_create,
+        };
+        if let Some(stages) = self.input_shields[index].shield_stages.as_mut() {
+            match stage {
+                "positioned" | "set_window_pos_failed" => stages.positioned = Some(snapshot),
+                "shown" => stages.shown = Some(snapshot),
+                _ => {}
+            }
+        }
+        if !reasons.is_empty() || set_window_pos_error.is_some() {
+            let window = &self.input_shields[index];
+            log_shield_probe_failure(
+                window.state.operation_id,
+                stage,
+                monitor,
+                window,
+                expected,
+                &probe,
+                &reasons,
+                set_window_pos_error,
+                self.closing,
+                window.shield_stages.as_ref(),
+            );
+        }
     }
     fn verify_shield_coverage(
         &self,
@@ -815,11 +923,18 @@ impl NativeOverlayRenderer {
                     ShieldFailure::MissingShield.description()
                 )));
             };
-            tracing::error!(operation_id=window.state.operation_id, stage, monitor=monitor + 1, hwnd=?window.hwnd,
-                    ?expected, actual=?probe.actual, get_window_rect_error=?probe.rect_error,
-                    get_window_long_ptr_error=?probe.style_error, visible=probe.visible, ex=probe.ex,
-                    thread_dpi_context=probe.thread_dpi_context, window_dpi_context=probe.window_dpi_context,
-                    window_dpi=probe.window_dpi, ?reasons, "rectangle shield acknowledgement failed");
+            log_shield_probe_failure(
+                window.state.operation_id,
+                stage,
+                monitor + 1,
+                window,
+                *expected,
+                &probe,
+                &reasons,
+                None,
+                self.closing,
+                window.shield_stages.as_ref(),
+            );
             return Err(platform(format!(
                 "Rectangle input shield monitor {}: {}",
                 monitor + 1,
@@ -837,9 +952,9 @@ impl NativeOverlayRenderer {
         module: windows::Win32::Foundation::HMODULE,
         class: PCWSTR,
         operation_id: OperationId,
-        bounds_list: &[ScreenRect],
+        indexed_bounds: &[(usize, ScreenRect)],
     ) -> Result<(), VisualOverlayError> {
-        for bounds in bounds_list.iter().copied() {
+        for (monitor, bounds) in indexed_bounds.iter().copied() {
             let (width, height) = win32_dimensions(bounds, "input shield")?;
             let mut state = Box::new(WindowPaintState {
                 bounds,
@@ -879,6 +994,7 @@ impl NativeOverlayRenderer {
                 hwnd,
                 state,
                 created_at: Instant::now(),
+                shield_stages: Some(ShieldStageObservations::default()),
             });
             unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 1, LWA_ALPHA) }.map_err(
                 |e| {
@@ -887,7 +1003,7 @@ impl NativeOverlayRenderer {
                     ))
                 },
             )?;
-            unsafe {
+            if let Err(error) = unsafe {
                 SetWindowPos(
                     hwnd,
                     HWND_TOPMOST,
@@ -897,15 +1013,23 @@ impl NativeOverlayRenderer {
                     height,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 )
+            } {
+                self.observe_shield_stage(
+                    hwnd,
+                    bounds,
+                    monitor + 1,
+                    "set_window_pos_failed",
+                    Some(error.code().0),
+                );
+                return Err(platform(format!(
+                    "input shield positioning failed for {bounds:?}: {error}"
+                )));
             }
-            .map_err(|e| {
-                platform(format!(
-                    "input shield positioning failed for {bounds:?}: {e}"
-                ))
-            })?;
+            self.observe_shield_stage(hwnd, bounds, monitor + 1, "positioned", None);
             unsafe {
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
+            self.observe_shield_stage(hwnd, bounds, monitor + 1, "shown", None);
             if !unsafe { InvalidateRect(hwnd, None, false) }.as_bool()
                 || !unsafe { UpdateWindow(hwnd) }.as_bool()
             {
@@ -1000,6 +1124,7 @@ impl NativeOverlayRenderer {
                 hwnd,
                 state,
                 created_at: Instant::now(),
+                shield_stages: None,
             };
             tracing::debug!(operation_id, visual=?visual, target=?target, requested=?bounds, ?hwnd, edge=description, badge, "created passive overlay window");
             if badge {
@@ -1154,6 +1279,8 @@ impl OverlayRenderer for NativeOverlayRenderer {
         }
         let input_shield_bounds = input_shield_plan(visual, &physical);
         if overlay_requires_input_shields(visual) {
+            let indexed_input_shield_bounds: Vec<_> =
+                input_shield_bounds.iter().copied().enumerate().collect();
             self.rectangle_input = Some(Arc::new(Mutex::new(RectangleNativeInput::default())));
             let shield_class = windows::core::w!("MultiLauncherVisualOverlayInputShield");
             let shield_wc = WNDCLASSW {
@@ -1171,9 +1298,12 @@ impl OverlayRenderer for NativeOverlayRenderer {
                     unsafe { GetLastError().0 }
                 ));
             }
-            if let Err(error) =
-                self.show_input_shields(module, shield_class, operation_id, &input_shield_bounds)
-            {
+            if let Err(error) = self.show_input_shields(
+                module,
+                shield_class,
+                operation_id,
+                &indexed_input_shield_bounds,
+            ) {
                 return self.fail(error.message);
             }
         }
@@ -1224,6 +1354,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 hwnd,
                 state,
                 created_at: Instant::now(),
+                shield_stages: None,
             });
             if let Err(e) =
                 unsafe { SetLayeredWindowAttributes(hwnd, TRANSPARENT_KEY, 0, LWA_COLORKEY) }
@@ -1308,6 +1439,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 hwnd,
                 state,
                 created_at: Instant::now(),
+                shield_stages: None,
             });
             unsafe { SetLayeredWindowAttributes(hwnd, TRANSPARENT_KEY, 0, LWA_COLORKEY) }
                 .map_err(|e| platform(format!("tooltip layered configuration failed: {e}")))
@@ -1348,7 +1480,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
                     self.input_shields.len()
                 ));
             }
-            if let Err(error) = self.verify_shield_coverage(&input_shield_bounds, "startup") {
+            if let Err(error) = self.verify_shield_coverage(&input_shield_bounds, "final_ready") {
                 return self.fail(error.message);
             }
             for window in &self.input_shields {
@@ -1871,6 +2003,35 @@ mod tests {
                 }
             }),
             WindowRole::TransparentOverlay
+        );
+    }
+
+    #[test]
+    fn rectangle_shield_repeated_topmost_probe_rejects_later_demoted_shield() {
+        let bounds = ScreenRect::new(-1920, -200, 1920, 1080);
+        let mut later_probe = ShieldProbe {
+            actual: Some(bounds),
+            rect_error: None,
+            visible: true,
+            ex: (WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOPMOST).0,
+            style_error: None,
+            thread_dpi_context: 0,
+            window_dpi_context: 0,
+            window_dpi: 96,
+        };
+
+        assert!(
+            later_probe.failures(bounds).is_empty(),
+            "the first otherwise-valid shield is acknowledged"
+        );
+
+        // Model a later operation with identical bounds and visibility whose
+        // native style query no longer reports the TOPMOST bit.
+        later_probe.ex &= !WS_EX_TOPMOST.0;
+        assert_eq!(
+            later_probe.failures(bounds),
+            [ShieldFailure::TopmostMissing],
+            "a repeated operation must fail at the real shield-probe seam"
         );
     }
 
