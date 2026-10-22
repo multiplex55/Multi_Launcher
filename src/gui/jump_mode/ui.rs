@@ -3058,10 +3058,13 @@ impl JumpModeUi {
                 .unwrap_or(true)
         });
         if population_changed {
+            self.invalidated_session_key_fence
+                .extend(self.held_captured_keys.iter().copied());
             self.cancel_active_session();
             // This prune runs before the first root input pass. Keep the
-            // invalidating frame's remaining key/text events in Jump's
-            // existing capture path so a stale hint cannot spill into Notes.
+            // invalidating frame's remaining key/text events and held keys in
+            // Jump's existing capture path so a stale hint cannot spill into
+            // Notes or a newly opened owner.
             self.root_input_frame.capture_text_remainder = true;
         }
     }
@@ -3183,6 +3186,9 @@ impl JumpModeUi {
                 ..
             } = event
             {
+                if *pressed && self.root_input_frame.capture_text_remainder {
+                    self.invalidated_session_key_fence.insert(*key);
+                }
                 let paired_text_index = paired_text_indices.get(&event_index).copied();
                 if !pressed {
                     let was_held_by_session = self.held_captured_keys.remove(key);

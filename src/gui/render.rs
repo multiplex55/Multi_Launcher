@@ -39526,6 +39526,71 @@ mod tests {
             );
             assert!(app.test_activation_trace.is_empty());
             assert!(!stale_hint.is_empty());
+
+            let stale_hint_key_events = notes_query_hint_completion_events(&stale_hint);
+            let (hint_key, hint_modifiers, hint_text) = stale_hint_key_events
+                .windows(2)
+                .find_map(|events| match (&events[0], &events[1]) {
+                    (
+                        egui::Event::Key {
+                            key,
+                            pressed: true,
+                            modifiers,
+                            ..
+                        },
+                        egui::Event::Text(text),
+                    ) if *key != egui::Key::Enter => Some((*key, *modifiers, text.clone())),
+                    _ => None,
+                })
+                .expect("a stale hint character has a paired key and text event");
+            let (_, enter_modifiers) = stale_hint_key_events
+                .iter()
+                .find_map(|event| match event {
+                    egui::Event::Key {
+                        key: egui::Key::Enter,
+                        modifiers,
+                        ..
+                    } => Some((egui::Key::Enter, *modifiers)),
+                    _ => None,
+                })
+                .expect("the stale completion contains Enter");
+            app.show_settings = true;
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                vec![
+                    egui::Event::Key {
+                        key: hint_key,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: true,
+                        modifiers: hint_modifiers,
+                    },
+                    egui::Event::Text(hint_text),
+                    egui::Event::Key {
+                        key: egui::Key::Enter,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: true,
+                        modifiers: enter_modifiers,
+                    },
+                ],
+            );
+            assert!(app.show_settings);
+            assert_eq!(app.query, "stale hint");
+            assert_eq!(app.notes_dialog.test_edit_draft(), draft_before_stale_hint);
+            assert!(
+                app.test_activation_trace.is_empty(),
+                "a following Settings takeover cannot receive stale hint repeats or Enter"
+            );
+            notes_query_mouse_run_frame(
+                &mut app,
+                &ctx,
+                screen_size,
+                notes_query_hint_release_events(&stale_hint),
+            );
+            assert_eq!(app.notes_dialog.test_edit_draft(), draft_before_stale_hint);
             drop(app);
             drop(_workspace);
         }
@@ -40070,17 +40135,23 @@ mod tests {
     fn launcher_show_focus_requests_actual_query_for_empty_and_nonempty_queries_in_both_jump_modes()
     {
         let query_id = egui::Id::new("query_input");
-        for (query, jump_mode) in [
-            ("", false),
-            ("", true),
-            ("preserve this query", false),
-            ("preserve this query", true),
+        for (query, jump_mode, follow_mouse) in [
+            ("", false, false),
+            ("", true, true),
+            ("preserve this query", false, true),
+            ("preserve this query", true, false),
         ] {
             let ctx = egui::Context::default();
             let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, query);
+            app.follow_mouse = follow_mouse;
+            app.static_location_enabled = !follow_mouse;
+            app.static_pos = (!follow_mouse).then_some((120, 90));
+            app.static_size = (!follow_mouse).then_some((520, 360));
             if jump_mode {
                 app.set_jump_mode_enabled(true);
             }
+            app.selected = Some(1);
+            let results_before_show = app.results.clone();
             let revision = app.request_launcher_state(Some(true), Some(true));
 
             let (output, _) = app.run_root_frame_for_test(&ctx, actual_query_input(true), false);
@@ -40093,7 +40164,51 @@ mod tests {
             assert_eq!(app.visibility_revision.current(), revision);
             assert!(app.pending_show_query_focus.is_none());
             assert!(!app.move_cursor_end, "show focus must not move the caret");
+            assert_eq!(app.results, results_before_show);
+            assert_eq!(app.selected, Some(1));
             output.drop_without_applying_deltas();
+
+            // A deliberate focus change while the root remains visible must
+            // not be undone by later frames. A new hidden-to-visible request
+            // can establish a fresh one-shot focus intent.
+            ctx.memory_mut(|memory| memory.surrender_focus(query_id));
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(
+                !ctx.memory(|memory| memory.has_focus(query_id)),
+                "steady visible frames do not reclaim deliberately surrendered query focus"
+            );
+
+            app.request_launcher_visibility(false);
+            app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(!app.visible_flag.load(Ordering::SeqCst));
+            assert!(app.pending_show_query_focus.is_none());
+
+            let second_revision = app.request_launcher_state(Some(true), Some(true));
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(
+                ctx.memory(|memory| memory.has_focus(query_id)),
+                "a second explicit show focuses the actual query (Jump Mode {jump_mode}, follow_mouse={follow_mouse})"
+            );
+            assert_eq!(app.query, query);
+            assert_eq!(app.results, results_before_show);
+            assert_eq!(app.selected, Some(1));
+            assert_eq!(app.visibility_revision.current(), second_revision);
+            assert!(app.pending_show_query_focus.is_none());
+
+            ctx.memory_mut(|memory| memory.surrender_focus(query_id));
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(
+                !ctx.memory(|memory| memory.has_focus(query_id)),
+                "the second show intent is also consumed once (Jump Mode {jump_mode}, follow_mouse={follow_mouse})"
+            );
         }
     }
 
