@@ -345,6 +345,7 @@ pub struct PluginManager {
     services: PluginInternalServices,
     runtime_enablement: Option<Option<HashSet<String>>>,
     next_plugin_epoch: u64,
+    settings_catalog_revision: u64,
     deferred_dynamic_reloads: Vec<(PathBuf, Weak<PluginSlot>)>,
     #[cfg(test)]
     inert_for_test: bool,
@@ -374,6 +375,9 @@ pub struct PluginSearchSnapshotResult {
 
 struct PluginSlot {
     name: String,
+    catalog_origin: PluginCatalogOrigin,
+    catalog_has_settings: bool,
+    catalog_capabilities: Vec<String>,
     plugin: RwLock<Box<dyn Plugin>>,
     /// Serializes the latest requested enablement with applying it to the
     /// provider. Lifecycle requests never wait on the provider lock while a
@@ -382,6 +386,33 @@ struct PluginSlot {
     _library: Option<Arc<libloading::Library>>,
     library_path: Option<PathBuf>,
     epoch: u64,
+}
+
+/// Registration class used to keep a dynamic plugin with a builtin name from
+/// inheriting that builtin's catalog entries.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum PluginCatalogOrigin {
+    Builtin,
+    DynamicLibrary,
+    Registered,
+}
+
+/// Immutable plugin facts used to build the Settings search catalog. This
+/// deliberately excludes provider handles, paths, and configuration values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PluginCatalogEntry {
+    pub(crate) name: String,
+    pub(crate) origin: PluginCatalogOrigin,
+    pub(crate) epoch: u64,
+    pub(crate) has_settings: bool,
+    pub(crate) enabled: bool,
+    pub(crate) capabilities: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PluginCatalogSnapshot {
+    pub(crate) revision: u64,
+    pub(crate) plugins: Vec<PluginCatalogEntry>,
 }
 
 #[derive(Default)]
@@ -407,6 +438,9 @@ impl OwnedPluginHandle {
     pub(crate) fn for_test_epoch(plugin: Box<dyn Plugin>, epoch: u64) -> Self {
         let slot = Arc::new(PluginSlot {
             name: plugin.name().to_string(),
+            catalog_origin: PluginCatalogOrigin::Registered,
+            catalog_has_settings: false,
+            catalog_capabilities: Vec::new(),
             plugin: RwLock::new(plugin),
             enablement: Mutex::new(PluginEnablement::default()),
             _library: None,
@@ -623,6 +657,7 @@ impl PluginManager {
                 system_data_runtime: None,
             },
             next_plugin_epoch: 0,
+            settings_catalog_revision: 0,
             deferred_dynamic_reloads: Vec::new(),
             #[cfg(test)]
             inert_for_test: false,
@@ -752,6 +787,7 @@ impl PluginManager {
                 system_data_runtime: None,
             },
             next_plugin_epoch: 0,
+            settings_catalog_revision: 0,
             deferred_dynamic_reloads: Vec::new(),
             #[cfg(test)]
             inert_for_test: false,
@@ -779,6 +815,7 @@ impl PluginManager {
             }
         }
         self.plugins.clear();
+        self.bump_settings_catalog_revision();
     }
 
     /// Rebuild the plugin list, deferring dynamic paths whose prior plugin slot is still pinned.
@@ -926,7 +963,20 @@ impl PluginManager {
 
     pub fn register(&mut self, plugin: Box<dyn Plugin>) {
         tracing::debug!("registered plugin {}", plugin.name());
-        self.register_slot(plugin, None, None);
+        let has_settings = plugin.default_settings().is_some();
+        let capabilities = plugin
+            .capabilities()
+            .iter()
+            .map(|capability| (*capability).to_owned())
+            .collect();
+        self.register_slot(
+            plugin,
+            None,
+            None,
+            PluginCatalogOrigin::Registered,
+            has_settings,
+            capabilities,
+        );
     }
 
     fn register_slot(
@@ -934,17 +984,24 @@ impl PluginManager {
         plugin: Box<dyn Plugin>,
         library: Option<Arc<libloading::Library>>,
         library_path: Option<PathBuf>,
+        catalog_origin: PluginCatalogOrigin,
+        catalog_has_settings: bool,
+        catalog_capabilities: Vec<String>,
     ) {
         self.next_plugin_epoch = self.next_plugin_epoch.wrapping_add(1).max(1);
         let name = plugin.name().to_string();
         self.plugins.push(Arc::new(PluginSlot {
             name,
+            catalog_origin,
+            catalog_has_settings,
+            catalog_capabilities,
             plugin: RwLock::new(plugin),
             enablement: Mutex::new(PluginEnablement::default()),
             _library: library,
             library_path,
             epoch: self.next_plugin_epoch,
         }));
+        self.bump_settings_catalog_revision();
     }
 
     fn register_with_settings<P: Plugin + 'static>(
@@ -952,10 +1009,25 @@ impl PluginManager {
         mut plugin: P,
         settings: &std::collections::HashMap<String, Value>,
     ) {
-        if let Some(val) = settings.get(plugin.name()) {
+        let name = plugin.name().to_owned();
+        let has_settings = plugin.default_settings().is_some() || settings.contains_key(&name);
+        if let Some(val) = settings.get(&name) {
             plugin.apply_settings(val);
         }
-        self.register(Box::new(plugin));
+        let capabilities = plugin
+            .capabilities()
+            .iter()
+            .map(|capability| (*capability).to_owned())
+            .collect();
+        tracing::debug!("registered plugin {name}");
+        self.register_slot(
+            Box::new(plugin),
+            None,
+            None,
+            PluginCatalogOrigin::Builtin,
+            has_settings,
+            capabilities,
+        );
     }
 
     /// Return a list of registered plugin names.
@@ -987,8 +1059,58 @@ impl PluginManager {
     /// Keep opt-in plugin runtimes aligned with launcher enablement. Managers used
     /// only for headless search do not call this and therefore never start them.
     pub fn sync_enabled_plugins(&mut self, enabled_plugins: Option<&HashSet<String>>) {
-        self.runtime_enablement = Some(enabled_plugins.cloned());
+        let requested = Some(enabled_plugins.cloned());
+        if self.runtime_enablement != requested {
+            self.runtime_enablement = requested;
+            self.bump_settings_catalog_revision();
+        }
         self.apply_runtime_enablement(enabled_plugins);
+    }
+
+    /// Cheap invalidation token for an app-owned cached Settings catalog.
+    /// Callers should request a snapshot only after this value changes.
+    pub(crate) fn settings_catalog_revision(&self) -> u64 {
+        self.settings_catalog_revision
+    }
+
+    /// Return immutable plugin metadata only when the caller's cached revision
+    /// is stale. This never acquires a provider lock or copies private settings.
+    pub(crate) fn settings_catalog_snapshot_if_changed(
+        &self,
+        known_revision: Option<u64>,
+    ) -> Option<PluginCatalogSnapshot> {
+        if known_revision == Some(self.settings_catalog_revision) {
+            return None;
+        }
+
+        let enabled_plugins = self.runtime_enablement.as_ref().and_then(Option::as_ref);
+        let mut plugins = self
+            .plugins
+            .iter()
+            .map(|slot| PluginCatalogEntry {
+                name: slot.name.clone(),
+                origin: slot.catalog_origin,
+                epoch: slot.epoch,
+                has_settings: slot.catalog_has_settings,
+                enabled: enabled_plugins.is_none_or(|enabled| enabled.contains(slot.name.as_str())),
+                capabilities: slot.catalog_capabilities.clone(),
+            })
+            .collect::<Vec<_>>();
+        plugins.sort_by(|left, right| {
+            left.name
+                .to_lowercase()
+                .cmp(&right.name.to_lowercase())
+                .then_with(|| left.origin.cmp(&right.origin))
+                .then_with(|| left.epoch.cmp(&right.epoch))
+        });
+        Some(PluginCatalogSnapshot {
+            revision: self.settings_catalog_revision,
+            plugins,
+        })
+    }
+
+    fn bump_settings_catalog_revision(&mut self) {
+        self.settings_catalog_revision = self.settings_catalog_revision.wrapping_add(1).max(1);
     }
 
     fn apply_runtime_enablement(&mut self, enabled_plugins: Option<&HashSet<String>>) {
@@ -1091,11 +1213,25 @@ impl PluginManager {
                 let constructor: libloading::Symbol<unsafe extern "C" fn() -> Box<dyn Plugin>> =
                     lib.get(b"create_plugin")?;
                 let mut plugin = constructor();
-                if let Some(val) = plugin_settings.get(plugin.name()) {
+                let name = plugin.name().to_string();
+                let has_settings =
+                    plugin.default_settings().is_some() || plugin_settings.contains_key(&name);
+                if let Some(val) = plugin_settings.get(&name) {
                     plugin.apply_settings(val);
                 }
-                let name = plugin.name().to_string();
-                self.register_slot(plugin, Some(lib), Some(library_path));
+                let capabilities = plugin
+                    .capabilities()
+                    .iter()
+                    .map(|capability| (*capability).to_owned())
+                    .collect();
+                self.register_slot(
+                    plugin,
+                    Some(lib),
+                    Some(library_path),
+                    PluginCatalogOrigin::DynamicLibrary,
+                    has_settings,
+                    capabilities,
+                );
                 tracing::debug!("loaded plugin {name}");
             }
         }
@@ -1295,6 +1431,85 @@ mod tests {
 
         assert_eq!(actions.len(), 1);
         assert_eq!(snapshot.actions, actions);
+    }
+
+    #[test]
+    fn settings_search_catalog_metadata_and_matching_do_not_wait_for_or_call_providers() {
+        let mut manager = PluginManager::new_inert_for_test();
+        let settings_ui_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        manager.register(Box::new(CatalogMetadataPlugin {
+            settings_ui_calls: Arc::clone(&settings_ui_calls),
+        }));
+        let snapshot = manager
+            .settings_catalog_snapshot_if_changed(None)
+            .expect("first catalog read returns a snapshot");
+        assert_eq!(snapshot.plugins.len(), 1);
+        assert!(snapshot.plugins[0].has_settings);
+        assert_eq!(snapshot.plugins[0].origin, PluginCatalogOrigin::Registered);
+        assert!(
+            manager
+                .settings_catalog_snapshot_if_changed(Some(snapshot.revision))
+                .is_none()
+        );
+
+        let catalog =
+            crate::settings_editor::catalog::SettingsCatalog::from_plugin_snapshot(&snapshot);
+        let revision = manager.settings_catalog_revision();
+        let provider_guard = manager.plugins[0].plugin.write().unwrap();
+        let (matched_tx, matched_rx) = std::sync::mpsc::channel();
+        let matching = std::thread::spawn(move || {
+            let matched_ids = catalog
+                .search("catalog metadata test")
+                .into_iter()
+                .map(|entry| entry.id.as_str().to_owned())
+                .collect::<Vec<_>>();
+            let secret_ids = catalog
+                .search("never-index-this-value")
+                .into_iter()
+                .map(|entry| entry.id.as_str().to_owned())
+                .collect::<Vec<_>>();
+            matched_tx.send((matched_ids, secret_ids)).unwrap();
+        });
+        let (matched_ids, secret_ids) = matched_rx
+            .recv_timeout(std::time::Duration::from_millis(250))
+            .expect("catalog matching completes while provider write lock is held");
+        drop(provider_guard);
+        matching.join().unwrap();
+
+        assert!(matched_ids.iter().any(|id| id.ends_with("settings")));
+        assert!(secret_ids.is_empty());
+        assert_eq!(
+            settings_ui_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(manager.settings_catalog_revision(), revision);
+    }
+
+    #[test]
+    fn settings_search_catalog_revision_tracks_registration_enablement_and_epoch_replacement() {
+        let mut manager = PluginManager::new_inert_for_test();
+        manager.register(Box::new(NamedPlugin("catalog_revision")));
+        let first = manager.settings_catalog_snapshot_if_changed(None).unwrap();
+        assert!(
+            manager
+                .settings_catalog_snapshot_if_changed(Some(first.revision))
+                .is_none()
+        );
+
+        manager.sync_enabled_plugins(Some(&HashSet::new()));
+        let disabled = manager
+            .settings_catalog_snapshot_if_changed(Some(first.revision))
+            .expect("enablement changes invalidate the catalog");
+        assert!(disabled.revision > first.revision);
+        assert!(!disabled.plugins[0].enabled);
+
+        manager.clear_plugins();
+        manager.register(Box::new(NamedPlugin("catalog_revision")));
+        let replacement = manager
+            .settings_catalog_snapshot_if_changed(Some(disabled.revision))
+            .expect("registration replacement invalidates the catalog");
+        assert!(replacement.revision > disabled.revision);
+        assert!(replacement.plugins[0].epoch > first.plugins[0].epoch);
     }
 
     #[test]
@@ -1515,6 +1730,37 @@ mod tests {
     }
 
     struct NamedPlugin(&'static str);
+
+    struct CatalogMetadataPlugin {
+        settings_ui_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Plugin for CatalogMetadataPlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            Vec::new()
+        }
+
+        fn name(&self) -> &str {
+            "catalog_metadata_test"
+        }
+
+        fn description(&self) -> &str {
+            "catalog metadata test provider"
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &["search"]
+        }
+
+        fn default_settings(&self) -> Option<Value> {
+            Some(serde_json::json!({ "private_token": "never-index-this-value" }))
+        }
+
+        fn settings_ui(&mut self, _ui: &mut egui::Ui, _value: &mut Value) {
+            self.settings_ui_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
 
     struct LifecyclePlugin(Arc<Mutex<Vec<bool>>>);
 
@@ -1848,11 +2094,17 @@ mod tests {
             Box::new(NamedPlugin("first")),
             Some(Arc::clone(&first_library)),
             Some(PathBuf::from("first.dll")),
+            PluginCatalogOrigin::DynamicLibrary,
+            false,
+            Vec::new(),
         );
         manager.register_slot(
             Box::new(NamedPlugin("unrelated")),
             Some(Arc::clone(&unrelated_library)),
             Some(PathBuf::from("unrelated.dll")),
+            PluginCatalogOrigin::DynamicLibrary,
+            false,
+            Vec::new(),
         );
         let first_handle = manager.owned_plugin("first").unwrap();
         manager.clear_plugins();

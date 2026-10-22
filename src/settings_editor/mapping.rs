@@ -45,6 +45,8 @@ impl SettingsEditor {
             settings.static_size.unwrap_or((400, 220)),
         );
         let mut s = Self {
+            search_catalog: super::catalog::SettingsCatalog::default(),
+            catalog_plugin_revision: None,
             baseline_settings: settings.clone(),
             paste_sequence: settings.paste_sequence.clone(),
             paste_next_enabled: settings.paste_sequence.next_hotkey.is_some(),

@@ -1,9 +1,12 @@
 use crate::hotkey::parse_hotkey;
+use crate::plugin::PluginManager;
 use crate::settings::Settings;
 use eframe::egui;
 
 #[derive(Default)]
 pub struct SettingsEditor {
+    pub(crate) search_catalog: super::catalog::SettingsCatalog,
+    pub(super) catalog_plugin_revision: Option<u64>,
     pub(crate) baseline_settings: Settings,
     pub(crate) paste_sequence: crate::settings::PasteSequencePreferences,
     pub(crate) paste_next_enabled: bool,
@@ -151,6 +154,20 @@ impl SettingsEditor {
             Self::SETTINGS_WINDOW_DEFAULT_WIDTH,
             Self::settings_window_default_height(ctx.content_rect().height()),
         ]
+    }
+
+    pub(crate) fn refresh_search_catalog(&mut self, plugins: &PluginManager) {
+        if self.catalog_plugin_revision != Some(plugins.settings_catalog_revision())
+            && let Some(snapshot) =
+                plugins.settings_catalog_snapshot_if_changed(self.catalog_plugin_revision)
+        {
+            self.catalog_plugin_revision = Some(snapshot.revision);
+            self.search_catalog = super::catalog::SettingsCatalog::from_plugin_snapshot(&snapshot);
+        }
+    }
+
+    pub fn search_catalog(&self) -> &super::catalog::SettingsCatalog {
+        &self.search_catalog
     }
 
     pub(crate) fn settings_content_height(

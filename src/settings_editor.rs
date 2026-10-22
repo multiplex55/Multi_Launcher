@@ -1,3 +1,4 @@
+pub mod catalog;
 #[path = "settings_editor/mapping.rs"]
 mod mapping;
 #[path = "settings_editor/render.rs"]

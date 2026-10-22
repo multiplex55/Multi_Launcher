@@ -1,3 +1,4 @@
+use super::catalog::{MainSettingsSection as TopLevelSettingsSection, ids as setting_ids};
 use super::state::SettingsEditor;
 use crate::gui::LauncherApp;
 use crate::gui::jump_mode::{
@@ -11,78 +12,7 @@ use eframe::egui;
 const RADIAL_TAP_HOLD_EXPLANATION: &str = "Release before the threshold to toggle the launcher. Crossing the threshold opens the radial menu; releasing afterward never also toggles the launcher.";
 const RADIAL_LEGACY_TIMING_EXPLANATION: &str = "Legacy timing: the launcher hotkey toggles immediately; named radial commands and configured direct triggers remain available.";
 
-#[derive(Clone, Copy)]
-enum TopLevelSettingsSection {
-    Hotkeys,
-    PasteSequences,
-    LauncherWindow,
-    SearchResults,
-    ActionsFeedback,
-    Dashboard,
-    Radial,
-    Plugins,
-}
-
 impl TopLevelSettingsSection {
-    const ALL: [Self; 8] = [
-        Self::Hotkeys,
-        Self::PasteSequences,
-        Self::LauncherWindow,
-        Self::SearchResults,
-        Self::ActionsFeedback,
-        Self::Dashboard,
-        Self::Radial,
-        Self::Plugins,
-    ];
-
-    const fn persistent_id(self) -> &'static str {
-        match self {
-            Self::Hotkeys => "settings_section_hotkeys",
-            Self::PasteSequences => "settings_section_paste_sequences",
-            Self::LauncherWindow => "settings_section_launcher_window",
-            Self::SearchResults => "settings_section_search_results",
-            Self::ActionsFeedback => "settings_section_actions_feedback",
-            Self::Dashboard => "settings_section_dashboard",
-            Self::Radial => "settings_section_radial",
-            Self::Plugins => "settings_section_plugins",
-        }
-    }
-
-    const fn title(self) -> &'static str {
-        match self {
-            Self::Hotkeys => "Hotkeys",
-            Self::PasteSequences => "Paste Sequences",
-            Self::LauncherWindow => "Launcher Window & Appearance",
-            Self::SearchResults => "Search & Results",
-            Self::ActionsFeedback => "Actions, Safety & Feedback",
-            Self::Dashboard => "Dashboard",
-            Self::Radial => "Radial Menus",
-            Self::Plugins => "Plugin Settings",
-        }
-    }
-
-    const fn description(self) -> &'static str {
-        match self {
-            Self::Hotkeys => "Set the launcher shortcut and optional quit/help shortcuts.",
-            Self::PasteSequences => {
-                "Configure playback controls. Saved sequence start shortcuts are edited in Paste Sequences."
-            }
-            Self::LauncherWindow => "Choose window placement behavior and query/list text scales.",
-            Self::SearchResults => "Tune matching and the way search results are presented.",
-            Self::ActionsFeedback => "Control action completion, safety prompts, and feedback.",
-            Self::Dashboard => "Configure the empty-query dashboard and its refresh behavior.",
-            Self::Radial => "Set radial timing, input scope, safety, and menu defaults.",
-            Self::Plugins => "Configure settings for enabled plugins.",
-        }
-    }
-
-    const fn default_open(self) -> bool {
-        matches!(
-            self,
-            Self::Hotkeys | Self::LauncherWindow | Self::SearchResults
-        )
-    }
-
     fn egui_id(self, ui: &egui::Ui) -> egui::Id {
         ui.make_persistent_id(self.persistent_id())
     }
@@ -375,6 +305,7 @@ impl SettingsEditor {
         jump_mode_scope: Option<JumpModeScope>,
         first_ui_pass: bool,
     ) {
+        self.refresh_search_catalog(&app.plugins);
         let mut jump_targets =
             SettingsJumpTargets::new(jump_mode_scope, first_ui_pass, app.jump_mode_enabled());
         let mut open = app.show_settings;
@@ -396,14 +327,17 @@ impl SettingsEditor {
                         let top_level_expand_request = ui
                             .horizontal(|ui| {
                                 let mut request = None;
-                                let expand =
-                                    jump_targets.button(ui, "sections.expand_all", "Expand all");
+                                let expand = jump_targets.button(
+                                    ui,
+                                    setting_ids::SECTIONS_EXPAND_ALL,
+                                    "Expand all",
+                                );
                                 if jump_targets.clicked(&expand) {
                                     request = Some(true);
                                 }
                                 let collapse = jump_targets.button(
                                     ui,
-                                    "sections.collapse_all",
+                                    setting_ids::SECTIONS_COLLAPSE_ALL,
                                     "Collapse all",
                                 );
                                 if jump_targets.clicked(&collapse) {
@@ -496,7 +430,13 @@ impl SettingsEditor {
                         save,
                         crate::gui::theme::widgets::ButtonEmphasis::Primary,
                     );
-                    jump_targets.response(ui, &save, "footer.save", "Save", TargetKind::Button);
+                    jump_targets.response(
+                        ui,
+                        &save,
+                        setting_ids::FOOTER_SAVE,
+                        "Save",
+                        TargetKind::Button,
+                    );
                     if jump_targets.clicked(&save) {
                         self.save_settings(ctx, app);
                     }
@@ -504,7 +444,7 @@ impl SettingsEditor {
                     jump_targets.register(
                         ui,
                         &cancel_button,
-                        "footer.cancel",
+                        setting_ids::FOOTER_CANCEL,
                         "Cancel",
                         TargetKind::Button,
                     );
@@ -533,8 +473,8 @@ impl SettingsEditor {
         render_paste_shortcut(
             ui,
             "Next",
-            "paste.next.enabled",
-            "paste.next.hotkey",
+            setting_ids::PASTE_NEXT_ENABLED,
+            setting_ids::PASTE_NEXT_HOTKEY,
             &mut self.paste_next_enabled,
             &mut self.paste_sequence.next_hotkey,
             targets,
@@ -542,8 +482,8 @@ impl SettingsEditor {
         render_paste_shortcut(
             ui,
             "Cancel",
-            "paste.cancel.enabled",
-            "paste.cancel.hotkey",
+            setting_ids::PASTE_CANCEL_ENABLED,
+            setting_ids::PASTE_CANCEL_HOTKEY,
             &mut self.paste_cancel_enabled,
             &mut self.paste_sequence.cancel_hotkey,
             targets,
@@ -551,13 +491,13 @@ impl SettingsEditor {
         targets.checkbox(
             ui,
             &mut self.paste_sequence.escape_cancel_enabled,
-            "paste.escape_cancel",
+            setting_ids::PASTE_ESCAPE_CANCEL,
             "Escape cancels active playback",
         );
         targets.checkbox(
             ui,
             &mut self.paste_sequence.keep_dialog_visible_during_playback,
-            "paste.keep_visible",
+            setting_ids::PASTE_KEEP_VISIBLE,
             "Keep Paste Sequences dialog visible during playback",
         );
         crate::gui::theme::widgets::secondary_help(
@@ -575,7 +515,7 @@ impl SettingsEditor {
             let resp = targets.text_edit_singleline(
                 ui,
                 &mut self.hotkey,
-                "hotkeys.launcher",
+                setting_ids::HOTKEY_LAUNCHER,
                 "Launcher hotkey",
             );
             if resp.changed() {
@@ -617,14 +557,14 @@ impl SettingsEditor {
         targets.checkbox(
             ui,
             &mut self.radial_enabled,
-            "radial.enabled",
+            setting_ids::RADIAL_ENABLED,
             "Enable radial menus",
         );
         ui.add_enabled_ui(self.radial_enabled, |ui| {
             targets.checkbox(
                 ui,
                 &mut self.radial_shared_tap_hold,
-                "radial.shared_tap_hold",
+                setting_ids::RADIAL_SHARED_TAP_HOLD,
                 "Share the launcher hotkey between tap and hold",
             );
             if self.radial_shared_tap_hold {
@@ -686,7 +626,7 @@ impl SettingsEditor {
             targets.checkbox(
                 ui,
                 &mut self.radial_show_expected_layout_diagnostics,
-                "radial.expected_layout_diagnostics",
+                setting_ids::RADIAL_EXPECTED_LAYOUT_DIAGNOSTICS,
                 "Show expected label-layout diagnostics",
             );
 
@@ -776,7 +716,7 @@ impl SettingsEditor {
             let global_inputs = targets.checkbox(
                 ui,
                 &mut self.radial_global_item_inputs,
-                "radial.global_item_inputs",
+                setting_ids::RADIAL_GLOBAL_ITEM_INPUTS,
                 "Allow process-wide radial item shortcuts and hotstrings",
             );
             if global_inputs.changed() && !self.radial_global_item_inputs {
@@ -833,11 +773,11 @@ impl SettingsEditor {
         );
         });
         ui.horizontal(|ui| {
-            let edit_menus = targets.button(ui, "radial.edit_menus", "Edit menus...");
+            let edit_menus = targets.button(ui, setting_ids::RADIAL_EDIT_MENUS, "Edit menus...");
             if targets.clicked(&edit_menus) {
                 RadialCommandHost::open_radial_editor(app, false);
             }
-            let edit_skins = targets.button(ui, "radial.edit_skins", "Edit skins...");
+            let edit_skins = targets.button(ui, setting_ids::RADIAL_EDIT_SKINS, "Edit skins...");
             if targets.clicked(&edit_skins) {
                 RadialCommandHost::open_radial_editor(app, true);
             }
@@ -851,7 +791,7 @@ impl SettingsEditor {
                     );
                     let restore = targets.button(
                         ui,
-                        "radial.restore_submenu_presentation",
+                        setting_ids::RADIAL_RESTORE_SUBMENU,
                         "Restore previous submenu presentation",
                     );
                     if targets.clicked(&restore) {
@@ -911,8 +851,14 @@ impl SettingsEditor {
             ),
         };
         let (toggle_identity, field_identity) = match kind {
-            HotkeyKind::Quit => ("hotkeys.quit.enabled", "hotkeys.quit.value"),
-            HotkeyKind::Help => ("hotkeys.help.enabled", "hotkeys.help.value"),
+            HotkeyKind::Quit => (
+                setting_ids::HOTKEY_QUIT_ENABLED,
+                setting_ids::HOTKEY_QUIT_VALUE,
+            ),
+            HotkeyKind::Help => (
+                setting_ids::HOTKEY_HELP_ENABLED,
+                setting_ids::HOTKEY_HELP_VALUE,
+            ),
         };
         targets.checkbox(ui, enabled, toggle_identity, toggle_label);
         if *enabled {
@@ -940,19 +886,19 @@ impl SettingsEditor {
             targets.checkbox(
                 ui,
                 &mut self.hide_after_run,
-                "actions.hide_after_run",
+                setting_ids::ACTIONS_HIDE_AFTER_RUN,
                 "Hide window after running action",
             );
             targets.checkbox(
                 ui,
                 &mut self.preserve_command,
-                "actions.preserve_command",
+                setting_ids::ACTIONS_PRESERVE_COMMAND,
                 "Preserve command after run",
             );
             targets.checkbox(
                 ui,
                 &mut self.clear_query_after_run,
-                "actions.clear_query_after_run",
+                setting_ids::ACTIONS_CLEAR_QUERY,
                 "Clear query after run",
             );
         });
@@ -961,7 +907,7 @@ impl SettingsEditor {
         targets.checkbox(
             ui,
             &mut self.require_confirm_destructive,
-            "actions.confirm_destructive",
+            setting_ids::ACTIONS_CONFIRM_DESTRUCTIVE,
             "Require confirm for destructive actions",
         );
 
@@ -969,7 +915,7 @@ impl SettingsEditor {
         targets.checkbox(
             ui,
             &mut self.show_toasts,
-            "feedback.toasts",
+            setting_ids::FEEDBACK_TOASTS,
             "Enable toast notifications",
         );
         if self.show_toasts {
@@ -978,9 +924,9 @@ impl SettingsEditor {
                     ui,
                     &mut self.toast_duration,
                     0.1..=5.0,
-                    "feedback.toast_duration",
+                    setting_ids::FEEDBACK_TOAST_DURATION,
                     "Toast duration",
-                    "feedback.toast_duration/value",
+                    setting_ids::FEEDBACK_TOAST_DURATION_VALUE,
                     "Toast duration value",
                 )
             });
@@ -989,20 +935,20 @@ impl SettingsEditor {
             targets.checkbox(
                 ui,
                 &mut self.show_inline_errors,
-                "feedback.inline_errors",
+                setting_ids::FEEDBACK_INLINE_ERRORS,
                 "Show inline errors",
             );
             targets.checkbox(
                 ui,
                 &mut self.show_error_toasts,
-                "feedback.error_toasts",
+                setting_ids::FEEDBACK_ERROR_TOASTS,
                 "Show error toasts",
             );
         });
 
         ui.label(egui::RichText::new("Diagnostics and refresh").strong());
         ui.horizontal(|ui| {
-            let combo_identity = "feedback.debug_logging";
+            let combo_identity = setting_ids::FEEDBACK_DEBUG_LOGGING;
             let combo_order = targets.reserve_order();
             let popup_scope = targets.combo_popup_scope(combo_identity);
             let combo = egui::ComboBox::from_label("Debug logging")
@@ -1041,7 +987,7 @@ impl SettingsEditor {
         targets.checkbox(
             ui,
             &mut self.disable_timer_updates,
-            "feedback.disable_timer_updates",
+            setting_ids::FEEDBACK_DISABLE_TIMER_UPDATES,
             "Disable timer auto refresh",
         );
         crate::gui::theme::widgets::labeled_form_row(ui, "Timer refresh rate (s)", |ui| {
@@ -1065,27 +1011,27 @@ impl SettingsEditor {
         targets.checkbox(
             ui,
             &mut self.always_on_top,
-            "launcher.always_on_top",
+            setting_ids::LAUNCHER_ALWAYS_ON_TOP,
             "Always on top",
         );
         ui.horizontal_wrapped(|ui| {
             targets.checkbox(
                 ui,
                 &mut self.show_launcher_icon,
-                "launcher.show_icon",
+                setting_ids::LAUNCHER_SHOW_ICON,
                 "Show Launcher Icon",
             );
             targets.checkbox(
                 ui,
                 &mut self.show_launcher_title,
-                "launcher.show_title",
+                setting_ids::LAUNCHER_SHOW_TITLE,
                 "Show Launcher Title",
             );
         });
         targets.checkbox(
             ui,
             &mut self.experimental_jump_mode_enabled,
-            "launcher.experimental_jump_mode",
+            setting_ids::LAUNCHER_JUMP_MODE,
             "Experimental Jump Mode",
         )
         .on_hover_text(
@@ -1103,7 +1049,7 @@ impl SettingsEditor {
         let follow_mouse_resp = targets.checkbox(
             ui,
             &mut self.follow_mouse,
-            "launcher.follow_mouse",
+            setting_ids::LAUNCHER_FOLLOW_MOUSE,
             "Follow mouse",
         );
         if follow_mouse_resp.changed() && self.follow_mouse {
@@ -1113,7 +1059,7 @@ impl SettingsEditor {
             targets.checkbox(
                 ui,
                 &mut self.static_enabled,
-                "launcher.static_position",
+                setting_ids::LAUNCHER_STATIC_POSITION,
                 "Use static position",
             );
         });
@@ -1145,9 +1091,9 @@ impl SettingsEditor {
                 ui,
                 &mut self.query_scale,
                 0.5..=5.0,
-                "launcher.query_scale",
+                setting_ids::LAUNCHER_QUERY_SCALE,
                 "Query scale",
-                "launcher.query_scale/value",
+                setting_ids::LAUNCHER_QUERY_SCALE_VALUE,
                 "Query scale value",
             )
         });
@@ -1156,14 +1102,17 @@ impl SettingsEditor {
                 ui,
                 &mut self.list_scale,
                 0.5..=5.0,
-                "launcher.list_scale",
+                setting_ids::LAUNCHER_LIST_SCALE,
                 "List scale",
-                "launcher.list_scale/value",
+                setting_ids::LAUNCHER_LIST_SCALE_VALUE,
                 "List scale value",
             )
         });
-        let theme_settings =
-            targets.button(ui, "launcher.open_theme_settings", "Open Theme Settings...");
+        let theme_settings = targets.button(
+            ui,
+            setting_ids::LAUNCHER_THEME_SETTINGS,
+            "Open Theme Settings...",
+        );
         if targets.clicked(&theme_settings) {
             app.open_theme_settings_dialog();
         }
@@ -1177,7 +1126,7 @@ impl SettingsEditor {
         targets.checkbox(
             ui,
             &mut self.query_autocomplete,
-            "search.autocomplete",
+            setting_ids::SEARCH_AUTOCOMPLETE,
             "Enable query autocomplete",
         );
         crate::gui::theme::widgets::labeled_form_row(ui, "Fuzzy weight", |ui| {
@@ -1185,9 +1134,9 @@ impl SettingsEditor {
                 ui,
                 &mut self.fuzzy_weight,
                 0.0..=5.0,
-                "search.fuzzy_weight",
+                setting_ids::SEARCH_FUZZY_WEIGHT,
                 "Fuzzy weight",
-                "search.fuzzy_weight/value",
+                setting_ids::SEARCH_FUZZY_WEIGHT_VALUE,
                 "Fuzzy weight value",
             )
         });
@@ -1196,16 +1145,16 @@ impl SettingsEditor {
                 ui,
                 &mut self.usage_weight,
                 0.0..=5.0,
-                "search.usage_weight",
+                setting_ids::SEARCH_USAGE_WEIGHT,
                 "Usage weight",
-                "search.usage_weight/value",
+                setting_ids::SEARCH_USAGE_WEIGHT_VALUE,
                 "Usage weight value",
             )
         });
         targets.checkbox(
             ui,
             &mut self.match_exact,
-            "search.match_exact",
+            setting_ids::SEARCH_MATCH_EXACT,
             "Match exact",
         );
         crate::gui::theme::widgets::labeled_form_row(ui, "Page jump", |ui| {
@@ -1218,7 +1167,7 @@ impl SettingsEditor {
         targets.checkbox(
             ui,
             &mut self.query_results_layout_enabled,
-            "search.grid_layout",
+            setting_ids::SEARCH_GRID_LAYOUT,
             "Display results in grid layout",
         );
         ui.add_enabled_ui(self.query_results_layout_enabled, |ui| {
@@ -1244,7 +1193,7 @@ impl SettingsEditor {
             targets.checkbox(
                 ui,
                 &mut self.query_results_layout_respect_plugin_capability,
-                "search.respect_plugin_capability",
+                setting_ids::SEARCH_RESPECT_PLUGIN_CAPABILITY,
                 "Respect plugin list/grid capability",
             );
             ui.horizontal(|ui| {
@@ -1252,7 +1201,7 @@ impl SettingsEditor {
                 targets.text_edit_singleline(
                     ui,
                     &mut self.query_results_layout_plugin_opt_out,
-                    "search.plugin_opt_out",
+                    setting_ids::SEARCH_PLUGIN_OPT_OUT,
                     "Force list for plugins",
                 );
             });
@@ -1268,7 +1217,7 @@ impl SettingsEditor {
         targets.checkbox(
             ui,
             &mut self.dashboard_enabled,
-            "dashboard.enabled",
+            setting_ids::DASHBOARD_ENABLED,
             "Enable dashboard when query is empty",
         );
         ui.horizontal(|ui| {
@@ -1276,7 +1225,7 @@ impl SettingsEditor {
             targets.text_edit_singleline(
                 ui,
                 &mut self.dashboard_path,
-                "dashboard.path",
+                setting_ids::DASHBOARD_PATH,
                 "Dashboard config path",
             );
         });
@@ -1285,31 +1234,35 @@ impl SettingsEditor {
             targets.text_edit_singleline(
                 ui,
                 &mut self.dashboard_default_location,
-                "dashboard.default_location",
+                setting_ids::DASHBOARD_DEFAULT_LOCATION,
                 "Default location",
             );
         });
         targets.checkbox(
             ui,
             &mut self.dashboard_show_when_empty,
-            "dashboard.show_when_empty",
+            setting_ids::DASHBOARD_SHOW_WHEN_EMPTY,
             "Show dashboard when the search box is blank",
         );
         targets.checkbox(
             ui,
             &mut self.reduce_dashboard_work_when_unfocused,
-            "dashboard.reduce_work_unfocused",
+            setting_ids::DASHBOARD_REDUCE_WORK,
             "Reduce dashboard work when not focused",
         );
         if self.debug_logging || cfg!(debug_assertions) {
             targets.checkbox(
                 ui,
                 &mut self.show_dashboard_diagnostics,
-                "dashboard.diagnostics",
+                setting_ids::DASHBOARD_DIAGNOSTICS,
                 "Show dashboard diagnostics (dev)",
             );
         }
-        let customize = targets.button(ui, "dashboard.customize", "Customize Dashboard...");
+        let customize = targets.button(
+            ui,
+            setting_ids::DASHBOARD_CUSTOMIZE,
+            "Customize Dashboard...",
+        );
         if targets.clicked(&customize) {
             app.show_dashboard_editor = true;
         }
@@ -1324,7 +1277,7 @@ impl SettingsEditor {
         ui.separator();
         let toggle_sections = targets.button(
             ui,
-            "plugins.toggle_sections",
+            setting_ids::PLUGINS_TOGGLE_SECTIONS,
             if self.plugins_expanded {
                 "Collapse plugin sections"
             } else {
@@ -1488,7 +1441,7 @@ impl SettingsEditor {
     }
 
     fn render_note_section(&mut self, ui: &mut egui::Ui) {
-        let id = ui.make_persistent_id("plugin_notes");
+        let id = ui.make_persistent_id(setting_ids::NOTES);
         let mut state =
             egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
         if let Some(open) = self.expand_request {
