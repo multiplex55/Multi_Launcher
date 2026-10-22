@@ -1400,8 +1400,8 @@ mod tests {
                 "{route} should execute the resolved primary"
             );
             assert_eq!(
-                *observed.lock().unwrap(),
-                [expected_action.clone()],
+                observed.lock().unwrap().as_slice(),
+                std::slice::from_ref(&expected_action),
                 "{route} should invoke the external action with its exact arguments once"
             );
             assert_eq!(

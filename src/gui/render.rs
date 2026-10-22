@@ -2605,22 +2605,21 @@ impl LauncherApp {
             }
             return;
         }
-        if let Some(pending) = self.pending_show_query_focus {
-            if pending.visibility_revision != self.visibility_revision.current()
+        if let Some(pending) = self.pending_show_query_focus
+            && (pending.visibility_revision != self.visibility_revision.current()
                 || !self.visible_flag.load(Ordering::Relaxed)
                 || pending.root_identity.is_some_and(|(hwnd, generation)| {
                     !self.root_window_bridge.is_current(hwnd, generation)
-                })
+                }))
+        {
+            self.pending_show_query_focus = None;
+            self.query_focus_session = None;
+            if query_focus_owner_exists
+                && ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input")))
             {
-                self.pending_show_query_focus = None;
-                self.query_focus_session = None;
-                if query_focus_owner_exists
-                    && ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input")))
-                {
-                    ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("query_input")));
-                }
-                return;
+                ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("query_input")));
             }
+            return;
         }
         if let Some(geometry) = geometry {
             if self.query_show_geometry_is_eligible(ctx, geometry) == Some(false) {

@@ -2310,23 +2310,21 @@ mod tests {
 
             fn wait_ready(&self, nonce: &str) -> Result<SourceReady, String> {
                 let deadline = Instant::now() + Duration::from_secs(10);
-                loop {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        return Err(
-                            "owned source fixture did not become ready within 10 seconds".into(),
-                        );
-                    }
-                    let line = self.next_line(remaining)?;
-                    if line.starts_with("ERROR|") {
-                        return Err(format!("owned source fixture reported {line}"));
-                    }
-                    let ready = SourceReady::parse(&line)?;
-                    if ready.nonce != nonce {
-                        return Err("owned source fixture nonce did not match the test".into());
-                    }
-                    return Ok(ready);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(
+                        "owned source fixture did not become ready within 10 seconds".into(),
+                    );
                 }
+                let line = self.next_line(remaining)?;
+                if line.starts_with("ERROR|") {
+                    return Err(format!("owned source fixture reported {line}"));
+                }
+                let ready = SourceReady::parse(&line)?;
+                if ready.nonce != nonce {
+                    return Err("owned source fixture nonce did not match the test".into());
+                }
+                Ok(ready)
             }
 
             fn command(&mut self, command: &str) -> Result<(), String> {
@@ -2343,24 +2341,22 @@ mod tests {
                     .and_then(|()| stdin.flush())
                     .map_err(|error| format!("could not send command to owned fixture: {error}"))?;
                 let deadline = Instant::now() + Duration::from_secs(3);
-                loop {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        return Err(format!(
-                            "owned source fixture did not acknowledge {command}"
-                        ));
-                    }
-                    let line = self.next_line(remaining)?;
-                    if line == format!("ACK|{id}") {
-                        return Ok(());
-                    }
-                    if line.starts_with(&format!("ERROR|{id}|")) || line.starts_with("ERROR|") {
-                        return Err(format!("owned source fixture rejected {command}: {line}"));
-                    }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
                     return Err(format!(
-                        "unexpected output from owned source fixture: {line}"
+                        "owned source fixture did not acknowledge {command}"
                     ));
                 }
+                let line = self.next_line(remaining)?;
+                if line == format!("ACK|{id}") {
+                    return Ok(());
+                }
+                if line.starts_with(&format!("ERROR|{id}|")) || line.starts_with("ERROR|") {
+                    return Err(format!("owned source fixture rejected {command}: {line}"));
+                }
+                Err(format!(
+                    "unexpected output from owned source fixture: {line}"
+                ))
             }
 
             fn finish(&mut self) -> Result<(), String> {
