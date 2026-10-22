@@ -997,11 +997,14 @@ pub struct LauncherApp {
     authoring_catalog_cache: Mutex<universal_action_catalog::AuthoringCatalogCache>,
     #[cfg(test)]
     authoring_catalog_build_count: AtomicUsize,
+    #[cfg(test)]
+    test_unpublish_root_identity_before_visibility_reconcile: bool,
     last_visible: bool,
     offscreen_pos: (f32, f32),
     pub window_size: (i32, i32),
     pub window_pos: (i32, i32),
     focus_query: bool,
+    pending_show_query_focus: Option<PendingShowQueryFocus>,
     move_cursor_end: bool,
     toasts: egui_toast::Toasts,
     #[cfg(test)]
@@ -1215,6 +1218,13 @@ pub struct LauncherApp {
     pub file_search_root: Option<std::path::PathBuf>,
     pub file_search_text: String,
     pub file_search_active: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PendingShowQueryFocus {
+    visibility_revision: u64,
+    root_identity: Option<(usize, u64)>,
+    query_cursor_range: Option<egui::text::CCursorRange>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -3065,11 +3075,14 @@ impl LauncherApp {
             authoring_catalog_cache: Mutex::new(None),
             #[cfg(test)]
             authoring_catalog_build_count: AtomicUsize::new(0),
+            #[cfg(test)]
+            test_unpublish_root_identity_before_visibility_reconcile: false,
             last_visible: initial_visible,
             offscreen_pos,
             window_size: win_size,
             window_pos: (0, 0),
             focus_query: false,
+            pending_show_query_focus: None,
             move_cursor_end: false,
             toasts,
             #[cfg(test)]
@@ -4778,6 +4791,7 @@ impl LauncherApp {
         // request. The note consumes a one-shot layer handoff after its own
         // window has rendered, so later deliberate focus changes remain intact.
         self.focus_query = false;
+        self.pending_show_query_focus = None;
         if let Some(existing_idx) = self
             .note_panels
             .iter()

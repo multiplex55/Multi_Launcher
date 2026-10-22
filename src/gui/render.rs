@@ -20,11 +20,11 @@ pub(super) struct RootFrameLogic {
     query_geometry_cause: super::track_c_query_observer::GeometryCause,
     source_state_before_frame: Option<SourceStateBeforeFrame>,
     snippet_prompt_owns_input: bool,
-    just_became_visible: bool,
     visibility_request: u64,
     visibility_invocation_id: Option<u64>,
     should_be_visible: bool,
     ui_passes: u32,
+    show_query_focus_attempted_revision: Option<u64>,
     trace_root_hwnd: Option<windows::Win32::Foundation::HWND>,
 }
 
@@ -35,11 +35,11 @@ impl Default for RootFrameLogic {
             query_geometry_cause: super::track_c_query_observer::GeometryCause::Other,
             source_state_before_frame: None,
             snippet_prompt_owns_input: false,
-            just_became_visible: false,
             visibility_request: 0,
             visibility_invocation_id: None,
             should_be_visible: false,
             ui_passes: 0,
+            show_query_focus_attempted_revision: None,
             trace_root_hwnd: None,
         }
     }
@@ -1805,6 +1805,220 @@ impl LauncherApp {
         (just_became_visible || focus_query) && !file_search_open
     }
 
+    fn published_root_identity_for_show_focus(&self) -> Option<(usize, u64)> {
+        let identity = self.root_window_bridge.identity();
+        if cfg!(windows) && (identity.0 == 0 || identity.1 == 0) {
+            None
+        } else {
+            Some(identity)
+        }
+    }
+
+    fn update_pending_show_query_focus_for_visibility(
+        &mut self,
+        visibility_revision: u64,
+        should_be_visible: bool,
+        just_became_visible: bool,
+        focus_intent: crate::visibility::RootFocusIntent,
+    ) {
+        if self.visibility_revision.current() != visibility_revision || !should_be_visible {
+            self.pending_show_query_focus = None;
+            return;
+        }
+
+        if self
+            .pending_show_query_focus
+            .is_some_and(|pending| pending.visibility_revision != visibility_revision)
+        {
+            self.pending_show_query_focus = None;
+        }
+
+        if just_became_visible {
+            self.pending_show_query_focus = (focus_intent
+                == crate::visibility::RootFocusIntent::ActivateRoot)
+                .then_some(super::PendingShowQueryFocus {
+                    visibility_revision,
+                    root_identity: self.published_root_identity_for_show_focus(),
+                    query_cursor_range: None,
+                });
+        }
+    }
+
+    fn pending_show_query_focus_owner_blocks(
+        &self,
+        ctx: &egui::Context,
+        query_layer: Option<egui::LayerId>,
+    ) -> bool {
+        use crate::gui::jump_mode::ui::{focused_response_layer, notes_dialog_layer_id};
+
+        if ctx.viewport_id() != egui::ViewportId::ROOT
+            || ctx.memory(|memory| memory.top_modal_layer().is_some())
+            || egui::Popup::is_any_open(ctx)
+            || self.file_search_dialog.open
+            || self.confirm_modal.is_open()
+            || self.action_sheet.is_open()
+            || self.snippet_prompt_dialog.is_open()
+            || self.macro_prompt.pending.is_some()
+            || self.macro_parameter_prompt.owns_input()
+            || self.screen_draw_controller.toolbar_open()
+            || self.pinboard_capture_owns_root()
+            || self.color_pick_owns_root()
+            || self.ocr_owns_root()
+            || self.coordinate_capture_parking.is_some()
+            || self.notes_dialog.jump_mode_unsupported_nested_owner_open()
+            || self
+                .note_panels
+                .iter()
+                .any(|panel| panel.owns_keyboard_layer(ctx))
+        {
+            return true;
+        }
+
+        let focused_id = ctx.memory(|memory| memory.focused());
+        let focused_layer = focused_response_layer(ctx);
+        if focused_layer == Some(notes_dialog_layer_id()) {
+            return true;
+        }
+        if focused_id.is_some_and(|focused_id| {
+            focused_id != egui::Id::new("query_input")
+                && (focused_layer.is_none()
+                    || query_layer.is_some_and(|query_layer| focused_layer != Some(query_layer)))
+        }) {
+            return true;
+        }
+
+        false
+    }
+
+    fn pending_show_query_focus_is_eligible(
+        &mut self,
+        ctx: &egui::Context,
+        query_response: &egui::Response,
+    ) -> Option<u64> {
+        let pending = self.pending_show_query_focus?;
+        let current_revision = self.visibility_revision.current();
+        if current_revision != pending.visibility_revision
+            || !self.visible_flag.load(Ordering::Relaxed)
+        {
+            self.pending_show_query_focus = None;
+            return None;
+        }
+
+        // Owner changes and deliberate user input permanently take over this
+        // show intent, even if the native window has not published its first
+        // identity yet. Otherwise a delayed HWND acknowledgement could steal
+        // focus after that owner has already closed.
+        if self.pending_show_query_focus_owner_blocks(ctx, Some(query_response.layer_id))
+            || Self::launcher_show_focus_has_user_transfer(ctx)
+            || self.jump_mode_ui.active_session().is_some()
+        {
+            self.pending_show_query_focus = None;
+            return None;
+        }
+        if !query_response.enabled() {
+            // Navigation ownership can temporarily disable the query while
+            // ROOT has not acknowledged native focus yet. That is a wait
+            // state, not a transfer to another input owner.
+            return None;
+        }
+
+        let Some(current_identity) = self.published_root_identity_for_show_focus() else {
+            // On Windows, eframe can publish the ROOT HWND after the first
+            // visible pass. Keep this request revision-bound until that exact
+            // root lifetime is available.
+            return None;
+        };
+        match pending.root_identity {
+            Some((hwnd, generation)) if !self.root_window_bridge.is_current(hwnd, generation) => {
+                self.pending_show_query_focus = None;
+                return None;
+            }
+            Some(_) => {}
+            None => {
+                if let Some(current) = self.pending_show_query_focus.as_mut() {
+                    current.root_identity = Some(current_identity);
+                }
+            }
+        }
+        if !self
+            .root_window_bridge
+            .is_current(current_identity.0, current_identity.1)
+        {
+            self.pending_show_query_focus = None;
+            return None;
+        }
+
+        if !ctx.input(|input| input.focused) {
+            return None;
+        }
+
+        // A newer visibility request can race the frame after the initial
+        // revision check. Revalidate immediately before handing focus to egui.
+        if self.visibility_revision.current() != pending.visibility_revision
+            || !self
+                .root_window_bridge
+                .is_current(current_identity.0, current_identity.1)
+        {
+            self.pending_show_query_focus = None;
+            return None;
+        }
+
+        Some(pending.visibility_revision)
+    }
+
+    fn pending_show_query_focus_owner_blocks_before_query(&self, ctx: &egui::Context) -> bool {
+        let query_layer = ctx
+            .read_response(egui::Id::new("query_input"))
+            .map(|response| response.layer_id);
+        self.pending_show_query_focus_owner_blocks(ctx, query_layer)
+    }
+
+    fn launcher_show_focus_has_user_transfer(ctx: &egui::Context) -> bool {
+        ctx.input(|input| {
+            input.events.iter().any(|event| match event {
+                egui::Event::PointerButton { pressed: true, .. } => true,
+                egui::Event::Key {
+                    key: egui::Key::Tab,
+                    pressed: true,
+                    ..
+                } => true,
+                egui::Event::Key {
+                    key: egui::Key::Space,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.shift => true,
+                _ => false,
+            })
+        })
+    }
+
+    fn launcher_query_cursor_navigation_input(ctx: &egui::Context) -> bool {
+        ctx.input(|input| {
+            input.focused
+                && input.events.iter().any(|event| match event {
+                    egui::Event::Key {
+                        key:
+                            egui::Key::ArrowLeft
+                            | egui::Key::ArrowRight
+                            | egui::Key::ArrowUp
+                            | egui::Key::ArrowDown
+                            | egui::Key::Home
+                            | egui::Key::End,
+                        pressed: true,
+                        ..
+                    } => true,
+                    egui::Event::Key {
+                        key: egui::Key::A,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } => modifiers.matches_logically(egui::Modifiers::COMMAND),
+                    _ => false,
+                })
+        })
+    }
+
     fn resolve_universal_actions(
         &self,
         action: &Action,
@@ -2451,7 +2665,14 @@ impl LauncherApp {
         if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
             self.launcher_hwnd = Some(hwnd.0 as usize);
         }
-        self.root_window_bridge.capture_frame(frame);
+        #[cfg(test)]
+        let capture_root_identity =
+            !std::mem::take(&mut self.test_unpublish_root_identity_before_visibility_reconcile);
+        #[cfg(not(test))]
+        let capture_root_identity = true;
+        if capture_root_identity {
+            self.root_window_bridge.capture_frame(frame);
+        }
 
         let plugin_search_generation = self.plugins.search_generation();
         if plugin_search_generation != self.last_plugin_search_generation
@@ -2635,13 +2856,21 @@ impl LauncherApp {
 
     fn reconcile_root_visibility(&mut self, ctx: &egui::Context) -> (u64, Option<u64>, bool, bool) {
         if self.pinboard_capture_owns_root() {
-            let (revision, (should_be_visible, invocation_id)) =
+            let (revision, (should_be_visible, invocation_id, focus_intent)) =
                 self.visibility_revision.inspect(|| {
                     (
                         self.visible_flag.load(Ordering::SeqCst),
                         self.visibility_revision.invocation_id(),
+                        self.visibility_revision.focus_intent(),
                     )
                 });
+            self.pending_show_query_focus = None;
+            self.update_pending_show_query_focus_for_visibility(
+                revision,
+                should_be_visible,
+                false,
+                focus_intent,
+            );
             return (revision, invocation_id, should_be_visible, false);
         }
         let (
@@ -2821,6 +3050,12 @@ impl LauncherApp {
         {
             self.root_window_bridge.request_presentation_reconcile();
         }
+        self.update_pending_show_query_focus_for_visibility(
+            visibility_request,
+            should_be_visible,
+            just_became_visible,
+            focus_intent,
+        );
         (
             visibility_request,
             visibility_invocation_id,
@@ -2861,7 +3096,7 @@ impl LauncherApp {
             && !self.ocr_surface_visible();
 
         let query_geometry_cause = self.run_runtime_tick(ctx, frame);
-        let (visibility_request, visibility_invocation_id, should_be_visible, just_became_visible) =
+        let (visibility_request, visibility_invocation_id, should_be_visible, _) =
             self.reconcile_root_visibility(ctx);
         self.mouse_gestures_dialog
             .reconcile_canvas_drag_with_root_lifecycle(ctx, should_be_visible);
@@ -2880,11 +3115,11 @@ impl LauncherApp {
             query_geometry_cause,
             source_state_before_frame,
             snippet_prompt_owns_input,
-            just_became_visible,
             visibility_request,
             visibility_invocation_id,
             should_be_visible,
             ui_passes: 0,
+            show_query_focus_attempted_revision: None,
             trace_root_hwnd,
         });
     }
@@ -4116,6 +4351,14 @@ impl LauncherApp {
             || self
                 .jump_mode_ui
                 .combo_popup_transition_pending(combo_popup_candidate.as_ref());
+        if self.pending_show_query_focus.is_some()
+            && (Self::launcher_show_focus_has_user_transfer(&ctx)
+                || self.jump_mode_ui.active_session().is_some())
+        {
+            // Capture deliberate transfers before Jump Mode consumes leader,
+            // hint, or handoff keys from egui's event stream.
+            self.pending_show_query_focus = None;
+        }
         let navigation_input_allowed = !owner_transition_pending
             && self.jump_mode_navigation_input_allowed(
                 &ctx,
@@ -4130,6 +4373,11 @@ impl LauncherApp {
             supported_dialog_visibility_changed,
             combo_popup_candidate,
         );
+        if self.pending_show_query_focus.is_some()
+            && self.pending_show_query_focus_owner_blocks_before_query(&ctx)
+        {
+            self.pending_show_query_focus = None;
+        }
         if first_ui_pass
             && self.snippet_prompt_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
         {
@@ -4186,7 +4434,6 @@ impl LauncherApp {
         let mut query_geometry_cause = frame_logic.query_geometry_cause;
         let source_state_before_frame = frame_logic.source_state_before_frame;
         let mut snippet_prompt_owns_input = frame_logic.snippet_prompt_owns_input;
-        let just_became_visible = frame_logic.just_became_visible;
         let mut painted_root_generation = None;
         let mut painted_query_results = false;
 
@@ -4539,6 +4786,21 @@ impl LauncherApp {
                     Vec::new()
                 };
 
+                // Capture cursor state before TextEdit processing: an
+                // unfocused widget can collapse a selection while a delayed
+                // native focus acknowledgement is pending. Keep this snapshot
+                // with the one-shot show request so discarded passes and
+                // delayed frames share the same original caret state.
+                let query_cursor_before_show_focus = self
+                    .pending_show_query_focus
+                    .and_then(|_| egui::TextEdit::load_state(ui.ctx(), input_id))
+                    .and_then(|state| state.cursor.char_range());
+                if let (Some(pending), Some(cursor_range)) = (
+                    self.pending_show_query_focus.as_mut(),
+                    query_cursor_before_show_focus,
+                ) {
+                    pending.query_cursor_range.get_or_insert(cursor_range);
+                }
                 let text_edit_started = self.track_c_query_observer.tentative_start();
                 let mut query_output = show_root_query_editor(
                     ui,
@@ -4548,19 +4810,42 @@ impl LauncherApp {
                     !action_sheet_blocks_launcher_input && root_navigation_allowed,
                 )
                 .output;
+                let query_text_edited = query_output.response.changed();
+                let query_cursor_navigated = self.pending_show_query_focus.is_some()
+                    && query_output.response.enabled()
+                    && query_output.response.has_focus()
+                    && Self::launcher_query_cursor_navigation_input(&ctx);
+                if (query_text_edited || query_cursor_navigated)
+                    && let (Some(pending), Some(cursor_range)) = (
+                        self.pending_show_query_focus.as_mut(),
+                        query_output.cursor_range,
+                    )
+                {
+                    // TextEdit may process real input while the show intent
+                    // is still waiting for ROOT's native identity. Carry the
+                    // resulting cursor/selection forward so a later eligible
+                    // frame cannot restore the pre-input position.
+                    pending.query_cursor_range = Some(cursor_range);
+                }
+                let move_cursor_end_requested = self.move_cursor_end;
                 if self.move_cursor_end
                     && !action_sheet_blocks_launcher_input
                     && root_navigation_allowed
                     && query_output.response.enabled()
                     && query_output.response.has_focus()
                 {
-                    query_output
-                        .state
-                        .cursor
-                        .set_char_range(Some(egui::text::CCursorRange::one(
-                            egui::text::CCursor::new(self.query.chars().count()),
-                        )));
+                    let cursor_range = egui::text::CCursorRange::one(egui::text::CCursor::new(
+                        self.query.chars().count(),
+                    ));
+                    query_output.state.cursor.set_char_range(Some(cursor_range));
                     query_output.state.clone().store(ui.ctx(), input_id);
+                    if let Some(pending) = self.pending_show_query_focus.as_mut() {
+                        // An explicit caret request may be consumed while a
+                        // show intent is still waiting for ROOT's focus ack.
+                        // Carry its resulting caret forward so a later show
+                        // pass cannot restore the older selection snapshot.
+                        pending.query_cursor_range = Some(cursor_range);
+                    }
                     self.move_cursor_end = false;
                 }
                 let query_response = query_output.response;
@@ -4569,16 +4854,47 @@ impl LauncherApp {
                 ctx.data_mut(|data| {
                     data.insert_temp(egui::Id::new("launcher-query-response-rect"), query_response.rect)
                 });
-                if first_ui_pass
+                let programmatic_query_focus_requested = first_ui_pass
                     && Self::launcher_query_focus_should_be_requested(
-                    just_became_visible,
-                    self.focus_query,
-                    self.file_search_dialog.open,
-                ) && !action_sheet_blocks_launcher_input
+                        false,
+                        self.focus_query,
+                        self.file_search_dialog.open,
+                    )
+                    && !action_sheet_blocks_launcher_input
                     && root_navigation_allowed
-                {
-                    query_response.request_focus();
+                ;
+                let show_query_focus_revision = self
+                    .pending_show_query_focus_is_eligible(&ctx, &query_response);
+                if programmatic_query_focus_requested {
                     self.focus_query = false;
+                }
+                let show_focus_requested = show_query_focus_revision.is_some()
+                    && !query_response.has_focus();
+                if programmatic_query_focus_requested || show_focus_requested {
+                    query_response.request_focus();
+                }
+                let show_focus_cursor_range = self
+                    .pending_show_query_focus
+                    .and_then(|pending| pending.query_cursor_range);
+                if self.pending_show_query_focus.is_some()
+                    && !programmatic_query_focus_requested
+                    && !move_cursor_end_requested
+                    && !self.move_cursor_end
+                    && let Some(cursor_range) = show_focus_cursor_range
+                {
+                    // egui collapses an unfocused selection while rendering
+                    // TextEdit. Restore only while this one-shot show intent
+                    // remains active; explicit caret requests retain priority.
+                    query_output
+                        .state
+                        .cursor
+                        .set_char_range(Some(cursor_range));
+                    query_output.state.clone().store(&ctx, input_id);
+                }
+                if let Some(revision) = show_query_focus_revision
+                    && let Some(frame_logic) = self.root_frame_logic.as_mut()
+                {
+                    frame_logic.show_query_focus_attempted_revision = Some(revision);
                 }
                 let query_has_focus = root_navigation_allowed && query_response.has_focus();
 
@@ -5407,12 +5723,10 @@ impl LauncherApp {
                                 self.last_results_valid = false;
                                 self.search();
                             }
+                            // Only an explicit result/list action may queue the
+                            // programmatic request; a steady visible frame must
+                            // not steal focus back from another owner.
                             if first_ui_pass && set_focus {
-                                self.focus_input();
-                            } else if first_ui_pass
-                                && self.visible_flag.load(Ordering::SeqCst)
-                                && !self.any_panel_open()
-                            {
                                 self.focus_input();
                             }
                         });
@@ -6962,6 +7276,23 @@ impl LauncherApp {
     }
 
     fn finish_ui_frame_receipt(&mut self) {
+        let completed_show_focus_revision = self
+            .root_frame_logic
+            .as_ref()
+            .and_then(|logic| logic.show_query_focus_attempted_revision);
+        if let Some(revision) = completed_show_focus_revision
+            && self
+                .pending_show_query_focus
+                .is_some_and(|pending| pending.visibility_revision == revision)
+            && self.visibility_revision.current() == revision
+            && self.visible_flag.load(Ordering::Relaxed)
+        {
+            // This point runs only after egui has chosen the retained pass. A
+            // request made during a discarded pass remains pending until the
+            // actual retained query Response has received the focus request.
+            self.pending_show_query_focus = None;
+        }
+
         let Some(candidate) = self.pending_ui_frame_receipt.take() else {
             let observer_frame_open = self
                 .root_frame_logic
@@ -7271,7 +7602,6 @@ impl LauncherApp {
                 } else {
                     self.begin_root_frame_logic(ui.ctx(), &mut frame);
                 }
-
                 if let Some(times) = phase_times.as_deref_mut() {
                     let started = std::time::Instant::now();
                     render_pass(self, ui);
@@ -8589,7 +8919,6 @@ mod tests {
             app.focus_query = true;
             app.root_frame_logic = Some(RootFrameLogic {
                 should_be_visible: true,
-                just_became_visible: true,
                 ..Default::default()
             });
             app.toasts.add(Toast {
@@ -22826,7 +23155,7 @@ mod tests {
     #[test]
     fn preserve_foreground_root_frame_has_safe_show_but_no_native_or_framework_focus() {
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
         install_owned_root_for_test(&mut app);
         app.query = "protected dirty query".into();
         app.visibility_revision.request_with_focus_intent(
@@ -36839,10 +37168,495 @@ mod tests {
         assert!(!include_str!("../window_manager.rs").contains("VK_END"));
     }
 
+    fn launcher_show_focus_test_app(
+        ctx: &egui::Context,
+        query: &str,
+    ) -> (
+        crate::performance::workloads::IsolatedWorkspace,
+        LauncherApp,
+    ) {
+        let (workspace, mut app) = root_list_test_app(ctx, two_results());
+        app.query = query.to_owned();
+        app.last_search_query = app.query.clone();
+        app.last_results_valid = true;
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+        app.focus_query = false;
+        app.move_cursor_end = false;
+        install_owned_root_for_test(&mut app);
+        (workspace, app)
+    }
+
+    #[test]
+    fn launcher_show_focus_requests_actual_query_for_empty_and_nonempty_queries_in_both_jump_modes()
+    {
+        let query_id = egui::Id::new("query_input");
+        for (query, jump_mode) in [
+            ("", false),
+            ("", true),
+            ("preserve this query", false),
+            ("preserve this query", true),
+        ] {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, query);
+            if jump_mode {
+                app.set_jump_mode_enabled(true);
+            }
+            let revision = app.request_launcher_state(Some(true), Some(true));
+
+            let (output, _) = app.run_root_frame_for_test(&ctx, actual_query_input(true), false);
+
+            assert!(
+                ctx.memory(|memory| memory.has_focus(query_id)),
+                "the retained query Response should own focus for query {query:?} with Jump Mode {jump_mode}"
+            );
+            assert_eq!(app.query, query);
+            assert_eq!(app.visibility_revision.current(), revision);
+            assert!(app.pending_show_query_focus.is_none());
+            assert!(!app.move_cursor_end, "show focus must not move the caret");
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn launcher_show_focus_waits_for_root_focus_and_never_refocuses_an_already_visible_query() {
+        for jump_mode in [false, true] {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) =
+                launcher_show_focus_test_app(&ctx, "delayed acknowledgement");
+            if jump_mode {
+                app.set_jump_mode_enabled(true);
+            }
+            let revision = app.request_launcher_state(Some(true), Some(true));
+            let query_id = egui::Id::new("query_input");
+
+            app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                .0
+                .drop_without_applying_deltas();
+            assert_eq!(
+                app.pending_show_query_focus
+                    .map(|pending| pending.visibility_revision),
+                Some(revision),
+                "the show request remains pending until the ROOT input reports focus; Jump Mode: {jump_mode}"
+            );
+            assert!(!ctx.memory(|memory| memory.has_focus(query_id)));
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+            assert!(app.pending_show_query_focus.is_none());
+
+            ctx.memory_mut(|memory| memory.surrender_focus(query_id));
+            set_query_cursor(&ctx, 2, 5);
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(
+                !ctx.memory(|memory| memory.has_focus(query_id)),
+                "a steady-state visible frame must not reapply the consumed show intent"
+            );
+        }
+    }
+
+    #[test]
+    fn launcher_show_focus_is_canceled_by_hide_or_a_new_visibility_revision() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "revision cancellation");
+        app.request_launcher_state(Some(true), Some(true));
+        app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.pending_show_query_focus.is_some());
+        // A newer request while already visible invalidates the prior one-shot
+        // intent but is not itself a hidden-to-visible edge.
+        app.request_launcher_state(Some(true), Some(false));
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.pending_show_query_focus.is_none());
+        assert!(!ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+
+        app.request_launcher_visibility(false);
+        app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.pending_show_query_focus.is_none());
+    }
+
+    #[test]
+    fn launcher_show_focus_never_arms_for_preserve_foreground() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "preserve foreground");
+        app.visibility_revision.request_with_focus_intent(
+            RootFocusIntent::PreserveForeground,
+            || {
+                app.visible_flag.store(true, Ordering::SeqCst);
+                app.restore_flag.store(true, Ordering::SeqCst);
+            },
+        );
+
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+
+        assert!(app.pending_show_query_focus.is_none());
+        assert!(!ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+    }
+
+    #[test]
+    fn launcher_show_focus_cancels_on_click_tab_and_protected_owner_takeover() {
+        let query_id = egui::Id::new("query_input");
+        for (transfer, focused) in [
+            (
+                egui::Event::PointerButton {
+                    pos: egui::pos2(20.0, 20.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                false,
+            ),
+            (key_press(egui::Key::Tab, egui::Modifiers::NONE), false),
+        ] {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "user transfer");
+            app.request_launcher_state(Some(true), Some(true));
+            app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(app.pending_show_query_focus.is_some());
+            let mut input = actual_query_input(focused);
+            input.events.push(transfer);
+            app.run_root_frame_for_test(&ctx, input, false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(app.pending_show_query_focus.is_none());
+            ctx.memory_mut(|memory| memory.surrender_focus(query_id));
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(!ctx.memory(|memory| memory.has_focus(query_id)));
+        }
+
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "protected owner");
+        app.request_launcher_state(Some(true), Some(true));
+        app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.pending_show_query_focus.is_some());
+        assert!(app.open_action_sheet_for_index(0));
+        app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.pending_show_query_focus.is_none());
+        app.close_action_sheet();
+        // The close action requests programmatic focus independently; clear
+        // only that explicit request to check the canceled show intent.
+        app.focus_query = false;
+        ctx.memory_mut(|memory| memory.surrender_focus(query_id));
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!ctx.memory(|memory| memory.has_focus(query_id)));
+    }
+
+    #[test]
+    fn launcher_show_focus_rejects_replaced_root_generation() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "stale root generation");
+        app.request_launcher_state(Some(true), Some(true));
+        app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.pending_show_query_focus.is_some());
+        app.root_window_bridge.set_identity_for_test(43);
+        app.launcher_hwnd = Some(43);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.pending_show_query_focus.is_none());
+        assert!(!ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn launcher_show_focus_waits_for_initial_root_identity_and_cancels_transfer_before_publication()
+    {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.query = "unpublished root".into();
+        app.last_visible = false;
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.request_launcher_state(Some(true), Some(true));
+        app.test_unpublish_root_identity_before_visibility_reconcile = true;
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.pending_show_query_focus.is_some());
+        assert_eq!(
+            app.pending_show_query_focus
+                .map(|pending| pending.root_identity),
+            Some(None)
+        );
+        assert!(!ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+        // The first visible frame armed the request without an HWND. Publish
+        // the delayed identity between frames, then keep kittest's unrelated
+        // synthetic handle from replacing it during the next runtime tick.
+        app.root_window_bridge.set_identity_for_test(43);
+        app.root_window_bridge
+            .qualify_simulated_wake_for_test()
+            .unwrap();
+        app.launcher_hwnd = Some(43);
+        app.test_unpublish_root_identity_before_visibility_reconcile = true;
+        let (output, _) =
+            app.run_root_frame_for_test_with(&ctx, actual_query_input(true), false, |app, ui| {
+                app.render_root_ui(ui)
+            });
+        output.drop_without_applying_deltas();
+        let query_id = egui::Id::new("query_input");
+        let query_response = ctx.read_response(query_id);
+        assert!(
+            ctx.memory(|memory| memory.has_focus(query_id)),
+            "focus after delayed HWND publication: root_identity={:?}, pending={:?}, root_visible={}, input_focused={}, query_enabled={:?}, query_focused={:?}, navigation_owner={:?}",
+            app.root_window_bridge.identity(),
+            app.pending_show_query_focus,
+            app.visible_flag.load(Ordering::Relaxed),
+            ctx.input(|input| input.focused),
+            query_response.as_ref().map(egui::Response::enabled),
+            query_response.as_ref().map(egui::Response::has_focus),
+            app.jump_mode_ui.frame_navigation_owner(),
+        );
+        assert!(app.pending_show_query_focus.is_none());
+        drop(app);
+        drop(_workspace);
+
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.query = "unpublished transfer".into();
+        app.last_visible = false;
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.request_launcher_state(Some(true), Some(true));
+        app.test_unpublish_root_identity_before_visibility_reconcile = true;
+        app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.pending_show_query_focus.is_some());
+        let mut input = actual_query_input(false);
+        input
+            .events
+            .push(key_press(egui::Key::Tab, egui::Modifiers::NONE));
+        app.test_unpublish_root_identity_before_visibility_reconcile = true;
+        app.run_root_frame_for_test(&ctx, input, false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.pending_show_query_focus.is_none());
+        install_owned_root_for_test(&mut app);
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+        drop(app);
+        drop(_workspace);
+
+        // A Shift+Space leader is a deliberate transfer attempt and must
+        // cancel pending show focus independently of the current Jump owner.
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.set_jump_mode_enabled(true);
+        app.last_visible = false;
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.request_launcher_state(Some(true), Some(true));
+        app.test_unpublish_root_identity_before_visibility_reconcile = true;
+        app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.pending_show_query_focus.is_some());
+
+        app.test_unpublish_root_identity_before_visibility_reconcile = true;
+        let (output, _) =
+            app.run_root_frame_for_test_with(&ctx, actual_query_input(true), false, |app, ui| {
+                app.render_root_ui(ui)
+            });
+        output.drop_without_applying_deltas();
+        assert!(app.pending_show_query_focus.is_some());
+
+        let mut input = actual_query_input(true);
+        input
+            .events
+            .push(key_press(egui::Key::Space, egui::Modifiers::SHIFT));
+        app.test_unpublish_root_identity_before_visibility_reconcile = true;
+        let (output, _) =
+            app.run_root_frame_for_test_with(&ctx, input, false, |app, ui| app.render_root_ui(ui));
+        assert!(!root_commands(&output).iter().any(|command| matches!(
+            command,
+            egui::ViewportCommand::Focus
+                | egui::ViewportCommand::Visible(true)
+                | egui::ViewportCommand::Minimized(false)
+        )));
+        output.drop_without_applying_deltas();
+        assert!(app.pending_show_query_focus.is_none());
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(!ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+        drop(app);
+        drop(_workspace);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn launcher_show_focus_tracks_text_and_cursor_navigation_while_identity_is_pending() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.query = "aβz".into();
+        prepare_actual_query_frame(&ctx, &mut app);
+        set_query_cursor(&ctx, 2, 2);
+
+        // Start a real show edge while the query retains egui focus but ROOT's
+        // HWND is unpublished. TextEdit must keep following the user's edits
+        // while the one-shot request waits for native identity.
+        app.root_window_bridge.clear();
+        app.last_visible = false;
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.request_launcher_state(Some(true), Some(true));
+        app.test_unpublish_root_identity_before_visibility_reconcile = true;
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.pending_show_query_focus.is_some());
+        assert_eq!(app.pending_show_query_focus.unwrap().root_identity, None);
+        assert_eq!(query_cursor_indices(&ctx), (2, 2));
+
+        let mut input = actual_query_input(true);
+        input.events.push(egui::Event::Text("🌱".into()));
+        app.test_unpublish_root_identity_before_visibility_reconcile = true;
+        app.run_root_frame_for_test(&ctx, input, false)
+            .0
+            .drop_without_applying_deltas();
+        assert_eq!(app.query, "aβ🌱z");
+        assert_eq!(query_cursor_indices(&ctx), (3, 3));
+        assert_eq!(
+            app.pending_show_query_focus
+                .and_then(|pending| pending.query_cursor_range)
+                .map(|range| (range.primary.index.0, range.secondary.index.0)),
+            Some((3, 3))
+        );
+
+        let mut input = actual_query_input(true);
+        input
+            .events
+            .push(key_press(egui::Key::ArrowLeft, egui::Modifiers::NONE));
+        app.test_unpublish_root_identity_before_visibility_reconcile = true;
+        app.run_root_frame_for_test(&ctx, input, false)
+            .0
+            .drop_without_applying_deltas();
+        assert_eq!(app.query, "aβ🌱z");
+        assert_eq!(query_cursor_indices(&ctx), (2, 2));
+        assert_eq!(
+            app.pending_show_query_focus
+                .and_then(|pending| pending.query_cursor_range)
+                .map(|range| (range.primary.index.0, range.secondary.index.0)),
+            Some((2, 2))
+        );
+
+        let mut input = actual_query_input(true);
+        input
+            .events
+            .push(key_press(egui::Key::ArrowUp, egui::Modifiers::SHIFT));
+        app.test_unpublish_root_identity_before_visibility_reconcile = true;
+        app.run_root_frame_for_test(&ctx, input, false)
+            .0
+            .drop_without_applying_deltas();
+        assert_eq!(app.query, "aβ🌱z");
+        assert_eq!(query_cursor_indices(&ctx), (0, 2));
+        assert_eq!(
+            app.pending_show_query_focus
+                .and_then(|pending| pending.query_cursor_range)
+                .map(|range| (range.primary.index.0, range.secondary.index.0)),
+            Some((0, 2))
+        );
+
+        let mut input = actual_query_input(true);
+        input
+            .events
+            .push(key_press(egui::Key::ArrowDown, egui::Modifiers::SHIFT));
+        app.test_unpublish_root_identity_before_visibility_reconcile = true;
+        app.run_root_frame_for_test(&ctx, input, false)
+            .0
+            .drop_without_applying_deltas();
+        assert_eq!(app.query, "aβ🌱z");
+        assert_eq!(query_cursor_indices(&ctx), (4, 2));
+        assert_eq!(
+            app.pending_show_query_focus
+                .and_then(|pending| pending.query_cursor_range)
+                .map(|range| (range.primary.index.0, range.secondary.index.0)),
+            Some((4, 2))
+        );
+
+        app.root_window_bridge.set_identity_for_test(43);
+        app.root_window_bridge
+            .qualify_simulated_wake_for_test()
+            .unwrap();
+        app.launcher_hwnd = Some(43);
+        app.test_unpublish_root_identity_before_visibility_reconcile = true;
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(app.pending_show_query_focus.is_none());
+        assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+        assert_eq!(query_cursor_indices(&ctx), (4, 2));
+
+        let mut input = actual_query_input(true);
+        input
+            .events
+            .push(key_press(egui::Key::ArrowLeft, egui::Modifiers::NONE));
+        app.test_unpublish_root_identity_before_visibility_reconcile = true;
+        app.run_root_frame_for_test(&ctx, input, false)
+            .0
+            .drop_without_applying_deltas();
+        assert_eq!(query_cursor_indices(&ctx), (2, 2));
+
+        let mut input = actual_query_input(true);
+        input.events.push(egui::Event::Text("é".into()));
+        app.test_unpublish_root_identity_before_visibility_reconcile = true;
+        app.run_root_frame_for_test(&ctx, input, false)
+            .0
+            .drop_without_applying_deltas();
+        assert_eq!(app.query, "aβé🌱z");
+        assert_eq!(query_cursor_indices(&ctx), (3, 3));
+    }
+
+    #[test]
+    fn launcher_show_focus_survives_discarded_pass_without_changing_query_or_selection() {
+        let ctx = egui::Context::default();
+        let query = "preserve β caret";
+        let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, query);
+        let query_id = egui::Id::new("query_input");
+        focus_launcher_query(&ctx, &mut app);
+        ctx.memory_mut(|memory| memory.surrender_focus(query_id));
+        set_query_cursor(&ctx, 2, 7);
+        let cursor_before = query_cursor_indices(&ctx);
+        app.request_launcher_state(Some(true), Some(true));
+
+        let (output, passes) = app.run_root_frame_for_test(&ctx, actual_query_input(true), true);
+        output.drop_without_applying_deltas();
+
+        assert_eq!(passes, 2);
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        assert!(app.pending_show_query_focus.is_none());
+        assert_eq!(app.query, query);
+        assert_eq!(query_cursor_indices(&ctx), cursor_before);
+        assert!(!app.move_cursor_end);
+    }
+
     #[test]
     fn actual_root_query_caret_request_survives_unfocused_and_action_sheet_disabled_frames() {
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
         app.query = "pending caret".into();
         prepare_actual_query_frame(&ctx, &mut app);
         set_query_cursor(&ctx, 0, 0);
@@ -36877,6 +37691,57 @@ mod tests {
             .drop_without_applying_deltas();
         assert!(!app.move_cursor_end);
         assert_query_cursor_end(&ctx, &app.query);
+
+        #[cfg(windows)]
+        {
+            let ctx = egui::Context::default();
+            drop(app);
+            let mut app = root_list_app_at(&ctx, Vec::new(), _workspace.root());
+            app.query = "preserve explicit caret".into();
+            prepare_actual_query_frame(&ctx, &mut app);
+            set_query_cursor(&ctx, 2, 5);
+            app.move_cursor_end = true;
+            // The preceding setup frame published its kittest HWND. Remove
+            // that identity before modeling a hidden-to-visible startup so
+            // the pending show intent is armed without a native identity.
+            app.root_window_bridge.clear();
+            app.last_visible = false;
+            app.visible_flag.store(false, Ordering::SeqCst);
+            app.request_launcher_state(Some(true), Some(true));
+            app.test_unpublish_root_identity_before_visibility_reconcile = true;
+
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+            assert!(app.pending_show_query_focus.is_some());
+            let expected_end = app.query.chars().count();
+            assert_eq!(
+                app.pending_show_query_focus
+                    .and_then(|pending| pending.query_cursor_range)
+                    .map(|range| (range.primary.index.0, range.secondary.index.0)),
+                Some((expected_end, expected_end)),
+                "an explicit cursor-to-end request consumed while ROOT identity is pending must replace the saved selection"
+            );
+            assert_query_cursor_end(&ctx, &app.query);
+
+            app.root_window_bridge.set_identity_for_test(43);
+            app.root_window_bridge
+                .qualify_simulated_wake_for_test()
+                .unwrap();
+            app.launcher_hwnd = Some(43);
+            app.test_unpublish_root_identity_before_visibility_reconcile = true;
+            let (output, _) = app.run_root_frame_for_test_with(
+                &ctx,
+                actual_query_input(true),
+                false,
+                |app, ui| app.render_root_ui(ui),
+            );
+            output.drop_without_applying_deltas();
+            assert!(app.pending_show_query_focus.is_none());
+            assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+            assert_query_cursor_end(&ctx, &app.query);
+            drop(app);
+        }
     }
 
     #[test]
