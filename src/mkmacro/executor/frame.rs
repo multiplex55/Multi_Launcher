@@ -1110,6 +1110,208 @@ mod tests {
     }
 
     #[test]
+    fn parameter_forms_integration_nested_calls_keep_exact_values_defaults_and_failure_isolation() {
+        use crate::mkmacro::{
+            MkCallArgumentBinding, MkCallMacroPayload, MkMacroParameter, MkParameterInputKind,
+            MkSignatureId, MkValueSource, MkValueType,
+        };
+
+        let parameter = |id, name: &str, input_kind, default_value| MkMacroParameter {
+            id: MkSignatureId(id),
+            name: name.into(),
+            value_type: MkValueType::String,
+            input_kind,
+            description: String::new(),
+            default_value,
+        };
+
+        let mut child = macro_with(
+            2,
+            vec![
+                step(1, text("child:${file}|${folder}|${mode}|${note}")),
+                step(2, set("file", "callee-local-file")),
+                step(3, set("folder", "callee-local-folder")),
+                step(4, set("mode", "callee-local-choice")),
+                step(5, set("note", "callee-local-default")),
+            ],
+        );
+        child.signature.parameters = vec![
+            parameter(1, "file", MkParameterInputKind::File, None),
+            parameter(2, "folder", MkParameterInputKind::Folder, None),
+            parameter(
+                3,
+                "mode",
+                MkParameterInputKind::Choice(vec!["safe".into(), "alternate".into()]),
+                None,
+            ),
+            parameter(
+                4,
+                "note",
+                MkParameterInputKind::Text,
+                Some(MkValue::String("authored default".into())),
+            ),
+        ];
+
+        let mut nested_call = step(
+            2,
+            MkAction::CallMacro(MkCallMacroPayload {
+                macro_id: 2,
+                arguments: vec![
+                    MkCallArgumentBinding {
+                        parameter_id: MkSignatureId(1),
+                        source: MkValueSource::Variable {
+                            name: "file".into(),
+                        },
+                    },
+                    MkCallArgumentBinding {
+                        parameter_id: MkSignatureId(2),
+                        source: MkValueSource::Variable {
+                            name: "folder".into(),
+                        },
+                    },
+                    MkCallArgumentBinding {
+                        parameter_id: MkSignatureId(3),
+                        source: MkValueSource::Variable {
+                            name: "mode".into(),
+                        },
+                    },
+                ],
+                ..Default::default()
+            }),
+        );
+        // A failed nested preflight should leave the caller able to continue.
+        nested_call.on_error = MkErrorPolicy::Continue;
+        let mut root = macro_with(
+            1,
+            vec![
+                step(1, set("caller_state", "preserved")),
+                nested_call,
+                step(
+                    3,
+                    text("caller:${file}|${folder}|${mode}:${caller_state}:${last_action_success}"),
+                ),
+            ],
+        );
+        // The root transports values as ordinary strings; the child owns and
+        // enforces the richer presentation metadata.
+        root.signature.parameters = vec![
+            parameter(101, "file", MkParameterInputKind::Text, None),
+            parameter(102, "folder", MkParameterInputKind::Text, None),
+            parameter(103, "mode", MkParameterInputKind::Text, None),
+        ];
+        let program = program(vec![root, child]);
+
+        let absent_root = tempfile::tempdir().unwrap();
+        // These paths are deliberately never created, checked, or executed;
+        // File and Folder metadata remains a String presentation constraint.
+        let first_file = absent_root
+            .path()
+            .join("first-missing-file.txt")
+            .to_str()
+            .expect("test temporary path should be representable as UTF-8")
+            .to_owned();
+        let first_folder = absent_root
+            .path()
+            .join("first-missing-folder")
+            .to_str()
+            .expect("test temporary path should be representable as UTF-8")
+            .to_owned();
+        let second_file = absent_root
+            .path()
+            .join("second-missing-file.txt")
+            .to_str()
+            .expect("test temporary path should be representable as UTF-8")
+            .to_owned();
+        let second_folder = absent_root
+            .path()
+            .join("second-missing-folder")
+            .to_str()
+            .expect("test temporary path should be representable as UTF-8")
+            .to_owned();
+        let invocation = |file: &str, folder: &str, mode: &str| {
+            [
+                (MkSignatureId(101), MkValue::String(file.into())),
+                (MkSignatureId(102), MkValue::String(folder.into())),
+                (MkSignatureId(103), MkValue::String(mode.into())),
+            ]
+            .into_iter()
+            .collect::<crate::mkmacro::MkInvocationValues>()
+        };
+
+        let fake = Arc::new(FakeBackend::default());
+        for (file, folder, mode) in [
+            (first_file.as_str(), first_folder.as_str(), "safe"),
+            (second_file.as_str(), second_folder.as_str(), "alternate"),
+        ] {
+            let control = Arc::new(RunControl::default());
+            control.reset();
+            Executor::new(fake.clone().backends(), control)
+                .execute_program(
+                    &program,
+                    &invocation(file, folder, mode),
+                    ExecutionOptions::normal(),
+                    &|_, _| {},
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            fake.events(),
+            [
+                format!("text:child:{first_file}|{first_folder}|safe|authored default"),
+                format!("text:caller:{first_file}|{first_folder}|safe:preserved:true"),
+                format!("text:child:{second_file}|{second_folder}|alternate|authored default"),
+                format!("text:caller:{second_file}|{second_folder}|alternate:preserved:true"),
+            ]
+        );
+
+        let rejected_value = "rejected-choice-sentinel";
+        let rejected_fake = Arc::new(FakeBackend::default());
+        let rejected_control = Arc::new(RunControl::default());
+        rejected_control.reset();
+        let entered_frames = std::sync::Mutex::new(Vec::new());
+        let failures = std::sync::Mutex::new(Vec::new());
+        Executor::new(rejected_fake.clone().backends(), rejected_control)
+            .execute_program(
+                &program,
+                &invocation(&first_file, &first_folder, rejected_value),
+                ExecutionOptions::normal(),
+                &|context, event| match event {
+                    ExecutionEvent::FrameEntered(_) => {
+                        entered_frames.lock().unwrap().push(context.macro_id);
+                    }
+                    ExecutionEvent::StepFailed(step_id, diagnostic) => failures
+                        .lock()
+                        .unwrap()
+                        .push((context.macro_id, step_id, diagnostic)),
+                    _ => {}
+                },
+            )
+            .unwrap();
+
+        assert_eq!(entered_frames.into_inner().unwrap(), [1]);
+        let failures = failures.into_inner().unwrap();
+        assert_eq!(failures.len(), 1);
+        let (failed_macro, failed_step, diagnostic) = &failures[0];
+        assert_eq!((*failed_macro, *failed_step), (1, 2));
+        assert!(diagnostic.message.contains("Parameter 'mode' is invalid"));
+        assert!(
+            diagnostic
+                .message
+                .contains("not one of the configured choices")
+        );
+        let diagnostic_text = format!("{diagnostic:?}");
+        assert!(!diagnostic_text.contains(rejected_value));
+        assert!(!diagnostic_text.contains(&first_file));
+        assert!(!diagnostic_text.contains(&first_folder));
+        assert_eq!(
+            rejected_fake.events(),
+            [format!(
+                "text:caller:{first_file}|{first_folder}|{rejected_value}:preserved:false"
+            )]
+        );
+    }
+
+    #[test]
     fn early_return_and_procedure_fallthrough_resume_the_exact_caller_position() {
         let root = macro_with(
             1,
