@@ -132,6 +132,7 @@ mod tests {
         headless_failure: bool,
         headless_commands: Vec<(Command, Action)>,
         dialog_calls: usize,
+        settings_search_queries: Vec<String>,
         qr_calls: Vec<Option<String>>,
         crop_calls: usize,
         note_calls: usize,
@@ -244,6 +245,9 @@ mod tests {
         }
         fn open_settings_dialog(&mut self) {
             self.dialog_calls += 1;
+        }
+        fn open_settings_search(&mut self, query: &str) {
+            self.settings_search_queries.push(query.to_owned());
         }
         fn open_dashboard_settings_dialog(&mut self) {
             self.dialog_calls += 1;

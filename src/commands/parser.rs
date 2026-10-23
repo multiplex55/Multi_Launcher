@@ -495,6 +495,9 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         "convert:panel" => Command::Dialog(DialogCommand::Convert),
         "tempfile:dialog" => Command::Storage(StorageCommand::TempfileDialog),
         "settings:dialog" => Command::Dialog(DialogCommand::Settings),
+        "settings:search" => Command::Dialog(DialogCommand::SettingsSearch {
+            query: action.args.clone().unwrap_or_default(),
+        }),
         "dashboard:settings" => Command::Dialog(DialogCommand::DashboardSettings),
         "theme:dialog" => Command::Dialog(DialogCommand::Theme),
         "volume:dialog" => Command::System(SystemCommand::VolumeDialog),
@@ -531,6 +534,58 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         _ => return parse_prefixed(action),
     };
     Ok(command)
+}
+
+#[cfg(test)]
+mod settings_search_entry_parser_tests {
+    use super::*;
+
+    fn action(raw: &str, args: Option<&str>) -> Action {
+        Action {
+            label: raw.into(),
+            desc: String::new(),
+            action: raw.into(),
+            args: args.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn settings_search_entry_parser_keeps_typed_query_and_legacy_dialogs() {
+        let query = "  font: \"Δelta\"\tlauncher  ";
+        let parsed = parse_action(&action("settings:search", Some(query))).unwrap();
+        assert_eq!(
+            parsed,
+            Command::Dialog(DialogCommand::SettingsSearch {
+                query: query.to_owned()
+            })
+        );
+        assert_eq!(parsed.kind_name(), "settings_search");
+
+        for args in [None, Some(" \t\u{2003}")] {
+            assert_eq!(
+                parse_action(&action("settings:search", args)).unwrap(),
+                Command::Dialog(DialogCommand::SettingsSearch {
+                    query: args.unwrap_or_default().to_owned()
+                })
+            );
+        }
+        assert_eq!(
+            parse_action(&action("settings:dialog", None)).unwrap(),
+            Command::Dialog(DialogCommand::Settings)
+        );
+        assert_eq!(
+            parse_action(&action("dashboard:settings", None)).unwrap(),
+            Command::Dialog(DialogCommand::DashboardSettings)
+        );
+        assert_eq!(
+            parse_action(&action("theme:dialog", None)).unwrap(),
+            Command::Dialog(DialogCommand::Theme)
+        );
+        assert!(matches!(
+            parse_action(&action("settings:search:font", Some(query))).unwrap(),
+            Command::External(_)
+        ));
+    }
 }
 
 fn parse_paste_sequence(raw: &str) -> Option<PasteSequenceCommand> {

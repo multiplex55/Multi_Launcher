@@ -3039,6 +3039,176 @@ mod tests {
     }
 
     #[test]
+    fn settings_search_catalog_g3_examples_find_exact_owned_controls() {
+        let catalog = SettingsCatalog::default();
+        let font_matches = catalog.search("font");
+        for id in ["launcher.query_scale", "launcher.list_scale"] {
+            let entry = font_matches
+                .iter()
+                .find(|entry| entry.id.as_str() == id)
+                .unwrap_or_else(|| panic!("font query should find {id}"));
+            assert_eq!(entry.owner, SettingsOwner::Application);
+            assert_eq!(
+                entry.section,
+                SettingsSection::Main(MainSettingsSection::LauncherWindow)
+            );
+            assert!(entry.availability.is_available());
+        }
+        let theme_font = font_matches
+            .iter()
+            .find(|entry| entry.id.as_str() == "theme.typography_scale")
+            .expect("font query also finds the separate theme text-size control");
+        assert_eq!(theme_font.owner, SettingsOwner::Theme);
+        assert_eq!(theme_font.section, SettingsSection::Theme);
+
+        let enabled_gestures = snapshot(
+            20,
+            vec![plugin(
+                "mouse_gestures",
+                PluginCatalogOrigin::Builtin,
+                77,
+                true,
+                true,
+                &[],
+            )],
+        );
+        let enabled_catalog = SettingsCatalog::from_plugin_snapshot(&enabled_gestures);
+        let gesture_matches = enabled_catalog.search("gesture interval");
+        let gesture_ids = gesture_matches
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            gesture_ids,
+            [
+                "mouse_gestures.recognition_interval",
+                "mouse_gestures.trail_interval"
+            ]
+        );
+        for entry in gesture_matches {
+            assert_eq!(
+                entry.owner,
+                SettingsOwner::Plugin {
+                    name: "mouse_gestures".into(),
+                    origin: PluginCatalogOrigin::Builtin,
+                    epoch: Some(77),
+                }
+            );
+            assert_eq!(entry.section, SettingsSection::MouseGestures);
+            assert!(entry.availability.is_available());
+        }
+
+        let paste_ids = catalog
+            .search("paste")
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paste_ids,
+            [
+                "paste.cancel.enabled",
+                "paste.cancel.hotkey",
+                "paste.escape_cancel",
+                "paste.keep_visible",
+                "paste.next.enabled",
+                "paste.next.hotkey",
+            ]
+        );
+        let next_hotkey = catalog.entry("paste.next.hotkey").unwrap();
+        assert_eq!(next_hotkey.owner, SettingsOwner::Application);
+        assert_eq!(
+            next_hotkey.section,
+            SettingsSection::Main(MainSettingsSection::PasteSequences)
+        );
+        assert!(matches!(
+            &next_hotkey.availability,
+            SettingsAvailability::Conditional { prerequisite }
+                if prerequisite.contains("Enable the Next shortcut")
+        ));
+
+        let top_matches = catalog.search("always on top");
+        assert_eq!(
+            top_matches
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["launcher.always_on_top"]
+        );
+        let topmost = top_matches[0];
+        assert_eq!(topmost.owner, SettingsOwner::Application);
+        assert_eq!(
+            topmost.section,
+            SettingsSection::Main(MainSettingsSection::LauncherWindow)
+        );
+        assert!(topmost.availability.is_available());
+    }
+
+    #[test]
+    fn settings_search_catalog_g3_retains_disabled_builtin_ids_and_order() {
+        let enabled = SettingsCatalog::from_plugin_snapshot(&snapshot(
+            30,
+            vec![plugin(
+                "mouse_gestures",
+                PluginCatalogOrigin::Builtin,
+                91,
+                true,
+                true,
+                &[],
+            )],
+        ));
+        let disabled = SettingsCatalog::from_plugin_snapshot(&snapshot(
+            31,
+            vec![plugin(
+                "mouse_gestures",
+                PluginCatalogOrigin::Builtin,
+                92,
+                true,
+                false,
+                &[],
+            )],
+        ));
+        let enabled_entries = enabled.search("gesture interval");
+        let disabled_entries = disabled.search("gesture interval");
+        let ids = [
+            "mouse_gestures.recognition_interval",
+            "mouse_gestures.trail_interval",
+        ];
+        assert_eq!(
+            enabled_entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ids
+        );
+        assert_eq!(
+            disabled_entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ids,
+            "disabling a built-in retains the same stable settings rows and order"
+        );
+        assert!(
+            enabled_entries
+                .iter()
+                .all(|entry| entry.availability.is_available())
+        );
+        assert!(disabled_entries.iter().all(|entry| matches!(
+            &entry.availability,
+            SettingsAvailability::Unavailable { prerequisite }
+                if prerequisite.contains("Enable mouse_gestures")
+        )));
+        assert!(disabled_entries.iter().all(|entry| matches!(
+            &entry.owner,
+            SettingsOwner::Plugin {
+                name,
+                origin: PluginCatalogOrigin::Builtin,
+                epoch: Some(92),
+            } if name == "mouse_gestures"
+        )));
+    }
+
+    #[test]
     fn settings_search_catalog_keeps_owner_identity_and_unavailable_prerequisites_truthful() {
         let current = snapshot(
             5,

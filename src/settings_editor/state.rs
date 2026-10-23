@@ -201,6 +201,26 @@ impl SettingsEditor {
     pub(crate) const SETTINGS_WINDOW_MAX_DEFAULT_HEIGHT: f32 = 720.0;
     pub(crate) const SETTINGS_WINDOW_MIN_HEIGHT: f32 = 360.0;
 
+    /// Set the transient Settings search query from an explicit command.
+    /// This intentionally changes no persisted setting or editor draft.
+    pub(crate) fn set_search_query_from_command(&mut self, query: &str) {
+        self.settings_search_query = if query.trim().is_empty() {
+            String::new()
+        } else {
+            query.to_owned()
+        };
+        self.settings_search_match_query.clear();
+        self.settings_search_match_revision = None;
+        self.settings_search_match_ids.clear();
+        self.settings_search_selected_id = None;
+        self.settings_search_page = 0;
+        self.pending_settings_navigation = None;
+        self.search_enter_consumption_pending = false;
+        self.settings_search_response_owner_instance = None;
+        self.settings_search_query_response_id = None;
+        self.settings_search_result_response_ids.clear();
+    }
+
     pub(crate) fn normalized_static_settings(
         follow_mouse: bool,
         static_enabled: bool,

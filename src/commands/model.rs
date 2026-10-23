@@ -434,10 +434,11 @@ pub enum DialogCommand {
     Help,
     Convert,
     Settings,
+    SettingsSearch { query: String },
     DashboardSettings,
     Theme,
 }
-kinds!(DialogCommand, Self::Qr { .. } => "qr", Self::RegexTester => "regex_tester", Self::Help => "help", Self::Convert => "convert", Self::Settings => "settings", Self::DashboardSettings => "dashboard_settings", Self::Theme => "theme");
+kinds!(DialogCommand, Self::Qr { .. } => "qr", Self::RegexTester => "regex_tester", Self::Help => "help", Self::Convert => "convert", Self::Settings => "settings", Self::SettingsSearch { .. } => "settings_search", Self::DashboardSettings => "dashboard_settings", Self::Theme => "theme");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CalendarCommand {
     Open { view: String },

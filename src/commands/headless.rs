@@ -143,6 +143,45 @@ mod screen_draw_headless_tests {
     }
 }
 
+#[cfg(test)]
+mod settings_search_headless_tests {
+    use super::*;
+
+    #[test]
+    fn settings_search_entry_requires_gui_without_external_fallback_or_query_leak() {
+        for query in [Some("font size: \"Δelta\""), None, Some(" \t\u{2003}")] {
+            let original = Action {
+                label: "Search Settings".into(),
+                desc: String::new(),
+                action: "settings:search".into(),
+                args: query.map(str::to_owned),
+            };
+            let command = crate::commands::parse_action(&original).unwrap();
+            assert!(matches!(
+                &command,
+                Command::Dialog(DialogCommand::SettingsSearch { .. })
+            ));
+
+            let mut external_calls = Vec::new();
+            let error = execute_with_external(command, &original, &mut |target, args| {
+                external_calls.push((target.to_owned(), args.map(str::to_owned)));
+                Ok(())
+            })
+            .unwrap_err();
+
+            let message = error.to_string();
+            assert!(message.contains("requires the launcher interface"));
+            if let Some(query) = query.filter(|query| !query.trim().is_empty()) {
+                assert!(
+                    !message.contains(query),
+                    "headless rejection must not expose the search query"
+                );
+            }
+            assert!(external_calls.is_empty());
+        }
+    }
+}
+
 fn execute_with_external(
     command: Command,
     original_action: &Action,
@@ -191,6 +230,9 @@ fn execute_with_external(
         }
         Command::Ocr(_) => {
             anyhow::bail!("screen region OCR requires the launcher interface")
+        }
+        Command::Dialog(DialogCommand::SettingsSearch { .. }) => {
+            anyhow::bail!("Settings search requires the launcher interface")
         }
         Command::Dialog(DialogCommand::Qr { .. }) => {
             anyhow::bail!("QR Generator requires the launcher interface")

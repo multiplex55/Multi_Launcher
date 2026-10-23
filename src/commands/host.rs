@@ -87,6 +87,7 @@ pub trait DialogCommandHost {
     fn open_convert_dialog(&mut self);
     fn open_tempfile_dialog(&mut self);
     fn open_settings_dialog(&mut self);
+    fn open_settings_search(&mut self, query: &str);
     fn open_dashboard_settings_dialog(&mut self);
     fn open_theme_dialog(&mut self);
     fn open_volume_dialog(&mut self);

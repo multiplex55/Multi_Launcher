@@ -371,6 +371,12 @@ impl DialogCommandHost for LauncherApp {
 
     fn open_settings_dialog(&mut self) {
         LauncherApp::open_settings_dialog(self);
+        self.settings_editor.set_search_query_from_command("");
+    }
+
+    fn open_settings_search(&mut self, query: &str) {
+        LauncherApp::open_settings_dialog(self);
+        self.settings_editor.set_search_query_from_command(query);
     }
 
     fn open_dashboard_settings_dialog(&mut self) {
@@ -4343,6 +4349,193 @@ pub(in crate::gui) mod tests {
         assert!(command_accepts_query_override(&Command::Dialog(
             crate::commands::DialogCommand::Help
         )));
+    }
+
+    #[test]
+    fn settings_search_entry_reaches_gui_host_losslessly_without_replacing_draft() {
+        use crate::plugin::Plugin;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = inert_test_app_with_paste_shortcuts_disabled(directory.path());
+        app.show_settings = true;
+
+        let baseline_hotkey = app.settings_editor.baseline_settings.hotkey.clone();
+        app.settings_editor.hotkey = "Ctrl+Shift+F10".into();
+        app.settings_editor.settings_search_match_query = "prior query".into();
+        app.settings_editor.settings_search_match_revision = Some(42);
+        app.settings_editor.settings_search_match_ids = vec!["launcher.always_on_top".into()];
+        app.settings_editor.settings_search_selected_id = Some("launcher.always_on_top".into());
+        app.settings_editor.settings_search_page = 3;
+        app.settings_editor.settings_search_response_owner_instance = Some(7);
+        app.settings_editor.settings_search_query_response_id =
+            Some(eframe::egui::Id::new("stale-settings-query"));
+        app.settings_editor.settings_search_result_response_ids =
+            vec![eframe::egui::Id::new("stale-settings-result")];
+        app.settings_editor.request_control_navigation(
+            "launcher.always_on_top",
+            None,
+            &app.plugins,
+        );
+        assert!(app.settings_editor.pending_settings_navigation.is_some());
+
+        let expected_query = "  font: \"Δelta\"\tlauncher  ";
+        let plugin_query = "  Settings   font: \"Δelta\"\tlauncher  ";
+        let search_action = crate::plugins::settings::SettingsPlugin
+            .search(plugin_query)
+            .into_iter()
+            .find(|action| action.action == "settings:search")
+            .expect("Settings plugin exposes a typed search action");
+        assert_eq!(search_action.args.as_deref(), Some(expected_query));
+
+        let invocation = crate::commands::parse_command(
+            search_action,
+            None,
+            crate::commands::ActivationSource::Enter,
+        )
+        .unwrap();
+        assert_eq!(
+            invocation.command,
+            crate::commands::Command::Dialog(crate::commands::DialogCommand::SettingsSearch {
+                query: expected_query.to_owned()
+            })
+        );
+        let outcome = crate::commands::CommandBus
+            .dispatch(&invocation, &mut app)
+            .unwrap();
+
+        assert!(app.show_settings);
+        assert_eq!(app.settings_editor.settings_search_query, expected_query);
+        assert!(app.settings_editor.settings_search_match_query.is_empty());
+        assert_eq!(app.settings_editor.settings_search_match_revision, None);
+        assert!(app.settings_editor.settings_search_match_ids.is_empty());
+        assert_eq!(app.settings_editor.settings_search_selected_id, None);
+        assert_eq!(app.settings_editor.settings_search_page, 0);
+        assert_eq!(app.settings_editor.pending_settings_navigation, None);
+        assert_eq!(
+            app.settings_editor.settings_search_response_owner_instance,
+            None
+        );
+        assert_eq!(app.settings_editor.settings_search_query_response_id, None);
+        assert!(
+            app.settings_editor
+                .settings_search_result_response_ids
+                .is_empty()
+        );
+        assert_eq!(app.settings_editor.hotkey, "Ctrl+Shift+F10");
+        assert_eq!(
+            app.settings_editor.baseline_settings.hotkey,
+            baseline_hotkey
+        );
+        assert!(!directory.path().join("settings.json").exists());
+        assert_eq!(outcome.query, crate::commands::QueryPolicy::Keep);
+
+        let empty_invocation = crate::commands::parse_command(
+            crate::actions::Action {
+                label: "Search Settings".into(),
+                desc: String::new(),
+                action: "settings:search".into(),
+                args: Some(" \t".into()),
+            },
+            None,
+            crate::commands::ActivationSource::Enter,
+        )
+        .unwrap();
+        assert_eq!(
+            empty_invocation.command,
+            crate::commands::Command::Dialog(crate::commands::DialogCommand::SettingsSearch {
+                query: " \t".into()
+            })
+        );
+        let empty_outcome = crate::commands::CommandBus
+            .dispatch(&empty_invocation, &mut app)
+            .unwrap();
+        assert!(app.settings_editor.settings_search_query.is_empty());
+        assert!(app.settings_editor.settings_search_match_query.is_empty());
+        assert_eq!(app.settings_editor.settings_search_match_revision, None);
+        assert!(app.settings_editor.settings_search_match_ids.is_empty());
+        assert_eq!(app.settings_editor.settings_search_selected_id, None);
+        assert_eq!(app.settings_editor.settings_search_page, 0);
+        assert_eq!(app.settings_editor.pending_settings_navigation, None);
+        assert_eq!(
+            app.settings_editor.settings_search_response_owner_instance,
+            None
+        );
+        assert_eq!(app.settings_editor.settings_search_query_response_id, None);
+        assert!(
+            app.settings_editor
+                .settings_search_result_response_ids
+                .is_empty()
+        );
+        assert_eq!(app.settings_editor.hotkey, "Ctrl+Shift+F10");
+        assert_eq!(
+            app.settings_editor.baseline_settings.hotkey,
+            baseline_hotkey
+        );
+        assert!(!directory.path().join("settings.json").exists());
+        assert_eq!(empty_outcome.query, crate::commands::QueryPolicy::Keep);
+
+        let repeated_query = crate::commands::CommandBus
+            .dispatch(&invocation, &mut app)
+            .unwrap();
+        assert_eq!(app.settings_editor.settings_search_query, expected_query);
+        assert_eq!(repeated_query.query, crate::commands::QueryPolicy::Keep);
+        app.settings_editor.settings_search_match_query = "stale result query".into();
+        app.settings_editor.settings_search_match_revision = Some(43);
+        app.settings_editor.settings_search_match_ids = vec!["launcher.always_on_top".into()];
+        app.settings_editor.settings_search_selected_id = Some("launcher.always_on_top".into());
+        app.settings_editor.settings_search_page = 2;
+        app.settings_editor.settings_search_response_owner_instance = Some(8);
+        app.settings_editor.settings_search_query_response_id =
+            Some(eframe::egui::Id::new("stale-settings-query-again"));
+        app.settings_editor.settings_search_result_response_ids =
+            vec![eframe::egui::Id::new("stale-settings-result-again")];
+        app.settings_editor.search_enter_consumption_pending = true;
+        app.settings_editor.request_control_navigation(
+            "launcher.always_on_top",
+            None,
+            &app.plugins,
+        );
+        assert!(app.settings_editor.pending_settings_navigation.is_some());
+        let legacy_settings = crate::commands::parse_command(
+            crate::actions::Action {
+                label: "Settings".into(),
+                desc: String::new(),
+                action: "settings:dialog".into(),
+                args: None,
+            },
+            None,
+            crate::commands::ActivationSource::Enter,
+        )
+        .unwrap();
+        let legacy_outcome = crate::commands::CommandBus
+            .dispatch(&legacy_settings, &mut app)
+            .unwrap();
+        assert!(app.settings_editor.settings_search_query.is_empty());
+        assert!(app.settings_editor.settings_search_match_query.is_empty());
+        assert_eq!(app.settings_editor.settings_search_match_revision, None);
+        assert!(app.settings_editor.settings_search_match_ids.is_empty());
+        assert_eq!(app.settings_editor.settings_search_selected_id, None);
+        assert_eq!(app.settings_editor.settings_search_page, 0);
+        assert_eq!(app.settings_editor.pending_settings_navigation, None);
+        assert!(!app.settings_editor.search_enter_consumption_pending);
+        assert_eq!(
+            app.settings_editor.settings_search_response_owner_instance,
+            None
+        );
+        assert_eq!(app.settings_editor.settings_search_query_response_id, None);
+        assert!(
+            app.settings_editor
+                .settings_search_result_response_ids
+                .is_empty()
+        );
+        assert_eq!(app.settings_editor.hotkey, "Ctrl+Shift+F10");
+        assert_eq!(
+            app.settings_editor.baseline_settings.hotkey,
+            baseline_hotkey
+        );
+        assert!(!directory.path().join("settings.json").exists());
+        assert_eq!(legacy_outcome.query, crate::commands::QueryPolicy::Keep);
     }
 
     #[test]

@@ -16,6 +16,9 @@ where
         Command::Dialog(DialogCommand::Help) => host.open_help_dialog(),
         Command::Dialog(DialogCommand::Convert) => host.open_convert_dialog(),
         Command::Dialog(DialogCommand::Settings) => host.open_settings_dialog(),
+        Command::Dialog(DialogCommand::SettingsSearch { query }) => {
+            host.open_settings_search(query)
+        }
         Command::Dialog(DialogCommand::DashboardSettings) => host.open_dashboard_settings_dialog(),
         Command::Dialog(DialogCommand::Theme) => host.open_theme_dialog(),
         Command::Timer(TimerCommand::TimerDialog) => host.open_timer_dialog(),
@@ -65,6 +68,7 @@ mod tests {
     #[derive(Default)]
     struct Host {
         opened: Option<String>,
+        settings_search_query: Option<String>,
         clear: bool,
         hide: bool,
         refocus: bool,
@@ -125,6 +129,10 @@ mod tests {
         }
         fn open_settings_dialog(&mut self) {
             self.mark("settings");
+        }
+        fn open_settings_search(&mut self, query: &str) {
+            self.mark("settings_search");
+            self.settings_search_query = Some(query.to_owned());
         }
         fn open_dashboard_settings_dialog(&mut self) {
             self.mark("dashboard_settings");
@@ -219,6 +227,23 @@ mod tests {
             assert_eq!(host.opened.as_deref(), Some(expected));
             assert_eq!(outcome, CommandOutcome::default());
         }
+    }
+
+    #[test]
+    fn settings_search_entry_reaches_its_host_without_reencoding_the_query() {
+        let query = "font size: \"Δelta\"\tlauncher";
+        let mut host = Host::default();
+        let outcome = handle_simple_dialog(
+            &mut host,
+            &Command::Dialog(DialogCommand::SettingsSearch {
+                query: query.to_owned(),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(host.opened.as_deref(), Some("settings_search"));
+        assert_eq!(host.settings_search_query.as_deref(), Some(query));
+        assert_eq!(outcome, CommandOutcome::default());
     }
 
     #[test]
