@@ -18667,6 +18667,37 @@ mod tests {
         run_root_list_frame(&ctx, &mut app, 1, 480.0, 640.0, Vec::new())
             .drop_without_applying_deltas();
         assert!(app.track_c_query_observer.has_pending());
+
+        let intermediate_geometry = app.track_c_query_observer.snapshot().geometry;
+        assert_eq!(
+            intermediate_geometry[GeometryCause::Query as usize].rebuilds,
+            1
+        );
+        assert_eq!(
+            intermediate_geometry[GeometryCause::DisplayOrResize as usize].rebuilds,
+            1
+        );
+        assert_eq!(
+            intermediate_geometry[GeometryCause::Navigation as usize].rebuilds,
+            0
+        );
+
+        let query_id = egui::Id::new("query_input");
+        let query_response = ctx
+            .read_response(query_id)
+            .expect("the width-480 frame rendered the real query response");
+        assert!(query_response.enabled(), "the rendered query is enabled");
+        query_response.request_focus();
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(query_id),
+            "focus is requested through the actual rendered query response"
+        );
+        assert!(
+            !app.query_focus_owner_blocks(&ctx, false),
+            "the exact focused query response is eligible for root keyboard input"
+        );
+        let selected_before_arrow = app.selected;
         run_root_list_frame(
             &ctx,
             &mut app,
@@ -18685,6 +18716,15 @@ mod tests {
         );
         assert_eq!(geometry[GeometryCause::Navigation as usize].rebuilds, 1);
         assert!(app.track_c_query_observer.has_pending());
+        assert_ne!(
+            app.selected, selected_before_arrow,
+            "ArrowDown changes the result selection only after the real query owns focus"
+        );
+        assert_eq!(
+            app.selected,
+            Some(0),
+            "ArrowDown selects the first result from an initially unselected list"
+        );
         drop(app);
         drop(workspace);
     }

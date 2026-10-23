@@ -1323,7 +1323,7 @@ mod tests {
     }
 
     struct TrackCObservedApp {
-        app: Option<LauncherApp>,
+        app: Option<Box<LauncherApp>>,
         release: Option<TrackCHandlerReleaseGuard>,
     }
 
@@ -1331,13 +1331,15 @@ mod tests {
         type Target = LauncherApp;
 
         fn deref(&self) -> &Self::Target {
-            self.app.as_ref().expect("tracked launcher app is live")
+            self.app.as_deref().expect("tracked launcher app is live")
         }
     }
 
     impl std::ops::DerefMut for TrackCObservedApp {
         fn deref_mut(&mut self) -> &mut Self::Target {
-            self.app.as_mut().expect("tracked launcher app is live")
+            self.app
+                .as_deref_mut()
+                .expect("tracked launcher app is live")
         }
     }
 
@@ -3884,6 +3886,8 @@ mod tests {
         settings.hotkey = None;
         settings.quit_hotkey = None;
         settings.help_hotkey = None;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         settings.match_exact = true;
         settings.usage_weight = 0.0;
         settings.enabled_plugins = Some(std::collections::HashSet::new());
@@ -3894,7 +3898,7 @@ mod tests {
         // watchers. The guard is declared before `app`, so an unwind drops the
         // app first and then performs the bounded release wait.
         let release = TrackCHandlerReleaseGuard::begin(fixture);
-        let mut app = LauncherApp::new(
+        let mut app = Box::new(LauncherApp::new(
             &context,
             Arc::new(initial_actions),
             fixture.custom_len,
@@ -3909,7 +3913,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
-        );
+        ));
         app.watchers.clear();
         app.process_watch_events();
         assert!(app.rx.try_recv().is_err(), "startup events are quiescent");
