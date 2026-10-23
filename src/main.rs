@@ -4210,6 +4210,10 @@ fn spawn_gui(
 }
 
 fn main() -> anyhow::Result<()> {
+    if let Some(exit_code) = startup_runtime::brightness_service::run_internal_helper_if_requested()
+    {
+        std::process::exit(exit_code);
+    }
     multi_launcher::performance::init_process_timer();
     // This ownership boundary must stay ahead of every persistent read,
     // migration, watcher, worker, plugin, and GUI initialization.
