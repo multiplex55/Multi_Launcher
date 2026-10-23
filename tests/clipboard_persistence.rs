@@ -1,4 +1,3 @@
-use arboard::Clipboard;
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::clipboard::{CLIPBOARD_FILE, ClipboardPlugin, save_history};
 use once_cell::sync::Lazy;
@@ -8,6 +7,8 @@ use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
+// These tests seed persisted history directly and keep clipboard sync disabled,
+// so they never read from or write to the system clipboard.
 #[test]
 fn history_survives_instances() {
     let _lock = TEST_MUTEX.lock().unwrap();
@@ -17,11 +18,6 @@ fn history_survives_instances() {
     let mut list = VecDeque::new();
     list.push_back("first".into());
     save_history(CLIPBOARD_FILE, &list).unwrap();
-
-    let mut cb = Clipboard::new().ok();
-    if let Some(ref mut clipboard) = cb {
-        let _ = clipboard.set_text("first".to_string());
-    }
 
     unsafe { std::env::set_var("ML_SKIP_CLIPBOARD_SYNC", "1") };
     let plugin1 = ClipboardPlugin::new(20);
@@ -46,11 +42,6 @@ fn cb_list_returns_all_entries() {
     list.push_back("alpha".into());
     list.push_back("beta".into());
     save_history(CLIPBOARD_FILE, &list).unwrap();
-
-    let mut cb = Clipboard::new().ok();
-    if let Some(ref mut clipboard) = cb {
-        let _ = clipboard.set_text("alpha".to_string());
-    }
 
     unsafe { std::env::set_var("ML_SKIP_CLIPBOARD_SYNC", "1") };
     let plugin = ClipboardPlugin::new(20);
