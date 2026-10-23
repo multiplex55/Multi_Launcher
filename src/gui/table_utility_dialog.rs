@@ -19,6 +19,14 @@ use std::sync::Arc;
 const RESULT_ROW_HEIGHT: f32 = 28.0;
 const SOURCE_PREVIEW_CHARS: usize = 2_048;
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+struct TestWidgetResponse {
+    id: egui::Id,
+    rect: egui::Rect,
+    enabled: bool,
+}
+
 #[derive(Clone)]
 enum ExportAction {
     Clipboard,
@@ -74,6 +82,30 @@ pub struct TableUtilityDialogState {
     test_replace_response_id: Option<egui::Id>,
     #[cfg(test)]
     test_cancel_overwrite_response_id: Option<egui::Id>,
+    #[cfg(test)]
+    test_paste_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_open_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_copy_tsv_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_copy_json_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_save_json_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_source_editor_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_source_preview_chars: usize,
+    #[cfg(test)]
+    test_source_preview_truncated: bool,
+    #[cfg(test)]
+    test_rendered_row_range: Option<(usize, usize)>,
+    #[cfg(test)]
+    test_visible_row_count: usize,
+    #[cfg(test)]
+    test_open_file_path: Option<PathBuf>,
+    #[cfg(test)]
+    test_save_json_path: Option<PathBuf>,
 }
 
 impl Default for TableUtilityDialogState {
@@ -110,6 +142,30 @@ impl Default for TableUtilityDialogState {
             test_replace_response_id: None,
             #[cfg(test)]
             test_cancel_overwrite_response_id: None,
+            #[cfg(test)]
+            test_paste_response: None,
+            #[cfg(test)]
+            test_open_response: None,
+            #[cfg(test)]
+            test_copy_tsv_response: None,
+            #[cfg(test)]
+            test_copy_json_response: None,
+            #[cfg(test)]
+            test_save_json_response: None,
+            #[cfg(test)]
+            test_source_editor_response: None,
+            #[cfg(test)]
+            test_source_preview_chars: 0,
+            #[cfg(test)]
+            test_source_preview_truncated: false,
+            #[cfg(test)]
+            test_rendered_row_range: None,
+            #[cfg(test)]
+            test_visible_row_count: 0,
+            #[cfg(test)]
+            test_open_file_path: None,
+            #[cfg(test)]
+            test_save_json_path: None,
         }
     }
 }
@@ -304,6 +360,19 @@ impl TableUtilityDialogState {
         if !self.open {
             return;
         }
+        #[cfg(test)]
+        {
+            self.test_paste_response = None;
+            self.test_open_response = None;
+            self.test_copy_tsv_response = None;
+            self.test_copy_json_response = None;
+            self.test_save_json_response = None;
+            self.test_source_editor_response = None;
+            self.test_source_preview_chars = 0;
+            self.test_source_preview_truncated = false;
+            self.test_rendered_row_range = None;
+            self.test_visible_row_count = 0;
+        }
         if let Err(error) = self.session.open(ctx) {
             self.session_open_error = Some(error);
         }
@@ -452,6 +521,14 @@ impl TableUtilityDialogState {
     ) {
         ui.horizontal_wrapped(|ui| {
             let paste = ui.add_enabled(enabled, egui::Button::new("Paste Text"));
+            #[cfg(test)]
+            {
+                self.test_paste_response = Some(TestWidgetResponse {
+                    id: paste.id,
+                    rect: paste.rect,
+                    enabled: paste.enabled(),
+                });
+            }
             register_target(
                 scope,
                 ui,
@@ -472,6 +549,14 @@ impl TableUtilityDialogState {
             }
 
             let open_file = ui.add_enabled(enabled, egui::Button::new("Open File…"));
+            #[cfg(test)]
+            {
+                self.test_open_response = Some(TestWidgetResponse {
+                    id: open_file.id,
+                    rect: open_file.rect,
+                    enabled: open_file.enabled(),
+                });
+            }
             register_target(
                 scope,
                 ui,
@@ -482,10 +567,13 @@ impl TableUtilityDialogState {
                 order,
             );
             if open_file.clicked() && commit_enabled {
-                if let Some(path) = rfd::FileDialog::new()
+                #[cfg(test)]
+                let selected_path = self.test_open_file_path.take();
+                #[cfg(not(test))]
+                let selected_path = rfd::FileDialog::new()
                     .add_filter("Delimited text", &["csv", "tsv", "txt"])
-                    .pick_file()
-                {
+                    .pick_file();
+                if let Some(path) = selected_path {
                     match self.session.request_file_read(path) {
                         Ok(()) => self.status = None,
                         Err(error) => self.status = Some(error),
@@ -668,6 +756,14 @@ impl TableUtilityDialogState {
                     .desired_rows(5)
                     .lock_focus(true),
             );
+            #[cfg(test)]
+            {
+                self.test_source_editor_response = Some(TestWidgetResponse {
+                    id: response.id,
+                    rect: response.rect,
+                    enabled: response.enabled(),
+                });
+            }
             register_target(
                 scope,
                 ui,
@@ -693,11 +789,17 @@ impl TableUtilityDialogState {
                 crate::table_utility_session::TABLE_INLINE_EDIT_MAX_BYTES,
                 crate::table_utility_session::TABLE_INLINE_EDIT_MAX_LINES,
             ));
+            let preview = bounded_text(&snapshot.source, SOURCE_PREVIEW_CHARS);
+            #[cfg(test)]
+            {
+                self.test_source_preview_chars = preview.chars().count();
+                self.test_source_preview_truncated = preview.ends_with('…');
+            }
             egui::ScrollArea::vertical()
                 .id_salt("table-large-source-preview")
                 .max_height(112.0)
                 .show(ui, |ui| {
-                    ui.monospace(bounded_text(&snapshot.source, SOURCE_PREVIEW_CHARS));
+                    ui.monospace(preview);
                 });
         }
     }
@@ -760,6 +862,10 @@ impl TableUtilityDialogState {
             );
         }
         let visible = projection.visible_rows();
+        #[cfg(test)]
+        {
+            self.test_visible_row_count = visible.len();
+        }
         let selected_count = snapshot.selected_visible_row_count;
         ui.label(format!(
             "{} visible rows · {} selected · {} columns available",
@@ -857,6 +963,10 @@ impl TableUtilityDialogState {
                         .id_salt("table-results-rows")
                         .max_height(250.0)
                         .show_rows(ui, RESULT_ROW_HEIGHT, visible.len(), |ui, range| {
+                            #[cfg(test)]
+                            {
+                                self.test_rendered_row_range = Some((range.start, range.end));
+                            }
                             for visible_index in range {
                                 let Some(row_id) =
                                     active_projection.visible_rows().get(visible_index).copied()
@@ -949,6 +1059,14 @@ impl TableUtilityDialogState {
                 order,
             );
             let tsv = ui.add_enabled(ready, egui::Button::new("Copy Selected Columns"));
+            #[cfg(test)]
+            {
+                self.test_copy_tsv_response = Some(TestWidgetResponse {
+                    id: tsv.id,
+                    rect: tsv.rect,
+                    enabled: tsv.enabled(),
+                });
+            }
             register_target(
                 scope,
                 ui,
@@ -1013,8 +1131,24 @@ impl TableUtilityDialogState {
                     ExportAction::Clipboard,
                 );
             }
+            #[cfg(test)]
+            {
+                self.test_copy_json_response = Some(TestWidgetResponse {
+                    id: copy_json.id,
+                    rect: copy_json.rect,
+                    enabled: copy_json.enabled(),
+                });
+            }
 
             let save_json = ui.add_enabled(ready, egui::Button::new("Save JSON As…"));
+            #[cfg(test)]
+            {
+                self.test_save_json_response = Some(TestWidgetResponse {
+                    id: save_json.id,
+                    rect: save_json.rect,
+                    enabled: save_json.enabled(),
+                });
+            }
             register_target(
                 scope,
                 ui,
@@ -1025,10 +1159,13 @@ impl TableUtilityDialogState {
                 order,
             );
             if save_json.clicked() && commit_enabled {
-                if let Some(path) = rfd::FileDialog::new()
+                #[cfg(test)]
+                let selected_path = self.test_save_json_path.take();
+                #[cfg(not(test))]
+                let selected_path = rfd::FileDialog::new()
                     .add_filter("JSON", &["json"])
-                    .save_file()
-                {
+                    .save_file();
+                if let Some(path) = selected_path {
                     if ensure_destination_is_not_source(snapshot.source_path.as_deref(), &path)
                         .is_ok()
                     {
@@ -1507,6 +1644,7 @@ fn write_json_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::table_utility_session::{TableParseState, TableProjectionState};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn table_input(events: Vec<egui::Event>) -> egui::RawInput {
@@ -1614,6 +1752,70 @@ mod tests {
         response
     }
 
+    fn click_test_widget(
+        ctx: &egui::Context,
+        dialog: &mut TableUtilityDialogState,
+        response: impl Fn(&TableUtilityDialogState) -> Option<TestWidgetResponse>,
+    ) -> TestWidgetResponse {
+        table_frame(ctx, dialog, Vec::new());
+        let initial = response(dialog).expect("the actual widget response is rendered");
+        assert!(initial.enabled, "the actual widget is enabled");
+        let initial_pos = initial.rect.center();
+
+        table_frame(ctx, dialog, vec![egui::Event::PointerMoved(initial_pos)]);
+        let moved = response(dialog).expect("the widget remains rendered after pointer move");
+        assert_eq!(
+            moved.id, initial.id,
+            "the clicked response keeps its widget identity"
+        );
+        assert!(moved.enabled, "the actual widget remains enabled");
+        let press_pos = moved.rect.center();
+        table_frame(
+            ctx,
+            dialog,
+            vec![egui::Event::PointerButton {
+                pos: press_pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        table_frame(
+            ctx,
+            dialog,
+            vec![egui::Event::PointerButton {
+                pos: press_pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        moved
+    }
+
+    fn await_dialog(
+        ctx: &egui::Context,
+        dialog: &mut TableUtilityDialogState,
+        mut ready: impl FnMut(&TableSessionSnapshot) -> bool,
+    ) -> TableSessionSnapshot {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            table_frame(ctx, dialog, Vec::new());
+            let snapshot = dialog.session.snapshot();
+            if ready(&snapshot) {
+                return snapshot;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "table dialog did not reach the expected state: parse={:?}, projection={:?}, source={:?}",
+                snapshot.parse_state,
+                snapshot.projection_state,
+                snapshot.source_load_state
+            );
+            std::thread::yield_now();
+        }
+    }
+
     fn prepare_dialog_table(
         ctx: &egui::Context,
         dialog: &mut TableUtilityDialogState,
@@ -1633,18 +1835,36 @@ mod tests {
     struct ClipboardProbe {
         reads: Arc<AtomicUsize>,
         writes: Arc<AtomicUsize>,
+        read_value: Arc<std::sync::Mutex<String>>,
+        written_values: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     impl ClipboardBackend for ClipboardProbe {
         fn read_text(&self) -> Result<String, ClipboardError> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            Ok("explicit clipboard fixture".into())
+            Ok(self
+                .read_value
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone())
         }
 
-        fn write_text(&self, _text: &str) -> Result<(), ClipboardError> {
+        fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
             self.writes.fetch_add(1, Ordering::SeqCst);
+            self.written_values
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(text.to_owned());
             Ok(())
         }
+    }
+
+    fn clipboard_writes(probe: &ClipboardProbe) -> Vec<String> {
+        probe
+            .written_values
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     #[test]
@@ -1669,6 +1889,279 @@ mod tests {
         dialog.close();
         assert_eq!(probe.reads.load(Ordering::SeqCst), 0);
         assert_eq!(probe.writes.load(Ordering::SeqCst), 0);
+        dialog.shutdown();
+    }
+
+    #[test]
+    fn table_workflow_paste_open_filter_sort_copy_and_save_are_explicit() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let source_path = directory.path().join("source.csv");
+        let source_text = "name,group,rank,note\nalpha,keep,2,\"tab\tinside\"\nbravo,drop,10,excluded\ngamma,keep,3,\"line\nbreak\"\ndelta,keep,1,\"quote \"\"ok\"\"\"\n";
+        let source_bytes = source_text.as_bytes();
+        fs::write(&source_path, source_bytes).expect("write source fixture");
+
+        let malformed_path = directory.path().join("malformed.csv");
+        let malformed_text = "name,value\n\"unterminated";
+        let malformed_bytes = malformed_text.as_bytes();
+        fs::write(&malformed_path, malformed_bytes).expect("write malformed fixture");
+
+        let save_path = directory.path().join("selection.json");
+        let clipboard = ClipboardProbe::default();
+        *clipboard
+            .read_value
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = "name,value\npasted,1\n".to_owned();
+
+        let context = egui::Context::default();
+        let mut dialog = TableUtilityDialogState::default();
+        dialog.set_clipboard_backend_for_test(Arc::new(clipboard.clone()));
+        dialog.open();
+        dialog.session.open(&context).expect("start table worker");
+        let defaults = dialog.session.parse_options();
+        assert_eq!(defaults.delimiter, DelimiterChoice::Auto);
+        assert!(!defaults.has_header);
+        assert_eq!(defaults.row_width, RowWidthPolicy::Lenient);
+        dialog.session.set_has_header(true);
+
+        // The first Window frame creates its area; the following real button
+        // response is used for the explicit clipboard action.
+        table_frame(&context, &mut dialog, Vec::new());
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(clipboard.writes.load(Ordering::SeqCst), 0);
+        click_test_widget(&context, &mut dialog, |state| state.test_paste_response);
+        let pasted = await_dialog(&context, &mut dialog, |snapshot| {
+            snapshot.source.as_ref() == "name,value\npasted,1\n"
+                && matches!(&snapshot.parse_state, TableParseState::Ready(_))
+                && matches!(&snapshot.projection_state, TableProjectionState::Ready(_))
+        });
+        assert_eq!(pasted.source.as_ref(), "name,value\npasted,1\n");
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(clipboard.writes.load(Ordering::SeqCst), 0);
+
+        // Open File uses the same rendered action and bounded session worker;
+        // the test supplies only the chooser result, never writes the source.
+        dialog.test_open_file_path = Some(source_path.clone());
+        click_test_widget(&context, &mut dialog, |state| state.test_open_response);
+        let canonical_source = fs::canonicalize(&source_path).expect("canonical source path");
+        let loaded = await_dialog(&context, &mut dialog, |snapshot| {
+            snapshot.source_path.as_ref() == Some(&canonical_source)
+                && matches!(&snapshot.source_load_state, TableSourceLoadState::Idle)
+                && matches!(&snapshot.parse_state, TableParseState::Ready(_))
+                && matches!(&snapshot.projection_state, TableProjectionState::Ready(_))
+        });
+        let loaded_document = loaded.document.as_ref().expect("file parsed");
+        let loaded_document_id = loaded_document.id();
+        assert_eq!(loaded.source.as_ref().as_bytes(), source_bytes);
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(clipboard.writes.load(Ordering::SeqCst), 0);
+
+        dialog.session.set_filter("keep".to_owned());
+        dialog.session.set_sort(Some(TableSort {
+            column: 2,
+            direction: TableSortDirection::Descending,
+            mode: TableSortMode::AutoNumeric,
+        }));
+        let filtered = await_dialog(&context, &mut dialog, |snapshot| {
+            snapshot.view_revision != loaded.view_revision
+                && matches!(snapshot.projection_state, TableProjectionState::Ready(_))
+        });
+        let document = filtered.document.as_ref().expect("last-good file document");
+        let projection = filtered.projection.as_ref().expect("filtered projection");
+        let displayed_names = projection
+            .visible_rows()
+            .iter()
+            .map(|id| document.row(*id).expect("visible row").cells()[0].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(displayed_names, ["gamma", "alpha", "delta"]);
+        let selected = projection
+            .visible_rows()
+            .iter()
+            .copied()
+            .filter(|id| {
+                matches!(
+                    document.row(*id).expect("visible row").cells()[0].as_str(),
+                    "gamma" | "alpha"
+                )
+            })
+            .collect::<std::collections::HashSet<_>>();
+        dialog
+            .session
+            .set_selection(Some(selected), std::collections::HashSet::from([0, 3]));
+        dialog.include_headers = true;
+        dialog.json_shape = TableJsonShape::Arrays;
+        let selected_snapshot = dialog.session.snapshot();
+        assert_eq!(selected_snapshot.selected_visible_row_count, 2);
+        for _ in 0..3 {
+            table_frame(&context, &mut dialog, Vec::new());
+        }
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(clipboard.writes.load(Ordering::SeqCst), 0);
+
+        click_test_widget(&context, &mut dialog, |state| state.test_copy_tsv_response);
+        let expected_tsv = "name\tnote\ngamma\t\"line\nbreak\"\nalpha\t\"tab\tinside\"\n";
+        await_dialog(&context, &mut dialog, |_| {
+            clipboard
+                .written_values
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len()
+                >= 1
+        });
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(clipboard_writes(&clipboard), vec![expected_tsv.to_owned()]);
+
+        click_test_widget(&context, &mut dialog, |state| state.test_copy_json_response);
+        let expected_json = "[[\"gamma\",\"line\\nbreak\"],[\"alpha\",\"tab\\tinside\"]]";
+        await_dialog(&context, &mut dialog, |_| {
+            clipboard
+                .written_values
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len()
+                >= 2
+        });
+        assert_eq!(
+            clipboard_writes(&clipboard),
+            vec![expected_tsv.to_owned(), expected_json.to_owned()]
+        );
+
+        dialog.test_save_json_path = Some(save_path.clone());
+        click_test_widget(&context, &mut dialog, |state| state.test_save_json_response);
+        await_dialog(&context, &mut dialog, |_| save_path.exists());
+        assert_eq!(
+            fs::read(&save_path)
+                .expect("captured JSON export")
+                .as_slice(),
+            expected_json.as_bytes()
+        );
+        assert_eq!(
+            fs::read(&source_path)
+                .expect("source remains read-only")
+                .as_slice(),
+            source_bytes
+        );
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            clipboard_writes(&clipboard),
+            vec![expected_tsv.to_owned(), expected_json.to_owned()]
+        );
+
+        // A malformed explicit file read leaves the accepted document and
+        // source bytes untouched, but invalidates export eligibility.
+        dialog.test_open_file_path = Some(malformed_path.clone());
+        click_test_widget(&context, &mut dialog, |state| state.test_open_response);
+        let failed = await_dialog(&context, &mut dialog, |snapshot| {
+            matches!(&snapshot.parse_state, TableParseState::Failed { .. })
+        });
+        assert_eq!(
+            failed.document.as_ref().map(|document| document.id()),
+            Some(loaded_document_id)
+        );
+        assert!(!failed.accepted_options_are_current());
+        assert!(!failed.can_export());
+        assert_eq!(failed.source.as_ref(), malformed_text);
+        assert!(
+            dialog
+                .session
+                .request_export(TableExportKind::Tsv, true)
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(&source_path).expect("source unchanged").as_slice(),
+            source_bytes
+        );
+        assert_eq!(
+            fs::read(&malformed_path)
+                .expect("malformed source unchanged")
+                .as_slice(),
+            malformed_bytes
+        );
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            clipboard_writes(&clipboard),
+            vec![expected_tsv.to_owned(), expected_json.to_owned()]
+        );
+        dialog.shutdown();
+    }
+
+    #[test]
+    fn table_workflow_virtualizes_rows_and_idle_frames_submit_no_jobs() {
+        let context = egui::Context::default();
+        let source = format!(
+            "name,value\n{}",
+            (0..5_000)
+                .map(|index| format!("row-{index},{}\n", index % 100))
+                .collect::<String>()
+        );
+        let mut dialog = TableUtilityDialogState::default();
+        prepare_dialog_table(&context, &mut dialog, &source);
+
+        // The first pass lays out the Window; row-range observations below
+        // come from the actual `show_rows` callback on the next pass.
+        table_frame(&context, &mut dialog, Vec::new());
+        table_frame(&context, &mut dialog, Vec::new());
+        let snapshot = dialog.session.snapshot();
+        let document_id = snapshot.document.as_ref().expect("parsed document").id();
+        let projection_id = snapshot
+            .projection
+            .as_ref()
+            .expect("current projection")
+            .id();
+        let first_visible = snapshot
+            .projection
+            .as_ref()
+            .expect("current projection")
+            .visible_rows()[0];
+        let range = dialog
+            .test_rendered_row_range
+            .expect("actual virtual row range was rendered");
+        assert_eq!(dialog.test_visible_row_count, 5_000);
+        assert!(range.1 > range.0);
+        assert!(
+            range.1 - range.0 < 32,
+            "only a viewport-sized row range is rendered"
+        );
+        let counts = dialog.session.test_job_counts();
+        assert!(counts.parse_submitted > 0 && counts.parse_executed > 0);
+        assert!(counts.project_submitted > 0 && counts.project_executed > 0);
+
+        for _ in 0..4 {
+            table_frame(&context, &mut dialog, Vec::new());
+        }
+        let after_idle = dialog.session.snapshot();
+        assert_eq!(dialog.session.test_job_counts(), counts);
+        assert_eq!(
+            after_idle.document.as_ref().map(|document| document.id()),
+            Some(document_id)
+        );
+        assert_eq!(
+            after_idle.projection.as_ref().map(|view| view.id()),
+            Some(projection_id)
+        );
+        assert_eq!(
+            after_idle.projection.as_ref().unwrap().visible_rows()[0],
+            first_visible
+        );
+        dialog.shutdown();
+    }
+
+    #[test]
+    fn table_workflow_large_source_keeps_full_input_outside_text_edit() {
+        let context = egui::Context::default();
+        let payload = "x".repeat(crate::table_utility_session::TABLE_INLINE_EDIT_MAX_BYTES + 1);
+        let source = format!("value\n{payload}\n");
+        let mut dialog = TableUtilityDialogState::default();
+        prepare_dialog_table(&context, &mut dialog, &source);
+
+        table_frame(&context, &mut dialog, Vec::new());
+        table_frame(&context, &mut dialog, Vec::new());
+        let snapshot = dialog.session.snapshot();
+        assert_eq!(snapshot.source.as_ref(), source);
+        assert!(!snapshot.source_is_editable());
+        assert!(dialog.test_source_editor_response.is_none());
+        assert_eq!(dialog.test_source_preview_chars, 2_049);
+        assert!(dialog.test_source_preview_truncated);
+        assert_eq!(snapshot.document.as_ref().unwrap().rows().len(), 1);
         dialog.shutdown();
     }
 

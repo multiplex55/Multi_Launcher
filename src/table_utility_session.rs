@@ -128,6 +128,44 @@ enum JobKind {
     Export,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct TableTestJobCounts {
+    pub parse_submitted: usize,
+    pub parse_executed: usize,
+    pub project_submitted: usize,
+    pub project_executed: usize,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TableTestJobCounters(Mutex<TableTestJobCounts>);
+
+#[cfg(test)]
+impl TableTestJobCounters {
+    fn submitted(&self, kind: JobKind) {
+        let mut counts = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        match kind {
+            JobKind::Parse => counts.parse_submitted += 1,
+            JobKind::Project => counts.project_submitted += 1,
+            JobKind::ReadFile | JobKind::Export => {}
+        }
+    }
+
+    fn executed(&self, kind: JobKind) {
+        let mut counts = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        match kind {
+            JobKind::Parse => counts.parse_executed += 1,
+            JobKind::Project => counts.project_executed += 1,
+            JobKind::ReadFile | JobKind::Export => {}
+        }
+    }
+
+    fn snapshot(&self) -> TableTestJobCounts {
+        *self.0.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct JobKey {
     lifetime: TableSessionLifetime,
@@ -260,6 +298,8 @@ struct WorkerState {
 struct TableWorker {
     shared: Arc<(Mutex<WorkerState>, Condvar)>,
     join: Option<JoinHandle<()>>,
+    #[cfg(test)]
+    test_job_counts: Arc<TableTestJobCounters>,
 }
 
 impl TableWorker {
@@ -267,6 +307,10 @@ impl TableWorker {
         let shared = Arc::new((Mutex::new(WorkerState::default()), Condvar::new()));
         let worker_state = Arc::clone(&shared);
         let repaint = ctx.clone();
+        #[cfg(test)]
+        let test_job_counts = Arc::new(TableTestJobCounters::default());
+        #[cfg(test)]
+        let worker_job_counts = Arc::clone(&test_job_counts);
         let join = thread::Builder::new()
             .name("table-utility-worker".to_owned())
             .spawn(move || {
@@ -287,6 +331,8 @@ impl TableWorker {
                         job
                     };
 
+                    #[cfg(test)]
+                    worker_job_counts.executed(job.key.kind);
                     let completion = job.run();
                     let (lock, wake) = &*worker_state;
                     let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
@@ -309,10 +355,14 @@ impl TableWorker {
         Ok(Self {
             shared,
             join: Some(join),
+            #[cfg(test)]
+            test_job_counts,
         })
     }
 
     fn submit(&self, job: Job) {
+        #[cfg(test)]
+        self.test_job_counts.submitted(job.key.kind);
         let (lock, wake) = &*self.shared;
         let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(active) = state.active_cancellation.as_ref() {
@@ -357,6 +407,11 @@ impl TableWorker {
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
+    }
+
+    #[cfg(test)]
+    fn test_job_counts(&self) -> TableTestJobCounts {
+        self.test_job_counts.snapshot()
     }
 }
 
@@ -1271,6 +1326,14 @@ impl TableUtilitySession {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_job_counts(&self) -> TableTestJobCounts {
+        self.worker
+            .as_ref()
+            .map(TableWorker::test_job_counts)
+            .unwrap_or_default()
+    }
+
     pub fn clear_message(&mut self) {
         self.message = None;
     }
@@ -1610,6 +1673,119 @@ mod tests {
         assert_eq!(snapshot.selected_visible_row_count, 0);
         assert!(!snapshot.can_export());
         assert!(session.request_export(TableExportKind::Tsv, false).is_err());
+        session.shutdown();
+    }
+
+    #[test]
+    fn table_workflow_source_admission_accepts_exact_limit_and_refuses_one_more_byte() {
+        let max_bytes = crate::table_utility::TABLE_UTILITY_MAX_INPUT_BYTES;
+        let exact_source = format!("{}\n", "x".repeat(max_bytes - 1));
+        assert_eq!(exact_source.len(), max_bytes);
+        let too_large_source = format!("{exact_source}x");
+
+        let ctx = egui::Context::default();
+        let mut session = TableUtilitySession::new();
+        session
+            .replace_source(exact_source.clone())
+            .expect("the exact byte limit is admitted");
+        session.open(&ctx).expect("start session worker");
+        session.request_parse();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let inline_snapshot = loop {
+            session.poll();
+            let snapshot = session.snapshot();
+            if matches!(&snapshot.parse_state, TableParseState::Ready(_))
+                && matches!(&snapshot.projection_state, TableProjectionState::Ready(_))
+            {
+                break snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "exact-limit inline source did not parse: {:?} / {:?}",
+                snapshot.parse_state,
+                snapshot.projection_state
+            );
+            thread::yield_now();
+        };
+        assert_eq!(inline_snapshot.source.len(), max_bytes);
+        assert_eq!(inline_snapshot.document.as_ref().unwrap().rows().len(), 1);
+        let inline_document_id = inline_snapshot.document.as_ref().unwrap().id();
+        assert!(session.replace_source(too_large_source.clone()).is_err());
+        let after_oversized_inline = session.snapshot();
+        assert_eq!(session.source(), exact_source);
+        assert_eq!(
+            after_oversized_inline.document.as_ref().unwrap().id(),
+            inline_document_id
+        );
+        assert!(after_oversized_inline.accepted_options_are_current());
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let exact_path = directory.path().join("exact.csv");
+        std::fs::write(&exact_path, exact_source.as_bytes()).expect("write exact-limit file");
+        let canonical_exact = std::fs::canonicalize(&exact_path).expect("canonical exact file");
+        session
+            .request_file_read(exact_path)
+            .expect("queue exact-limit file read");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let exact_file_snapshot = loop {
+            session.poll();
+            let snapshot = session.snapshot();
+            if snapshot.source_path.as_ref() == Some(&canonical_exact)
+                && matches!(&snapshot.source_load_state, TableSourceLoadState::Idle)
+                && matches!(&snapshot.parse_state, TableParseState::Ready(_))
+                && matches!(&snapshot.projection_state, TableProjectionState::Ready(_))
+            {
+                break snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "exact-limit file did not finish: {:?} / {:?} / {:?}",
+                snapshot.source_load_state,
+                snapshot.parse_state,
+                snapshot.projection_state
+            );
+            thread::yield_now();
+        };
+        assert_eq!(exact_file_snapshot.source.as_ref(), exact_source);
+        assert_eq!(
+            exact_file_snapshot.document.as_ref().unwrap().rows().len(),
+            1
+        );
+        let file_document_id = exact_file_snapshot.document.as_ref().unwrap().id();
+
+        let too_large_path = directory.path().join("too-large.csv");
+        std::fs::write(&too_large_path, too_large_source.as_bytes())
+            .expect("write one-byte-over file");
+        session
+            .request_file_read(too_large_path.clone())
+            .expect("queue oversized file read");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let refused = loop {
+            session.poll();
+            let snapshot = session.snapshot();
+            if matches!(
+                &snapshot.source_load_state,
+                TableSourceLoadState::Failed { .. }
+            ) {
+                break snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "oversized file did not reach a refusal state: {:?}",
+                snapshot.source_load_state
+            );
+            thread::yield_now();
+        };
+        assert_eq!(refused.source.as_ref(), exact_source);
+        assert_eq!(refused.source_path.as_ref(), Some(&canonical_exact));
+        assert_eq!(refused.document.as_ref().unwrap().id(), file_document_id);
+        assert!(!refused.accepted_options_are_current());
+        assert_eq!(
+            std::fs::metadata(&too_large_path)
+                .expect("oversized fixture remains on disk")
+                .len(),
+            (max_bytes + 1) as u64
+        );
         session.shutdown();
     }
 }

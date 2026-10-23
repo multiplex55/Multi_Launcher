@@ -30,6 +30,7 @@ It’s designed to be “one hotkey away” from:
 - [Clipboard Snippets](#clipboard-snippets)
 - [Paste Sequences](#paste-sequences)
 - [Hotkey Directory](#hotkey-directory)
+- [Table Utility](#table-utility)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
 - [XML Toolkit](#xml-toolkit)
 - [Hash Generator](#hash-generator)
@@ -118,6 +119,7 @@ unknown popups, and hidden, clipped, or disabled controls are not hint targets.
 | `cb` | Clipboard history | `cb list` / `cb clear` |
 | `cm` | Clipboard Modify operations, templates, pipelines, and undo | `cm trim | uppercase` / `cm template prompt-context` |
 | `json` | Local JSON formatter and minifier | `json` / `json format` / `json minify` |
+| `table` | Local delimited-text table viewer and JSON exporter | `table` |
 | `xml` | Local XML tree, XPath, XSD, format and file utility | `xml` |
 | `regex` | Local Rust regex tester | `regex` |
 | `replace` | Explicit-root multi-file replacement with per-match approval and durable recovery | `replace` |
@@ -796,6 +798,27 @@ precedence**, and **Unavailable**. Conflict details identify competing actions.
 Entries marked **Not configurable** have no current editor. **Edit** opens the
 owning settings section or editor; use that owner's existing **Save** or
 **Cancel** controls to apply or discard changes.
+
+## Table Utility
+
+Type `table` to open the local table viewer. **Paste Text** and **Open File**
+are explicit source actions; opening the dialog never reads the clipboard or
+file system, and an opened source file is never modified. The default parser
+detects comma or tab delimiters, treats the first record as data (**Has Header**
+is off), and accepts uneven row widths with diagnostics. **Parse / Refresh**
+explicitly parses the current source. You can enable headers, change delimiter
+or row width policy, filter rows with case-insensitive literal text, sort a
+column, and select the rows and columns to export. Sorting uses numeric order
+when every populated value is finite; otherwise it uses lexical order.
+
+**Copy Selected Columns** produces quoted TSV, while **Copy JSON** and **Save
+JSON As** use the same current selection. Large sources remain intact but use
+a bounded preview of up to 2,048 content characters plus a truncation marker
+instead of an oversized inline editor.
+The source limit is 10 MiB, with up to 50,000 data rows and 128 columns. If a
+source edit or parse fails, the last successful table stays visible with its
+original parse settings; outputs remain disabled until the current source
+parses successfully.
 
 ## JSON and screen color utilities
 

@@ -76,6 +76,10 @@ impl HelpWindow {
                             ui.label(
                                 "Open Settings > Hotkeys > Hotkey Directory to search configured shortcuts and actions, such as End, paste, or macro. Active means the runtime acknowledged the route; Pending is still being applied, and Unknown means no reliable acknowledgement is available. Other statuses include Disabled, Invalid, Conflict, Unsupported, Omitted by precedence, and Unavailable. Conflict details name competing routes. Not configurable entries have no current editor. Edit opens the owning settings or editor, where its existing Save and Cancel controls apply.",
                             );
+                            ui.label(egui::RichText::new("Table Utility").strong());
+                            ui.label(
+                                "Type table to open the local table viewer; opened source files are never modified. Paste Text and Open File are explicit inputs; the defaults are Auto delimiter, headers off, and lenient row widths. Parse / Refresh explicitly parses the source. Filter uses case-insensitive literal text; sorting uses numeric order for finite values or lexical order otherwise. Select visible rows and columns before copying quoted TSV or JSON, or saving JSON. The source limit is 10 MiB, with up to 50,000 data rows and 128 columns. Large sources keep their full text and show up to 2,048 preview characters plus a truncation marker. A failed parse leaves the last successful results visible and disables output until the current source parses.",
+                            );
                             ui.label("Older query: Ctrl+Up");
                             ui.label("Newer query / restore draft: Ctrl+Down");
                             ui.label(egui::RichText::new("Experimental Jump Mode").strong());
