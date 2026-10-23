@@ -76,6 +76,9 @@ impl HelpWindow {
                             ui.label(
                                 "Open Settings > Hotkeys > Hotkey Directory to search configured shortcuts and actions, such as End, paste, or macro. Active means the runtime acknowledged the route; Pending is still being applied, and Unknown means no reliable acknowledgement is available. Other statuses include Disabled, Invalid, Conflict, Unsupported, Omitted by precedence, and Unavailable. Conflict details name competing routes. Not configurable entries have no current editor. Edit opens the owning settings or editor, where its existing Save and Cancel controls apply.",
                             );
+                            ui.label(
+                                "In Settings, Search settings finds existing controls. Choose a result to reveal and focus that control; search does not change or save it, and it does not enable unavailable controls. Use the owning section's normal Save, Apply, or Cancel controls.",
+                            );
                             ui.label(egui::RichText::new("Table Utility").strong());
                             ui.label(
                                 "Type table to open the local table viewer; opened source files are never modified. Paste Text and Open File are explicit inputs; the defaults are Auto delimiter, headers off, and lenient row widths. Parse / Refresh explicitly parses the source. Filter uses case-insensitive literal text; sorting uses numeric order for finite values or lexical order otherwise. Select visible rows and columns before copying quoted TSV or JSON, or saving JSON. The source limit is 10 MiB, with up to 50,000 data rows and 128 columns. Large sources keep their full text and show up to 2,048 preview characters plus a truncation marker. A failed parse leaves the last successful results visible and disables output until the current source parses.",
@@ -111,6 +114,9 @@ impl HelpWindow {
                                 "Use paste to open the editor. Run Once keeps a draft in memory; Save stores authored literal text as plaintext and clipboard steps as expiring history references.",
                             );
                             ui.label(
+                                "Add Snippet and Add Clipboard Item open an inline source picker. Search snippets by alias, tags, and visible text; hidden bodies stay concealed. A selected template preview is raw and unevaluated. Insert selected adds a reference to the draft; it does not copy or run the source, and the source is rechecked at insertion.",
+                            );
+                            ui.label(
                                 "Commands: paste <query>, paste:run:<id>, paste:start, paste:next, paste:cancel. Saved sequence shortcuts use the application's chord syntax.",
                             );
                             ui.label("Choose Automatic, Manual advance, or Paste-to-Advance (Ctrl+V). Each step uses the current eligible application; invocation context only freezes template values. Paste-to-Advance uses one real Ctrl+V per step, with time to settle between presses. After completion the final item stays on the clipboard for ordinary pasting.");
@@ -121,6 +127,29 @@ impl HelpWindow {
                                 }
                             }
                             ui.label("Settings > Paste Sequences, also reached through Playback Settings in the editor, configures playback controls and optional Escape cancellation. Cancel Run or configured Cancel ends early; Esc also cancels when enabled and available. Empty shortcuts are disabled. Conflicting defaults can be inactive; custom conflicts retain the previous routes. Each saved sequence can have its own optional Start shortcut.");
+                            ui.separator();
+                            ui.label(egui::RichText::new("Reusable macro parameters").strong());
+                            ui.label(
+                                "In the Signature Editor, String parameters can be Text, File picker, Folder picker, or an ordered Choice list with an optional default. Browse fills a path, and selecting a choice fills its value; neither runs the macro. Review the values and choose Run separately. Canceled or unavailable file and folder choosers leave the path editable.",
+                            );
+                            ui.label(
+                                "Read Clipboard Text reads into a named String variable when its step runs. Write Clipboard Text writes an exact literal or String variable only when its step runs; neither action pastes text or restores earlier clipboard contents.",
+                            );
+                            ui.separator();
+                            ui.label(egui::RichText::new("Screenshot pinboard").strong());
+                            ui.label(
+                                "Each session-only pin has an Opacity control from 10% to 100% (default 100%) in its toolbar and Pin List row. Pending and failed requests are distinguished from the confirmed native value. Opacity changes the displayed window, not the source image used by Copy Image or Save As.",
+                            );
+                            ui.separator();
+                            ui.label(egui::RichText::new("Brightness").strong());
+                            ui.label(
+                                "Type bright and choose the bright: edit brightness result to open the named physical-monitor list. Refresh explicitly reads monitor information; choose a supported device, adjust its draft, and press Set. Unsupported devices have no invented percentage. The legacy bright <0–100> action remains a separate numeric route that targets all enumerated physical monitors.",
+                            );
+                            ui.separator();
+                            ui.label(egui::RichText::new("Markup editor").strong());
+                            ui.label(
+                                "Zoom and Text Size share a row above Tools when the editor is wide enough; at narrow widths they wrap onto separate lines.",
+                            );
                             ui.separator();
                             ui.label(egui::RichText::new("Dashboard").strong());
                             let dashboard_guidance = ui.add(

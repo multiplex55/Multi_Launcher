@@ -745,6 +745,13 @@ history, or temporary text steps; review the explicit preview, then choose
 steps store a content digest rather than the clipboard body and can expire when
 the corresponding history item is removed.
 
+Use **Add Snippet** or **Add Clipboard Item** to open the inline source picker.
+Search snippets by alias, tags, and visible text; hidden snippet bodies are not
+searched or revealed. Selecting a source shows its preview, and snippet templates
+remain raw and unevaluated. **Insert selected** adds a reference to the draft; it
+does not copy or run the source. The source is checked again when you insert it.
+Use **Add Temporary Text** when the step itself should contain new literal text.
+
 `paste <query>` searches saved sequence names, and activating a result runs the
 sequence. `paste:run:<id>` is the payload-free stable-ID action used by saved
 results. `paste:start`, `paste:next`, and `paste:cancel` control a prepared or
@@ -797,6 +804,12 @@ Early cancellation restores the original clipboard only while the session still
 owns it; newer clipboard contents are preserved.
 
 ## Hotkey Directory
+
+In Settings, **Search settings** finds existing controls; choose a result to
+reveal and focus that control in its owning section. Search and navigation do
+not change or save a setting. Use the owner's normal **Save**, **Apply**, or
+**Cancel** controls, and remember that search does not enable unavailable
+controls.
 
 Open **Settings > Hotkeys > Hotkey Directory** to search configured shortcuts
 and actions by text such as `End`, `paste`, or `macro`. The directory reports
@@ -1249,6 +1262,8 @@ Screenshots can be taken to:
 
 ### Markup editor highlights
 - Draw markup (pen/shape tools)
+- **Zoom** and **Text Size** share a row above **Tools** when there is room; at
+  narrow widths the controls wrap onto separate lines.
 - Copy to clipboard
 - Save to file
 - Optional toasts:
@@ -1263,6 +1278,12 @@ Screenshot behavior is controlled by settings:
 ## Screenshot pinboard
 
 Use `pinboard capture` to select a screen region and open it as an in-memory floating reference image. Multiple pins are session-only, default to Always on Top, and are limited to 8 pins and 256 MiB total image data. Each pin can be moved and resized, switched between Fit and 1:1 display, zoomed, made not-topmost or click-through, and explicitly copied or saved. Fit and 1:1 sizing use each child viewport's DPI. The image remains available without a backing temporary file; Copy Image and Save As run only when selected.
+
+Each pin has a session-only **Opacity** control from 10% to 100%, defaulting to
+100%, in both its toolbar and **Pin List** row. The requested value is shown
+separately from the confirmed native value while a change is pending or has
+failed. Opacity changes the displayed window only; **Copy Image** and **Save As**
+use the original image pixels.
 
 Use `pinboard live` to select a crop inside one external window and refresh it
 through Windows Graphics Capture, capped at approximately 10 frames per second.
@@ -1336,6 +1357,12 @@ templates, and the complete in-app MkMacro help.
   outputs. Calls have isolated local-variable frames, may nest, and appear in the
   Runtime Inspector. Stable IDs keep references intact across rename/reorder, while
   recursive call cycles are rejected.
+- In the Signature Editor, String parameters can use **Text**, **File picker**,
+  **Folder picker**, or an ordered **Choice list** with an optional default.
+  **Browse** fills a File or Folder path, and selecting a Choice fills its value;
+  neither action runs the macro. Review or edit the invocation values, then choose
+  **Run** separately. If a chooser is canceled or unavailable, the path remains
+  editable. Save or Cancel the authoring draft through the editor as usual.
 - **Read Clipboard Text** reads the current clipboard text into a named String
   variable when the worker reaches that step. **Write Clipboard Text** writes an
   exact literal or String variable at its step; neither action pastes the text nor

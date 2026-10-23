@@ -496,6 +496,7 @@ fn help(ui: &mut egui::Ui) {
     ui.label("Ctrl+F finds fields, Ctrl+H performs schema-aware replacement, and Ctrl+G jumps to a step. Fold block rows, add labels/comments/accent colors, bookmark steps, and use the Outline to navigate structure.");
     ui.heading("Reusable macros");
     ui.label("Parameters and named outputs are typed. Call Macro binds arguments explicitly and maps outputs explicitly; Return publishes declared outputs. Each call gets an isolated local-variable frame, while nested calls remain visible in the Runtime Inspector call stack.");
+    ui.label("In the Signature Editor, String parameters can use Text, File picker, Folder picker, or an ordered Choice list with an optional default. Browse fills a file or folder path, and selecting a choice fills its value; neither runs the macro. Review or edit the invocation form, then choose Run separately. If a chooser is canceled or unavailable, its path remains editable.");
     ui.label("Calls use stable macro and signature IDs, so renaming or reordering does not break them. Recursive dependency cycles are prohibited. Breakpoints in called macros pause the same debug run.");
     ui.heading("Clipboard actions");
     ui.label("Read Clipboard Text reads the current text into a named String variable when the worker reaches that step. Write Clipboard Text publishes its exact literal or String variable at that step; neither action pastes text or restores earlier clipboard contents.");
