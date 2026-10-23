@@ -34,4 +34,5 @@ pub mod lru;
 pub mod number_format;
 pub mod persistence;
 pub mod query;
+pub(crate) mod repair_watch;
 pub mod slug;

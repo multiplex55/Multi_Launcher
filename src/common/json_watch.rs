@@ -87,7 +87,13 @@ where
                     EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
                 ) && event_targets_path(&event, &target, false)
                 {
-                    invoke_callbacks(&callbacks_clone);
+                    let target = target.clone();
+                    let callbacks = Arc::clone(&callbacks_clone);
+                    crate::common::repair_watch::dispatch_or_defer_path(
+                        &target,
+                        id as u64,
+                        move || invoke_callbacks(&callbacks),
+                    );
                 }
             }
             Err(e) => tracing::error!("watch error: {:?}", e),

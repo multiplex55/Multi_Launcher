@@ -7,12 +7,22 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub const FOLDERS_FILE: &str = "folders.json";
 static FOLDERS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static LIVE_FOLDERS: Lazy<super::live_snapshot::LiveSnapshotRegistry<FolderEntry>> =
     Lazy::new(super::live_snapshot::LiveSnapshotRegistry::new);
+static FOLDERS_VERSION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn folders_version() -> u64 {
+    FOLDERS_VERSION.load(Ordering::SeqCst)
+}
+
+fn bump_folders_version() {
+    FOLDERS_VERSION.fetch_add(1, Ordering::SeqCst);
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct FolderEntry {
@@ -67,6 +77,14 @@ pub fn load_folders(path: &str) -> anyhow::Result<Vec<FolderEntry>> {
 pub fn load_folders_typed(
     path: impl AsRef<Path>,
 ) -> Result<LoadState<Vec<FolderEntry>>, PersistenceError> {
+    let path = path.as_ref();
+    let _permit = crate::common::repair_watch::require_persisted_read(path)?;
+    load_folders_typed_unfenced(path)
+}
+
+pub(crate) fn load_folders_typed_unfenced(
+    path: impl AsRef<Path>,
+) -> Result<LoadState<Vec<FolderEntry>>, PersistenceError> {
     load_json(path)
 }
 
@@ -84,19 +102,32 @@ pub fn update_folders(
     path: &str,
     mutate: impl FnOnce(&mut Vec<FolderEntry>) -> anyhow::Result<bool>,
 ) -> anyhow::Result<Vec<FolderEntry>> {
+    let _permit = crate::common::repair_watch::require_path_read(Path::new(path))?;
     let _transaction = folders_transaction_guard();
-    let mut folders = load_folders(path)?;
+    let mut folders = match load_folders_typed_unfenced(path)? {
+        LoadState::Missing | LoadState::Empty => default_folders(),
+        LoadState::Loaded(folders) => folders,
+    };
     if mutate(&mut folders)? {
         save_json_atomic(path, &folders)?;
         LIVE_FOLDERS.publish(path, &folders);
+        bump_folders_version();
     }
     Ok(folders)
 }
 
-fn folders_transaction_guard() -> MutexGuard<'static, ()> {
+pub(crate) fn folders_transaction_guard() -> MutexGuard<'static, ()> {
     FOLDERS_TRANSACTION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Publish a folder snapshot after a coordinated persistence operation has
+/// committed. Callers must hold `folders_transaction_guard` while writing and
+/// publish only after all related stores have reached their final state.
+pub(crate) fn publish_repaired_folders(path: &str, folders: &[FolderEntry]) {
+    LIVE_FOLDERS.publish(path, folders);
+    bump_folders_version();
 }
 
 /// Append a folder path to the list stored at `path`.
@@ -230,7 +261,7 @@ impl FoldersPlugin {
 
 fn reload_folder_snapshot(path: &str, data: &Arc<Mutex<Vec<FolderEntry>>>) -> anyhow::Result<()> {
     let _transaction = folders_transaction_guard();
-    let folders = match load_folders_typed(path)? {
+    let folders = match load_folders_typed_unfenced(path)? {
         LoadState::Missing => anyhow::bail!("folders file was removed; retaining last-good state"),
         LoadState::Empty => default_folders(),
         LoadState::Loaded(folders) => folders,
@@ -239,6 +270,7 @@ fn reload_folder_snapshot(path: &str, data: &Arc<Mutex<Vec<FolderEntry>>>) -> an
         && *current != folders
     {
         *current = folders;
+        bump_folders_version();
     }
     Ok(())
 }

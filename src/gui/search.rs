@@ -479,10 +479,40 @@ impl LauncherApp {
         HashMap<String, Option<String>>,
         HashMap<String, Option<String>>,
     )> {
+        Self::folder_alias_maps(crate::plugins::folders::load_folders(
+            crate::plugins::folders::FOLDERS_FILE,
+        )?)
+    }
+
+    /// Reload aliases from a WatchEvent whose dispatcher already holds the
+    /// exact folders.json read permit. Re-entering the public loader here
+    /// would acquire a nested permit and could reject an event admitted just
+    /// before a repair fence was installed.
+    pub(crate) fn try_folder_alias_maps_for_admitted_read() -> anyhow::Result<(
+        HashMap<String, Option<String>>,
+        HashMap<String, Option<String>>,
+    )> {
+        let folders = match crate::plugins::folders::load_folders_typed_unfenced(
+            crate::plugins::folders::FOLDERS_FILE,
+        )? {
+            crate::common::persistence::LoadState::Missing
+            | crate::common::persistence::LoadState::Empty => {
+                crate::plugins::folders::default_folders()
+            }
+            crate::common::persistence::LoadState::Loaded(folders) => folders,
+        };
+        Self::folder_alias_maps(folders)
+    }
+
+    fn folder_alias_maps(
+        folders: Vec<crate::plugins::folders::FolderEntry>,
+    ) -> anyhow::Result<(
+        HashMap<String, Option<String>>,
+        HashMap<String, Option<String>>,
+    )> {
         let mut aliases = HashMap::new();
         let mut aliases_lc = HashMap::new();
-        for folder in crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)?
-        {
+        for folder in folders {
             let (alias, alias_lc) = Self::normalize_alias(folder.alias);
             aliases.insert(folder.path.clone(), alias);
             aliases_lc.insert(folder.path, alias_lc);

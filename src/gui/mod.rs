@@ -957,6 +957,11 @@ pub struct LauncherApp {
     #[cfg(test)]
     pub(crate) test_sequence_context_capture_calls: usize,
     pub usage: HashMap<String, u32>,
+    pub(crate) target_repair_usage_generation: Arc<AtomicU64>,
+    pub(crate) target_repair_usage_barrier: Arc<Mutex<()>>,
+    pub(crate) target_repair_deferred_usage: Arc<Mutex<HashMap<String, u32>>>,
+    pub(crate) target_repair_usage_handoff: crate::target_repair::UsageHandoff,
+    pub(crate) target_repair_client: Option<crate::target_repair::TargetRepairClient>,
     /// IDs registered through the legacy public `global_hotkey::Hotkey` API.
     /// The launcher itself routes configured hotkeys through the main runtime.
     pub registered_hotkeys: Mutex<HashMap<String, usize>>,
@@ -1321,6 +1326,116 @@ impl CachedSearchEntry {
 }
 
 impl LauncherApp {
+    /// Installs the owned repair worker using this app's actual Hot Folder
+    /// store and root repaint handle. Startup code supplies the shared Radial
+    /// owner and data root without reaching through private GUI state.
+    pub fn initialize_target_repair_service(
+        &mut self,
+        root: PathBuf,
+        radial: Arc<crate::radial::store::RadialStore>,
+    ) {
+        let repaint_context = self.egui_ctx.clone();
+        match crate::target_repair::TargetRepairClient::new(
+            root,
+            radial,
+            self.hotfolder_runtime.repair_store_handle(),
+            self.target_repair_usage_handoff.clone(),
+            Arc::clone(&self.target_repair_usage_barrier),
+            move || repaint_context.request_repaint(),
+        ) {
+            Ok(client) => self.target_repair_client = Some(client),
+            Err(error) => self.report_error_message("target.repair.startup", error.message),
+        }
+    }
+
+    pub(crate) fn submit_target_repair(
+        &self,
+        selected: crate::target_repair::SelectedTarget,
+        replacement: PathBuf,
+    ) -> Result<(), crate::target_repair::RepairFailure> {
+        let client = self.target_repair_client.as_ref().ok_or_else(|| {
+            crate::target_repair::RepairFailure {
+                kind: crate::target_repair::RepairFailureKind::WorkerUnavailable,
+                message: "Target repair is unavailable.",
+            }
+        })?;
+        let usage = crate::target_repair::LiveUsageSnapshot::capture(
+            &self.usage,
+            Arc::clone(&self.target_repair_usage_generation),
+            Arc::clone(&self.target_repair_usage_barrier),
+            Arc::clone(&self.target_repair_deferred_usage),
+            self.target_repair_usage_handoff.clone(),
+        )?;
+        client.submit(
+            crate::target_repair::RepairRequest::new(selected, replacement).with_live_usage(usage),
+        )
+    }
+
+    fn process_target_repair_completions(&mut self) {
+        let completions = self
+            .target_repair_client
+            .as_ref()
+            .map(crate::target_repair::TargetRepairClient::poll_completions)
+            .unwrap_or_default();
+        for completion in completions {
+            match completion.result {
+                Ok(commit) => self
+                    .publish_target_repair_actions(commit.custom_actions, commit.actions_version),
+                Err(error) => self.report_error_message("target.repair", error.message),
+            }
+        }
+        let handoff = {
+            let usage_barrier = match self.target_repair_usage_barrier.try_lock() {
+                Ok(guard) => Some(guard),
+                Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+            };
+            if let Some(_usage_barrier) = usage_barrier
+                && let Some(client) = self.target_repair_client.as_ref()
+            {
+                let applied =
+                    client.apply_usage_handoff(&mut self.usage, &self.target_repair_deferred_usage);
+                if applied.changed {
+                    self.target_repair_usage_generation
+                        .fetch_add(1, Ordering::AcqRel);
+                }
+                applied
+            } else {
+                crate::target_repair::UsageHandoffApply::default()
+            }
+        };
+        if handoff.conflict {
+            self.report_error_message(
+                "target.repair.usage",
+                "Usage could not be reconciled safely after target repair; no usage values were merged.",
+            );
+        }
+    }
+
+    fn publish_target_repair_actions(
+        &mut self,
+        custom_actions: Option<Vec<Action>>,
+        committed_version: Option<u64>,
+    ) {
+        match (custom_actions, committed_version) {
+            (Some(custom_actions), Some(committed_version))
+                if crate::actions::actions_version() == committed_version =>
+            {
+                self.publish_custom_actions_with_indexed_tail(custom_actions);
+            }
+            (Some(_), _) | (_, Some(_)) => {
+                // A newer action owner revision has already won. Let the
+                // normal watcher path load that authoritative store instead
+                // of replacing it with this older repair snapshot. An
+                // incomplete receipt is handled the same safe way.
+                let _ = self
+                    .event_tx
+                    .send_as(WatchEvent::Actions, EventOrigin::FileWatcher);
+            }
+            (None, None) => {}
+        }
+    }
+
     pub fn install_hotkey_directory_document_revision(
         &mut self,
         revision: Arc<AtomicU64>,
@@ -3189,6 +3304,11 @@ impl LauncherApp {
             #[cfg(test)]
             test_sequence_context_capture_calls: 0,
             usage: usage::load_usage(USAGE_FILE).unwrap_or_default(),
+            target_repair_usage_generation: Arc::new(AtomicU64::new(0)),
+            target_repair_usage_barrier: Arc::new(Mutex::new(())),
+            target_repair_deferred_usage: Arc::new(Mutex::new(HashMap::new())),
+            target_repair_usage_handoff: crate::target_repair::UsageHandoff::default(),
+            target_repair_client: None,
             registered_hotkeys: Mutex::new(HashMap::new()),
             show_editor: false,
             show_settings: false,
@@ -5423,6 +5543,8 @@ mod tests {
         settings.hotkey = None;
         settings.quit_hotkey = None;
         settings.help_hotkey = None;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         settings.dashboard.enabled = false;
         let mut app = LauncherApp::new(
             &ctx,
@@ -5503,6 +5625,8 @@ mod tests {
         settings.hotkey = None;
         settings.quit_hotkey = None;
         settings.help_hotkey = None;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         settings.enabled_plugins = Some(std::collections::HashSet::new());
         settings.dashboard.enabled = false;
         settings.enable_toasts = false;
@@ -6520,6 +6644,103 @@ mod tests {
             action: format!("{label}:action"),
             args: None,
         }
+    }
+
+    #[test]
+    fn target_repair_transaction_publishes_committed_custom_rows_and_preserves_indexed_tail() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let config = crate::indexer::coordinator::IndexConfig::new(Vec::new(), None);
+        let mut app = new_index_app_in_workspace(
+            &egui::Context::default(),
+            &workspace,
+            &config,
+            "target-repair-publication",
+        );
+
+        let repair_root = workspace.root().join("target-repair");
+        std::fs::create_dir_all(&repair_root).unwrap();
+        app.actions_path = repair_root
+            .join("actions.json")
+            .to_string_lossy()
+            .into_owned();
+        let missing_path = repair_root.join("missing-tool.exe");
+        let original = Action {
+            label: "Selected saved tool".into(),
+            desc: "The label and arguments stay intact".into(),
+            action: missing_path.to_string_lossy().into_owned(),
+            args: Some("--profile=blue".into()),
+        };
+        let unrelated_external = Action {
+            label: "Added outside this app".into(),
+            desc: "This row was not in the stale GUI cache".into(),
+            action: "external:custom-row".into(),
+            args: None,
+        };
+        std::fs::write(
+            &app.actions_path,
+            serde_json::to_vec(&[original.clone(), unrelated_external.clone()]).unwrap(),
+        )
+        .unwrap();
+        let replacement = repair_root.join("replacement.exe");
+        std::fs::write(&replacement, b"owned test target").unwrap();
+
+        let stale_indexed_tail = index_test_action("preserved-indexed-tail");
+        app.actions = Arc::new(vec![original.clone(), stale_indexed_tail.clone()]);
+        app.custom_len = 1;
+        app.update_action_cache();
+
+        let data_root = crate::platform::app_data::AppDataRoot::from_path(repair_root.clone());
+        let coordinator = crate::target_repair::TargetRepairCoordinator::new(
+            repair_root.clone(),
+            Arc::new(crate::radial::store::RadialStore::new(&data_root).unwrap()),
+            crate::hotfolder::HotFolderRulesStore::new(&data_root),
+        );
+        let commit = coordinator
+            .repair(crate::target_repair::RepairRequest::new(
+                crate::target_repair::SelectedTarget::action_with_kind(
+                    original.clone(),
+                    0,
+                    crate::target_repair::ActionTargetKind::File,
+                ),
+                replacement.clone(),
+            ))
+            .unwrap();
+        let updated = Action {
+            action: replacement.to_string_lossy().into_owned(),
+            ..original
+        };
+        let committed_custom = vec![updated.clone(), unrelated_external.clone()];
+        assert_eq!(
+            commit.custom_actions.as_deref(),
+            Some(committed_custom.as_slice())
+        );
+        let committed_version = commit.actions_version.unwrap();
+
+        app.publish_target_repair_actions(commit.custom_actions.clone(), commit.actions_version);
+        assert_eq!(app.custom_len, 2);
+        assert_eq!(&app.actions[..app.custom_len], committed_custom.as_slice());
+        assert_eq!(
+            &app.actions[app.custom_len..],
+            std::slice::from_ref(&stale_indexed_tail),
+            "repair publication preserves the currently indexed tail"
+        );
+
+        // A later accepted Actions publication must remain authoritative if a
+        // delayed completion for this earlier commit is processed afterward.
+        let newer_external = Action {
+            label: "Later external edit".into(),
+            desc: "Already published after repair".into(),
+            action: "external:later-row".into(),
+            args: None,
+        };
+        let later_custom = vec![updated, unrelated_external, newer_external];
+        app.publish_custom_actions_with_indexed_tail(later_custom.clone());
+        crate::actions::bump_actions_version();
+        let before_stale_completion = Arc::clone(&app.actions);
+        app.publish_target_repair_actions(commit.custom_actions, Some(committed_version));
+        assert!(Arc::ptr_eq(&app.actions, &before_stale_completion));
+        assert_eq!(&app.actions[..app.custom_len], later_custom.as_slice());
     }
 
     #[test]

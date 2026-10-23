@@ -485,12 +485,19 @@ impl BindingEntry {
 }
 
 pub fn load_gestures(path: impl AsRef<Path>) -> anyhow::Result<GestureDb> {
+    let path = path.as_ref();
+    let _permit = crate::common::repair_watch::require_path_read(path)?;
     let _transaction = gestures_transaction_guard();
-    load_gestures_plan(path.as_ref()).map(|(db, _)| db)
+    load_gestures_plan(path).map(|(db, _)| db)
 }
 
 pub fn load_gestures_typed(path: impl AsRef<Path>) -> anyhow::Result<LoadState<GestureDb>> {
     let path = path.as_ref();
+    let _permit = crate::common::repair_watch::require_persisted_read(path)?;
+    load_gestures_typed_unfenced(path)
+}
+
+fn load_gestures_typed_unfenced(path: &Path) -> anyhow::Result<LoadState<GestureDb>> {
     match read_bytes(path)? {
         LoadState::Missing => Ok(LoadState::Missing),
         LoadState::Empty => Ok(LoadState::Empty),
@@ -501,8 +508,10 @@ pub fn load_gestures_typed(path: impl AsRef<Path>) -> anyhow::Result<LoadState<G
 pub(crate) fn load_gestures_for_reload(
     path: impl AsRef<Path>,
 ) -> anyhow::Result<LoadState<GestureDb>> {
+    let path = path.as_ref();
+    let _permit = crate::common::repair_watch::require_persisted_read(path)?;
     let _transaction = gestures_transaction_guard();
-    load_gestures_typed(path)
+    load_gestures_typed_unfenced(path)
 }
 
 fn load_gestures_plan(path: &Path) -> anyhow::Result<(GestureDb, bool)> {
@@ -594,11 +603,12 @@ pub fn update_gestures(
     })
 }
 
-fn update_gestures_with_save(
+pub(crate) fn update_gestures_with_save(
     path: &Path,
     mutate: impl FnOnce(&mut GestureDb) -> anyhow::Result<bool>,
     save: impl FnOnce(&Path, &GestureDb) -> anyhow::Result<()>,
 ) -> anyhow::Result<GestureDb> {
+    let _permit = crate::common::repair_watch::require_path_read(path)?;
     let _transaction = gestures_transaction_guard();
     let (mut db, migrated) = load_gestures_plan(path)?;
     let changed = mutate(&mut db)?;

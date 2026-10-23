@@ -344,8 +344,14 @@ impl LauncherApp {
                 self.history_limit,
             );
         }
-        let count = self.usage.entry(action.action.clone()).or_insert(0);
-        *count += 1;
+        crate::target_repair::record_usage_delta(
+            &action.action,
+            &mut self.usage,
+            &self.target_repair_deferred_usage,
+            &self.target_repair_usage_generation,
+            &self.target_repair_usage_barrier,
+            &self.target_repair_usage_handoff,
+        );
     }
 
     pub(crate) fn wrap_note_plain_links(&mut self, slug: &str) {

@@ -250,6 +250,7 @@ pub(super) fn watch_file_with_wake(
     let tx = tx.with_origin(EventOrigin::FileWatcher);
     let target = path.to_path_buf();
     let target_is_directory = path.is_dir();
+    let subscriber_id = crate::common::repair_watch::new_subscriber_id();
     #[cfg(test)]
     let release = track_c_gui_handler_release(path, &event);
     #[cfg(test)]
@@ -266,9 +267,20 @@ pub(super) fn watch_file_with_wake(
                     &ev,
                     &target,
                     target_is_directory,
-                ) && tx.send(event.clone()).is_ok()
-                {
-                    wake.wake();
+                ) {
+                    let target = target.clone();
+                    let tx = tx.clone();
+                    let event = event.clone();
+                    let wake = wake.clone();
+                    crate::common::repair_watch::dispatch_or_defer_path(
+                        &target,
+                        subscriber_id,
+                        move || {
+                            if tx.send(event).is_ok() {
+                                wake.wake();
+                            }
+                        },
+                    );
                 }
             }
             Err(e) => tracing::error!("watch error: {:?}", e),
@@ -329,6 +341,7 @@ impl LauncherApp {
     }
 
     pub fn process_watch_events(&mut self) {
+        self.process_target_repair_completions();
         super::hotfolder_dispatch::pump_launcher_completions(self);
         #[cfg(test)]
         track_c3c_dispatch_receipt::drain_started();
@@ -337,6 +350,43 @@ impl LauncherApp {
         );
         let mut drained = 0_usize;
         while let Ok(delivery) = self.rx.try_recv_for_dispatch() {
+            let repair_read_path = match &delivery.event {
+                WatchEvent::Actions => Some(PathBuf::from(&self.actions_path)),
+                WatchEvent::Folders => Some(PathBuf::from(crate::plugins::folders::FOLDERS_FILE)),
+                WatchEvent::Favorites => Some(PathBuf::from(crate::plugins::fav::FAV_FILE)),
+                WatchEvent::Gestures => {
+                    Some(PathBuf::from(crate::mouse_gestures::db::GESTURES_FILE))
+                }
+                _ => None,
+            };
+            let _repair_read_permit = if let Some(path) = repair_read_path.as_deref() {
+                match crate::common::repair_watch::try_read_path(path) {
+                    Some(permit) => Some(permit),
+                    None => {
+                        let sender = self
+                            .event_tx
+                            .with_origin(crate::performance::track_c::EventOrigin::FileWatcher);
+                        let event = delivery.event.clone();
+                        let wake = super::ViewportWake::root(&self.egui_ctx);
+                        let subscriber_id =
+                            crate::common::repair_watch::subscriber_for_event(&delivery.event);
+                        crate::common::repair_watch::dispatch_or_defer_path(
+                            path,
+                            subscriber_id,
+                            move || {
+                                if sender.send(event).is_ok() {
+                                    wake.wake();
+                                }
+                            },
+                        );
+                        // Do not spin on a fenced owner path, and let unrelated
+                        // events remain available to the next UI iteration.
+                        break;
+                    }
+                }
+            } else {
+                None
+            };
             drained = drained.saturating_add(1);
             self.event_sink.event_consumed();
             #[cfg(test)]
@@ -475,7 +525,7 @@ impl LauncherApp {
                         let _track_c_typed_load = super::track_c_action_observer::scope(
                             super::track_c_action_observer::Phase::TypedLoad,
                         );
-                        load_actions_typed(&self.actions_path)
+                        crate::actions::load_actions_typed_unfenced(&self.actions_path)
                     };
                     let custom = match typed_load {
                         Ok(crate::common::persistence::LoadState::Missing) => {
@@ -558,7 +608,7 @@ impl LauncherApp {
                         "Folders file was removed; retaining last-good aliases",
                     );
                 }
-                WatchEvent::Folders => match Self::try_folder_alias_maps() {
+                WatchEvent::Folders => match Self::try_folder_alias_maps_for_admitted_read() {
                     Ok((aliases, aliases_lc)) => {
                         self.folder_aliases = aliases;
                         self.folder_aliases_lc = aliases_lc;

@@ -242,6 +242,14 @@ pub fn load_pins(path: &str) -> anyhow::Result<Vec<HistoryPin>> {
 pub fn load_pins_typed(
     path: impl AsRef<Path>,
 ) -> Result<LoadState<Vec<HistoryPin>>, PersistenceError> {
+    let path = path.as_ref();
+    let _permit = crate::common::repair_watch::require_persisted_read(path)?;
+    load_pins_typed_unfenced(path)
+}
+
+fn load_pins_typed_unfenced(
+    path: impl AsRef<Path>,
+) -> Result<LoadState<Vec<HistoryPin>>, PersistenceError> {
     load_json(path)
 }
 
@@ -270,15 +278,19 @@ fn update_pins_with_save(
     mutate: impl FnOnce(&mut Vec<HistoryPin>) -> anyhow::Result<bool>,
     save: impl FnOnce(&str, &[HistoryPin]) -> anyhow::Result<()>,
 ) -> anyhow::Result<Vec<HistoryPin>> {
+    let _permit = crate::common::repair_watch::require_path_read(Path::new(path))?;
     let _transaction = pins_transaction_guard();
-    let mut pins = load_pins(path)?;
+    let mut pins = match load_pins_typed_unfenced(path)? {
+        LoadState::Missing | LoadState::Empty => Vec::new(),
+        LoadState::Loaded(pins) => pins,
+    };
     if mutate(&mut pins)? {
         save(path, &pins)?;
     }
     Ok(pins)
 }
 
-fn pins_transaction_guard() -> MutexGuard<'static, ()> {
+pub(crate) fn pins_transaction_guard() -> MutexGuard<'static, ()> {
     PINS_TRANSACTION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CandidateState {
@@ -178,6 +178,101 @@ pub struct RadialStore {
     disk_identity: Mutex<Option<String>>,
 }
 
+pub(crate) struct TargetRepairRadialGuard<'a> {
+    _transaction: MutexGuard<'a, ()>,
+    document: Arc<RadialDocument>,
+}
+
+impl TargetRepairRadialGuard<'_> {
+    pub(crate) fn has_action_reference(&self, action_path: &str, args: Option<&str>) -> bool {
+        use crate::radial::model::ActionBinding;
+        use crate::universal_actions::PersistableActionTargetRef as Target;
+
+        fn binding_matches(binding: &ActionBinding, action_path: &str, args: Option<&str>) -> bool {
+            use crate::universal_actions::PersistableActionTargetRef as Target;
+            match binding {
+                ActionBinding::Persisted { action } => matches!(
+                    action.target.as_ref(),
+                    Some(Target::LegacyAction { action } | Target::CustomAction { action })
+                        if action.action == action_path && action.args.as_deref() == args
+                ),
+                ActionBinding::ExactCommand {
+                    command,
+                    args: stored_args,
+                } => command == action_path && stored_args.as_deref() == args,
+                _ => false,
+            }
+        }
+
+        self.document.menus.iter().any(|menu| {
+            [
+                menu.center_action.as_ref(),
+                menu.center_secondary_action.as_ref(),
+                menu.background_action.as_ref(),
+                menu.background_secondary_action.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|binding| binding_matches(binding, action_path, args))
+                || menu.rings.iter().any(|ring| {
+                    ring.cells.iter().any(|cell| {
+                        let content = matches!(
+                            &cell.content,
+                            crate::radial::model::CellContent::Action { binding }
+                                if binding_matches(binding, action_path, args)
+                        );
+                        content
+                            || cell
+                                .alternate_clicks
+                                .iter()
+                                .any(|click| binding_matches(&click.action, action_path, args))
+                    })
+                })
+        })
+    }
+
+    pub(crate) fn has_folder_reference(&self, folder_path: &str) -> bool {
+        use crate::radial::model::ActionBinding;
+        use crate::universal_actions::PersistableActionTargetRef as Target;
+
+        fn binding_matches(binding: &ActionBinding, folder_path: &str) -> bool {
+            match binding {
+                ActionBinding::Persisted { action } => {
+                    matches!(action.target.as_ref(), Some(Target::Folder { path }) if path == folder_path)
+                }
+                ActionBinding::ExactCommand { command, args } => {
+                    command == folder_path && args.is_none()
+                }
+                _ => false,
+            }
+        }
+
+        self.document.menus.iter().any(|menu| {
+            [
+                menu.center_action.as_ref(),
+                menu.center_secondary_action.as_ref(),
+                menu.background_action.as_ref(),
+                menu.background_secondary_action.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|binding| binding_matches(binding, folder_path))
+                || menu.rings.iter().any(|ring| {
+                    ring.cells.iter().any(|cell| {
+                        matches!(
+                            &cell.content,
+                            crate::radial::model::CellContent::Action { binding }
+                                if binding_matches(binding, folder_path)
+                        ) || cell
+                            .alternate_clicks
+                            .iter()
+                            .any(|click| binding_matches(&click.action, folder_path))
+                    })
+                })
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AuthoringCommitResult {
     pub snapshot: AuthoringSnapshot,
@@ -248,6 +343,47 @@ impl RadialStore {
             }
         }
         Ok(AuthoringSnapshot::new(document, sha256_hex(&bytes)))
+    }
+
+    /// Hold the radial owner transaction while checking a cross-store repair.
+    /// The returned view is read-only; a persisted reference is a conflict
+    /// until radial itself gains an owner-coordinated reference migration.
+    pub(crate) fn target_repair_guard(&self) -> Result<TargetRepairRadialGuard<'_>, StoreError> {
+        let transaction = self
+            .transaction
+            .lock()
+            .map_err(|_| StoreError::LockPoisoned)?;
+        let document = self
+            .published
+            .read()
+            .map_err(|_| StoreError::LockPoisoned)?
+            .clone();
+        let bytes = match read_bytes(&self.path)? {
+            LoadState::Loaded(bytes) => bytes,
+            LoadState::Missing | LoadState::Empty => Vec::new(),
+        };
+        if !bytes.is_empty() {
+            let decoded = decode_document(&bytes).map_err(|error| match error {
+                DocumentDecodeError::Malformed(source) => StoreError::Malformed {
+                    path: self.path.clone(),
+                    source,
+                },
+                DocumentDecodeError::UnsupportedNewerVersion { found, supported } => {
+                    StoreError::UnsupportedNewerVersion { found, supported }
+                }
+                DocumentDecodeError::Validation(error) => StoreError::Validation(error),
+            })?;
+            let mut comparable = decoded.document;
+            comparable.schema_version = document.schema_version;
+            comparable.revision = document.revision;
+            if comparable != *document {
+                return Err(StoreError::DiskChanged);
+            }
+        }
+        Ok(TargetRepairRadialGuard {
+            _transaction: transaction,
+            document,
+        })
     }
 
     /// Main-owner transaction used by authoring Apply/Save/Cancel. Managed

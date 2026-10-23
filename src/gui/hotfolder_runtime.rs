@@ -173,6 +173,7 @@ pub(crate) struct HotFolderRuntimeDriver {
     shutdown_requested: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     reaper: Option<JoinHandle<()>>,
+    repair_store: crate::hotfolder::HotFolderRulesStore,
 }
 
 impl HotFolderRuntimeDriver {
@@ -180,6 +181,7 @@ impl HotFolderRuntimeDriver {
         data_root: AppDataRoot,
         adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter>,
     ) -> Self {
+        let repair_store = crate::hotfolder::HotFolderRulesStore::new(&data_root);
         let (sender, receiver) = mpsc::sync_channel(DRIVER_QUEUE_CAPACITY);
         let snapshot = Arc::new(RwLock::new(HotFolderDriverSnapshot::default()));
         let execution_control = HotFolderExecutionControl::initially_blocked();
@@ -187,12 +189,13 @@ impl HotFolderRuntimeDriver {
         let worker_shutdown = Arc::clone(&shutdown_requested);
         let worker_snapshot = Arc::clone(&snapshot);
         let worker_control = execution_control.clone();
+        let worker_repair_store = repair_store.clone();
         let worker = thread::Builder::new()
             .name("hotfolder-app-driver".into())
             .spawn(move || {
                 driver_main(
                     receiver,
-                    data_root,
+                    worker_repair_store,
                     adapter,
                     worker_control,
                     worker_shutdown,
@@ -208,7 +211,12 @@ impl HotFolderRuntimeDriver {
             shutdown_requested,
             worker: Some(worker),
             reaper: None,
+            repair_store,
         }
+    }
+
+    pub(crate) fn repair_store_handle(&self) -> crate::hotfolder::HotFolderRulesStore {
+        self.repair_store.clone()
     }
 
     pub(crate) fn snapshot(&self) -> HotFolderDriverSnapshot {
@@ -727,13 +735,12 @@ struct PreparedEnable {
 
 fn driver_main(
     receiver: mpsc::Receiver<DriverRequest>,
-    data_root: AppDataRoot,
+    store: crate::hotfolder::HotFolderRulesStore,
     adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter>,
     control: HotFolderExecutionControl,
     shutdown_requested: Arc<AtomicBool>,
     published: Arc<RwLock<HotFolderDriverSnapshot>>,
 ) {
-    let store = crate::hotfolder::HotFolderRulesStore::new(&data_root);
     let mut store_loaded = false;
     let mut inputs = HotFolderCapabilityInputs::empty();
     let mut watcher: Option<HotFolderWatchService> = None;

@@ -78,6 +78,7 @@ pub mod sound;
 pub mod startup;
 pub mod table_utility;
 pub mod table_utility_session;
+pub mod target_repair;
 pub mod text_transform;
 pub(crate) mod thread_reaper;
 pub mod toast_log;

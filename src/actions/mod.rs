@@ -107,11 +107,20 @@ impl Default for ActionIdLookup {
 pub fn load_actions_typed(
     path: impl AsRef<Path>,
 ) -> Result<LoadState<Vec<Action>>, PersistenceError> {
-    load_json(path)
+    let path = path.as_ref();
+    let _permit = crate::common::repair_watch::require_persisted_read(path)?;
+    load_actions_typed_unfenced(path)
 }
 
 pub fn load_actions(path: &str) -> anyhow::Result<Vec<Action>> {
+    let _permit = crate::common::repair_watch::require_path_read(Path::new(path))?;
     load_effective(path).map_err(Into::into)
+}
+
+pub(crate) fn load_actions_typed_unfenced(
+    path: impl AsRef<Path>,
+) -> Result<LoadState<Vec<Action>>, PersistenceError> {
+    load_json(path)
 }
 
 pub fn save_actions(path: &str, actions: &[Action]) -> anyhow::Result<()> {
@@ -129,6 +138,7 @@ pub fn update_actions(
     path: &str,
     mutate: impl FnOnce(&mut Vec<Action>) -> anyhow::Result<()>,
 ) -> anyhow::Result<Vec<Action>> {
+    let _permit = crate::common::repair_watch::require_path_read(Path::new(path))?;
     let _transaction = transaction_guard();
     let mut actions = load_effective(path)?;
     mutate(&mut actions)?;
@@ -138,7 +148,7 @@ pub fn update_actions(
 }
 
 fn load_effective(path: impl AsRef<Path>) -> Result<Vec<Action>, PersistenceError> {
-    match load_actions_typed(path)? {
+    match load_actions_typed_unfenced(path)? {
         LoadState::Missing | LoadState::Empty => Ok(Vec::new()),
         LoadState::Loaded(actions) => Ok(actions),
     }

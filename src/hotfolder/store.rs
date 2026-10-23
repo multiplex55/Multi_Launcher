@@ -1,6 +1,6 @@
 use super::model::{
     HOT_FOLDER_RULES_FILE, HOT_FOLDER_RULES_FORMAT_VERSION, HotFolderRule, MAX_DOCUMENT_BYTES,
-    MAX_QUARANTINED_ROWS, MAX_RULES,
+    MAX_QUARANTINED_ROWS, MAX_RULES, RuleAction,
 };
 use crate::{common::atomic_file::save_atomic, platform::app_data::AppDataRoot};
 use serde::{Deserialize, Serialize};
@@ -201,22 +201,49 @@ struct StoreState {
 
 /// Read-only until one of the explicit CRUD methods is called. Construction
 /// records the app-data path only; it never reads, creates, or activates files.
+#[derive(Clone)]
 pub struct HotFolderRulesStore {
-    path: PathBuf,
-    state: Mutex<StoreState>,
+    path: Arc<PathBuf>,
+    state: Arc<Mutex<StoreState>>,
+    transaction: Arc<Mutex<()>>,
 }
 
 impl HotFolderRulesStore {
     pub fn new(root: &AppDataRoot) -> Self {
+        let path = root.path().join(HOT_FOLDER_RULES_FILE);
+        let transaction = path_transaction(&path);
         Self {
-            path: root.path().join(HOT_FOLDER_RULES_FILE),
-            state: Mutex::new(StoreState {
+            path: Arc::new(path),
+            state: Arc::new(Mutex::new(StoreState {
                 snapshot: HotFolderRulesSnapshot::empty(),
                 status: None,
                 baseline: DiskBaseline::Unknown,
                 last_good_raw: None,
                 last_observed_raw: None,
-            }),
+            })),
+            transaction,
+        }
+    }
+
+    pub(crate) fn repair_guard(&self) -> HotFolderRepairGuard<'_> {
+        let transaction = self
+            .transaction
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let snapshot = state.snapshot.clone();
+        let status = state.status;
+        let baseline = state.baseline;
+        drop(state);
+        HotFolderRepairGuard {
+            _transaction: transaction,
+            path: &self.path,
+            snapshot,
+            status,
+            baseline,
         }
     }
 
@@ -228,8 +255,36 @@ impl HotFolderRulesStore {
     /// whole documents preserve the in-memory last-good snapshot and block
     /// writes until a valid version is explicitly loaded.
     pub fn load(&self) -> HotFolderLoadReport {
-        let transaction = path_transaction(&self.path);
-        let _transaction = transaction
+        let _permit = match crate::common::repair_watch::try_read_path_checked(&self.path) {
+            Ok(permit) => permit,
+            Err(refusal) => {
+                let message = match refusal {
+                    crate::common::repair_watch::PathReadRefusal::RepairInProgress => {
+                        "Hot Folder rules are temporarily unavailable during saved-target repair"
+                    }
+                    crate::common::repair_watch::PathReadRefusal::RecoveryConflict => {
+                        "Hot Folder rules are unavailable until saved-target recovery completes"
+                    }
+                };
+                return HotFolderLoadReport {
+                    status: HotFolderLoadStatus::UnavailableRetained,
+                    snapshot: self.snapshot(),
+                    diagnostic: Some(message.to_owned()),
+                };
+            }
+        };
+        self.load_unfenced()
+    }
+
+    /// The target-repair worker already owns this path's repair fence and the
+    /// store transaction when it needs to refresh the authorization snapshot.
+    pub(crate) fn load_for_target_repair(&self) -> HotFolderLoadReport {
+        self.load_unfenced()
+    }
+
+    fn load_unfenced(&self) -> HotFolderLoadReport {
+        let _transaction = self
+            .transaction
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match read_limited(&self.path) {
@@ -271,7 +326,8 @@ impl HotFolderRulesStore {
         expected_revision: u64,
         rules: Vec<HotFolderRule>,
     ) -> Result<HotFolderRulesSnapshot, HotFolderStoreError> {
-        self.commit_rules(expected_revision, rules)
+        let _permit = self.write_permit()?;
+        self.commit_rules_under_permit(expected_revision, rules)
     }
 
     pub fn add_rule(
@@ -279,13 +335,14 @@ impl HotFolderRulesStore {
         expected_revision: u64,
         mut rule: HotFolderRule,
     ) -> Result<HotFolderRulesSnapshot, HotFolderStoreError> {
+        let _permit = self.write_permit()?;
         rule.enabled = false;
         let mut rules = self.rules_for_revision(expected_revision)?;
         if rules.iter().any(|existing| existing.id == rule.id) {
             return Err(HotFolderStoreError::DuplicateRuleId);
         }
         rules.push(rule);
-        self.commit_rules(expected_revision, rules)
+        self.commit_rules_under_permit(expected_revision, rules)
     }
 
     pub fn replace_rule(
@@ -293,13 +350,14 @@ impl HotFolderRulesStore {
         expected_revision: u64,
         rule: HotFolderRule,
     ) -> Result<HotFolderRulesSnapshot, HotFolderStoreError> {
+        let _permit = self.write_permit()?;
         let mut rules = self.rules_for_revision(expected_revision)?;
         let existing = rules
             .iter_mut()
             .find(|existing| existing.id == rule.id)
             .ok_or(HotFolderStoreError::RuleNotFound)?;
         *existing = rule;
-        self.commit_rules(expected_revision, rules)
+        self.commit_rules_under_permit(expected_revision, rules)
     }
 
     pub fn remove_rule(
@@ -307,13 +365,30 @@ impl HotFolderRulesStore {
         expected_revision: u64,
         id: &super::model::RuleId,
     ) -> Result<HotFolderRulesSnapshot, HotFolderStoreError> {
+        let _permit = self.write_permit()?;
         let mut rules = self.rules_for_revision(expected_revision)?;
         let old_len = rules.len();
         rules.retain(|rule| &rule.id != id);
         if rules.len() == old_len {
             return Err(HotFolderStoreError::RuleNotFound);
         }
-        self.commit_rules(expected_revision, rules)
+        self.commit_rules_under_permit(expected_revision, rules)
+    }
+
+    fn write_permit(
+        &self,
+    ) -> Result<crate::common::repair_watch::PathReadPermit, HotFolderStoreError> {
+        crate::common::repair_watch::try_read_path_checked(&self.path).map_err(|refusal| {
+            let message = match refusal {
+                crate::common::repair_watch::PathReadRefusal::RepairInProgress => {
+                    "saved-target repair is in progress; retry Hot Folder changes"
+                }
+                crate::common::repair_watch::PathReadRefusal::RecoveryConflict => {
+                    "saved-target recovery needs attention; Hot Folder changes are unavailable"
+                }
+            };
+            HotFolderStoreError::WriteBlocked(message.to_owned())
+        })
     }
 
     fn rules_for_revision(
@@ -329,13 +404,13 @@ impl HotFolderRulesStore {
         Ok(state.snapshot.rules.clone())
     }
 
-    fn commit_rules(
+    fn commit_rules_under_permit(
         &self,
         expected_revision: u64,
         mut rules: Vec<HotFolderRule>,
     ) -> Result<HotFolderRulesSnapshot, HotFolderStoreError> {
-        let transaction = path_transaction(&self.path);
-        let _transaction = transaction
+        let _transaction = self
+            .transaction
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut state = self
@@ -522,6 +597,58 @@ impl HotFolderRulesStore {
             });
         }
         retain_last_good(&mut state, status, diagnostic, error)
+    }
+}
+
+pub(crate) struct HotFolderRepairGuard<'a> {
+    _transaction: std::sync::MutexGuard<'a, ()>,
+    path: &'a Path,
+    snapshot: HotFolderRulesSnapshot,
+    status: Option<HotFolderLoadStatus>,
+    baseline: DiskBaseline,
+}
+
+impl HotFolderRepairGuard<'_> {
+    pub(crate) fn is_authoritative(&self, _path: &Path) -> bool {
+        let baseline_matches = match (&self.baseline, read_limited(self.path)) {
+            (DiskBaseline::Missing, Ok(ReadDocument::Missing)) => true,
+            (DiskBaseline::Bytes(expected), Ok(ReadDocument::Bytes(current))) => {
+                *expected == digest(&current)
+            }
+            _ => false,
+        };
+        baseline_matches
+            && matches!(
+                self.status,
+                Some(HotFolderLoadStatus::Missing)
+                    | Some(HotFolderLoadStatus::Loaded)
+                    | Some(HotFolderLoadStatus::LoadedWithQuarantinedRows)
+            )
+    }
+
+    pub(crate) fn has_auth_bound_reference(&self, action_path: &str, args: Option<&str>) -> bool {
+        use crate::universal_actions::PersistableActionTargetRef as Target;
+        self.snapshot.rules.iter().any(|rule| {
+            let RuleAction::RegisteredLauncherAction { reference, .. } = &rule.action else {
+                return false;
+            };
+            match reference.target.as_ref() {
+                Some(Target::LegacyAction { action } | Target::CustomAction { action }) => {
+                    action.action == action_path && action.args.as_deref() == args
+                }
+                _ => false,
+            }
+        })
+    }
+
+    pub(crate) fn has_folder_reference(&self, folder_path: &str) -> bool {
+        use crate::universal_actions::PersistableActionTargetRef as Target;
+        self.snapshot.rules.iter().any(|rule| {
+            let RuleAction::RegisteredLauncherAction { reference, .. } = &rule.action else {
+                return false;
+            };
+            matches!(reference.target.as_ref(), Some(Target::Folder { path }) if path == folder_path)
+        })
     }
 }
 

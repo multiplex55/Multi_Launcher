@@ -4023,6 +4023,8 @@ struct GuiStartupServices {
     paste_sequence_document_revision: Arc<AtomicU64>,
     event_tx: Sender<()>,
     settings_save_workers: multi_launcher::gui::SettingsSaveWorkerRegistry,
+    target_repair_radial: Arc<RadialStore>,
+    target_repair_root: PathBuf,
 }
 
 /// Spawn the GUI on a separate thread.
@@ -4058,6 +4060,8 @@ fn spawn_gui(
         paste_sequence_document_revision,
         event_tx,
         settings_save_workers,
+        target_repair_radial,
+        target_repair_root,
     } = startup_services;
     #[cfg(feature = "qa-framebuffer-capture")]
     let qa_framebuffer_request = match QaFramebufferRequest::from_environment() {
@@ -4114,6 +4118,8 @@ fn spawn_gui(
     let actions_for_window = Arc::clone(&actions);
     let startup_indexing_for_window = startup_indexing;
     let settings_save_workers_for_window = settings_save_workers;
+    let target_repair_radial_for_window = Arc::clone(&target_repair_radial);
+    let target_repair_root_for_window = target_repair_root.clone();
     let paste_sequence_document_revision_for_window = Arc::clone(&paste_sequence_document_revision);
     let hotkey_directory_main_wake = event_tx.clone();
     #[cfg(feature = "qa-framebuffer-capture")]
@@ -4166,6 +4172,10 @@ fn spawn_gui(
                     flag_clone,
                     restore_clone,
                     help_clone,
+                );
+                app.initialize_target_repair_service(
+                    target_repair_root_for_window,
+                    target_repair_radial_for_window,
                 );
                 app.install_hotkey_directory_document_revision(
                     paste_sequence_document_revision_for_window,
@@ -4224,6 +4234,7 @@ fn main() -> anyhow::Result<()> {
         SingleInstanceAcquire::Acquired(guard) => guard,
         SingleInstanceAcquire::AlreadyRunning => return Ok(()),
     };
+    multi_launcher::target_repair::recover_startup(app_data_root.path())?;
     let settings_timer = multi_launcher::performance::Timer::start();
     let startup_preload = load_startup_preload(&app_data_root, "settings.json");
     let startup_recovery = startup_preload.recovery;
@@ -4318,7 +4329,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     let mut listener = HotkeyTrigger::start_listener(watched, "main", event_tx.clone());
-    let radial_store = RadialStore::new(&app_data_root).map_err(anyhow::Error::msg)?;
+    let radial_store = Arc::new(RadialStore::new(&app_data_root).map_err(anyhow::Error::msg)?);
     let (mut radial_document, radial_store_loaded) = match radial_store.reload() {
         Ok(document) => (document, true),
         Err(error) => {
@@ -4585,6 +4596,8 @@ fn main() -> anyhow::Result<()> {
         paste_sequence_document_revision: Arc::clone(&paste_sequence_document_revision),
         event_tx: event_tx.clone(),
         settings_save_workers: settings_save_workers.clone(),
+        target_repair_radial: Arc::clone(&radial_store),
+        target_repair_root: app_data_root.path().to_path_buf(),
     };
     let (gui_worker, visibility, restore_flag, help_flag, ctx, root_window_bridge) = spawn_gui(
         Arc::clone(&actions),

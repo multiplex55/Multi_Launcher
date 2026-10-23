@@ -9391,7 +9391,19 @@ impl eframe::App for LauncherApp {
         self.request_launcher_visibility(false);
         self.last_visible = false;
         self.prepare_settings_save_shutdown();
-        let _ = usage::save_usage(USAGE_FILE, &self.usage);
+        if let Some(mut client) = self.target_repair_client.take() {
+            client.shutdown();
+            let save_result = client.save_usage_on_exit(
+                USAGE_FILE,
+                &mut self.usage,
+                &self.target_repair_deferred_usage,
+            );
+            if let Err(error) = save_result {
+                self.report_error("usage.save_on_exit", error);
+            }
+        } else if let Err(error) = usage::save_usage(USAGE_FILE, &self.usage) {
+            self.report_error("usage.save_on_exit", error);
+        }
     }
 }
 

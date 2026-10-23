@@ -40,14 +40,24 @@ pub fn load_favs(path: &str) -> anyhow::Result<Vec<FavEntry>> {
 pub fn load_favs_typed(
     path: impl AsRef<Path>,
 ) -> Result<LoadState<Vec<FavEntry>>, PersistenceError> {
+    let path = path.as_ref();
+    let _permit = crate::common::repair_watch::require_persisted_read(path)?;
+    load_favs_typed_unfenced(path)
+}
+
+fn load_favs_typed_unfenced(
+    path: impl AsRef<Path>,
+) -> Result<LoadState<Vec<FavEntry>>, PersistenceError> {
     load_json(path)
 }
 
 pub(crate) fn load_favs_for_reload(
     path: impl AsRef<Path>,
 ) -> Result<LoadState<Vec<FavEntry>>, PersistenceError> {
+    let path = path.as_ref();
+    let _permit = crate::common::repair_watch::require_persisted_read(path)?;
     let _transaction = fav_transaction_guard();
-    load_favs_typed(path)
+    load_favs_typed_unfenced(path)
 }
 
 pub fn save_favs(path: &str, favs: &[FavEntry]) -> anyhow::Result<()> {
@@ -75,8 +85,12 @@ fn update_favs_with_save(
     mutate: impl FnOnce(&mut Vec<FavEntry>) -> anyhow::Result<bool>,
     save: impl FnOnce(&str, &[FavEntry]) -> anyhow::Result<()>,
 ) -> anyhow::Result<Vec<FavEntry>> {
+    let _permit = crate::common::repair_watch::require_path_read(Path::new(path))?;
     let _transaction = fav_transaction_guard();
-    let mut favs = load_favs(path)?;
+    let mut favs = match load_favs_typed_unfenced(path)? {
+        LoadState::Missing | LoadState::Empty => Vec::new(),
+        LoadState::Loaded(favs) => favs,
+    };
     if mutate(&mut favs)? {
         save(path, &favs)?;
         LIVE_FAVS.publish(path, &favs);
@@ -85,10 +99,16 @@ fn update_favs_with_save(
     Ok(favs)
 }
 
-fn fav_transaction_guard() -> MutexGuard<'static, ()> {
+pub(crate) fn fav_transaction_guard() -> MutexGuard<'static, ()> {
     FAV_TRANSACTION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Publish a favorite snapshot after an owner-coordinated repair commits.
+pub(crate) fn publish_repaired_favs(path: &str, favs: &[FavEntry]) {
+    LIVE_FAVS.publish(path, favs);
+    record_versioned_favs(path, favs);
 }
 
 pub fn set_fav(path: &str, label: &str, action: &str, args: Option<&str>) -> anyhow::Result<()> {
@@ -278,7 +298,7 @@ impl FavPlugin {
 
 fn reload_fav_snapshot(path: &str, data: &Arc<Mutex<Vec<FavEntry>>>) -> anyhow::Result<()> {
     let _transaction = fav_transaction_guard();
-    let favs = match load_favs_typed(path)? {
+    let favs = match load_favs_typed_unfenced(path)? {
         LoadState::Missing => {
             anyhow::bail!("favorites file was removed; retaining last-good state")
         }
