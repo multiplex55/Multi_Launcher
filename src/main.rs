@@ -1263,37 +1263,6 @@ fn publish_paste_sequence_route_presentation(
     ));
 }
 
-fn directory_candidate(
-    id: impl Into<String>,
-    owner: multi_launcher::hotkey::directory::Owner,
-    owner_label: &str,
-    action_label: impl Into<String>,
-    chord: Option<String>,
-    route: multi_launcher::hotkey::directory::RouteKind,
-    scope: multi_launcher::hotkey::directory::Scope,
-    source_revision: u64,
-    expected_runtime_generation: Option<u64>,
-    state: multi_launcher::hotkey::directory::CandidateState,
-    reason: Option<multi_launcher::hotkey::directory::Reason>,
-    edit: Option<multi_launcher::hotkey::directory::EditDestination>,
-) -> multi_launcher::hotkey::directory::Candidate {
-    use multi_launcher::hotkey::directory::{Candidate, EntryId};
-    Candidate {
-        id: EntryId::new(id),
-        owner,
-        owner_label: owner_label.into(),
-        action_label: action_label.into(),
-        chord,
-        route,
-        scope,
-        source_revision,
-        expected_runtime_generation,
-        state,
-        reason,
-        edit,
-    }
-}
-
 fn candidate_runtime_state(
     chord: &str,
     generation: u64,
@@ -1418,25 +1387,46 @@ fn directory_source_snapshot(
     }
 }
 
-fn hotkey_directory_source_snapshots(
-    settings: &Settings,
-    radial_document: &RadialDocument,
-    sequence_snapshot: Option<&multi_launcher::paste_sequence::SequenceSnapshot>,
-    sequence_routes: &[PasteSequenceHotkeyRoute],
-    sequence_presentation: Option<&multi_launcher::paste_sequence::SequenceRoutePresentation>,
-    sequence_omissions: &[PasteSequenceRouteOmission],
-    macro_document: Option<&multi_launcher::mkmacro::MkMacroDocument>,
+struct HotkeyDirectorySourceInputs<'a> {
+    settings: &'a Settings,
+    radial_document: &'a RadialDocument,
+    sequence_snapshot: Option<&'a multi_launcher::paste_sequence::SequenceSnapshot>,
+    sequence_routes: &'a [PasteSequenceHotkeyRoute],
+    sequence_presentation: Option<&'a multi_launcher::paste_sequence::SequenceRoutePresentation>,
+    sequence_omissions: &'a [PasteSequenceRouteOmission],
+    macro_document: Option<&'a multi_launcher::mkmacro::MkMacroDocument>,
     macro_revision: u64,
-    active_legacy_triggers: &[multi_launcher::hotkey::Hotkey],
-    applied_shared_route: Option<&AppliedSharedRouteEvidence>,
+    active_legacy_triggers: &'a [multi_launcher::hotkey::Hotkey],
+    applied_shared_route: Option<&'a AppliedSharedRouteEvidence>,
     runtime_generation: u64,
     sequence_runtime_acknowledged: bool,
     route_pending: bool,
     source_publication_revision: u64,
+}
+
+fn hotkey_directory_source_snapshots(
+    inputs: HotkeyDirectorySourceInputs<'_>,
 ) -> Vec<multi_launcher::hotkey::directory::SourceSnapshot> {
+    let HotkeyDirectorySourceInputs {
+        settings,
+        radial_document,
+        sequence_snapshot,
+        sequence_routes,
+        sequence_presentation,
+        sequence_omissions,
+        macro_document,
+        macro_revision,
+        active_legacy_triggers,
+        applied_shared_route,
+        runtime_generation,
+        sequence_runtime_acknowledged,
+        route_pending,
+        source_publication_revision,
+    } = inputs;
     use multi_launcher::hotkey::directory::{
-        AppliedRouteReceipt, CandidateState, EditDestination, MacroRecorderSetting, MainSetting,
-        Owner, PasteSetting, Reason, RouteKind, Scope, Source, SourceSnapshot,
+        AppliedRouteReceipt, Candidate, CandidateState, EditDestination, EntryId,
+        MacroRecorderSetting, MainSetting, Owner, PasteSetting, Reason, RouteKind, Scope, Source,
+        SourceSnapshot,
     };
     use multi_launcher::hotkey::launcher_invocation::RelatedAction;
     use multi_launcher::paste_sequence::SequenceShortcutPresentation;
@@ -1500,20 +1490,20 @@ fn hotkey_directory_source_snapshots(
         } else {
             RouteKind::LegacyPolling
         };
-        let candidate = directory_candidate(
-            id,
-            Owner::Launcher,
-            "Launcher",
-            action,
-            chord.clone(),
+        let candidate = Candidate {
+            id: EntryId::new(id),
+            owner: Owner::Launcher,
+            owner_label: "Launcher".into(),
+            action_label: action.into(),
+            chord: chord.clone(),
             route,
-            Scope::ProcessWide,
-            runtime_generation,
-            configured.map(|_| runtime_generation),
-            state.0.clone(),
-            state.1,
-            Some(EditDestination::MainSettings(setting)),
-        );
+            scope: Scope::ProcessWide,
+            source_revision: runtime_generation,
+            expected_runtime_generation: configured.map(|_| runtime_generation),
+            state: state.0.clone(),
+            reason: state.1,
+            edit: Some(EditDestination::MainSettings(setting)),
+        };
         let related_action = match setting {
             MainSetting::Launcher => None,
             MainSetting::Quit => Some(RelatedAction::Quit),
@@ -1601,23 +1591,23 @@ fn hotkey_directory_source_snapshots(
                 runtime_generation,
             ));
         }
-        screen_draw_candidates.push(directory_candidate(
-            id_owned,
-            Owner::ScreenDraw,
-            "Screen Draw",
-            label,
-            chord_owned,
+        screen_draw_candidates.push(Candidate {
+            id: EntryId::new(id_owned),
+            owner: Owner::ScreenDraw,
+            owner_label: "Screen Draw".into(),
+            action_label: label.into(),
+            chord: chord_owned,
             route,
-            Scope::ProcessWide,
-            runtime_generation,
-            expected_generation,
+            scope: Scope::ProcessWide,
+            source_revision: runtime_generation,
+            expected_runtime_generation: expected_generation,
             state,
-            reason.or_else(|| {
+            reason: reason.or_else(|| {
                 (expected_generation.is_some() && !route_pending && !(exact_shared || exact_legacy))
                     .then_some(Reason::RouteNotAcknowledged)
             }),
             edit,
-        ));
+        });
     };
     match screen_draw.as_ref() {
         Some(screen_draw) => {
@@ -1651,20 +1641,20 @@ fn hotkey_directory_source_snapshots(
                         Some(Reason::LocalRouteHasNoGlobalReceipt),
                     )
                 };
-                screen_draw_candidates.push(directory_candidate(
-                    format!("screen_draw.tool.{tool:?}"),
-                    Owner::ScreenDraw,
-                    "Screen Draw",
-                    format!("{tool:?} tool"),
-                    Some(raw),
-                    RouteKind::Local,
-                    Scope::LocalSession,
-                    runtime_generation,
-                    None,
+                screen_draw_candidates.push(Candidate {
+                    id: EntryId::new(format!("screen_draw.tool.{tool:?}")),
+                    owner: Owner::ScreenDraw,
+                    owner_label: "Screen Draw".into(),
+                    action_label: format!("{tool:?} tool"),
+                    chord: Some(raw),
+                    route: RouteKind::Local,
+                    scope: Scope::LocalSession,
+                    source_revision: runtime_generation,
+                    expected_runtime_generation: None,
                     state,
                     reason,
-                    None,
-                ));
+                    edit: None,
+                });
             }
             for (id, label, chord) in [
                 (
@@ -1696,20 +1686,20 @@ fn hotkey_directory_source_snapshots(
                                 )
                             }
                         });
-                screen_draw_candidates.push(directory_candidate(
-                    id,
-                    Owner::ScreenDraw,
-                    "Screen Draw",
-                    label,
-                    raw,
-                    RouteKind::Local,
-                    Scope::LocalSession,
-                    runtime_generation,
-                    None,
+                screen_draw_candidates.push(Candidate {
+                    id: EntryId::new(id),
+                    owner: Owner::ScreenDraw,
+                    owner_label: "Screen Draw".into(),
+                    action_label: label.into(),
+                    chord: raw,
+                    route: RouteKind::Local,
+                    scope: Scope::LocalSession,
+                    source_revision: runtime_generation,
+                    expected_runtime_generation: None,
                     state,
                     reason,
-                    None,
-                ));
+                    edit: None,
+                });
             }
             for (index, chord) in screen_draw.quick_color_hotkeys.iter().enumerate() {
                 let raw = chord.as_ref().map(|chord| chord.as_str().to_owned());
@@ -1730,20 +1720,20 @@ fn hotkey_directory_source_snapshots(
                                 )
                             }
                         });
-                screen_draw_candidates.push(directory_candidate(
-                    format!("screen_draw.quick_color.{index}"),
-                    Owner::ScreenDraw,
-                    "Screen Draw",
-                    format!("Select quick color {}", index + 1),
-                    raw,
-                    RouteKind::Local,
-                    Scope::LocalSession,
-                    runtime_generation,
-                    None,
+                screen_draw_candidates.push(Candidate {
+                    id: EntryId::new(format!("screen_draw.quick_color.{index}")),
+                    owner: Owner::ScreenDraw,
+                    owner_label: "Screen Draw".into(),
+                    action_label: format!("Select quick color {}", index + 1),
+                    chord: raw,
+                    route: RouteKind::Local,
+                    scope: Scope::LocalSession,
+                    source_revision: runtime_generation,
+                    expected_runtime_generation: None,
                     state,
                     reason,
-                    None,
-                ));
+                    edit: None,
+                });
             }
         }
         None => {
@@ -1751,20 +1741,20 @@ fn hotkey_directory_source_snapshots(
                 ("screen_draw.launch", "Launch Screen Draw"),
                 ("screen_draw.emergency", "Emergency Screen Draw control"),
             ] {
-                screen_draw_candidates.push(directory_candidate(
-                    id,
-                    Owner::ScreenDraw,
-                    "Screen Draw",
-                    label,
-                    None,
-                    RouteKind::SharedHook,
-                    Scope::ProcessWide,
-                    runtime_generation,
-                    Some(runtime_generation),
-                    CandidateState::Unavailable,
-                    Some(Reason::OwnerUnavailable),
-                    None,
-                ));
+                screen_draw_candidates.push(Candidate {
+                    id: EntryId::new(id),
+                    owner: Owner::ScreenDraw,
+                    owner_label: "Screen Draw".into(),
+                    action_label: label.into(),
+                    chord: None,
+                    route: RouteKind::SharedHook,
+                    scope: Scope::ProcessWide,
+                    source_revision: runtime_generation,
+                    expected_runtime_generation: Some(runtime_generation),
+                    state: CandidateState::Unavailable,
+                    reason: Some(Reason::OwnerUnavailable),
+                    edit: None,
+                });
             }
         }
     }
@@ -1859,29 +1849,29 @@ fn hotkey_directory_source_snapshots(
             }
         }
         let chord = configured.map(|chord| chord.trim().to_owned());
-        let candidate = directory_candidate(
-            id,
-            Owner::PasteSequences,
-            "Paste Sequences",
-            label,
-            chord.clone(),
-            paste_route_kind,
-            Scope::ProcessWide,
-            runtime_generation,
-            configured.map(|_| runtime_generation),
+        let candidate = Candidate {
+            id: EntryId::new(id),
+            owner: Owner::PasteSequences,
+            owner_label: "Paste Sequences".into(),
+            action_label: label.into(),
+            chord: chord.clone(),
+            route: paste_route_kind,
+            scope: Scope::ProcessWide,
+            source_revision: runtime_generation,
+            expected_runtime_generation: configured.map(|_| runtime_generation),
             state,
-            reason.or_else(|| {
+            reason: reason.or_else(|| {
                 (configured.is_some()
                     && acknowledged_chord.is_none()
                     && paste_enabled
                     && !route_pending)
                     .then_some(Reason::RouteNotAcknowledged)
             }),
-            Some(EditDestination::PasteSequence {
+            edit: Some(EditDestination::PasteSequence {
                 sequence_id: None,
                 setting,
             }),
-        );
+        };
         if let (Some(chord), Some(acknowledged_chord)) = (chord.as_deref(), acknowledged_chord)
             && chord == acknowledged_chord
         {
@@ -1893,23 +1883,23 @@ fn hotkey_directory_source_snapshots(
         for sequence in snapshot.sequences() {
             let id = format!("paste.sequence.{}.start", sequence.id.get());
             let Some(hotkey) = sequence.hotkey.as_ref() else {
-                paste_candidates.push(directory_candidate(
-                    id,
-                    Owner::PasteSequences,
-                    "Paste Sequences",
-                    sequence.name.clone(),
-                    None,
-                    paste_route_kind,
-                    Scope::ProcessWide,
-                    runtime_generation,
-                    None,
-                    CandidateState::Disabled,
-                    None,
-                    Some(EditDestination::PasteSequence {
+                paste_candidates.push(Candidate {
+                    id: EntryId::new(id),
+                    owner: Owner::PasteSequences,
+                    owner_label: "Paste Sequences".into(),
+                    action_label: sequence.name.clone(),
+                    chord: None,
+                    route: paste_route_kind,
+                    scope: Scope::ProcessWide,
+                    source_revision: runtime_generation,
+                    expected_runtime_generation: None,
+                    state: CandidateState::Disabled,
+                    reason: None,
+                    edit: Some(EditDestination::PasteSequence {
                         sequence_id: Some(sequence.id.get()),
                         setting: PasteSetting::Start,
                     }),
-                ));
+                });
                 continue;
             };
             let chord = hotkey.as_str().trim().to_owned();
@@ -1960,39 +1950,39 @@ fn hotkey_directory_source_snapshots(
             if !route_pending && let Some(active_chord) = active_chord {
                 paste_receipts.push(receipt(&id, active_chord, runtime_generation));
             }
-            paste_candidates.push(directory_candidate(
-                id,
-                Owner::PasteSequences,
-                "Paste Sequences",
-                sequence.name.clone(),
-                Some(chord),
-                paste_route_kind,
-                Scope::ProcessWide,
-                runtime_generation,
-                Some(runtime_generation),
+            paste_candidates.push(Candidate {
+                id: EntryId::new(id),
+                owner: Owner::PasteSequences,
+                owner_label: "Paste Sequences".into(),
+                action_label: sequence.name.clone(),
+                chord: Some(chord),
+                route: paste_route_kind,
+                scope: Scope::ProcessWide,
+                source_revision: runtime_generation,
+                expected_runtime_generation: Some(runtime_generation),
                 state,
                 reason,
-                Some(EditDestination::PasteSequence {
+                edit: Some(EditDestination::PasteSequence {
                     sequence_id: Some(sequence.id.get()),
                     setting: PasteSetting::Start,
                 }),
-            ));
+            });
         }
     } else {
-        paste_candidates.push(directory_candidate(
-            "paste.sequence.document",
-            Owner::PasteSequences,
-            "Paste Sequences",
-            "Saved sequence start shortcuts unavailable",
-            None,
-            paste_route_kind,
-            Scope::ProcessWide,
-            runtime_generation,
-            None,
-            CandidateState::Unavailable,
-            Some(Reason::OwnerUnavailable),
-            None,
-        ));
+        paste_candidates.push(Candidate {
+            id: EntryId::new("paste.sequence.document"),
+            owner: Owner::PasteSequences,
+            owner_label: "Paste Sequences".into(),
+            action_label: "Saved sequence start shortcuts unavailable".into(),
+            chord: None,
+            route: paste_route_kind,
+            scope: Scope::ProcessWide,
+            source_revision: runtime_generation,
+            expected_runtime_generation: None,
+            state: CandidateState::Unavailable,
+            reason: Some(Reason::OwnerUnavailable),
+            edit: None,
+        });
     }
     let paste_source = directory_source_snapshot(
         Source::PasteSequences,
@@ -2049,23 +2039,23 @@ fn hotkey_directory_source_snapshots(
         } else {
             Scope::Global
         };
-        radial_candidates.push(directory_candidate(
-            id,
-            Owner::Radial,
-            "Radial",
-            "Open radial menu",
-            Some(chord),
-            RouteKind::Radial,
+        radial_candidates.push(Candidate {
+            id: EntryId::new(id),
+            owner: Owner::Radial,
+            owner_label: "Radial".into(),
+            action_label: "Open radial menu".into(),
+            chord: Some(chord),
+            route: RouteKind::Radial,
             scope,
-            radial_document.revision.0,
-            Some(runtime_generation),
+            source_revision: radial_document.revision.0,
+            expected_runtime_generation: Some(runtime_generation),
             state,
             reason,
-            Some(EditDestination::RadialTrigger {
+            edit: Some(EditDestination::RadialTrigger {
                 trigger_id: trigger.id.as_str().to_owned(),
                 menu_id: trigger.menu_id.as_str().to_owned(),
             }),
-        ));
+        });
     }
     for menu in &radial_document.menus {
         for cell in menu.rings.iter().flat_map(|ring| &ring.cells) {
@@ -2073,10 +2063,9 @@ fn hotkey_directory_source_snapshots(
                 let chord = shortcut.chord.trim().to_owned();
                 let local_scope =
                     shortcut.scope == multi_launcher::radial::model::TriggerScope::MenuLocal;
-                let (state, reason) = if !settings.radial.enabled {
-                    (CandidateState::Disabled, Some(Reason::OwnerDisabled))
-                } else if shortcut.scope == multi_launcher::radial::model::TriggerScope::Global
-                    && !settings.radial.global_item_inputs
+                let (state, reason) = if !settings.radial.enabled
+                    || (shortcut.scope == multi_launcher::radial::model::TriggerScope::Global
+                        && !settings.radial.global_item_inputs)
                 {
                     (CandidateState::Disabled, Some(Reason::OwnerDisabled))
                 } else if parse_hotkey(&chord).is_none() {
@@ -2091,28 +2080,28 @@ fn hotkey_directory_source_snapshots(
                 } else {
                     (CandidateState::Unknown, Some(Reason::RouteNotAcknowledged))
                 };
-                radial_candidates.push(directory_candidate(
-                    format!("radial.shortcut.{}", shortcut.id.as_str()),
-                    Owner::Radial,
-                    "Radial",
-                    format!("Shortcut for {}", cell.label),
-                    Some(chord),
-                    RouteKind::Radial,
-                    if local_scope {
+                radial_candidates.push(Candidate {
+                    id: EntryId::new(format!("radial.shortcut.{}", shortcut.id.as_str())),
+                    owner: Owner::Radial,
+                    owner_label: "Radial".into(),
+                    action_label: format!("Shortcut for {}", cell.label),
+                    chord: Some(chord),
+                    route: RouteKind::Radial,
+                    scope: if local_scope {
                         Scope::MenuLocal(menu.id.as_str().to_owned())
                     } else {
                         Scope::Global
                     },
-                    radial_document.revision.0,
-                    Some(runtime_generation),
+                    source_revision: radial_document.revision.0,
+                    expected_runtime_generation: Some(runtime_generation),
                     state,
                     reason,
-                    Some(EditDestination::RadialShortcut {
+                    edit: Some(EditDestination::RadialShortcut {
                         menu_id: menu.id.as_str().to_owned(),
                         cell_id: cell.id.as_str().to_owned(),
                         shortcut_id: shortcut.id.as_str().to_owned(),
                     }),
-                ));
+                });
             }
         }
     }
@@ -2179,20 +2168,20 @@ fn hotkey_directory_source_snapshots(
                 multi_launcher::mkmacro::MkHotkeyScope::AnyWindow => Scope::Global,
                 multi_launcher::mkmacro::MkHotkeyScope::ActiveWindow(_) => Scope::ActiveWindow,
             };
-            macro_candidates.push(directory_candidate(
-                id,
-                Owner::MkMacro,
-                "MkMacro",
-                entry.name.clone(),
+            macro_candidates.push(Candidate {
+                id: EntryId::new(id),
+                owner: Owner::MkMacro,
+                owner_label: "MkMacro".into(),
+                action_label: entry.name.clone(),
                 chord,
-                RouteKind::MacroPolling,
+                route: RouteKind::MacroPolling,
                 scope,
-                macro_revision,
-                None,
+                source_revision: macro_revision,
+                expected_runtime_generation: None,
                 state,
                 reason,
-                Some(EditDestination::MacroPlayback { macro_id: entry.id }),
-            ));
+                edit: Some(EditDestination::MacroPlayback { macro_id: entry.id }),
+            });
         }
         for (id, label, hotkey, setting) in [
             (
@@ -2227,36 +2216,36 @@ fn hotkey_directory_source_snapshots(
                             (CandidateState::Invalid, Some(Reason::InvalidChord))
                         }
                     });
-            macro_candidates.push(directory_candidate(
-                id,
-                Owner::MkMacro,
-                "MkMacro recorder",
-                label,
+            macro_candidates.push(Candidate {
+                id: EntryId::new(id),
+                owner: Owner::MkMacro,
+                owner_label: "MkMacro recorder".into(),
+                action_label: label.into(),
                 chord,
-                RouteKind::MacroPolling,
-                Scope::Global,
-                macro_revision,
-                None,
+                route: RouteKind::MacroPolling,
+                scope: Scope::Global,
+                source_revision: macro_revision,
+                expected_runtime_generation: None,
                 state,
                 reason,
-                Some(EditDestination::MacroRecorder(setting)),
-            ));
+                edit: Some(EditDestination::MacroRecorder(setting)),
+            });
         }
     } else {
-        macro_candidates.push(directory_candidate(
-            "macro.document",
-            Owner::MkMacro,
-            "MkMacro",
-            "Macro shortcuts unavailable",
-            None,
-            RouteKind::MacroPolling,
-            Scope::Global,
-            macro_revision,
-            None,
-            CandidateState::Unavailable,
-            Some(Reason::OwnerUnavailable),
-            None,
-        ));
+        macro_candidates.push(Candidate {
+            id: EntryId::new("macro.document"),
+            owner: Owner::MkMacro,
+            owner_label: "MkMacro".into(),
+            action_label: "Macro shortcuts unavailable".into(),
+            chord: None,
+            route: RouteKind::MacroPolling,
+            scope: Scope::Global,
+            source_revision: macro_revision,
+            expected_runtime_generation: None,
+            state: CandidateState::Unavailable,
+            reason: Some(Reason::OwnerUnavailable),
+            edit: None,
+        });
     }
     let macro_source = SourceSnapshot::new(
         Source::Macros,
@@ -2286,33 +2275,41 @@ struct HotkeyDirectoryPublicationKey {
     shared_route_acknowledged: bool,
 }
 
-fn hotkey_directory_publication_key(
+#[derive(Clone, Copy)]
+struct HotkeyDirectoryPublicationInputs<'a> {
+    settings: &'a Settings,
     settings_generation: u64,
-    radial_document: &RadialDocument,
+    radial_document: &'a RadialDocument,
     paste_document_revision: u64,
+    sequence_routes: &'a [PasteSequenceHotkeyRoute],
+    sequence_omissions: &'a [PasteSequenceRouteOmission],
     macro_revision: u64,
-    pending_route: Option<&PendingLauncherRoute>,
-    listener: &HotkeyListener,
-    invocation_service: Option<&LauncherInvocationService>,
-    applied_shared_route: Option<&AppliedSharedRouteEvidence>,
-    settings: &Settings,
-    sequence_routes: &[PasteSequenceHotkeyRoute],
+    listener: &'a HotkeyListener,
+    invocation_service: Option<&'a LauncherInvocationService>,
+    applied_shared_route: Option<&'a AppliedSharedRouteEvidence>,
+    pending_route: Option<&'a PendingLauncherRoute>,
+}
+
+fn hotkey_directory_publication_key(
+    inputs: &HotkeyDirectoryPublicationInputs<'_>,
 ) -> HotkeyDirectoryPublicationKey {
     HotkeyDirectoryPublicationKey {
-        settings_generation,
-        radial_revision: radial_document.revision.0,
-        paste_document_revision,
-        macro_revision,
-        pending_route_generation: pending_route.map(|pending| pending.settings_generation),
-        listener_active: listener.is_active(),
-        shared_service_active: invocation_service.is_some(),
-        shared_route_acknowledged: applied_shared_route.is_some_and(|evidence| {
-            invocation_service.is_some()
+        settings_generation: inputs.settings_generation,
+        radial_revision: inputs.radial_document.revision.0,
+        paste_document_revision: inputs.paste_document_revision,
+        macro_revision: inputs.macro_revision,
+        pending_route_generation: inputs
+            .pending_route
+            .map(|pending| pending.settings_generation),
+        listener_active: inputs.listener.is_active(),
+        shared_service_active: inputs.invocation_service.is_some(),
+        shared_route_acknowledged: inputs.applied_shared_route.is_some_and(|evidence| {
+            inputs.invocation_service.is_some()
                 && evidence.matches(
-                    settings,
-                    radial_document,
-                    sequence_routes,
-                    settings_generation,
+                    inputs.settings,
+                    inputs.radial_document,
+                    inputs.sequence_routes,
+                    inputs.settings_generation,
                 )
         }),
     }
@@ -2321,18 +2318,21 @@ fn hotkey_directory_publication_key(
 fn publish_hotkey_directory_if_changed(
     last_publication: &mut Option<HotkeyDirectoryPublicationKey>,
     source_publication_revision: &mut u64,
-    settings: &Settings,
-    settings_generation: u64,
-    radial_document: &RadialDocument,
-    paste_document_revision: u64,
-    sequence_routes: &[PasteSequenceHotkeyRoute],
-    sequence_omissions: &[PasteSequenceRouteOmission],
-    macro_revision: u64,
-    listener: &HotkeyListener,
-    invocation_service: Option<&LauncherInvocationService>,
-    applied_shared_route: Option<&AppliedSharedRouteEvidence>,
-    pending_route: Option<&PendingLauncherRoute>,
+    inputs: HotkeyDirectoryPublicationInputs<'_>,
 ) {
+    let HotkeyDirectoryPublicationInputs {
+        settings,
+        settings_generation,
+        radial_document,
+        paste_document_revision,
+        sequence_routes,
+        sequence_omissions,
+        macro_revision,
+        listener,
+        invocation_service,
+        applied_shared_route,
+        pending_route,
+    } = inputs;
     let (candidate_settings, candidate_generation, candidate_sequence_routes, candidate_omissions) =
         match pending_route.map(|pending| &pending.completion) {
             Some(PendingLauncherRouteCompletion::Hotkey(application)) => (
@@ -2348,18 +2348,20 @@ fn publish_hotkey_directory_if_changed(
                 sequence_omissions,
             ),
         };
-    let publication = hotkey_directory_publication_key(
-        candidate_generation,
+    let resolved_inputs = HotkeyDirectoryPublicationInputs {
+        settings: candidate_settings,
+        settings_generation: candidate_generation,
         radial_document,
         paste_document_revision,
+        sequence_routes: candidate_sequence_routes,
+        sequence_omissions: candidate_omissions,
         macro_revision,
-        pending_route,
         listener,
         invocation_service,
         applied_shared_route,
-        candidate_settings,
-        candidate_sequence_routes,
-    );
+        pending_route,
+    };
+    let publication = hotkey_directory_publication_key(&resolved_inputs);
     if last_publication.as_ref() == Some(&publication) {
         return;
     }
@@ -2404,22 +2406,22 @@ fn publish_hotkey_directory_if_changed(
     let macro_document = multi_launcher::mkmacro::runtime::shared_hotkey_document_snapshot()
         .ok()
         .flatten();
-    for source in hotkey_directory_source_snapshots(
-        candidate_settings,
+    for source in hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
+        settings: candidate_settings,
         radial_document,
-        sequence_snapshot.as_ref(),
-        candidate_sequence_routes,
-        sequence_runtime_acknowledged.then_some(&sequence_presentation),
-        candidate_omissions,
-        macro_document.as_deref(),
+        sequence_snapshot: sequence_snapshot.as_ref(),
+        sequence_routes: candidate_sequence_routes,
+        sequence_presentation: sequence_runtime_acknowledged.then_some(&sequence_presentation),
+        sequence_omissions: candidate_omissions,
+        macro_document: macro_document.as_deref(),
         macro_revision,
-        &legacy_listener_hotkeys(listener),
+        active_legacy_triggers: &legacy_listener_hotkeys(listener),
         applied_shared_route,
-        candidate_generation,
+        runtime_generation: candidate_generation,
         sequence_runtime_acknowledged,
         route_pending,
-        next_source_publication_revision,
-    ) {
+        source_publication_revision: next_source_publication_revision,
+    }) {
         multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::HotkeyDirectorySource(
             source,
         ));
@@ -4609,17 +4611,19 @@ fn main() -> anyhow::Result<()> {
     publish_hotkey_directory_if_changed(
         &mut last_hotkey_directory_publication,
         &mut hotkey_directory_source_publication_revision,
-        &settings,
-        settings_generation,
-        &radial_document,
-        paste_sequence_document_revision.load(Ordering::Acquire),
-        &paste_sequence_routes,
-        &[],
-        macro_directory_revision.load(Ordering::Acquire),
-        &listener,
-        invocation_service.as_ref(),
-        applied_shared_route.as_ref(),
-        pending_launcher_route.as_ref(),
+        HotkeyDirectoryPublicationInputs {
+            settings: &settings,
+            settings_generation,
+            radial_document: &radial_document,
+            paste_document_revision: paste_sequence_document_revision.load(Ordering::Acquire),
+            sequence_routes: &paste_sequence_routes,
+            sequence_omissions: &[],
+            macro_revision: macro_directory_revision.load(Ordering::Acquire),
+            listener: &listener,
+            invocation_service: invocation_service.as_ref(),
+            applied_shared_route: applied_shared_route.as_ref(),
+            pending_route: pending_launcher_route.as_ref(),
+        },
     );
 
     loop {
@@ -6689,17 +6693,19 @@ fn main() -> anyhow::Result<()> {
         publish_hotkey_directory_if_changed(
             &mut last_hotkey_directory_publication,
             &mut hotkey_directory_source_publication_revision,
-            &settings,
-            settings_generation,
-            &radial_document,
-            paste_sequence_document_revision.load(Ordering::Acquire),
-            &paste_sequence_routes,
-            &[],
-            macro_directory_revision.load(Ordering::Acquire),
-            &listener,
-            invocation_service.as_ref(),
-            applied_shared_route.as_ref(),
-            pending_launcher_route.as_ref(),
+            HotkeyDirectoryPublicationInputs {
+                settings: &settings,
+                settings_generation,
+                radial_document: &radial_document,
+                paste_document_revision: paste_sequence_document_revision.load(Ordering::Acquire),
+                sequence_routes: &paste_sequence_routes,
+                sequence_omissions: &[],
+                macro_revision: macro_directory_revision.load(Ordering::Acquire),
+                listener: &listener,
+                invocation_service: invocation_service.as_ref(),
+                applied_shared_route: applied_shared_route.as_ref(),
+                pending_route: pending_launcher_route.as_ref(),
+            },
         );
 
         // Consolidate every fail-closed path through the same demand owner.
@@ -9105,22 +9111,22 @@ mod tests {
                                 active: &[multi_launcher::hotkey::Hotkey],
                                 pending: bool,
                                 source_revision: u64| {
-            hotkey_directory_source_snapshots(
+            hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
                 settings,
-                &radial_document,
-                None,
-                &[],
-                None,
-                &[],
-                Some(&directory_macros),
-                1,
-                active,
-                None,
-                generation,
-                false,
-                pending,
-                source_revision,
-            )
+                radial_document: &radial_document,
+                sequence_snapshot: None,
+                sequence_routes: &[],
+                sequence_presentation: None,
+                sequence_omissions: &[],
+                macro_document: Some(&directory_macros),
+                macro_revision: 1,
+                active_legacy_triggers: active,
+                applied_shared_route: None,
+                runtime_generation: generation,
+                sequence_runtime_acknowledged: false,
+                route_pending: pending,
+                source_publication_revision: source_revision,
+            })
             .into_iter()
             .find(|source| source.source == multi_launcher::hotkey::directory::Source::MainSettings)
             .expect("the main Settings directory source exists")
@@ -9371,22 +9377,22 @@ mod tests {
                                      active: &[multi_launcher::hotkey::Hotkey],
                                      pending: bool,
                                      source_revision: u64| {
-            hotkey_directory_source_snapshots(
+            hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
                 settings,
-                &radial_document,
-                None,
-                &[],
-                None,
-                &[],
-                Some(&directory_macros),
-                1,
-                active,
-                None,
-                generation,
-                false,
-                pending,
-                source_revision,
-            )
+                radial_document: &radial_document,
+                sequence_snapshot: None,
+                sequence_routes: &[],
+                sequence_presentation: None,
+                sequence_omissions: &[],
+                macro_document: Some(&directory_macros),
+                macro_revision: 1,
+                active_legacy_triggers: active,
+                applied_shared_route: None,
+                runtime_generation: generation,
+                sequence_runtime_acknowledged: false,
+                route_pending: pending,
+                source_publication_revision: source_revision,
+            })
             .into_iter()
             .find(|source| source.source == multi_launcher::hotkey::directory::Source::MainSettings)
             .expect("the main Settings source is published")
@@ -9797,22 +9803,22 @@ mod tests {
              route_pending: bool,
              publication_revision: u64,
              applied: Option<&AppliedSharedRouteEvidence>| {
-                hotkey_directory_source_snapshots(
+                hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
                     settings,
-                    &radial_document,
-                    None,
-                    &[],
-                    None,
-                    &[],
-                    Some(&directory_macros),
-                    1,
-                    &[],
-                    applied,
-                    generation,
-                    false,
+                    radial_document: &radial_document,
+                    sequence_snapshot: None,
+                    sequence_routes: &[],
+                    sequence_presentation: None,
+                    sequence_omissions: &[],
+                    macro_document: Some(&directory_macros),
+                    macro_revision: 1,
+                    active_legacy_triggers: &[],
+                    applied_shared_route: applied,
+                    runtime_generation: generation,
+                    sequence_runtime_acknowledged: false,
                     route_pending,
-                    publication_revision,
-                )
+                    source_publication_revision: publication_revision,
+                })
                 .into_iter()
                 .find(|source| {
                     source.source == multi_launcher::hotkey::directory::Source::MainSettings
@@ -10749,22 +10755,22 @@ mod hotkey_directory_runtime_tests {
         route_pending: bool,
         active_triggers: &[multi_launcher::hotkey::Hotkey],
     ) -> multi_launcher::hotkey::directory::SourceSnapshot {
-        hotkey_directory_source_snapshots(
+        hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
             settings,
-            radial,
-            None,
-            &[],
-            None,
-            &[],
-            Some(macro_document),
-            1,
-            active_triggers,
-            None,
-            generation,
-            false,
+            radial_document: radial,
+            sequence_snapshot: None,
+            sequence_routes: &[],
+            sequence_presentation: None,
+            sequence_omissions: &[],
+            macro_document: Some(macro_document),
+            macro_revision: 1,
+            active_legacy_triggers: active_triggers,
+            applied_shared_route: None,
+            runtime_generation: generation,
+            sequence_runtime_acknowledged: false,
             route_pending,
-            generation,
-        )
+            source_publication_revision: generation,
+        })
         .into_iter()
         .find(|source| source.source == Source::MainSettings)
         .expect("main Settings source is always published")
@@ -10779,22 +10785,22 @@ mod hotkey_directory_runtime_tests {
         active_triggers: &[multi_launcher::hotkey::Hotkey],
         evidence: Option<&AppliedSharedRouteEvidence>,
     ) -> multi_launcher::hotkey::directory::SourceSnapshot {
-        hotkey_directory_source_snapshots(
+        hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
             settings,
-            radial,
-            None,
-            &[],
-            None,
-            &[],
-            Some(macro_document),
-            1,
-            active_triggers,
-            evidence,
-            generation,
-            false,
+            radial_document: radial,
+            sequence_snapshot: None,
+            sequence_routes: &[],
+            sequence_presentation: None,
+            sequence_omissions: &[],
+            macro_document: Some(macro_document),
+            macro_revision: 1,
+            active_legacy_triggers: active_triggers,
+            applied_shared_route: evidence,
+            runtime_generation: generation,
+            sequence_runtime_acknowledged: false,
             route_pending,
-            generation,
-        )
+            source_publication_revision: generation,
+        })
         .into_iter()
         .find(|source| source.source == Source::MainSettings)
         .expect("main Settings source is always published")
@@ -11068,22 +11074,22 @@ mod hotkey_directory_runtime_tests {
         else {
             panic!("the initial external Radial document is accepted")
         };
-        let radial_sources = hotkey_directory_source_snapshots(
-            &settings,
-            &radial_a,
-            None,
-            &[],
-            None,
-            &[],
-            Some(&macros),
-            1,
-            &[],
-            None,
-            7,
-            false,
-            false,
-            1,
-        );
+        let radial_sources = hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
+            settings: &settings,
+            radial_document: &radial_a,
+            sequence_snapshot: None,
+            sequence_routes: &[],
+            sequence_presentation: None,
+            sequence_omissions: &[],
+            macro_document: Some(&macros),
+            macro_revision: 1,
+            active_legacy_triggers: &[],
+            applied_shared_route: None,
+            runtime_generation: 7,
+            sequence_runtime_acknowledged: false,
+            route_pending: false,
+            source_publication_revision: 1,
+        });
         let radial_source_a = radial_sources
             .into_iter()
             .find(|source| source.source == Source::Radial)
@@ -11107,22 +11113,22 @@ mod hotkey_directory_runtime_tests {
         else {
             panic!("the changed external Radial document is accepted")
         };
-        let radial_sources = hotkey_directory_source_snapshots(
-            &settings,
-            &radial_b,
-            None,
-            &[],
-            None,
-            &[],
-            Some(&macros),
-            1,
-            &[],
-            None,
-            7,
-            false,
-            false,
-            2,
-        );
+        let radial_sources = hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
+            settings: &settings,
+            radial_document: &radial_b,
+            sequence_snapshot: None,
+            sequence_routes: &[],
+            sequence_presentation: None,
+            sequence_omissions: &[],
+            macro_document: Some(&macros),
+            macro_revision: 1,
+            active_legacy_triggers: &[],
+            applied_shared_route: None,
+            runtime_generation: 7,
+            sequence_runtime_acknowledged: false,
+            route_pending: false,
+            source_publication_revision: 2,
+        });
         let radial_source_b = radial_sources
             .into_iter()
             .find(|source| source.source == Source::Radial)
@@ -11176,22 +11182,22 @@ mod hotkey_directory_runtime_tests {
         let accepted_macro_document = macro_store.save(macro_document).unwrap();
         let accepted_macro_revision = macro_revision.load(Ordering::SeqCst);
         assert!(accepted_macro_revision > revision_before_save);
-        let macro_sources = hotkey_directory_source_snapshots(
-            &settings,
-            &radial_b,
-            None,
-            &[],
-            None,
-            &[],
-            Some(&accepted_macro_document),
-            accepted_macro_revision,
-            &[],
-            None,
-            7,
-            false,
-            false,
-            3,
-        );
+        let macro_sources = hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
+            settings: &settings,
+            radial_document: &radial_b,
+            sequence_snapshot: None,
+            sequence_routes: &[],
+            sequence_presentation: None,
+            sequence_omissions: &[],
+            macro_document: Some(&accepted_macro_document),
+            macro_revision: accepted_macro_revision,
+            active_legacy_triggers: &[],
+            applied_shared_route: None,
+            runtime_generation: 7,
+            sequence_runtime_acknowledged: false,
+            route_pending: false,
+            source_publication_revision: 3,
+        });
         let macro_source = macro_sources
             .into_iter()
             .find(|source| source.source == Source::Macros)
@@ -11211,25 +11217,26 @@ mod hotkey_directory_runtime_tests {
 
         let mut disabled_settings = settings.clone();
         disabled_settings.enabled_plugins = Some(std::collections::HashSet::new());
-        let disabled_macro_source = hotkey_directory_source_snapshots(
-            &disabled_settings,
-            &radial_b,
-            None,
-            &[],
-            None,
-            &[],
-            Some(&accepted_macro_document),
-            accepted_macro_revision,
-            &[],
-            None,
-            7,
-            false,
-            false,
-            4,
-        )
-        .into_iter()
-        .find(|source| source.source == Source::Macros)
-        .unwrap();
+        let disabled_macro_source =
+            hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
+                settings: &disabled_settings,
+                radial_document: &radial_b,
+                sequence_snapshot: None,
+                sequence_routes: &[],
+                sequence_presentation: None,
+                sequence_omissions: &[],
+                macro_document: Some(&accepted_macro_document),
+                macro_revision: accepted_macro_revision,
+                active_legacy_triggers: &[],
+                applied_shared_route: None,
+                runtime_generation: 7,
+                sequence_runtime_acknowledged: false,
+                route_pending: false,
+                source_publication_revision: 4,
+            })
+            .into_iter()
+            .find(|source| source.source == Source::Macros)
+            .unwrap();
         let disabled_snapshot = macro_snapshot
             .replacing_source(4, disabled_macro_source)
             .expect("the disabled owner selection is a new source publication");
@@ -11245,25 +11252,26 @@ mod hotkey_directory_runtime_tests {
         let mut reenabled_settings = disabled_settings;
         reenabled_settings.enabled_plugins =
             Some(std::collections::HashSet::from(["mkmacro".to_owned()]));
-        let reenabled_macro_source = hotkey_directory_source_snapshots(
-            &reenabled_settings,
-            &radial_b,
-            None,
-            &[],
-            None,
-            &[],
-            Some(&accepted_macro_document),
-            accepted_macro_revision,
-            &[],
-            None,
-            7,
-            false,
-            false,
-            5,
-        )
-        .into_iter()
-        .find(|source| source.source == Source::Macros)
-        .unwrap();
+        let reenabled_macro_source =
+            hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
+                settings: &reenabled_settings,
+                radial_document: &radial_b,
+                sequence_snapshot: None,
+                sequence_routes: &[],
+                sequence_presentation: None,
+                sequence_omissions: &[],
+                macro_document: Some(&accepted_macro_document),
+                macro_revision: accepted_macro_revision,
+                active_legacy_triggers: &[],
+                applied_shared_route: None,
+                runtime_generation: 7,
+                sequence_runtime_acknowledged: false,
+                route_pending: false,
+                source_publication_revision: 5,
+            })
+            .into_iter()
+            .find(|source| source.source == Source::Macros)
+            .unwrap();
         let reenabled_snapshot = disabled_snapshot
             .replacing_source(5, reenabled_macro_source)
             .expect("re-enabling publishes the current owner state");
@@ -11316,22 +11324,22 @@ mod hotkey_directory_runtime_tests {
             macro_with_hotkey(203, "Duplicate macro one", 5, MkHotkeyScope::AnyWindow),
             macro_with_hotkey(204, "Duplicate macro two", 5, MkHotkeyScope::AnyWindow),
         ];
-        let sources = hotkey_directory_source_snapshots(
-            &settings,
-            &radial,
-            None,
-            &[],
-            None,
-            &[],
-            Some(&macros),
-            9,
-            &[],
-            None,
-            4,
-            false,
-            false,
-            9,
-        );
+        let sources = hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
+            settings: &settings,
+            radial_document: &radial,
+            sequence_snapshot: None,
+            sequence_routes: &[],
+            sequence_presentation: None,
+            sequence_omissions: &[],
+            macro_document: Some(&macros),
+            macro_revision: 9,
+            active_legacy_triggers: &[],
+            applied_shared_route: None,
+            runtime_generation: 4,
+            sequence_runtime_acknowledged: false,
+            route_pending: false,
+            source_publication_revision: 9,
+        });
         let macro_source = sources
             .iter()
             .find(|source| source.source == Source::Macros)
@@ -11372,52 +11380,54 @@ mod hotkey_directory_runtime_tests {
         settings.radial.enabled = false;
         settings.radial.shared_tap_hold = false;
         let radial = RadialDocument::default();
-        let before = hotkey_directory_publication_key(
-            1,
-            &radial,
-            10,
-            2,
-            None,
-            &listener,
-            None,
-            None,
-            &settings,
-            &[],
-        );
-        let after = hotkey_directory_publication_key(
-            1,
-            &radial,
-            11,
-            2,
-            None,
-            &listener,
-            None,
-            None,
-            &settings,
-            &[],
-        );
+        let before = hotkey_directory_publication_key(&HotkeyDirectoryPublicationInputs {
+            settings_generation: 1,
+            radial_document: &radial,
+            paste_document_revision: 10,
+            macro_revision: 2,
+            pending_route: None,
+            sequence_omissions: &[],
+            listener: &listener,
+            invocation_service: None,
+            applied_shared_route: None,
+            settings: &settings,
+            sequence_routes: &[],
+        });
+        let after = hotkey_directory_publication_key(&HotkeyDirectoryPublicationInputs {
+            settings_generation: 1,
+            radial_document: &radial,
+            paste_document_revision: 11,
+            macro_revision: 2,
+            pending_route: None,
+            sequence_omissions: &[],
+            listener: &listener,
+            invocation_service: None,
+            applied_shared_route: None,
+            settings: &settings,
+            sequence_routes: &[],
+        });
         assert_ne!(
             before, after,
             "accepted sequence edits trigger republishing"
         );
 
         let macros = multi_launcher::mkmacro::MkMacroDocument::default();
-        let legacy_sources = hotkey_directory_source_snapshots(
-            &settings,
-            &radial,
-            None,
-            &[],
-            None,
-            &[],
-            Some(&macros),
-            2,
-            &[],
-            None,
-            1,
-            false,
-            false,
-            1,
-        );
+        let legacy_sources = hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
+            settings: &settings,
+            radial_document: &radial,
+            sequence_snapshot: None,
+            sequence_routes: &[],
+            sequence_presentation: None,
+            sequence_omissions: &[],
+            macro_document: Some(&macros),
+            macro_revision: 2,
+            active_legacy_triggers: &[],
+            applied_shared_route: None,
+            runtime_generation: 1,
+            sequence_runtime_acknowledged: false,
+            route_pending: false,
+            source_publication_revision: 1,
+        });
         let screen_draw = legacy_sources
             .iter()
             .find(|source| source.source == Source::ScreenDraw)
@@ -11440,22 +11450,22 @@ mod hotkey_directory_runtime_tests {
         let mut shared_settings = settings;
         shared_settings.radial.enabled = true;
         shared_settings.radial.shared_tap_hold = true;
-        let shared_sources = hotkey_directory_source_snapshots(
-            &shared_settings,
-            &radial,
-            None,
-            &[],
-            None,
-            &[],
-            Some(&macros),
-            2,
-            &[],
-            None,
-            1,
-            false,
-            false,
-            1,
-        );
+        let shared_sources = hotkey_directory_source_snapshots(HotkeyDirectorySourceInputs {
+            settings: &shared_settings,
+            radial_document: &radial,
+            sequence_snapshot: None,
+            sequence_routes: &[],
+            sequence_presentation: None,
+            sequence_omissions: &[],
+            macro_document: Some(&macros),
+            macro_revision: 2,
+            active_legacy_triggers: &[],
+            applied_shared_route: None,
+            runtime_generation: 1,
+            sequence_runtime_acknowledged: false,
+            route_pending: false,
+            source_publication_revision: 1,
+        });
         let paste_next = shared_sources
             .iter()
             .find(|source| source.source == Source::PasteSequences)
