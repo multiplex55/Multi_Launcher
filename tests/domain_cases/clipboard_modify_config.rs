@@ -3,7 +3,9 @@ use multi_launcher::clipboard_modify::config::{
     VersionedClipboardModifiersFile, default_model, load_current_or_migrate, load_startup,
     reset_to_defaults_with_backup, save_model_atomic, validate_model,
 };
-use multi_launcher::clipboard_modify::model::{ClipboardTemplate, SavedPipeline};
+use multi_launcher::clipboard_modify::model::{
+    ClipboardTemplate, OperationId, SavedPipeline, StageArguments, StageSpec,
+};
 
 fn minimal() -> VersionedClipboardModifiersFile {
     VersionedClipboardModifiersFile {
@@ -174,4 +176,118 @@ fn defaults_are_not_merged_into_valid_user_catalogs() {
     assert_eq!(loaded.model.templates[0].id, "my template");
     assert_eq!(loaded.catalog.templates[0].id, "my-template");
     assert!(loaded.model.pipelines.is_empty());
+}
+
+#[test]
+fn schema_one_saved_names_may_match_new_operations_and_apply_remains_explicit() {
+    let model = VersionedClipboardModifiersFile {
+        schema_version: CURRENT_SCHEMA_VERSION,
+        templates: vec![ClipboardTemplate {
+            id: "remove-blank-lines".into(),
+            label: "Legacy named template".into(),
+            aliases: vec![],
+            template: "[{{clipboard}}]".into(),
+            processor: None,
+        }],
+        pipelines: vec![SavedPipeline {
+            id: "join-lines".into(),
+            label: "Legacy named pipeline".into(),
+            aliases: vec![],
+            stages: vec![StageSpec {
+                operation: OperationId::JoinLines,
+                arguments: StageArguments::default(),
+            }],
+        }],
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("clipboard_modifiers.json");
+    save_model_atomic(&path, &model).unwrap();
+    let (loaded, catalog) = load_current_or_migrate(&path).unwrap();
+    assert_eq!(loaded, model);
+
+    assert!(matches!(
+        multi_launcher::clipboard_modify::parse("cm join-lines", &catalog),
+        multi_launcher::clipboard_modify::ClipboardModifyParseResult::CompleteExecution(
+            multi_launcher::clipboard_modify::ClipboardModifyIntent::Stages(stages)
+        ) if stages[0].operation == OperationId::JoinLines
+    ));
+    assert!(matches!(
+        multi_launcher::clipboard_modify::parse("cm apply join-lines", &catalog),
+        multi_launcher::clipboard_modify::ClipboardModifyParseResult::CompleteExecution(
+            multi_launcher::clipboard_modify::ClipboardModifyIntent::ApplySavedPipeline { name }
+        ) if name == "join-lines"
+    ));
+    assert_eq!(
+        multi_launcher::clipboard_modify::execute_pipeline("a\nb", "join-lines", &catalog, &|| {
+            false
+        },)
+        .unwrap(),
+        "a b"
+    );
+
+    let mut missing_split_separator = model.clone();
+    missing_split_separator.pipelines[0].stages[0] = StageSpec {
+        operation: OperationId::SplitLines,
+        arguments: StageArguments::default(),
+    };
+    assert!(validate_model(&missing_split_separator).is_err());
+
+    let mut irrelevant_separator = model.clone();
+    irrelevant_separator.pipelines[0].stages[0] = StageSpec {
+        operation: OperationId::RemoveBlankLines,
+        arguments: StageArguments {
+            separator: Some("|".into()),
+            ..Default::default()
+        },
+    };
+    assert!(validate_model(&irrelevant_separator).is_err());
+
+    let mut invalid = model;
+    invalid.templates[0].id = "template".into();
+    assert!(
+        validate_model(&invalid).is_err(),
+        "older reserved names stay reserved"
+    );
+}
+
+#[test]
+fn schema_one_names_allow_each_new_line_operation_spelling() {
+    for name in [
+        "remove-blank-lines",
+        "number-lines",
+        "reverse-lines",
+        "join-lines",
+        "split-lines",
+    ] {
+        let template_model = VersionedClipboardModifiersFile {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            templates: vec![ClipboardTemplate {
+                id: name.into(),
+                label: "Legacy template".into(),
+                aliases: vec![],
+                template: "{{clipboard}}".into(),
+                processor: None,
+            }],
+            pipelines: vec![],
+        };
+        assert!(
+            validate_model(&template_model).is_ok(),
+            "schema-1 templates named {name} remain valid"
+        );
+
+        let pipeline_model = VersionedClipboardModifiersFile {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            templates: vec![],
+            pipelines: vec![SavedPipeline {
+                id: name.into(),
+                label: "Legacy pipeline".into(),
+                aliases: vec![],
+                stages: vec![],
+            }],
+        };
+        assert!(
+            validate_model(&pipeline_model).is_ok(),
+            "schema-1 pipelines named {name} remain valid"
+        );
+    }
 }

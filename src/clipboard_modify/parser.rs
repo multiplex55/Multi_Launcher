@@ -522,6 +522,58 @@ fn parse_stage(stage: &Stage, idx: usize) -> Result<StageSpec, ClipboardModifyPa
             a.prefix = Some(args[0].text.clone());
             a.suffix = Some(args[1].text.clone());
         }
+        ArgumentRequirements::OptionalSeparator => {
+            if args.len() > 1 {
+                let t = &args[1];
+                return Err(ClipboardModifyParseResult::Invalid(err(
+                    Some(idx),
+                    t.span.start,
+                    t.span.end,
+                    ParserErrorKind::UnexpectedArgument {
+                        operation: op.command.into(),
+                        argument: t.text.clone(),
+                    },
+                )));
+            }
+            a.separator = args.first().map(|token| token.text.clone());
+        }
+        ArgumentRequirements::RequiredSeparator => {
+            let Some(separator) = args.first() else {
+                return Err(ClipboardModifyParseResult::Invalid(err(
+                    Some(idx),
+                    stage.span.end,
+                    stage.span.end,
+                    ParserErrorKind::MissingArgument {
+                        operation: op.command.into(),
+                        argument: "separator",
+                    },
+                )));
+            };
+            if args.len() > 1 {
+                let t = &args[1];
+                return Err(ClipboardModifyParseResult::Invalid(err(
+                    Some(idx),
+                    t.span.start,
+                    t.span.end,
+                    ParserErrorKind::UnexpectedArgument {
+                        operation: op.command.into(),
+                        argument: t.text.clone(),
+                    },
+                )));
+            }
+            if separator.text.is_empty() {
+                return Err(ClipboardModifyParseResult::Invalid(err(
+                    Some(idx),
+                    separator.span.start,
+                    separator.span.end,
+                    ParserErrorKind::MissingArgument {
+                        operation: op.command.into(),
+                        argument: "nonempty separator",
+                    },
+                )));
+            }
+            a.separator = Some(separator.text.clone());
+        }
     }
     Ok(StageSpec {
         operation: op.id,

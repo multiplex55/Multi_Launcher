@@ -181,6 +181,38 @@ fn transform<C: Cancellation + ?Sized>(
         TrimLines => line_op(input, c, |v| {
             v.into_iter().map(str::trim).collect::<Vec<_>>().join("\n")
         }),
+        RemoveBlankLines => line_op(input, c, |v| {
+            v.into_iter()
+                .filter(|line| !line.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }),
+        NumberLines => line_op(input, c, |v| {
+            v.into_iter()
+                .enumerate()
+                .map(|(index, line)| format!("{}. {line}", index + 1))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }),
+        ReverseLines => line_op(input, c, |mut v| {
+            v.reverse();
+            v.join("\n")
+        }),
+        JoinLines => {
+            let separator = a.separator.as_deref().unwrap_or(" ");
+            line_op(input, c, |v| v.join(separator))
+        }
+        SplitLines => {
+            let separator = a.separator.as_deref().unwrap_or_default();
+            // Validation rejects an empty separator before execution. Keeping
+            // this guard makes the executor robust if a caller bypasses it.
+            if separator.is_empty() {
+                return Err(ClipboardModifyError::Transform(
+                    "separator must not be empty".into(),
+                ));
+            }
+            split_lines(input, separator, c)
+        }
         JsonPretty => {
             let document = crate::json_transform::JsonDocument::parse(input)
                 .map_err(|e| ClipboardModifyError::Transform(e.to_string()))?;
@@ -258,6 +290,36 @@ fn line_op<C: Cancellation + ?Sized, F: FnOnce(Vec<&str>) -> String>(
     }
     cancelled(c)?;
     Ok(f(v))
+}
+fn split_lines<C: Cancellation + ?Sized>(
+    input: &str,
+    separator: &str,
+    c: &C,
+) -> Result<String, ClipboardModifyError> {
+    let mut lines = Vec::new();
+    for (index, line) in input.lines().enumerate() {
+        if index % 1024 == 0 {
+            cancelled(c)?;
+        }
+        lines.push(line);
+    }
+    cancelled(c)?;
+    if lines.is_empty() {
+        return Ok(String::new());
+    }
+    let normalized = lines.join("\n");
+    let mut output = String::new();
+    for (index, field) in normalized.split(separator).enumerate() {
+        if index % 1024 == 0 {
+            cancelled(c)?;
+        }
+        if index > 0 {
+            output.push('\n');
+        }
+        output.push_str(field);
+    }
+    cancelled(c)?;
+    Ok(output)
 }
 fn words(input: &str) -> impl Iterator<Item = &str> {
     input
@@ -630,5 +692,88 @@ mod comprehensive_transform_regressions {
             run("item2\nitem10\nitem1", st(OperationId::SortAscending)).unwrap(),
             "item1\nitem10\nitem2"
         );
+    }
+}
+
+#[cfg(test)]
+mod line_cleanup_tests {
+    use super::*;
+    use crate::clipboard_modify::model::StageArguments;
+
+    fn run(
+        input: &str,
+        operation: OperationId,
+        separator: Option<&str>,
+    ) -> Result<String, ExecuteError> {
+        let catalog = crate::clipboard_modify::defaults::default_catalog();
+        let stage = StageSpec {
+            operation,
+            arguments: StageArguments {
+                separator: separator.map(str::to_owned),
+                ..Default::default()
+            },
+        };
+        execute_stages(input, &[stage], &catalog, &|| false)
+    }
+
+    #[test]
+    fn clipboard_modify_line_cleanup_preserves_content_and_normalizes_line_endings() {
+        assert_eq!(
+            run("  a  \r\n \t\r\nβ\n", OperationId::RemoveBlankLines, None).unwrap(),
+            "  a  \nβ"
+        );
+        assert_eq!(
+            run("first\r\n\r\nβ", OperationId::NumberLines, None).unwrap(),
+            "1. first\n2. \n3. β"
+        );
+        assert_eq!(
+            run("a\nb\nc\n", OperationId::ReverseLines, None).unwrap(),
+            "c\nb\na"
+        );
+        assert_eq!(run("", OperationId::ReverseLines, None).unwrap(), "");
+    }
+
+    #[test]
+    fn clipboard_modify_line_cleanup_join_and_split_preserve_literal_empty_fields() {
+        assert_eq!(run("a\nβ\n", OperationId::JoinLines, None).unwrap(), "a β");
+        assert_eq!(run("a\nβ", OperationId::JoinLines, Some("")).unwrap(), "aβ");
+        assert_eq!(
+            run("a::β::", OperationId::SplitLines, Some("::")).unwrap(),
+            "a\nβ\n"
+        );
+        assert_eq!(
+            run("a||β", OperationId::SplitLines, Some("|")).unwrap(),
+            "a\n\nβ"
+        );
+        assert_eq!(run("", OperationId::SplitLines, Some("|")).unwrap(), "");
+        assert!(matches!(
+            run("a|b", OperationId::SplitLines, Some("")).unwrap_err(),
+            ExecuteError::Validation(_)
+        ));
+    }
+
+    #[test]
+    fn clipboard_modify_line_cleanup_split_checks_cancellation_while_emitting_fields() {
+        let input = (0..4096).map(|_| "x").collect::<Vec<_>>().join(",");
+        let checks = std::cell::Cell::new(0);
+        let stage = StageSpec {
+            operation: OperationId::SplitLines,
+            arguments: StageArguments {
+                separator: Some(",".into()),
+                ..Default::default()
+            },
+        };
+        let result = execute_stages(
+            &input,
+            &[stage],
+            &crate::clipboard_modify::defaults::default_catalog(),
+            &|| {
+                let current = checks.get();
+                checks.set(current + 1);
+                current >= 5
+            },
+        );
+        assert_eq!(result.unwrap_err(), ExecuteError::Cancelled);
+        assert!(checks.get() >= 5);
     }
 }

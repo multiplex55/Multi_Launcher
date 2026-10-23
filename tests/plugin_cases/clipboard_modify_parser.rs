@@ -41,6 +41,12 @@ fn every_baseline_command_parses_to_execution() {
             multi_launcher::clipboard_modify::catalog::ArgumentRequirements::CodeBlock => {
                 format!("cm {} rust", op.command)
             }
+            multi_launcher::clipboard_modify::catalog::ArgumentRequirements::OptionalSeparator => {
+                format!("cm {}", op.command)
+            }
+            multi_launcher::clipboard_modify::catalog::ArgumentRequirements::RequiredSeparator => {
+                format!("cm {} ::", op.command)
+            }
         };
         assert!(
             matches!(
@@ -48,6 +54,56 @@ fn every_baseline_command_parses_to_execution() {
                 ClipboardModifyParseResult::CompleteExecution(_)
             ),
             "{query}"
+        );
+    }
+}
+
+#[test]
+fn clipboard_modify_parser_line_cleanup_separators_are_literal_and_pipeline_safe() {
+    let cat = catalog();
+    let parse_stage = |query: &str| match parse(query, &cat) {
+        ClipboardModifyParseResult::CompleteExecution(ClipboardModifyIntent::Stages(stages)) => {
+            stages
+        }
+        other => panic!("expected executable stages for {query:?}, got {other:?}"),
+    };
+
+    assert_eq!(
+        parse_stage("cm join-lines")[0].arguments.separator,
+        None,
+        "omitted join separator uses the operation's default"
+    );
+    assert_eq!(
+        parse_stage("cm join-lines \"\"")[0]
+            .arguments
+            .separator
+            .as_deref(),
+        Some("")
+    );
+    assert_eq!(
+        parse_stage("cm join-lines \" | \"")[0]
+            .arguments
+            .separator
+            .as_deref(),
+        Some(" | ")
+    );
+    assert_eq!(
+        parse_stage("cm split-lines \"a|b\"")[0]
+            .arguments
+            .separator
+            .as_deref(),
+        Some("a|b")
+    );
+    let pipeline = parse_stage("cm trim | split-lines \"|\" | join-lines \"::\"");
+    assert_eq!(pipeline.len(), 3);
+    assert_eq!(pipeline[1].operation, OperationId::SplitLines);
+    assert_eq!(pipeline[1].arguments.separator.as_deref(), Some("|"));
+    assert_eq!(pipeline[2].arguments.separator.as_deref(), Some("::"));
+
+    for invalid in ["cm split-lines", "cm split-lines \"\"", "cm join-lines a b"] {
+        assert!(
+            matches!(parse(invalid, &cat), ClipboardModifyParseResult::Invalid(_)),
+            "expected invalid query: {invalid}"
         );
     }
 }

@@ -20,6 +20,8 @@ pub enum ArgumentRequirements {
     NamedWrap,
     CodeBlock,
     Template,
+    OptionalSeparator,
+    RequiredSeparator,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +65,9 @@ impl ArgumentRequirements {
         args: &StageArguments,
     ) -> Result<(), ClipboardModifyError> {
         let op = canonical_command(id);
+        if !matches!(self, Self::OptionalSeparator | Self::RequiredSeparator) {
+            reject(args.separator.is_some(), op, "separator")?;
+        }
         match self {
             Self::None => {
                 for (name, supplied) in [
@@ -110,6 +115,33 @@ impl ArgumentRequirements {
                 reject(args.prefix.is_some(), op, "prefix")?;
                 reject(args.suffix.is_some(), op, "suffix")?;
                 reject(args.name.is_some(), op, "name")?;
+            }
+            Self::OptionalSeparator => {
+                reject(args.prefix.is_some(), op, "prefix")?;
+                reject(args.suffix.is_some(), op, "suffix")?;
+                reject(args.name.is_some(), op, "name")?;
+                reject(args.language.is_some(), op, "language")?;
+            }
+            Self::RequiredSeparator => {
+                reject(args.prefix.is_some(), op, "prefix")?;
+                reject(args.suffix.is_some(), op, "suffix")?;
+                reject(args.name.is_some(), op, "name")?;
+                reject(args.language.is_some(), op, "language")?;
+                match args.separator.as_deref() {
+                    None => {
+                        return Err(ClipboardModifyError::MissingArgument {
+                            operation: op.into(),
+                            argument: "separator",
+                        });
+                    }
+                    Some("") => {
+                        return Err(ClipboardModifyError::MissingArgument {
+                            operation: op.into(),
+                            argument: "nonempty separator",
+                        });
+                    }
+                    Some(_) => {}
+                }
             }
         }
         Ok(())
@@ -247,6 +279,56 @@ pub static OPERATIONS: Lazy<Vec<OperationInfo>> = Lazy::new(|| {
             &["strip-lines"],
             ArgumentRequirements::None,
             &["trim-lines"],
+        ),
+        op(
+            OperationId::RemoveBlankLines,
+            "remove-blank-lines",
+            "Remove blank lines",
+            "Remove lines whose trimmed content is empty",
+            OperationCategory::Lines,
+            &[],
+            ArgumentRequirements::None,
+            &["remove-blank-lines"],
+        ),
+        op(
+            OperationId::NumberLines,
+            "number-lines",
+            "Number lines",
+            "Prefix logical lines with consecutive numbers",
+            OperationCategory::Lines,
+            &[],
+            ArgumentRequirements::None,
+            &["number-lines"],
+        ),
+        op(
+            OperationId::ReverseLines,
+            "reverse-lines",
+            "Reverse lines",
+            "Reverse logical line order",
+            OperationCategory::Lines,
+            &[],
+            ArgumentRequirements::None,
+            &["reverse-lines"],
+        ),
+        op(
+            OperationId::JoinLines,
+            "join-lines",
+            "Join lines",
+            "Join logical lines with a literal separator (one space by default)",
+            OperationCategory::Lines,
+            &[],
+            ArgumentRequirements::OptionalSeparator,
+            &["join-lines", "join-lines \" | \"", "join-lines \"\""],
+        ),
+        op(
+            OperationId::SplitLines,
+            "split-lines",
+            "Split lines",
+            "Split on a nonempty literal separator and join fields with LF",
+            OperationCategory::Lines,
+            &[],
+            ArgumentRequirements::RequiredSeparator,
+            &["split-lines ::", "split-lines \"a|b\""],
         ),
         op(
             OperationId::JsonPretty,
@@ -479,6 +561,28 @@ pub fn reserved_names() -> BTreeSet<String> {
         }
     }
     s
+}
+
+/// Names reserved for saved entries before the additive line-cleanup operations.
+/// New operation spellings remain valid for existing schema-1 IDs and aliases;
+/// direct `cm <operation>` and explicit `cm apply <name>` routes stay distinct.
+pub fn saved_name_reserved_names() -> BTreeSet<String> {
+    let mut names = reserved_names();
+    for id in [
+        OperationId::RemoveBlankLines,
+        OperationId::NumberLines,
+        OperationId::ReverseLines,
+        OperationId::JoinLines,
+        OperationId::SplitLines,
+    ] {
+        if let Some(op) = operation_by_id(id) {
+            names.remove(&normalize_name(op.command));
+            for alias in op.aliases {
+                names.remove(&normalize_name(alias));
+            }
+        }
+    }
+    names
 }
 
 pub static WRAPPERS: Lazy<Vec<WrapperInfo>> = Lazy::new(|| {

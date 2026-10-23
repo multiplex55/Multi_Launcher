@@ -1,5 +1,6 @@
+use crate::clipboard_modify::catalog::ArgumentRequirements;
 use crate::clipboard_modify::clipboard::{
-    ClipboardError, ClipboardSummary, ProductionClipboardService,
+    ClipboardBackend, ClipboardError, ClipboardService, ClipboardSummary,
 };
 use crate::clipboard_modify::coordinator::{PreviewCoordinator, PreviewState};
 use crate::clipboard_modify::model::{
@@ -99,6 +100,7 @@ pub struct ClipboardModifyDialogState {
     pub source_error: Option<String>,
     pub stages: Vec<DialogStage>,
     next_stage_id: u64,
+    selected_stage_operation: OperationId,
     pub preview: PreviewCoordinator,
     pub acknowledged_large_sources: HashSet<(u64, usize)>,
     pub large_confirmation_open: bool,
@@ -138,6 +140,7 @@ impl Default for ClipboardModifyDialogState {
             source_error: None,
             stages: Vec::new(),
             next_stage_id: 1,
+            selected_stage_operation: OperationId::Uppercase,
             preview: PreviewCoordinator::default(),
             acknowledged_large_sources: HashSet::new(),
             large_confirmation_open: false,
@@ -178,10 +181,10 @@ impl ClipboardModifyDialogState {
         state
     }
 
-    pub fn open_section(
+    pub fn open_section<B: ClipboardBackend>(
         &mut self,
         section: ClipboardModifyDialogSection,
-        service: &Arc<ProductionClipboardService>,
+        service: &Arc<ClipboardService<B>>,
     ) {
         let was_open = self.open;
         self.open = true;
@@ -194,7 +197,7 @@ impl ClipboardModifyDialogState {
         self.open = true;
         self.section = section;
     }
-    pub fn load_clipboard(&mut self, service: &Arc<ProductionClipboardService>) {
+    pub fn load_clipboard<B: ClipboardBackend>(&mut self, service: &Arc<ClipboardService<B>>) {
         match service.read_text_for_modify() {
             Ok(text) => self.replace_loaded_source(text),
             Err(ClipboardError::NonText) => {
@@ -294,10 +297,10 @@ impl ClipboardModifyDialogState {
         });
         self.mark_dirty(catalog);
     }
-    pub fn ui(
+    pub fn ui<B: ClipboardBackend>(
         &mut self,
         ctx: &egui::Context,
-        service: &Arc<ProductionClipboardService>,
+        service: &Arc<ClipboardService<B>>,
         catalog: Arc<crate::clipboard_modify::model::ClipboardModifierCatalog>,
         store: Option<&ClipboardModifierStore>,
     ) {
@@ -367,12 +370,12 @@ impl ClipboardModifyDialogState {
         response.inner
     }
 
-    fn render_section_body(
+    fn render_section_body<B: ClipboardBackend>(
         &mut self,
         ui: &mut egui::Ui,
         available_height: f32,
         available_width: f32,
-        service: &Arc<ProductionClipboardService>,
+        service: &Arc<ClipboardService<B>>,
         catalog: Arc<ClipboardModifierCatalog>,
         store: Option<&ClipboardModifierStore>,
     ) -> egui::Rect {
@@ -414,10 +417,10 @@ impl ClipboardModifyDialogState {
         output.inner_rect
     }
 
-    fn render_section_footer(
+    fn render_section_footer<B: ClipboardBackend>(
         &mut self,
         ui: &mut egui::Ui,
-        service: &Arc<ProductionClipboardService>,
+        service: &Arc<ClipboardService<B>>,
         catalog: Arc<ClipboardModifierCatalog>,
         store: Option<&ClipboardModifierStore>,
     ) -> Option<egui::Response> {
@@ -480,10 +483,10 @@ impl ClipboardModifyDialogState {
         }
     }
 
-    fn render_section_contents(
+    fn render_section_contents<B: ClipboardBackend>(
         &mut self,
         ui: &mut egui::Ui,
-        service: &Arc<ProductionClipboardService>,
+        service: &Arc<ClipboardService<B>>,
         catalog: Arc<ClipboardModifierCatalog>,
         store: Option<&ClipboardModifierStore>,
     ) -> Option<egui::Response> {
@@ -794,10 +797,10 @@ impl ClipboardModifyDialogState {
             });
         }
     }
-    fn templates_ui(
+    fn templates_ui<B: ClipboardBackend>(
         &mut self,
         ui: &mut egui::Ui,
-        _service: &Arc<ProductionClipboardService>,
+        _service: &Arc<ClipboardService<B>>,
         catalog: Arc<ClipboardModifierCatalog>,
     ) {
         compact_section_heading(
@@ -1071,10 +1074,10 @@ impl ClipboardModifyDialogState {
         }
     }
 
-    fn saved_pipelines_ui(
+    fn saved_pipelines_ui<B: ClipboardBackend>(
         &mut self,
         ui: &mut egui::Ui,
-        service: &Arc<ProductionClipboardService>,
+        service: &Arc<ClipboardService<B>>,
         catalog: Arc<ClipboardModifierCatalog>,
     ) {
         compact_section_heading(
@@ -1195,75 +1198,41 @@ impl ClipboardModifyDialogState {
                         .collect();
                     self.unsaved_pipeline_draft = true;
                 }
+                let mut remove_stage = None;
                 for j in 0..self.pipeline_draft[i].stages.len() {
-                    ui.horizontal_wrapped(|ui| {
-                        compact_section_heading(
+                    let stage_id = egui::Id::new((pipeline_field_id.as_str(), "stage", j));
+                    ui.push_id(stage_id, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            compact_section_heading(ui, &format!("Stage {}", j + 1), None);
+                            if ui.button("Remove stage").clicked() {
+                                remove_stage = Some(j);
+                            }
+                        });
+                        edited |= stage_spec_editor(
                             ui,
-                            &format!(
-                                "Stage {} {:?}",
-                                j + 1,
-                                self.pipeline_draft[i].stages[j].operation
-                            ),
-                            None,
+                            stage_id.with("editor"),
+                            &mut self.pipeline_draft[i].stages[j],
                         );
-                        ui.label("Prefix");
-                        let a = &mut self.pipeline_draft[i].stages[j].arguments;
-                        edited |= ui
-                            .push_id(format!("stage_{j}_prefix"), |ui| {
-                                stage_argument_editor(
-                                    ui,
-                                    egui::Id::new((pipeline_field_id.as_str(), j, "prefix")),
-                                    a.prefix.get_or_insert_with(String::new),
-                                )
-                            })
-                            .inner
-                            .changed();
-                        ui.label("Suffix");
-                        edited |= ui
-                            .push_id(format!("stage_{j}_suffix"), |ui| {
-                                stage_argument_editor(
-                                    ui,
-                                    egui::Id::new((pipeline_field_id.as_str(), j, "suffix")),
-                                    a.suffix.get_or_insert_with(String::new),
-                                )
-                            })
-                            .inner
-                            .changed();
-                        ui.label("Template or pipeline");
-                        edited |= ui
-                            .push_id(format!("stage_{j}_name"), |ui| {
-                                stage_argument_editor(
-                                    ui,
-                                    egui::Id::new((pipeline_field_id.as_str(), j, "name")),
-                                    a.name.get_or_insert_with(String::new),
-                                )
-                            })
-                            .inner
-                            .changed();
-                        ui.label("Language");
-                        edited |= ui
-                            .push_id(format!("stage_{j}_language"), |ui| {
-                                stage_argument_editor(
-                                    ui,
-                                    egui::Id::new((pipeline_field_id.as_str(), j, "language")),
-                                    a.language.get_or_insert_with(String::new),
-                                )
-                            })
-                            .inner
-                            .changed();
-                        if ui.button("Remove stage").clicked() {
-                            self.pipeline_draft[i].stages.remove(j);
-                            edited = true;
-                        }
                     });
                 }
-                if ui.button("Add trim stage").clicked() {
-                    self.pipeline_draft[i].stages.push(StageSpec {
-                        operation: OperationId::Trim,
-                        arguments: Default::default(),
-                    });
-                    self.unsaved_pipeline_draft = true;
+                if let Some(j) = remove_stage {
+                    self.pipeline_draft[i].stages.remove(j);
+                    edited = true;
                 }
+                ui.horizontal(|ui| {
+                    stage_operation_selector(
+                        ui,
+                        egui::Id::new((pipeline_field_id.as_str(), "add_stage_operation")),
+                        &mut self.selected_stage_operation,
+                    );
+                    if ui.button("Add stage").clicked() {
+                        self.pipeline_draft[i].stages.push(StageSpec {
+                            operation: self.selected_stage_operation,
+                            arguments: Default::default(),
+                        });
+                        self.unsaved_pipeline_draft = true;
+                    }
+                });
                 if ui.button("Preview complete output").clicked() {
                     self.preview.request(
                         self.source.clone(),
@@ -1310,10 +1279,10 @@ impl ClipboardModifyDialogState {
             readonly_multiline_preview(ui, egui::Id::new("cm_pipeline_editor_error"), e, true);
         }
     }
-    fn shortcuts(
+    fn shortcuts<B: ClipboardBackend>(
         &mut self,
         ui: &egui::Ui,
-        service: &Arc<ProductionClipboardService>,
+        service: &Arc<ClipboardService<B>>,
         catalog: Arc<crate::clipboard_modify::model::ClipboardModifierCatalog>,
     ) {
         ui.input(|i| {
@@ -1343,10 +1312,10 @@ impl ClipboardModifyDialogState {
             }
         }
     }
-    fn modify_ui(
+    fn modify_ui<B: ClipboardBackend>(
         &mut self,
         ui: &mut egui::Ui,
-        service: &Arc<ProductionClipboardService>,
+        service: &Arc<ClipboardService<B>>,
         catalog: Arc<crate::clipboard_modify::model::ClipboardModifierCatalog>,
     ) {
         if let Some(e) = &self.source_error {
@@ -1354,8 +1323,13 @@ impl ClipboardModifyDialogState {
         }
         compact_section_heading(ui, "Modify clipboard", None);
         ui.horizontal(|ui| {
-            if ui.button("Add uppercase stage").clicked() {
-                self.add_stage(OperationId::Uppercase, catalog.clone())
+            stage_operation_selector(
+                ui,
+                egui::Id::new("cm_modify_add_stage_operation"),
+                &mut self.selected_stage_operation,
+            );
+            if ui.button("Add stage").clicked() {
+                self.add_stage(self.selected_stage_operation, catalog.clone())
             }
             if ui.button("Reset").clicked() {
                 self.reset(catalog.clone())
@@ -1370,10 +1344,10 @@ impl ClipboardModifyDialogState {
         self.modify_body_ui(ui, service, catalog.clone());
     }
 
-    fn modify_body_ui(
+    fn modify_body_ui<B: ClipboardBackend>(
         &mut self,
         ui: &mut egui::Ui,
-        service: &Arc<ProductionClipboardService>,
+        service: &Arc<ClipboardService<B>>,
         catalog: Arc<crate::clipboard_modify::model::ClipboardModifierCatalog>,
     ) {
         if self.large_confirmation_open {
@@ -1399,13 +1373,10 @@ impl ClipboardModifyDialogState {
         let mut remove = None;
         let mut changed = false;
         for i in 0..self.stages.len() {
+            let stage_id = self.stages[i].id;
             ui.push_id(self.stages[i].id, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(format!(
-                        "Stage {}: {:?}",
-                        i + 1,
-                        self.stages[i].spec.operation
-                    ));
+                    ui.label(format!("Stage {}", i + 1,));
                     if ui.button("↑").clicked() && i > 0 {
                         self.stages.swap(i, i - 1);
                         changed = true;
@@ -1418,6 +1389,11 @@ impl ClipboardModifyDialogState {
                         remove = Some(i);
                     }
                 });
+                changed |= stage_spec_editor(
+                    ui,
+                    egui::Id::new(("cm_modify_stage_editor", stage_id)),
+                    &mut self.stages[i].spec,
+                );
             });
         }
         if let Some(i) = remove {
@@ -1478,10 +1454,10 @@ impl ClipboardModifyDialogState {
         }
     }
 
-    fn external_change_warning_ui(
+    fn external_change_warning_ui<B: ClipboardBackend>(
         &mut self,
         ui: &mut egui::Ui,
-        service: &Arc<ProductionClipboardService>,
+        service: &Arc<ClipboardService<B>>,
     ) {
         if let Some(cur) = &self.external_change {
             ui.separator();
@@ -1511,10 +1487,10 @@ impl ClipboardModifyDialogState {
         }
     }
 
-    fn modify_footer_ui(
+    fn modify_footer_ui<B: ClipboardBackend>(
         &mut self,
         ui: &mut egui::Ui,
-        service: &Arc<ProductionClipboardService>,
+        service: &Arc<ClipboardService<B>>,
     ) -> egui::Response {
         let labels = section_footer_action_labels(ClipboardModifyDialogSection::Modify);
         let (button_height, content_width) = footer_button_row_metrics(ui, labels);
@@ -1578,9 +1554,9 @@ impl ClipboardModifyDialogState {
         }
         output.inner
     }
-    pub fn commit(
+    pub fn commit<B: ClipboardBackend>(
         &mut self,
-        service: &Arc<ProductionClipboardService>,
+        service: &Arc<ClipboardService<B>>,
         close: bool,
         confirmed: bool,
     ) {
@@ -1671,6 +1647,117 @@ fn stage_argument_editor(ui: &mut egui::Ui, id: egui::Id, text: &mut String) -> 
     } else {
         ui.add(egui::TextEdit::singleline(text).id_salt(id))
     }
+}
+
+fn stage_operation_selector(ui: &mut egui::Ui, id: egui::Id, operation: &mut OperationId) {
+    let selected_label = crate::clipboard_modify::catalog::operation_by_id(*operation)
+        .map(|info| info.label)
+        .unwrap_or_else(|| crate::clipboard_modify::catalog::canonical_command(*operation));
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(selected_label)
+        .show_ui(ui, |ui| {
+            for info in crate::clipboard_modify::catalog::operations()
+                .iter()
+                .filter(|info| info.pipeline_available)
+            {
+                ui.selectable_value(operation, info.id, info.label);
+            }
+        });
+}
+
+fn edit_optional_stage_argument(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    label: &str,
+    slot: &mut Option<String>,
+) -> bool {
+    ui.label(label);
+    let mut value = slot.clone().unwrap_or_default();
+    let changed = stage_argument_editor(ui, id, &mut value).changed();
+    if changed {
+        *slot = Some(value);
+    }
+    changed
+}
+
+fn stage_spec_editor(ui: &mut egui::Ui, id: egui::Id, spec: &mut StageSpec) -> bool {
+    let mut changed = false;
+    let previous = spec.operation;
+    stage_operation_selector(ui, id.with("operation"), &mut spec.operation);
+    if spec.operation != previous {
+        // Changing the operation is explicit and clears arguments that belong
+        // to the previous operation. Merely rendering an editor never does.
+        spec.arguments = StageArguments::default();
+        changed = true;
+    }
+
+    let requirements = crate::clipboard_modify::catalog::operation_by_id(spec.operation)
+        .map(|info| info.argument_requirements);
+    match requirements {
+        Some(ArgumentRequirements::None) | None => {}
+        Some(ArgumentRequirements::CustomWrap) => {
+            ui.horizontal_wrapped(|ui| {
+                changed |= edit_optional_stage_argument(
+                    ui,
+                    id.with("prefix"),
+                    "Prefix",
+                    &mut spec.arguments.prefix,
+                );
+                changed |= edit_optional_stage_argument(
+                    ui,
+                    id.with("suffix"),
+                    "Suffix",
+                    &mut spec.arguments.suffix,
+                );
+            });
+        }
+        Some(ArgumentRequirements::NamedWrap | ArgumentRequirements::Template) => {
+            ui.horizontal_wrapped(|ui| {
+                changed |= edit_optional_stage_argument(
+                    ui,
+                    id.with("name"),
+                    "Template or wrapper",
+                    &mut spec.arguments.name,
+                );
+            });
+        }
+        Some(ArgumentRequirements::CodeBlock) => {
+            ui.horizontal_wrapped(|ui| {
+                changed |= edit_optional_stage_argument(
+                    ui,
+                    id.with("language"),
+                    "Optional language",
+                    &mut spec.arguments.language,
+                );
+            });
+        }
+        Some(ArgumentRequirements::OptionalSeparator) => {
+            ui.horizontal_wrapped(|ui| {
+                let mut explicit = spec.arguments.separator.is_some();
+                if ui
+                    .checkbox(&mut explicit, "Set literal separator (default: one space)")
+                    .changed()
+                {
+                    spec.arguments.separator = explicit.then(String::new);
+                    changed = true;
+                }
+                if let Some(separator) = &mut spec.arguments.separator {
+                    changed |= stage_argument_editor(ui, id.with("separator"), separator).changed();
+                }
+            });
+        }
+        Some(ArgumentRequirements::RequiredSeparator) => {
+            ui.horizontal_wrapped(|ui| {
+                changed |= edit_optional_stage_argument(
+                    ui,
+                    id.with("separator"),
+                    "Nonempty literal separator",
+                    &mut spec.arguments.separator,
+                );
+            });
+        }
+    }
+    changed
 }
 
 fn readonly_multiline_preview(ui: &mut egui::Ui, id: egui::Id, text: &str, wrap: bool) {
@@ -2152,6 +2239,189 @@ mod tests {
             "Apply stays disabled without a completed preview"
         );
         assert!(!state.can_apply());
+    }
+
+    #[test]
+    fn clipboard_modify_line_cleanup_editor_is_passive_and_exposes_new_operations() {
+        let mut spec = StageSpec {
+            operation: OperationId::JoinLines,
+            arguments: StageArguments::default(),
+        };
+        let original = spec.clone();
+        let ctx = egui::Context::default();
+        let mut changed = false;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 500.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    changed =
+                        stage_spec_editor(ui, egui::Id::new("passive_join_editor"), &mut spec);
+                });
+            },
+        );
+        output.drop_without_applying_deltas();
+
+        assert!(!changed, "passive rendering does not edit the stage draft");
+        assert_eq!(
+            spec, original,
+            "the unset join separator remains the default"
+        );
+        for operation in [
+            OperationId::RemoveBlankLines,
+            OperationId::NumberLines,
+            OperationId::ReverseLines,
+            OperationId::JoinLines,
+            OperationId::SplitLines,
+        ] {
+            assert!(ClipboardModifyDialogState::allowed_stage_operations().contains(&operation));
+        }
+    }
+
+    #[test]
+    fn clipboard_modify_line_cleanup_preview_applies_and_undoes_through_real_response() {
+        use crate::clipboard_modify::clipboard::fake::FakeClipboardBackend;
+
+        let original = " a  \r\n \t\r\nβ\n".to_string();
+        let service = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text(
+            original.clone(),
+        )));
+        let catalog = Arc::new(crate::clipboard_modify::defaults::default_catalog());
+        let mut state = ClipboardModifyDialogState::default();
+        state.source = original.clone();
+        state.baseline = original.clone();
+        state.reset_source = original.clone();
+        state.stages.push(DialogStage {
+            id: 41,
+            spec: StageSpec {
+                operation: OperationId::RemoveBlankLines,
+                arguments: StageArguments::default(),
+            },
+            error: None,
+        });
+        state.mark_dirty(catalog);
+        state.preview.force_start_pending();
+
+        let expected = " a  \nβ";
+        assert_eq!(state.preview.apply_text(), Some(expected));
+        assert!(
+            service.backend().writes().is_empty(),
+            "preview is read-only"
+        );
+
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
+        let frame = |events: Vec<egui::Event>, state: &mut ClipboardModifyDialogState| {
+            let mut response = None;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        response = Some(state.modify_footer_ui(ui, &service));
+                    });
+                },
+            );
+            (output, response.expect("Apply response is rendered"))
+        };
+
+        let (output, apply) = frame(Vec::new(), &mut state);
+        let position = apply.rect.center();
+        let initially_enabled = apply.enabled();
+        output.drop_without_applying_deltas();
+        assert!(initially_enabled, "the completed preview enables Apply");
+        assert!(service.backend().writes().is_empty());
+
+        let (output, _) = frame(vec![egui::Event::PointerMoved(position)], &mut state);
+        output.drop_without_applying_deltas();
+        let (output, _) = frame(
+            vec![egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut state,
+        );
+        output.drop_without_applying_deltas();
+        let (output, released) = frame(
+            vec![egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut state,
+        );
+        let clicked = released.clicked();
+        output.drop_without_applying_deltas();
+
+        assert!(clicked, "the enabled Apply Response received the click");
+        assert_eq!(service.backend().writes(), vec![expected.to_string()]);
+        service.undo().unwrap();
+        assert_eq!(
+            service.backend().writes(),
+            vec![expected.to_string(), original]
+        );
+    }
+
+    #[test]
+    fn clipboard_modify_line_cleanup_rejects_empty_split_without_clipboard_write() {
+        use crate::clipboard_modify::clipboard::fake::FakeClipboardBackend;
+
+        let service = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text(
+            "a|b".to_string(),
+        )));
+        let catalog = Arc::new(crate::clipboard_modify::defaults::default_catalog());
+        let mut state = ClipboardModifyDialogState::default();
+        state.source = "a|b".into();
+        state.baseline = state.source.clone();
+        state.reset_source = state.source.clone();
+        state.stages.push(DialogStage {
+            id: 7,
+            spec: StageSpec {
+                operation: OperationId::SplitLines,
+                arguments: StageArguments {
+                    separator: Some(String::new()),
+                    ..Default::default()
+                },
+            },
+            error: None,
+        });
+        state.mark_dirty(catalog);
+        state.preview.force_start_pending();
+
+        assert!(matches!(state.preview.state(), PreviewState::Failed { .. }));
+        assert!(!state.can_apply());
+
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 400.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    assert!(!state.modify_footer_ui(ui, &service).enabled());
+                });
+            },
+        );
+        output.drop_without_applying_deltas();
+        assert!(
+            service.backend().writes().is_empty(),
+            "an invalid separator cannot write even when the dialog footer renders"
+        );
     }
 
     #[test]

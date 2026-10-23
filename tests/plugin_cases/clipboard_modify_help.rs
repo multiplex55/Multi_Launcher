@@ -110,6 +110,12 @@ fn operation_pipeline_allowed_help_flag_matches_parser_behavior() {
             multi_launcher::clipboard_modify::catalog::ArgumentRequirements::CodeBlock => {
                 format!("cm trim | {} rust", op.command)
             }
+            multi_launcher::clipboard_modify::catalog::ArgumentRequirements::OptionalSeparator => {
+                format!("cm trim | {}", op.command)
+            }
+            multi_launcher::clipboard_modify::catalog::ArgumentRequirements::RequiredSeparator => {
+                format!("cm trim | {} ::", op.command)
+            }
         };
         let parses = matches!(
             parse(&query, &catalog),
@@ -121,4 +127,38 @@ fn operation_pipeline_allowed_help_flag_matches_parser_behavior() {
             .unwrap();
         assert_eq!(entry.pipeline_allowed, parses, "{}", op.command);
     }
+}
+
+#[test]
+fn clipboard_modify_help_describes_literal_line_separators() {
+    let entries = build_help_entries(&catalog());
+    let join = entries
+        .iter()
+        .find(|entry| entry.source == HelpSource::Operation(OperationId::JoinLines))
+        .unwrap();
+    assert_eq!(join.canonical_syntax, "cm join-lines [separator]");
+    assert!(join.arguments.contains("literal separator"));
+    assert!(join.arguments.contains("one space"));
+    assert!(
+        join.examples
+            .iter()
+            .any(|example| example == "cm join-lines \"\"")
+    );
+
+    let split = entries
+        .iter()
+        .find(|entry| entry.source == HelpSource::Operation(OperationId::SplitLines))
+        .unwrap();
+    assert_eq!(split.canonical_syntax, "cm split-lines <separator>");
+    assert!(
+        split
+            .arguments
+            .contains("required nonempty literal separator")
+    );
+    assert!(
+        split
+            .examples
+            .iter()
+            .any(|example| example == "cm split-lines \"a|b\"")
+    );
 }

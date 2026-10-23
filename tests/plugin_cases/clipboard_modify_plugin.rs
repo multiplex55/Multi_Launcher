@@ -57,6 +57,33 @@ fn prefix_routing_and_actions() {
 }
 
 #[test]
+fn clipboard_modify_plugin_line_cleanup_returns_typed_literal_arguments() {
+    let plugin = ClipboardModifyPlugin::new(shared_default_catalog());
+    let joined = plugin.search(r#"cm join-lines " | ""#).remove(0);
+    assert_eq!(joined.action, "clipboard_modify:execute");
+    let payload: ClipboardModifyActionPayload =
+        decode_action_payload(&joined.args.unwrap()).expect("typed join action");
+    assert!(matches!(
+        payload,
+        ClipboardModifyActionPayload::ExecuteAdHocStages { ref stages, .. }
+            if stages.len() == 1
+                && stages[0].operation == OperationId::JoinLines
+                && stages[0].arguments.separator.as_deref() == Some(" | ")
+    ));
+
+    let split = plugin.search(r#"cm split-lines "a|b""#).remove(0);
+    let payload: ClipboardModifyActionPayload =
+        decode_action_payload(&split.args.unwrap()).expect("typed split action");
+    assert!(matches!(
+        payload,
+        ClipboardModifyActionPayload::ExecuteAdHocStages { ref stages, .. }
+            if stages.len() == 1
+                && stages[0].operation == OperationId::SplitLines
+                && stages[0].arguments.separator.as_deref() == Some("a|b")
+    ));
+}
+
+#[test]
 fn dynamic_templates_and_pipelines_are_suggested() {
     let shared = shared_default_catalog();
     *shared.write().unwrap() = Arc::new(custom_catalog());

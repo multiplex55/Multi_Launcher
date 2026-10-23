@@ -141,6 +141,8 @@ fn argument_suffix(req: ArgumentRequirements) -> &'static str {
         ArgumentRequirements::CustomWrap => " <prefix> <suffix>",
         ArgumentRequirements::NamedWrap | ArgumentRequirements::Template => " <name>",
         ArgumentRequirements::CodeBlock => " [language]",
+        ArgumentRequirements::OptionalSeparator => " [separator]",
+        ArgumentRequirements::RequiredSeparator => " <separator>",
     }
 }
 fn argument_text(req: ArgumentRequirements) -> &'static str {
@@ -152,6 +154,12 @@ fn argument_text(req: ArgumentRequirements) -> &'static str {
         ArgumentRequirements::NamedWrap => "named wrapper/template id or alias",
         ArgumentRequirements::Template => "template id or alias",
         ArgumentRequirements::CodeBlock => "optional language tag",
+        ArgumentRequirements::OptionalSeparator => {
+            "optional literal separator; defaults to one space; quote spaces or pipe characters"
+        }
+        ArgumentRequirements::RequiredSeparator => {
+            "required nonempty literal separator; quote spaces or pipe characters"
+        }
     }
 }
 fn category_name(c: OperationCategory) -> &'static str {

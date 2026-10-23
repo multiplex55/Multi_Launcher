@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::catalog::{normalize_name, operation_by_id, reserved_names};
+use super::catalog::{normalize_name, operation_by_id};
 use super::error::ClipboardModifyError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -18,6 +18,11 @@ pub enum OperationId {
     UniqueLines,
     Trim,
     TrimLines,
+    RemoveBlankLines,
+    NumberLines,
+    ReverseLines,
+    JoinLines,
+    SplitLines,
     JsonPretty,
     JsonMinify,
     Base64Encode,
@@ -41,6 +46,8 @@ pub struct StageArguments {
     pub suffix: Option<String>,
     pub name: Option<String>,
     pub language: Option<String>,
+    #[serde(default)]
+    pub separator: Option<String>,
 }
 
 impl StageArguments {
@@ -49,6 +56,7 @@ impl StageArguments {
             || self.suffix.is_some()
             || self.name.is_some()
             || self.language.is_some()
+            || self.separator.is_some()
     }
 }
 
@@ -205,7 +213,10 @@ pub fn validate_namespace(
     templates: &[ClipboardTemplate],
     pipelines: &[SavedPipeline],
 ) -> Result<(), ClipboardModifyError> {
-    let reserved = reserved_names();
+    // Names that were accepted before the line-cleanup operations remain
+    // valid. `cm apply <name>` is the explicit route for those saved entries,
+    // while the operation spellings remain available directly under `cm`.
+    let reserved = super::catalog::saved_name_reserved_names();
     let mut seen = std::collections::BTreeSet::new();
     for name in templates
         .iter()
@@ -249,6 +260,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&OperationId::TrimLines).unwrap(),
             "\"trim-lines\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationId::RemoveBlankLines).unwrap(),
+            "\"remove-blank-lines\""
         );
         assert_eq!(
             serde_json::to_string(&OperationId::JsonPretty).unwrap(),
@@ -368,6 +383,23 @@ mod tests {
     fn unknown_field_rejection_through_serde() {
         let json = r#"{"operation":"trim-lines","arguments":{"extra":"nope"}}"#;
         assert!(serde_json::from_str::<StageSpec>(json).is_err());
+    }
+
+    #[test]
+    fn separator_field_is_optional_for_legacy_stage_json_and_round_trips_explicit_empty() {
+        let legacy: StageSpec = serde_json::from_str(r#"{"operation":"trim-lines"}"#).unwrap();
+        assert_eq!(legacy.arguments, StageArguments::default());
+
+        let stage = StageSpec {
+            operation: OperationId::JoinLines,
+            arguments: StageArguments {
+                separator: Some(String::new()),
+                ..Default::default()
+            },
+        };
+        let decoded: StageSpec =
+            serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
+        assert_eq!(decoded, stage);
     }
 
     #[test]
