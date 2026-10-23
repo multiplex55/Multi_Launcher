@@ -112,10 +112,40 @@ pub struct ScreenshotPlugin;
 
 impl Plugin for ScreenshotPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        if crate::common::strip_prefix_ci(query.trim(), "ss").is_none() {
+        let Some(suffix) = crate::common::strip_prefix_ci(query.trim(), "ss") else {
             return Vec::new();
+        };
+        let suffix = suffix.trim();
+        let mut tokens = suffix.split_whitespace();
+        match tokens.next() {
+            Some(command) if command.eq_ignore_ascii_case("cancel") => {
+                return if tokens.next().is_none() {
+                    vec![Action {
+                        label: "Cancel delayed screenshot".into(),
+                        desc: "Screenshot".into(),
+                        action: "screenshot:cancel".into(),
+                        args: None,
+                    }]
+                } else {
+                    Vec::new()
+                };
+            }
+            Some(command) if command.eq_ignore_ascii_case("delay") => {
+                let delay = match tokens.next() {
+                    None => None,
+                    Some("3") => Some(("3", "3 seconds")),
+                    Some("5") => Some(("5", "5 seconds")),
+                    Some("10") => Some(("10", "10 seconds")),
+                    Some(_) => return Vec::new(),
+                };
+                if tokens.next().is_some() {
+                    return Vec::new();
+                }
+                return delayed_actions(delay);
+            }
+            _ => {}
         }
-        vec![
+        let mut actions = vec![
             Action {
                 label: "Screenshot active window".into(),
                 desc: "Screenshot".into(),
@@ -158,7 +188,15 @@ impl Plugin for ScreenshotPlugin {
                 action: "screenshot:desktop_clip".into(),
                 args: None,
             },
-        ]
+        ];
+        actions.extend(delayed_actions(None));
+        actions.push(Action {
+            label: "Cancel delayed screenshot".into(),
+            desc: "Screenshot".into(),
+            action: "screenshot:cancel".into(),
+            args: None,
+        });
+        actions
     }
 
     fn name(&self) -> &str {
@@ -191,6 +229,18 @@ impl Plugin for ScreenshotPlugin {
                 label: "shot region markup".into(),
                 desc: "Screenshot".into(),
                 action: "screenshot:region_markup".into(),
+                args: None,
+            },
+            Action {
+                label: "shot delay".into(),
+                desc: "Screenshot".into(),
+                action: "query:ss delay".into(),
+                args: None,
+            },
+            Action {
+                label: "shot cancel".into(),
+                desc: "Screenshot".into(),
+                action: "query:ss cancel".into(),
                 args: None,
             },
         ]
@@ -248,4 +298,33 @@ impl Plugin for ScreenshotPlugin {
             *value = v;
         }
     }
+}
+
+fn delayed_actions(delay: Option<(&str, &str)>) -> Vec<Action> {
+    const DELAYS: [(&str, &str); 3] =
+        [("3", "3 seconds"), ("5", "5 seconds"), ("10", "10 seconds")];
+    const CAPTURES: [(&str, &str); 7] = [
+        ("window", "active window"),
+        ("region", "region"),
+        ("region_markup", "region (markup pen)"),
+        ("desktop", "desktop"),
+        ("window_clip", "active window to clipboard"),
+        ("region_clip", "region to clipboard"),
+        ("desktop_clip", "desktop to clipboard"),
+    ];
+    let delays: Vec<(&str, &str)> = match delay {
+        Some(delay) => vec![delay],
+        None => DELAYS.to_vec(),
+    };
+    delays
+        .iter()
+        .flat_map(|(wire_delay, description)| {
+            CAPTURES.iter().map(move |(capture, label)| Action {
+                label: format!("Screenshot {label} in {description}"),
+                desc: "Screenshot".into(),
+                action: format!("screenshot:delay:{wire_delay}:{capture}"),
+                args: None,
+            })
+        })
+        .collect()
 }

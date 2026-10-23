@@ -111,6 +111,26 @@ struct JumpModeObservationRequest {
     settings_search: Option<SettingsSearchRequest>,
     #[serde(default)]
     target_repair: Option<TargetRepairRequest>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    #[serde(default)]
+    screenshot_countdown: Option<ScreenshotCountdownRequest>,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ExpectedScreenshotWindow {
+    process_id: u32,
+    hwnd: u64,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ScreenshotCountdownRequest {
+    expected_window: ExpectedScreenshotWindow,
+    #[serde(default)]
+    export_editor_image: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -214,6 +234,47 @@ struct JumpModeObservation {
     target_repair: Option<TargetRepairObservation>,
     #[cfg(feature = "qa-framebuffer-capture")]
     target_repair_action_sheet: Option<TargetRepairActionSheetObservation>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screenshot_countdown: Option<Vec<ScreenshotCountdownObservation>>,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct ScreenshotCountdownObservation {
+    request_id: u64,
+    mode: &'static str,
+    destination: &'static str,
+    markup: &'static str,
+    capture_phase: &'static str,
+    scheduled_at_unix_ms: u64,
+    deadline_unix_ms: u64,
+    capture_started_at_unix_ms: Option<u64>,
+    capture_finished_at_unix_ms: Option<u64>,
+    acquisition_count: u32,
+    expected_window_pid: u32,
+    expected_window_hwnd: u64,
+    acquired_window_pid: Option<u32>,
+    acquired_window_hwnd: Option<u64>,
+    target_identity_valid: Option<bool>,
+    foreign_coverage_clear: Option<bool>,
+    native: Option<super::screenshot_countdown::ScreenshotCountdownQaSnapshot>,
+    root_visible: Option<bool>,
+    root_visible_flag: bool,
+    root_capture_safe_ack_at_unix_ms: Option<u64>,
+    parking_verified_at_unix_ms: Option<u64>,
+    presentation_granted_at_unix_ms: Option<u64>,
+    completion_at_unix_ms: Option<u64>,
+    completion_status: Option<&'static str>,
+    history_count_before: usize,
+    history_count_after: Option<usize>,
+    editor_open: bool,
+    editor_capture_request_id: Option<u64>,
+    editor_artifact_file: Option<String>,
+    editor_artifact_sha256: Option<String>,
+    editor_artifact_width: Option<u32>,
+    editor_artifact_height: Option<u32>,
+    editor_artifact_error: Option<String>,
 }
 
 #[cfg(feature = "qa-framebuffer-capture")]
@@ -592,6 +653,28 @@ fn validate_manifest(manifest: &RequestManifest) -> Result<(), String> {
             || settings_search.expected_query.len() > 256
         {
             return Err("Settings search observation query must be 1-256 bytes".into());
+        }
+    }
+    #[cfg(feature = "qa-framebuffer-capture")]
+    if let Some(observation) = manifest.jump_mode_observation.as_ref()
+        && let Some(screenshot) = observation.screenshot_countdown.as_ref()
+    {
+        if manifest.target != CaptureTarget::Root
+            || manifest.trigger != CaptureTrigger::F11
+            || observation.wait_for_active_hints
+            || observation.phase2.is_some()
+            || observation.settings_search.is_some()
+            || observation.target_repair.is_some()
+        {
+            return Err(
+                "screenshot countdown observation requires a dedicated ROOT/F11 request".into(),
+            );
+        }
+        if screenshot.expected_window.process_id == 0
+            || screenshot.expected_window.hwnd == 0
+            || usize::try_from(screenshot.expected_window.hwnd).is_err()
+        {
+            return Err("screenshot countdown expected_window identity is invalid".into());
         }
     }
     if !is_sha256(&manifest.fixture_manifest_sha256) {
@@ -1060,6 +1143,10 @@ pub(super) struct FramebufferProbe {
     target_repair_observation_enabled: bool,
     target_repair_expected_action_replacement: Option<String>,
     target_repair_expected_folder_replacement: Option<String>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    screenshot_countdown_request: Option<ScreenshotCountdownRequest>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    screenshot_countdown_observations: Vec<ScreenshotCountdownObservation>,
     activation_count: u64,
     last_action: Option<QaActivationObservation>,
     tab_processed_count: u64,
@@ -1132,6 +1219,11 @@ impl FramebufferProbe {
             target_repair_expected_folder_replacement: observation_request
                 .and_then(|request| request.target_repair.as_ref())
                 .and_then(|request| request.expected_folder_replacement.clone()),
+            #[cfg(feature = "qa-framebuffer-capture")]
+            screenshot_countdown_request: observation_request
+                .and_then(|request| request.screenshot_countdown.clone()),
+            #[cfg(feature = "qa-framebuffer-capture")]
+            screenshot_countdown_observations: Vec::new(),
             activation_count: 0,
             last_action: None,
             tab_processed_count: 0,
@@ -1696,6 +1788,46 @@ impl FramebufferProbe {
         });
     }
 
+    #[cfg(feature = "qa-framebuffer-capture")]
+    fn upsert_screenshot_countdown(&mut self, observation: ScreenshotCountdownObservation) {
+        if self.screenshot_countdown_request.is_none() {
+            return;
+        }
+        if let Some(existing) = self
+            .screenshot_countdown_observations
+            .iter_mut()
+            .find(|existing| existing.request_id == observation.request_id)
+        {
+            if *existing == observation {
+                return;
+            }
+            *existing = observation;
+        } else if self.screenshot_countdown_observations.len() < 8 {
+            self.screenshot_countdown_observations.push(observation);
+        } else {
+            return;
+        }
+        if let Some(latest) = self.latest_jump_mode_observation.as_mut() {
+            latest.screenshot_countdown = Some(self.screenshot_countdown_observations.clone());
+            if let Err(error) = write_jump_mode_observation(&self.output_dir, latest) {
+                self.fail_jump_mode_observation(format!(
+                    "failed to write screenshot countdown observation: {error}"
+                ));
+            }
+        }
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    fn screenshot_countdown_expected_window(
+        &self,
+    ) -> Option<crate::actions::screenshot::WindowCaptureTarget> {
+        let expected = self.screenshot_countdown_request.as_ref()?.expected_window;
+        Some(crate::actions::screenshot::WindowCaptureTarget {
+            process_id: expected.process_id,
+            hwnd: usize::try_from(expected.hwnd).ok()?,
+        })
+    }
+
     fn record_enter_processed(&mut self) {
         if !self.jump_mode_observation_enabled {
             return;
@@ -1821,6 +1953,263 @@ impl FramebufferProbe {
 }
 
 impl LauncherApp {
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn qa_framebuffer_screenshot_expected_window(
+        &self,
+    ) -> Option<crate::actions::screenshot::WindowCaptureTarget> {
+        self.qa_framebuffer
+            .as_ref()?
+            .screenshot_countdown_expected_window()
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn qa_framebuffer_screenshot_export_path(&self) -> Option<PathBuf> {
+        let probe = self.qa_framebuffer.as_ref()?;
+        probe
+            .screenshot_countdown_request
+            .as_ref()?
+            .export_editor_image
+            .then(|| probe.output_dir.join("screenshot-editor-output.png"))
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn qa_framebuffer_record_screenshot_scheduled(
+        &mut self,
+        snapshot: &super::screenshot_capture::ScreenshotCaptureSnapshot,
+        history_count: usize,
+    ) {
+        let Some(probe) = self
+            .qa_framebuffer
+            .as_mut()
+            .filter(|probe| probe.screenshot_countdown_request.is_some())
+        else {
+            return;
+        };
+        let Some(target) = probe.screenshot_countdown_expected_window() else {
+            probe.fail_jump_mode_observation("screenshot countdown expected target was invalid");
+            return;
+        };
+        probe.upsert_screenshot_countdown(ScreenshotCountdownObservation {
+            request_id: snapshot.request_id.get(),
+            mode: screenshot_mode_name(snapshot.mode),
+            destination: screenshot_destination_name(snapshot.destination),
+            markup: screenshot_markup_name(snapshot.markup),
+            capture_phase: screenshot_capture_phase_name(snapshot.phase),
+            scheduled_at_unix_ms: snapshot.scheduled_at_unix_ms,
+            deadline_unix_ms: snapshot.deadline_unix_ms,
+            capture_started_at_unix_ms: snapshot.capture_started_at_unix_ms,
+            capture_finished_at_unix_ms: None,
+            acquisition_count: snapshot.acquisition_count,
+            expected_window_pid: target.process_id,
+            expected_window_hwnd: target.hwnd as u64,
+            acquired_window_pid: None,
+            acquired_window_hwnd: None,
+            target_identity_valid: None,
+            foreign_coverage_clear: None,
+            native: None,
+            root_visible: None,
+            root_visible_flag: self.visible_flag.load(std::sync::atomic::Ordering::Relaxed),
+            root_capture_safe_ack_at_unix_ms: None,
+            parking_verified_at_unix_ms: None,
+            presentation_granted_at_unix_ms: None,
+            completion_at_unix_ms: None,
+            completion_status: None,
+            history_count_before: history_count,
+            history_count_after: None,
+            editor_open: false,
+            editor_capture_request_id: None,
+            editor_artifact_file: None,
+            editor_artifact_sha256: None,
+            editor_artifact_width: None,
+            editor_artifact_height: None,
+            editor_artifact_error: None,
+        });
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn qa_framebuffer_update_screenshot_runtime(
+        &mut self,
+        snapshot: Option<&super::screenshot_capture::ScreenshotCaptureSnapshot>,
+        native: Option<super::screenshot_countdown::ScreenshotCountdownQaSnapshot>,
+        root_visible: Option<bool>,
+        root_visible_flag: bool,
+    ) {
+        let Some(probe) = self
+            .qa_framebuffer
+            .as_mut()
+            .filter(|probe| probe.screenshot_countdown_request.is_some())
+        else {
+            return;
+        };
+        let Some(request_id) = snapshot
+            .map(|snapshot| snapshot.request_id.get())
+            .or_else(|| native.as_ref().map(|snapshot| snapshot.request_id))
+        else {
+            return;
+        };
+        let Some(mut observation) = probe
+            .screenshot_countdown_observations
+            .iter()
+            .find(|observation| observation.request_id == request_id)
+            .cloned()
+        else {
+            return;
+        };
+        if let Some(snapshot) = snapshot {
+            if observation.completion_status.is_none() {
+                observation.capture_phase = screenshot_capture_phase_name(snapshot.phase);
+                observation.capture_started_at_unix_ms = snapshot.capture_started_at_unix_ms;
+                observation.acquisition_count = snapshot.acquisition_count;
+            }
+        }
+        if native.is_some() {
+            observation.native = native;
+        }
+        observation.root_visible = root_visible;
+        observation.root_visible_flag = root_visible_flag;
+        probe.upsert_screenshot_countdown(observation);
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn qa_framebuffer_screenshot_parking_ack(
+        &mut self,
+        request_id: super::screenshot_capture::ScreenshotRequestId,
+        capture_safe_ack: bool,
+        parking_verified: bool,
+        presentation_granted: bool,
+    ) {
+        let now = unix_millis();
+        if let Some(parking) = self
+            .screenshot_capture_parking
+            .as_mut()
+            .filter(|parking| parking.request_id == request_id)
+        {
+            if capture_safe_ack {
+                parking.root_capture_safe_ack_at_unix_ms.get_or_insert(now);
+            }
+            if parking_verified {
+                parking.parking_verified_at_unix_ms.get_or_insert(now);
+            }
+            if presentation_granted {
+                parking.presentation_granted_at_unix_ms.get_or_insert(now);
+            }
+        }
+        let Some(probe) = self
+            .qa_framebuffer
+            .as_mut()
+            .filter(|probe| probe.screenshot_countdown_request.is_some())
+        else {
+            return;
+        };
+        let Some(mut observation) = probe
+            .screenshot_countdown_observations
+            .iter()
+            .find(|observation| observation.request_id == request_id.get())
+            .cloned()
+        else {
+            return;
+        };
+        if capture_safe_ack {
+            observation
+                .root_capture_safe_ack_at_unix_ms
+                .get_or_insert(now);
+        }
+        if parking_verified {
+            observation.parking_verified_at_unix_ms.get_or_insert(now);
+        }
+        if presentation_granted {
+            observation
+                .presentation_granted_at_unix_ms
+                .get_or_insert(now);
+        }
+        probe.upsert_screenshot_countdown(observation);
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn qa_framebuffer_cancel_screenshot_observation(
+        &mut self,
+        request_id: super::screenshot_capture::ScreenshotRequestId,
+        status: &'static str,
+        history_count: usize,
+    ) {
+        let Some(probe) = self
+            .qa_framebuffer
+            .as_mut()
+            .filter(|probe| probe.screenshot_countdown_request.is_some())
+        else {
+            return;
+        };
+        let Some(mut observation) = probe
+            .screenshot_countdown_observations
+            .iter()
+            .find(|observation| observation.request_id == request_id.get())
+            .cloned()
+        else {
+            return;
+        };
+        if observation.completion_status.is_none() {
+            observation.capture_phase = "terminal";
+            observation.completion_at_unix_ms = Some(unix_millis());
+            observation.completion_status = Some(status);
+            observation.history_count_after = Some(history_count);
+        }
+        probe.upsert_screenshot_countdown(observation);
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn qa_framebuffer_finish_screenshot_observation(
+        &mut self,
+        request_id: super::screenshot_capture::ScreenshotRequestId,
+        capture_finished_at_unix_ms: u64,
+        acquisition_count: u32,
+        acquired_window_target: Option<crate::actions::screenshot::WindowCaptureTarget>,
+        status: &'static str,
+        history_count: usize,
+        editor_request_id: Option<u64>,
+        editor_is_open: bool,
+        artifact: Option<(String, String, u32, u32)>,
+        artifact_error: Option<String>,
+    ) {
+        let Some(probe) = self
+            .qa_framebuffer
+            .as_mut()
+            .filter(|probe| probe.screenshot_countdown_request.is_some())
+        else {
+            return;
+        };
+        let Some(mut observation) = probe
+            .screenshot_countdown_observations
+            .iter()
+            .find(|observation| observation.request_id == request_id.get())
+            .cloned()
+        else {
+            return;
+        };
+        observation.capture_phase = "terminal";
+        observation.capture_finished_at_unix_ms = Some(capture_finished_at_unix_ms);
+        observation.acquisition_count = acquisition_count;
+        observation.acquired_window_pid = acquired_window_target.map(|target| target.process_id);
+        observation.acquired_window_hwnd = acquired_window_target.map(|target| target.hwnd as u64);
+        observation.target_identity_valid = acquired_window_target.map(|target| {
+            target.process_id == observation.expected_window_pid
+                && target.hwnd as u64 == observation.expected_window_hwnd
+        });
+        observation.foreign_coverage_clear = observation.target_identity_valid;
+        observation.completion_at_unix_ms = Some(unix_millis());
+        observation.completion_status = Some(status);
+        observation.history_count_after = Some(history_count);
+        observation.editor_open = editor_is_open;
+        observation.editor_capture_request_id = editor_request_id;
+        if let Some((file, sha256, width, height)) = artifact {
+            observation.editor_artifact_file = Some(file);
+            observation.editor_artifact_sha256 = Some(sha256);
+            observation.editor_artifact_width = Some(width);
+            observation.editor_artifact_height = Some(height);
+        }
+        observation.editor_artifact_error = artifact_error;
+        probe.upsert_screenshot_countdown(observation);
+    }
+
     pub(super) fn qa_framebuffer_target_repair_observation_enabled(&self) -> bool {
         self.qa_framebuffer
             .as_ref()
@@ -2994,6 +3383,13 @@ fn build_jump_mode_observation(
         target_repair,
         #[cfg(feature = "qa-framebuffer-capture")]
         target_repair_action_sheet,
+        #[cfg(feature = "qa-framebuffer-capture")]
+        screenshot_countdown: app.qa_framebuffer.as_ref().and_then(|probe| {
+            probe
+                .screenshot_countdown_request
+                .as_ref()
+                .map(|_| probe.screenshot_countdown_observations.clone())
+        }),
     }
 }
 
@@ -3678,6 +4074,47 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+#[cfg(feature = "qa-framebuffer-capture")]
+fn screenshot_mode_name(mode: crate::commands::ScreenshotMode) -> &'static str {
+    match mode {
+        crate::commands::ScreenshotMode::Window => "window",
+        crate::commands::ScreenshotMode::Region => "region",
+        crate::commands::ScreenshotMode::Desktop => "desktop",
+    }
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+fn screenshot_destination_name(
+    destination: crate::commands::ScreenshotDestination,
+) -> &'static str {
+    match destination {
+        crate::commands::ScreenshotDestination::Clipboard => "clipboard",
+        crate::commands::ScreenshotDestination::Editor => "editor",
+    }
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+fn screenshot_markup_name(markup: crate::commands::ScreenshotMarkup) -> &'static str {
+    match markup {
+        crate::commands::ScreenshotMarkup::Rectangle => "rectangle",
+        crate::commands::ScreenshotMarkup::Pen => "pen",
+    }
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+fn screenshot_capture_phase_name(
+    phase: super::screenshot_capture::ScreenshotCapturePhase,
+) -> &'static str {
+    match phase {
+        super::screenshot_capture::ScreenshotCapturePhase::Waiting => "waiting",
+        super::screenshot_capture::ScreenshotCapturePhase::AwaitingPresentation => {
+            "awaiting_presentation"
+        }
+        super::screenshot_capture::ScreenshotCapturePhase::Capturing => "capturing",
+        super::screenshot_capture::ScreenshotCapturePhase::Draining => "draining",
+    }
+}
+
 fn unix_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3954,6 +4391,7 @@ mod tests {
                 }),
                 settings_search: None,
                 target_repair: None,
+                screenshot_countdown: None,
             }),
             output_dir: PathBuf::from("capture"),
             fixture_manifest_sha256: "a".repeat(64),
@@ -4530,6 +4968,8 @@ mod tests {
             target_repair_observation_enabled: false,
             target_repair_expected_action_replacement: None,
             target_repair_expected_folder_replacement: None,
+            screenshot_countdown_request: None,
+            screenshot_countdown_observations: Vec::new(),
             activation_count: 0,
             last_action: None,
             tab_processed_count: 0,
@@ -4920,6 +5360,7 @@ mod tests {
                 phase2: None,
                 settings_search: None,
                 target_repair: None,
+                screenshot_countdown: None,
             }),
             output_dir: PathBuf::from("capture"),
             fixture_manifest_sha256: "a".repeat(64),

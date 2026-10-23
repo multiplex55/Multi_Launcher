@@ -9,6 +9,8 @@ use egui::emath::GuiRounding as _;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 use image::RgbaImage;
 use std::path::PathBuf;
+#[cfg(feature = "qa-framebuffer-capture")]
+use std::{fs::OpenOptions, io::Read, path::Path};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkupTool {
@@ -358,6 +360,8 @@ pub struct ScreenshotEditor {
     test_force_marker_discard: bool,
     #[cfg(test)]
     test_marker_ui_passes: Vec<(u64, usize)>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    capture_request_id: Option<u64>,
 }
 
 #[cfg(test)]
@@ -449,7 +453,42 @@ impl ScreenshotEditor {
             test_force_marker_discard: false,
             #[cfg(test)]
             test_marker_ui_passes: Vec::new(),
+            #[cfg(feature = "qa-framebuffer-capture")]
+            capture_request_id: None,
         }
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn qa_mark_capture_request(&mut self, request_id: u64) {
+        self.capture_request_id = Some(request_id);
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn qa_capture_request_id(&self) -> Option<u64> {
+        self.capture_request_id
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn qa_write_applied_png(&self, path: &Path) -> std::io::Result<(String, u32, u32)> {
+        let image = self.apply_edits();
+        let dimensions = (image.width(), image.height());
+        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        let result = (|| {
+            image::DynamicImage::ImageRgba8(image)
+                .write_to(&mut file, image::ImageFormat::Png)
+                .map_err(std::io::Error::other)?;
+            file.sync_all()?;
+            drop(file);
+            let mut bytes = Vec::new();
+            std::fs::File::open(path)?.read_to_end(&mut bytes)?;
+            use sha2::Digest as _;
+            let sha256 = format!("{:x}", sha2::Sha256::digest(&bytes));
+            Ok((sha256, dimensions.0, dimensions.1))
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(path);
+        }
+        result
     }
 
     fn apply_edits(&self) -> RgbaImage {

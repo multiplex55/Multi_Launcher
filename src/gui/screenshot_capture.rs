@@ -1,3 +1,4 @@
+use crate::actions::screenshot::WindowCaptureTarget;
 use crate::commands::{
     CommandInvocation, ScreenshotDelay, ScreenshotDestination, ScreenshotMarkup, ScreenshotMode,
 };
@@ -9,9 +10,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-type CaptureFn = dyn Fn(ScreenshotMode) -> Result<Option<RgbaImage>, String> + Send + Sync;
+type CaptureFn = dyn Fn(ScreenshotMode, &[usize], Option<WindowCaptureTarget>) -> Result<Option<RgbaImage>, String>
+    + Send
+    + Sync;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ScreenshotRequestId(u64);
@@ -19,6 +22,11 @@ pub(crate) struct ScreenshotRequestId(u64);
 impl ScreenshotRequestId {
     pub(crate) fn get(self) -> u64 {
         self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(value: u64) -> Self {
+        Self(value)
     }
 }
 
@@ -34,6 +42,11 @@ pub(crate) enum ScreenshotCapturePhase {
 pub(crate) struct ScreenshotCaptureSnapshot {
     pub request_id: ScreenshotRequestId,
     pub deadline: Instant,
+    pub scheduled_at_unix_ms: u64,
+    pub deadline_unix_ms: u64,
+    pub capture_started_at_unix_ms: Option<u64>,
+    pub acquisition_count: u32,
+    pub expected_window_target: Option<WindowCaptureTarget>,
     pub phase: ScreenshotCapturePhase,
     pub mode: ScreenshotMode,
     pub destination: ScreenshotDestination,
@@ -49,6 +62,11 @@ struct ScreenshotRequest {
     invocation: CommandInvocation,
     history_query: String,
     root_policy: RootLauncherPolicy,
+    scheduled_at_unix_ms: u64,
+    deadline_unix_ms: u64,
+    capture_started_at_unix_ms: Option<u64>,
+    acquisition_count: u32,
+    expected_window_target: Option<WindowCaptureTarget>,
 }
 
 type WorkerResult = Result<Option<RgbaImage>, String>;
@@ -71,6 +89,12 @@ pub(crate) struct ScreenshotCaptureCompletion {
     pub invocation: CommandInvocation,
     pub history_query: String,
     pub root_policy: RootLauncherPolicy,
+    pub scheduled_at_unix_ms: u64,
+    pub deadline_unix_ms: u64,
+    pub capture_started_at_unix_ms: Option<u64>,
+    pub capture_finished_at_unix_ms: u64,
+    pub acquisition_count: u32,
+    pub acquired_window_target: Option<WindowCaptureTarget>,
 }
 
 /// One delayed request and, while it drains, its one owned capture worker.
@@ -95,13 +119,17 @@ impl Default for ScreenshotCaptureOwner {
 
 impl ScreenshotCaptureOwner {
     pub(crate) fn new() -> Self {
-        Self::with_capture(Arc::new(|mode| {
+        Self::with_capture(Arc::new(|mode, excluded_windows, expected_target| {
             let mode = match mode {
                 ScreenshotMode::Window => crate::actions::screenshot::Mode::Window,
                 ScreenshotMode::Region => crate::actions::screenshot::Mode::Region,
                 ScreenshotMode::Desktop => crate::actions::screenshot::Mode::Desktop,
             };
-            match crate::actions::screenshot::capture_raw(mode) {
+            match crate::actions::screenshot::capture_raw_for_owned_target(
+                mode,
+                excluded_windows,
+                expected_target,
+            ) {
                 Ok(image) => Ok(Some(image)),
                 Err(error) if crate::actions::screenshot::is_cancel_or_timeout(&error) => Ok(None),
                 Err(error) => Err(error.to_string()),
@@ -134,6 +162,33 @@ impl ScreenshotCaptureOwner {
         now: Instant,
         ctx: &egui::Context,
     ) -> Result<ScreenshotRequestId, String> {
+        self.schedule_for_window_target(
+            delay,
+            mode,
+            destination,
+            markup,
+            invocation,
+            history_query,
+            root_policy,
+            now,
+            ctx,
+            None,
+        )
+    }
+
+    pub(crate) fn schedule_for_window_target(
+        &mut self,
+        delay: ScreenshotDelay,
+        mode: ScreenshotMode,
+        destination: ScreenshotDestination,
+        markup: ScreenshotMarkup,
+        invocation: &CommandInvocation,
+        history_query: &str,
+        root_policy: RootLauncherPolicy,
+        now: Instant,
+        ctx: &egui::Context,
+        expected_window_target: Option<WindowCaptureTarget>,
+    ) -> Result<ScreenshotRequestId, String> {
         if self.shutdown {
             return Err("Screenshot capture is shutting down".into());
         }
@@ -142,6 +197,9 @@ impl ScreenshotCaptureOwner {
         }
         self.generation = self.generation.wrapping_add(1).max(1);
         let deadline = now + delay.duration();
+        let scheduled_at_unix_ms = unix_millis();
+        let deadline_unix_ms =
+            scheduled_at_unix_ms.saturating_add(duration_millis(delay.duration()));
         let id = ScreenshotRequestId(self.generation);
         self.request = Some(ScreenshotRequest {
             id,
@@ -152,6 +210,11 @@ impl ScreenshotCaptureOwner {
             invocation: invocation.clone(),
             history_query: history_query.to_owned(),
             root_policy,
+            scheduled_at_unix_ms,
+            deadline_unix_ms,
+            capture_started_at_unix_ms: None,
+            acquisition_count: 0,
+            expected_window_target,
         });
         self.phase = Some(ScreenshotCapturePhase::Waiting);
         ctx.request_repaint_after(delay.duration());
@@ -226,16 +289,27 @@ impl ScreenshotCaptureOwner {
         if !was_current {
             return None;
         }
+        let (image, error) = match result {
+            Ok(image) => (image, None),
+            Err(error) => (None, Some(error)),
+        };
+        let acquired_window_target = image.as_ref().and(request.expected_window_target);
         Some(ScreenshotCaptureCompletion {
             request_id: request.id,
             mode: request.mode,
             destination: request.destination,
             markup: request.markup,
-            image: result.as_ref().ok().and_then(|image| image.clone()),
-            error: result.err(),
+            image,
+            error,
             invocation: request.invocation,
             history_query: request.history_query,
             root_policy: request.root_policy,
+            scheduled_at_unix_ms: request.scheduled_at_unix_ms,
+            deadline_unix_ms: request.deadline_unix_ms,
+            capture_started_at_unix_ms: request.capture_started_at_unix_ms,
+            capture_finished_at_unix_ms: unix_millis(),
+            acquisition_count: request.acquisition_count,
+            acquired_window_target,
         })
     }
 
@@ -244,6 +318,16 @@ impl ScreenshotCaptureOwner {
         request_id: ScreenshotRequestId,
         now: Instant,
         ctx: &egui::Context,
+    ) -> Result<(), String> {
+        self.grant_presentation_excluding(request_id, now, ctx, Vec::new())
+    }
+
+    pub(crate) fn grant_presentation_excluding(
+        &mut self,
+        request_id: ScreenshotRequestId,
+        now: Instant,
+        ctx: &egui::Context,
+        excluded_windows: Vec<usize>,
     ) -> Result<(), String> {
         if self.shutdown {
             return Err("Screenshot capture is shutting down".into());
@@ -262,7 +346,9 @@ impl ScreenshotCaptureOwner {
         }
 
         let mode = request.mode;
+        let expected_window_target = request.expected_window_target;
         let capture = Arc::clone(&self.capture);
+        let excluded_windows = excluded_windows;
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
         let reap_permit = thread_reaper::reserve().map_err(str::to_owned)?;
@@ -278,7 +364,7 @@ impl ScreenshotCaptureOwner {
                 let result = if worker_cancelled.load(Ordering::Acquire) {
                     Ok(None)
                 } else {
-                    let result = capture(mode);
+                    let result = capture(mode, &excluded_windows, expected_window_target);
                     if worker_cancelled.load(Ordering::Acquire) {
                         Ok(None)
                     } else {
@@ -301,6 +387,10 @@ impl ScreenshotCaptureOwner {
             join,
             reap_permit,
         });
+        if let Some(request) = self.request.as_mut() {
+            request.capture_started_at_unix_ms = Some(unix_millis());
+            request.acquisition_count = 1;
+        }
         self.phase = Some(ScreenshotCapturePhase::Capturing);
         Ok(())
     }
@@ -349,6 +439,11 @@ impl ScreenshotCaptureOwner {
         Some(ScreenshotCaptureSnapshot {
             request_id: request.id,
             deadline: request.deadline,
+            scheduled_at_unix_ms: request.scheduled_at_unix_ms,
+            deadline_unix_ms: request.deadline_unix_ms,
+            capture_started_at_unix_ms: request.capture_started_at_unix_ms,
+            acquisition_count: request.acquisition_count,
+            expected_window_target: request.expected_window_target,
             phase: self.phase?,
             mode: request.mode,
             destination: request.destination,
@@ -365,7 +460,7 @@ impl ScreenshotCaptureOwner {
         &mut self,
         capture: impl Fn(ScreenshotMode) -> Result<Option<RgbaImage>, String> + Send + Sync + 'static,
     ) {
-        self.capture = Arc::new(capture);
+        self.capture = Arc::new(move |mode, _excluded, _expected| capture(mode));
     }
 
     #[cfg(test)]
@@ -382,6 +477,17 @@ impl ScreenshotCaptureOwner {
             .as_ref()
             .map(|worker| worker.reap_permit.reaped_probe())
     }
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or_default()
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 impl Drop for ScreenshotCaptureOwner {
@@ -431,7 +537,7 @@ mod tests {
         let started = Instant::now();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_calls = Arc::clone(&calls);
-        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(move |_| {
+        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(move |_, _, _| {
             observed_calls.fetch_add(1, Ordering::AcqRel);
             Ok(Some(RgbaImage::from_pixel(
                 1,
@@ -492,7 +598,7 @@ mod tests {
     fn screenshot_delay_requires_deadline_and_rejects_stale_reentry() {
         let ctx = egui::Context::default();
         let started = Instant::now();
-        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(|_| Ok(None)));
+        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(|_, _, _| Ok(None)));
         let (mode, destination, markup) = options();
         let id = owner
             .schedule(
@@ -552,7 +658,7 @@ mod tests {
         let started = Instant::now();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_calls = Arc::clone(&calls);
-        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(move |_| {
+        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(move |_, _, _| {
             observed_calls.fetch_add(1, Ordering::AcqRel);
             Ok(None)
         }));
@@ -586,7 +692,7 @@ mod tests {
 
         let deadline_owner_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_calls = Arc::clone(&deadline_owner_calls);
-        let mut at_deadline = ScreenshotCaptureOwner::with_capture(Arc::new(move |_| {
+        let mut at_deadline = ScreenshotCaptureOwner::with_capture(Arc::new(move |_, _, _| {
             observed_calls.fetch_add(1, Ordering::AcqRel);
             Ok(None)
         }));
@@ -621,7 +727,7 @@ mod tests {
     fn screenshot_delay_shutdown_invalidates_pending_requests() {
         let ctx = egui::Context::default();
         let started = Instant::now();
-        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(|_| Ok(None)));
+        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(|_, _, _| Ok(None)));
         let (mode, destination, markup) = options();
         let id = owner
             .schedule(
@@ -667,7 +773,7 @@ mod tests {
         let (started_tx, started_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let release_rx = std::sync::Mutex::new(release_rx);
-        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(move |_| {
+        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(move |_, _, _| {
             started_tx.send(()).unwrap();
             release_rx.lock().unwrap().recv().unwrap();
             Ok(Some(RgbaImage::from_pixel(
@@ -719,7 +825,7 @@ mod tests {
         let observed_revision = Arc::clone(&target_revision);
         let captured_revision = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let captured_revision_worker = Arc::clone(&captured_revision);
-        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(move |_| {
+        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(move |_, _, _| {
             captured_revision_worker
                 .store(observed_revision.load(Ordering::Acquire), Ordering::Release);
             Ok(Some(RgbaImage::from_pixel(
@@ -782,7 +888,7 @@ mod tests {
         let (started_tx, started_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let release_rx = std::sync::Mutex::new(release_rx);
-        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(move |_| {
+        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(move |_, _, _| {
             started_tx.send(()).unwrap();
             release_rx.lock().unwrap().recv().unwrap();
             Ok(Some(RgbaImage::from_pixel(
@@ -845,7 +951,7 @@ mod tests {
         let release_rx = std::sync::Mutex::new(release_rx);
         let worker_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let finished_from_worker = Arc::clone(&worker_finished);
-        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(move |_| {
+        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(move |_, _, _| {
             started_tx.send(()).unwrap();
             release_rx.lock().unwrap().recv().unwrap();
             finished_from_worker.store(true, Ordering::Release);

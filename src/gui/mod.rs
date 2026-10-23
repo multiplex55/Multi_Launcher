@@ -72,6 +72,7 @@ mod render;
 mod screen_draw_restore;
 mod screen_draw_toolbar;
 pub(crate) mod screenshot_capture;
+pub(crate) mod screenshot_countdown;
 mod screenshot_editor;
 mod search;
 mod search_replace_dialog;
@@ -183,6 +184,19 @@ pub use xml_toolkit_dialog::XmlToolkitDialogState;
 struct ScreenDrawRegionOperation {
     generation: crate::screen_draw::ScreenDrawGeneration,
     operation_id: mkmacro_dialog::visual_overlay::OperationId,
+}
+
+struct ScreenshotCaptureParking {
+    request_id: screenshot_capture::ScreenshotRequestId,
+    transaction: crate::launcher_parking::LauncherParkingTransaction<u64>,
+    visibility_revision: u64,
+    was_visible: bool,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    root_capture_safe_ack_at_unix_ms: Option<u64>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    parking_verified_at_unix_ms: Option<u64>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    presentation_granted_at_unix_ms: Option<u64>,
 }
 
 use crate::actions::folders;
@@ -1145,6 +1159,11 @@ pub struct LauncherApp {
     image_panels: Vec<ImagePanel>,
     screenshot_editors: Vec<ScreenshotEditor>,
     pub(crate) screenshot_capture: screenshot_capture::ScreenshotCaptureOwner,
+    pub(crate) screenshot_countdown: screenshot_countdown::ScreenshotCountdownPresentation,
+    screenshot_capture_parking: Option<ScreenshotCaptureParking>,
+    #[cfg(test)]
+    test_screenshot_parking: Option<crate::launcher_parking::LauncherParkingTransaction<u64>>,
+    pending_screenshot_completion: Option<screenshot_capture::ScreenshotCaptureCompletion>,
     pub(crate) crop_dialog: crop_dialog::CropDialogState,
     crop_screenshot_operation: Option<mkmacro_dialog::visual_overlay::OperationId>,
     crop_screenshot_capture: Option<Arc<dyn crate::mkmacro::ScreenCaptureBackend>>,
@@ -3500,6 +3519,11 @@ impl LauncherApp {
             image_panels: Vec::new(),
             screenshot_editors: Vec::new(),
             screenshot_capture: screenshot_capture::ScreenshotCaptureOwner::new(),
+            screenshot_countdown: screenshot_countdown::ScreenshotCountdownPresentation::default(),
+            screenshot_capture_parking: None,
+            #[cfg(test)]
+            test_screenshot_parking: None,
+            pending_screenshot_completion: None,
             crop_dialog: crop_dialog::CropDialogState::default(),
             crop_screenshot_operation: None,
             crop_screenshot_capture: None,

@@ -2,6 +2,7 @@
 use super::qa_framebuffer::{RootListDiagnostic, VisibleRowDiagnostic};
 use super::*;
 
+use super::screenshot_countdown::NATIVE_POLL_INTERVAL;
 use crate::gui::jump_mode::ui::NavigationOwner;
 use crate::radial::acceptance_trace::{
     self, Correlation, RestoreEdge, RootMenuControl, RootResultKind, VisibilitySource,
@@ -3408,6 +3409,445 @@ impl LauncherApp {
         self.root_list_geometry.invalidate_geometry();
     }
 
+    fn screenshot_capture_conflict(&self) -> Option<&'static str> {
+        if self.pinboard_capture_busy() {
+            return Some("Finish or cancel screenshot pin capture before taking a screenshot");
+        }
+        if self.coordinate_pick_blocks_other_screen_actions() {
+            return Some("Finish or cancel coordinate picking before taking a screenshot");
+        }
+        if self.color_pick_capture_busy() {
+            return Some("Finish or cancel the screen color picker before taking a screenshot");
+        }
+        if self.ocr_capture_busy() {
+            return Some("Finish or cancel Screen Region OCR before taking a screenshot");
+        }
+        if self.crop_screenshot_operation.is_some()
+            || self.screen_draw_region_operation.is_some()
+            || self.screen_draw_launcher_parking.is_some()
+        {
+            return Some("Finish or cancel the active screen operation before taking a screenshot");
+        }
+        if self
+            .mkmacro_dialog
+            .action_editor
+            .visual_capture
+            .as_ref()
+            .is_some_and(|capture| capture.active())
+            || self
+                .mkmacro_dialog
+                .action_editor
+                .visual_overlay
+                .operation_id()
+                .is_some()
+        {
+            return Some("Finish or cancel the active visual selection before taking a screenshot");
+        }
+        if !matches!(
+            self.screen_draw_controller.state(),
+            crate::screen_draw::ScreenDrawState::NoSession
+                | crate::screen_draw::ScreenDrawState::Failed { .. }
+        ) {
+            return Some("Finish or cancel Screen Draw before taking a screenshot");
+        }
+        None
+    }
+
+    pub(crate) fn ensure_delayed_screenshot_admitted(&self) -> Result<(), String> {
+        if self.screenshot_capture.is_busy()
+            || self.screenshot_countdown.is_busy()
+            || self.pending_screenshot_completion.is_some()
+            || self.screenshot_capture_parking.is_some()
+        {
+            return Err("A screenshot capture is already pending or retiring".into());
+        }
+        if let Some(reason) = self.screenshot_capture_conflict() {
+            return Err(reason.into());
+        }
+        Ok(())
+    }
+
+    fn start_screenshot_launcher_parking(
+        &mut self,
+        request_id: super::screenshot_capture::ScreenshotRequestId,
+        ctx: &egui::Context,
+        now: Instant,
+    ) {
+        if self.screenshot_capture_conflict().is_some() {
+            let reason = self
+                .screenshot_capture_conflict()
+                .unwrap_or("another screen operation is active");
+            self.report_error_message("screenshot", reason);
+            self.cancel_screenshot_capture_request(request_id, "failed", ctx);
+            return;
+        }
+        let Some(hwnd) = self.launcher_hwnd else {
+            self.report_error_message(
+                "screenshot",
+                "Launcher HWND is unavailable for safe capture",
+            );
+            self.cancel_screenshot_capture_request(request_id, "failed", ctx);
+            return;
+        };
+        {
+            let was_visible = self.visible_flag.load(Ordering::Acquire);
+            let transaction = match self.begin_screenshot_parking_transaction(request_id, hwnd) {
+                Ok(transaction) => transaction,
+                Err(error) => {
+                    self.report_error_message("screenshot", error);
+                    self.cancel_screenshot_capture_request(request_id, "failed", ctx);
+                    return;
+                }
+            };
+            if let Err(error) = transaction.verify().and_then(|safe| {
+                safe.then_some(())
+                    .ok_or_else(|| "Launcher did not reach capture-safe parking".to_owned())
+            }) {
+                self.report_error_message("screenshot", error);
+                self.cancel_screenshot_capture_request(request_id, "failed", ctx);
+                return;
+            }
+            let visibility_revision = self.request_launcher_state(Some(false), Some(false));
+            self.last_visible = false;
+            self.screenshot_capture_parking = Some(super::ScreenshotCaptureParking {
+                request_id,
+                transaction,
+                visibility_revision,
+                was_visible,
+                #[cfg(feature = "qa-framebuffer-capture")]
+                root_capture_safe_ack_at_unix_ms: None,
+                #[cfg(feature = "qa-framebuffer-capture")]
+                parking_verified_at_unix_ms: None,
+                #[cfg(feature = "qa-framebuffer-capture")]
+                presentation_granted_at_unix_ms: None,
+            });
+            if let Err(error) = self.screenshot_countdown.request_hide(request_id, ctx, now) {
+                self.report_error_message("screenshot", error);
+                self.cancel_screenshot_capture_request(request_id, "failed", ctx);
+                self.release_screenshot_launcher_parking(request_id, false, ctx);
+            }
+        }
+    }
+
+    fn begin_screenshot_parking_transaction(
+        &mut self,
+        request_id: super::screenshot_capture::ScreenshotRequestId,
+        hwnd: usize,
+    ) -> Result<crate::launcher_parking::LauncherParkingTransaction<u64>, String> {
+        #[cfg(test)]
+        if let Some(transaction) = self.test_screenshot_parking.take() {
+            return Ok(transaction);
+        }
+
+        #[cfg(windows)]
+        {
+            use crate::mkmacro::screen::ScreenCaptureBackend;
+            let desktop = crate::mkmacro::screen::WindowsScreenCaptureBackend::system()
+                .virtual_desktop()
+                .map_err(|error| error.to_string())?;
+            crate::launcher_parking::LauncherParkingTransaction::begin(
+                request_id.get(),
+                hwnd,
+                desktop,
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (request_id, hwnd);
+            Err("Delayed screenshot capture requires Windows native presentation".into())
+        }
+    }
+
+    fn cancel_screenshot_capture_request(
+        &mut self,
+        request_id: super::screenshot_capture::ScreenshotRequestId,
+        status: &'static str,
+        ctx: &egui::Context,
+    ) {
+        let cancelled = self.screenshot_capture.cancel();
+        #[cfg(feature = "qa-framebuffer-capture")]
+        if cancelled {
+            self.qa_framebuffer_cancel_screenshot_observation(
+                request_id,
+                status,
+                crate::history::get_history().len(),
+            );
+        }
+        #[cfg(not(feature = "qa-framebuffer-capture"))]
+        let _ = (cancelled, status);
+        let _ = self.screenshot_countdown.request_close(request_id, ctx);
+    }
+
+    fn release_screenshot_launcher_parking(
+        &mut self,
+        request_id: super::screenshot_capture::ScreenshotRequestId,
+        show_root: bool,
+        ctx: &egui::Context,
+    ) -> bool {
+        let Some(mut parking) = self.screenshot_capture_parking.take() else {
+            return true;
+        };
+        if parking.request_id != request_id {
+            self.screenshot_capture_parking = Some(parking);
+            return false;
+        }
+        let original_rect_was_off_desktop = !parking
+            .transaction
+            .original_rect_intersects_virtual_desktop();
+        let (restore_revision, (focus_intent, invocation_id)) =
+            self.visibility_revision.inspect(|| {
+                (
+                    self.visibility_revision.focus_intent(),
+                    self.visibility_revision.invocation_id(),
+                )
+            });
+        if restore_revision != parking.visibility_revision {
+            parking.transaction.commit_hidden();
+            return true;
+        }
+        if let Err(error) = parking.transaction.restore() {
+            tracing::error!(request_id = request_id.get(), %error, "failed to restore launcher after delayed screenshot");
+            self.report_error_message("screenshot.restore", error);
+            self.screenshot_capture_parking = Some(parking);
+            return false;
+        }
+        let visible = show_root || parking.was_visible;
+        let reveal_without_configured_position = show_root
+            && original_rect_was_off_desktop
+            && !self.follow_mouse
+            && !(self.static_location_enabled && self.static_pos.is_some());
+        let Some((visibility_revision, ())) = self
+            .visibility_revision
+            .request_if_current_with_focus_intent_and_invocation(
+                restore_revision,
+                focus_intent,
+                invocation_id,
+                || {
+                    self.visible_flag.store(visible, Ordering::SeqCst);
+                    self.restore_flag.store(visible, Ordering::SeqCst);
+                },
+            )
+        else {
+            let (_, latest_visibility) = self
+                .visibility_revision
+                .inspect(|| self.visible_flag.load(Ordering::SeqCst));
+            self.last_visible = !latest_visibility;
+            self.root_window_bridge.request_presentation_reconcile();
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            return true;
+        };
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+        if reveal_without_configured_position {
+            match crate::visibility::cursor_centered_outer_position((
+                self.window_size.0 as f32,
+                self.window_size.1 as f32,
+            )) {
+                Some(position) => {
+                    let root_ctx =
+                        RootViewportCtx::with_window_bridge(ctx, self.root_window_bridge.clone());
+                    let position_published = self.visibility_revision.with_current(
+                        visibility_revision,
+                        || self.visible_flag.load(Ordering::SeqCst) == visible,
+                        || {
+                            root_ctx
+                                .send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
+                        },
+                    );
+                    if position_published.is_none() {
+                        tracing::debug!(
+                            request_id = request_id.get(),
+                            "skipped screenshot editor fallback placement after a newer visibility request"
+                        );
+                    }
+                }
+                None => tracing::warn!(
+                    request_id = request_id.get(),
+                    "could not determine the current signed-screen pointer position for the screenshot editor fallback"
+                ),
+            }
+        }
+        true
+    }
+
+    fn poll_screenshot_presentation(&mut self, ctx: &egui::Context, now: Instant) {
+        let native_event = self
+            .screenshot_countdown
+            .poll_native(ctx, self.launcher_hwnd, now);
+        if let Some(event) = native_event {
+            match event {
+                super::screenshot_countdown::CountdownEvent::Cancel(request_id)
+                | super::screenshot_countdown::CountdownEvent::NativeClosed(request_id) => {
+                    self.cancel_screenshot_capture_request(request_id, "cancelled", ctx);
+                }
+                super::screenshot_countdown::CountdownEvent::Failed(request_id, error) => {
+                    self.report_error_message("screenshot.presentation", error);
+                    self.cancel_screenshot_capture_request(request_id, "failed", ctx);
+                }
+                super::screenshot_countdown::CountdownEvent::Visible(_)
+                | super::screenshot_countdown::CountdownEvent::Hidden(_)
+                | super::screenshot_countdown::CountdownEvent::Closed(_) => {}
+            }
+        }
+
+        let snapshot = self.screenshot_capture.snapshot();
+        if let Some(snapshot) = snapshot {
+            let request_id = snapshot.request_id;
+            if snapshot.phase
+                == super::screenshot_capture::ScreenshotCapturePhase::AwaitingPresentation
+                && self.screenshot_countdown.visible_acknowledged(request_id)
+                && self.screenshot_capture_parking.is_none()
+            {
+                self.start_screenshot_launcher_parking(request_id, ctx, now);
+            }
+
+            let parking_matches = self
+                .screenshot_capture_parking
+                .as_ref()
+                .is_some_and(|parking| parking.request_id == request_id);
+            if parking_matches {
+                let parking_revision = self
+                    .screenshot_capture_parking
+                    .as_ref()
+                    .map(|parking| parking.visibility_revision);
+                if parking_revision != Some(self.visibility_revision.current()) {
+                    if snapshot.phase
+                        == super::screenshot_capture::ScreenshotCapturePhase::AwaitingPresentation
+                    {
+                        self.cancel_screenshot_capture_request(request_id, "cancelled", ctx);
+                    }
+                    if let Some(mut parking) = self.screenshot_capture_parking.take() {
+                        parking.transaction.commit_hidden();
+                    }
+                } else if snapshot.phase
+                    == super::screenshot_capture::ScreenshotCapturePhase::AwaitingPresentation
+                    && self.screenshot_countdown.hidden_acknowledged(request_id)
+                {
+                    // The native bit only accompanies an exact owned-HWND
+                    // identity check. Capture safety comes from the current
+                    // logical-hidden request and this transaction's verified
+                    // off-desktop parking, so WS_VISIBLE is informational.
+                    let safe_root = self.launcher_hwnd.and_then(|hwnd| {
+                        self.screenshot_countdown
+                            .launcher_native_visible_and_owned(hwnd)
+                            .ok()
+                            .map(|_native_visible| {
+                                (hwnd, !self.visible_flag.load(Ordering::Acquire))
+                            })
+                    });
+                    let safe_parking = self
+                        .screenshot_capture_parking
+                        .as_ref()
+                        .filter(|parking| parking.request_id == request_id)
+                        .map(|parking| parking.transaction.verify());
+                    match (safe_root, safe_parking) {
+                        (Some((root_hwnd, true)), Some(Ok(true)))
+                            if self.screenshot_capture_conflict().is_none()
+                                && self.screenshot_capture.snapshot().is_some_and(|current| {
+                                    current.request_id == request_id
+                                        && current.phase == super::screenshot_capture::ScreenshotCapturePhase::AwaitingPresentation
+                                }) =>
+                        {
+                            #[cfg(feature = "qa-framebuffer-capture")]
+                            self.qa_framebuffer_screenshot_parking_ack(
+                                request_id,
+                                true,
+                                true,
+                                false,
+                            );
+                            let mut excluded = vec![root_hwnd];
+                            if let Some(countdown_hwnd) = self.screenshot_countdown.hwnd(request_id) {
+                                excluded.push(countdown_hwnd);
+                            }
+                            if let Err(error) = self.screenshot_capture.grant_presentation_excluding(
+                                request_id,
+                                now,
+                                ctx,
+                                excluded,
+                            ) {
+                                self.report_error_message("screenshot.presentation", error);
+                                self.cancel_screenshot_capture_request(request_id, "failed", ctx);
+                            } else {
+                                #[cfg(feature = "qa-framebuffer-capture")]
+                                self.qa_framebuffer_screenshot_parking_ack(
+                                    request_id,
+                                    false,
+                                    false,
+                                    true,
+                                );
+                                let _ = self.screenshot_countdown.request_close(request_id, ctx);
+                            }
+                        }
+                        (Some((_, false)), Some(Ok(true))) => {
+                            self.report_error_message(
+                                "screenshot",
+                                "Launcher visibility changed before screenshot capture",
+                            );
+                            self.cancel_screenshot_capture_request(request_id, "failed", ctx);
+                        }
+                        (Some(_), Some(Ok(false))) => {
+                            self.report_error_message("screenshot", "Launcher capture-safe parking could not be verified");
+                            self.cancel_screenshot_capture_request(request_id, "failed", ctx);
+                        }
+                        (_, Some(Err(error))) => {
+                            self.report_error_message("screenshot", error);
+                            self.cancel_screenshot_capture_request(request_id, "failed", ctx);
+                        }
+                        _ => {
+                            self.report_error_message("screenshot", "Launcher ownership could not be verified for screenshot capture");
+                            self.cancel_screenshot_capture_request(request_id, "failed", ctx);
+                        }
+                    }
+                }
+            }
+        } else if let Some(request_id) = self
+            .screenshot_capture_parking
+            .as_ref()
+            .map(|parking| parking.request_id)
+        {
+            if self.screenshot_countdown.request_id() == Some(request_id) {
+                let _ = self.screenshot_countdown.request_close(request_id, ctx);
+            }
+            if !self.screenshot_capture.is_busy()
+                && self.pending_screenshot_completion.is_none()
+                && !self.screenshot_countdown.is_busy()
+            {
+                self.release_screenshot_launcher_parking(request_id, false, ctx);
+            }
+        } else if let Some(request_id) = self.screenshot_countdown.request_id() {
+            let _ = self.screenshot_countdown.request_close(request_id, ctx);
+        }
+
+        if self.pending_screenshot_completion.is_some()
+            && !self.screenshot_countdown.is_busy()
+            && let Some(completion) = self.pending_screenshot_completion.take()
+        {
+            let show_root = completion.image.is_some() && self.get_screenshot_use_editor();
+            if self.release_screenshot_launcher_parking(completion.request_id, show_root, ctx) {
+                self.finish_screenshot_capture(completion);
+            } else {
+                self.pending_screenshot_completion = Some(completion);
+                ctx.request_repaint_after(NATIVE_POLL_INTERVAL);
+            }
+        }
+
+        #[cfg(feature = "qa-framebuffer-capture")]
+        if self.qa_framebuffer_screenshot_expected_window().is_some() {
+            let capture = self.screenshot_capture.snapshot();
+            let native = self.screenshot_countdown.qa_snapshot();
+            let root_visible = self.launcher_hwnd.and_then(|hwnd| {
+                self.screenshot_countdown
+                    .launcher_native_visible_and_owned(hwnd)
+                    .ok()
+            });
+            self.qa_framebuffer_update_screenshot_runtime(
+                capture.as_ref(),
+                native,
+                root_visible,
+                self.visible_flag.load(Ordering::Acquire),
+            );
+        }
+    }
+
     fn run_runtime_tick(
         &mut self,
         ctx: &egui::Context,
@@ -3416,7 +3856,7 @@ impl LauncherApp {
         self.drain_settings_save(ctx);
         self.brightness_dialog.runtime_tick(ctx);
         if let Some(completion) = self.screenshot_capture.tick(std::time::Instant::now(), ctx) {
-            self.finish_screenshot_capture(completion);
+            self.pending_screenshot_completion = Some(completion);
         }
         let mut geometry_cause = super::track_c_query_observer::GeometryCause::Other;
         if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
@@ -3430,6 +3870,7 @@ impl LauncherApp {
         if capture_root_identity {
             self.root_window_bridge.capture_frame(frame);
         }
+        self.poll_screenshot_presentation(ctx, Instant::now());
 
         let plugin_search_generation = self.plugins.search_generation();
         if plugin_search_generation != self.last_plugin_search_generation
@@ -9325,7 +9766,9 @@ impl eframe::App for LauncherApp {
     }
 
     fn needs_root_ui_when_hidden(&self) -> bool {
-        self.needs_viewport_bootstrap() || self.pin_windows_need_hidden_root_ui()
+        self.needs_viewport_bootstrap()
+            || self.pin_windows_need_hidden_root_ui()
+            || self.screenshot_countdown.is_busy()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -9362,6 +9805,10 @@ impl eframe::App for LauncherApp {
         self.shutdown_batch_rename_scanner();
         self.shutdown_search_replace_runtime();
         self.sequence_playback.cancel(std::time::Instant::now());
+        self.screenshot_countdown.shutdown();
+        if let Some(mut parking) = self.screenshot_capture_parking.take() {
+            parking.transaction.commit_hidden();
+        }
         self.screenshot_capture.shutdown();
         if let Err(error) = self.shutdown_indexing() {
             self.report_error_message("index.shutdown", error.to_string());
@@ -23509,6 +23956,716 @@ mod tests {
         drop(workspace);
     }
 
+    fn schedule_expired_screenshot_with_countdown(
+        app: &mut LauncherApp,
+        ctx: &egui::Context,
+        destination: crate::commands::ScreenshotDestination,
+        query: &str,
+    ) -> super::super::screenshot_capture::ScreenshotRequestId {
+        let invocation = crate::commands::CommandInvocation {
+            command: crate::commands::Command::Screenshot(
+                crate::commands::ScreenshotCommand::Schedule {
+                    delay: crate::commands::ScreenshotDelay::ThreeSeconds,
+                    mode: crate::commands::ScreenshotMode::Window,
+                    destination,
+                    markup: crate::commands::ScreenshotMarkup::Pen,
+                },
+            ),
+            original_action: Action {
+                label: "Delayed window capture".into(),
+                desc: "test screenshot action".into(),
+                action: "screenshot:delay:3:window_clip".into(),
+                args: Some("original args".into()),
+            },
+            query_override: Some("query override at scheduling".into()),
+            source: crate::commands::ActivationSource::Enter,
+        };
+        let scheduled_at = Instant::now() - Duration::from_secs(4);
+        let id = app
+            .screenshot_capture
+            .schedule(
+                crate::commands::ScreenshotDelay::ThreeSeconds,
+                crate::commands::ScreenshotMode::Window,
+                destination,
+                crate::commands::ScreenshotMarkup::Pen,
+                &invocation,
+                query,
+                crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState,
+                scheduled_at,
+                ctx,
+            )
+            .expect("the isolated app accepts one delayed request");
+        app.screenshot_countdown
+            .begin(
+                app.screenshot_capture
+                    .snapshot()
+                    .expect("the request snapshot is retained"),
+                Instant::now(),
+            )
+            .expect("the isolated request owns its countdown");
+        id
+    }
+
+    fn screenshot_test_original_launcher_rect() -> crate::launcher_parking::LauncherWindowRect {
+        crate::launcher_parking::LauncherWindowRect {
+            left: 520,
+            top: 320,
+            right: 983,
+            bottom: 607,
+        }
+    }
+
+    fn install_test_screenshot_parking_with_original_rect(
+        app: &mut LauncherApp,
+        request_id: super::super::screenshot_capture::ScreenshotRequestId,
+        original_rect: crate::launcher_parking::LauncherWindowRect,
+    ) -> crate::launcher_parking::LauncherParkingTestObserver {
+        install_test_screenshot_parking_with_rects(
+            app,
+            request_id,
+            original_rect,
+            crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+        )
+    }
+
+    fn install_test_screenshot_parking_with_rects(
+        app: &mut LauncherApp,
+        request_id: super::super::screenshot_capture::ScreenshotRequestId,
+        original_rect: crate::launcher_parking::LauncherWindowRect,
+        virtual_desktop: crate::mkmacro::screen::ScreenRect,
+    ) -> crate::launcher_parking::LauncherParkingTestObserver {
+        let (transaction, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+            request_id.get(),
+            original_rect,
+            virtual_desktop,
+        );
+        app.test_screenshot_parking = Some(transaction);
+        observer
+    }
+
+    fn install_test_screenshot_parking(
+        app: &mut LauncherApp,
+        request_id: super::super::screenshot_capture::ScreenshotRequestId,
+    ) -> crate::launcher_parking::LauncherParkingTestObserver {
+        install_test_screenshot_parking_with_original_rect(
+            app,
+            request_id,
+            screenshot_test_original_launcher_rect(),
+        )
+    }
+
+    fn hidden_tick(app: &mut LauncherApp, ctx: &egui::Context) {
+        drop(hidden_tick_output(app, ctx));
+    }
+
+    fn hidden_tick_output(app: &mut LauncherApp, ctx: &egui::Context) -> egui::LogicOutput {
+        app.run_hidden_logic_tick_for_test(ctx, egui::RawInput::default())
+    }
+
+    #[test]
+    fn screenshot_countdown_hidden_runtime_waits_for_hide_and_parking_then_restores_by_delivery_policy()
+     {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let _mouse_guard = crate::window_manager::MOCK_MOUSE_LOCK.lock().unwrap();
+        let _history_guard =
+            crate::history::replace_history_for_test(std::collections::VecDeque::new());
+
+        struct ResetMockMousePosition;
+        impl Drop for ResetMockMousePosition {
+            fn drop(&mut self) {
+                crate::window_manager::clear_mock_mouse_position();
+            }
+        }
+        let _reset_mouse = ResetMockMousePosition;
+
+        #[derive(Clone, Copy)]
+        enum Placement {
+            Configured,
+            CursorCentered,
+            None,
+        }
+
+        for (destination, use_editor, expected_clip, expected_root_visible, query, placement) in [
+            (
+                crate::commands::ScreenshotDestination::Clipboard,
+                true,
+                true,
+                true,
+                "clipboard uses configured editor",
+                Placement::Configured,
+            ),
+            (
+                crate::commands::ScreenshotDestination::Editor,
+                false,
+                false,
+                false,
+                "editor destination follows disabled editor setting",
+                Placement::None,
+            ),
+            (
+                crate::commands::ScreenshotDestination::Clipboard,
+                true,
+                true,
+                true,
+                "clipboard editor uses signed cursor placement when no position is configured",
+                Placement::CursorCentered,
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            app.visible_flag.store(false, Ordering::SeqCst);
+            app.last_visible = false;
+            app.launcher_hwnd = Some(42);
+            app.screenshot_use_editor = use_editor;
+            app.test_skip_history_persistence = true;
+            app.test_recorded_history_queries.clear();
+            app.follow_mouse = false;
+            match placement {
+                Placement::Configured => {
+                    app.static_location_enabled = true;
+                    app.static_pos = Some((610, 410));
+                    app.static_size = Some((900, 650));
+                }
+                Placement::CursorCentered | Placement::None => {
+                    app.static_location_enabled = false;
+                    app.static_pos = None;
+                    app.static_size = None;
+                }
+            }
+            if matches!(placement, Placement::CursorCentered) {
+                app.window_size = (900, 650);
+            }
+            let virtual_desktop = match placement {
+                Placement::CursorCentered => {
+                    crate::window_manager::set_mock_mouse_position(Some((-1000.0, 500.0)));
+                    crate::mkmacro::screen::ScreenRect::new(-1920, 0, 3840, 1080)
+                }
+                Placement::Configured | Placement::None => {
+                    crate::window_manager::clear_mock_mouse_position();
+                    crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080)
+                }
+            };
+            let expected_position = match placement {
+                Placement::Configured => Some(egui::pos2(610.0, 410.0)),
+                Placement::CursorCentered => Some(egui::pos2(-1450.0, 175.0)),
+                Placement::None => None,
+            };
+            let native = crate::gui::screenshot_countdown::ScreenshotCountdownTestNative::default();
+            native.set_root_hidden(false);
+            app.screenshot_countdown.set_test_native(native.clone());
+
+            let capture_calls = Arc::new(AtomicUsize::new(0));
+            let observed_hide_before_root_probe = Arc::new(Mutex::new(None));
+            let capture_calls_worker = Arc::clone(&capture_calls);
+            let order_observation = Arc::clone(&observed_hide_before_root_probe);
+            let observed_native = native.clone();
+            app.screenshot_capture.set_capture_for_test(move |_| {
+                capture_calls_worker.fetch_add(1, Ordering::AcqRel);
+                let operations = observed_native.operations();
+                let hide = operations.iter().position(|operation| *operation == "hide");
+                let root_check = operations
+                    .iter()
+                    .position(|operation| *operation == "verify_root_visibility");
+                *order_observation.lock().unwrap() = Some(
+                    hide.zip(root_check)
+                        .is_some_and(|(hide, root_check)| hide < root_check),
+                );
+                Ok(Some(image::RgbaImage::from_pixel(
+                    1,
+                    1,
+                    image::Rgba([41, 42, 43, 255]),
+                )))
+            });
+            let deliveries = Arc::new(Mutex::new(Vec::new()));
+            let observed_deliveries = Arc::clone(&deliveries);
+            app.test_screenshot_delivery = Some(Box::new(move |image, clip, tool| {
+                observed_deliveries
+                    .lock()
+                    .unwrap()
+                    .push((image.get_pixel(0, 0).0, clip, tool));
+                Ok(crate::plugins::screenshot::ScreenshotLaunchOutcome::Completed)
+            }));
+
+            let id = schedule_expired_screenshot_with_countdown(&mut app, &ctx, destination, query);
+            let original_offscreen = crate::launcher_parking::LauncherWindowRect {
+                left: 2000,
+                top: 2000,
+                right: 2463,
+                bottom: 2287,
+            };
+            let parking = install_test_screenshot_parking_with_rects(
+                &mut app,
+                id,
+                original_offscreen,
+                virtual_desktop,
+            );
+            hidden_tick(&mut app, &ctx);
+            assert_eq!(capture_calls.load(Ordering::Acquire), 0);
+            assert!(
+                native.is_alive(),
+                "the request has a real fake-native child owner"
+            );
+            assert!(
+                app.screenshot_capture.snapshot().is_some_and(|snapshot| {
+                    snapshot.phase
+                        == super::super::screenshot_capture::ScreenshotCapturePhase::AwaitingPresentation
+                }),
+                "deadline expiry alone must leave acquisition unstarted"
+            );
+
+            hidden_tick(&mut app, &ctx);
+            assert_eq!(capture_calls.load(Ordering::Acquire), 0);
+            assert!(
+                native.operations().contains(&"hide"),
+                "parking begins only after the countdown was shown, then explicitly requests native hide"
+            );
+            assert!(parking.restored_rects().is_empty());
+            assert_eq!(capture_calls.load(Ordering::Acquire), 0);
+            assert!(
+                app.screenshot_capture.snapshot().is_some_and(|snapshot| {
+                    snapshot.phase
+                        == super::super::screenshot_capture::ScreenshotCapturePhase::AwaitingPresentation
+                }),
+                "the delayed request remains gated until the countdown hide is polled"
+            );
+
+            assert!(
+                !native.root_is_hidden(),
+                "the fake native ROOT remains visible while transaction parking keeps it capture-safe"
+            );
+            hidden_tick(&mut app, &ctx);
+
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut root_positions = Vec::new();
+            while app.screenshot_capture.is_busy()
+                || app.screenshot_countdown.is_busy()
+                || app.screenshot_capture_parking.is_some()
+                || app.pending_screenshot_completion.is_some()
+            {
+                let output = hidden_tick_output(&mut app, &ctx);
+                if let Some(commands) = output.viewport_commands.get(&egui::ViewportId::ROOT) {
+                    root_positions.extend(commands.iter().filter_map(|command| match command {
+                        egui::ViewportCommand::OuterPosition(position) => Some(*position),
+                        _ => None,
+                    }));
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the hidden runtime must finish the granted request"
+                );
+                thread::yield_now();
+            }
+
+            let operations = native.operations();
+            let index = |name| operations.iter().position(|operation| *operation == name);
+            assert!(
+                index("create")
+                    .zip(index("show"))
+                    .is_some_and(|(a, b)| a < b)
+            );
+            assert!(index("show").zip(index("hide")).is_some_and(|(a, b)| a < b));
+            assert!(
+                index("hide")
+                    .zip(index("verify_root_visibility"))
+                    .is_some_and(|(a, b)| a < b)
+            );
+            assert!(
+                index("verify_root_visibility")
+                    .zip(index("destroy"))
+                    .is_some_and(|(a, b)| a < b)
+            );
+            assert_eq!(*observed_hide_before_root_probe.lock().unwrap(), Some(true));
+            assert_eq!(capture_calls.load(Ordering::Acquire), 1);
+            assert_eq!(
+                *deliveries.lock().unwrap(),
+                vec![(
+                    [41, 42, 43, 255],
+                    expected_clip,
+                    crate::gui::MarkupTool::Pen
+                )]
+            );
+            assert_eq!(parking.restored_rects(), [original_offscreen]);
+            assert_eq!(parking.current_rect(), original_offscreen);
+            assert_eq!(app.test_recorded_history_queries, [query]);
+            match expected_position {
+                Some(position) => assert!(
+                    root_positions.contains(&position),
+                    "showing the editor from an originally offscreen ROOT must request the configured or signed cursor-centered position"
+                ),
+                None => assert!(
+                    root_positions.is_empty(),
+                    "a hidden ROOT that stays hidden must not receive a reveal placement"
+                ),
+            }
+            assert_eq!(
+                app.visible_flag.load(Ordering::Acquire),
+                expected_root_visible
+            );
+            assert!(!native.is_alive());
+            drop(app);
+        }
+    }
+
+    #[test]
+    fn screenshot_countdown_hidden_runtime_preserves_newer_hide_during_restore() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let _mouse_guard = crate::window_manager::MOCK_MOUSE_LOCK.lock().unwrap();
+        let _history_guard =
+            crate::history::replace_history_for_test(std::collections::VecDeque::new());
+
+        struct ResetMockMousePosition;
+        impl Drop for ResetMockMousePosition {
+            fn drop(&mut self) {
+                crate::window_manager::clear_mock_mouse_position();
+            }
+        }
+        let _reset_mouse = ResetMockMousePosition;
+        crate::window_manager::set_mock_mouse_position(Some((1000.0, 500.0)));
+
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+        app.launcher_hwnd = Some(42);
+        app.screenshot_use_editor = true;
+        app.test_skip_history_persistence = true;
+        app.follow_mouse = false;
+        app.static_location_enabled = false;
+        app.static_pos = None;
+        app.static_size = None;
+        app.window_size = (900, 650);
+
+        let native = crate::gui::screenshot_countdown::ScreenshotCountdownTestNative::default();
+        native.set_root_hidden(true);
+        app.screenshot_countdown.set_test_native(native.clone());
+
+        let capture_calls = Arc::new(AtomicUsize::new(0));
+        let capture_calls_worker = Arc::clone(&capture_calls);
+        app.screenshot_capture.set_capture_for_test(move |_| {
+            capture_calls_worker.fetch_add(1, Ordering::AcqRel);
+            Ok(Some(image::RgbaImage::from_pixel(
+                1,
+                1,
+                image::Rgba([81, 82, 83, 255]),
+            )))
+        });
+        let deliveries = Arc::new(AtomicUsize::new(0));
+        let deliveries_owner = Arc::clone(&deliveries);
+        app.test_screenshot_delivery = Some(Box::new(move |_, _, _| {
+            deliveries_owner.fetch_add(1, Ordering::AcqRel);
+            Ok(crate::plugins::screenshot::ScreenshotLaunchOutcome::Completed)
+        }));
+
+        let query = "a newer hide arrives during screenshot ROOT restoration";
+        let id = schedule_expired_screenshot_with_countdown(
+            &mut app,
+            &ctx,
+            crate::commands::ScreenshotDestination::Clipboard,
+            query,
+        );
+        let original_offscreen = crate::launcher_parking::LauncherWindowRect {
+            left: 2000,
+            top: 2000,
+            right: 2463,
+            bottom: 2287,
+        };
+        let parking =
+            install_test_screenshot_parking_with_original_rect(&mut app, id, original_offscreen);
+        let revision = app.visibility_revision.clone();
+        let visible = Arc::clone(&app.visible_flag);
+        let restore = Arc::clone(&app.restore_flag);
+        let newer_hide_revision = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let record_hide_revision = Arc::clone(&newer_hide_revision);
+        parking.before_next_restore(move || {
+            let (revision, ()) = revision.request_with_focus_intent_and_invocation(
+                crate::visibility::RootFocusIntent::PreserveForeground,
+                Some(0x5C4E_3E),
+                || {
+                    visible.store(false, Ordering::SeqCst);
+                    restore.store(false, Ordering::SeqCst);
+                },
+            );
+            record_hide_revision.store(revision, Ordering::Release);
+        });
+
+        let mut root_positions = Vec::new();
+        let mut root_revealed_or_focused = false;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.screenshot_capture.is_busy()
+            || app.screenshot_countdown.is_busy()
+            || app.screenshot_capture_parking.is_some()
+            || app.pending_screenshot_completion.is_some()
+        {
+            let output = hidden_tick_output(&mut app, &ctx);
+            if let Some(commands) = output.viewport_commands.get(&egui::ViewportId::ROOT) {
+                root_positions.extend(commands.iter().filter_map(|command| match command {
+                    egui::ViewportCommand::OuterPosition(position) => Some(*position),
+                    _ => None,
+                }));
+                root_revealed_or_focused |= commands.iter().any(|command| {
+                    matches!(
+                        command,
+                        egui::ViewportCommand::Visible(true)
+                            | egui::ViewportCommand::Focus
+                            | egui::ViewportCommand::Minimized(false)
+                    )
+                });
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a superseding visibility request must not strand screenshot cleanup"
+            );
+            thread::yield_now();
+        }
+
+        let hide_revision = newer_hide_revision.load(Ordering::Acquire);
+        assert_ne!(hide_revision, 0, "the restore hook issued a newer hide");
+        assert_eq!(app.visibility_revision.current(), hide_revision);
+        let (_, (focus_intent, invocation_id)) = app.visibility_revision.inspect(|| {
+            (
+                app.visibility_revision.focus_intent(),
+                app.visibility_revision.invocation_id(),
+            )
+        });
+        assert_eq!(
+            focus_intent,
+            crate::visibility::RootFocusIntent::PreserveForeground
+        );
+        assert_eq!(invocation_id, Some(0x5C4E_3E));
+        assert!(!app.visible_flag.load(Ordering::Acquire));
+        assert!(!app.restore_flag.load(Ordering::Acquire));
+        assert!(!app.last_visible);
+        assert!(
+            !root_revealed_or_focused,
+            "the stale screenshot reveal must not focus or show ROOT"
+        );
+        assert!(
+            !root_positions.is_empty(),
+            "ordinary current-state reconciliation should park ROOT without applying the stale cursor-centered reveal"
+        );
+        assert!(!root_positions.contains(&egui::pos2(550.0, 175.0)));
+        assert_eq!(capture_calls.load(Ordering::Acquire), 1);
+        assert_eq!(deliveries.load(Ordering::Acquire), 1);
+        assert_eq!(app.test_recorded_history_queries, [query]);
+        assert_eq!(parking.restored_rects(), [original_offscreen]);
+        assert_eq!(parking.current_rect(), original_offscreen);
+        assert!(app.screenshot_capture.snapshot().is_none());
+        assert!(app.pending_screenshot_completion.is_none());
+        assert!(app.screenshot_capture_parking.is_none());
+        assert!(!native.is_alive());
+        drop(app);
+    }
+
+    #[test]
+    fn screenshot_countdown_hidden_runtime_refuses_parking_drift_before_capture() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let _history_guard =
+            crate::history::replace_history_for_test(std::collections::VecDeque::new());
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+        app.launcher_hwnd = Some(42);
+        app.test_skip_history_persistence = true;
+        let native = crate::gui::screenshot_countdown::ScreenshotCountdownTestNative::default();
+        native.set_root_hidden(false);
+        app.screenshot_countdown.set_test_native(native.clone());
+
+        let capture_calls = Arc::new(AtomicUsize::new(0));
+        let capture_calls_worker = Arc::clone(&capture_calls);
+        app.screenshot_capture.set_capture_for_test(move |_| {
+            capture_calls_worker.fetch_add(1, Ordering::AcqRel);
+            Ok(Some(image::RgbaImage::from_pixel(
+                1,
+                1,
+                image::Rgba([71, 72, 73, 255]),
+            )))
+        });
+
+        let id = schedule_expired_screenshot_with_countdown(
+            &mut app,
+            &ctx,
+            crate::commands::ScreenshotDestination::Clipboard,
+            "parking drift before screenshot grant",
+        );
+        let parking = install_test_screenshot_parking(&mut app, id);
+
+        hidden_tick(&mut app, &ctx);
+        assert_eq!(capture_calls.load(Ordering::Acquire), 0);
+        hidden_tick(&mut app, &ctx);
+        assert!(native.operations().contains(&"hide"));
+        assert_eq!(capture_calls.load(Ordering::Acquire), 0);
+        assert!(app.screenshot_capture_parking.is_some());
+
+        let onscreen = crate::launcher_parking::LauncherWindowRect {
+            left: 120,
+            top: 90,
+            right: 583,
+            bottom: 377,
+        };
+        parking.set_current_rect(onscreen);
+        hidden_tick(&mut app, &ctx);
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.screenshot_capture.is_busy()
+            || app.screenshot_countdown.is_busy()
+            || app.screenshot_capture_parking.is_some()
+            || app.pending_screenshot_completion.is_some()
+        {
+            hidden_tick(&mut app, &ctx);
+            assert!(
+                Instant::now() < deadline,
+                "parking drift cancellation must retire the countdown and restore its owner"
+            );
+            thread::yield_now();
+        }
+
+        assert_eq!(capture_calls.load(Ordering::Acquire), 0);
+        assert!(app.test_recorded_history_queries.is_empty());
+        assert!(native.operations().contains(&"verify_root_visibility"));
+        assert!(!native.is_alive());
+        let original = screenshot_test_original_launcher_rect();
+        assert_eq!(parking.restored_rects(), [original]);
+        assert_eq!(parking.current_rect(), original);
+        assert!(!app.visible_flag.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn screenshot_countdown_native_cancel_before_grant_never_acquires_or_records_success() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let _history_guard =
+            crate::history::replace_history_for_test(std::collections::VecDeque::new());
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+        app.launcher_hwnd = Some(42);
+        app.test_skip_history_persistence = true;
+        let native = crate::gui::screenshot_countdown::ScreenshotCountdownTestNative::default();
+        native.set_root_hidden(true);
+        app.screenshot_countdown.set_test_native(native.clone());
+        let capture_calls = Arc::new(AtomicUsize::new(0));
+        let capture_calls_worker = Arc::clone(&capture_calls);
+        app.screenshot_capture.set_capture_for_test(move |_| {
+            capture_calls_worker.fetch_add(1, Ordering::AcqRel);
+            Ok(Some(image::RgbaImage::from_pixel(
+                1,
+                1,
+                image::Rgba([61, 62, 63, 255]),
+            )))
+        });
+        schedule_expired_screenshot_with_countdown(
+            &mut app,
+            &ctx,
+            crate::commands::ScreenshotDestination::Clipboard,
+            "native cancel before grant",
+        );
+
+        hidden_tick(&mut app, &ctx);
+        assert!(native.is_alive());
+        assert!(native.operations().contains(&"show"));
+        native.request_cancel();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.screenshot_countdown.is_busy() || app.screenshot_capture.is_busy() {
+            hidden_tick(&mut app, &ctx);
+            assert!(
+                Instant::now() < deadline,
+                "native Cancel retires its matching countdown"
+            );
+            thread::yield_now();
+        }
+
+        assert_eq!(capture_calls.load(Ordering::Acquire), 0);
+        assert!(app.screenshot_capture.snapshot().is_none());
+        assert!(app.test_recorded_history_queries.is_empty());
+        assert!(!native.is_alive());
+        assert_eq!(app.screenshot_countdown.request_id(), None);
+    }
+
+    #[test]
+    fn screenshot_countdown_cancel_after_child_close_drains_worker_and_restores_parking() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let _history_guard =
+            crate::history::replace_history_for_test(std::collections::VecDeque::new());
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+        app.launcher_hwnd = Some(42);
+        app.test_skip_history_persistence = true;
+        let native = crate::gui::screenshot_countdown::ScreenshotCountdownTestNative::default();
+        native.set_root_hidden(true);
+        app.screenshot_countdown.set_test_native(native.clone());
+
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = Mutex::new(release_rx);
+        let capture_calls = Arc::new(AtomicUsize::new(0));
+        let capture_calls_worker = Arc::clone(&capture_calls);
+        app.screenshot_capture.set_capture_for_test(move |_| {
+            capture_calls_worker.fetch_add(1, Ordering::AcqRel);
+            started_tx.send(()).unwrap();
+            release_rx.lock().unwrap().recv().unwrap();
+            Ok(Some(image::RgbaImage::from_pixel(
+                1,
+                1,
+                image::Rgba([51, 52, 53, 255]),
+            )))
+        });
+        let deliveries = Arc::new(AtomicUsize::new(0));
+        let deliveries_owner = Arc::clone(&deliveries);
+        app.test_screenshot_delivery = Some(Box::new(move |_, _, _| {
+            deliveries_owner.fetch_add(1, Ordering::AcqRel);
+            Ok(crate::plugins::screenshot::ScreenshotLaunchOutcome::Completed)
+        }));
+
+        let id = schedule_expired_screenshot_with_countdown(
+            &mut app,
+            &ctx,
+            crate::commands::ScreenshotDestination::Clipboard,
+            "cancel while capture drains",
+        );
+        let parking = install_test_screenshot_parking(&mut app, id);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut worker_started = false;
+        while !worker_started || native.is_alive() {
+            hidden_tick(&mut app, &ctx);
+            if !worker_started {
+                worker_started = matches!(started_rx.try_recv(), Ok(()));
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the request must grant capture and retire its countdown"
+            );
+            thread::yield_now();
+        }
+        assert!(worker_started);
+        assert!(app.screenshot_capture.is_busy());
+        assert!(app.screenshot_capture_parking.is_some());
+        assert!(
+            !native.is_alive(),
+            "the countdown has already retired before cancellation"
+        );
+
+        crate::commands::ScreenshotCommandHost::cancel_delayed_screenshot(&mut app).unwrap();
+        release_tx.send(()).unwrap();
+        let drain_deadline = Instant::now() + Duration::from_secs(3);
+        while app.screenshot_capture.is_busy() || app.screenshot_capture_parking.is_some() {
+            hidden_tick(&mut app, &ctx);
+            assert!(
+                Instant::now() < drain_deadline,
+                "cancelled worker retirement releases the matching park"
+            );
+            thread::yield_now();
+        }
+
+        assert_eq!(capture_calls.load(Ordering::Acquire), 1);
+        assert_eq!(deliveries.load(Ordering::Acquire), 0);
+        assert!(app.test_recorded_history_queries.is_empty());
+        assert_eq!(parking.restored_rects().len(), 1);
+        assert!(!app.visible_flag.load(Ordering::Acquire));
+        assert!(!native.is_alive());
+    }
     #[test]
     fn reopening_pick_restores_previous_parking_after_its_result_was_consumed() {
         let ctx = egui::Context::default();

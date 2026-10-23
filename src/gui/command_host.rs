@@ -1014,24 +1014,66 @@ impl ScreenshotCommandHost for LauncherApp {
         invocation: &CommandInvocation,
         captured_history_query: Option<&str>,
     ) -> Result<(), String> {
+        self.ensure_delayed_screenshot_admitted()?;
         let history_query = captured_history_query.unwrap_or(&self.query).to_owned();
-        self.screenshot_capture
-            .schedule(
-                delay,
-                mode,
-                destination,
-                markup,
-                invocation,
-                &history_query,
-                self.command_root_policy,
-                std::time::Instant::now(),
-                &self.egui_ctx,
-            )
-            .map(|_| ())
+        #[cfg(feature = "qa-framebuffer-capture")]
+        let expected_window_target = self.qa_framebuffer_screenshot_expected_window();
+        #[cfg(not(feature = "qa-framebuffer-capture"))]
+        let expected_window_target = None;
+        self.screenshot_capture.schedule_for_window_target(
+            delay,
+            mode,
+            destination,
+            markup,
+            invocation,
+            &history_query,
+            self.command_root_policy,
+            std::time::Instant::now(),
+            &self.egui_ctx,
+            expected_window_target,
+        )?;
+        let snapshot = self
+            .screenshot_capture
+            .snapshot()
+            .ok_or_else(|| "screenshot request was not retained".to_owned())?;
+        if let Err(error) = self
+            .screenshot_countdown
+            .begin(snapshot, std::time::Instant::now())
+        {
+            self.screenshot_capture.cancel();
+            return Err(error);
+        }
+        #[cfg(feature = "qa-framebuffer-capture")]
+        self.qa_framebuffer_record_screenshot_scheduled(
+            &snapshot,
+            crate::history::get_history().len(),
+        );
+        self.egui_ctx
+            .request_repaint_of(eframe::egui::ViewportId::ROOT);
+        Ok(())
     }
 
     fn cancel_delayed_screenshot(&mut self) -> Result<(), String> {
+        #[cfg(feature = "qa-framebuffer-capture")]
+        let capture_request_id = self
+            .screenshot_capture
+            .snapshot()
+            .map(|snapshot| snapshot.request_id);
+        let countdown_request_id = self.screenshot_countdown.request_id();
         if self.screenshot_capture.cancel() {
+            if let Some(request_id) = countdown_request_id {
+                let _ = self
+                    .screenshot_countdown
+                    .request_close(request_id, &self.egui_ctx);
+            }
+            #[cfg(feature = "qa-framebuffer-capture")]
+            if let Some(request_id) = capture_request_id {
+                self.qa_framebuffer_cancel_screenshot_observation(
+                    request_id,
+                    "cancelled",
+                    crate::history::get_history().len(),
+                );
+            }
             self.egui_ctx
                 .request_repaint_of(eframe::egui::ViewportId::ROOT);
         }
@@ -1045,11 +1087,30 @@ impl LauncherApp {
         completion: super::screenshot_capture::ScreenshotCaptureCompletion,
     ) {
         let Some(image) = completion.image else {
+            #[cfg(feature = "qa-framebuffer-capture")]
+            self.qa_framebuffer_finish_screenshot_observation(
+                completion.request_id,
+                completion.capture_finished_at_unix_ms,
+                completion.acquisition_count,
+                completion.acquired_window_target,
+                if completion.error.is_some() {
+                    "failed"
+                } else {
+                    "cancelled"
+                },
+                crate::history::get_history().len(),
+                None,
+                false,
+                None,
+                None,
+            );
             if let Some(error) = completion.error {
                 self.report_error_message("launcher", format!("Failed: {error}"));
             }
             return;
         };
+        #[cfg(feature = "qa-framebuffer-capture")]
+        let previous_editor_count = self.screenshot_editors.len();
         let clip = completion.destination == ScreenshotDestination::Clipboard;
         let tool = match completion.markup {
             ScreenshotMarkup::Rectangle => super::MarkupTool::Rectangle,
@@ -1067,9 +1128,84 @@ impl LauncherApp {
                     Some(&completion.history_query),
                     completion.root_policy,
                 );
+                #[cfg(feature = "qa-framebuffer-capture")]
+                {
+                    let mut editor_request_id = None;
+                    let mut editor_is_open = false;
+                    let mut artifact = None;
+                    let mut artifact_error = None;
+                    let export_path = self.qa_framebuffer_screenshot_export_path();
+                    if self.screenshot_editors.len() > previous_editor_count {
+                        if let Some(editor) = self.screenshot_editors.last_mut() {
+                            editor.qa_mark_capture_request(completion.request_id.get());
+                            editor_request_id = editor.qa_capture_request_id();
+                            editor_is_open = editor.open;
+                            if let Some(path) = export_path.as_ref().filter(|_| editor.open) {
+                                match editor.qa_write_applied_png(path) {
+                                    Ok((sha256, width, height)) => {
+                                        let file = path
+                                            .file_name()
+                                            .map(|name| name.to_string_lossy().into_owned())
+                                            .unwrap_or_else(|| {
+                                                "screenshot-editor-output.png".into()
+                                            });
+                                        artifact = Some((file, sha256, width, height));
+                                    }
+                                    Err(error) => artifact_error = Some(error.to_string()),
+                                }
+                            } else if export_path.is_some() {
+                                artifact_error =
+                                    Some("the current screenshot editor is not open".into());
+                            }
+                        }
+                    } else if export_path.is_some() {
+                        artifact_error = Some(
+                            "the completed capture did not open a new screenshot editor".into(),
+                        );
+                    }
+                    self.qa_framebuffer_finish_screenshot_observation(
+                        completion.request_id,
+                        completion.capture_finished_at_unix_ms,
+                        completion.acquisition_count,
+                        completion.acquired_window_target,
+                        "completed",
+                        crate::history::get_history().len(),
+                        editor_request_id,
+                        editor_is_open,
+                        artifact,
+                        artifact_error,
+                    );
+                }
             }
-            Ok(crate::plugins::screenshot::ScreenshotLaunchOutcome::Cancelled) => {}
+            Ok(crate::plugins::screenshot::ScreenshotLaunchOutcome::Cancelled) => {
+                #[cfg(feature = "qa-framebuffer-capture")]
+                self.qa_framebuffer_finish_screenshot_observation(
+                    completion.request_id,
+                    completion.capture_finished_at_unix_ms,
+                    completion.acquisition_count,
+                    completion.acquired_window_target,
+                    "cancelled",
+                    crate::history::get_history().len(),
+                    None,
+                    false,
+                    None,
+                    None,
+                );
+            }
             Err(error) => {
+                #[cfg(feature = "qa-framebuffer-capture")]
+                self.qa_framebuffer_finish_screenshot_observation(
+                    completion.request_id,
+                    completion.capture_finished_at_unix_ms,
+                    completion.acquisition_count,
+                    completion.acquired_window_target,
+                    "failed",
+                    crate::history::get_history().len(),
+                    None,
+                    false,
+                    None,
+                    Some(error.clone()),
+                );
                 self.report_error_message("launcher", format!("Failed: {error}"));
             }
         }

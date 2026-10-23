@@ -1543,13 +1543,9 @@ pub fn apply_visibility_with_focus_intent<C: ViewportCtx>(
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
                 }
             } else if follow_mouse
-                && let Some((x, y)) = crate::window_manager::current_mouse_position()
+                && let Some(position) = cursor_centered_outer_position(window_size)
             {
-                let pos_x = x - window_size.0 / 2.0;
-                let pos_y = y - window_size.1 / 2.0;
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
-                    pos_x, pos_y,
-                )));
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
             }
         }
         if focus_intent == RootFocusIntent::ActivateRoot {
@@ -1573,6 +1569,14 @@ pub fn apply_visibility_with_focus_intent<C: ViewportCtx>(
     }
     ctx.request_repaint();
     activation
+}
+
+/// The existing follow-mouse placement in signed screen coordinates. A
+/// screenshot editor reveal may reuse this for one request when its saved
+/// launcher rectangle was already off-desktop and no placement is configured.
+pub(crate) fn cursor_centered_outer_position(window_size: (f32, f32)) -> Option<egui::Pos2> {
+    let (x, y) = crate::window_manager::current_mouse_position()?;
+    Some(egui::pos2(x - window_size.0 / 2.0, y - window_size.1 / 2.0))
 }
 
 #[cfg(test)]

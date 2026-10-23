@@ -20,6 +20,13 @@ fn search_lists_screenshot_actions() {
         "screenshot:region_clip",
         "screenshot:desktop_clip",
     ];
+    assert_eq!(
+        results[..prefixes.len()]
+            .iter()
+            .map(|action| action.action.as_str())
+            .collect::<Vec<_>>(),
+        prefixes
+    );
     for prefix in prefixes.iter() {
         assert!(
             results.iter().any(|a| a.action == *prefix),
@@ -27,6 +34,18 @@ fn search_lists_screenshot_actions() {
             prefix
         );
     }
+    let delayed = plugin.search("ss delay 5");
+    assert_eq!(delayed.len(), 7);
+    assert!(
+        delayed
+            .iter()
+            .all(|action| action.action.starts_with("screenshot:delay:5:"))
+    );
+    assert!(plugin.search("ss delay 4").is_empty());
+    assert!(plugin.search("ss delay nope").is_empty());
+    let cancel = plugin.search("ss cancel");
+    assert_eq!(cancel.len(), 1);
+    assert_eq!(cancel[0].action, "screenshot:cancel");
 }
 
 #[test]

@@ -160,6 +160,12 @@ impl<G: Copy> LauncherParkingTransaction<G> {
         self.original_snapshot
     }
 
+    /// Whether the exact pre-parking window rectangle intersects the same
+    /// physical virtual-desktop bounds used by this transaction.
+    pub(crate) fn original_rect_intersects_virtual_desktop(&self) -> bool {
+        signed_rectangles_intersect(self.virtual_desktop, self.original_snapshot.rect())
+    }
+
     pub(crate) const fn parked_rect(&self) -> LauncherWindowRect {
         self.parked_rect
     }
