@@ -1303,6 +1303,14 @@ templates, and the complete in-app MkMacro help.
   outputs. Calls have isolated local-variable frames, may nest, and appear in the
   Runtime Inspector. Stable IDs keep references intact across rename/reorder, while
   recursive call cycles are rejected.
+- **Read Clipboard Text** reads the current clipboard text into a named String
+  variable when the worker reaches that step. **Write Clipboard Text** writes an
+  exact literal or String variable at its step; neither action pastes the text nor
+  restores earlier clipboard contents. Busy or non-text failures use the step's
+  Stop, Continue, or Retry policy, and these actions are unsupported in unattended
+  Hot Folder runs. Runs whose enabled reachable macro closure contains either
+  action hide runtime variable values and sanitize dependent failure details;
+  ordinary macro debug values and failure details remain available.
 - Exporting a macro or explicit multi-root library captures all authored Call
   dependencies and referenced images. Import shows additions, conflict-driven
   renames, asset reuse, and hotkey conflicts before an explicit Apply. Imported

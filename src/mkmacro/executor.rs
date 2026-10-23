@@ -8322,10 +8322,68 @@ mod phase_d_tests {
                 "text:Creating project my_project"
             ]
         );
+        assert!(
+            f.events()
+                .iter()
+                .all(|event| !event.starts_with("clipboard:")),
+            "PromptInput with copy disabled must not publish clipboard text"
+        );
         let prompts = f.prompts.lock().unwrap();
         assert_eq!(prompts[0].title, "Rename initial");
         assert_eq!(prompts[0].prompt, "Current: initial");
         assert_eq!(prompts[0].default_value, "initial");
+    }
+
+    #[test]
+    fn clipboard_action_integration_prompt_copy_is_explicit_and_cancel_safe() {
+        let answer = "prompt 雪\nraw ${literal}";
+        let submitted_fake = Arc::new(FakeBackend::default());
+        submitted_fake.script_prompt(PromptResponse::Submitted(answer.into()));
+        run(
+            vec![s(
+                1,
+                MkAction::PromptInput(MkPromptInputPayload {
+                    title: "Copy answer".into(),
+                    prompt: "Enter text".into(),
+                    variable: "answer".into(),
+                    copy_to_clipboard: true,
+                    ..Default::default()
+                }),
+            )],
+            submitted_fake.clone(),
+        )
+        .unwrap();
+        let writes = submitted_fake
+            .events()
+            .into_iter()
+            .filter(|event| event.starts_with("clipboard:"))
+            .collect::<Vec<_>>();
+        assert_eq!(writes, [format!("clipboard:{answer}")]);
+
+        let cancelled_fake = Arc::new(FakeBackend::default());
+        cancelled_fake.script_prompt(PromptResponse::Cancelled);
+        let error = run(
+            vec![s(
+                1,
+                MkAction::PromptInput(MkPromptInputPayload {
+                    title: "Copy answer".into(),
+                    prompt: "Enter text".into(),
+                    variable: "answer".into(),
+                    copy_to_clipboard: true,
+                    ..Default::default()
+                }),
+            )],
+            cancelled_fake.clone(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+        assert!(
+            cancelled_fake
+                .events()
+                .iter()
+                .all(|event| !event.starts_with("clipboard:")),
+            "a cancelled prompt must not publish clipboard text"
+        );
     }
 
     #[test]

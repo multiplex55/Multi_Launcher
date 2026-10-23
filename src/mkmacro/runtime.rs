@@ -5397,12 +5397,52 @@ mod runtime_snapshot_tests {
 
     struct SentinelTextClipboard(&'static str);
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum MemoryClipboardOperation {
+        ReadText,
+        WriteText(String),
+    }
+
+    #[derive(Debug)]
+    struct MemoryClipboardState {
+        text: String,
+        operations: Vec<MemoryClipboardOperation>,
+    }
+
+    struct MemoryTextClipboard(Mutex<MemoryClipboardState>);
+
+    impl MemoryTextClipboard {
+        fn new(text: &str) -> Self {
+            Self(Mutex::new(MemoryClipboardState {
+                text: text.to_owned(),
+                operations: Vec::new(),
+            }))
+        }
+    }
+
     impl ClipboardBackend for SentinelTextClipboard {
         fn snapshot_text(&self) -> ExecResult<String> {
             Ok(self.0.to_owned())
         }
 
         fn set_text(&self, _text: &str) -> ExecResult {
+            Ok(())
+        }
+    }
+
+    impl ClipboardBackend for MemoryTextClipboard {
+        fn snapshot_text(&self) -> ExecResult<String> {
+            let mut state = self.0.lock().unwrap();
+            state.operations.push(MemoryClipboardOperation::ReadText);
+            Ok(state.text.clone())
+        }
+
+        fn set_text(&self, text: &str) -> ExecResult {
+            let mut state = self.0.lock().unwrap();
+            state.text = text.to_owned();
+            state
+                .operations
+                .push(MemoryClipboardOperation::WriteText(text.to_owned()));
             Ok(())
         }
     }
@@ -5705,6 +5745,152 @@ mod runtime_snapshot_tests {
         assert_eq!(debug.step_id, step_id);
         assert_eq!(debug.reason, reason);
         assert_eq!(&*snapshot.debug_variables, &*debug.variables);
+    }
+
+    #[test]
+    fn clipboard_action_integration_saved_reopened_workflow_is_exact_and_stops_on_wrong_type() {
+        use crate::mkmacro::{MkErrorPolicy, MkValueSource, MkWriteClipboardTextPayload};
+
+        let initial_text = "source 雪\nraw ${literal}";
+        let replacement_text = "replacement café\nraw ${still_literal}";
+        let write_variable = |name: &str| {
+            MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+                source: MkValueSource::Variable { name: name.into() },
+            })
+        };
+        let workflow = test_macro(vec![
+            step(
+                101,
+                MkAction::ReadClipboardText {
+                    variable: "clipboard_text".into(),
+                },
+            ),
+            step(102, write_variable("clipboard_text")),
+            step(
+                103,
+                MkAction::SetVariable {
+                    name: "clipboard_text".into(),
+                    value: MkValue::String(replacement_text.into()),
+                },
+            ),
+            step(104, write_variable("clipboard_text")),
+        ]);
+        let expected_steps = workflow.steps.clone();
+
+        // Keep the wrong-type source uncertain to authoring analysis: the
+        // selected runtime branch writes a Number, while the other branch
+        // writes a String. Runtime still validates the actual value.
+        let mut wrong_type = test_macro(vec![
+            step(
+                201,
+                MkAction::If(crate::mkmacro::MkCondition::WindowExists {
+                    matcher: crate::mkmacro::MkWindowMatcher {
+                        title: Some("M8-C wrong-type branch".into()),
+                        ..Default::default()
+                    },
+                }),
+            ),
+            step(
+                202,
+                MkAction::SetVariable {
+                    name: "runtime_value".into(),
+                    value: MkValue::String("alternate branch".into()),
+                },
+            ),
+            step(203, MkAction::Else),
+            step(
+                204,
+                MkAction::SetVariable {
+                    name: "runtime_value".into(),
+                    value: MkValue::Number(42.0),
+                },
+            ),
+            step(205, MkAction::EndIf),
+            {
+                let mut write = step(206, write_variable("runtime_value"));
+                write.on_error = MkErrorPolicy::Stop;
+                write
+            },
+            step(
+                207,
+                MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+                    source: MkValueSource::Literal(MkValue::String("must not be written".into())),
+                }),
+            ),
+        ]);
+        wrong_type.id = 2;
+
+        let directory = tempfile::tempdir().unwrap();
+        {
+            let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+            store
+                .save(MkMacroDocument {
+                    macros: vec![workflow, wrong_type],
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        // Reopen the persisted document before constructing the runtime so
+        // this exercises the stored representation, not an in-memory plan.
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        let reopened = store.snapshot();
+        let reopened_workflow = reopened.macros.iter().find(|item| item.id == 1).unwrap();
+        assert_eq!(reopened_workflow.steps, expected_steps);
+        assert!(matches!(
+            &reopened_workflow.steps[1].action,
+            MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+                source: MkValueSource::Variable { name }
+            }) if name == "clipboard_text"
+        ));
+        assert_eq!(
+            reopened_workflow
+                .steps
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            [101, 102, 103, 104]
+        );
+
+        let clipboard = Arc::new(MemoryTextClipboard::new(initial_text));
+        let mut backends = Arc::new(FakeBackend::default()).backends();
+        backends.clipboard = clipboard.clone();
+        let runtime = MacroRuntime::new(Arc::new(store), backends);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        let completed = wait_for_terminal(&runtime);
+        assert_eq!(completed.state, RuntimeState::Completed);
+        assert_eq!(completed.macro_id, Some(1));
+        let expected_operations = vec![
+            MemoryClipboardOperation::ReadText,
+            MemoryClipboardOperation::WriteText(initial_text.into()),
+            MemoryClipboardOperation::WriteText(replacement_text.into()),
+        ];
+        {
+            let state = clipboard.0.lock().unwrap();
+            assert_eq!(state.operations, expected_operations);
+            assert_eq!(state.text, replacement_text);
+        }
+
+        let successful_run_id = completed.run_id;
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(2)),
+            CommandResult::Accepted
+        );
+        let failed = wait_for_terminal_after(&runtime, successful_run_id);
+        assert_eq!(failed.state, RuntimeState::Failed);
+        let failure = failed.latest_failure.as_ref().unwrap();
+        assert_eq!(failure.kind, DiagnosticKind::TypeMismatch);
+        assert_eq!(
+            failure.context.get("origin_step_id").map(String::as_str),
+            Some("206")
+        );
+        let state = clipboard.0.lock().unwrap();
+        assert_eq!(state.operations, expected_operations);
+        assert_eq!(state.text, replacement_text);
     }
 
     #[test]

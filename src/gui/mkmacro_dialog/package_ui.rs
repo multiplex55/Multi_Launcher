@@ -497,6 +497,10 @@ fn help(ui: &mut egui::Ui) {
     ui.heading("Reusable macros");
     ui.label("Parameters and named outputs are typed. Call Macro binds arguments explicitly and maps outputs explicitly; Return publishes declared outputs. Each call gets an isolated local-variable frame, while nested calls remain visible in the Runtime Inspector call stack.");
     ui.label("Calls use stable macro and signature IDs, so renaming or reordering does not break them. Recursive dependency cycles are prohibited. Breakpoints in called macros pause the same debug run.");
+    ui.heading("Clipboard actions");
+    ui.label("Read Clipboard Text reads the current text into a named String variable when the worker reaches that step. Write Clipboard Text publishes its exact literal or String variable at that step; neither action pastes text or restores earlier clipboard contents.");
+    ui.label("Busy or non-text clipboard failures follow the step's Stop, Continue, or Retry policy. Clipboard actions are unsupported in unattended Hot Folder runs.");
+    ui.label("Runs whose enabled reachable macro closure contains either action hide runtime variable values and sanitize dependent failure details. Ordinary macros keep their normal debug values and failure details.");
     ui.heading("Packages, libraries, and templates");
     ui.label("Export packages include every authored Call dependency and referenced image. A library has explicit root macros. Import always previews additions, renames, images, and hotkey conflicts before an explicit Apply.");
     ui.label("Imports are independent copies with fresh macro, folder, step, parameter, output, and asset identities. Imported authored hotkeys are retained; template instances clear every copied hotkey. Templates and all instances are snapshots—there are no live links.");
