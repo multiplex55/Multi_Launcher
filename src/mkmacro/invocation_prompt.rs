@@ -504,8 +504,14 @@ mod tests {
 
     #[test]
     fn confirmation_revalidates_signature_subset_enablement_and_runtime_lifetime() {
-        for mutation in 0..6 {
+        for mutation in 0..7 {
             let (_directory, store, runtime, backend) = fixture(None);
+            if mutation == 6 {
+                let mut baseline = (*store.snapshot()).clone();
+                baseline.macros[0].signature.parameters[0].input_kind =
+                    MkParameterInputKind::Choice(vec!["answer".into(), "original".into()]);
+                store.save(baseline).unwrap();
+            }
             let broker = Arc::new(InvocationPromptBroker::default());
             let registration = broker.register_gui(Arc::new(|| {}));
             let invocation = MkInvocation {
@@ -527,7 +533,11 @@ mod tests {
                     target.steps.pop();
                 }
                 4 => target.enabled = false,
-                _ => runtime.shutdown(),
+                5 => runtime.shutdown(),
+                _ => {
+                    target.signature.parameters[0].input_kind =
+                        MkParameterInputKind::Choice(vec!["answer".into(), "replacement".into()]);
+                }
             }
             store.save(changed).unwrap();
             assert!(pending.submit(values()).is_err(), "mutation {mutation}");
