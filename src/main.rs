@@ -10810,8 +10810,10 @@ mod hotkey_directory_runtime_tests {
     fn hotkey_directory_runtime_requires_an_exact_applied_listener_receipt() {
         use multi_launcher::hotkey::parse_hotkey;
 
-        let mut settings = Settings::default();
-        settings.hotkey = Some("F2".into());
+        let mut settings = Settings {
+            hotkey: Some("F2".into()),
+            ..Settings::default()
+        };
         settings.radial.enabled = false;
         let radial = RadialDocument::default();
         let macros = multi_launcher::mkmacro::MkMacroDocument::default();
