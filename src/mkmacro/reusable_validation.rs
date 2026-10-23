@@ -278,7 +278,7 @@ fn source(
     }
 }
 
-fn clipboard_text_source(
+pub(super) fn clipboard_text_source(
     source: &MkValueSource,
     catalog: &VariableCatalog,
     owner: u64,

@@ -6,7 +6,7 @@ pub use super::executor::DebugSnapshotReason;
 use super::executor::{
     Backends, DiagnosticKind, ExecResult, ExecutionDiagnostic, ExecutionEvent,
     ExecutionFrameContext, ExecutionFrameSnapshot, ExecutionMode, ExecutionOptions, Executor,
-    RunControl, StepOutcome, production_backends_with_store,
+    RunControl, StepOutcome, production_backends_with_store, program_contains_clipboard_actions,
 };
 use super::{
     EventEnricher, KeyboardTranslator, MkInvocation, MkInvocationSubset, MkInvocationValues,
@@ -243,6 +243,10 @@ pub struct RuntimeSnapshot {
     pub debug_variables_step_id: Option<u64>,
     /// Reason associated with `debug_variables`, if a Debug event was seen.
     pub debug_snapshot_reason: Option<DebugSnapshotReason>,
+    /// True when this Debug run can access clipboard text and therefore hides
+    /// value maps from the Runtime Inspector. Status and call-stack metadata
+    /// remain available.
+    pub debug_values_redacted: bool,
     /// Root-only projection of the last terminal step. A skipped step is not
     /// considered completed because it did not execute.
     pub last_completed_step_id: Option<u64>,
@@ -278,6 +282,7 @@ impl Default for RuntimeSnapshot {
             debug_variables: Arc::new(BTreeMap::new()),
             debug_variables_step_id: None,
             debug_snapshot_reason: None,
+            debug_values_redacted: false,
             last_completed_step_id: None,
             completed_steps: 0,
             total_steps: 0,
@@ -1538,6 +1543,7 @@ fn run_one(
     let start_cancelled = owned_start_gate
         .as_ref()
         .is_some_and(|gate| !gate.wait_for_start());
+    let mut clipboard_privacy_active = false;
     let result = if start_cancelled {
         Err(ExecutionDiagnostic::new(
             DiagnosticKind::Cancelled,
@@ -1552,6 +1558,7 @@ fn run_one(
                     super::invocation::compile_invocation_program(&store.snapshot(), &invocation)?
                 }
             };
+            clipboard_privacy_active = program_contains_clipboard_actions(&program);
             let plan = program.plan(mid).ok_or_else(|| {
                 ExecutionDiagnostic::new(
                     DiagnosticKind::InvalidPlan,
@@ -1567,6 +1574,8 @@ fn run_one(
                     run_id,
                     origin,
                     macro_id: Some(mid),
+                    debug_values_redacted: mode == RuntimeRunMode::Debug
+                        && clipboard_privacy_active,
                     pause_reason: (state == RuntimeState::Paused)
                         .then_some(RuntimePauseReason::User),
                     total_steps: plan.instructions.iter().filter(|x| x.step.enabled).count(),
@@ -1607,21 +1616,33 @@ fn run_one(
             )
         }))
         .unwrap_or_else(|payload| {
-            let message = payload
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| {
-                    payload
-                        .downcast_ref::<&str>()
-                        .map(|text| (*text).to_owned())
-                })
-                .unwrap_or_else(|| "non-string panic payload".into());
-            tracing::error!(macro_id = mid, %message, "macro execution panicked");
-            Err(ExecutionDiagnostic::new(
-                DiagnosticKind::Panic,
-                format!("Macro execution panicked: {message}"),
-            )
-            .context("macro_id", mid.to_string()))
+            if clipboard_privacy_active {
+                tracing::error!(
+                    macro_id = mid,
+                    "macro execution panicked in clipboard-enabled run"
+                );
+                Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::Panic,
+                    "Macro execution panicked during clipboard-enabled execution",
+                )
+                .context("macro_id", mid.to_string()))
+            } else {
+                let message = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| {
+                        payload
+                            .downcast_ref::<&str>()
+                            .map(|text| (*text).to_owned())
+                    })
+                    .unwrap_or_else(|| "non-string panic payload".into());
+                tracing::error!(macro_id = mid, %message, "macro execution panicked");
+                Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::Panic,
+                    format!("Macro execution panicked: {message}"),
+                )
+                .context("macro_id", mid.to_string()))
+            }
         })
     };
     let failure_kind = result.as_ref().err().map(|diagnostic| diagnostic.kind);
@@ -5364,13 +5385,67 @@ mod runtime_snapshot_tests {
     use super::*;
     use crate::mkmacro::{
         MkAction, MkCoordinateTarget, MkDelayPayload, MkImageNotFoundPolicy, MkImageOutputs,
-        MkImagePayload, MkImageRef, MkMacro, MkMacroDocument, MkMouseMovePayload, MkOcrFindPayload,
-        MkOcrSearchSpec, MkPoint, MkStep, MkTextMode, MkTextPayload, MkValue, MkWaitOptions,
-        OcrDocument, OcrLine, OcrWord, ScreenCaptureBackend, ScreenRect, SearchRegion,
-        executor::fake::FakeBackend,
+        MkImagePayload, MkImageRef, MkLauncherCommandPayload, MkMacro, MkMacroDocument,
+        MkMouseMovePayload, MkOcrFindPayload, MkOcrSearchSpec, MkPoint, MkStep, MkTextMode,
+        MkTextPayload, MkValue, MkWaitOptions, OcrDocument, OcrLine, OcrWord, ScreenCaptureBackend,
+        ScreenRect, SearchRegion,
+        executor::{ClipboardBackend, LauncherBackend, fake::FakeBackend},
     };
-    use std::sync::Arc;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    struct SentinelTextClipboard(&'static str);
+
+    impl ClipboardBackend for SentinelTextClipboard {
+        fn snapshot_text(&self) -> ExecResult<String> {
+            Ok(self.0.to_owned())
+        }
+
+        fn set_text(&self, _text: &str) -> ExecResult {
+            Ok(())
+        }
+    }
+
+    struct LeakingQueryFailure;
+
+    impl LauncherBackend for LeakingQueryFailure {
+        fn launch_process(&self, _payload: &crate::mkmacro::MkProcessPayload) -> ExecResult {
+            Ok(())
+        }
+
+        fn command(&self, query: &str, control: &RunControl) -> ExecResult {
+            control.checkpoint()?;
+            Err(ExecutionDiagnostic::new(
+                DiagnosticKind::Backend,
+                format!("launcher rejected query: {query}"),
+            )
+            .context("backend", "launcher")
+            .context("query", query))
+        }
+
+        fn resolved_legacy(
+            &self,
+            _action: &crate::actions::Action,
+            _control: &RunControl,
+        ) -> ExecResult {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct SharedTraceWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedTraceWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn step(id: u64, action: MkAction) -> MkStep {
         MkStep {
@@ -5555,6 +5630,29 @@ mod runtime_snapshot_tests {
         }
     }
 
+    fn wait_for_terminal_after(
+        runtime: &MacroRuntime,
+        previous_run_id: u64,
+    ) -> Arc<RuntimeSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = runtime.snapshot();
+            if snapshot.run_id > previous_run_id
+                && matches!(
+                    snapshot.state,
+                    RuntimeState::Completed | RuntimeState::Failed | RuntimeState::Stopped
+                )
+            {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not finish after run {previous_run_id}: {snapshot:?}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     fn wait_for_state(runtime: &MacroRuntime, state: RuntimeState) -> Arc<RuntimeSnapshot> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -5607,6 +5705,389 @@ mod runtime_snapshot_tests {
         assert_eq!(debug.step_id, step_id);
         assert_eq!(debug.reason, reason);
         assert_eq!(&*snapshot.debug_variables, &*debug.variables);
+    }
+
+    #[test]
+    fn clipboard_action_runtime_debug_snapshot_redacts_only_affected_runs() {
+        use crate::mkmacro::MkCallMacroPayload;
+
+        let sentinel = "runtime_clipboard_private_sentinel";
+        let root = test_macro(vec![
+            step(
+                1,
+                MkAction::SetVariable {
+                    name: "caller_private".into(),
+                    value: MkValue::String(sentinel.into()),
+                },
+            ),
+            step(
+                2,
+                MkAction::CallMacro(MkCallMacroPayload {
+                    macro_id: 2,
+                    ..Default::default()
+                }),
+            ),
+        ]);
+        let mut child = test_macro(vec![
+            step(
+                1,
+                MkAction::ReadClipboardText {
+                    variable: "clipboard_text".into(),
+                },
+            ),
+            step(
+                2,
+                MkAction::SetVariable {
+                    name: "child_private".into(),
+                    value: MkValue::String(sentinel.into()),
+                },
+            ),
+            {
+                let mut breakpoint = step(
+                    3,
+                    MkAction::SetVariable {
+                        name: "child_done".into(),
+                        value: MkValue::String("yes".into()),
+                    },
+                );
+                breakpoint.breakpoint = true;
+                breakpoint
+            },
+        ]);
+        child.id = 2;
+        let mut disabled_clipboard = step(
+            1,
+            MkAction::ReadClipboardText {
+                variable: "disabled_clipboard_text".into(),
+            },
+        );
+        disabled_clipboard.enabled = false;
+        let mut ordinary = test_macro(vec![
+            disabled_clipboard,
+            step(
+                2,
+                MkAction::SetVariable {
+                    name: "ordinary_private".into(),
+                    value: MkValue::String(sentinel.into()),
+                },
+            ),
+            {
+                let mut breakpoint = step(
+                    3,
+                    MkAction::SetVariable {
+                        name: "ordinary_done".into(),
+                        value: MkValue::String("yes".into()),
+                    },
+                );
+                breakpoint.breakpoint = true;
+                breakpoint
+            },
+        ]);
+        ordinary.id = 3;
+        let mut subset_root = test_macro(vec![
+            step(
+                1,
+                MkAction::CallMacro(crate::mkmacro::MkCallMacroPayload {
+                    macro_id: 2,
+                    ..Default::default()
+                }),
+            ),
+            step(
+                2,
+                MkAction::SetVariable {
+                    name: "subset_private".into(),
+                    value: MkValue::String(sentinel.into()),
+                },
+            ),
+            {
+                let mut breakpoint = step(
+                    3,
+                    MkAction::SetVariable {
+                        name: "subset_done".into(),
+                        value: MkValue::String("yes".into()),
+                    },
+                );
+                breakpoint.breakpoint = true;
+                breakpoint
+            },
+        ]);
+        subset_root.id = 4;
+
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        store
+            .save(MkMacroDocument {
+                macros: vec![root, child, ordinary, subset_root],
+                ..Default::default()
+            })
+            .unwrap();
+        let fake = Arc::new(FakeBackend::default());
+        let runtime = MacroRuntime::new(Arc::new(store), fake.clone().backends());
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        let paused = wait_for_state(&runtime, RuntimeState::Paused);
+        assert_eq!(paused.active_macro_id(), Some(2));
+        assert!(paused.debug_values_redacted);
+        assert!(paused.debug_variables.is_empty());
+        assert!(paused.debug_snapshot.as_ref().unwrap().variables.is_empty());
+        assert!(!format!("{paused:?}").contains(sentinel));
+        let clipboard_events = runtime.take_test_events();
+        assert!(clipboard_events.iter().all(|event| match event {
+            ExecutionEvent::DebugVariables { variables, .. }
+            | ExecutionEvent::BreakpointHit { variables, .. } => variables.is_empty(),
+            ExecutionEvent::FrameExited {
+                caller_boundary: Some(boundary),
+            } => boundary.variables.is_empty(),
+            _ => true,
+        }));
+        assert!(!format!("{clipboard_events:?}").contains(sentinel));
+        assert_eq!(
+            runtime.command(RuntimeCommand::Resume),
+            CommandResult::Accepted
+        );
+        let completed = wait_for_terminal(&runtime);
+        assert!(completed.debug_values_redacted);
+        assert!(completed.debug_variables.is_empty());
+        assert!(
+            completed
+                .debug_snapshot
+                .as_ref()
+                .is_none_or(|debug| debug.variables.is_empty())
+        );
+        assert!(!format!("{completed:?}").contains(sentinel));
+        assert!(!format!("{:?}", runtime.take_test_events()).contains(sentinel));
+
+        // A run-from subset can omit a clipboard callee even though the
+        // compiled program retains that callee's full plan.
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRunFrom(4, 2)),
+            CommandResult::Accepted
+        );
+        let subset_paused = wait_for_state(&runtime, RuntimeState::Paused);
+        assert!(!subset_paused.debug_values_redacted);
+        assert_eq!(
+            subset_paused.debug_variables.get("subset_private"),
+            Some(&MkValue::String(sentinel.into()))
+        );
+        let subset_events = runtime.take_test_events();
+        assert!(format!("{subset_events:?}").contains(sentinel));
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+        wait_for_terminal(&runtime);
+
+        // The privacy policy is derived for each invocation, not stored on the
+        // runtime or debugger. An ordinary macro can still publish its values.
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(3)),
+            CommandResult::Accepted
+        );
+        let ordinary_paused = wait_for_state(&runtime, RuntimeState::Paused);
+        assert!(!ordinary_paused.debug_values_redacted);
+        assert_eq!(
+            ordinary_paused.debug_variables.get("ordinary_private"),
+            Some(&MkValue::String(sentinel.into()))
+        );
+        assert_eq!(
+            ordinary_paused
+                .debug_snapshot
+                .as_ref()
+                .unwrap()
+                .variables
+                .get("ordinary_private"),
+            Some(&MkValue::String(sentinel.into()))
+        );
+        let ordinary_events = runtime.take_test_events();
+        assert!(ordinary_events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::BreakpointHit { variables, .. }
+                if variables.get("ordinary_private") == Some(&MkValue::String(sentinel.into()))
+        )));
+        assert!(format!("{ordinary_events:?}").contains(sentinel));
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+        wait_for_terminal(&runtime);
+    }
+
+    #[test]
+    fn clipboard_action_runtime_failure_payload_is_redacted_before_publication() {
+        let sentinel = "failure_clipboard_payload_sentinel";
+        let clipboard_macro = test_macro(vec![
+            step(
+                1,
+                MkAction::ReadClipboardText {
+                    variable: "clipboard_text".into(),
+                },
+            ),
+            step(
+                2,
+                MkAction::LauncherCommand(MkLauncherCommandPayload {
+                    query: "${clipboard_text}".into(),
+                    legacy_resolved_action: None,
+                }),
+            ),
+        ]);
+        let mut ordinary_macro = test_macro(vec![step(
+            1,
+            MkAction::LauncherCommand(MkLauncherCommandPayload {
+                query: "ordinary_failure_detail_sentinel".into(),
+                legacy_resolved_action: None,
+            }),
+        )]);
+        ordinary_macro.id = 2;
+
+        let traced_run = |executor: &Executor, plan: &crate::mkmacro::MkExecutionPlan| {
+            let trace_bytes = Arc::new(Mutex::new(Vec::new()));
+            let trace_writer = trace_bytes.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(move || SharedTraceWriter(trace_writer.clone()))
+                .finish();
+            let observed = Mutex::new(Vec::new());
+            let result = tracing::subscriber::with_default(subscriber, || {
+                executor.execute(plan, ExecutionOptions::normal(), &|event| {
+                    observed.lock().unwrap().push(event);
+                })
+            });
+            let events = observed.into_inner().unwrap();
+            let trace = String::from_utf8(trace_bytes.lock().unwrap().clone()).unwrap();
+            (result, events, trace)
+        };
+
+        let fake = Arc::new(FakeBackend::default());
+        let mut backends = fake.clone().backends();
+        backends.clipboard = Arc::new(SentinelTextClipboard(sentinel));
+        backends.launcher = Arc::new(LeakingQueryFailure);
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::new(backends.clone(), control.clone());
+
+        let clipboard_plan = crate::mkmacro::compile(&clipboard_macro).unwrap();
+        let (clipboard_result, clipboard_events, clipboard_log) =
+            traced_run(&executor, &clipboard_plan);
+        let clipboard_error = clipboard_result.as_ref().unwrap_err();
+        assert_eq!(clipboard_error.kind, DiagnosticKind::Backend);
+        assert_eq!(
+            clipboard_error.message,
+            "Macro step backend operation failed"
+        );
+        assert_eq!(
+            clipboard_error
+                .context
+                .get("origin_macro_id")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            clipboard_error
+                .context
+                .get("origin_step_id")
+                .map(String::as_str),
+            Some("2")
+        );
+        assert!(!clipboard_error.context.contains_key("query"));
+        assert!(
+            !format!("{clipboard_result:?}{clipboard_events:?}{clipboard_log}").contains(sentinel)
+        );
+        assert!(clipboard_log.contains("Macro step backend operation failed"));
+        let failed_event = clipboard_events.iter().find_map(|event| match event {
+            ExecutionEvent::StepFailed(2, diagnostic) => Some(diagnostic),
+            _ => None,
+        });
+        assert_eq!(failed_event, Some(clipboard_error));
+
+        // A direct ordinary failure remains fully diagnostic, including the
+        // query detail that is suppressed only for clipboard-enabled plans.
+        control.reset();
+        let ordinary_plan = crate::mkmacro::compile(&ordinary_macro).unwrap();
+        let (ordinary_result, ordinary_events, ordinary_log) =
+            traced_run(&executor, &ordinary_plan);
+        let ordinary_error = ordinary_result.as_ref().unwrap_err();
+        assert!(
+            ordinary_error
+                .message
+                .contains("ordinary_failure_detail_sentinel")
+        );
+        assert_eq!(
+            ordinary_error.context.get("query").map(String::as_str),
+            Some("ordinary_failure_detail_sentinel")
+        );
+        assert!(
+            format!("{ordinary_result:?}{ordinary_events:?}{ordinary_log}")
+                .contains("ordinary_failure_detail_sentinel")
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        store
+            .save(MkMacroDocument {
+                macros: vec![clipboard_macro, ordinary_macro],
+                ..Default::default()
+            })
+            .unwrap();
+        let mut runtime_backends = fake.clone().backends();
+        runtime_backends.clipboard = Arc::new(SentinelTextClipboard(sentinel));
+        runtime_backends.launcher = Arc::new(LeakingQueryFailure);
+        let runtime = MacroRuntime::new(Arc::new(store), runtime_backends);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        let clipboard_terminal = wait_for_terminal(&runtime);
+        assert_eq!(clipboard_terminal.state, RuntimeState::Failed);
+        assert!(clipboard_terminal.debug_values_redacted);
+        let terminal_error = clipboard_terminal.latest_failure.as_ref().unwrap();
+        assert_eq!(
+            terminal_error.message,
+            "Macro step backend operation failed"
+        );
+        assert!(!terminal_error.context.contains_key("query"));
+        assert!(!format!("{clipboard_terminal:?}").contains(sentinel));
+        let clipboard_runtime_events = runtime.take_test_events();
+        assert!(!format!("{clipboard_runtime_events:?}").contains(sentinel));
+        let document = runtime.store.snapshot();
+        let inspector =
+            crate::gui::mkmacro_dialog::runtime_inspector::RuntimeInspectorViewModel::from_snapshot(
+                &clipboard_terminal,
+                &document,
+            );
+        assert!(inspector.value_redaction_notice.is_some());
+        assert!(inspector.outcome.is_some() || inspector.run_failure.is_some());
+        assert!(!format!("{inspector:?}").contains(sentinel));
+
+        // A subsequent ordinary run on the same runtime retains its useful
+        // failure details, proving the privacy policy is not sticky.
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(2)),
+            CommandResult::Accepted
+        );
+        let ordinary_terminal = wait_for_terminal_after(&runtime, clipboard_terminal.run_id);
+        assert_eq!(ordinary_terminal.state, RuntimeState::Failed);
+        assert!(!ordinary_terminal.debug_values_redacted);
+        let ordinary_failure = ordinary_terminal.latest_failure.as_ref().unwrap();
+        assert!(
+            ordinary_failure
+                .message
+                .contains("ordinary_failure_detail_sentinel")
+        );
+        assert_eq!(
+            ordinary_failure.context.get("query").map(String::as_str),
+            Some("ordinary_failure_detail_sentinel")
+        );
+        let ordinary_runtime_events = runtime.take_test_events();
+        assert!(
+            format!("{ordinary_terminal:?}{ordinary_runtime_events:?}")
+                .contains("ordinary_failure_detail_sentinel")
+        );
     }
 
     #[test]
@@ -5825,6 +6306,7 @@ mod runtime_snapshot_tests {
         let default = RuntimeSnapshot::default();
         assert_eq!(default.run_mode, RuntimeRunMode::Normal);
         assert_eq!(default.pause_reason, None);
+        assert!(!default.debug_values_redacted);
         assert!(default.debug_variables.is_empty());
         assert_eq!(default.debug_variables_step_id, None);
         assert_eq!(default.debug_snapshot_reason, None);

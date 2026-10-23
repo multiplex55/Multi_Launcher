@@ -5,7 +5,7 @@
 
 use crate::mkmacro::{
     MkAction, MkBlockKind, MkErrorPolicy, MkImageNotFoundPolicy, MkImageOutputs, MkMacro,
-    MkMacroDocument, MkMacroSignature, MkSignatureId, MkStep, MkValue, MkValueType,
+    MkMacroDocument, MkMacroSignature, MkSignatureId, MkStep, MkValue, MkValueSource, MkValueType,
     StructureAnalysis, structure::analyze_structure,
 };
 
@@ -163,6 +163,27 @@ impl VariableDescriptor {
 pub struct VariableCatalog {
     history: Vec<VariableDescriptor>,
     effective: Vec<VariableDescriptor>,
+}
+
+/// Returns the same type/availability diagnostics used by document analysis
+/// for an explicit clipboard-text source. GUI drafts use this boundary so a
+/// conditionally produced wrong-type value remains a warning instead of
+/// becoming an editor-only fatal error.
+pub(crate) fn clipboard_text_source_diagnostics(
+    source: &MkValueSource,
+    catalog: &VariableCatalog,
+    owner_id: u64,
+    step_id: u64,
+) -> Vec<super::MkDiagnostic> {
+    let mut diagnostics = Vec::new();
+    super::reusable_validation::clipboard_text_source(
+        source,
+        catalog,
+        owner_id,
+        step_id,
+        &mut diagnostics,
+    );
+    diagnostics
 }
 
 impl VariableCatalog {

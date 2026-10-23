@@ -147,6 +147,10 @@ struct RootSession<'executor, 'observer> {
     executor: &'executor Executor,
     options: ExecutionOptions,
     observe: &'observer dyn Fn(ExecutionFrameContext, ExecutionEvent),
+    // This is derived from the exact execution plan/compiled dependency
+    // closure for this run. It never lives on Executor, so a later ordinary
+    // debug run retains its normal variable inspection behavior.
+    clipboard_privacy_active: bool,
     transitions: u64,
     next_frame_id: u64,
 }
@@ -156,6 +160,7 @@ impl<'executor, 'observer> RootSession<'executor, 'observer> {
         executor: &'executor Executor,
         options: ExecutionOptions,
         observe: &'observer dyn Fn(ExecutionFrameContext, ExecutionEvent),
+        clipboard_privacy_active: bool,
     ) -> Self {
         let activity = RunActivityGuard(&executor.control);
         let input = InputCleanupGuard::new(executor.backends.input.clone());
@@ -165,6 +170,7 @@ impl<'executor, 'observer> RootSession<'executor, 'observer> {
             executor,
             options,
             observe,
+            clipboard_privacy_active,
             transitions: 0,
             next_frame_id: 2,
         }
@@ -180,10 +186,117 @@ impl<'executor, 'observer> RootSession<'executor, 'observer> {
             context,
             ExecutionEvent::DebugVariables {
                 step_id: boundary.step_id,
-                variables: boundary.variables.clone(),
+                variables: if self.clipboard_privacy_active {
+                    RuntimeVariables::new()
+                } else {
+                    boundary.variables.clone()
+                },
                 reason,
             },
         );
+    }
+
+    fn sanitize_failure_diagnostic(&self, mut error: ExecutionDiagnostic) -> ExecutionDiagnostic {
+        if !self.clipboard_privacy_active {
+            return error;
+        }
+
+        let clipboard_reason = error
+            .context
+            .get("clipboard_reason")
+            .map(String::as_str)
+            .filter(|reason| {
+                matches!(
+                    *reason,
+                    "content_unavailable"
+                        | "unsupported"
+                        | "backend_unsupported"
+                        | "busy"
+                        | "conversion_failed"
+                        | "unknown"
+                )
+            });
+        let operation = error
+            .context
+            .get("operation")
+            .map(String::as_str)
+            .filter(|operation| matches!(*operation, "read text" | "write text" | "set_image"))
+            .map(str::to_owned);
+        let safe_clipboard_failure = clipboard_reason.map(|reason| {
+            let explanation = match reason {
+                "content_unavailable" => "clipboard content is unavailable",
+                "unsupported" => "clipboard access is not supported by this system",
+                "backend_unsupported" => "clipboard access is not supported by this backend",
+                "busy" => "clipboard is currently in use",
+                "conversion_failed" => "clipboard content could not be converted",
+                _ => "clipboard operation could not be completed",
+            };
+            match operation.as_deref() {
+                Some(operation) => format!("clipboard {operation} failed: {explanation}"),
+                None => format!("clipboard operation failed: {explanation}"),
+            }
+        });
+        error.message = match safe_clipboard_failure {
+            Some(message) => message,
+            None if matches!(
+                error.message.as_str(),
+                "clipboard text source variable is unavailable"
+                    | "clipboard text source must resolve to a String"
+                    | "Clipboard text source must be a String"
+            ) =>
+            {
+                error.message.clone()
+            }
+            None => match error.kind {
+                DiagnosticKind::Cancelled => "Macro execution was cancelled".into(),
+                DiagnosticKind::TypeMismatch => "Macro step has an incompatible value".into(),
+                DiagnosticKind::UnsupportedOperation => "Macro step is unsupported".into(),
+                DiagnosticKind::Backend => "Macro step backend operation failed".into(),
+                _ => "Macro step failed during clipboard-enabled execution".into(),
+            },
+        };
+
+        error.context.retain(|key, value| match key.as_str() {
+            "origin_macro_id" | "origin_step_id" | "step" | "step_id" | "macro_id"
+            | "callee_macro_id" | "target_macro_id" | "limit" | "attempt" => {
+                value.parse::<u64>().is_ok()
+            }
+            "attempts_exhausted" => matches!(value.as_str(), "true" | "false"),
+            "backend_operation" => matches!(
+                value.as_str(),
+                "macro executor"
+                    | "SendInput"
+                    | "window"
+                    | "virtual desktop"
+                    | "screen"
+                    | "screen capture"
+                    | "OCR"
+                    | "UIAutomation"
+                    | "launcher"
+                    | "condition_evaluator"
+                    | "prompt"
+                    | "clipboard"
+                    | "notification"
+                    | "sound"
+                    | "runtime"
+            ),
+            "backend" => matches!(value.as_str(), "clipboard" | "launcher" | "UI Automation"),
+            "operation" => matches!(value.as_str(), "read text" | "write text" | "set_image"),
+            "clipboard_reason" => matches!(
+                value.as_str(),
+                "content_unavailable"
+                    | "unsupported"
+                    | "backend_unsupported"
+                    | "busy"
+                    | "conversion_failed"
+                    | "unknown"
+            ),
+            _ => false,
+        });
+        if let Some(operation) = operation {
+            error.context.insert("operation".into(), operation);
+        }
+        error
     }
 
     fn run_stack<'plan>(
@@ -231,6 +344,7 @@ impl<'executor, 'observer> RootSession<'executor, 'observer> {
                     Err(error) => Err(error),
                 }
             };
+            let completion = completion.map_err(|error| self.sanitize_failure_diagnostic(error));
             let completed = frames.pop().expect("completed frame exists");
             let reason = match &completion {
                 Ok(_) => DebugSnapshotReason::RunFinished,
@@ -247,7 +361,11 @@ impl<'executor, 'observer> RootSession<'executor, 'observer> {
                 .and_then(|caller| caller.safe_boundary.as_ref())
                 .map(|boundary| FrameVariableBoundary {
                     step_id: boundary.step_id,
-                    variables: boundary.variables.clone(),
+                    variables: if self.clipboard_privacy_active {
+                        RuntimeVariables::new()
+                    } else {
+                        boundary.variables.clone()
+                    },
                 });
             (self.observe)(
                 completed.context,
@@ -451,7 +569,11 @@ impl<'executor, 'observer> RootSession<'executor, 'observer> {
                 frame.context,
                 ExecutionEvent::BreakpointHit {
                     step_id: step.id,
-                    variables: frame.variables.clone(),
+                    variables: if self.clipboard_privacy_active {
+                        RuntimeVariables::new()
+                    } else {
+                        frame.variables.clone()
+                    },
                 },
             );
             self.executor.control.checkpoint()?;
@@ -504,6 +626,7 @@ impl<'executor, 'observer> RootSession<'executor, 'observer> {
                         "attempts_exhausted",
                         (attempt.attempt == attempt.attempts).to_string(),
                     );
+                let error = self.sanitize_failure_diagnostic(error);
                 frame
                     .variables
                     .insert("last_action_success".into(), MkValue::Boolean(false));
@@ -632,19 +755,27 @@ fn execute_root(
     options: ExecutionOptions,
     observe: &dyn Fn(ExecutionFrameContext, ExecutionEvent),
 ) -> ExecResult {
-    let mut session = RootSession::new(executor, options, observe);
+    let clipboard_privacy_active = program.map_or_else(
+        || super::plan_contains_clipboard_actions(plan),
+        super::program_contains_clipboard_actions,
+    );
+    let mut session = RootSession::new(executor, options, observe, clipboard_privacy_active);
     if !plan.enabled {
-        return Err(ExecutionDiagnostic::new(
-            DiagnosticKind::InvalidTarget,
-            "Macro is disabled",
-        ));
+        return Err(
+            session.sanitize_failure_diagnostic(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "Macro is disabled",
+            )),
+        );
     }
     let variables = invocation::prepare_parameters(
         plan.signature.parameters(),
         plan.signature.outputs(),
         arguments,
-    )?
-    .into_variables(plan.signature.parameters())?;
+    )
+    .map_err(|error| session.sanitize_failure_diagnostic(error))?
+    .into_variables(plan.signature.parameters())
+    .map_err(|error| session.sanitize_failure_diagnostic(error))?;
     let frame = ExecutionFrame::with_variables(
         plan,
         options.mode,
@@ -736,7 +867,7 @@ mod tests {
             }
             events.lock().unwrap().push(event);
         };
-        let mut session = RootSession::new(&executor, ExecutionOptions::debug(), &observe);
+        let mut session = RootSession::new(&executor, ExecutionOptions::debug(), &observe, false);
         let mut frame = ExecutionFrame::new(&plan, ExecutionMode::Debug);
         session.advance(&mut frame, None).unwrap();
         session.advance(&mut frame, None).unwrap();
@@ -858,7 +989,8 @@ mod tests {
         let control = Arc::new(RunControl::default());
         control.reset();
         let executor = Executor::new(fake.clone().backends(), control.clone());
-        let mut session = RootSession::new(&executor, ExecutionOptions::normal(), &|_, _| {});
+        let mut session =
+            RootSession::new(&executor, ExecutionOptions::normal(), &|_, _| {}, false);
         session.transitions = Executor::MAX_CONTROL_TRANSITIONS - 1;
         let mut first = ExecutionFrame::new(&first_plan, ExecutionMode::Normal);
         session.run_frame(&mut first).unwrap();
@@ -1813,7 +1945,8 @@ mod tests {
         assert_eq!(error.context["limit"], "64");
         assert_eq!(*maximum_depth.lock().unwrap(), 64);
         control.reset();
-        let mut session = RootSession::new(&executor, ExecutionOptions::normal(), &|_, _| {});
+        let mut session =
+            RootSession::new(&executor, ExecutionOptions::normal(), &|_, _| {}, false);
         session.transitions = Executor::MAX_CONTROL_TRANSITIONS - 1;
         let root = ExecutionFrame::new(program.plan(1).unwrap(), ExecutionMode::Normal);
         let error = session.run_stack(root, Some(&program)).unwrap_err();
@@ -1821,6 +1954,117 @@ mod tests {
         assert_eq!(error.context["limit"], "100000");
         assert_eq!(session.transitions, Executor::MAX_CONTROL_TRANSITIONS + 1);
         assert!(fake.events().is_empty());
+    }
+
+    #[test]
+    fn clipboard_action_runtime_redacts_debug_events_per_execution() {
+        let sentinel = "debug_clipboard_private_sentinel";
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        let executor = Executor::new(fake.clone().backends(), control.clone());
+
+        let mut direct_breakpoint = step(3, set("direct_done", "yes"));
+        direct_breakpoint.breakpoint = true;
+        let direct_plan = plan(vec![
+            step(
+                1,
+                MkAction::ReadClipboardText {
+                    variable: "clipboard_text".into(),
+                },
+            ),
+            step(2, set("private_value", sentinel)),
+            direct_breakpoint,
+        ]);
+        control.reset();
+        let direct_events = Mutex::new(Vec::new());
+        executor
+            .execute(&direct_plan, ExecutionOptions::debug(), &|event| {
+                if matches!(event, ExecutionEvent::BreakpointHit { .. }) {
+                    control.resume();
+                }
+                direct_events.lock().unwrap().push(event);
+            })
+            .unwrap();
+        let direct_events = direct_events.into_inner().unwrap();
+        assert!(direct_events.iter().all(|event| match event {
+            ExecutionEvent::DebugVariables { variables, .. }
+            | ExecutionEvent::BreakpointHit { variables, .. } => variables.is_empty(),
+            _ => true,
+        }));
+        assert!(!format!("{direct_events:?}").contains(sentinel));
+
+        let mut child_breakpoint = step(3, set("child_done", "yes"));
+        child_breakpoint.breakpoint = true;
+        let transitive_program = program(vec![
+            macro_with(
+                1,
+                vec![step(1, set("caller_private", sentinel)), step(2, call(2))],
+            ),
+            macro_with(
+                2,
+                vec![
+                    step(
+                        1,
+                        MkAction::ReadClipboardText {
+                            variable: "clipboard_text".into(),
+                        },
+                    ),
+                    step(2, set("child_private", sentinel)),
+                    child_breakpoint,
+                ],
+            ),
+        ]);
+        control.reset();
+        let transitive_events = Mutex::new(Vec::new());
+        executor
+            .execute_program(
+                &transitive_program,
+                &MkInvocationValues::new(),
+                ExecutionOptions::debug(),
+                &|_, event| {
+                    if matches!(event, ExecutionEvent::BreakpointHit { .. }) {
+                        control.resume();
+                    }
+                    transitive_events.lock().unwrap().push(event);
+                },
+            )
+            .unwrap();
+        let transitive_events = transitive_events.into_inner().unwrap();
+        assert!(transitive_events.iter().all(|event| match event {
+            ExecutionEvent::DebugVariables { variables, .. }
+            | ExecutionEvent::BreakpointHit { variables, .. } => variables.is_empty(),
+            ExecutionEvent::FrameExited {
+                caller_boundary: Some(boundary),
+            } => boundary.variables.is_empty(),
+            _ => true,
+        }));
+        assert!(!format!("{transitive_events:?}").contains(sentinel));
+
+        // Suppression belongs to a single run. Reusing the same Executor for an
+        // ordinary macro must preserve the established debugger value view.
+        let mut ordinary_breakpoint = step(2, set("ordinary_done", "yes"));
+        ordinary_breakpoint.breakpoint = true;
+        let ordinary_plan = plan(vec![
+            step(1, set("ordinary_private", sentinel)),
+            ordinary_breakpoint,
+        ]);
+        control.reset();
+        let ordinary_events = Mutex::new(Vec::new());
+        executor
+            .execute(&ordinary_plan, ExecutionOptions::debug(), &|event| {
+                if matches!(event, ExecutionEvent::BreakpointHit { .. }) {
+                    control.resume();
+                }
+                ordinary_events.lock().unwrap().push(event);
+            })
+            .unwrap();
+        let ordinary_events = ordinary_events.into_inner().unwrap();
+        assert!(ordinary_events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::BreakpointHit { variables, .. }
+                if variables.get("ordinary_private") == Some(&MkValue::String(sentinel.into()))
+        )));
+        assert!(format!("{ordinary_events:?}").contains(sentinel));
     }
 
     struct ReleaseObserver {

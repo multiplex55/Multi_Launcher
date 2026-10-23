@@ -1510,6 +1510,15 @@ impl ActionEditorState {
             self.capture_message = Some(message);
             return None;
         }
+        if let Some(diagnostic) = clipboard_draft_validation_diagnostic(
+            &self.draft.as_ref()?.action,
+            &self.variable_catalog,
+        )
+        .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Fatal)
+        {
+            self.capture_message = Some(diagnostic.message);
+            return None;
+        }
         self.sync_search_region_to_draft();
         let mut step = self.draft.take()?;
         normalize_optional_outputs(&mut step.action);
@@ -2107,6 +2116,15 @@ impl ActionEditorState {
         self.image_test.cancel();
         // Keep invalid drafts open for correction without changing the step.
         if !virtual_desktop_number_valid(&self.draft.as_ref()?.action) {
+            return None;
+        }
+        if let Some(diagnostic) = clipboard_draft_validation_diagnostic(
+            &self.draft.as_ref()?.action,
+            &self.variable_catalog,
+        )
+        .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Fatal)
+        {
+            self.capture_message = Some(diagnostic.message);
             return None;
         }
         let owner_id = self.owner_macro_id.or(dialog.selected_macro_id)?;
@@ -3979,6 +3997,35 @@ fn action_ui(
                 ui.text_edit_singleline(name);
             });
         }
+        MkAction::ReadClipboardText { variable } => {
+            ui.heading("Read Clipboard Text");
+            ui.label("Destination variable");
+            ui.text_edit_singleline(variable);
+            ui.small("Reads plain text when this step runs; the value is stored as a String.");
+            if let Err(error) = crate::mkmacro::variables::validate_variable_name(variable) {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+        }
+        MkAction::WriteClipboardText(payload) => {
+            ui.heading("Write Clipboard Text");
+            super::call_editor::source_ui(
+                ui,
+                ("write_clipboard_source", draft_id),
+                &mut payload.source,
+                Some(MkValueType::String),
+                variable_catalog,
+            );
+            ui.small("Writes the selected String exactly; ${...} text is not expanded.");
+            if let Some(diagnostic) =
+                clipboard_source_draft_validation_diagnostic(&payload.source, variable_catalog)
+            {
+                let color = match diagnostic.severity {
+                    DiagnosticSeverity::Fatal => ui.visuals().error_fg_color,
+                    DiagnosticSeverity::Warning => ui.visuals().warn_fg_color,
+                };
+                ui.colored_label(color, diagnostic.message);
+            }
+        }
         MkAction::PromptInput(p) => {
             ui.label("Dialog title");
             ui.text_edit_singleline(&mut p.title)
@@ -4778,9 +4825,64 @@ fn ocr_draft_validation_error(step: &MkStep) -> Option<String> {
         .map(|diagnostic| diagnostic.message)
 }
 
+fn clipboard_source_draft_validation_diagnostic(
+    source: &MkValueSource,
+    variable_catalog: &VariableCatalog,
+) -> Option<MkDiagnostic> {
+    match source {
+        MkValueSource::Literal(MkValue::String(_)) => None,
+        MkValueSource::Literal(_) => {
+            crate::mkmacro::authoring_analysis::clipboard_text_source_diagnostics(
+                source,
+                variable_catalog,
+                0,
+                0,
+            )
+            .into_iter()
+            .next()
+        }
+        MkValueSource::Variable { name } => {
+            if let Err(error) = crate::mkmacro::variables::validate_variable_reference(name) {
+                return Some(MkDiagnostic::fatal(
+                    0,
+                    None,
+                    "invalid_variable_reference",
+                    error,
+                ));
+            }
+            crate::mkmacro::authoring_analysis::clipboard_text_source_diagnostics(
+                source,
+                variable_catalog,
+                0,
+                0,
+            )
+            .into_iter()
+            .next()
+        }
+    }
+}
+
+fn clipboard_draft_validation_diagnostic(
+    action: &MkAction,
+    variable_catalog: &VariableCatalog,
+) -> Option<MkDiagnostic> {
+    match action {
+        MkAction::ReadClipboardText { variable } => {
+            crate::mkmacro::variables::validate_variable_name(variable)
+                .err()
+                .map(|error| MkDiagnostic::fatal(0, None, "invalid_variable_name", error))
+        }
+        MkAction::WriteClipboardText(payload) => {
+            clipboard_source_draft_validation_diagnostic(&payload.source, variable_catalog)
+        }
+        _ => None,
+    }
+}
+
 fn draft_apply_valid(
     step: &MkStep,
     image_search: Option<&super::image_search_editor::ImageSearchEditorState>,
+    variable_catalog: &VariableCatalog,
 ) -> bool {
     !matches!(&step.action, MkAction::PromptInput(p) if crate::mkmacro::variables::validate_variable_name(&p.variable).is_err())
         && virtual_desktop_number_valid(&step.action)
@@ -4800,6 +4902,8 @@ fn draft_apply_valid(
             .and_then(|image| image.validation_error())
             .is_none()
         && ocr_draft_validation_error(step).is_none()
+        && clipboard_draft_validation_diagnostic(&step.action, variable_catalog)
+            .is_none_or(|diagnostic| diagnostic.severity != DiagnosticSeverity::Fatal)
 }
 
 /// Validate the exact prospective Call/Return document through the central
@@ -5748,7 +5852,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 });
             ui.separator();
             apply_enabled =
-                draft_apply_valid(step, state.image_search.as_ref())
+                draft_apply_valid(step, state.image_search.as_ref(), &state.variable_catalog)
                     && !workflow_active
                     && !importing
                     && !crop_open;
@@ -6831,7 +6935,11 @@ mod tests {
                 let mut editor = test_editor();
                 editor.begin_edit(&step(action));
                 assert_eq!(
-                    draft_apply_valid(editor.draft.as_ref().unwrap(), editor.image_search.as_ref()),
+                    draft_apply_valid(
+                        editor.draft.as_ref().unwrap(),
+                        editor.image_search.as_ref(),
+                        &editor.variable_catalog,
+                    ),
                     *expected,
                     "Apply gating: case={case}, pixel={pixel}, outputs={outputs:?}"
                 );
@@ -6846,7 +6954,11 @@ mod tests {
             mode: MkTextMode::Type,
         }));
         assert!(image_output_names_valid(&unrelated.action));
-        assert!(draft_apply_valid(&unrelated, None));
+        assert!(draft_apply_valid(
+            &unrelated,
+            None,
+            &VariableCatalog::default()
+        ));
     }
 
     #[test]
@@ -7592,6 +7704,343 @@ mod tests {
         dialog.action_editor = ActionEditorState::new(dialog.visual_overlay.clone());
         dialog.create_macro();
         (dir, dialog, fixture)
+    }
+
+    fn render_clipboard_action_editor(
+        context: &egui::Context,
+        dialog: &mut MkMacroDialog,
+    ) -> String {
+        fn collect_text(shape: &egui::epaint::Shape, text: &mut String) {
+            match shape {
+                egui::epaint::Shape::Text(shape) => {
+                    text.push_str(&shape.galley.job.text);
+                    text.push('\n');
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect_text(shape, text);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut text = String::new();
+        for pass in 0..2 {
+            let output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(720.0, 620.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| super::show(ctx, dialog),
+            );
+            if pass == 1 {
+                for clipped in &output.shapes {
+                    collect_text(&clipped.shape, &mut text);
+                }
+            }
+            // The first frame establishes egui Window sizing; its painted
+            // content can be intentionally absent. Always release its output
+            // before observing the visible frame.
+            output.drop_without_applying_deltas();
+        }
+        text
+    }
+
+    #[test]
+    fn clipboard_action_editor_apply_cancel_and_render_are_staged() {
+        let (directory, mut dialog, _fixture) = shared_dialog();
+        dialog.save().unwrap();
+        let macro_id = dialog.selected_macro_id.unwrap();
+        let initial_step = MkStep {
+            metadata: Default::default(),
+            id: 0,
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            action: MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+                source: MkValueSource::Literal(MkValue::String("original draft".into())),
+            }),
+        };
+        dialog
+            .selected_macro_mut()
+            .unwrap()
+            .steps
+            .push(initial_step);
+        dialog.mark_dirty();
+        dialog.save().unwrap();
+        let persisted_document = dialog.store.snapshot();
+        let persisted_bytes =
+            std::fs::read(directory.path().join(crate::mkmacro::MKMACROS_FILE)).unwrap();
+        let persisted_step = dialog.selected_macro().unwrap().steps[0].clone();
+
+        dialog
+            .action_editor
+            .begin_edit_in_macro(Some(macro_id), &persisted_step);
+        let original_draft = dialog.draft.clone();
+        let original_revision = dialog.draft_revision();
+        let context = egui::Context::default();
+        let rendered = render_clipboard_action_editor(&context, &mut dialog);
+        assert!(rendered.contains("Write Clipboard Text"), "{rendered}");
+        assert!(rendered.contains("Literal"), "{rendered}");
+        assert!(rendered.contains("Variable"), "{rendered}");
+        assert_eq!(dialog.draft, original_draft);
+        assert_eq!(dialog.draft_revision(), original_revision);
+        assert_eq!(
+            dialog.store.snapshot().as_ref(),
+            persisted_document.as_ref()
+        );
+
+        let MkAction::WriteClipboardText(payload) =
+            &mut dialog.action_editor.draft.as_mut().unwrap().action
+        else {
+            unreachable!()
+        };
+        payload.source = MkValueSource::Literal(MkValue::String("staged ${literal}".into()));
+        let mut state = dialog.take_action_editor();
+        let applied_id = state.apply(&mut dialog).unwrap();
+        dialog.action_editor = state;
+        let applied_step = dialog
+            .selected_macro()
+            .unwrap()
+            .steps
+            .iter()
+            .find(|step| step.id == applied_id)
+            .unwrap();
+        assert!(matches!(
+            &applied_step.action,
+            MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+                source: MkValueSource::Literal(MkValue::String(value))
+            }) if value == "staged ${literal}"
+        ));
+        assert_eq!(
+            dialog.store.snapshot().as_ref(),
+            persisted_document.as_ref()
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join(crate::mkmacro::MKMACROS_FILE)).unwrap(),
+            persisted_bytes
+        );
+
+        let applied_draft = dialog.draft.clone();
+        let applied_step = applied_step.clone();
+        dialog
+            .action_editor
+            .begin_edit_in_macro(Some(macro_id), &applied_step);
+        let MkAction::WriteClipboardText(payload) =
+            &mut dialog.action_editor.draft.as_mut().unwrap().action
+        else {
+            unreachable!()
+        };
+        payload.source = MkValueSource::Literal(MkValue::String("cancelled edit".into()));
+        dialog.action_editor.cancel();
+        assert_eq!(dialog.draft, applied_draft);
+        assert_eq!(
+            dialog.store.snapshot().as_ref(),
+            persisted_document.as_ref()
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join(crate::mkmacro::MKMACROS_FILE)).unwrap(),
+            persisted_bytes
+        );
+
+        let mut state = dialog.take_action_editor();
+        state.begin_new(MkAction::ReadClipboardText {
+            variable: "clipboard_text".into(),
+        });
+        dialog.action_editor = state;
+        let read_draft = dialog.draft.clone();
+        let read_revision = dialog.draft_revision();
+        let rendered = render_clipboard_action_editor(&context, &mut dialog);
+        assert!(rendered.contains("Read Clipboard Text"), "{rendered}");
+        assert!(rendered.contains("Destination variable"), "{rendered}");
+        assert_eq!(dialog.draft, read_draft);
+        assert_eq!(dialog.draft_revision(), read_revision);
+        let mut state = dialog.take_action_editor();
+        let read_id = state.apply(&mut dialog).unwrap();
+        dialog.action_editor = state;
+        assert!(dialog.selected_macro().unwrap().steps.iter().any(|step| {
+            step.id == read_id
+                && matches!(
+                    &step.action,
+                    MkAction::ReadClipboardText { variable } if variable == "clipboard_text"
+                )
+        }));
+
+        let mut state = dialog.take_action_editor();
+        state.begin_new(MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+            source: MkValueSource::Literal(MkValue::String(String::new())),
+        }));
+        dialog.action_editor = state;
+        let rendered = render_clipboard_action_editor(&context, &mut dialog);
+        assert!(
+            rendered.contains("Writes the selected String exactly"),
+            "{rendered}"
+        );
+        let mut state = dialog.take_action_editor();
+        let MkAction::WriteClipboardText(payload) = &mut state.draft.as_mut().unwrap().action
+        else {
+            unreachable!()
+        };
+        payload.source = MkValueSource::Variable {
+            name: "clipboard_text".into(),
+        };
+        assert!(draft_apply_valid(
+            state.draft.as_ref().unwrap(),
+            state.image_search.as_ref(),
+            &state.variable_catalog
+        ));
+        let variable_id = state.apply(&mut dialog).unwrap();
+        dialog.action_editor = state;
+        assert!(dialog.selected_macro().unwrap().steps.iter().any(|step| {
+            step.id == variable_id
+                && matches!(
+                    &step.action,
+                    MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+                        source: MkValueSource::Variable { name }
+                    }) if name == "clipboard_text"
+                )
+        }));
+        assert_eq!(
+            dialog.store.snapshot().as_ref(),
+            persisted_document.as_ref()
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join(crate::mkmacro::MKMACROS_FILE)).unwrap(),
+            persisted_bytes
+        );
+    }
+
+    #[test]
+    fn clipboard_action_editor_apply_matches_central_type_availability() {
+        use crate::mkmacro::authoring_analysis::{
+            VariableAvailability, clipboard_text_source_diagnostics,
+        };
+
+        let (_directory, mut dialog, _fixture) = shared_dialog();
+        dialog.save().unwrap();
+        let owner = dialog.selected_macro_id.unwrap();
+        let action_for = |name: &str| {
+            MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+                source: MkValueSource::Variable { name: name.into() },
+            })
+        };
+
+        let certain_producer = variable_step(81, "certain_number", MkValue::Number(5.0));
+        dialog.selected_macro_mut().unwrap().steps = vec![certain_producer.clone()];
+        dialog.mark_dirty();
+        let certain_steps = [certain_producer, step(action_for("certain_number"))];
+        let certain_catalog = VariableCatalog::before_step(&certain_steps, 1);
+        let certain_diagnostics = clipboard_text_source_diagnostics(
+            &MkValueSource::Variable {
+                name: "certain_number".into(),
+            },
+            &certain_catalog,
+            owner,
+            certain_steps[1].id,
+        );
+        assert_eq!(certain_diagnostics.len(), 1);
+        assert_eq!(certain_diagnostics[0].severity, DiagnosticSeverity::Fatal);
+
+        let mut rejected = dialog.take_action_editor();
+        rejected.begin_new(action_for("certain_number"));
+        rejected.bind_owner(Some(owner));
+        rejected.variable_catalog = certain_catalog;
+        assert!(!draft_apply_valid(
+            rejected.draft.as_ref().unwrap(),
+            None,
+            &rejected.variable_catalog
+        ));
+        assert!(rejected.apply(&mut dialog).is_none());
+        assert!(rejected.draft.is_some());
+        assert_eq!(
+            dialog.selected_macro().unwrap().steps,
+            vec![certain_steps[0].clone()]
+        );
+        dialog.action_editor = rejected;
+        dialog.action_editor.cancel();
+
+        let marker = |id, action| MkStep {
+            metadata: Default::default(),
+            id,
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            action,
+        };
+        let conditional_steps = [
+            marker(
+                91,
+                MkAction::If(MkCondition::Variable {
+                    name: "gate".into(),
+                    op: MkCompareOp::Eq,
+                    value: MkValue::Boolean(true),
+                }),
+            ),
+            variable_step(92, "possible_number", MkValue::Number(7.0)),
+            marker(93, MkAction::EndIf),
+            marker(94, action_for("possible_number")),
+        ];
+        dialog.selected_macro_mut().unwrap().steps = conditional_steps[..3].to_vec();
+        dialog.mark_dirty();
+        let uncertain_catalog = VariableCatalog::before_step(&conditional_steps, 3);
+        let descriptor = uncertain_catalog
+            .effective_variables()
+            .iter()
+            .find(|descriptor| descriptor.name == "possible_number")
+            .unwrap();
+        assert_eq!(
+            descriptor.value_type,
+            VariableValueType::Known(MkValueType::Number)
+        );
+        assert_eq!(
+            descriptor.availability,
+            VariableAvailability::PossiblyUnavailable
+        );
+        let uncertain_source = MkValueSource::Variable {
+            name: "possible_number".into(),
+        };
+        let uncertain_diagnostics = clipboard_text_source_diagnostics(
+            &uncertain_source,
+            &uncertain_catalog,
+            owner,
+            conditional_steps[3].id,
+        );
+        assert_eq!(uncertain_diagnostics.len(), 1);
+        assert_eq!(
+            uncertain_diagnostics[0].severity,
+            DiagnosticSeverity::Warning
+        );
+
+        let mut accepted = dialog.take_action_editor();
+        accepted.begin_new(action_for("possible_number"));
+        accepted.bind_owner(Some(owner));
+        accepted.variable_catalog = uncertain_catalog;
+        assert!(draft_apply_valid(
+            accepted.draft.as_ref().unwrap(),
+            None,
+            &accepted.variable_catalog
+        ));
+        let applied_id = accepted
+            .apply(&mut dialog)
+            .expect("uncertain availability remains repairable and authorable");
+        assert!(dialog.selected_macro().unwrap().steps.iter().any(|step| {
+            step.id == applied_id
+                && matches!(
+                    &step.action,
+                    MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+                        source: MkValueSource::Variable { name }
+                    }) if name == "possible_number"
+                )
+        }));
+        dialog.action_editor = accepted;
     }
 
     #[test]
@@ -9586,7 +10035,11 @@ mod tests {
         ] {
             let draft = step(action);
             assert!(ocr_draft_validation_error(&draft).is_some());
-            assert!(!draft_apply_valid(&draft, None));
+            assert!(!draft_apply_valid(
+                &draft,
+                None,
+                &VariableCatalog::default()
+            ));
         }
 
         let directory = tempfile::tempdir().unwrap();

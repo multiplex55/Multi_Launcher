@@ -93,6 +93,8 @@ pub enum EditorKind {
     Repeat,
     Variable,
     PromptInput,
+    ReadClipboardText,
+    WriteClipboardText,
     Notify,
     PlaySound,
     CallMacro,
@@ -659,6 +661,26 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             MkAction::PromptInput(MkPromptInputPayload::default())
         ),
         d!(
+            Variables,
+            "Read Clipboard Text",
+            "Read the current clipboard text into a String variable",
+            &["clipboard", "read", "text", "variable"],
+            ReadClipboardText,
+            MkAction::ReadClipboardText {
+                variable: "clipboard_text".into()
+            }
+        ),
+        d!(
+            Variables,
+            "Write Clipboard Text",
+            "Write literal text or a String variable to the clipboard",
+            &["clipboard", "write", "text", "variable"],
+            WriteClipboardText,
+            MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+                source: MkValueSource::Literal(MkValue::String(String::new()))
+            })
+        ),
+        d!(
             Logic,
             "If",
             "Condition block",
@@ -971,7 +993,8 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         }
         MkAction::RepeatStart { .. } => EditorKind::Repeat,
         MkAction::SetVariable { .. } | MkAction::UnsetVariable { .. } => EditorKind::Variable,
-        MkAction::ReadClipboardText { .. } | MkAction::WriteClipboardText(_) => EditorKind::General,
+        MkAction::ReadClipboardText { .. } => EditorKind::ReadClipboardText,
+        MkAction::WriteClipboardText(_) => EditorKind::WriteClipboardText,
         MkAction::PromptInput(_) => EditorKind::PromptInput,
         MkAction::Else
         | MkAction::EndIf
@@ -1044,6 +1067,8 @@ pub fn editor_completeness(editor: EditorKind) -> Option<EditorCompleteness> {
         | EditorKind::Repeat
         | EditorKind::Variable
         | EditorKind::PromptInput
+        | EditorKind::ReadClipboardText
+        | EditorKind::WriteClipboardText
         | EditorKind::Notify
         | EditorKind::PlaySound
         | EditorKind::CallMacro
@@ -1165,6 +1190,9 @@ pub fn editor_contract(editor: EditorKind) -> Option<EditorContract> {
         | EditorKind::Repeat
         | EditorKind::Variable => Some(EditorContract::Configurable { field_count: 1 }),
         EditorKind::PromptInput => Some(EditorContract::Configurable { field_count: 5 }),
+        EditorKind::ReadClipboardText | EditorKind::WriteClipboardText => {
+            Some(EditorContract::Configurable { field_count: 1 })
+        }
         EditorKind::Notify => Some(EditorContract::Configurable { field_count: 5 }),
         EditorKind::PlaySound => Some(EditorContract::Configurable { field_count: 1 }),
         EditorKind::CallMacro => Some(EditorContract::Configurable { field_count: 3 }),
@@ -1414,19 +1442,15 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
         }
         MkAction::SetVariable { name, .. } => format!("Set {name}"),
         MkAction::UnsetVariable { name } => format!("Unset {name}"),
-        MkAction::ReadClipboardText { variable } => {
-            format!("Clipboard text → {variable} (runtime unavailable)")
-        }
+        MkAction::ReadClipboardText { variable } => format!("Read text → {variable}"),
         MkAction::WriteClipboardText(payload) => match &payload.source {
             crate::mkmacro::MkValueSource::Literal(crate::mkmacro::MkValue::String(_)) => {
-                "Literal text (runtime unavailable)".into()
+                "Literal text".into()
             }
             crate::mkmacro::MkValueSource::Variable { name } => {
-                format!("Variable {name} (runtime unavailable)")
+                format!("Variable {name}")
             }
-            crate::mkmacro::MkValueSource::Literal(_) => {
-                "Invalid non-string source (runtime unavailable)".into()
-            }
+            crate::mkmacro::MkValueSource::Literal(_) => "Invalid non-string source".into(),
         },
         MkAction::PromptInput(p) => format!(
             "Ask ‘{}’ → {}{}",
@@ -1986,6 +2010,46 @@ mod grouping_tests {
 #[cfg(test)]
 mod paste_tests {
     use super::*;
+
+    #[test]
+    fn clipboard_action_editor_descriptors_are_searchable_and_configurable() {
+        let rows = group_visible_descriptors("clipboard")
+            .into_iter()
+            .flat_map(|(_, rows)| rows)
+            .collect::<Vec<_>>();
+        for (name, editor, action) in [
+            (
+                "Read Clipboard Text",
+                EditorKind::ReadClipboardText,
+                MkAction::ReadClipboardText {
+                    variable: "clipboard_text".into(),
+                },
+            ),
+            (
+                "Write Clipboard Text",
+                EditorKind::WriteClipboardText,
+                MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+                    source: MkValueSource::Literal(MkValue::String(
+                        "clipboard_editor_private_sentinel".into(),
+                    )),
+                }),
+            ),
+        ] {
+            let descriptor = rows
+                .iter()
+                .find(|descriptor| descriptor.name == name)
+                .unwrap_or_else(|| panic!("{name} is not searchable by clipboard"));
+            assert_eq!(descriptor.category, ActionCategory::Variables);
+            assert_eq!(descriptor.editor, editor);
+            assert_eq!(descriptor.runtime, RuntimeAvailability::Supported);
+            assert!(matches!(
+                descriptor.editor.contract(),
+                Some(EditorContract::Configurable { field_count: 1.. })
+            ));
+            assert!(editor_route_recognizes(&action, editor));
+            assert!(!action_details(&action).contains("clipboard_editor_private_sentinel"));
+        }
+    }
 
     #[test]
     fn text_details_distinguish_type_and_paste() {

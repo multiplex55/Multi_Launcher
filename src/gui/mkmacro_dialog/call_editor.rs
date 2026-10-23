@@ -13,7 +13,7 @@ pub(super) struct CallUiOutcome {
     pub open_target: Option<u64>,
 }
 
-fn source_ui(
+pub(super) fn source_ui(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash + Copy + std::fmt::Debug,
     source: &mut MkValueSource,

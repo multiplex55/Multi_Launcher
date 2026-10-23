@@ -2947,9 +2947,8 @@ mod tests {
             MkAction::SetVariable { .. } | MkAction::UnsetVariable { .. } => {
                 (EditorKind::Variable, true)
             }
-            MkAction::ReadClipboardText { .. } | MkAction::WriteClipboardText(_) => {
-                (EditorKind::General, false)
-            }
+            MkAction::ReadClipboardText { .. } => (EditorKind::ReadClipboardText, true),
+            MkAction::WriteClipboardText(_) => (EditorKind::WriteClipboardText, true),
             MkAction::PromptInput(_) => (EditorKind::PromptInput, true),
             MkAction::Else
             | MkAction::EndIf
@@ -3016,7 +3015,7 @@ mod tests {
                 MkAction::ReadClipboardText {
                     variable: "clipboard_text".into(),
                 },
-                "Clipboard text → clipboard_text (runtime unavailable)",
+                "Read text → clipboard_text",
             ),
             (
                 MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
@@ -3024,7 +3023,7 @@ mod tests {
                         name: "clipboard_text".into(),
                     },
                 }),
-                "Variable clipboard_text (runtime unavailable)",
+                "Variable clipboard_text",
             ),
         ]
     }
@@ -3131,7 +3130,7 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_action_model_loaded_rows_are_named_redacted_and_unavailable() {
+    fn clipboard_action_editor_loaded_rows_are_named_redacted_and_supported() {
         let sentinel = "private_clipboard_sentinel";
         let action = MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
             source: MkValueSource::Literal(MkValue::String(sentinel.into())),
@@ -3139,18 +3138,42 @@ mod tests {
         assert_eq!(action_catalog::action_name(&action), "Write Clipboard Text");
         assert_eq!(
             action_catalog::editor_for_action(&action),
-            action_catalog::EditorKind::General
+            action_catalog::EditorKind::WriteClipboardText
         );
-        assert!(!action_catalog::editor_route_recognizes(
+        assert!(action_catalog::editor_route_recognizes(
             &action,
-            action_catalog::EditorKind::General
+            action_catalog::EditorKind::WriteClipboardText
         ));
         assert!(!action_catalog::action_details(&action).contains(sentinel));
         assert!(!format!("{action:?}").contains(sentinel));
-        assert!(!action_catalog::descriptors().iter().any(|descriptor| {
+        assert!(action_catalog::descriptors().iter().any(|descriptor| {
             action_catalog::descriptor_name_matches_action(descriptor, &action)
         }));
-        assert!(!crate::mkmacro::executor::has_runtime_support(&action));
+        assert!(crate::mkmacro::executor::has_runtime_support(&action));
+        assert!(matches!(
+            action_catalog::draft_validation_contract(&action),
+            action_catalog::DraftValidationContract::CommitReady
+        ));
+
+        let read = MkAction::ReadClipboardText {
+            variable: "clipboard_text".into(),
+        };
+        assert_eq!(
+            action_catalog::editor_for_action(&read),
+            action_catalog::EditorKind::ReadClipboardText
+        );
+        assert!(action_catalog::editor_route_recognizes(
+            &read,
+            action_catalog::EditorKind::ReadClipboardText
+        ));
+        assert!(action_catalog::descriptors().iter().any(|descriptor| {
+            action_catalog::descriptor_name_matches_action(descriptor, &read)
+        }));
+        assert!(crate::mkmacro::executor::has_runtime_support(&read));
+        assert!(matches!(
+            action_catalog::draft_validation_contract(&read),
+            action_catalog::DraftValidationContract::CommitReady
+        ));
     }
 
     #[test]

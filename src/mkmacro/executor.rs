@@ -5,14 +5,14 @@ use super::ocr::{
     search_document,
 };
 use super::{
-    CapturedRegion, Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkDelayMode,
-    MkExecutionPlan, MkFileCollisionPolicy, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload,
-    MkImageRef, MkKey, MkMacroStore, MkMouseButton, MkMouseScrollAxis, MkNotificationDuration,
-    MkNotificationKind, MkNotifyPayload, MkPlaySoundPayload, MkPlayback, MkPoint, MkProcessPayload,
-    MkPromptInputPayload, MkScreenshotFormat, MkTextPayload, MkUiPayload, MkValue, MkWaitOptions,
-    MkWindowMatcher, MkWindowMoveResizePayload, MkWindowPayload, MkWindowState, PromptBackend,
-    PromptRequest, PromptResponse, RuntimeVariables, ScreenCaptureBackend, ScreenRect,
-    SearchRegion, interpolate,
+    CapturedRegion, Jump, MkAction, MkCompareOp, MkCompiledProgram, MkCondition,
+    MkCoordinateTarget, MkDelayMode, MkExecutionPlan, MkFileCollisionPolicy, MkImageNotFoundPolicy,
+    MkImageOutputs, MkImagePayload, MkImageRef, MkKey, MkMacroStore, MkMouseButton,
+    MkMouseScrollAxis, MkNotificationDuration, MkNotificationKind, MkNotifyPayload,
+    MkPlaySoundPayload, MkPlayback, MkPoint, MkProcessPayload, MkPromptInputPayload,
+    MkScreenshotFormat, MkTextPayload, MkUiPayload, MkValue, MkWaitOptions, MkWindowMatcher,
+    MkWindowMoveResizePayload, MkWindowPayload, MkWindowState, PromptBackend, PromptRequest,
+    PromptResponse, RuntimeVariables, ScreenCaptureBackend, ScreenRect, SearchRegion, interpolate,
 };
 use rand::RngExt;
 use std::{
@@ -23,6 +23,41 @@ use std::{
     sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
+
+pub(crate) fn program_contains_clipboard_actions(program: &MkCompiledProgram) -> bool {
+    let mut pending = vec![program.root_macro_id];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(macro_id) = pending.pop() {
+        if !visited.insert(macro_id) {
+            continue;
+        }
+        let Some(plan) = program.plan(macro_id) else {
+            continue;
+        };
+        if plan_contains_clipboard_actions(plan) {
+            return true;
+        }
+        pending.extend(plan.instructions.iter().filter_map(|instruction| {
+            (instruction.step.enabled)
+                .then_some(&instruction.step.action)
+                .and_then(|action| match action {
+                    MkAction::CallMacro(call) => Some(call.macro_id),
+                    _ => None,
+                })
+        }));
+    }
+    false
+}
+
+pub(crate) fn plan_contains_clipboard_actions(plan: &MkExecutionPlan) -> bool {
+    plan.instructions.iter().any(|instruction| {
+        instruction.step.enabled
+            && matches!(
+                &instruction.step.action,
+                MkAction::ReadClipboardText { .. } | MkAction::WriteClipboardText(_)
+            )
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticKind {
@@ -781,12 +816,12 @@ impl ClipboardBackend for ProductionClipboard {
     fn snapshot_text(&self) -> ExecResult<String> {
         arboard::Clipboard::new()
             .and_then(|mut c| c.get_text())
-            .map_err(|e| clipboard_error("snapshot", e))
+            .map_err(|e| clipboard_error("read text", e))
     }
     fn set_text(&self, text: &str) -> ExecResult {
         arboard::Clipboard::new()
             .and_then(|mut c| c.set_text(text.to_owned()))
-            .map_err(|e| clipboard_error("set_text", e))
+            .map_err(|e| clipboard_error("write text", e))
     }
     fn set_image(&self, frame: &CapturedRegion) -> ExecResult {
         let data = arboard::ImageData {
@@ -799,13 +834,66 @@ impl ClipboardBackend for ProductionClipboard {
             .map_err(|e| clipboard_error("set_image", e))
     }
 }
-fn clipboard_error(operation: &'static str, error: impl fmt::Display) -> ExecutionDiagnostic {
+fn clipboard_error(operation: &'static str, error: arboard::Error) -> ExecutionDiagnostic {
+    let (reason, message) = match error {
+        arboard::Error::ContentNotAvailable => {
+            ("content_unavailable", "clipboard content is unavailable")
+        }
+        arboard::Error::ClipboardNotSupported => (
+            "unsupported",
+            "clipboard access is not supported by this system",
+        ),
+        arboard::Error::ClipboardOccupied => ("busy", "clipboard is currently in use"),
+        arboard::Error::ConversionFailure => (
+            "conversion_failed",
+            "clipboard content could not be converted",
+        ),
+        // `Unknown.description` may include OS or provider details. Keep it
+        // out of diagnostics and Debug output because a provider can include
+        // clipboard content in that string.
+        _ => ("unknown", "clipboard operation could not be completed"),
+    };
     ExecutionDiagnostic::new(
         DiagnosticKind::Backend,
-        format!("clipboard {operation} failed: {error}"),
+        format!("clipboard {operation} failed: {message}"),
     )
     .context("backend", "clipboard")
     .context("operation", operation)
+    .context("clipboard_reason", reason)
+}
+
+fn safe_clipboard_backend_error(
+    operation: &'static str,
+    error: ExecutionDiagnostic,
+) -> ExecutionDiagnostic {
+    let clipboard_reason = match error.context.get("clipboard_reason").map(String::as_str) {
+        Some("content_unavailable") => Some("content_unavailable"),
+        Some("unsupported") => Some("unsupported"),
+        Some("busy") => Some("busy"),
+        Some("conversion_failed") => Some("conversion_failed"),
+        Some("unknown") => Some("unknown"),
+        _ if error.kind == DiagnosticKind::UnsupportedOperation => Some("backend_unsupported"),
+        _ => None,
+    };
+    let reason = match clipboard_reason {
+        Some("content_unavailable") => "clipboard content is unavailable",
+        Some("unsupported") => "clipboard access is not supported by this system",
+        Some("backend_unsupported") => "clipboard access is not supported by this backend",
+        Some("busy") => "clipboard is currently in use",
+        Some("conversion_failed") => "clipboard content could not be converted",
+        Some("unknown") => "clipboard operation could not be completed",
+        // Injected or future backends are not trusted to keep error text free
+        // of payloads. Preserve their error kind, but replace their message
+        // and context with fixed, payload-free diagnostics.
+        _ => "clipboard operation could not be completed",
+    };
+    let diagnostic = ExecutionDiagnostic::new(
+        error.kind,
+        format!("clipboard {operation} failed: {reason}"),
+    )
+    .context("backend", "clipboard")
+    .context("operation", operation);
+    diagnostic.context("clipboard_reason", clipboard_reason.unwrap_or("unknown"))
 }
 
 /// A text-only clipboard transaction. Drop is a last-resort restoration path;
@@ -4316,11 +4404,32 @@ impl Executor {
                 DiagnosticKind::InvalidPlan,
                 "Reusable action bypassed the frame engine",
             )),
-            MkAction::ReadClipboardText { .. } | MkAction::WriteClipboardText(_) => {
-                Err(ExecutionDiagnostic::new(
-                    DiagnosticKind::UnsupportedOperation,
-                    "Clipboard text actions are not available in this runtime",
-                ))
+            MkAction::ReadClipboardText { variable } => {
+                // Check cancellation at the side-effect boundary as well as
+                // instruction entry, then assign only after a complete read.
+                self.control.checkpoint()?;
+                let text = self
+                    .backends
+                    .clipboard
+                    .snapshot_text()
+                    .map_err(|error| safe_clipboard_backend_error("read text", error))?;
+                v.insert(variable.clone(), MkValue::String(text));
+                Ok(())
+            }
+            MkAction::WriteClipboardText(payload) => {
+                let text = super::variables::resolve_clipboard_text_source(&payload.source, v)
+                    .map_err(|error| {
+                        ExecutionDiagnostic::new(DiagnosticKind::TypeMismatch, error.safe_message())
+                            .context("backend_operation", "write clipboard text")
+                            .context("macro_id", macro_id.to_string())
+                    })?;
+                // Resolve and type-check before the last cancellation check;
+                // publishing is one direct write, never a temporary paste.
+                self.control.checkpoint()?;
+                self.backends
+                    .clipboard
+                    .set_text(&text)
+                    .map_err(|error| safe_clipboard_backend_error("write text", error))
             }
             MkAction::KeyDown(k) => g.down_key(k),
             MkAction::KeyUp(k) => g.up_key(k),
@@ -6037,6 +6146,7 @@ mod notification_sound_tests {
         MkErrorPolicy, MkMacro, MkNotifyPayload, MkPlaySoundPayload, MkRetry, MkStep, MkTextMode,
         MkValueSource, compile,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
 
     struct SchedulingSoundBackend(Mutex<mpsc::Sender<String>>);
@@ -6316,42 +6426,412 @@ mod notification_sound_tests {
         assert_eq!(fake.events(), vec!["text:following step"]);
     }
 
+    #[derive(Default)]
+    struct ClipboardProbe {
+        text: Mutex<String>,
+        reads: AtomicUsize,
+        write_attempts: AtomicUsize,
+        writes: Mutex<Vec<String>>,
+        read_error: Mutex<Option<ExecutionDiagnostic>>,
+        write_error: Mutex<Option<ExecutionDiagnostic>>,
+    }
+
+    impl ClipboardBackend for ClipboardProbe {
+        fn snapshot_text(&self) -> ExecResult<String> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if let Some(error) = self.read_error.lock().unwrap().take() {
+                return Err(error);
+            }
+            Ok(self.text.lock().unwrap().clone())
+        }
+
+        fn set_text(&self, text: &str) -> ExecResult {
+            self.write_attempts.fetch_add(1, Ordering::SeqCst);
+            if let Some(error) = self.write_error.lock().unwrap().take() {
+                return Err(error);
+            }
+            self.writes.lock().unwrap().push(text.to_owned());
+            *self.text.lock().unwrap() = text.to_owned();
+            Ok(())
+        }
+    }
+
+    fn clipboard_executor(
+        fake: &Arc<FakeBackend>,
+        clipboard: Arc<ClipboardProbe>,
+        control: Arc<RunControl>,
+    ) -> Executor {
+        let mut backends = fake.clone().backends();
+        backends.clipboard = clipboard;
+        Executor::new(backends, control)
+    }
+
+    fn clipboard_step(id: u64, action: MkAction) -> MkStep {
+        MkStep {
+            id,
+            action,
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            metadata: Default::default(),
+        }
+    }
+
+    fn clipboard_plan(steps: Vec<MkStep>) -> MkExecutionPlan {
+        compile(&MkMacro {
+            signature: Default::default(),
+            id: 707,
+            name: "clipboard runtime test".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: MkPlayback::default(),
+            steps,
+        })
+        .unwrap()
+    }
+
     #[test]
-    fn clipboard_action_policy_runtime_fails_closed_without_backend_or_variable_effects() {
+    fn clipboard_action_runtime_reads_and_writes_exact_text_once() {
         let fake = Arc::new(FakeBackend::default());
-        let mut variables =
-            RuntimeVariables::from([("existing".into(), MkValue::String("preserved".into()))]);
-        let original = variables.clone();
-        let mut guard = InputCleanupGuard::new(fake.clone());
+        let clipboard = Arc::new(ClipboardProbe {
+            text: Mutex::new("雪\n${literal} — café".into()),
+            ..Default::default()
+        });
         let control = Arc::new(RunControl::default());
         control.reset();
-        let executor = Executor::new(fake.clone().backends(), control);
-        let actions = [
-            MkAction::ReadClipboardText {
-                variable: "read_value".into(),
-            },
+        let executor = clipboard_executor(&fake, clipboard.clone(), control);
+        let mut variables = RuntimeVariables::from([(
+            "write_value".into(),
+            MkValue::String("变量\nraw ${literal}".into()),
+        )]);
+        let mut guard = InputCleanupGuard::new(fake.clone());
+
+        let read = MkAction::ReadClipboardText {
+            variable: "read_value".into(),
+        };
+        assert!(has_runtime_support(&read));
+        executor
+            .action(7, &read, &MkPlayback::default(), &mut variables, &mut guard)
+            .unwrap();
+        assert_eq!(
+            variables.get("read_value"),
+            Some(&MkValue::String("雪\n${literal} — café".into()))
+        );
+
+        let literal = "literal ${literal}\nsecond line";
+        let write_literal =
             MkAction::WriteClipboardText(crate::mkmacro::MkWriteClipboardTextPayload {
-                source: MkValueSource::Literal(MkValue::String(
-                    "private_clipboard_sentinel".into(),
-                )),
-            }),
-        ];
-        for action in &actions {
-            assert!(!has_runtime_support(action));
+                source: MkValueSource::Literal(MkValue::String(literal.into())),
+            });
+        assert!(has_runtime_support(&write_literal));
+        executor
+            .action(
+                7,
+                &write_literal,
+                &MkPlayback::default(),
+                &mut variables,
+                &mut guard,
+            )
+            .unwrap();
+        let write_variable =
+            MkAction::WriteClipboardText(crate::mkmacro::MkWriteClipboardTextPayload {
+                source: MkValueSource::Variable {
+                    name: "write_value".into(),
+                },
+            });
+        executor
+            .action(
+                7,
+                &write_variable,
+                &MkPlayback::default(),
+                &mut variables,
+                &mut guard,
+            )
+            .unwrap();
+
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *clipboard.writes.lock().unwrap(),
+            vec![literal.to_owned(), "变量\nraw ${literal}".to_owned()]
+        );
+        assert_eq!(*clipboard.text.lock().unwrap(), "变量\nraw ${literal}");
+        // Clipboard actions do not use the input backend for paste or restore.
+        assert!(fake.events().is_empty());
+    }
+
+    #[test]
+    fn clipboard_action_runtime_failures_and_cancellation_preserve_effects() {
+        let fake = Arc::new(FakeBackend::default());
+        let clipboard = Arc::new(ClipboardProbe::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = clipboard_executor(&fake, clipboard.clone(), control.clone());
+        let mut variables =
+            RuntimeVariables::from([("read_value".into(), MkValue::String("preserved".into()))]);
+        let original = variables.clone();
+        let mut guard = InputCleanupGuard::new(fake.clone());
+
+        *clipboard.read_error.lock().unwrap() = Some(
+            ExecutionDiagnostic::new(
+                DiagnosticKind::Backend,
+                "provider private_clipboard_sentinel",
+            )
+            .context("provider_detail", "private_clipboard_sentinel"),
+        );
+        let read = MkAction::ReadClipboardText {
+            variable: "read_value".into(),
+        };
+        let error = executor
+            .action(7, &read, &MkPlayback::default(), &mut variables, &mut guard)
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Backend);
+        assert!(!format!("{error:?}").contains("private_clipboard_sentinel"));
+        assert_eq!(variables, original);
+
+        for (reason, expected) in [
+            (
+                "busy",
+                "clipboard read text failed: clipboard is currently in use",
+            ),
+            (
+                "content_unavailable",
+                "clipboard read text failed: clipboard content is unavailable",
+            ),
+        ] {
+            *clipboard.read_error.lock().unwrap() = Some(
+                ExecutionDiagnostic::new(DiagnosticKind::Backend, "provider detail sentinel")
+                    .context("clipboard_reason", reason),
+            );
+            let error = executor
+                .action(7, &read, &MkPlayback::default(), &mut variables, &mut guard)
+                .unwrap_err();
+            assert_eq!(error.message, expected);
+            assert_eq!(
+                error.context.get("clipboard_reason").map(String::as_str),
+                Some(reason)
+            );
+            assert!(!format!("{error:?}").contains("provider detail sentinel"));
+            assert_eq!(variables, original);
+        }
+
+        let busy = clipboard_error("read text", arboard::Error::ClipboardOccupied);
+        assert_eq!(
+            busy.message,
+            "clipboard read text failed: clipboard is currently in use"
+        );
+        assert_eq!(
+            busy.context.get("clipboard_reason").map(String::as_str),
+            Some("busy")
+        );
+        let nontext = clipboard_error("read text", arboard::Error::ContentNotAvailable);
+        assert_eq!(
+            nontext.message,
+            "clipboard read text failed: clipboard content is unavailable"
+        );
+        assert_eq!(
+            nontext.context.get("clipboard_reason").map(String::as_str),
+            Some("content_unavailable")
+        );
+        let image_content_unavailable =
+            clipboard_error("set_image", arboard::Error::ContentNotAvailable);
+        assert_eq!(
+            image_content_unavailable.message,
+            "clipboard set_image failed: clipboard content is unavailable"
+        );
+        assert!(!image_content_unavailable.message.contains("text"));
+
+        let native_error = clipboard_error(
+            "read text",
+            arboard::Error::Unknown {
+                description: "private_clipboard_sentinel".into(),
+            },
+        );
+        assert!(!format!("{native_error:?}").contains("private_clipboard_sentinel"));
+
+        let write = |source| {
+            MkAction::WriteClipboardText(crate::mkmacro::MkWriteClipboardTextPayload { source })
+        };
+        for (source, expected_message) in [
+            (
+                MkValueSource::Variable {
+                    name: "missing".into(),
+                },
+                "clipboard text source variable is unavailable",
+            ),
+            (
+                MkValueSource::Variable {
+                    name: "number".into(),
+                },
+                "clipboard text source must resolve to a String",
+            ),
+        ] {
+            variables.insert("number".into(), MkValue::Number(5.0));
             let error = executor
                 .action(
                     7,
-                    action,
+                    &write(source),
                     &MkPlayback::default(),
                     &mut variables,
                     &mut guard,
                 )
                 .unwrap_err();
-            assert_eq!(error.kind, DiagnosticKind::UnsupportedOperation);
-            assert!(!error.message.contains("private_clipboard_sentinel"));
-            assert_eq!(variables, original);
+            assert_eq!(error.kind, DiagnosticKind::TypeMismatch);
+            assert_eq!(error.message, expected_message);
         }
+        assert!(clipboard.writes.lock().unwrap().is_empty());
+        assert_eq!(clipboard.write_attempts.load(Ordering::SeqCst), 0);
+
+        let unsupported_fake = Arc::new(FakeBackend::default());
+        let unsupported_control = Arc::new(RunControl::default());
+        unsupported_control.reset();
+        let unsupported_executor = Executor::new(Backends::unsupported(), unsupported_control);
+        let mut unsupported_variables = RuntimeVariables::new();
+        let mut unsupported_guard = InputCleanupGuard::new(unsupported_fake);
+        let unsupported_error = unsupported_executor
+            .action(
+                7,
+                &read,
+                &MkPlayback::default(),
+                &mut unsupported_variables,
+                &mut unsupported_guard,
+            )
+            .unwrap_err();
+        assert_eq!(unsupported_error.kind, DiagnosticKind::UnsupportedOperation);
+        assert!(!format!("{unsupported_error:?}").contains("private_clipboard_sentinel"));
+        assert!(unsupported_variables.is_empty());
+
+        control.stop();
+        let cancelled_read = executor
+            .action(7, &read, &MkPlayback::default(), &mut variables, &mut guard)
+            .unwrap_err();
+        let cancelled_write = executor
+            .action(
+                7,
+                &write(MkValueSource::Literal(MkValue::String("never".into()))),
+                &MkPlayback::default(),
+                &mut variables,
+                &mut guard,
+            )
+            .unwrap_err();
+        assert_eq!(cancelled_read.kind, DiagnosticKind::Cancelled);
+        assert_eq!(cancelled_write.kind, DiagnosticKind::Cancelled);
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 3);
+        assert!(clipboard.writes.lock().unwrap().is_empty());
+        assert_eq!(clipboard.write_attempts.load(Ordering::SeqCst), 0);
         assert!(fake.events().is_empty());
+    }
+
+    #[test]
+    fn clipboard_action_runtime_write_failure_obeys_error_policy_without_publishing() {
+        let fake = Arc::new(FakeBackend::default());
+        let clipboard = Arc::new(ClipboardProbe {
+            text: Mutex::new("unchanged".into()),
+            write_error: Mutex::new(Some(
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    "write failed private_clipboard_sentinel",
+                )
+                .context("provider_detail", "private_clipboard_sentinel"),
+            )),
+            ..Default::default()
+        });
+        let mut backends = fake.clone().backends();
+        backends.clipboard = clipboard.clone();
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::new(backends, control);
+        let mut write = clipboard_step(
+            1,
+            MkAction::WriteClipboardText(crate::mkmacro::MkWriteClipboardTextPayload {
+                source: MkValueSource::Literal(MkValue::String("candidate".into())),
+            }),
+        );
+        write.on_error = MkErrorPolicy::Continue;
+        let plan = clipboard_plan(vec![
+            write,
+            clipboard_step(
+                2,
+                MkAction::Text(MkTextPayload {
+                    text: "continued".into(),
+                    mode: MkTextMode::Type,
+                }),
+            ),
+        ]);
+        let failures = Mutex::new(Vec::new());
+        let result = executor.execute(&plan, ExecutionOptions::normal(), &|event| {
+            if let ExecutionEvent::StepFailed(step_id, error) = event {
+                failures.lock().unwrap().push((step_id, error));
+            }
+        });
+
+        assert!(result.is_ok(), "Continue should allow the following step");
+        assert_eq!(clipboard.write_attempts.load(Ordering::SeqCst), 1);
+        assert!(clipboard.writes.lock().unwrap().is_empty());
+        assert_eq!(*clipboard.text.lock().unwrap(), "unchanged");
+        assert_eq!(fake.events(), vec!["text:continued"]);
+        let failures = failures.into_inner().unwrap();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, 1);
+        assert_eq!(failures[0].1.kind, DiagnosticKind::Backend);
+        assert_eq!(
+            failures[0].1.message,
+            "clipboard write text failed: clipboard operation could not be completed"
+        );
+        assert!(!format!("{:?}", failures[0]).contains("private_clipboard_sentinel"));
+    }
+
+    #[test]
+    fn clipboard_action_runtime_error_policy_controls_following_steps() {
+        for (policy, should_continue) in [
+            (MkErrorPolicy::Stop, false),
+            (MkErrorPolicy::Continue, true),
+        ] {
+            let fake = Arc::new(FakeBackend::default());
+            let clipboard = Arc::new(ClipboardProbe::default());
+            *clipboard.read_error.lock().unwrap() = Some(ExecutionDiagnostic::new(
+                DiagnosticKind::Backend,
+                "private_clipboard_sentinel",
+            ));
+            let mut backends = fake.clone().backends();
+            backends.clipboard = clipboard.clone();
+            let control = Arc::new(RunControl::default());
+            control.reset();
+            let executor = Executor::new(backends, control);
+            let mut read = clipboard_step(
+                1,
+                MkAction::ReadClipboardText {
+                    variable: "text".into(),
+                },
+            );
+            read.on_error = policy;
+            let plan = clipboard_plan(vec![
+                read,
+                clipboard_step(
+                    2,
+                    MkAction::Text(MkTextPayload {
+                        text: "continued".into(),
+                        mode: MkTextMode::Type,
+                    }),
+                ),
+            ]);
+            let result = executor.execute(&plan, ExecutionOptions::normal(), &|_| {});
+            assert_eq!(result.is_ok(), should_continue);
+            assert_eq!(clipboard.reads.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                fake.events(),
+                if should_continue {
+                    vec!["text:continued"]
+                } else {
+                    Vec::new()
+                }
+            );
+            assert!(!format!("{result:?}").contains("private_clipboard_sentinel"));
+        }
     }
 }
 /// Reports whether every condition in the tree has an available runtime
@@ -6378,7 +6858,6 @@ fn has_runtime_support_with_ocr(action: &MkAction, ocr_supported: bool) -> bool 
         | MkAction::UiSelect(_)
         | MkAction::UiFocus(_)
         | MkAction::UiWait(_) => false,
-        MkAction::ReadClipboardText { .. } | MkAction::WriteClipboardText(_) => false,
         MkAction::Notify(_) => cfg!(windows),
         MkAction::WaitUntil { condition, .. } | MkAction::WhileStart { condition } => {
             condition_runtime_support(condition, ocr_supported)
@@ -6389,6 +6868,8 @@ fn has_runtime_support_with_ocr(action: &MkAction, ocr_supported: bool) -> bool 
         | MkAction::KeyPress(_)
         | MkAction::Hotkey(_)
         | MkAction::Text(_)
+        | MkAction::ReadClipboardText { .. }
+        | MkAction::WriteClipboardText(_)
         | MkAction::MouseMove(_)
         | MkAction::MouseDrag(_)
         | MkAction::MouseClick(_)

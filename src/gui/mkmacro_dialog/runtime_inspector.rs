@@ -224,6 +224,7 @@ pub struct RuntimeInspectorViewModel {
     pub breakpoint_pause: bool,
     pub variable_label: String,
     pub snapshot_reason: String,
+    pub value_redaction_notice: Option<&'static str>,
     pub outcome: Option<LastOutcomePresentation>,
     pub run_failure: Option<LastOutcomePresentation>,
     pub variables: VariableGroups,
@@ -339,6 +340,9 @@ impl RuntimeInspectorViewModel {
                 .map(debug_snapshot_reason_description)
                 .unwrap_or("No debug snapshot reason published.")
                 .into(),
+            value_redaction_notice: snapshot.debug_values_redacted.then_some(
+                "Variable values are hidden for runs whose compiled actions include clipboard access. Status and call stack remain available.",
+            ),
             outcome,
             run_failure,
             variables: VariableGroups::from_variables(variables),
@@ -673,6 +677,9 @@ fn render_body(
                 render_outcome(ui, failure);
             }
             ui.small(&view.snapshot_reason);
+            if let Some(notice) = view.value_redaction_notice {
+                ui.small(notice);
+            }
             ui.separator();
             ui.horizontal_wrapped(|ui| {
                 ui.strong(&view.variable_label);
@@ -803,6 +810,21 @@ mod tests {
             revision: 3,
             ..RuntimeSnapshot::default()
         }
+    }
+
+    #[test]
+    fn clipboard_action_runtime_inspector_explains_redaction_while_status_and_call_stack_remain() {
+        let mut snapshot = snapshot();
+        snapshot.state = RuntimeState::Paused;
+        snapshot.debug_values_redacted = true;
+
+        let view = RuntimeInspectorViewModel::from_snapshot(&snapshot, &document());
+
+        let notice = view.value_redaction_notice.unwrap();
+        assert!(notice.contains("clipboard access"));
+        assert!(notice.contains("Status and call stack remain available."));
+        assert_eq!(view.call_stack.len(), 1);
+        assert_eq!(view.status, "Paused");
     }
 
     #[test]
