@@ -14,18 +14,23 @@ const MAX_PICKER_PREVIEW_HEIGHT: f32 = 112.0;
 const MAX_PICKER_PREVIEW_SCROLL_HEIGHT: f32 = 80.0;
 
 fn bounded_picker_text(text: &str, max_chars: usize) -> String {
+    bounded_picker_text_with_status(text, max_chars).0
+}
+
+fn bounded_picker_text_with_status(text: &str, max_chars: usize) -> (String, bool) {
     let mut chars = text.chars();
     let mut bounded = String::new();
     for _ in 0..max_chars {
         let Some(character) = chars.next() else {
-            return bounded;
+            return (bounded, false);
         };
         bounded.push(character);
     }
-    if chars.next().is_some() {
+    let truncated = chars.next().is_some();
+    if truncated {
         bounded.push('…');
     }
-    bounded
+    (bounded, truncated)
 }
 
 fn bounded_picker_excerpt(text: &str, max_chars: usize) -> String {
@@ -1634,6 +1639,15 @@ impl PasteSequenceDialog {
                                 "History item {} · selected preview",
                                 identity.source_index + 1
                             ));
+                            let (preview_text, truncated) =
+                                bounded_picker_text_with_status(text, MAX_PICKER_PREVIEW_CHARS);
+                            let mut header_height = header.rect.height();
+                            if truncated {
+                                let notice = ui.weak(
+                                    "Preview is truncated; Insert references the full history item.",
+                                );
+                                header_height += ui.spacing().item_spacing.y + notice.rect.height();
+                            }
                             egui::ScrollArea::vertical()
                                 .id_salt((
                                     "paste-source-picker-preview",
@@ -1642,15 +1656,9 @@ impl PasteSequenceDialog {
                                     identity.source_index,
                                 ))
                                 .min_scrolled_height(0.0)
-                                .max_height(scroll_height(header.rect.height(), ui))
+                                .max_height(scroll_height(header_height, ui))
                                 .show(ui, |ui| {
-                                    ui.label(
-                                        egui::RichText::new(bounded_picker_text(
-                                            text,
-                                            MAX_PICKER_PREVIEW_CHARS,
-                                        ))
-                                        .code(),
-                                    );
+                                    ui.label(egui::RichText::new(preview_text).code());
                                 });
                         }
                         _ => {
@@ -4557,7 +4565,16 @@ mod tests {
             &["safe"],
             &[],
         )];
-        dialog.history = vec!["picker history text".into()];
+        let history_tail = "owned-history-tail-6f2c0a";
+        let long_history = format!(
+            "History Unicode prefix 🧾\n{}{}",
+            "λ".repeat(MAX_PICKER_PREVIEW_CHARS),
+            history_tail
+        );
+        assert!(long_history.chars().count() > MAX_PICKER_PREVIEW_CHARS);
+        dialog.history = vec!["unrelated history item".into(), long_history.clone()];
+        let refreshed_history = dialog.history.clone();
+        dialog.test_set_picker_source_refresh(None, Some(Ok(refreshed_history)));
         for _ in 0..2 {
             editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
         }
@@ -4577,9 +4594,65 @@ mod tests {
             &ctx,
             &mut app,
             size,
-            "History item 1 · picker history text",
+            "Search this history snapshot",
+        );
+        let history_matches = editor_event_frame(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            vec![egui::Event::Text(history_tail.into())],
+        );
+        assert!(
+            dialog.source_picker.as_ref().unwrap().query == history_tail,
+            "the owned tail query was entered into the history filter"
+        );
+        let long_history_row = format!(
+            "History item 2 · {}",
+            bounded_picker_excerpt(&long_history, 72)
+        );
+        assert!(
+            history_matches
+                .iter()
+                .any(|(text, _)| text == &long_history_row),
+            "searching the distinctive tail finds its bounded, owned history row"
+        );
+        assert_eq!(dialog.test_source_picker_selected_index(), None);
+        editor_click(&mut dialog, &ctx, &mut app, size, &long_history_row);
+        assert_eq!(dialog.test_source_picker_selected_index(), Some(1));
+        let selected_history = editor_reveal_source_picker_actions(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            &long_history_row,
+        );
+        let selected_picker = dialog.layout.source_picker.unwrap();
+        let visible_preview = bounded_picker_text(&long_history, MAX_PICKER_PREVIEW_CHARS);
+        assert!(visible_preview.ends_with('…'));
+        assert!(
+            selected_history.iter().any(|(text, rect)| {
+                selected_picker.preview.intersects(*rect) && text == &visible_preview
+            }),
+            "the selected preview visibly marks its bounded text with an ellipsis"
+        );
+        assert!(selected_history.iter().any(|(text, rect)| {
+            selected_picker.preview.intersects(*rect)
+                && text == "Preview is truncated; Insert references the full history item."
+        }));
+        assert!(
+            selected_history.iter().all(|(text, rect)| {
+                !selected_picker.preview.intersects(*rect) || !text.contains(history_tail)
+            }),
+            "the part beyond the preview cap is not rendered in the preview"
         );
         editor_click(&mut dialog, &ctx, &mut app, size, "Insert selected");
+        assert!(
+            dialog
+                .history
+                .get(1)
+                .is_some_and(|item| item == &long_history)
+        );
         editor_reveal_toolbar(&mut dialog, &ctx, &mut app, size);
         editor_click(&mut dialog, &ctx, &mut app, size, "Add Temporary Text");
         editor_click(
@@ -4601,7 +4674,7 @@ mod tests {
             Step::SnippetRef {
                 alias: "picker-snippet".into(),
             },
-            Step::clipboard_history_reference("picker history text"),
+            Step::clipboard_history_reference(&long_history),
             Step::LiteralText {
                 text: "temporary draft text".into(),
             },
@@ -4618,6 +4691,9 @@ mod tests {
             steps: dialog.draft.steps.clone(),
         };
         let encoded_sequence = serde_json::to_vec(&serialized_sequence).unwrap();
+        let encoded_text = std::str::from_utf8(&encoded_sequence).unwrap();
+        assert!(!encoded_text.contains(history_tail));
+        assert!(!encoded_text.contains(&long_history));
         let decoded_sequence: crate::paste_sequence::Sequence =
             serde_json::from_slice(&encoded_sequence).unwrap();
         assert_eq!(decoded_sequence, serialized_sequence);
@@ -4634,17 +4710,16 @@ mod tests {
             .sequence_playback
             .prepared_preview()
             .expect("the mixed draft is resolved before fake playback starts");
-        assert_eq!(
+        assert!(
             prepared_preview
                 .steps
                 .iter()
                 .map(|step| step.text.as_deref())
-                .collect::<Vec<_>>(),
-            [
-                Some("Resolved snippet text"),
-                Some("picker history text"),
-                Some("temporary draft text"),
-            ],
+                .eq([
+                    Some("Resolved snippet text"),
+                    Some(long_history.as_str()),
+                    Some("temporary draft text"),
+                ]),
             "preflight preserves picker-created resolved text order"
         );
         let picker_snippets = dialog.snippets.clone();
@@ -4669,6 +4744,27 @@ mod tests {
             .started_run()
             .expect("picker-created steps enter the existing fake playback owner");
         assert_eq!(run.mode, crate::paste_sequence::PlaybackMode::Automatic);
+        let playback_now = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        for _ in 1..expected_steps.len() {
+            let _ = app.sequence_playback.tick(&mut platform, playback_now);
+        }
+        let pasted_texts = platform
+            .pasted_values()
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            pasted_texts.iter().copied().eq([
+                "Resolved snippet text",
+                long_history.as_str(),
+                "temporary draft text"
+            ]),
+            "fake playback receives the complete history payload, including its tail"
+        );
+        assert_eq!(
+            app.sequence_playback.status(),
+            crate::paste_sequence::SequencePlaybackStatus::Completed
+        );
         assert!(
             app.paste_sequence_dialog.open,
             "keep-visible playback remains open"

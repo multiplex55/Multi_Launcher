@@ -2295,6 +2295,10 @@ pub(in crate::gui) mod tests {
                 pasted: Vec::new(),
             }
         }
+
+        pub(crate) fn pasted_values(&self) -> &[(isize, String)] {
+            &self.pasted
+        }
     }
 
     fn playback_settings_fixture(app: &LauncherApp) -> Vec<u8> {
