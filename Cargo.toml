@@ -72,6 +72,7 @@ eframe = {
 } # egui-based GUI; preserve Glow instead of enabling the new Wgpu default
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+csv = "1.4"
 fuzzy-matcher = "0.3"
 fst = { version = "0.4", features = ["levenshtein"] }
 open = "5.0"                   # Open files/folders/apps cross-platform

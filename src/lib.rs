@@ -53,9 +53,9 @@ pub mod note_ui_state;
 pub mod notes_markdown;
 pub mod ocr;
 pub mod paste_sequence;
-pub mod performance;
 #[cfg(feature = "perf-harness")]
 pub mod perf_harness;
+pub mod performance;
 pub mod persistence;
 pub mod pinboard;
 pub mod platform;
@@ -75,6 +75,7 @@ pub mod settings_editor;
 mod settings_save;
 pub mod sound;
 pub mod startup;
+pub mod table_utility;
 pub mod text_transform;
 pub(crate) mod thread_reaper;
 pub mod toast_log;
