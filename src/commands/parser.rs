@@ -64,6 +64,37 @@ mod screen_draw_parser_tests {
 }
 
 #[cfg(test)]
+mod brightness_legacy_protocol_tests {
+    use super::*;
+
+    fn action(raw: &str) -> Action {
+        Action {
+            label: raw.into(),
+            desc: String::new(),
+            action: raw.into(),
+            args: None,
+        }
+    }
+
+    #[test]
+    fn brightness_legacy_protocol_preserves_raw_integer_and_dialog() {
+        assert_eq!(
+            parse_action(&action("brightness:dialog")).unwrap(),
+            Command::System(SystemCommand::BrightnessDialog)
+        );
+        assert_eq!(
+            parse_action(&action("brightness:set:50")).unwrap(),
+            Command::System(SystemCommand::Brightness(50_u32))
+        );
+        assert_eq!(
+            parse_action(&action("brightness:set:137")).unwrap(),
+            Command::System(SystemCommand::Brightness(137_u32)),
+            "the legacy wire integer remains a raw u32 even above the plugin's 0–100 input range"
+        );
+    }
+}
+
+#[cfg(test)]
 mod pinboard_parser_tests {
     use super::*;
 

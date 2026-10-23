@@ -1,3 +1,4 @@
+use multi_launcher::commands::{Command, SystemCommand, parse_action};
 use multi_launcher::gui::BRIGHTNESS_QUERIES;
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::brightness::BrightnessPlugin;
@@ -9,6 +10,10 @@ fn search_set_numeric() {
     let results = plugin.search("bright 50");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "brightness:set:50");
+    assert_eq!(
+        parse_action(&results[0]).unwrap(),
+        Command::System(SystemCommand::Brightness(50))
+    );
 }
 
 #[test]
@@ -25,6 +30,14 @@ fn search_plain_bright() {
         results
             .iter()
             .any(|action| action.label.starts_with("Usage: bright"))
+    );
+    let dialog = results
+        .iter()
+        .find(|action| action.action == "brightness:dialog")
+        .unwrap();
+    assert_eq!(
+        parse_action(dialog).unwrap(),
+        Command::System(SystemCommand::BrightnessDialog)
     );
 }
 

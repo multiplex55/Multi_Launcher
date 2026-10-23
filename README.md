@@ -171,6 +171,16 @@ unknown popups, and hidden, clipped, or disabled controls are not hint targets.
 
 ---
 
+### Brightness controls
+
+Type `bright` and choose **edit brightness** to open the named physical-monitor list. Opening performs an initial monitor read; **Refresh** requests an updated list and reading. Each controllable monitor shows its reported percentage and has its own draft slider. Select a value and press that row's **Set** button to change only that monitor. A confirmed Set is followed by a readback and refresh. The dialog does not continuously poll. Unsupported or unavailable monitors are shown without a fabricated brightness percentage. If a Set result is uncertain, refresh before trying another Set.
+
+Some laptop panels, internal displays, USB-C docks, remote displays, and other hardware do not expose the Windows physical-monitor brightness controls. The list reports what the current system can identify and control.
+
+The `bright <0–100>` numeric action remains on its existing legacy command route, which targets all enumerated physical monitors and passes the integer through unchanged. It is distinct from the dialog's per-monitor **Set** action.
+
+---
+
 ## Cookbook examples
 
 ### 1) Power search & launch
