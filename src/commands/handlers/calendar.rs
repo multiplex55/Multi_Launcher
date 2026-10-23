@@ -233,7 +233,8 @@ mod tests {
     use super::*;
     use crate::commands::{
         CalendarCommandHost, CropCommandHost, DialogCommandHost, HeadlessCommandHost,
-        LauncherCommandHost, NoteCommandHost, TodoCommandHost, XmlToolkitCommandHost,
+        LauncherCommandHost, NoteCommandHost, TableUtilityCommandHost, TodoCommandHost,
+        XmlToolkitCommandHost,
     };
 
     #[derive(Default)]
@@ -279,6 +280,9 @@ mod tests {
     }
     impl XmlToolkitCommandHost for Host {
         fn open_xml_toolkit(&mut self) {}
+    }
+    impl TableUtilityCommandHost for Host {
+        fn open_table_utility(&mut self) {}
     }
     impl crate::commands::BatchRenameCommandHost for Host {
         fn open_batch_rename(&mut self) {}

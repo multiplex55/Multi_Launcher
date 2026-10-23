@@ -6,7 +6,8 @@ use crate::commands::handlers::{
     handle_hotfolder, handle_json_utility, handle_launcher, handle_link, handle_mouse_gesture,
     handle_multi_manager, handle_note, handle_ocr, handle_paste_sequence, handle_pinboard,
     handle_query, handle_radial, handle_screen_draw, handle_screenshot, handle_search_replace,
-    handle_simple_dialog, handle_snippet_run, handle_todo, handle_xml_toolkit,
+    handle_simple_dialog, handle_snippet_run, handle_table_utility, handle_todo,
+    handle_xml_toolkit,
 };
 
 #[derive(Debug, Default)]
@@ -43,6 +44,7 @@ impl CommandBus {
             Command::Crop(command) => Ok(handle_crop(host, command)),
             Command::JsonUtility(command) => Ok(handle_json_utility(host, command)),
             Command::XmlToolkit(command) => Ok(handle_xml_toolkit(host, *command)),
+            Command::TableUtility(command) => Ok(handle_table_utility(host, *command)),
             Command::BatchRename(command) => Ok(handle_batch_rename(host, *command)),
             Command::SearchReplace(command) => Ok(handle_search_replace(host, *command)),
             Command::HotFolder(command) => handle_hotfolder(host, *command),
@@ -149,6 +151,7 @@ mod tests {
         ocr_requests: usize,
         json_utility_intents: Vec<crate::commands::JsonUtilityIntent>,
         xml_toolkit_opens: usize,
+        table_utility_opens: usize,
         batch_rename_opens: usize,
         search_replace_opens: usize,
         hotfolder_commands: Vec<crate::commands::HotFolderCommand>,
@@ -419,6 +422,11 @@ mod tests {
     impl crate::commands::XmlToolkitCommandHost for FakeHost {
         fn open_xml_toolkit(&mut self) {
             self.xml_toolkit_opens += 1;
+        }
+    }
+    impl crate::commands::TableUtilityCommandHost for FakeHost {
+        fn open_table_utility(&mut self) {
+            self.table_utility_opens += 1;
         }
     }
     impl crate::commands::BatchRenameCommandHost for FakeHost {
@@ -840,6 +848,36 @@ mod tests {
         assert_eq!(outcome.results, crate::commands::ResultsPolicy::Keep);
         assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
         assert_eq!(outcome.history, HistoryPolicy::Skip);
+    }
+
+    #[test]
+    fn table_command_opens_once_through_typed_host_and_requires_gui_headlessly() {
+        let mut host = FakeHost::default();
+        let outcome = CommandBus
+            .dispatch(
+                &invocation(Command::TableUtility(
+                    crate::commands::TableUtilityCommand::Open,
+                )),
+                &mut host,
+            )
+            .expect("typed Table Utility command");
+
+        assert_eq!(host.table_utility_opens, 1);
+        assert_eq!(host.headless_calls, 0);
+        assert_eq!(outcome, crate::commands::CommandOutcome::default());
+
+        let action = Action {
+            label: "Open Table Utility".into(),
+            desc: String::new(),
+            action: "table:open".into(),
+            args: None,
+        };
+        let error = crate::commands::headless::execute(
+            Command::TableUtility(crate::commands::TableUtilityCommand::Open),
+            &action,
+        )
+        .expect_err("headless callers cannot open a window");
+        assert!(error.to_string().contains("require the launcher interface"));
     }
 
     #[test]

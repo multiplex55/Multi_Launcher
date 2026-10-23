@@ -19,7 +19,7 @@ pub use host::{
     LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost,
     OcrCommandHost, PinboardCommandHost, RadialCommandHost, ScreenDrawCommandHost,
     ScreenshotCommandHost, ScreenshotCommandResult, SearchReplaceCommandHost, SnippetPromptIntent,
-    TodoCommandHost, XmlToolkitCommandHost,
+    TableUtilityCommandHost, TodoCommandHost, XmlToolkitCommandHost,
 };
 pub use model::*;
 pub use outcome::*;

@@ -24,6 +24,7 @@ mod screen_draw;
 mod screenshot;
 mod search_replace;
 mod snippet_run;
+mod table_utility;
 mod todo;
 mod xml_toolkit;
 
@@ -53,5 +54,6 @@ pub(crate) use screen_draw::handle_screen_draw;
 pub(crate) use screenshot::handle_screenshot;
 pub(crate) use search_replace::handle_search_replace;
 pub(crate) use snippet_run::handle_snippet_run;
+pub(crate) use table_utility::handle_table_utility;
 pub(crate) use todo::handle_todo;
 pub(crate) use xml_toolkit::handle_xml_toolkit;

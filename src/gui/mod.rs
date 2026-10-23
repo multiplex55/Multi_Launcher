@@ -78,6 +78,7 @@ mod shell_cmd_dialog;
 mod snippet_dialog;
 mod snippet_prompt_dialog;
 mod state;
+mod table_utility_dialog;
 mod tempfile_alias_dialog;
 mod tempfile_dialog;
 pub mod theme;
@@ -163,6 +164,7 @@ pub use screenshot_editor::{
 };
 pub use shell_cmd_dialog::ShellCmdDialog;
 pub use snippet_dialog::SnippetDialog;
+pub use table_utility_dialog::TableUtilityDialogState;
 pub use tempfile_alias_dialog::TempfileAliasDialog;
 pub use tempfile_dialog::TempfileDialog;
 pub use theme_settings_dialog::ThemeSettingsDialogState;
@@ -719,6 +721,7 @@ pub enum Panel {
     MultiManagerDialog,
     MultiManagerSettingsDialog,
     RadialEditor,
+    TableUtilityDialog,
 }
 
 impl Panel {
@@ -763,6 +766,7 @@ impl Panel {
             Self::BatchRenameDialog => "Batch Renamer",
             Self::SearchReplaceDialog => "Search and Replace",
             Self::XmlToolkitDialog => "XML Toolkit",
+            Self::TableUtilityDialog => "Table Utility",
             Self::QrDialog => "QR Generator",
             Self::ConvertPanel => "Converter",
             Self::VolumeDialog => "Volume",
@@ -824,6 +828,7 @@ struct PanelStates {
     batch_rename_dialog: bool,
     search_replace_dialog: bool,
     xml_toolkit_dialog: bool,
+    table_utility_dialog: bool,
     qr_dialog: bool,
     convert_panel: bool,
     volume_dialog: bool,
@@ -1131,6 +1136,7 @@ pub struct LauncherApp {
     pub json_utility_dialog: JsonUtilityDialogState,
     pub regex_tester_dialog: RegexTesterDialogState,
     pub xml_toolkit_dialog: XmlToolkitDialogState,
+    pub table_utility_dialog: TableUtilityDialogState,
     pub qr_dialog: QrDialogState,
     pub clipboard_modify_config_diagnostic: Option<String>,
     clipboard_modify_watcher: Option<crate::clipboard_modify::watch::ClipboardModifyWatcher>,
@@ -3319,6 +3325,7 @@ impl LauncherApp {
             json_utility_dialog: JsonUtilityDialogState::default(),
             regex_tester_dialog,
             xml_toolkit_dialog: XmlToolkitDialogState::default(),
+            table_utility_dialog: TableUtilityDialogState::default(),
             qr_dialog: QrDialogState::default(),
             clipboard_modify_config_diagnostic,
             clipboard_modify_watcher,
@@ -3978,7 +3985,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 55] = [
+    const TRACKED_PANELS: [Panel; 56] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4018,6 +4025,7 @@ impl LauncherApp {
         Panel::BatchRenameDialog,
         Panel::SearchReplaceDialog,
         Panel::XmlToolkitDialog,
+        Panel::TableUtilityDialog,
         Panel::QrDialog,
         Panel::ConvertPanel,
         Panel::VolumeDialog,
@@ -4077,6 +4085,7 @@ impl LauncherApp {
             Panel::BatchRenameDialog => self.batch_rename_dialog.open,
             Panel::SearchReplaceDialog => self.search_replace_dialog.open,
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open,
+            Panel::TableUtilityDialog => self.table_utility_dialog.open,
             Panel::QrDialog => self.qr_dialog.open,
             Panel::ConvertPanel => self.convert_panel.open,
             Panel::VolumeDialog => self.volume_dialog.open,
@@ -4327,6 +4336,10 @@ impl LauncherApp {
             Panel::XmlToolkitDialog => {
                 self.xml_toolkit_dialog.end_session();
                 self.panel_states.xml_toolkit_dialog = false;
+            }
+            Panel::TableUtilityDialog => {
+                self.table_utility_dialog.close();
+                self.panel_states.table_utility_dialog = false;
             }
             Panel::JsonUtilityDialog => {
                 self.json_utility_dialog.close();
@@ -4580,6 +4593,10 @@ impl LauncherApp {
                 self.xml_toolkit_dialog.end_session();
                 self.panel_states.xml_toolkit_dialog = false;
             }
+            Panel::TableUtilityDialog => {
+                self.table_utility_dialog.close();
+                self.panel_states.table_utility_dialog = false;
+            }
             Panel::JsonUtilityDialog => {
                 self.json_utility_dialog.close();
                 self.panel_states.json_utility_dialog = false;
@@ -4706,6 +4723,7 @@ impl LauncherApp {
                 }
             }
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open(),
+            Panel::TableUtilityDialog => self.table_utility_dialog.open(),
             Panel::ConvertPanel => self.convert_panel.open = true,
             Panel::VolumeDialog => self.volume_dialog.ensure_open(),
             Panel::BrightnessDialog => self.brightness_dialog.open = true,
@@ -4852,6 +4870,7 @@ impl LauncherApp {
         check!(batch_rename_dialog, Panel::BatchRenameDialog);
         check!(search_replace_dialog, Panel::SearchReplaceDialog);
         check!(xml_toolkit_dialog, Panel::XmlToolkitDialog);
+        check!(table_utility_dialog, Panel::TableUtilityDialog);
         check!(qr_dialog, Panel::QrDialog);
         check!(convert_panel, Panel::ConvertPanel);
         check!(volume_dialog, Panel::VolumeDialog);

@@ -207,6 +207,9 @@ fn execute_with_external(
         Command::XmlToolkit(_) => {
             anyhow::bail!("XML Toolkit commands require the launcher interface")
         }
+        Command::TableUtility(_) => {
+            anyhow::bail!("Table Utility commands require the launcher interface")
+        }
         Command::BatchRename(_) => {
             anyhow::bail!("Batch Renamer commands require the launcher interface")
         }

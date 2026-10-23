@@ -115,6 +115,10 @@ pub trait XmlToolkitCommandHost {
     fn open_xml_toolkit(&mut self);
 }
 
+pub trait TableUtilityCommandHost {
+    fn open_table_utility(&mut self);
+}
+
 pub trait BatchRenameCommandHost {
     fn open_batch_rename(&mut self);
 }
@@ -317,6 +321,7 @@ pub trait CommandHost:
     + CropCommandHost
     + JsonUtilityCommandHost
     + XmlToolkitCommandHost
+    + TableUtilityCommandHost
     + BatchRenameCommandHost
     + SearchReplaceCommandHost
     + HotFolderCommandHost
@@ -345,6 +350,7 @@ impl<T> CommandHost for T where
         + CropCommandHost
         + JsonUtilityCommandHost
         + XmlToolkitCommandHost
+        + TableUtilityCommandHost
         + BatchRenameCommandHost
         + SearchReplaceCommandHost
         + HotFolderCommandHost

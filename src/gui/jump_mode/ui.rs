@@ -49,10 +49,11 @@ pub(crate) enum NavigationDialogKind {
     RadialDesigner,
     MouseGestureSettings,
     HotkeyDirectory,
+    TableUtility,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 14] = [
+    pub(crate) const ALL: [Self; 15] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -67,6 +68,7 @@ impl NavigationDialogKind {
         Self::RadialDesigner,
         Self::MouseGestureSettings,
         Self::HotkeyDirectory,
+        Self::TableUtility,
     ];
 
     const fn index(self) -> usize {
@@ -85,6 +87,7 @@ impl NavigationDialogKind {
             Self::RadialDesigner => 11,
             Self::MouseGestureSettings => 12,
             Self::HotkeyDirectory => 13,
+            Self::TableUtility => 14,
         }
     }
 
@@ -104,6 +107,7 @@ impl NavigationDialogKind {
             Self::RadialDesigner => "radial-designer",
             Self::MouseGestureSettings => "mouse-gesture-settings",
             Self::HotkeyDirectory => "hotkey-directory",
+            Self::TableUtility => "table-utility",
         }
     }
 
@@ -126,6 +130,7 @@ impl NavigationDialogKind {
             Self::RadialDesigner => return None,
             Self::MouseGestureSettings => egui::Id::new(Some("Mouse Gesture Settings")),
             Self::HotkeyDirectory => egui::Id::new(Some("Hotkey Directory")),
+            Self::TableUtility => egui::Id::new(Some("Table Utility")),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -405,6 +410,7 @@ impl NavigationViewportBinding {
             NavigationOwner::Dialog {
                 kind: NavigationDialogKind::RegexTester
                     | NavigationDialogKind::XmlToolkit
+                    | NavigationDialogKind::TableUtility
                     | NavigationDialogKind::RadialDesigner,
                 ..
             } | NavigationOwner::XmlOverwriteConfirmation { .. }
@@ -3911,6 +3917,9 @@ mod tests {
                         egui::Window::new("XML Toolkit")
                             .id(egui::Id::new("xml_toolkit_embedded_window"))
                             .show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::TableUtility => {
+                        egui::Window::new("Table Utility").show(ctx, |_| {});
                     }
                     NavigationDialogKind::MouseSettings => {
                         egui::Window::new("Mouse Settings").show(ctx, |_| {});

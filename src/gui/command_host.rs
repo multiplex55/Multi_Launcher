@@ -814,6 +814,12 @@ impl XmlToolkitCommandHost for LauncherApp {
     }
 }
 
+impl crate::commands::TableUtilityCommandHost for LauncherApp {
+    fn open_table_utility(&mut self) {
+        self.focus_panel(super::Panel::TableUtilityDialog);
+    }
+}
+
 impl BatchRenameCommandHost for LauncherApp {
     fn open_batch_rename(&mut self) {
         self.batch_rename_dialog.open();

@@ -4051,6 +4051,48 @@ impl LauncherApp {
         );
     }
 
+    fn show_table_utility(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        first_ui_pass: bool,
+        owner_transition_pending: bool,
+    ) {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let instance = match owner {
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::TableUtility,
+                instance,
+            } => Some(instance),
+            _ => None,
+        };
+        let native_owner_current = !owner_transition_pending
+            && self.table_utility_native_ui_owner_current(ctx, root_visible);
+        let scope = instance
+            .filter(|_| native_owner_current && self.jump_mode_enabled())
+            .and_then(|instance| {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("table-utility", instance),
+                    crate::gui::jump_mode::TargetGeneration(instance),
+                    "table-utility/form",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )
+            });
+        self.table_utility_dialog.show_with_jump_mode(
+            ctx,
+            scope.as_ref(),
+            instance,
+            owner,
+            self.native_ui_application_input_allowed(ctx),
+            native_owner_current,
+            first_ui_pass,
+        );
+    }
+
     fn jump_mode_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         self.jump_mode_enabled()
             && self.native_ui_host_input_allowed(ctx, root_visible)
@@ -4801,6 +4843,29 @@ impl LauncherApp {
             && visible_top_middle_layer(ctx) == Some(layer)
     }
 
+    fn table_utility_native_ui_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+
+        if !self.table_utility_dialog.open || !self.native_ui_host_input_allowed(ctx, root_visible)
+        {
+            return false;
+        }
+        let parent_is_current = NavigationDialogKind::TableUtility
+            .layer_id()
+            .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer));
+        if egui::Popup::is_any_open(ctx) {
+            return self.table_utility_dialog.owned_combo_popup_is_current(ctx);
+        }
+        parent_is_current
+            || self
+                .table_utility_dialog
+                .overwrite_confirmation_layer_is_current(ctx)
+    }
+
     fn snippet_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
 
@@ -4859,6 +4924,7 @@ impl LauncherApp {
                         | super::Panel::JsonUtilityDialog
                         | super::Panel::RegexTesterDialog
                         | super::Panel::XmlToolkitDialog
+                        | super::Panel::TableUtilityDialog
                         | super::Panel::MouseSettingsDialog
                         | super::Panel::MouseGesturesDialog
                         | super::Panel::MouseGestureSettingsDialog
@@ -4930,6 +4996,10 @@ impl LauncherApp {
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::XmlToolkit,
                 self.xml_toolkit_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::TableUtility,
+                self.table_utility_dialog.open,
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::MouseSettings,
@@ -6325,6 +6395,82 @@ impl LauncherApp {
                     }
                 }
 
+                let table_utility_escape_handled = if first_ui_pass
+                    && !action_sheet_blocks_launcher_input
+                    && !owner_transition_pending
+                    && !jump_session_escape_preempted
+                    && self.jump_mode_ui.active_session().is_none()
+                    && self.table_utility_dialog.open
+                    && !egui::Popup::is_any_open(&ctx)
+                    && ctx.input(|input| input.key_pressed(egui::Key::Escape))
+                {
+                    let native_owner = self.table_utility_native_ui_owner_current(
+                        &ctx,
+                        frame_logic.should_be_visible,
+                    );
+                    let exact_confirmation_owner = self.native_ui_host_input_allowed(
+                        &ctx,
+                        frame_logic.should_be_visible,
+                    ) && self
+                        .table_utility_dialog
+                        .overwrite_confirmation_layer_is_current(&ctx);
+                    let escaped_confirmation = exact_confirmation_owner
+                        && self
+                            .table_utility_dialog
+                            .cancel_overwrite_confirmation();
+                    let table_layer = crate::gui::jump_mode::ui::NavigationDialogKind::TableUtility
+                        .layer_id();
+                    let exact_table_owner = table_layer.is_some_and(|layer| {
+                        crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx) == Some(layer)
+                            && crate::gui::jump_mode::ui::focused_response_layer(&ctx)
+                                .is_none_or(|focused| focused == layer)
+                    });
+                    if escaped_confirmation {
+                        let modifiers = ctx.input(|input| {
+                            input.events.iter().rev().find_map(|event| match event {
+                                egui::Event::Key {
+                                    key: egui::Key::Escape,
+                                    pressed: true,
+                                    modifiers,
+                                    ..
+                                } => Some(*modifiers),
+                                _ => None,
+                            })
+                        });
+                        if let Some(modifiers) = modifiers {
+                            ctx.input_mut(|input| {
+                                input.consume_key(modifiers, egui::Key::Escape)
+                            });
+                        }
+                        true
+                    } else if exact_table_owner
+                        && native_owner
+                        && self.close_front_dialog()
+                    {
+                        let modifiers = ctx.input(|input| {
+                            input.events.iter().rev().find_map(|event| match event {
+                                egui::Event::Key {
+                                    key: egui::Key::Escape,
+                                    pressed: true,
+                                    modifiers,
+                                    ..
+                                } => Some(*modifiers),
+                                _ => None,
+                            })
+                        });
+                        if let Some(modifiers) = modifiers {
+                            ctx.input_mut(|input| {
+                                input.consume_key(modifiers, egui::Key::Escape)
+                            });
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
                 let paste_picker_escape_handled = if first_ui_pass
                     && !action_sheet_blocks_launcher_input
                     && !owner_transition_pending
@@ -6371,7 +6517,8 @@ impl LauncherApp {
                     false
                 };
 
-                if !paste_picker_escape_handled
+                if !table_utility_escape_handled
+                    && !paste_picker_escape_handled
                     && first_ui_pass
                     && !action_sheet_blocks_launcher_input
                     && Self::launcher_escape_handling_enabled(
@@ -8641,6 +8788,12 @@ impl LauncherApp {
         self.hash_generator_dialog.show(&ctx);
         self.show_regex_tester(&ctx, frame_logic.should_be_visible);
         self.show_xml_toolkit(&ctx, frame_logic.should_be_visible);
+        self.show_table_utility(
+            &ctx,
+            frame_logic.should_be_visible,
+            first_ui_pass,
+            owner_transition_pending,
+        );
         self.render_hotfolder_manager(&ctx, first_ui_pass);
         #[cfg(feature = "qa-framebuffer-capture")]
         if self.qa_framebuffer_needs_qr_observation() {
@@ -9161,6 +9314,7 @@ impl eframe::App for LauncherApp {
         self.hotfolder_runtime.shutdown_and_reap();
         self.hotfolder_runtime.join_reaper();
         self.xml_toolkit_dialog.shutdown();
+        self.table_utility_dialog.shutdown();
         self.hash_generator_dialog.shutdown();
         self.shutdown_batch_rename_scanner();
         self.shutdown_search_replace_runtime();
@@ -27466,6 +27620,173 @@ mod tests {
         app.run_root_frame_for_test(ctx, actual_query_input(true), false)
             .0
             .drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn table_dialog_jump_focus_does_not_paste_and_escape_closes_after_jump_cancel() {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        #[derive(Clone, Default)]
+        struct ClipboardProbe {
+            reads: Arc<AtomicUsize>,
+        }
+        impl crate::clipboard_modify::clipboard::ClipboardBackend for ClipboardProbe {
+            fn read_text(
+                &self,
+            ) -> Result<String, crate::clipboard_modify::clipboard::ClipboardError> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                Ok("clipboard must remain untouched".into())
+            }
+
+            fn write_text(
+                &self,
+                _text: &str,
+            ) -> Result<(), crate::clipboard_modify::clipboard::ClipboardError> {
+                Ok(())
+            }
+        }
+
+        let context = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&context, Vec::new());
+        let clipboard = ClipboardProbe::default();
+        app.table_utility_dialog
+            .set_clipboard_backend_for_test(Arc::new(clipboard.clone()));
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&context, &mut app);
+        crate::commands::TableUtilityCommandHost::open_table_utility(&mut app);
+        for _ in 0..3 {
+            run_dialog_frame(&context, &mut app);
+        }
+
+        let instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::TableUtility)
+            .expect("the Table Utility window has a current instance");
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::TableUtility,
+                instance,
+            }
+        );
+        let target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Paste text from the clipboard")
+            .expect("the explicit Paste Text response is registered");
+        let response_id = target.response_id();
+
+        start_actual_root_jump_mode(&context, &mut app);
+        let hint = dialog_hint_for_label(&app, "Paste text from the clipboard");
+        let (output, retained_passes) = app.run_root_frame_for_test(
+            &context,
+            egui::RawInput {
+                events: vec![
+                    egui::Event::Text(hint.to_ascii_lowercase()),
+                    key_press(egui::Key::Enter, egui::Modifiers::NONE),
+                ],
+                ..actual_query_input(true)
+            },
+            true,
+        );
+        output.drop_without_applying_deltas();
+        assert!(
+            retained_passes >= 2,
+            "the explicit discard produced a retained pass"
+        );
+        assert!(
+            context
+                .read_response(response_id)
+                .is_some_and(|response| response.enabled()),
+            "the real Paste response remains enabled after Jump requests focus on the discarded pass"
+        );
+        release_dialog_hint_enter(&context, &mut app);
+        assert_eq!(context.memory(|memory| memory.focused()), Some(response_id));
+        assert!(app.table_utility_dialog.open);
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 0);
+
+        start_actual_root_jump_mode(&context, &mut app);
+        app.run_root_frame_for_test(
+            &context,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(app.table_utility_dialog.open);
+        app.run_root_frame_for_test(
+            &context,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+
+        let overwrite_target = workspace.root().join("table-export.json");
+        std::fs::write(&overwrite_target, b"old output")
+            .expect("create an isolated JSON overwrite target");
+        app.table_utility_dialog
+            .test_prepare_overwrite_confirmation(&context, overwrite_target.clone())
+            .expect("prepare an exact captured overwrite receipt");
+        for _ in 0..3 {
+            run_dialog_frame(&context, &mut app);
+        }
+        assert!(
+            app.table_utility_dialog
+                .overwrite_confirmation_layer_is_current(&context)
+        );
+        app.run_root_frame_for_test(
+            &context,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.table_utility_dialog.open);
+        assert!(
+            !app.table_utility_dialog
+                .overwrite_confirmation_layer_is_current(&context)
+        );
+        assert_eq!(
+            std::fs::read(&overwrite_target).expect("Escape does not replace the destination"),
+            b"old output"
+        );
+        app.set_jump_mode_enabled(false);
+        app.run_root_frame_for_test(
+            &context,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.run_root_frame_for_test(
+            &context,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.table_utility_dialog.open);
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 0);
+        drop(workspace);
     }
 
     fn query_cursor_indices(ctx: &egui::Context) -> (usize, usize) {

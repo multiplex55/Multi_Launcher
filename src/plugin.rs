@@ -64,6 +64,7 @@ use crate::plugins::stopwatch::StopwatchPlugin;
 use crate::plugins::sysinfo::SysInfoPlugin;
 use crate::plugins::system::SystemPlugin;
 use crate::plugins::system_data::SystemDataRuntime;
+use crate::plugins::table_utility::TableUtilityPlugin;
 use crate::plugins::task_manager::TaskManagerPlugin;
 use crate::plugins::tempfile::TempfilePlugin;
 use crate::plugins::text_case::TextCasePlugin;
@@ -919,6 +920,7 @@ impl PluginManager {
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(JsonUtilityPlugin, plugin_settings);
         self.register_with_settings(XmlToolkitPlugin, plugin_settings);
+        self.register_with_settings(TableUtilityPlugin, plugin_settings);
         self.register_with_settings(BatchRenamePlugin, plugin_settings);
         self.register_with_settings(SearchReplacePlugin, plugin_settings);
         self.register_with_settings(HotFolderPlugin, plugin_settings);
@@ -2151,6 +2153,30 @@ mod tests {
             !unrelated_actions
                 .iter()
                 .any(|action| action.action.starts_with("json_utility:"))
+        );
+    }
+
+    #[test]
+    fn table_command_search_respects_enabled_plugin_and_search_capability() {
+        let mut manager = PluginManager::new();
+        manager.register(Box::new(TableUtilityPlugin));
+
+        let enabled = HashSet::from(["table_utility".to_owned()]);
+        let searchable = HashMap::from([("table_utility".to_owned(), vec!["search".to_owned()])]);
+        let actions = manager.search_filtered("table", Some(&enabled), Some(&searchable));
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "table:open");
+
+        assert!(
+            manager
+                .search_filtered("table", Some(&HashSet::new()), Some(&searchable))
+                .is_empty()
+        );
+        let no_search = HashMap::from([("table_utility".to_owned(), Vec::new())]);
+        assert!(
+            manager
+                .search_filtered("table", Some(&enabled), Some(&no_search))
+                .is_empty()
         );
     }
 

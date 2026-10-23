@@ -357,6 +357,20 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
     if s == "xml:open" {
         return Ok(Command::XmlToolkit(XmlToolkitCommand::Open));
     }
+    if s.starts_with("table:") {
+        if s == "table:open" && action.args.is_none() {
+            return Ok(Command::TableUtility(TableUtilityCommand::Open));
+        }
+        return Err(CommandError::new(
+            "table_utility",
+            if action.args.is_some() {
+                "Table Utility commands do not accept a path or content payload"
+            } else {
+                "unknown Table Utility command"
+            },
+        )
+        .with_gui_failure_policy());
+    }
     if s.starts_with("hotfolder:") {
         let command = match (s, action.args.is_none()) {
             ("hotfolder:open", true) => Some(HotFolderCommand::Open),
