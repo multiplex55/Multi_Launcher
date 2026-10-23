@@ -3414,6 +3414,7 @@ impl LauncherApp {
         frame: &mut eframe::Frame,
     ) -> super::track_c_query_observer::GeometryCause {
         self.drain_settings_save(ctx);
+        self.brightness_dialog.runtime_tick(ctx);
         let mut geometry_cause = super::track_c_query_observer::GeometryCause::Other;
         if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
             self.launcher_hwnd = Some(hwnd.0 as usize);
@@ -8816,6 +8817,8 @@ impl LauncherApp {
         vol_dlg.ui(&ctx, self);
         self.volume_dialog = vol_dlg;
         let brightness_section = crate::settings_editor::catalog::SettingsSection::Brightness;
+        let brightness_navigation_first_pass =
+            first_ui_pass && !self.brightness_dialog.awaiting_initial_inventory();
         let brightness_owner_current = self.dedicated_settings_native_ui_owner_current(
             &ctx,
             frame_logic.should_be_visible,
@@ -8826,14 +8829,12 @@ impl LauncherApp {
             frame_logic.should_be_visible,
             &brightness_section,
             brightness_owner_current,
-            first_ui_pass,
+            brightness_navigation_first_pass,
         );
         let _brightness_navigation_scope = brightness_navigation
             .as_ref()
             .map(|observer| observer.install(&ctx));
-        let mut bright_dlg = std::mem::take(&mut self.brightness_dialog);
-        bright_dlg.ui(&ctx, self);
-        self.brightness_dialog = bright_dlg;
+        self.brightness_dialog.ui(&ctx);
         drop(_brightness_navigation_scope);
         if let Some(observer) = brightness_navigation.as_ref() {
             let owner_current = self.dedicated_settings_native_ui_owner_current(
@@ -8841,7 +8842,11 @@ impl LauncherApp {
                 frame_logic.should_be_visible,
                 &brightness_section,
             );
-            self.finish_dedicated_settings_navigation_frame(observer, owner_current, first_ui_pass);
+            self.finish_dedicated_settings_navigation_frame(
+                observer,
+                owner_current,
+                brightness_navigation_first_pass,
+            );
         }
         let mut cpu_dlg = std::mem::take(&mut self.cpu_list_dialog);
         cpu_dlg.ui(&ctx, self);
@@ -9315,6 +9320,18 @@ impl eframe::App for LauncherApp {
         self.hotfolder_runtime.join_reaper();
         self.xml_toolkit_dialog.shutdown();
         self.table_utility_dialog.shutdown();
+        if let Err(failure) = self.brightness_dialog.shutdown() {
+            self.report_error_message(
+                "brightness.shutdown",
+                format!(
+                    "Final monitor cleanup failed: {:?} during {:?} (native_code={:?}, cleanup={:?}).",
+                    failure.kind,
+                    failure.operation,
+                    failure.native_code,
+                    failure.process_cleanup
+                ),
+            );
+        }
         self.hash_generator_dialog.shutdown();
         self.shutdown_batch_rename_scanner();
         self.shutdown_search_replace_runtime();
@@ -39239,9 +39256,10 @@ mod tests {
         ctx.global_style_mut(|style| style.animation_time = 0.0);
         let (workspace, mut app) = root_list_test_app(&ctx, two_results());
         app.test_skip_history_persistence = true;
-        app.brightness_dialog.test_seed_fake_hardware_value(37);
         prepare_settings_cross_owner_root(&ctx, &mut app);
         let committed_settings = persist_cross_owner_test_settings(&app.settings_path);
+        let refresh_requests_before =
+            crate::brightness_service::BRIGHTNESS_QUERIES.load(Ordering::Relaxed);
 
         open_settings_cross_owner_destination(
             &ctx,
@@ -39250,6 +39268,11 @@ mod tests {
             "brightness.level",
         );
         assert!(app.is_brightness_dialog_open());
+        app.brightness_dialog.test_load_preopened_inventory(
+            crate::brightness_service::tests::fake_inventory_for_dialog(
+                crate::brightness_service::tests::FakeServiceMode::MultiMonitorUi,
+            ),
+        );
         let actual_response = wait_for_settings_cross_owner_focus(
             &ctx,
             &mut app,
@@ -39270,13 +39293,462 @@ mod tests {
             ctx.memory(|memory| memory.focused()),
             Some(level_response.id)
         );
-        assert_eq!(app.brightness_dialog.test_hardware_query_count(), 0);
-        assert_eq!(app.brightness_dialog.test_set_action_count(), 0);
+        assert!(!app.brightness_dialog.test_has_service());
+        assert!(
+            app.brightness_dialog
+                .test_rows()
+                .iter()
+                .filter_map(|row| row.set.as_ref())
+                .all(|response| !response.enabled())
+        );
+        assert_eq!(
+            crate::brightness_service::BRIGHTNESS_QUERIES.load(Ordering::Relaxed),
+            refresh_requests_before
+        );
         assert_eq!(
             std::fs::read(&app.settings_path).unwrap(),
             committed_settings
         );
         assert!(app.settings_editor.pending_settings_navigation.is_none());
+        drop(workspace);
+    }
+
+    #[test]
+    fn settings_search_cross_owner_brightness_waits_for_gated_inventory() {
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.test_skip_history_persistence = true;
+        prepare_settings_cross_owner_root(&ctx, &mut app);
+        let committed_settings = persist_cross_owner_test_settings(&app.settings_path);
+        let refresh_requests_before =
+            crate::brightness_service::BRIGHTNESS_QUERIES.load(Ordering::Relaxed);
+
+        let query_id = queue_settings_cross_owner_destination(
+            &ctx,
+            &mut app,
+            "brightness level",
+            "brightness.level",
+        );
+        assert!(app.is_brightness_dialog_open());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(query_id));
+
+        let wake_context = ctx.clone();
+        let wake: crate::brightness_service::BrightnessWakeCallback = Arc::new(move || {
+            wake_context.request_repaint_of(egui::ViewportId::ROOT);
+        });
+        let (service, harness) = crate::brightness_service::tests::fake_service_for_dialog(
+            crate::brightness_service::tests::FakeServiceMode::GateFirstRefresh,
+            wake,
+        );
+        app.brightness_dialog.test_install_service(service);
+        assert!(harness.wait_for_gate());
+        assert_eq!(
+            crate::brightness_service::BRIGHTNESS_QUERIES.load(Ordering::Relaxed),
+            refresh_requests_before + 1,
+            "the fake service accepts exactly one initial Refresh request"
+        );
+        let refresh_requests_after_submit =
+            crate::brightness_service::BRIGHTNESS_QUERIES.load(Ordering::Relaxed);
+        run_settings_cross_owner_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+
+        for _ in 0..8 {
+            run_settings_cross_owner_frame(&ctx, &mut app, Vec::new());
+            assert!(
+                app.settings_editor.pending_settings_navigation.is_some(),
+                "loading discovery pauses the destination focus budget"
+            );
+            assert!(app.brightness_dialog.test_inventory().is_none());
+            assert!(app.brightness_dialog.test_level_response().is_none());
+            assert_eq!(harness.snapshot().set_count, 0);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(query_id));
+        }
+        assert_eq!(
+            crate::brightness_service::BRIGHTNESS_QUERIES.load(Ordering::Relaxed),
+            refresh_requests_after_submit,
+            "loading and focus observation submit no additional monitor requests"
+        );
+
+        harness.release_gate();
+        assert!(harness.wait_for_completed_operation_count(1));
+        let actual_response =
+            wait_for_settings_cross_owner_focus(&ctx, &mut app, "brightness.level").unwrap_or_else(
+                || {
+                    panic!(
+                        "the real Level Slider receives focus after discovery; history={:?}",
+                        app.settings_editor.test_search_navigation_history
+                    )
+                },
+            );
+        let slider = app
+            .brightness_dialog
+            .test_level_response()
+            .expect("loaded inventory exposes its actual Level Slider");
+        assert_eq!(slider.id, actual_response);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(slider.id));
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert_eq!(
+            app.settings_editor
+                .test_search_navigation_history
+                .iter()
+                .filter(|event| {
+                    event.contains("control=brightness.level")
+                        && event.contains("focus_requested=true")
+                })
+                .count(),
+            1,
+            "only the actual loaded Slider response completes this request"
+        );
+        assert_eq!(harness.snapshot().set_count, 0);
+        assert_eq!(
+            crate::brightness_service::BRIGHTNESS_QUERIES.load(Ordering::Relaxed),
+            refresh_requests_after_submit
+        );
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            committed_settings
+        );
+
+        app.brightness_dialog.close();
+        assert!(harness.wait_for_live_sessions(0));
+        for _ in 0..4 {
+            let tick = app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default());
+            drop(tick);
+            if !app.brightness_dialog.test_service_closing() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        app.brightness_dialog.shutdown().unwrap();
+        drop(workspace);
+    }
+
+    #[test]
+    fn settings_search_cross_owner_brightness_close_reopen_retires_loading_request() {
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.test_skip_history_persistence = true;
+        prepare_settings_cross_owner_root(&ctx, &mut app);
+        let committed_settings = persist_cross_owner_test_settings(&app.settings_path);
+
+        let query_id = queue_settings_cross_owner_destination(
+            &ctx,
+            &mut app,
+            "brightness level",
+            "brightness.level",
+        );
+        assert!(app.is_brightness_dialog_open());
+        assert!(app.settings_editor.pending_settings_navigation.is_some());
+
+        let wake_context = ctx.clone();
+        let wake: crate::brightness_service::BrightnessWakeCallback = Arc::new(move || {
+            wake_context.request_repaint_of(egui::ViewportId::ROOT);
+        });
+        let (service, harness) = crate::brightness_service::tests::fake_service_for_dialog(
+            crate::brightness_service::tests::FakeServiceMode::GateFirstRefresh,
+            wake,
+        );
+        app.brightness_dialog.test_install_service(service);
+        assert!(harness.wait_for_gate());
+        assert_eq!(harness.snapshot().operations.len(), 1);
+        run_settings_cross_owner_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..8 {
+            run_settings_cross_owner_frame(&ctx, &mut app, Vec::new());
+            assert!(app.settings_editor.pending_settings_navigation.is_some());
+            assert!(app.brightness_dialog.test_inventory().is_none());
+            assert!(app.brightness_dialog.test_level_response().is_none());
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(query_id));
+            assert_eq!(harness.snapshot().set_count, 0);
+        }
+
+        assert!(app.close_front_dialog());
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(!app.is_brightness_dialog_open());
+        assert!(app.brightness_dialog.test_service_closing());
+
+        // Reopen synchronously before another UI frame: the prior request must
+        // not become eligible for a new dialog lifetime.
+        app.open_brightness_settings_dialog();
+        assert!(app.is_brightness_dialog_open());
+        assert!(app.brightness_dialog.test_service_closing());
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(app.brightness_dialog.test_level_response().is_none());
+
+        harness.release_gate();
+        assert!(harness.wait_for_live_sessions(0));
+        for _ in 0..4 {
+            let tick = app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default());
+            drop(tick);
+            if !app.brightness_dialog.test_service_closing() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(!app.brightness_dialog.test_service_closing());
+        assert!(!app.brightness_dialog.test_has_service());
+        for _ in 0..2 {
+            run_settings_cross_owner_frame(&ctx, &mut app, Vec::new());
+        }
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(app.brightness_dialog.test_level_response().is_none());
+        assert!(
+            app.settings_editor
+                .test_search_navigation_history
+                .iter()
+                .all(|event| !event.contains("control=brightness.level")
+                    || !event.contains("focus_requested=true")),
+            "the closed request cannot focus a later dialog lifetime: {:?}",
+            app.settings_editor.test_search_navigation_history
+        );
+        assert_eq!(harness.snapshot().set_count, 0);
+        let operations = harness.snapshot().operations;
+        assert_eq!(operations.len(), 1, "no request is submitted after reopen");
+        assert_eq!(operations[0].2, "refresh");
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            committed_settings
+        );
+
+        assert!(app.close_front_dialog());
+        app.brightness_dialog.shutdown().unwrap();
+        drop(workspace);
+    }
+
+    #[test]
+    fn settings_search_cross_owner_brightness_takeover_cancels_while_loading() {
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.test_skip_history_persistence = true;
+        prepare_settings_cross_owner_root(&ctx, &mut app);
+
+        let query_id = queue_settings_cross_owner_destination(
+            &ctx,
+            &mut app,
+            "brightness level",
+            "brightness.level",
+        );
+        let wake_context = ctx.clone();
+        let wake: crate::brightness_service::BrightnessWakeCallback = Arc::new(move || {
+            wake_context.request_repaint_of(egui::ViewportId::ROOT);
+        });
+        let (service, harness) = crate::brightness_service::tests::fake_service_for_dialog(
+            crate::brightness_service::tests::FakeServiceMode::GateFirstRefresh,
+            wake,
+        );
+        app.brightness_dialog.test_install_service(service);
+        assert!(harness.wait_for_gate());
+        run_settings_cross_owner_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        for _ in 0..8 {
+            run_settings_cross_owner_frame(&ctx, &mut app, Vec::new());
+            assert!(app.settings_editor.pending_settings_navigation.is_some());
+            assert!(app.brightness_dialog.test_inventory().is_none());
+            assert!(app.brightness_dialog.test_level_response().is_none());
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(query_id));
+        }
+
+        app.confirm_modal.open_custom(
+            "Protected owner fixture",
+            "The pending request stays cancelled.",
+        );
+        run_settings_cross_owner_frame(&ctx, &mut app, Vec::new());
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(
+            app.settings_editor
+                .test_search_navigation_history
+                .iter()
+                .any(|event| event.contains("reason=protected-takeover"))
+        );
+        assert!(
+            app.settings_editor
+                .test_last_dedicated_navigation_focus
+                .is_none()
+        );
+
+        app.confirm_modal.close();
+        harness.release_gate();
+        assert!(harness.wait_for_completed_operation_count(1));
+        for _ in 0..8 {
+            run_settings_cross_owner_frame(&ctx, &mut app, Vec::new());
+        }
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(
+            app.settings_editor
+                .test_last_dedicated_navigation_focus
+                .is_none()
+        );
+        assert_eq!(
+            app.settings_editor
+                .test_search_navigation_history
+                .iter()
+                .filter(|event| {
+                    event.contains("control=brightness.level")
+                        && event.contains("focus_requested=true")
+                })
+                .count(),
+            0,
+            "protected takeover while loading cannot resurrect brightness focus: {:?}",
+            app.settings_editor.test_search_navigation_history
+        );
+        assert_eq!(harness.snapshot().set_count, 0);
+
+        app.brightness_dialog.close();
+        assert!(harness.wait_for_live_sessions(0));
+        for _ in 0..4 {
+            let tick = app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default());
+            drop(tick);
+            if !app.brightness_dialog.test_service_closing() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        app.brightness_dialog.shutdown().unwrap();
+        drop(workspace);
+    }
+
+    #[test]
+    fn brightness_dialog_close_retains_service_until_hidden_cleanup_and_reopen() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        let notifications = Arc::new((Mutex::new((0usize, false)), std::sync::Condvar::new()));
+        let wake_notifications = Arc::clone(&notifications);
+        let wake: crate::brightness_service::BrightnessWakeCallback = Arc::new(move || {
+            let (state, changed) = &*wake_notifications;
+            let mut state = state.lock().unwrap();
+            state.0 += 1;
+            changed.notify_all();
+            if state.0 == 2 {
+                // The second callback is the terminal-cleanup wake. Hold it
+                // briefly to exercise the service's terminal-published / join
+                // not-yet-finished window without delaying native work.
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while !state.1 && std::time::Instant::now() < deadline {
+                    let (next, _) = changed
+                        .wait_timeout(
+                            state,
+                            deadline.saturating_duration_since(std::time::Instant::now()),
+                        )
+                        .unwrap();
+                    state = next;
+                }
+            }
+        });
+
+        app.open_brightness_settings_dialog();
+        let (service, harness) = crate::brightness_service::tests::fake_service_for_dialog(
+            crate::brightness_service::tests::FakeServiceMode::GateShutdown,
+            Arc::clone(&wake),
+        );
+        let reopened_service =
+            crate::brightness_service::tests::fake_service_reusing_dialog_harness(
+                Arc::clone(&harness),
+                wake,
+            );
+        app.brightness_dialog
+            .test_queue_reopen_service(reopened_service);
+        app.brightness_dialog.test_install_service(service);
+        assert!(harness.wait_for_gate());
+
+        app.close_front_dialog();
+        assert!(!app.is_brightness_dialog_open());
+        assert!(app.brightness_dialog.test_service_closing());
+        assert!(harness.wait_for_cleanup());
+        let hidden_tick = app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default());
+        drop(hidden_tick);
+
+        app.open_brightness_settings_dialog();
+        let waiting_tick = app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default());
+        drop(waiting_tick);
+        assert!(app.is_brightness_dialog_open());
+        assert!(app.brightness_dialog.test_service_closing());
+        assert!(app.brightness_dialog.test_has_service());
+        assert_eq!(
+            harness.snapshot().starts,
+            1,
+            "reopen waits for owned cleanup"
+        );
+        assert!(app.brightness_dialog.test_inventory().is_none());
+
+        harness.release_cleanup();
+        assert!(harness.wait_for_live_sessions(0));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let (wake_state, wake_changed) = &*notifications;
+        let mut wake_state = wake_state.lock().unwrap();
+        while wake_state.0 < 2 {
+            let now = std::time::Instant::now();
+            assert!(now < deadline, "shutdown terminal callback is delivered");
+            let (next, timeout) = wake_changed
+                .wait_timeout(wake_state, deadline.saturating_duration_since(now))
+                .unwrap();
+            wake_state = next;
+            assert!(!timeout.timed_out() || wake_state.0 >= 2);
+        }
+        assert!(
+            !wake_state.1,
+            "terminal callback remains gated for this tick"
+        );
+        drop(wake_state);
+        assert!(app.brightness_dialog.test_shutdown_terminal_published());
+
+        let blocked_callback_tick =
+            app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default());
+        drop(blocked_callback_tick);
+        assert!(app.brightness_dialog.test_service_closing());
+        assert!(app.brightness_dialog.test_has_service());
+        assert!(app.brightness_dialog.test_shutdown_terminal_published());
+        {
+            let (wake_state, wake_changed) = &*notifications;
+            wake_state.lock().unwrap().1 = true;
+            wake_changed.notify_all();
+        }
+
+        for _ in 0..4 {
+            let tick = app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default());
+            drop(tick);
+            if !app.brightness_dialog.test_service_closing() {
+                break;
+            }
+            assert!(app.brightness_dialog.test_shutdown_terminal_published());
+            std::thread::yield_now();
+        }
+        assert!(!app.brightness_dialog.test_service_closing());
+        assert!(app.brightness_dialog.test_has_service());
+        assert!(app.brightness_dialog.test_inventory().is_none());
+        assert!(harness.wait_for_operation_count(2));
+        assert!(harness.wait_for_completed_operation_count(1));
+        let loaded_tick = app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default());
+        drop(loaded_tick);
+        assert_eq!(harness.snapshot().starts, 2);
+        assert_eq!(harness.snapshot().set_count, 0);
+        for _ in 0..8 {
+            if app.brightness_dialog.test_inventory().is_some() {
+                break;
+            }
+            std::thread::yield_now();
+            let loaded_tick = app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default());
+            drop(loaded_tick);
+        }
+        assert_eq!(
+            app.brightness_dialog.test_inventory().unwrap().generation,
+            1
+        );
+
+        app.close_front_dialog();
+        app.brightness_dialog.shutdown().unwrap();
+        assert_eq!(harness.snapshot().live_sessions, 0);
         drop(workspace);
     }
 

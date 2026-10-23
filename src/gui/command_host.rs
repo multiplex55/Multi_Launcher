@@ -388,7 +388,7 @@ impl DialogCommandHost for LauncherApp {
     }
 
     fn open_brightness_dialog(&mut self) {
-        self.brightness_dialog.open();
+        self.open_brightness_settings_dialog();
     }
 
     fn open_cpu_list_dialog(&mut self, count: usize) {

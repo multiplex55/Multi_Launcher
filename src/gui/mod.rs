@@ -112,12 +112,12 @@ pub(crate) use state::{AuthoringProviderSearchPurpose, AuthoringProviderTestPayl
 
 pub(crate) const RADIAL_DESIGNER_WINDOW_TITLE: &str = "Radial Designer";
 
+pub use crate::brightness_service::BRIGHTNESS_QUERIES;
 pub use add_action_dialog::AddActionDialog;
 pub use add_bookmark_dialog::AddBookmarkDialog;
 pub use alias_dialog::AliasDialog;
 pub(crate) use batch_rename_dialog::{BatchRenameDialogState, BatchRenameUiCommand};
 pub use bookmark_alias_dialog::BookmarkAliasDialog;
-pub use brightness_dialog::BRIGHTNESS_QUERIES;
 pub use brightness_dialog::BrightnessDialog;
 pub use calendar_event_details::CalendarEventDetails;
 pub use calendar_event_editor::CalendarEventEditor;
@@ -1833,11 +1833,31 @@ impl LauncherApp {
         self.brightness_dialog.open
     }
 
+    pub(crate) fn brightness_settings_control_available(&self) -> Option<bool> {
+        self.brightness_dialog.settings_control_available()
+    }
+
     pub(crate) fn open_brightness_settings_dialog(&mut self) {
-        if !self.brightness_dialog.open {
-            self.brightness_dialog.open();
-        }
+        self.brightness_dialog.open();
         self.focus_panel(Panel::BrightnessDialog);
+        self.egui_ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+
+    fn retire_pending_brightness_navigation(&mut self) {
+        let is_current_brightness_request = self
+            .settings_editor
+            .pending_settings_navigation
+            .as_ref()
+            .is_some_and(|request| {
+                request.control_id == "brightness.level"
+                    && request.owner
+                        == crate::settings_editor::catalog::SettingsOwner::BrightnessDialog
+                    && request.section
+                        == crate::settings_editor::catalog::SettingsSection::Brightness
+            });
+        if is_current_brightness_request {
+            self.settings_editor.pending_settings_navigation = None;
+        }
     }
 
     pub fn open_clipboard_modify_dialog(&mut self) {
@@ -4354,7 +4374,8 @@ impl LauncherApp {
                 self.panel_states.volume_dialog = false;
             }
             Panel::BrightnessDialog => {
-                self.brightness_dialog.open = false;
+                self.retire_pending_brightness_navigation();
+                self.brightness_dialog.close();
                 self.panel_states.brightness_dialog = false;
             }
             Panel::CpuListDialog => {
@@ -4610,7 +4631,8 @@ impl LauncherApp {
                 self.panel_states.volume_dialog = false;
             }
             Panel::BrightnessDialog => {
-                self.brightness_dialog.open = false;
+                self.retire_pending_brightness_navigation();
+                self.brightness_dialog.close();
                 self.panel_states.brightness_dialog = false;
             }
             Panel::CpuListDialog => {
@@ -4726,7 +4748,10 @@ impl LauncherApp {
             Panel::TableUtilityDialog => self.table_utility_dialog.open(),
             Panel::ConvertPanel => self.convert_panel.open = true,
             Panel::VolumeDialog => self.volume_dialog.ensure_open(),
-            Panel::BrightnessDialog => self.brightness_dialog.open = true,
+            Panel::BrightnessDialog => {
+                self.brightness_dialog.open();
+                self.egui_ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }
             Panel::CpuListDialog => self.cpu_list_dialog.open = true,
             Panel::DataRecoveryDialog => {
                 let _ = self

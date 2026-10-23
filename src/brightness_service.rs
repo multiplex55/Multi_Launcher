@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -18,6 +18,14 @@ const HELPER_RESPONSE_DEADLINE: Duration = Duration::from_secs(2);
 const HELPER_START_DEADLINE: Duration = Duration::from_secs(1);
 const HELPER_CLEANUP_DEADLINE: Duration = Duration::from_secs(1);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+/// Counts accepted parent-service inventory requests. Native enumeration runs
+/// in the helper process, so this counter intentionally measures the owned
+/// request boundary rather than child-local API calls. Plugin search does not
+/// touch it.
+pub static BRIGHTNESS_QUERIES: AtomicUsize = AtomicUsize::new(0);
+
+pub type BrightnessWakeCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BrightnessSessionId(u128);
@@ -881,6 +889,7 @@ struct MailboxState {
     pending: Option<QueuedRequest>,
     active_cancel: Option<BrightnessCancellation>,
     shutting_down: bool,
+    shutdown_terminal_published: bool,
     shutdown_failure: Option<BrightnessFailure>,
     shutdown_disposition: Option<HelperCleanupDisposition>,
 }
@@ -888,6 +897,7 @@ struct MailboxState {
 struct Mailbox {
     state: Mutex<MailboxState>,
     ready: Condvar,
+    wake: BrightnessWakeCallback,
 }
 
 pub struct BrightnessService {
@@ -898,13 +908,26 @@ pub struct BrightnessService {
 
 impl BrightnessService {
     pub fn new() -> Self {
-        Self::with_factory(default_helper_factory(), ServiceTiming::production())
+        Self::new_with_wake_callback(Arc::new(|| {}))
+    }
+
+    pub fn new_with_wake_callback(wake: BrightnessWakeCallback) -> Self {
+        Self::with_factory_and_wake(default_helper_factory(), ServiceTiming::production(), wake)
     }
 
     fn with_factory(factory: Box<dyn HelperFactory>, timing: ServiceTiming) -> Self {
+        Self::with_factory_and_wake(factory, timing, Arc::new(|| {}))
+    }
+
+    fn with_factory_and_wake(
+        factory: Box<dyn HelperFactory>,
+        timing: ServiceTiming,
+        wake: BrightnessWakeCallback,
+    ) -> Self {
         let mailbox = Arc::new(Mailbox {
             state: Mutex::new(MailboxState::default()),
             ready: Condvar::new(),
+            wake,
         });
         let worker_mailbox = Arc::clone(&mailbox);
         let worker = thread::Builder::new()
@@ -919,7 +942,12 @@ impl BrightnessService {
     }
 
     pub fn refresh(&self) -> Result<BrightnessRequestTicket, BrightnessFailure> {
-        self.enqueue(ServiceRequest::Refresh)
+        let ticket = self.enqueue(ServiceRequest::Refresh)?;
+        // This is deliberately a parent-process request counter. The native
+        // monitor call runs in the owned helper process and cannot update a
+        // parent static; plugin discovery remains verifiably free of requests.
+        BRIGHTNESS_QUERIES.fetch_add(1, Ordering::Relaxed);
+        Ok(ticket)
     }
 
     pub fn set(
@@ -955,13 +983,18 @@ impl BrightnessService {
                 BrightnessFailureKind::ServiceShutdown,
             ));
         }
-        if let Some(superseded) = state.pending.take() {
+        let superseded = state.pending.take();
+        if let Some(superseded) = superseded.as_ref() {
             let _ = superseded
                 .reply
                 .send(BrightnessCompletion::Superseded { by: id });
         }
         state.pending = Some(QueuedRequest { id, request, reply });
         self.mailbox.ready.notify_one();
+        drop(state);
+        if superseded.is_some() {
+            (self.mailbox.wake)();
+        }
         Ok(BrightnessRequestTicket { id, receiver })
     }
 
@@ -975,6 +1008,7 @@ impl BrightnessService {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut cancelled_pending = false;
         if !state.shutting_down {
             state.shutting_down = true;
             if let Some(active) = state.active_cancel.as_ref() {
@@ -982,9 +1016,26 @@ impl BrightnessService {
             }
             if let Some(pending) = state.pending.take() {
                 let _ = pending.reply.send(BrightnessCompletion::Cancelled);
+                cancelled_pending = true;
             }
             self.mailbox.ready.notify_all();
         }
+        drop(state);
+        if cancelled_pending {
+            (self.mailbox.wake)();
+        }
+    }
+
+    /// Whether the worker has published its final cleanup result and issued
+    /// its wake callback. Owners may immediately retry `try_join_shutdown`
+    /// until the finished thread can be joined; before this receipt they must
+    /// wait for the registered callback instead of spinning a repaint loop.
+    pub fn shutdown_terminal_published(&self) -> bool {
+        self.mailbox
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .shutdown_terminal_published
     }
 
     /// After [`Self::request_shutdown`], joins the worker only after it has
@@ -1346,6 +1397,18 @@ fn service_worker(
             Ok(disposition) => state.shutdown_disposition = Some(disposition),
             Err(failure) => state.shutdown_failure = Some(failure),
         }
+        state.shutdown_terminal_published = true;
+        drop(state);
+        (mailbox.wake)();
+    } else {
+        // Shutdown without a helper is still an observable terminal transition
+        // for owners waiting to join and release this service.
+        mailbox
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .shutdown_terminal_published = true;
+        (mailbox.wake)();
     }
 }
 
@@ -1383,6 +1446,8 @@ fn publish_completion(
     let _ = reply.send(completion);
     state.active_cancel = None;
     mailbox.ready.notify_all();
+    drop(state);
+    (mailbox.wake)();
 }
 
 fn completion_is_success(completion: &BrightnessCompletion) -> bool {
@@ -1639,7 +1704,7 @@ fn envelope_matches(
 mod windows_process;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::{Condvar, MutexGuard};
@@ -2284,13 +2349,16 @@ mod tests {
     }
 
     #[derive(Clone, Copy)]
-    enum FakeServiceMode {
+    pub(crate) enum FakeServiceMode {
         Normal,
+        MultiMonitorUi,
+        RemoveFirstOnSecondRefresh,
         GateFirstRefresh,
         GateShutdown,
         LateFirstRefresh,
         FailFirstStart,
         FailFirstSetAfterDispatch,
+        FailShutdown,
     }
 
     #[derive(Default)]
@@ -2302,17 +2370,86 @@ mod tests {
         release_gate: bool,
         cleanup_entered: bool,
         release_cleanup: bool,
+        completed_operations: usize,
         operations: Vec<(usize, BrightnessRequestId, &'static str, u64)>,
         set_count: usize,
+        set_targets: Vec<MonitorTarget>,
+        set_percents: Vec<u8>,
     }
 
-    struct FakeServiceHarness {
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct FakeServiceSnapshot {
+        pub starts: usize,
+        pub shutdowns: usize,
+        pub live_sessions: usize,
+        pub gate_entered: bool,
+        pub cleanup_entered: bool,
+        pub completed_operations: usize,
+        pub operations: Vec<(usize, BrightnessRequestId, &'static str, u64)>,
+        pub set_count: usize,
+        pub set_targets: Vec<MonitorTarget>,
+        pub set_percents: Vec<u8>,
+    }
+
+    pub(crate) struct FakeServiceHarness {
         state: Mutex<FakeServiceState>,
         changed: Condvar,
         mode: FakeServiceMode,
     }
 
     impl FakeServiceHarness {
+        pub(crate) fn snapshot(&self) -> FakeServiceSnapshot {
+            let state = self.lock();
+            FakeServiceSnapshot {
+                starts: state.starts,
+                shutdowns: state.shutdowns,
+                live_sessions: state.live_sessions,
+                gate_entered: state.gate_entered,
+                cleanup_entered: state.cleanup_entered,
+                completed_operations: state.completed_operations,
+                operations: state.operations.clone(),
+                set_count: state.set_count,
+                set_targets: state.set_targets.clone(),
+                set_percents: state.set_percents.clone(),
+            }
+        }
+
+        pub(crate) fn wait_for_gate(&self) -> bool {
+            self.wait_for(|state| state.gate_entered)
+        }
+
+        pub(crate) fn wait_for_cleanup(&self) -> bool {
+            self.wait_for(|state| state.cleanup_entered)
+        }
+
+        pub(crate) fn wait_for_operation_count(&self, count: usize) -> bool {
+            self.wait_for(|state| state.operations.len() >= count)
+        }
+
+        pub(crate) fn wait_for_completed_operation_count(&self, count: usize) -> bool {
+            self.wait_for(|state| state.completed_operations >= count)
+        }
+
+        pub(crate) fn wait_for_set_count(&self, count: usize) -> bool {
+            self.wait_for(|state| state.set_count >= count)
+        }
+
+        pub(crate) fn wait_for_live_sessions(&self, count: usize) -> bool {
+            self.wait_for(|state| state.live_sessions == count)
+        }
+
+        pub(crate) fn release_gate(&self) {
+            let mut state = self.lock();
+            state.release_gate = true;
+            self.changed.notify_all();
+        }
+
+        pub(crate) fn release_cleanup(&self) {
+            let mut state = self.lock();
+            state.release_cleanup = true;
+            self.changed.notify_all();
+        }
+
         fn lock(&self) -> MutexGuard<'_, FakeServiceState> {
             self.state.lock().unwrap()
         }
@@ -2428,8 +2565,32 @@ mod tests {
             if cancellation.is_cancelled() {
                 return Err(BrightnessFailure::new(BrightnessFailureKind::Cancelled));
             }
-            let inventory = test_inventory(self.session, generation);
+            let mut inventory =
+                test_inventory_for_mode(self.harness.mode, self.session, generation);
+            if let Some(previous) = self.inventory.as_ref() {
+                for entry in &mut inventory.entries {
+                    let Some(identity) = entry.identity.as_ref() else {
+                        continue;
+                    };
+                    let prior_range = previous
+                        .entries
+                        .iter()
+                        .find(|prior| prior.identity.as_ref() == Some(identity))
+                        .and_then(|prior| prior.native_range);
+                    if let (Some(current), Some(prior_range)) = (entry.native_range, prior_range) {
+                        let readback = NativeBrightnessRange {
+                            current: prior_range.current,
+                            ..current
+                        };
+                        entry.native_range = Some(readback);
+                        entry.percent = readback.percent().ok();
+                    }
+                }
+            }
             self.inventory = Some(inventory.clone());
+            let mut state = self.harness.lock();
+            state.completed_operations += 1;
+            self.harness.changed.notify_all();
             Ok(inventory)
         }
 
@@ -2450,7 +2611,12 @@ mod tests {
             if inventory.target(target.id) != Some(target) {
                 return Err(BrightnessFailure::new(BrightnessFailureKind::StaleTarget));
             }
-            let before = range(10, 60, 110);
+            let before = inventory
+                .entries
+                .iter()
+                .find(|entry| entry.target.as_ref() == Some(target))
+                .and_then(|entry| entry.native_range)
+                .ok_or_else(|| BrightnessFailure::new(BrightnessFailureKind::Unsupported))?;
             let applied_native = before
                 .native_for_percent(percent)
                 .map_err(|_| BrightnessFailure::new(BrightnessFailureKind::InvalidRange))?;
@@ -2458,11 +2624,23 @@ mod tests {
                 current: applied_native,
                 ..before
             };
+            if let Some(inventory) = self.inventory.as_mut()
+                && let Some(entry) = inventory
+                    .entries
+                    .iter_mut()
+                    .find(|entry| entry.target.as_ref() == Some(target))
+            {
+                entry.native_range = Some(readback);
+                entry.percent = readback.percent().ok();
+            }
             let mut state = self.harness.lock();
             state
                 .operations
                 .push((self.ordinal, request_id, "set", target.generation));
             state.set_count += 1;
+            state.set_targets.push(target.clone());
+            state.set_percents.push(percent);
+            state.completed_operations += 1;
             let should_fail = self.ordinal == 1
                 && matches!(
                     self.harness.mode,
@@ -2523,6 +2701,16 @@ mod tests {
                 state.live_sessions = state.live_sessions.saturating_sub(1);
                 self.harness.changed.notify_all();
             }
+            if self.ordinal == 1 && matches!(self.harness.mode, FakeServiceMode::FailShutdown) {
+                return Err(BrightnessFailure {
+                    kind: BrightnessFailureKind::HelperCleanupFailure,
+                    operation: Some(BrightnessOperation::VerifyHelperExit),
+                    native_code: None,
+                    process_cleanup: Some(HelperCleanupDisposition::ExitUnverified),
+                    set_disposition: None,
+                    set_cause: None,
+                });
+            }
             Ok(
                 if self.ordinal == 1
                     && matches!(self.harness.mode, FakeServiceMode::LateFirstRefresh)
@@ -2565,22 +2753,161 @@ mod tests {
         }
     }
 
+    fn test_inventory_with_rows(
+        session: BrightnessSessionId,
+        generation: u64,
+        rows: Vec<(&str, u32, u32, &str, Option<NativeBrightnessRange>)>,
+    ) -> MonitorInventory {
+        let mut entries = Vec::with_capacity(rows.len());
+        let mut topology = Vec::with_capacity(rows.len());
+        for (row_index, (logical_device, logical_index, physical_index, description, native)) in
+            rows.into_iter().enumerate()
+        {
+            let identity = PhysicalMonitorIdentity {
+                logical_device: logical_device.to_owned(),
+                logical_index,
+                physical_index,
+                description: description.to_owned(),
+            };
+            let target = MonitorTarget {
+                session,
+                generation,
+                id: MonitorTargetId(row_index as u32),
+                identity: identity.clone(),
+            };
+            topology.push(identity.clone());
+            entries.push(MonitorInventoryEntry {
+                id: Some(target.id),
+                identity: Some(identity),
+                target: Some(target),
+                display_name: description.to_owned(),
+                native_range: native,
+                percent: native.and_then(|range| range.percent().ok()),
+                unavailable: native
+                    .is_none()
+                    .then_some(MonitorUnavailable::ReadFailed { code: Some(50) }),
+            });
+        }
+        MonitorInventory {
+            session,
+            generation,
+            entries,
+            topology_complete: true,
+            topology,
+        }
+    }
+
+    fn test_inventory_for_mode(
+        mode: FakeServiceMode,
+        session: BrightnessSessionId,
+        generation: u64,
+    ) -> MonitorInventory {
+        match mode {
+            FakeServiceMode::MultiMonitorUi => test_inventory_with_rows(
+                session,
+                generation,
+                vec![
+                    (
+                        "\\\\.\\DISPLAY1",
+                        0,
+                        0,
+                        "Desk panel",
+                        Some(range(10, 60, 110)),
+                    ),
+                    (
+                        "\\\\.\\DISPLAY2",
+                        1,
+                        0,
+                        "Desk panel",
+                        Some(range(0, 25, 100)),
+                    ),
+                    ("\\\\.\\DISPLAY3", 2, 0, "Projector", None),
+                ],
+            ),
+            FakeServiceMode::RemoveFirstOnSecondRefresh if generation > 1 => {
+                test_inventory_with_rows(
+                    session,
+                    generation,
+                    vec![(
+                        "\\\\.\\DISPLAY2",
+                        1,
+                        0,
+                        "Kept panel",
+                        Some(range(0, 35, 100)),
+                    )],
+                )
+            }
+            FakeServiceMode::RemoveFirstOnSecondRefresh => test_inventory_with_rows(
+                session,
+                generation,
+                vec![
+                    (
+                        "\\\\.\\DISPLAY1",
+                        0,
+                        0,
+                        "Removed panel",
+                        Some(range(10, 60, 110)),
+                    ),
+                    (
+                        "\\\\.\\DISPLAY2",
+                        1,
+                        0,
+                        "Kept panel",
+                        Some(range(0, 25, 100)),
+                    ),
+                ],
+            ),
+            _ => test_inventory(session, generation),
+        }
+    }
+
     fn fake_service(
         mode: FakeServiceMode,
         timing: ServiceTiming,
+    ) -> (BrightnessService, Arc<FakeServiceHarness>) {
+        fake_service_with_wake(mode, timing, Arc::new(|| {}))
+    }
+
+    fn fake_service_with_wake(
+        mode: FakeServiceMode,
+        timing: ServiceTiming,
+        wake: BrightnessWakeCallback,
     ) -> (BrightnessService, Arc<FakeServiceHarness>) {
         let harness = Arc::new(FakeServiceHarness {
             state: Mutex::new(FakeServiceState::default()),
             changed: Condvar::new(),
             mode,
         });
-        let service = BrightnessService::with_factory(
+        let service = BrightnessService::with_factory_and_wake(
             Box::new(FakeHelperFactory {
                 harness: Arc::clone(&harness),
             }),
             timing,
+            wake,
         );
         (service, harness)
+    }
+
+    pub(crate) fn fake_service_for_dialog(
+        mode: FakeServiceMode,
+        wake: BrightnessWakeCallback,
+    ) -> (BrightnessService, Arc<FakeServiceHarness>) {
+        fake_service_with_wake(mode, quick_timing(), wake)
+    }
+
+    pub(crate) fn fake_service_reusing_dialog_harness(
+        harness: Arc<FakeServiceHarness>,
+        wake: BrightnessWakeCallback,
+    ) -> BrightnessService {
+        BrightnessService::with_factory_and_wake(
+            Box::new(FakeHelperFactory { harness }),
+            quick_timing(),
+            wake,
+        )
+    }
+
+    pub(crate) fn fake_inventory_for_dialog(mode: FakeServiceMode) -> MonitorInventory {
+        test_inventory_for_mode(mode, BrightnessSessionId(rand::random()), 1)
     }
 
     fn quick_timing() -> ServiceTiming {

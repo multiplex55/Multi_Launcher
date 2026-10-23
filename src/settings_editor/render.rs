@@ -1878,17 +1878,26 @@ impl SettingsEditor {
             SettingsAvailability::Conditional { prerequisite } => {
                 let satisfied = self.conditional_search_prerequisite_satisfied(entry, app);
                 if satisfied == Some(true) {
-                    let message = if matches!(entry.section, SettingsSection::Main(_)) {
+                    let message = if matches!(entry.section, SettingsSection::Brightness) {
+                        "A controllable monitor is available; Set remains explicit."
+                    } else if matches!(entry.section, SettingsSection::Main(_)) {
                         "Available in the current draft."
                     } else {
                         "Available in the current owner."
                     };
                     (Some(message.into()), false)
                 } else if matches!(entry.section, SettingsSection::Brightness) {
-                    (
-                        Some("The Brightness dialog checks the current display; Set is always explicit.".into()),
-                        false,
-                    )
+                    match satisfied {
+                        Some(false) => (
+                            Some("No controllable monitor is currently available.".into()),
+                            true,
+                        ),
+                        None => (
+                            Some("Open Brightness to check connected monitors; discovery runs only while the dialog is open.".into()),
+                            false,
+                        ),
+                        Some(true) => (None, false),
+                    }
                 } else {
                     (Some(format!("Requires: {prerequisite}")), false)
                 }
@@ -1906,10 +1915,9 @@ impl SettingsEditor {
                 (SettingsSection::Theme, "theme.accent.color") => {
                     Some(app.theme_accent_override_is_set())
                 }
-                // The existing dialog always renders its Level control, even
-                // when reading the display's current value falls back to its
-                // safe default. Navigation itself never presses Set.
-                (SettingsSection::Brightness, "brightness.level") => Some(true),
+                (SettingsSection::Brightness, "brightness.level") => {
+                    app.brightness_settings_control_available()
+                }
                 _ => None,
             }
         })
@@ -1982,7 +1990,9 @@ impl SettingsEditor {
             SettingsAvailability::Available => true,
             SettingsAvailability::Unavailable { .. } => false,
             SettingsAvailability::Conditional { .. } => {
-                self.conditional_search_prerequisite_satisfied(&entry, app) == Some(true)
+                let satisfied = self.conditional_search_prerequisite_satisfied(&entry, app);
+                satisfied == Some(true)
+                    || (matches!(entry.section, SettingsSection::Brightness) && satisfied.is_none())
             }
         };
         if matches!(
