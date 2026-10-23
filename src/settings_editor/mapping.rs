@@ -57,6 +57,9 @@ impl SettingsEditor {
             settings_search_query_response_id: None,
             settings_search_result_response_ids: Vec::new(),
             pending_settings_navigation: None,
+            settings_navigation_highlight: None,
+            #[cfg(feature = "qa-framebuffer-capture")]
+            settings_navigation_qa_paint: None,
             next_settings_navigation_token: 1,
             search_enter_consumption_pending: false,
             baseline_settings: settings.clone(),
@@ -200,6 +203,8 @@ impl SettingsEditor {
             test_last_navigation_focus: None,
             #[cfg(test)]
             test_last_dedicated_navigation_focus: None,
+            #[cfg(test)]
+            test_last_navigation_highlight: None,
             #[cfg(test)]
             test_last_navigation_diagnostic: None,
             #[cfg(test)]

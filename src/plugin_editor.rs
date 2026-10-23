@@ -154,6 +154,8 @@ impl PluginEditor {
                         && request.catalog_revision == app.plugins.settings_catalog_revision()
                 },
             );
+        let navigation_highlight_only =
+            crate::settings_editor::render::scoped_settings_navigation_is_highlight_only(ctx);
         let catalog_snapshot = navigation_request
             .as_ref()
             .and_then(|_| app.plugins.settings_catalog_snapshot_if_changed(None));
@@ -169,7 +171,7 @@ impl PluginEditor {
                 )
             })
             .map(|(name, description, _)| (name.to_owned(), description.to_owned()));
-        if let Some((name, description)) = requested_filter_row {
+        if !navigation_highlight_only && let Some((name, description)) = requested_filter_row {
             let filter = self.filter.trim().to_lowercase();
             if !filter.is_empty()
                 && !name.to_lowercase().contains(&filter)
@@ -312,6 +314,9 @@ impl PluginEditor {
                 }
             });
         app.show_plugins = open;
+        if !open {
+            app.settings_editor.retire_plugin_settings_navigation();
+        }
         if changed {
             self.save_settings(ctx, app);
         }

@@ -101,6 +101,14 @@ struct JumpModeObservationRequest {
     wait_for_active_hints: bool,
     #[serde(default)]
     phase2: Option<Phase2DialogRequest>,
+    #[serde(default)]
+    settings_search: Option<SettingsSearchRequest>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct SettingsSearchRequest {
+    expected_query: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -182,6 +190,30 @@ struct JumpModeObservation {
     prefix_target_ids: Vec<String>,
     targets: Vec<JumpModeTargetObservation>,
     navigation_targets: Vec<JumpModeTargetObservation>,
+    settings_search: Option<SettingsSearchObservation>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SettingsSearchObservation {
+    expected_query: String,
+    actual_query: String,
+    query_matches_expected: bool,
+    highlight: Option<SettingsSearchHighlightObservation>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SettingsSearchHighlightObservation {
+    request_token: u64,
+    control_id: String,
+    owner: &'static str,
+    owner_instance: Option<u64>,
+    response_id: String,
+    rect: [f32; 4],
+    egui_frame_nr: u64,
+    egui_pass_index: usize,
+    qa_logic_frame_id: u64,
+    qa_ui_pass_id: u64,
+    qa_ui_pass_index: u32,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -459,6 +491,28 @@ fn validate_manifest(manifest: &RequestManifest) -> Result<(), String> {
             );
         }
     }
+    if let Some(settings_search) = manifest
+        .jump_mode_observation
+        .as_ref()
+        .and_then(|observation| observation.settings_search.as_ref())
+    {
+        if manifest.trigger != CaptureTrigger::F11
+            || manifest
+                .jump_mode_observation
+                .as_ref()
+                .and_then(|observation| observation.phase2)
+                .is_none_or(|phase2| phase2.surface != Phase2Surface::Settings)
+        {
+            return Err(
+                "Settings search observation requires the ROOT/F11 Settings fixture".into(),
+            );
+        }
+        if settings_search.expected_query.trim().is_empty()
+            || settings_search.expected_query.len() > 256
+        {
+            return Err("Settings search observation query must be 1-256 bytes".into());
+        }
+    }
     if !is_sha256(&manifest.fixture_manifest_sha256) {
         return Err("manifest fixture_manifest_sha256 must be 64 hexadecimal characters".into());
     }
@@ -710,6 +764,8 @@ struct RetainedPassMarker {
     logic_frame_id: u64,
     ui_pass_id: u64,
     ui_pass_index: u32,
+    egui_frame_nr: Option<u64>,
+    egui_pass_index: Option<usize>,
     eligibility: SurfaceEligibility,
     evidence: Option<FrameEvidence>,
     root_list_diagnostic: Option<RootListDiagnostic>,
@@ -919,6 +975,7 @@ pub(super) struct FramebufferProbe {
     jump_mode_observation_enabled: bool,
     wait_for_active_hints: bool,
     phase2_request: Option<Phase2DialogRequest>,
+    settings_search_expected_query: Option<String>,
     activation_count: u64,
     last_action: Option<QaActivationObservation>,
     tab_processed_count: u64,
@@ -980,6 +1037,9 @@ impl FramebufferProbe {
             wait_for_active_hints: observation_request
                 .is_some_and(|request| request.wait_for_active_hints),
             phase2_request: observation_request.and_then(|request| request.phase2),
+            settings_search_expected_query: observation_request
+                .and_then(|request| request.settings_search.as_ref())
+                .map(|request| request.expected_query.clone()),
             activation_count: 0,
             last_action: None,
             tab_processed_count: 0,
@@ -1134,6 +1194,8 @@ impl FramebufferProbe {
             logic_frame_id: self.logic_frame_id,
             ui_pass_id,
             ui_pass_index: self.current_ui_pass_index,
+            egui_frame_nr: None,
+            egui_pass_index: None,
             eligibility,
             evidence,
             root_list_diagnostic: self.latest_root_list_diagnostic.take(),
@@ -1960,6 +2022,10 @@ impl LauncherApp {
         }
         if let Some(probe) = self.qa_framebuffer.as_mut() {
             probe.finish_ui_pass(eligibility, evidence);
+            if let Some(marker) = probe.retained_pass.as_mut() {
+                marker.egui_frame_nr = Some(ctx.cumulative_frame_nr());
+                marker.egui_pass_index = Some(ctx.current_pass_index());
+            }
         }
     }
 
@@ -1995,7 +2061,7 @@ impl LauncherApp {
                 )
             })
         });
-        let jump_mode_observation = observation_details.and_then(
+        let mut jump_mode_observation = observation_details.and_then(
             |(
                 logic_frame_id,
                 ui_pass_id,
@@ -2031,10 +2097,124 @@ impl LauncherApp {
                 })
             },
         );
+        if let Some(observation) = jump_mode_observation.as_mut()
+            && let Some(marker) = self
+                .qa_framebuffer
+                .as_ref()
+                .and_then(|probe| probe.retained_pass.as_ref())
+            && let Some(highlight) = retained_settings_search_paint_if_current(
+                self,
+                &ctx,
+                eligibility,
+                marker,
+                observation,
+            )
+            && let Some(settings_search) = observation.settings_search.as_mut()
+        {
+            settings_search.highlight = Some(highlight);
+        }
         if let Some(probe) = self.qa_framebuffer.as_mut() {
             probe.finish_retained_ui_frame(&ctx, eligibility, jump_mode_observation);
         }
     }
+}
+
+fn retained_settings_search_paint_if_current(
+    app: &LauncherApp,
+    ctx: &egui::Context,
+    final_eligibility: SurfaceEligibility,
+    marker: &RetainedPassMarker,
+    observation: &JumpModeObservation,
+) -> Option<SettingsSearchHighlightObservation> {
+    use super::jump_mode::ui::NavigationOwner;
+    use crate::settings_editor::catalog::SettingsAvailability;
+
+    let retained_search = marker
+        .evidence
+        .as_ref()?
+        .jump_mode_observation
+        .as_ref()?
+        .settings_search
+        .as_ref()?;
+    let retained_paint = retained_search.highlight.as_ref()?;
+    let current_search = observation.settings_search.as_ref()?;
+    let highlight = app.settings_editor.settings_navigation_highlight.as_ref()?;
+    let paint = app.settings_editor.settings_navigation_qa_paint.as_ref()?;
+    let owner_instance = highlight.settings_instance?;
+    let marker_egui_frame = marker.egui_frame_nr?;
+    let marker_egui_pass = marker.egui_pass_index?;
+    let entry = app
+        .settings_editor
+        .search_catalog
+        .entry(&highlight.control_id)?;
+
+    let navigation_owner_is_current = matches!(
+        app.jump_mode_ui.frame_navigation_owner(),
+        NavigationOwner::Settings { instance } if instance == owner_instance
+    );
+    let dialog_state_is_current = observation.dialog_state.as_ref().is_some_and(|dialog| {
+        dialog.surface == Some("settings") && dialog.instance == Some(owner_instance)
+    });
+    let query_is_current = retained_search.query_matches_expected
+        && current_search.query_matches_expected
+        && retained_search.expected_query == current_search.expected_query
+        && retained_search.actual_query == current_search.actual_query
+        && app.settings_editor.settings_search_query == current_search.expected_query;
+    let catalog_is_current = entry.owner == highlight.owner
+        && entry.section == highlight.section
+        && !matches!(
+            &entry.availability,
+            SettingsAvailability::Unavailable { .. }
+        )
+        && highlight.catalog_revision == app.settings_editor.search_catalog.plugin_revision();
+    let paint_matches_retained = paint.request_token == retained_paint.request_token
+        && paint.control_id == retained_paint.control_id
+        && settings_search_owner_kind(&paint.owner) == retained_paint.owner
+        && paint.owner_instance == retained_paint.owner_instance
+        && format!("{:?}", paint.response_id) == retained_paint.response_id
+        && [
+            paint.rect.min.x,
+            paint.rect.min.y,
+            paint.rect.max.x,
+            paint.rect.max.y,
+        ] == retained_paint.rect
+        && paint.egui_frame_nr == retained_paint.egui_frame_nr
+        && paint.egui_pass_index == retained_paint.egui_pass_index;
+    let retained_pass_matches = marker.logic_frame_id == observation.logic_frame_id
+        && marker.ui_pass_id == observation.ui_pass_id
+        && marker.ui_pass_index == observation.ui_pass_index
+        && retained_paint.qa_logic_frame_id == marker.logic_frame_id
+        && retained_paint.qa_ui_pass_id == marker.ui_pass_id
+        && retained_paint.qa_ui_pass_index == marker.ui_pass_index
+        && retained_paint.egui_frame_nr == marker_egui_frame
+        && retained_paint.egui_pass_index == marker_egui_pass;
+    let live_settings_owner_is_safe = app.settings_native_ui_owner_current(
+        ctx,
+        marker.eligibility.logical_root_visible && final_eligibility.logical_root_visible,
+    ) && navigation_owner_is_current
+        && dialog_state_is_current
+        && ctx.memory(|memory| memory.focused()) == Some(paint.response_id);
+    let highlight_matches_paint = highlight.request_token == paint.request_token
+        && highlight.control_id == paint.control_id
+        && highlight.owner == paint.owner
+        && highlight.settings_instance == paint.owner_instance
+        && highlight.catalog_revision == paint.catalog_revision
+        && settings_search_owner_kind(&highlight.owner) == retained_paint.owner
+        && highlight.request_token == retained_paint.request_token
+        && highlight.control_id == retained_paint.control_id
+        && highlight.settings_instance == retained_paint.owner_instance;
+    let now = ctx.input(|input| input.time);
+
+    (now < highlight.expires_at
+        && marker.eligibility.eligible()
+        && final_eligibility.eligible()
+        && query_is_current
+        && catalog_is_current
+        && paint_matches_retained
+        && retained_pass_matches
+        && live_settings_owner_is_safe
+        && highlight_matches_paint)
+        .then(|| retained_paint.clone())
 }
 
 fn viewport_class_name(class: egui::ViewportClass) -> &'static str {
@@ -2322,6 +2502,40 @@ fn build_jump_mode_observation(
         .find(|target| target.focused)
         .map(|target| target.target_id.clone());
     let dialog_state = qa_dialog_state(app, ctx, navigation_owner, &navigation_targets);
+    let settings_search = app
+        .qa_framebuffer
+        .as_ref()
+        .and_then(|probe| probe.settings_search_expected_query.as_ref())
+        .map(|expected_query| {
+            let actual_query = app.settings_editor.settings_search_query.clone();
+            let highlight = app
+                .settings_editor
+                .settings_navigation_qa_paint_for_current_pass(ctx)
+                .map(|paint| SettingsSearchHighlightObservation {
+                    request_token: paint.request_token,
+                    control_id: paint.control_id.clone(),
+                    owner: settings_search_owner_kind(&paint.owner),
+                    owner_instance: paint.owner_instance,
+                    response_id: format!("{:?}", paint.response_id),
+                    rect: [
+                        paint.rect.min.x,
+                        paint.rect.min.y,
+                        paint.rect.max.x,
+                        paint.rect.max.y,
+                    ],
+                    egui_frame_nr: paint.egui_frame_nr,
+                    egui_pass_index: paint.egui_pass_index,
+                    qa_logic_frame_id: logic_frame_id,
+                    qa_ui_pass_id: ui_pass_id,
+                    qa_ui_pass_index: ui_pass_index,
+                });
+            SettingsSearchObservation {
+                expected_query: expected_query.clone(),
+                query_matches_expected: actual_query == *expected_query,
+                actual_query,
+                highlight,
+            }
+        });
     let selected_target_id = selected_index.and_then(|selected_index| {
         targets
             .iter()
@@ -2409,6 +2623,20 @@ fn build_jump_mode_observation(
         prefix_target_ids,
         targets,
         navigation_targets,
+        settings_search,
+    }
+}
+
+fn settings_search_owner_kind(
+    owner: &crate::settings_editor::catalog::SettingsOwner,
+) -> &'static str {
+    use crate::settings_editor::catalog::SettingsOwner;
+    match owner {
+        SettingsOwner::Application => "application",
+        SettingsOwner::Plugin { .. } => "plugin",
+        SettingsOwner::Theme => "theme",
+        SettingsOwner::Mouse => "mouse",
+        SettingsOwner::BrightnessDialog => "brightness",
     }
 }
 
@@ -3065,9 +3293,18 @@ mod tests {
     use std::sync::mpsc::TryRecvError;
 
     fn test_launcher_app(ctx: &egui::Context, data_dir: &Path) -> LauncherApp {
+        test_launcher_app_with_jump_mode(ctx, data_dir, false)
+    }
+
+    fn test_launcher_app_with_jump_mode(
+        ctx: &egui::Context,
+        data_dir: &Path,
+        jump_mode_enabled: bool,
+    ) -> LauncherApp {
         let mut settings = crate::settings::Settings::default();
         settings.paste_sequence.next_hotkey = None;
         settings.paste_sequence.cancel_hotkey = None;
+        settings.experimental_jump_mode_enabled = jump_mode_enabled;
         settings.enable_toasts = true;
         settings.show_error_toasts = true;
         settings.dashboard.config_path = Some(
@@ -3292,6 +3529,16 @@ mod tests {
             file_search.phase2.map(|request| request.surface),
             Some(Phase2Surface::FileSearch)
         );
+        let settings_search: JumpModeObservationRequest = serde_json::from_str(
+            r#"{"wait_for_active_hints":false,"phase2":{"surface":"settings"},"settings_search":{"expected_query":"fuzzy weight"}}"#,
+        )
+        .expect("the M1-B native workflow binds its exact Settings search query");
+        assert_eq!(
+            settings_search.settings_search,
+            Some(SettingsSearchRequest {
+                expected_query: "fuzzy weight".into(),
+            })
+        );
 
         let manifest = RequestManifest {
             run_id: "phase2".into(),
@@ -3306,6 +3553,7 @@ mod tests {
                     surface: Phase2Surface::Paste,
                     use_empty_paste_invocation_context: true,
                 }),
+                settings_search: None,
             }),
             output_dir: PathBuf::from("capture"),
             fixture_manifest_sha256: "a".repeat(64),
@@ -3319,6 +3567,24 @@ mod tests {
             use_empty_paste_invocation_context: true,
         });
         assert!(validate_manifest(&invalid).is_err());
+
+        let mut valid_settings_search = invalid;
+        valid_settings_search
+            .jump_mode_observation
+            .as_mut()
+            .unwrap()
+            .phase2 = Some(Phase2DialogRequest {
+            surface: Phase2Surface::Settings,
+            use_empty_paste_invocation_context: false,
+        });
+        valid_settings_search
+            .jump_mode_observation
+            .as_mut()
+            .unwrap()
+            .settings_search = Some(SettingsSearchRequest {
+            expected_query: "fuzzy weight".into(),
+        });
+        assert!(validate_manifest(&valid_settings_search).is_ok());
     }
 
     #[test]
@@ -3358,6 +3624,128 @@ mod tests {
 
         assert_eq!(state.settings_draft_fuzzy_weight, Some(0.75));
         assert_eq!(state.settings_committed_fuzzy_weight, Some(1.75));
+    }
+
+    #[test]
+    fn settings_search_retained_paint_survives_only_current_root_frame_completion() {
+        use crate::settings_editor::catalog::ids;
+
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let output_dir = workspace.root().join("qa-retained-settings-search");
+        fs::create_dir_all(&output_dir).unwrap();
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let mut app = test_launcher_app_with_jump_mode(&ctx, workspace.root(), true);
+        app.show_settings = true;
+        app.settings_editor
+            .set_search_query_from_command("fuzzy weight");
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 900.0),
+            )),
+            focused: true,
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input.clone(), false);
+        output.drop_without_applying_deltas();
+        assert!(
+            app.settings_native_ui_owner_current(&ctx, true)
+                && app
+                    .settings_editor
+                    .search_catalog()
+                    .entry(ids::SEARCH_FUZZY_WEIGHT)
+                    .is_some(),
+            "the real Settings root owner and its current catalog are established before queueing navigation"
+        );
+        let settings_instance = app.settings_navigation_owner_instance();
+        app.settings_editor.request_control_navigation(
+            ids::SEARCH_FUZZY_WEIGHT,
+            Some(settings_instance),
+            &app.plugins,
+        );
+
+        let (mut probe, _writer_rx, _outcome_tx) = test_probe(CaptureTrigger::Startup);
+        probe.output_dir = output_dir.clone();
+        probe.jump_mode_observation_enabled = true;
+        probe.settings_search_expected_query = Some("fuzzy weight".into());
+        app.qa_framebuffer = Some(probe);
+        let mut completed_observation = None;
+        for _ in 0..8 {
+            let (output, passes) = app.run_root_frame_for_test(&ctx, input.clone(), true);
+            output.drop_without_applying_deltas();
+            assert!(passes >= 2, "the first egui pass was discarded");
+            let bytes = fs::read(output_dir.join(JUMP_OBSERVATION_FILE_NAME)).unwrap();
+            let observation: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if observation
+                .pointer("/settings_search/highlight/control_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(ids::SEARCH_FUZZY_WEIGHT)
+            {
+                completed_observation = Some((observation, passes));
+                break;
+            }
+        }
+        let (observation, passes) = completed_observation.unwrap_or_else(|| {
+            panic!(
+                "the actual Settings slider was not retained in the completed QA observation: {:?}",
+                app.settings_editor.test_last_navigation_diagnostic
+            )
+        });
+        let painted = observation.pointer("/settings_search/highlight").unwrap();
+        assert_eq!(passes, 2, "the selected paint followed a discarded pass");
+        assert_eq!(
+            observation["settings_search"]["expected_query"],
+            "fuzzy weight"
+        );
+        assert_eq!(
+            observation["settings_search"]["actual_query"],
+            "fuzzy weight"
+        );
+        assert_eq!(painted["qa_logic_frame_id"], observation["logic_frame_id"]);
+        assert_eq!(painted["qa_ui_pass_id"], observation["ui_pass_id"]);
+        assert_eq!(painted["qa_ui_pass_index"], observation["ui_pass_index"]);
+        assert!(
+            app.settings_editor
+                .settings_navigation_qa_paint_for_current_pass(&ctx)
+                .is_none(),
+            "the strict current-pass accessor remains unavailable after run_ui"
+        );
+
+        let mut rendered_passes = 0;
+        let mut actual_paint_before_close = false;
+        let (output, passes) = app.run_root_frame_for_test_with(&ctx, input, true, |app, ui| {
+            let mut frame = eframe::Frame::_new_kittest();
+            eframe::App::ui(app, ui, &mut frame);
+            if rendered_passes == 1 {
+                actual_paint_before_close = app
+                    .qa_framebuffer
+                    .as_ref()
+                    .and_then(|probe| probe.retained_pass.as_ref())
+                    .and_then(|marker| marker.evidence.as_ref())
+                    .and_then(|evidence| evidence.jump_mode_observation.as_ref())
+                    .and_then(|observation| observation.settings_search.as_ref())
+                    .and_then(|search| search.highlight.as_ref())
+                    .is_some_and(|paint| paint.control_id == ids::SEARCH_FUZZY_WEIGHT);
+                app.show_settings = false;
+            }
+            rendered_passes += 1;
+        });
+        output.drop_without_applying_deltas();
+        assert_eq!(passes, 2);
+        assert!(
+            actual_paint_before_close,
+            "the retained pass painted the real slider before its owner closed"
+        );
+        let after_close: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join(JUMP_OBSERVATION_FILE_NAME)).unwrap())
+                .unwrap();
+        assert_eq!(
+            after_close["settings_search"]["highlight"],
+            serde_json::Value::Null,
+            "completion rejects a real retained paint after its Settings owner closes"
+        );
     }
 
     #[test]
@@ -3527,6 +3915,7 @@ mod tests {
             jump_mode_observation_enabled: false,
             wait_for_active_hints: false,
             phase2_request: None,
+            settings_search_expected_query: None,
             activation_count: 0,
             last_action: None,
             tab_processed_count: 0,
@@ -3620,6 +4009,8 @@ mod tests {
             logic_frame_id: 3,
             ui_pass_id: 3,
             ui_pass_index: 0,
+            egui_frame_nr: None,
+            egui_pass_index: None,
             eligibility,
             evidence: Some(test_evidence(3, 3, 0)),
             root_list_diagnostic: None,
@@ -3913,6 +4304,7 @@ mod tests {
             jump_mode_observation: Some(JumpModeObservationRequest {
                 wait_for_active_hints: true,
                 phase2: None,
+                settings_search: None,
             }),
             output_dir: PathBuf::from("capture"),
             fixture_manifest_sha256: "a".repeat(64),

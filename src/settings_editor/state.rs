@@ -30,6 +30,88 @@ pub(crate) struct PendingSettingsNavigation {
     /// it becomes the active native owner, so this is distinct from
     /// `destination_observed`.
     pub(crate) destination_owner_eligible: bool,
+    /// The selected row can be unavailable while an exact built-in owner
+    /// prerequisite is still safe to reveal. The original query target stays
+    /// explicit so the prerequisite is never presented as that target.
+    pub(crate) delivery: SettingsNavigationDelivery,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SettingsNavigationDelivery {
+    ExactControl,
+    BuiltinPrerequisite { requested_control_id: String },
+    ConditionalPrerequisite { requested_control_id: String },
+}
+
+/// Short-lived, value-only provenance for drawing an outline around the real
+/// control after its one-shot focus handoff has completed. It retains no
+/// egui Response or geometry.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SettingsNavigationHighlight {
+    pub(crate) request_token: u64,
+    pub(crate) control_id: String,
+    pub(crate) owner: super::catalog::SettingsOwner,
+    pub(crate) section: super::catalog::SettingsSection,
+    pub(crate) catalog_revision: u64,
+    pub(crate) settings_instance: Option<u64>,
+    pub(crate) delivery: SettingsNavigationDelivery,
+    pub(crate) expires_at: f64,
+}
+
+/// QA-only evidence that the current Settings owner painted the accepted
+/// navigation target in one specific egui pass. The retained navigation
+/// highlight above intentionally remains geometry-free.
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SettingsNavigationQaPaint {
+    pub(crate) request_token: u64,
+    pub(crate) control_id: String,
+    pub(crate) owner: super::catalog::SettingsOwner,
+    pub(crate) owner_instance: Option<u64>,
+    pub(crate) catalog_revision: u64,
+    pub(crate) response_id: egui::Id,
+    pub(crate) rect: egui::Rect,
+    pub(crate) egui_frame_nr: u64,
+    pub(crate) egui_pass_index: usize,
+}
+
+impl SettingsNavigationHighlight {
+    pub(crate) fn from_request(request: &PendingSettingsNavigation, now: f64) -> Self {
+        Self {
+            request_token: request.request_token,
+            control_id: request.control_id.clone(),
+            owner: request.owner.clone(),
+            section: request.section.clone(),
+            catalog_revision: request.catalog_revision,
+            settings_instance: request.settings_instance,
+            delivery: request.delivery.clone(),
+            expires_at: now + 1.8,
+        }
+    }
+
+    pub(crate) fn as_request(&self) -> PendingSettingsNavigation {
+        PendingSettingsNavigation {
+            request_token: self.request_token,
+            control_id: self.control_id.clone(),
+            owner: self.owner.clone(),
+            section: self.section.clone(),
+            catalog_revision: self.catalog_revision,
+            settings_instance: self.settings_instance,
+            stage: match &self.section {
+                super::catalog::SettingsSection::Main(_)
+                | super::catalog::SettingsSection::Notes
+                | super::catalog::SettingsSection::Plugin { .. } => {
+                    SettingsNavigationStage::DeferredControl
+                }
+                _ => SettingsNavigationStage::DedicatedOwner,
+            },
+            frames_remaining: 0,
+            scroll_requested: false,
+            destination_observed: true,
+            destination_owner_eligible: true,
+            delivery: self.delivery.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -59,6 +141,9 @@ pub struct SettingsEditor {
     pub(crate) settings_search_query_response_id: Option<egui::Id>,
     pub(crate) settings_search_result_response_ids: Vec<egui::Id>,
     pub(crate) pending_settings_navigation: Option<PendingSettingsNavigation>,
+    pub(crate) settings_navigation_highlight: Option<SettingsNavigationHighlight>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) settings_navigation_qa_paint: Option<SettingsNavigationQaPaint>,
     pub(crate) next_settings_navigation_token: u64,
     /// Keeps a locally handled search Enter from reaching controls on a
     /// retained egui pass after the search result has requested focus.
@@ -185,6 +270,8 @@ pub struct SettingsEditor {
     #[cfg(test)]
     pub(crate) test_last_dedicated_navigation_focus: Option<(String, egui::Id)>,
     #[cfg(test)]
+    pub(crate) test_last_navigation_highlight: Option<(String, egui::Id)>,
+    #[cfg(test)]
     pub(crate) test_last_navigation_diagnostic: Option<String>,
     #[cfg(test)]
     pub(crate) test_root_escape_preflight: Option<String>,
@@ -215,6 +302,11 @@ impl SettingsEditor {
         self.settings_search_selected_id = None;
         self.settings_search_page = 0;
         self.pending_settings_navigation = None;
+        self.settings_navigation_highlight = None;
+        #[cfg(feature = "qa-framebuffer-capture")]
+        {
+            self.settings_navigation_qa_paint = None;
+        }
         self.search_enter_consumption_pending = false;
         self.settings_search_response_owner_instance = None;
         self.settings_search_query_response_id = None;
@@ -346,6 +438,81 @@ impl SettingsEditor {
         self.paste_sequence = preferences.clone();
         self.paste_next_enabled = preferences.next_hotkey.is_some();
         self.paste_cancel_enabled = preferences.cancel_hotkey.is_some();
+    }
+
+    pub(crate) fn retire_settings_navigation_for_section(
+        &mut self,
+        section: &super::catalog::SettingsSection,
+    ) {
+        if self
+            .pending_settings_navigation
+            .as_ref()
+            .is_some_and(|request| &request.section == section)
+        {
+            self.pending_settings_navigation = None;
+        }
+        if self
+            .settings_navigation_highlight
+            .as_ref()
+            .is_some_and(|highlight| &highlight.section == section)
+        {
+            self.settings_navigation_highlight = None;
+            #[cfg(feature = "qa-framebuffer-capture")]
+            {
+                self.settings_navigation_qa_paint = None;
+            }
+        }
+    }
+
+    pub(crate) fn retire_plugin_settings_navigation(&mut self) {
+        let is_plugin_editor = |section: &super::catalog::SettingsSection| {
+            matches!(
+                section,
+                super::catalog::SettingsSection::PluginEditor
+                    | super::catalog::SettingsSection::Plugin { .. }
+            )
+        };
+        if self
+            .pending_settings_navigation
+            .as_ref()
+            .is_some_and(|request| is_plugin_editor(&request.section))
+        {
+            self.pending_settings_navigation = None;
+        }
+        if self
+            .settings_navigation_highlight
+            .as_ref()
+            .is_some_and(|highlight| is_plugin_editor(&highlight.section))
+        {
+            self.settings_navigation_highlight = None;
+            #[cfg(feature = "qa-framebuffer-capture")]
+            {
+                self.settings_navigation_qa_paint = None;
+            }
+        }
+    }
+
+    pub(crate) fn retire_all_settings_navigation(&mut self) {
+        self.pending_settings_navigation = None;
+        self.settings_navigation_highlight = None;
+        #[cfg(feature = "qa-framebuffer-capture")]
+        {
+            self.settings_navigation_qa_paint = None;
+        }
+    }
+
+    pub(crate) fn expire_settings_navigation_highlight(&mut self, now: f64) {
+        if self
+            .settings_navigation_highlight
+            .as_ref()
+            .is_some_and(|highlight| now >= highlight.expires_at)
+        {
+            self.settings_navigation_highlight = None;
+            #[cfg(feature = "qa-framebuffer-capture")]
+            {
+                self.settings_navigation_qa_paint = None;
+            }
+        }
     }
 
     pub(crate) fn radial_settings(&self) -> crate::radial::model::RadialFeatureSettings {

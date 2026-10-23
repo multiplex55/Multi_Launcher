@@ -9,6 +9,8 @@ mod save;
 mod state;
 
 pub use state::SettingsEditor;
+#[cfg(test)]
+pub(crate) use state::SettingsNavigationDelivery;
 
 #[cfg(test)]
 mod tests {

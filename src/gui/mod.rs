@@ -2454,6 +2454,28 @@ impl LauncherApp {
             .is_some()
     }
 
+    fn retire_settings_navigation_for_panel(&mut self, panel: Panel) {
+        use crate::settings_editor::catalog::SettingsSection;
+
+        match panel {
+            Panel::Settings => self.settings_editor.retire_all_settings_navigation(),
+            Panel::Plugins => self.settings_editor.retire_plugin_settings_navigation(),
+            Panel::ThemeSettingsDialog => self
+                .settings_editor
+                .retire_settings_navigation_for_section(&SettingsSection::Theme),
+            Panel::MouseSettingsDialog => self
+                .settings_editor
+                .retire_settings_navigation_for_section(&SettingsSection::Mouse),
+            Panel::MouseGestureSettingsDialog => self
+                .settings_editor
+                .retire_settings_navigation_for_section(&SettingsSection::MouseGestures),
+            Panel::BrightnessDialog => self
+                .settings_editor
+                .retire_settings_navigation_for_section(&SettingsSection::Brightness),
+            _ => {}
+        }
+    }
+
     pub fn close_theme_settings_dialog(&mut self) {
         if self.pinned_panels.contains(&Panel::ThemeSettingsDialog) {
             self.theme_settings_dialog_open = true;
@@ -2463,6 +2485,7 @@ impl LauncherApp {
             }
             return;
         }
+        self.retire_settings_navigation_for_panel(Panel::ThemeSettingsDialog);
         self.theme_settings_dialog_open = false;
         self.theme_settings_dialog.end_session(&self.egui_ctx);
         self.panel_states.theme_settings_dialog = false;
@@ -4190,6 +4213,7 @@ impl LauncherApp {
             self.panel_stack.push(panel);
             return false;
         }
+        self.retire_settings_navigation_for_panel(panel);
         match panel {
             Panel::AliasDialog => {
                 self.alias_dialog.open = false;
@@ -4447,6 +4471,7 @@ impl LauncherApp {
     }
 
     fn force_close_panel(&mut self, panel: Panel) {
+        self.retire_settings_navigation_for_panel(panel);
         match panel {
             Panel::AliasDialog => {
                 self.alias_dialog.open = false;

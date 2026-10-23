@@ -2,7 +2,10 @@ use super::catalog::{
     MainSettingsSection as TopLevelSettingsSection, SettingsAvailability, SettingsCatalogEntry,
     SettingsOwner, SettingsSection, ids as setting_ids,
 };
-use super::state::{PendingSettingsNavigation, SettingsEditor, SettingsNavigationStage};
+use super::state::{
+    PendingSettingsNavigation, SettingsEditor, SettingsNavigationDelivery,
+    SettingsNavigationHighlight, SettingsNavigationStage,
+};
 use crate::gui::LauncherApp;
 use crate::gui::jump_mode::{
     TargetKind,
@@ -17,6 +20,8 @@ const RADIAL_TAP_HOLD_EXPLANATION: &str = "Release before the threshold to toggl
 const RADIAL_LEGACY_TIMING_EXPLANATION: &str = "Legacy timing: the launcher hotkey toggles immediately; named radial commands and configured direct triggers remain available.";
 
 const SETTINGS_NAVIGATION_OBSERVER_ID: &str = "settings_navigation_frame_observer";
+const SETTINGS_NAVIGATION_HIGHLIGHT_DURATION: std::time::Duration =
+    std::time::Duration::from_millis(1800);
 
 #[derive(Clone, Copy, Debug, Default)]
 struct SettingsNavigationFrameOutcome {
@@ -24,6 +29,25 @@ struct SettingsNavigationFrameOutcome {
     scroll_requested: bool,
     superseded: bool,
     focused_response: Option<egui::Id>,
+    target_seen: bool,
+    highlighted_response: Option<egui::Id>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    qa_paint: Option<SettingsNavigationPaintedResponse>,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone, Copy, Debug)]
+struct SettingsNavigationPaintedResponse {
+    response_id: egui::Id,
+    rect: egui::Rect,
+    egui_frame_nr: u64,
+    egui_pass_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SettingsNavigationObservationMode {
+    Focus,
+    Highlight,
 }
 
 #[cfg(test)]
@@ -44,6 +68,7 @@ struct TestPendingResponseObservation {
 
 struct SettingsNavigationFrameState {
     request: PendingSettingsNavigation,
+    mode: SettingsNavigationObservationMode,
     first_ui_pass: bool,
     owner_current: bool,
     active: bool,
@@ -62,10 +87,16 @@ pub(crate) struct SettingsNavigationFrameObserver {
 }
 
 impl SettingsNavigationFrameObserver {
-    fn new(request: PendingSettingsNavigation, first_ui_pass: bool, owner_current: bool) -> Self {
+    fn new(
+        request: PendingSettingsNavigation,
+        first_ui_pass: bool,
+        owner_current: bool,
+        mode: SettingsNavigationObservationMode,
+    ) -> Self {
         Self {
             state: Arc::new(Mutex::new(SettingsNavigationFrameState {
                 request,
+                mode,
                 first_ui_pass,
                 owner_current,
                 active: true,
@@ -80,6 +111,17 @@ impl SettingsNavigationFrameObserver {
 
     fn request(&self) -> Option<PendingSettingsNavigation> {
         self.state.lock().ok().map(|state| state.request.clone())
+    }
+
+    fn mode(&self) -> SettingsNavigationObservationMode {
+        self.state
+            .lock()
+            .map(|state| state.mode)
+            .unwrap_or(SettingsNavigationObservationMode::Highlight)
+    }
+
+    pub(crate) fn is_highlight_only(&self) -> bool {
+        self.mode() == SettingsNavigationObservationMode::Highlight
     }
 
     fn outcome(&self) -> SettingsNavigationFrameOutcome {
@@ -114,6 +156,26 @@ impl SettingsNavigationFrameObserver {
             .lock()
             .map(|state| state.owner_current)
             .unwrap_or(false)
+    }
+
+    fn mark_highlighted_response(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        painted_rect: egui::Rect,
+    ) {
+        if let Ok(mut state) = self.state.lock() {
+            state.outcome.highlighted_response = Some(response.id);
+            #[cfg(feature = "qa-framebuffer-capture")]
+            {
+                state.outcome.qa_paint = Some(SettingsNavigationPaintedResponse {
+                    response_id: response.id,
+                    rect: painted_rect,
+                    egui_frame_nr: ui.ctx().cumulative_frame_nr(),
+                    egui_pass_index: ui.ctx().current_pass_index(),
+                });
+            }
+        }
     }
 
     fn is_deferred_plugin(&self, name: &str) -> bool {
@@ -170,7 +232,15 @@ impl SettingsNavigationFrameObserver {
         } else {
             None
         };
-        let (request, first_ui_pass, owner_current, active, already_superseded, already_focused) = {
+        let (
+            request,
+            mode,
+            first_ui_pass,
+            owner_current,
+            active,
+            already_superseded,
+            already_focused,
+        ) = {
             let Ok(state) = self.state.lock() else {
                 return;
             };
@@ -182,6 +252,7 @@ impl SettingsNavigationFrameObserver {
             }
             (
                 state.request.clone(),
+                state.mode,
                 state.first_ui_pass,
                 state.owner_current,
                 state.active,
@@ -194,7 +265,27 @@ impl SettingsNavigationFrameObserver {
         }
 
         if request.control_id == control_id {
-            if already_focused {
+            if mode == SettingsNavigationObservationMode::Highlight {
+                if let Ok(mut state) = self.state.lock() {
+                    state.outcome.target_seen = true;
+                }
+                if ui.is_sizing_pass() || !ui.is_visible() {
+                    return;
+                }
+                if !ui.is_enabled() || !response.enabled() {
+                    self.mark_superseded(format!("disabled-highlight:{control_id}"));
+                    return;
+                }
+                let visible_rect = response.rect.intersect(ui.clip_rect());
+                if !visible_rect.is_positive()
+                    || !ui
+                        .ctx()
+                        .memory(|memory| memory.allows_interaction(response.layer_id))
+                {
+                    return;
+                }
+                paint_settings_navigation_highlight(ui, visible_rect);
+                self.mark_highlighted_response(ui, response, visible_rect);
                 return;
             }
             if ui.is_sizing_pass() || !ui.is_visible() {
@@ -221,10 +312,23 @@ impl SettingsNavigationFrameObserver {
                 }
                 return;
             }
+            if already_focused {
+                paint_settings_navigation_highlight(ui, visible_rect);
+                self.mark_highlighted_response(ui, response, visible_rect);
+                if let Ok(mut state) = self.state.lock() {
+                    state.outcome.focus_requested = true;
+                    state.outcome.focused_response = Some(response.id);
+                    state.outcome.target_seen = true;
+                }
+                return;
+            }
             FocusDirective::Focus(kind).apply_to_response(response);
+            paint_settings_navigation_highlight(ui, visible_rect);
+            self.mark_highlighted_response(ui, response, visible_rect);
             if let Ok(mut state) = self.state.lock() {
                 state.outcome.focus_requested = true;
                 state.outcome.focused_response = Some(response.id);
+                state.outcome.target_seen = true;
             }
         } else if first_ui_pass
             && (response.clicked()
@@ -249,6 +353,17 @@ impl SettingsNavigationFrameObserver {
 
     pub(crate) fn install(&self, ctx: &egui::Context) -> ScopedSettingsNavigationObserver {
         ScopedSettingsNavigationObserver::install(ctx, self.clone())
+    }
+}
+
+fn paint_settings_navigation_highlight(ui: &egui::Ui, visible_rect: egui::Rect) {
+    if visible_rect.is_positive() {
+        ui.painter().with_clip_rect(ui.clip_rect()).rect_stroke(
+            visible_rect.expand(2.0),
+            4.0,
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(92, 173, 255)),
+            egui::StrokeKind::Inside,
+        );
     }
 }
 
@@ -309,6 +424,15 @@ pub(crate) fn scoped_settings_navigation_request(
         ))
     });
     observer.and_then(|observer| observer.request())
+}
+
+pub(crate) fn scoped_settings_navigation_is_highlight_only(ctx: &egui::Context) -> bool {
+    let observer = ctx.data(|data| {
+        data.get_temp::<SettingsNavigationFrameObserver>(egui::Id::new(
+            SETTINGS_NAVIGATION_OBSERVER_ID,
+        ))
+    });
+    observer.is_some_and(|observer| observer.is_highlight_only())
 }
 
 impl TopLevelSettingsSection {
@@ -697,6 +821,24 @@ impl SettingsEditor {
         entry: &SettingsCatalogEntry,
         settings_instance: Option<u64>,
     ) {
+        self.queue_settings_navigation_with_delivery(
+            entry,
+            settings_instance,
+            SettingsNavigationDelivery::ExactControl,
+        );
+    }
+
+    fn queue_settings_navigation_with_delivery(
+        &mut self,
+        entry: &SettingsCatalogEntry,
+        settings_instance: Option<u64>,
+        delivery: SettingsNavigationDelivery,
+    ) {
+        self.settings_navigation_highlight = None;
+        #[cfg(feature = "qa-framebuffer-capture")]
+        {
+            self.settings_navigation_qa_paint = None;
+        }
         let stage = match (&entry.section, &entry.owner) {
             (SettingsSection::Main(_), SettingsOwner::Application) => {
                 SettingsNavigationStage::MainControl
@@ -721,6 +863,7 @@ impl SettingsEditor {
             scroll_requested: false,
             destination_observed: false,
             destination_owner_eligible: false,
+            delivery,
         });
         #[cfg(test)]
         {
@@ -737,11 +880,51 @@ impl SettingsEditor {
         &mut self,
         observer: &SettingsNavigationFrameObserver,
         owner_current: bool,
+        now: f64,
     ) {
         let Some(request) = observer.request() else {
             return;
         };
         let outcome = observer.outcome();
+        if observer.is_highlight_only() {
+            let matches_highlight =
+                self.settings_navigation_highlight
+                    .as_ref()
+                    .is_some_and(|highlight| {
+                        highlight.request_token == request.request_token
+                            && highlight.control_id == request.control_id
+                            && highlight.owner == request.owner
+                            && highlight.section == request.section
+                            && highlight.catalog_revision == request.catalog_revision
+                            && highlight.settings_instance == request.settings_instance
+                    });
+            if !matches_highlight
+                || !owner_current
+                || outcome.superseded
+                || !outcome.target_seen
+                || now
+                    >= self
+                        .settings_navigation_highlight
+                        .as_ref()
+                        .map(|highlight| highlight.expires_at)
+                        .unwrap_or(0.0)
+            {
+                self.settings_navigation_highlight = None;
+                #[cfg(feature = "qa-framebuffer-capture")]
+                {
+                    self.settings_navigation_qa_paint = None;
+                }
+            } else {
+                #[cfg(feature = "qa-framebuffer-capture")]
+                self.record_settings_navigation_qa_paint(&request, outcome.qa_paint);
+            }
+            #[cfg(test)]
+            if owner_current && let Some(response_id) = outcome.highlighted_response {
+                self.test_last_navigation_highlight =
+                    Some((request.control_id.clone(), response_id));
+            }
+            return;
+        }
         let Some(pending) = self.pending_settings_navigation.as_ref() else {
             return;
         };
@@ -757,13 +940,65 @@ impl SettingsEditor {
         {
             return;
         }
-        if outcome.focus_requested || outcome.superseded {
+        if outcome.focus_requested {
             self.pending_settings_navigation = None;
+            self.settings_navigation_highlight =
+                Some(SettingsNavigationHighlight::from_request(&request, now));
+            #[cfg(feature = "qa-framebuffer-capture")]
+            self.record_settings_navigation_qa_paint(&request, outcome.qa_paint);
+        } else if outcome.superseded {
+            self.pending_settings_navigation = None;
+            self.settings_navigation_highlight = None;
+            #[cfg(feature = "qa-framebuffer-capture")]
+            {
+                self.settings_navigation_qa_paint = None;
+            }
         } else if outcome.scroll_requested
             && let Some(pending) = self.pending_settings_navigation.as_mut()
         {
             pending.scroll_requested = true;
         }
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn settings_navigation_qa_paint_for_current_pass(
+        &self,
+        ctx: &egui::Context,
+    ) -> Option<&super::state::SettingsNavigationQaPaint> {
+        let paint = self.settings_navigation_qa_paint.as_ref()?;
+        let highlight = self.settings_navigation_highlight.as_ref()?;
+        let now = ctx.input(|input| input.time);
+        (paint.egui_frame_nr == ctx.cumulative_frame_nr()
+            && paint.egui_pass_index == ctx.current_pass_index()
+            && paint.request_token == highlight.request_token
+            && paint.control_id == highlight.control_id
+            && paint.owner == highlight.owner
+            && paint.owner_instance == highlight.settings_instance
+            && paint.catalog_revision == highlight.catalog_revision
+            && now < highlight.expires_at)
+            .then_some(paint)
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    fn record_settings_navigation_qa_paint(
+        &mut self,
+        request: &PendingSettingsNavigation,
+        painted: Option<SettingsNavigationPaintedResponse>,
+    ) {
+        let Some(painted) = painted else {
+            return;
+        };
+        self.settings_navigation_qa_paint = Some(super::state::SettingsNavigationQaPaint {
+            request_token: request.request_token,
+            control_id: request.control_id.clone(),
+            owner: request.owner.clone(),
+            owner_instance: request.settings_instance,
+            catalog_revision: request.catalog_revision,
+            response_id: painted.response_id,
+            rect: painted.rect,
+            egui_frame_nr: painted.egui_frame_nr,
+            egui_pass_index: painted.egui_pass_index,
+        });
     }
 
     pub(crate) fn dedicated_navigation_observer(
@@ -774,6 +1009,33 @@ impl SettingsEditor {
         protected_takeover: bool,
         first_ui_pass: bool,
     ) -> Option<SettingsNavigationFrameObserver> {
+        if self.pending_settings_navigation.is_none() {
+            let highlight = self.settings_navigation_highlight.as_ref()?.clone();
+            if &highlight.section != section {
+                return None;
+            }
+            let current_entry = self.search_catalog.entry(&highlight.control_id);
+            if highlight.catalog_revision != self.search_catalog.plugin_revision()
+                || !current_entry.is_some_and(|entry| {
+                    entry.owner == highlight.owner
+                        && entry.section == highlight.section
+                        && !matches!(entry.availability, SettingsAvailability::Unavailable { .. })
+                })
+            {
+                self.settings_navigation_highlight = None;
+                return None;
+            }
+            if protected_takeover || !owner_open || !owner_current {
+                self.settings_navigation_highlight = None;
+                return None;
+            }
+            return Some(SettingsNavigationFrameObserver::new(
+                highlight.as_request(),
+                first_ui_pass,
+                true,
+                SettingsNavigationObservationMode::Highlight,
+            ));
+        }
         let request = self.pending_settings_navigation.as_ref()?;
         if request.stage != SettingsNavigationStage::DedicatedOwner
             || &request.section != section
@@ -880,6 +1142,7 @@ impl SettingsEditor {
             request.clone(),
             first_ui_pass,
             true,
+            SettingsNavigationObservationMode::Focus,
         ))
     }
 
@@ -888,6 +1151,7 @@ impl SettingsEditor {
         observer: &SettingsNavigationFrameObserver,
         owner_current: bool,
         first_ui_pass: bool,
+        now: f64,
     ) {
         let Some(request) = observer.request() else {
             return;
@@ -924,7 +1188,7 @@ impl SettingsEditor {
             self.test_last_dedicated_navigation_focus =
                 Some((request.control_id.clone(), response_id));
         }
-        self.apply_navigation_frame_outcome(observer, owner_current);
+        self.apply_navigation_frame_outcome(observer, owner_current, now);
         let Some(pending) = self.pending_settings_navigation.as_mut() else {
             return;
         };
@@ -965,6 +1229,13 @@ impl SettingsEditor {
         jump_mode_active: bool,
         first_ui_pass: bool,
     ) {
+        let now = ctx.input(|input| input.time);
+        self.expire_settings_navigation_highlight(now);
+        if let Some(highlight) = self.settings_navigation_highlight.as_ref() {
+            ctx.request_repaint_after(SETTINGS_NAVIGATION_HIGHLIGHT_DURATION.min(
+                std::time::Duration::from_secs_f64((highlight.expires_at - now).max(0.0)),
+            ));
+        }
         #[cfg(test)]
         let test_pending_before = self.pending_settings_navigation.as_ref().map(|pending| {
             format!(
@@ -986,6 +1257,7 @@ impl SettingsEditor {
         #[cfg(test)]
         {
             self.test_last_navigation_diagnostic = None;
+            self.test_last_navigation_highlight = None;
             self.test_notes_external_open_response = None;
         }
         if first_ui_pass {
@@ -1015,20 +1287,65 @@ impl SettingsEditor {
             {
                 self.pending_settings_navigation = None;
             }
+            self.settings_navigation_highlight = None;
         }
         self.refresh_settings_search_matches();
         self.validate_pending_settings_navigation(app, settings_owner_instance, first_ui_pass);
-        let navigation_observer = self
-            .pending_settings_navigation
+        let main_or_notes_highlight_lost_owner = self
+            .settings_navigation_highlight
             .as_ref()
-            .filter(|pending| {
+            .is_some_and(|highlight| {
+                matches!(
+                    &highlight.section,
+                    SettingsSection::Main(_) | SettingsSection::Notes
+                ) && (settings_owner_instance != highlight.settings_instance
+                    || !app.settings_native_ui_owner_current(ctx, true))
+            });
+        if main_or_notes_highlight_lost_owner {
+            self.settings_navigation_highlight = None;
+            #[cfg(feature = "qa-framebuffer-capture")]
+            {
+                self.settings_navigation_qa_paint = None;
+            }
+        }
+        let navigation_observer = if let Some(pending) =
+            self.pending_settings_navigation.as_ref().filter(|pending| {
                 pending.stage != SettingsNavigationStage::DedicatedOwner
                     && settings_owner_instance.is_some()
                     && settings_owner_instance == pending.settings_instance
                     && pending.catalog_revision == catalog_revision
-            })
-            .cloned()
-            .map(|pending| SettingsNavigationFrameObserver::new(pending, first_ui_pass, true));
+            }) {
+            Some(SettingsNavigationFrameObserver::new(
+                pending.clone(),
+                first_ui_pass,
+                true,
+                SettingsNavigationObservationMode::Focus,
+            ))
+        } else {
+            self.settings_navigation_highlight
+                .as_ref()
+                .filter(|highlight| {
+                    highlight.settings_instance.is_some()
+                        && settings_owner_instance == highlight.settings_instance
+                        && highlight.catalog_revision == catalog_revision
+                        && highlight.section != SettingsSection::PluginEditor
+                        && !matches!(
+                            highlight.section,
+                            SettingsSection::Theme
+                                | SettingsSection::Mouse
+                                | SettingsSection::MouseGestures
+                                | SettingsSection::Brightness
+                        )
+                })
+                .map(|highlight| {
+                    SettingsNavigationFrameObserver::new(
+                        highlight.as_request(),
+                        first_ui_pass,
+                        true,
+                        SettingsNavigationObservationMode::Highlight,
+                    )
+                })
+        };
         let mut jump_targets = SettingsJumpTargets::new(
             jump_mode_scope,
             first_ui_pass,
@@ -1086,14 +1403,7 @@ impl SettingsEditor {
                             );
                         }
                         if let Some(observer) = jump_targets.navigation_observer.as_ref()
-                            && !self
-                                .pending_settings_navigation
-                                .as_ref()
-                                .is_some_and(|pending| {
-                                    observer.request().is_some_and(|request| {
-                                        request.request_token == pending.request_token
-                                    })
-                                })
+                            && !self.settings_navigation_observer_is_authoritative(observer)
                         {
                             observer.invalidate();
                         }
@@ -1283,8 +1593,12 @@ impl SettingsEditor {
         if let Some(observer) = jump_targets.navigation_observer.as_ref() {
             let owner_current = settings_owner_instance.is_some()
                 && app.settings_native_ui_owner_current(ctx, true);
+            let observer_request = observer.request();
+            let observer_is_authoritative =
+                self.settings_navigation_observer_is_authoritative(observer);
             #[cfg(test)]
             if owner_current
+                && observer_is_authoritative
                 && navigation_outcome.focus_requested
                 && let Some(request) = navigation_request.as_ref()
                 && request.stage != SettingsNavigationStage::DedicatedOwner
@@ -1296,19 +1610,21 @@ impl SettingsEditor {
             {
                 self.test_last_navigation_focus = Some((request.control_id.clone(), response_id));
             }
-            self.apply_navigation_frame_outcome(observer, owner_current);
-            if let Some(pending) = self.pending_settings_navigation.as_mut()
-                && pending.request_token
-                    == observer
-                        .request()
-                        .map_or(u64::MAX, |request| request.request_token)
-                && pending.stage != SettingsNavigationStage::DedicatedOwner
-            {
-                if first_ui_pass {
-                    pending.frames_remaining = pending.frames_remaining.saturating_sub(1);
-                }
-                if pending.frames_remaining == 0 {
-                    self.pending_settings_navigation = None;
+            if observer_is_authoritative {
+                self.apply_navigation_frame_outcome(observer, owner_current, now);
+                if !observer.is_highlight_only()
+                    && let Some(pending) = self.pending_settings_navigation.as_mut()
+                    && observer_request
+                        .as_ref()
+                        .is_some_and(|request| pending.request_token == request.request_token)
+                    && pending.stage != SettingsNavigationStage::DedicatedOwner
+                {
+                    if first_ui_pass {
+                        pending.frames_remaining = pending.frames_remaining.saturating_sub(1);
+                    }
+                    if pending.frames_remaining == 0 {
+                        self.pending_settings_navigation = None;
+                    }
                 }
             }
         }
@@ -1411,6 +1727,7 @@ impl SettingsEditor {
         }
         if !open {
             self.pending_settings_navigation = None;
+            self.settings_navigation_highlight = None;
             self.settings_search_query.clear();
             self.settings_search_match_query.clear();
             self.settings_search_match_revision = None;
@@ -1459,6 +1776,7 @@ impl SettingsEditor {
         self.settings_search_selected_id = None;
         self.settings_search_page = 0;
         self.pending_settings_navigation = None;
+        self.settings_navigation_highlight = None;
         ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         true
     }
@@ -1496,6 +1814,35 @@ impl SettingsEditor {
         }
         if self.settings_search_match_ids.is_empty() {
             self.settings_search_selected_id = None;
+        }
+    }
+
+    fn settings_navigation_observer_is_authoritative(
+        &self,
+        observer: &SettingsNavigationFrameObserver,
+    ) -> bool {
+        let Some(request) = observer.request() else {
+            return false;
+        };
+        if self.search_catalog.plugin_revision() != request.catalog_revision {
+            return false;
+        }
+        if observer.is_highlight_only() {
+            self.settings_navigation_highlight
+                .as_ref()
+                .is_some_and(|highlight| {
+                    highlight.request_token == request.request_token
+                        && highlight.control_id == request.control_id
+                        && highlight.owner == request.owner
+                        && highlight.section == request.section
+                        && highlight.catalog_revision == request.catalog_revision
+                        && highlight.settings_instance == request.settings_instance
+                        && highlight.delivery == request.delivery
+                })
+        } else {
+            self.pending_settings_navigation
+                .as_ref()
+                .is_some_and(|pending| pending == &request)
         }
     }
 
@@ -1661,6 +2008,7 @@ impl SettingsEditor {
         let raw_enter_after_query = ctx.input(|input| input.key_pressed(egui::Key::Enter));
         if query_changed {
             self.pending_settings_navigation = None;
+            self.settings_navigation_highlight = None;
             self.refresh_settings_search_matches();
             #[cfg(test)]
             self.record_search_navigation_event(format!(
@@ -1873,10 +2221,36 @@ impl SettingsEditor {
         entry: &SettingsCatalogEntry,
         app: &LauncherApp,
     ) -> (Option<String>, bool) {
+        if entry.id.as_str() == "plugin.notes.external_open"
+            && self.plugin_settings.get("note").is_some_and(|settings| {
+                serde_json::from_value::<NotePluginSettings>(settings.clone()).is_err()
+            })
+        {
+            return (
+                Some(
+                    "Stored Notes options are malformed; edit the stored value before changing this option. The original value is preserved."
+                        .into(),
+                ),
+                true,
+            );
+        }
         match &entry.availability {
             SettingsAvailability::Available => (None, false),
             SettingsAvailability::Unavailable { prerequisite } => {
-                (Some(format!("Unavailable: {prerequisite}")), true)
+                if self.builtin_plugin_prerequisite(entry, app).is_some() {
+                    let plugin_name = match &entry.owner {
+                        SettingsOwner::Plugin { name, .. } => name.as_str(),
+                        _ => "plugin",
+                    };
+                    (
+                        Some(format!(
+                            "Unavailable: {prerequisite}. Select to reveal Enable {plugin_name} in Plugin Settings; it remains disabled."
+                        )),
+                        false,
+                    )
+                } else {
+                    (Some(format!("Unavailable: {prerequisite}")), true)
+                }
             }
             SettingsAvailability::Conditional { prerequisite } => {
                 let satisfied = self.conditional_search_prerequisite_satisfied(entry, app);
@@ -1902,10 +2276,78 @@ impl SettingsEditor {
                         Some(true) => (None, false),
                     }
                 } else {
-                    (Some(format!("Requires: {prerequisite}")), false)
+                    if let Some(target) = self.conditional_search_prerequisite_entry(entry, app) {
+                        (
+                            Some(format!(
+                                "Requires: {prerequisite}. Select to reveal {} in {}; the prerequisite remains unchanged until you change it.",
+                                target.label,
+                                target.section.title(),
+                            )),
+                            false,
+                        )
+                    } else {
+                        (Some(format!("Unavailable: {prerequisite}")), true)
+                    }
                 }
             }
         }
+    }
+
+    fn builtin_plugin_prerequisite(
+        &self,
+        entry: &SettingsCatalogEntry,
+        app: &LauncherApp,
+    ) -> Option<SettingsCatalogEntry> {
+        let SettingsOwner::Plugin {
+            name,
+            origin: crate::plugin::PluginCatalogOrigin::Builtin,
+            epoch: Some(epoch),
+        } = &entry.owner
+        else {
+            return None;
+        };
+        if !matches!(entry.availability, SettingsAvailability::Unavailable { .. })
+            || !self
+                .search_catalog
+                .entry(entry.id.as_str())
+                .is_some_and(|current| {
+                    current.owner == entry.owner && current.section == entry.section
+                })
+        {
+            return None;
+        }
+        let snapshot = app.plugins.settings_catalog_snapshot_if_changed(None)?;
+        if snapshot.revision != self.search_catalog.plugin_revision() {
+            return None;
+        }
+        let mut registrations = snapshot
+            .plugins
+            .iter()
+            .filter(|plugin| plugin.name == *name);
+        let plugin = registrations.next()?;
+        if registrations.next().is_some()
+            || plugin.origin != crate::plugin::PluginCatalogOrigin::Builtin
+            || plugin.epoch != *epoch
+            || plugin.enabled
+        {
+            return None;
+        }
+        let prerequisite_id = format!("plugin_editor.builtin.{name}.{epoch}.enabled");
+        let prerequisite = self.search_catalog.entry(&prerequisite_id)?;
+        if prerequisite.section != SettingsSection::PluginEditor
+            || !matches!(prerequisite.availability, SettingsAvailability::Available)
+            || !matches!(
+                &prerequisite.owner,
+                SettingsOwner::Plugin {
+                    name: owner_name,
+                    origin: crate::plugin::PluginCatalogOrigin::Builtin,
+                    epoch: Some(owner_epoch),
+                } if owner_name == name && owner_epoch == epoch
+            )
+        {
+            return None;
+        }
+        Some(prerequisite.clone())
     }
 
     fn conditional_search_prerequisite_satisfied(
@@ -1924,6 +2366,90 @@ impl SettingsEditor {
                 _ => None,
             }
         })
+    }
+
+    fn conditional_search_prerequisite_entry(
+        &self,
+        entry: &SettingsCatalogEntry,
+        app: &LauncherApp,
+    ) -> Option<SettingsCatalogEntry> {
+        if !matches!(entry.availability, SettingsAvailability::Conditional { .. }) {
+            return None;
+        }
+        let target_id = match entry.id.as_str() {
+            "hotkeys.quit.value" => "hotkeys.quit.enabled",
+            "hotkeys.help.value" => "hotkeys.help.enabled",
+            "paste.next.hotkey" => "paste.next.enabled",
+            "paste.cancel.hotkey" => "paste.cancel.enabled",
+            "launcher.static_position" => "launcher.follow_mouse",
+            "launcher.static_x"
+            | "launcher.static_y"
+            | "launcher.static_width"
+            | "launcher.static_height"
+                if self.follow_mouse =>
+            {
+                "launcher.follow_mouse"
+            }
+            "launcher.static_x"
+            | "launcher.static_y"
+            | "launcher.static_width"
+            | "launcher.static_height" => "launcher.static_position",
+            "search.grid_rows"
+            | "search.grid_columns"
+            | "search.respect_plugin_capability"
+            | "search.plugin_opt_out" => "search.grid_layout",
+            "feedback.toast_duration" | "feedback.toast_duration/value" => "feedback.toasts",
+            "feedback.timer_refresh" => "feedback.disable_timer_updates",
+            "dashboard.diagnostics" if !cfg!(debug_assertions) => "feedback.debug_logging",
+            "radial.shared_tap_hold"
+            | "radial.hold_threshold"
+            | "radial.tooltip_scope"
+            | "radial.tooltip_delay"
+            | "radial.expected_layout_diagnostics"
+            | "radial.default_menu"
+            | "radial.default_interaction"
+            | "radial.default_submenu_presentation"
+            | "radial.safety_policy"
+            | "radial.global_item_inputs" => "radial.enabled",
+            "radial.default_item_input_scope" if !self.radial_enabled => "radial.enabled",
+            "radial.default_item_input_scope" => "radial.global_item_inputs",
+            "notes.outline_default_open" => "notes.outline_sidebar",
+            "theme.accent.color" => "theme.accent",
+            // A completed migration has no current user-editable prerequisite.
+            // Keep its recovery action disabled rather than inventing a route.
+            "radial.restore_submenu_presentation" | "brightness.level" => return None,
+            _ => return None,
+        };
+        let target = self.search_catalog.entry(target_id)?;
+        let same_owner = match (&entry.owner, &target.owner) {
+            (SettingsOwner::Application, SettingsOwner::Application) => true,
+            (SettingsOwner::Theme, SettingsOwner::Theme) => true,
+            _ => false,
+        };
+        if !same_owner
+            || self.search_catalog.plugin_revision() != app.plugins.settings_catalog_revision()
+            || !self
+                .search_catalog
+                .entry(entry.id.as_str())
+                .is_some_and(|current| {
+                    current.owner == entry.owner && current.section == entry.section
+                })
+            || !self.search_catalog.entry(target_id).is_some_and(|current| {
+                current.owner == target.owner
+                    && current.section == target.section
+                    && match &current.availability {
+                        SettingsAvailability::Available => true,
+                        SettingsAvailability::Conditional { .. } => {
+                            self.conditional_search_prerequisite_satisfied(current, app)
+                                == Some(true)
+                        }
+                        SettingsAvailability::Unavailable { .. } => false,
+                    }
+            })
+        {
+            return None;
+        }
+        Some(target.clone())
     }
 
     fn main_prerequisite_satisfied(
@@ -1983,12 +2509,35 @@ impl SettingsEditor {
         let Some(settings_instance) = settings_owner_instance else {
             return;
         };
-        if matches!(
-            &entry.availability,
-            SettingsAvailability::Unavailable { .. }
-        ) {
-            return;
-        }
+        let (navigation_entry, delivery) = match &entry.availability {
+            SettingsAvailability::Unavailable { .. } => {
+                let Some(prerequisite) = self.builtin_plugin_prerequisite(&entry, app) else {
+                    return;
+                };
+                (
+                    prerequisite,
+                    SettingsNavigationDelivery::BuiltinPrerequisite {
+                        requested_control_id: entry.id.as_str().to_owned(),
+                    },
+                )
+            }
+            SettingsAvailability::Conditional { .. }
+                if self.conditional_search_prerequisite_satisfied(&entry, app) == Some(false) =>
+            {
+                let Some(prerequisite) = self.conditional_search_prerequisite_entry(&entry, app)
+                else {
+                    self.pending_settings_navigation = None;
+                    return;
+                };
+                (
+                    prerequisite,
+                    SettingsNavigationDelivery::ConditionalPrerequisite {
+                        requested_control_id: entry.id.as_str().to_owned(),
+                    },
+                )
+            }
+            _ => (entry.clone(), SettingsNavigationDelivery::ExactControl),
+        };
         let condition_met = match &entry.availability {
             SettingsAvailability::Available => true,
             SettingsAvailability::Unavailable { .. } => false,
@@ -2002,16 +2551,22 @@ impl SettingsEditor {
             &entry.availability,
             SettingsAvailability::Conditional { .. }
         ) && !condition_met
+            && !matches!(
+                &delivery,
+                SettingsNavigationDelivery::ConditionalPrerequisite { .. }
+            )
         {
-            // Reveal the relevant section so the prerequisite is visible, but
-            // never toggle it or leave a focus request waiting for it.
             self.pending_settings_navigation = None;
             return;
         }
 
-        self.queue_settings_navigation(&entry, Some(settings_instance));
+        self.queue_settings_navigation_with_delivery(
+            &navigation_entry,
+            Some(settings_instance),
+            delivery,
+        );
 
-        match &entry.section {
+        match &navigation_entry.section {
             SettingsSection::Main(_) | SettingsSection::Notes | SettingsSection::Plugin { .. } => {}
             SettingsSection::Theme => {
                 app.open_theme_settings_dialog();
@@ -3340,6 +3895,7 @@ impl SettingsEditor {
                     let response = ui.add(
                         egui::DragValue::new(&mut self.note_max_outline_depth)
                             .range(1..=6)
+                            .clamp_existing_to_range(false)
                             .speed(1),
                     );
                     observe_scoped_settings_navigation_response(
@@ -3349,8 +3905,6 @@ impl SettingsEditor {
                         TargetKind::TextEntry,
                     );
                 });
-                self.note_max_outline_depth = self.note_max_outline_depth.clamp(1, 6);
-
                 ui.separator();
                 ui.heading("Legacy note options");
                 observed_checkbox!(
@@ -3414,40 +3968,57 @@ impl SettingsEditor {
                         TargetKind::TextEntry,
                     );
                 });
+                let malformed_note_settings =
+                    self.plugin_settings.get("note").is_some_and(|value| {
+                        serde_json::from_value::<NotePluginSettings>(value.clone()).is_err()
+                    });
                 let mut cfg = self
                     .plugin_settings
                     .get("note")
-                    .and_then(|v| serde_json::from_value::<NotePluginSettings>(v.clone()).ok())
-                    .unwrap_or_default();
-                let external_open = egui::ComboBox::from_label("Open externally")
-                    .selected_text(match cfg.external_open {
-                        NoteExternalOpen::Neither => "Neither",
-                        NoteExternalOpen::Powershell => "Powershell",
-                        NoteExternalOpen::Notepad => "Notepad",
-                        NoteExternalOpen::Wezterm => "WezTerm",
+                    .and_then(|value| {
+                        serde_json::from_value::<NotePluginSettings>(value.clone()).ok()
                     })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut cfg.external_open,
-                            NoteExternalOpen::Neither,
-                            "Neither",
-                        );
-                        ui.selectable_value(
-                            &mut cfg.external_open,
-                            NoteExternalOpen::Powershell,
-                            "Powershell",
-                        );
-                        ui.selectable_value(
-                            &mut cfg.external_open,
-                            NoteExternalOpen::Notepad,
-                            "Notepad",
-                        );
-                        ui.selectable_value(
-                            &mut cfg.external_open,
-                            NoteExternalOpen::Wezterm,
-                            "WezTerm",
-                        );
-                    });
+                    .unwrap_or_default();
+                if malformed_note_settings {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(205, 145, 70),
+                        "Stored Notes options are malformed; the original value is preserved.",
+                    );
+                }
+                let original_external_open = cfg.external_open;
+                let external_open = ui
+                    .add_enabled_ui(!malformed_note_settings, |ui| {
+                        egui::ComboBox::from_label("Open externally")
+                            .selected_text(match cfg.external_open {
+                                NoteExternalOpen::Neither => "Neither",
+                                NoteExternalOpen::Powershell => "Powershell",
+                                NoteExternalOpen::Notepad => "Notepad",
+                                NoteExternalOpen::Wezterm => "WezTerm",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut cfg.external_open,
+                                    NoteExternalOpen::Neither,
+                                    "Neither",
+                                );
+                                ui.selectable_value(
+                                    &mut cfg.external_open,
+                                    NoteExternalOpen::Powershell,
+                                    "Powershell",
+                                );
+                                ui.selectable_value(
+                                    &mut cfg.external_open,
+                                    NoteExternalOpen::Notepad,
+                                    "Notepad",
+                                );
+                                ui.selectable_value(
+                                    &mut cfg.external_open,
+                                    NoteExternalOpen::Wezterm,
+                                    "WezTerm",
+                                );
+                            })
+                    })
+                    .inner;
                 observe_scoped_settings_navigation_response(
                     ui,
                     &external_open.response,
@@ -3470,10 +4041,24 @@ impl SettingsEditor {
                             has_focus: external_open.response.has_focus(),
                         });
                 }
-                self.plugin_settings.insert(
-                    "note".into(),
-                    serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null),
-                );
+                if cfg.external_open != original_external_open {
+                    let value = self
+                        .plugin_settings
+                        .entry("note".into())
+                        .or_insert_with(|| serde_json::json!({}));
+                    if let Some(object) = value.as_object_mut() {
+                        let stored_value = match cfg.external_open {
+                            NoteExternalOpen::Neither => "Neither",
+                            NoteExternalOpen::Powershell => "Powershell",
+                            NoteExternalOpen::Notepad => "Notepad",
+                            NoteExternalOpen::Wezterm => "Wezterm",
+                        };
+                        object.insert(
+                            "external_open".into(),
+                            serde_json::Value::String(stored_value.into()),
+                        );
+                    }
+                }
             });
     }
 }
@@ -3567,6 +4152,35 @@ fn hotkey_indicator(ui: &mut egui::Ui, valid: bool) {
 #[cfg(test)]
 mod settings_shell_tests {
     use super::*;
+
+    #[test]
+    fn settings_search_delivery_highlight_expires_at_its_deadline() {
+        let request = PendingSettingsNavigation {
+            request_token: 7,
+            control_id: "paste.next.enabled".into(),
+            owner: SettingsOwner::Application,
+            section: SettingsSection::Main(TopLevelSettingsSection::PasteSequences),
+            catalog_revision: 3,
+            settings_instance: Some(11),
+            stage: SettingsNavigationStage::MainControl,
+            frames_remaining: 0,
+            scroll_requested: false,
+            destination_observed: true,
+            destination_owner_eligible: true,
+            delivery: SettingsNavigationDelivery::ConditionalPrerequisite {
+                requested_control_id: "paste.next.hotkey".into(),
+            },
+        };
+        let highlight = SettingsNavigationHighlight::from_request(&request, 4.0);
+        let deadline = highlight.expires_at;
+        let mut editor = SettingsEditor::default();
+        editor.settings_navigation_highlight = Some(highlight);
+
+        editor.expire_settings_navigation_highlight(deadline - 0.001);
+        assert!(editor.settings_navigation_highlight.is_some());
+        editor.expire_settings_navigation_highlight(deadline);
+        assert!(editor.settings_navigation_highlight.is_none());
+    }
 
     fn paste_settings_frame(
         ctx: &egui::Context,
@@ -3699,9 +4313,31 @@ mod settings_shell_tests {
         events: Vec<egui::Event>,
         discard_first_pass: bool,
     ) -> usize {
+        settings_search_frame_observing(
+            ctx,
+            app,
+            settings_owner_instance,
+            jump_mode_active,
+            events,
+            discard_first_pass,
+            |_, _| (),
+        )
+        .0
+    }
+
+    fn settings_search_frame_observing<T>(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        settings_owner_instance: Option<u64>,
+        jump_mode_active: bool,
+        events: Vec<egui::Event>,
+        discard_first_pass: bool,
+        mut observe_after_render: impl FnMut(&egui::Context, &LauncherApp) -> T,
+    ) -> (usize, T) {
         if settings_owner_instance.is_some() {
             app.mark_visible_root_for_test();
         }
+        let mut observation = None;
         let output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -3724,6 +4360,7 @@ mod settings_shell_tests {
                     first_ui_pass,
                 );
                 app.settings_editor = editor;
+                observation = Some(observe_after_render(ctx, app));
                 if discard_first_pass && first_ui_pass {
                     ui.ctx().request_discard("Settings search navigation test");
                 }
@@ -3731,7 +4368,44 @@ mod settings_shell_tests {
         );
         let passes = output.platform_output.num_completed_passes;
         output.drop_without_applying_deltas();
-        passes
+        (
+            passes,
+            observation.expect("the Settings frame renders at least one UI pass"),
+        )
+    }
+
+    fn settings_search_frame_with_foreign_takeover(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        settings_owner_instance: u64,
+    ) {
+        app.mark_visible_root_for_test();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1100.0, 900.0),
+                )),
+                focused: true,
+                ..Default::default()
+            },
+            |ui| {
+                let first_ui_pass = ui.output(|output| output.num_completed_passes == 0);
+                let mut editor = std::mem::take(&mut app.settings_editor);
+                editor.ui(
+                    ctx,
+                    app,
+                    None,
+                    Some(settings_owner_instance),
+                    false,
+                    first_ui_pass,
+                );
+                app.settings_editor = editor;
+                egui::Window::new("Unrelated settings owner")
+                    .show(ctx, |ui| ui.label("Protected owner"));
+            },
+        );
+        output.drop_without_applying_deltas();
     }
 
     fn settle_settings_search_window(
@@ -4263,7 +4937,7 @@ mod settings_shell_tests {
                     .iter()
                     .any(|id| id == "paste.next.enabled")
             );
-            app.settings_editor.settings_search_selected_id = Some("paste.next.enabled".into());
+            app.settings_editor.settings_search_selected_id = Some("paste.next.hotkey".into());
             ctx.memory_mut(|memory| memory.request_focus(query_id));
 
             let enter = egui::Event::Key {
@@ -4311,6 +4985,52 @@ mod settings_shell_tests {
                         ctx.memory(|memory| memory.focused()) == Some(*response_id)
                     }),
                 "Jump setting {jump_enabled}: memory focus matches the actual destination response"
+            );
+            assert!(
+                app.settings_editor
+                    .settings_navigation_highlight
+                    .as_ref()
+                    .is_some_and(|highlight| {
+                        highlight.control_id == "paste.next.enabled"
+                            && matches!(
+                                &highlight.delivery,
+                                SettingsNavigationDelivery::ConditionalPrerequisite {
+                                    requested_control_id,
+                                } if requested_control_id == "paste.next.hotkey"
+                            )
+                    })
+            );
+            let focused_response_id = app
+                .settings_editor
+                .test_last_navigation_focus
+                .as_ref()
+                .expect("the current checkbox focus receipt is recorded")
+                .1;
+            settings_search_frame(&ctx, &mut app, Some(owner), false, Vec::new(), false);
+            assert_eq!(
+                app.settings_editor
+                    .test_last_navigation_highlight
+                    .as_ref()
+                    .map(|(id, response_id)| (id.as_str(), *response_id)),
+                Some(("paste.next.enabled", focused_response_id)),
+                "Jump setting {jump_enabled}: a later pass outlines the same actual response"
+            );
+            assert_eq!(
+                ctx.memory(|memory| memory.focused()),
+                Some(focused_response_id),
+                "Jump setting {jump_enabled}: highlight observation does not redirect focus"
+            );
+            assert!(
+                app.settings_editor
+                    .test_last_navigation_diagnostic
+                    .as_ref()
+                    .is_some_and(|diagnostic| diagnostic.contains("focus_requested=false"))
+            );
+            assert!(
+                app.settings_editor
+                    .settings_navigation_highlight
+                    .as_ref()
+                    .is_some_and(|highlight| highlight.control_id == "paste.next.enabled")
             );
             assert!(
                 !app.settings_editor.paste_next_enabled,
@@ -4896,6 +5616,7 @@ mod settings_shell_tests {
         let mut app = settings_test_app(&ctx, &directory, crate::settings::Settings::default());
         app.show_settings = true;
         app.settings_editor.toast_duration = 9.25;
+        app.settings_editor.note_max_outline_depth = 9;
         let main_draft = app.settings_editor.toast_duration;
         let committed = std::fs::read(directory.path().join("settings.json")).unwrap();
         let owner = app.settings_navigation_owner_instance();
@@ -4971,11 +5692,92 @@ mod settings_shell_tests {
         });
         assert_eq!(focused_control.0, "plugin.notes.external_open");
         assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(
+            !app.settings_editor.plugin_settings.contains_key("note"),
+            "passive Notes rendering and navigation leave an absent raw plugin value absent"
+        );
+        assert_eq!(
+            app.settings_editor.note_max_outline_depth, 9,
+            "merely rendering the numeric response does not clamp an existing draft"
+        );
         assert_eq!(app.settings_editor.toast_duration, main_draft);
         assert_eq!(
             std::fs::read(directory.path().join("settings.json")).unwrap(),
             committed,
             "response focus does not save or change Main Settings"
+        );
+        #[cfg(feature = "qa-framebuffer-capture")]
+        let (_, painted) = settings_search_frame_observing(
+            &ctx,
+            &mut app,
+            Some(owner),
+            false,
+            Vec::new(),
+            false,
+            |ctx, app| {
+                app.settings_editor
+                    .settings_navigation_qa_paint_for_current_pass(ctx)
+                    .cloned()
+            },
+        );
+        #[cfg(not(feature = "qa-framebuffer-capture"))]
+        settings_search_frame(&ctx, &mut app, Some(owner), false, Vec::new(), false);
+        assert_eq!(
+            app.settings_editor
+                .test_last_navigation_highlight
+                .as_ref()
+                .map(|(control_id, response_id)| (control_id.as_str(), *response_id)),
+            Some(("plugin.notes.external_open", focused_control.1)),
+            "the later Notes pass highlights its current real response"
+        );
+        #[cfg(feature = "qa-framebuffer-capture")]
+        {
+            let painted =
+                painted.expect("QA evidence is retained only for the current real paint pass");
+            assert_eq!(painted.control_id, "plugin.notes.external_open");
+            assert_eq!(painted.response_id, focused_control.1);
+            assert_eq!(painted.owner_instance, Some(owner));
+            assert!(
+                app.settings_editor
+                    .settings_navigation_qa_paint_for_current_pass(&ctx)
+                    .is_none(),
+                "the same receipt is rejected once its egui pass has ended"
+            );
+        }
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(focused_control.1)
+        );
+        assert!(
+            app.settings_editor
+                .test_last_navigation_diagnostic
+                .as_ref()
+                .is_some_and(|diagnostic| diagnostic.contains("focus_requested=false"))
+        );
+
+        // A real foreground owner takes over for two frames. The second frame
+        // observes that layer as the previous-frame top owner and must retire
+        // the persistent Main/Notes highlight, even though its one-shot focus
+        // request has already completed. Returning to Settings must not revive
+        // the old highlight or deliver another focus request.
+        settings_search_frame_with_foreign_takeover(&ctx, &mut app, owner);
+        settings_search_frame_with_foreign_takeover(&ctx, &mut app, owner);
+        assert!(app.settings_editor.settings_navigation_highlight.is_none());
+        #[cfg(feature = "qa-framebuffer-capture")]
+        assert!(
+            app.settings_editor
+                .settings_navigation_qa_paint_for_current_pass(&ctx)
+                .is_none(),
+            "a protected owner takeover invalidates stale geometry evidence"
+        );
+        settings_search_frame(&ctx, &mut app, Some(owner), false, Vec::new(), false);
+        settings_search_frame(&ctx, &mut app, Some(owner), false, Vec::new(), false);
+        assert!(app.settings_editor.settings_navigation_highlight.is_none());
+        assert!(
+            !app.settings_editor
+                .test_last_navigation_focus
+                .as_ref()
+                .is_some_and(|(control_id, _)| control_id == "plugin.notes.external_open")
         );
 
         // A second request is pending at the start of this frame. Typing into
@@ -5014,6 +5816,7 @@ mod settings_shell_tests {
         );
         assert_eq!(app.settings_editor.settings_search_query, "notes markdown");
         assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(app.settings_editor.settings_navigation_highlight.is_none());
         assert!(
             !app.settings_editor
                 .test_last_navigation_focus
@@ -5098,11 +5901,105 @@ mod settings_shell_tests {
             !notes_received_focus,
             "the canceled request never gives focus to the Notes response; latest={notes_response:?}"
         );
+
+        app.settings_editor.plugin_settings.insert(
+            "note".into(),
+            serde_json::json!({"external_open": "Neither", "preserved_note_key": "sentinel"}),
+        );
+        settings_search_frame(&ctx, &mut app, Some(owner), false, Vec::new(), false);
+        notes_response = app
+            .settings_editor
+            .test_notes_external_open_response
+            .expect("the actual Notes ComboBox remains rendered for a deliberate edit");
+        assert!(notes_response.response_enabled && notes_response.visible);
+        click_settings_search_response(&ctx, &mut app, Some(owner), notes_response.rect);
+        let popup_labels = paste_settings_frame(&ctx, &mut app, Vec::new());
+        assert!(
+            popup_labels.iter().any(|(label, _)| label == "Notepad"),
+            "the explicit Notes popup offers the real Notepad option"
+        );
+        paste_settings_click(&ctx, &mut app, "Notepad");
+        let note_settings = app
+            .settings_editor
+            .plugin_settings
+            .get("note")
+            .expect("the explicit combo choice creates or patches its owned raw object");
+        assert_eq!(note_settings["external_open"], "Notepad");
+        assert_eq!(
+            note_settings["preserved_note_key"], "sentinel",
+            "an intentional field edit retains unrelated raw object keys"
+        );
         assert_eq!(app.settings_editor.toast_duration, main_draft);
         assert_eq!(
             std::fs::read(directory.path().join("settings.json")).unwrap(),
             committed
         );
+    }
+
+    #[test]
+    fn settings_search_delivery_preserves_malformed_notes_value() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let mut app = settings_test_app(&ctx, &directory, crate::settings::Settings::default());
+        app.show_settings = true;
+        app.settings_editor.plugin_settings.insert(
+            "note".into(),
+            serde_json::Value::String("malformed-note-sentinel".into()),
+        );
+        let owner = app.settings_navigation_owner_instance();
+        prepare_search_result(
+            &ctx,
+            &mut app,
+            Some(owner),
+            "plugin.notes.external_open",
+            "open externally",
+        );
+        let key_event = |pressed| egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        settings_search_frame(
+            &ctx,
+            &mut app,
+            Some(owner),
+            false,
+            vec![key_event(true)],
+            false,
+        );
+        settings_search_frame(
+            &ctx,
+            &mut app,
+            Some(owner),
+            false,
+            vec![key_event(false)],
+            false,
+        );
+        for _ in 0..8 {
+            if app
+                .settings_editor
+                .test_notes_external_open_response
+                .is_some()
+            {
+                break;
+            }
+            settings_search_frame(&ctx, &mut app, Some(owner), false, Vec::new(), false);
+        }
+        let raw_value = app
+            .settings_editor
+            .plugin_settings
+            .get("note")
+            .expect("the malformed stored value remains present");
+        assert_eq!(raw_value, "malformed-note-sentinel");
+        let response = app
+            .settings_editor
+            .test_notes_external_open_response
+            .expect("the Notes owner reports the malformed option through its real response");
+        assert!(response.visible);
+        assert!(!response.response_enabled);
     }
 
     #[test]

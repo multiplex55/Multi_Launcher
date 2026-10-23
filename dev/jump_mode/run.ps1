@@ -2,12 +2,14 @@
 [CmdletBinding()]
 param(
     [switch]$FixturesOnly,
-    [ValidateSet('Baseline', 'QueryProbe', 'Phase1', 'Phase1Enabled', 'Phase1Disabled', 'Phase2')][string]$Scenario = 'Baseline',
+    [ValidateSet('Baseline', 'QueryProbe', 'Phase1', 'Phase1Enabled', 'Phase1Disabled', 'Phase2', 'SettingsSearch')][string]$Scenario = 'Baseline',
     [ValidateSet('All', 'Dashboard', 'Grid', 'FinalSmoke')][string]$Screen = 'All',
     [ValidateSet('Settings', 'Notes', 'Todo', 'Timer', 'Paste', 'MkMacro', 'FileSearch')][string]$Surface = 'Settings',
     [ValidateRange(5, 120)][int]$CaptureTimeoutSeconds = 45,
     [ValidateRange(1, 30)][int]$GracefulCloseSeconds = 6,
-    [ValidateRange(300, 7200)][int]$OverallTimeoutSeconds = 2400
+    [ValidateRange(90, 7200)][int]$OverallTimeoutSeconds = 2400,
+    [switch]$NativeOnly,
+    [string]$PrebuiltArtifactManifest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,7 +20,7 @@ $phase2SurfaceKey = switch ($Surface) {
     'FileSearch' { 'file-search' }
     default { $Surface.ToLowerInvariant() }
 }
-$runMilestone = if ($isFinalSmoke) { 'M15' } elseif ($Scenario -eq 'QueryProbe') { 'M05' } elseif ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'M08' } elseif ($Scenario -eq 'Phase2') { 'M13' } else { 'M01' }
+$runMilestone = if ($Scenario -eq 'SettingsSearch') { 'G3-M1-B' } elseif ($isFinalSmoke) { 'M15' } elseif ($Scenario -eq 'QueryProbe') { 'M05' } elseif ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'M08' } elseif ($Scenario -eq 'Phase2') { 'M13' } else { 'M01' }
 $runStamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
 $runSuffix = [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $scenarioTag = if ($isFinalSmoke) { 'm15_final_smoke' } else { switch ($Scenario) {
@@ -27,6 +29,7 @@ $scenarioTag = if ($isFinalSmoke) { 'm15_final_smoke' } else { switch ($Scenario
     'Phase1Enabled' { 'm08_phase1_enabled' }
     'Phase1Disabled' { 'm08_phase1_disabled' }
     'Phase2' { "m13_phase2_$phase2SurfaceKey" }
+    'SettingsSearch' { 'g3_m1b_settings_search' }
     default { 'm01_baseline' }
 } }
 $runId = "jump_${scenarioTag}_${runStamp}_$runSuffix"
@@ -60,6 +63,8 @@ $processStartUtc = $null
 $processId = $null
 $processSessionId = $null
 $fixtureHash = $null
+$sourceBranch = $null
+$sourceDiffSha256 = $null
 $executablePath = $null
 $executableHash = $null
 $buildReceiptIdentity = $null
@@ -78,6 +83,7 @@ $scenarioReason = if ($isFinalSmoke) { 'M15 final representative smoke has not s
     'QueryProbe' { 'Native Jump Mode query probe has not started.' }
     { $_ -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled') } { 'Native Phase 1 Jump Mode scenarios have not started.' }
     'Phase2' { "Native Phase 2 $Surface workflow has not started." }
+    'SettingsSearch' { 'Native Settings search navigation scenario has not started.' }
     default { 'Baseline capture has not started.' }
 } }
 $fixtureScenarioStatus = 'BLOCKED'
@@ -97,10 +103,15 @@ $phase1CaptureCount = if ($Scenario -eq 'Phase1Enabled') {
 $phase1BaseActivationCount = 1
 $appWindowMetadata = $null
 $finalSmokeResizeMetadata = $null
-$phase2CaptureCount = if ($Scenario -eq 'Phase2' -and $Surface -eq 'Settings') { 3 } elseif ($Scenario -eq 'Phase2') { 2 } else { 0 }
+$phase2CaptureCount = if (($Scenario -eq 'Phase2' -and $Surface -eq 'Settings') -or $Scenario -eq 'SettingsSearch') { 3 } elseif ($Scenario -eq 'Phase2') { 2 } else { 0 }
+$prebuiltSettingsPath = $null
+$prebuiltSettingsSha256 = $null
 $phase2NextCaptureIndex = 1
 $phase2Captures = [Collections.Generic.List[object]]::new()
 $phase2OwnerInstance = $null
+$prebuiltSettingsPreInputSha256 = $null
+$settingsSearchNavigationSha256 = $null
+$settingsSearchNavigationHashVerified = $null
 
 function Get-RemainingRunSeconds([int]$RequestedSeconds = 86400) {
     $remaining = [int][Math]::Floor(($script:runDeadlineUtc - [DateTime]::UtcNow).TotalSeconds)
@@ -205,6 +216,15 @@ function Record-CleanupIssue([string]$Step, [string]$Message) {
 }
 
 function Write-Summary([string]$Status, [string]$Details) {
+    $buildSummary = if ($NativeOnly) {
+        if ($script:buildReceiptIdentity) {
+            "Validated prebuilt artifacts: app=``$script:executablePath`` sha256=$script:executableHash; source=$script:sourceBranch@$script:headSha diff=$script:sourceDiffSha256; build receipt identity=``$script:buildReceiptIdentity``"
+        } else {
+            'Build: NativeOnly; no Cargo invocation (prebuilt artifact validation pending).'
+        }
+    } else {
+        "Build: ``cargo build --profile fast-dev --features $cargoFeatures --bin multi_launcher``"
+    }
     $lines = @(
         "# Jump Mode $Scenario run $runId",
         '',
@@ -214,7 +234,7 @@ function Write-Summary([string]$Status, [string]$Details) {
         "Updated (UTC): $([DateTime]::UtcNow.ToString('O'))",
         "Interactive session: $interactive (session $sessionId)",
         "Fixture profile: ``$profileRoot``",
-        "Build: ``cargo build --profile fast-dev --features $cargoFeatures --bin multi_launcher``",
+        $buildSummary,
         '',
         $Details,
         ''
@@ -568,6 +588,43 @@ function Wait-JumpModeObservation([scriptblock]$Condition, [int]$TimeoutSeconds,
         Start-Sleep -Milliseconds 100
     }
     throw "timed out after $boundedTimeout seconds waiting for $Description"
+}
+
+function Wait-SettingsSearchStartupReadiness {
+    return Wait-JumpModeObservation {
+        param($state)
+        if (!(Test-RetainedProcessIdentity)) {
+            throw 'retained app PID/birth identity changed while waiting for Settings Search startup readiness'
+        }
+        $process.Refresh()
+        if ($process.HasExited) {
+            $script:processExitCode = $process.ExitCode
+            throw "isolated app exited before publishing its owned main window and ROOT query response (exit $script:processExitCode)"
+        }
+
+        $window = $process.MainWindowHandle
+        if ($window -eq [IntPtr]::Zero) { return $false }
+        $windowProcessId = [int][JumpModeNativeProbe]::WindowProcessId($window)
+        if ($windowProcessId -ne $processId) {
+            throw "startup main window belongs to PID $windowProcessId instead of retained PID $processId"
+        }
+
+        $queryResponses = @($state.targets | Where-Object {
+            $_.surface -ceq 'launcher_results' -and $_.is_query_input -and $_.kind -ceq 'text_entry'
+        })
+        if ($state.active_session -or $queryResponses.Count -ne 1) {
+            return $false
+        }
+        $queryResponse = $queryResponses[0]
+        if ([string]::IsNullOrWhiteSpace([string]$queryResponse.target_id) -or
+            $null -eq $state.logic_frame_id -or [long]$state.logic_frame_id -le 0 -or
+            $null -eq $state.ui_pass_id -or [long]$state.ui_pass_id -le 0 -or
+            !(Test-Phase2TargetGeometry $queryResponse)) {
+            return $false
+        }
+
+        return $true
+    }.GetNewClosure() $CaptureTimeoutSeconds 'retained app main HWND and current ROOT query Response before metadata capture'
 }
 
 function Test-Phase1CapturePredicateComposition {
@@ -934,6 +991,7 @@ function Save-WorkflowCapture([int]$CatalogNumber, [string]$Name, [scriptblock]$
         focused_widget_id = $capturedObservation.focused_widget_id
         focused_navigation_destination = $capturedObservation.focused_navigation_destination
         dialog_state = $capturedObservation.dialog_state
+        settings_search = $capturedObservation.settings_search
         mkmacro_action_editor_open = $capturedObservation.mkmacro_action_editor_open
         pixels_per_point = $captured.pixels_per_point
         native_pixels_per_point = $captured.native_pixels_per_point
@@ -1659,6 +1717,11 @@ function Get-Phase2SurfaceContract {
     }
 }
 
+function Test-Phase2ExactActionArgument($Actual, $Expected) {
+    if ($null -eq $Expected) { return $null -eq $Actual }
+    return $null -ne $Actual -and [string]$Actual -ceq [string]$Expected
+}
+
 function Test-Phase2SemanticIdentity($Target, [string]$LocalIdentity) {
     if ($null -eq $Target.semantic_id -or $Target.semantic_id.kind -cne 'named') { return $false }
     $value = [string]$Target.semantic_id.value
@@ -1743,7 +1806,7 @@ function Get-Phase2RootActionTarget($Observation, $Contract, [switch]$RequireHin
         $_.surface -ceq 'launcher_results' -and $_.eligible -and
             $null -ne $_.root_action -and
             [string]$_.root_action.action -ceq [string]$Contract.action -and
-            $null -eq $_.root_action.args
+            (Test-Phase2ExactActionArgument $_.root_action.args $Contract.args)
     })
     if ($targetCandidates.Count -ne 1) { throw "production query '$($Contract.query)' returned $($targetCandidates.Count) exact $($Contract.action) targets" }
     if ($RequireHint -and (!$targetCandidates[0].hint -or [string]$targetCandidates[0].hint -notmatch '^[A-Z]+$')) {
@@ -1917,7 +1980,7 @@ function Invoke-Phase2RootOpener($Contract) {
             [long]$state.activation_count -eq $activationCount -and
             [string]$state.selected_target_id -ceq $targetId -and $state.query_focused -and
             [string]$state.selected_action.action -ceq [string]$Contract.action -and
-            $null -eq $state.selected_action.args
+            (Test-Phase2ExactActionArgument $state.selected_action.args $Contract.args)
     }.GetNewClosure() $CaptureTimeoutSeconds "$($Contract.name) exact production opener selected from the observed hint map"
     Write-Event 'phase2_root_opener_selected' @{ surface = $Contract.name; target_id = $targetId; semantic_id = $target.semantic_id; target_generation = $target.target_generation; hint = $hint; action = $selected.selected_action.action; args = $selected.selected_action.args; query = $selected.query; activation_count = $selected.activation_count }
     Invoke-NativeKeyBatch "phase2-$($Contract.name.ToLowerInvariant())-fresh-enter-opener" ([uint16[]]@(0x0D)) ([string[]]@('Enter'))
@@ -1926,7 +1989,7 @@ function Invoke-Phase2RootOpener($Contract) {
         (Test-Phase2OwnerSnapshot $state $Contract) -and
             [long]$state.activation_count -eq ($activationCount + 1) -and
             [string]$state.last_action.action_id -ceq [string]$Contract.action -and
-            $null -eq $state.last_action.args -and [string]$state.last_action.source -ceq 'enter' -and
+            (Test-Phase2ExactActionArgument $state.last_action.args $Contract.args) -and [string]$state.last_action.source -ceq 'enter' -and
             [string]$state.query -ceq [string]$Contract.query
     }.GetNewClosure() $CaptureTimeoutSeconds "$($Contract.name) owner after one fresh Enter production action"
     if ([long]$opened.navigation_owner.instance -le 0) { throw "$($Contract.name) owner has no nonzero instance identity" }
@@ -2095,10 +2158,100 @@ function Test-Phase2WorkflowHelpers {
     if (& $closurePredicate $wrongClosureObservation) {
         throw 'Phase 2 wait-closure regression accepted a mismatched dialog instance'
     }
+
+    $settingsSearchContract = [pscustomobject]@{
+        name = 'SettingsSearch'; query = 'settings fuzzy weight'; action = 'settings:search'; args = 'fuzzy weight'
+        owner = 'settings'; dialog = 'settings'
+    }
+    $settingsSearchRootTarget = [pscustomobject]@{
+        surface = 'launcher_results'; eligible = $true
+        root_action = [pscustomobject]@{ action = 'settings:search'; args = 'fuzzy weight' }
+    }
+    $settingsSearchRootObservation = [pscustomobject]@{
+        root_focused = $true; root_owner_allowed = $true
+        navigation_owner = [pscustomobject]@{ kind = 'root' }
+        targets = @($settingsSearchRootTarget)
+    }
+    if (!(Test-Phase2RootActionReady $settingsSearchRootObservation $settingsSearchContract)) {
+        throw 'Settings Search root readiness rejected its exact nonempty production query argument'
+    }
+    $settingsSearchRootTarget.root_action.args = $null
+    if (Test-Phase2RootActionReady $settingsSearchRootObservation $settingsSearchContract) {
+        throw 'Settings Search root readiness accepted a legacy null argument in place of its required query'
+    }
+    $settingsSearchRootTarget.root_action.args = 'fuzzy'
+    if (Test-Phase2RootActionReady $settingsSearchRootObservation $settingsSearchContract) {
+        throw 'Settings Search root readiness accepted a truncated query argument'
+    }
+
+    $paintObservation = [pscustomobject]@{
+        dialog_state = [pscustomobject]@{ instance = 31 }
+        focused_widget_id = 'settings-response-opaque-7'
+        logic_frame_id = [long]42
+        ui_pass_id = [long]9
+        settings_search = [pscustomobject]@{
+            query_matches_expected = $true
+            actual_query = 'fuzzy weight'
+            highlight = [pscustomobject]@{
+                control_id = 'search.fuzzy_weight'
+                owner = 'application'
+                owner_instance = [long]31
+                response_id = 'settings-response-opaque-7'
+                qa_logic_frame_id = [long]42
+                qa_ui_pass_id = [long]9
+                rect = @(10.0, 20.0, 30.0, 40.0)
+            }
+        }
+    }
+    if (!(Test-SettingsSearchPaint $paintObservation 'search.fuzzy_weight')) {
+        throw 'Settings Search accepted-response predicate rejected a same-pass real-control highlight'
+    }
+    $stalePassObservation = $paintObservation.PSObject.Copy()
+    $stalePassObservation.settings_search = $paintObservation.settings_search.PSObject.Copy()
+    $stalePassObservation.settings_search.highlight = $paintObservation.settings_search.highlight.PSObject.Copy()
+    $stalePassObservation.settings_search.highlight.qa_ui_pass_id = [long]8
+    if (Test-SettingsSearchPaint $stalePassObservation 'search.fuzzy_weight') {
+        throw 'Settings Search accepted a highlight receipt from a previous UI pass'
+    }
+    $wrongResponseObservation = $paintObservation.PSObject.Copy()
+    $wrongResponseObservation.focused_widget_id = 'different-response'
+    if (Test-SettingsSearchPaint $wrongResponseObservation 'search.fuzzy_weight') {
+        throw 'Settings Search accepted a highlight whose response was not the current focused widget'
+    }
+
+    $focusedSliderTarget = [pscustomobject]@{
+        target_id = 'settings-slider-target-opaque'
+        semantic_id = [pscustomobject]@{ kind = 'named'; value = 'settings/19:search.fuzzy_weight' }
+        target_generation = [long]1
+        surface_identity = [pscustomobject]@{ kind = 'settings'; instance = [long]31 }
+        eligible = $true
+        focused = $true
+        kind = 'slider'
+        rect = @(10.0, 20.0, 30.0, 40.0)
+        clipped_rect = @(10.0, 20.0, 30.0, 40.0)
+    }
+    $focusedSliderObservation = [pscustomobject]@{
+        navigation_owner = [pscustomobject]@{ kind = 'settings'; instance = [long]31 }
+        root_owner_allowed = $false
+        dialog_state = [pscustomobject]@{ surface = 'settings'; instance = [long]31; target_generation = [long]1 }
+        focused_widget_id = 'settings-response-opaque-7'
+        focused_navigation_destination = 'settings-slider-target-opaque'
+        settings_search = [pscustomobject]@{ query_matches_expected = $true; actual_query = 'fuzzy weight' }
+        navigation_targets = @($focusedSliderTarget)
+    }
+    if (!(Test-SettingsSearchFocusedTarget $focusedSliderObservation $settingsSearchContract 31 'search.fuzzy_weight' 'settings-slider-target-opaque' 'settings-response-opaque-7')) {
+        throw 'Settings Search focused-target predicate rejected the exact current slider response and target'
+    }
+    $wrongFocusedSliderResponse = $focusedSliderObservation.PSObject.Copy()
+    $wrongFocusedSliderResponse.focused_widget_id = 'different-response'
+    if (Test-SettingsSearchFocusedTarget $wrongFocusedSliderResponse $settingsSearchContract 31 'search.fuzzy_weight' 'settings-slider-target-opaque' 'settings-response-opaque-7') {
+        throw 'Settings Search focused-target predicate accepted a different current response'
+    }
+
     $script:phase2OwnerInstance = $savedOwnerInstance
     $script:phase2ActivationCount = $savedActivationCount
     $script:phase2Query = $savedQuery
-    Write-Event 'phase2_helper_regressions_passed' @{ semantic_identity = 'structured named target'; exact_opaque_id = $resolved.target_id; observed_hint = $resolved.hint; ambiguous_target_rejected = $ambiguousRejected; exact_root_action_required = $true; ambiguous_root_action_rejected = $true; file_search_exact_open_action = $true; file_search_query_target_identity = $fileSearchResolved.target_id; file_search_wrong_instance_rejected = $wrongFileSearchRejected; explicit_empty_paste_context = $true; clipboard_text_absent = $true; exact_nonempty_notes_focus_required = $true; scoped_wait_closure_preserved_nonzero_owner_count_query = $true }
+    Write-Event 'phase2_helper_regressions_passed' @{ semantic_identity = 'structured named target'; exact_opaque_id = $resolved.target_id; observed_hint = $resolved.hint; ambiguous_target_rejected = $ambiguousRejected; exact_root_action_required = $true; ambiguous_root_action_rejected = $true; file_search_exact_open_action = $true; file_search_query_target_identity = $fileSearchResolved.target_id; file_search_wrong_instance_rejected = $wrongFileSearchRejected; explicit_empty_paste_context = $true; clipboard_text_absent = $true; exact_nonempty_notes_focus_required = $true; scoped_wait_closure_preserved_nonzero_owner_count_query = $true; settings_search_exact_query_argument = $true; settings_search_stale_ui_pass_paint_rejected = $true; settings_search_focused_target_response_required = $true }
 }
 
 function Test-Phase2EmptyPasteContext($DialogState) {
@@ -2201,6 +2354,493 @@ function Invoke-Phase2SettingsWorkflow($Contract) {
     }.GetNewClosure() $CaptureTimeoutSeconds 'Settings Cancel restores committed Jump Mode without saving drafts'
     Write-Event 'phase2_settings_cancel_verified' @{ initial_jump_mode = $true; committed_jump_mode = $closed.jump_mode_enabled; draft_jump_mode_before_cancel = $checkbox.dialog_state.settings_draft_jump_mode; fuzzy_weight_before = $runtimeFuzzyWeightBefore; fuzzy_weight_after_slider = $slider.dialog_state.settings_draft_fuzzy_weight; fuzzy_weight_after_numeric = $numeric.dialog_state.settings_draft_fuzzy_weight; fuzzy_weight_after_final_native_up = $numericFinal.dialog_state.settings_draft_fuzzy_weight; fuzzy_weight_after_cancel = $closed.effective_fuzzy_weight; activation_count = $closed.activation_count; capture_indexes = @($phase2Captures | ForEach-Object { $_.capture_index }) }
     if ($phase2Captures.Count -ne 3) { throw 'Settings workflow did not save all three required receipt-bound screenshots' }
+}
+
+function Wait-SettingsSearchPaint($Contract, [string]$ControlId, [string]$Description) {
+    $waitContext = Get-Phase2WaitContext
+    return Wait-JumpModeObservation {
+        param($state)
+        if (!(Test-Phase2OwnerSnapshot $state $Contract $waitContext.owner_instance) -or
+            !$state.settings_search -or !$state.settings_search.query_matches_expected -or
+            [string]$state.settings_search.actual_query -cne 'fuzzy weight') { return $false }
+        $paint = $state.settings_search.highlight
+        $null -ne $paint -and [string]$paint.control_id -ceq $ControlId -and
+            [string]$paint.owner -ceq 'application' -and
+            [long]$paint.owner_instance -eq [long]$waitContext.owner_instance -and
+            [string]$paint.response_id -ceq [string]$state.focused_widget_id -and
+            [long]$paint.qa_logic_frame_id -eq [long]$state.logic_frame_id -and
+            [long]$paint.qa_ui_pass_id -eq [long]$state.ui_pass_id -and
+            [double]$paint.rect[2] -gt [double]$paint.rect[0] -and
+            [double]$paint.rect[3] -gt [double]$paint.rect[1]
+    }.GetNewClosure() $CaptureTimeoutSeconds $Description
+}
+
+function Test-SettingsSearchPaint($Observation, [string]$ControlId) {
+    if (!$Observation.settings_search -or !$Observation.settings_search.query_matches_expected -or
+        [string]$Observation.settings_search.actual_query -cne 'fuzzy weight') { return $false }
+    $paint = $Observation.settings_search.highlight
+    return $null -ne $paint -and [string]$paint.control_id -ceq $ControlId -and
+        [string]$paint.owner -ceq 'application' -and
+        [long]$paint.owner_instance -eq [long]$Observation.dialog_state.instance -and
+        [string]$paint.response_id -ceq [string]$Observation.focused_widget_id -and
+        [long]$paint.qa_logic_frame_id -eq [long]$Observation.logic_frame_id -and
+        [long]$paint.qa_ui_pass_id -eq [long]$Observation.ui_pass_id -and
+        [double]$paint.rect[2] -gt [double]$paint.rect[0] -and
+        [double]$paint.rect[3] -gt [double]$paint.rect[1]
+}
+
+function Test-SettingsSearchFocusedTarget($Observation, $Contract, [long]$ExpectedInstance, [string]$ControlId, [string]$TargetId, [string]$ResponseId) {
+    if (!(Test-Phase2OwnerSnapshot $Observation $Contract $ExpectedInstance) -or
+        !$Observation.settings_search -or !$Observation.settings_search.query_matches_expected -or
+        [string]$Observation.settings_search.actual_query -cne 'fuzzy weight' -or
+        [string]$Observation.focused_widget_id -cne $ResponseId -or
+        [string]$Observation.focused_navigation_destination -cne $TargetId) { return $false }
+
+    $targetMatches = @($Observation.navigation_targets | Where-Object {
+        [string]$_.target_id -ceq $TargetId -and
+            $_.eligible -and $_.focused -and $_.kind -ceq 'slider' -and
+            $_.surface_identity.kind -ceq 'settings' -and
+            [long]$_.surface_identity.instance -eq $ExpectedInstance -and
+            [long]$_.target_generation -eq [long]$Observation.dialog_state.target_generation -and
+            (Test-Phase2SemanticIdentity $_ $ControlId) -and
+            (Test-Phase2TargetGeometry $_)
+    })
+    return $targetMatches.Count -eq 1
+}
+
+function Invoke-SettingsSearchNativeWorkflow {
+    $contract = [pscustomobject]@{
+        name = 'SettingsSearch'
+        query = 'settings fuzzy weight'
+        action = 'settings:search'
+        args = 'fuzzy weight'
+        owner = 'settings'
+        dialog = 'settings'
+    }
+    Write-Event 'settings_search_native_started' @{ query = $contract.query; action = $contract.action; args = $contract.args; settings_search_query = 'fuzzy weight'; expected_capture_count = $phase2CaptureCount }
+    $opened = Invoke-Phase2RootOpener $contract
+    $waitContext = Get-Phase2WaitContext
+    $baselineWeight = [double]$opened.effective_fuzzy_weight
+    $committedWeight = [double]$opened.dialog_state.settings_committed_fuzzy_weight
+    if ($opened.dialog_state.settings_draft_jump_mode -ne $true -or
+        $opened.dialog_state.settings_committed_jump_mode -ne $true) {
+        throw 'Settings Search fixture did not retain enabled committed and draft Jump Mode'
+    }
+
+    $sliderResult = Complete-Phase2HintTarget $contract 'Fuzzy match weight' 'button' 'settings.search.result/search.fuzzy_weight'
+    Invoke-NativeKeyBatch 'settings-search-slider-result-fresh-enter' ([uint16[]]@(0x0D)) ([string[]]@('Enter'))
+    $sliderPaint = Wait-SettingsSearchPaint $contract 'search.fuzzy_weight' 'Settings search result handoff to the real Fuzzy weight slider response'
+    if ([long]$sliderPaint.activation_count -ne $waitContext.activation_count -or
+        [double]$sliderPaint.dialog_state.settings_draft_fuzzy_weight -ne $baselineWeight -or
+        [double]$sliderPaint.dialog_state.settings_committed_fuzzy_weight -ne $committedWeight) {
+        throw 'Fuzzy weight search handoff changed an action count or setting value before native editing'
+    }
+    $sliderTargetId = [string]$sliderPaint.settings_search.highlight.response_id
+    $sliderNavigationTargets = @($sliderPaint.navigation_targets | Where-Object {
+        $_.eligible -and $_.focused -and $_.kind -ceq 'slider' -and
+            $_.surface_identity.kind -ceq 'settings' -and
+            [long]$_.surface_identity.instance -eq $waitContext.owner_instance -and
+            [long]$_.target_generation -eq [long]$sliderPaint.dialog_state.target_generation -and
+            (Test-Phase2SemanticIdentity $_ 'search.fuzzy_weight') -and
+            (Test-Phase2TargetGeometry $_)
+    })
+    if ($sliderNavigationTargets.Count -ne 1) {
+        throw "Settings Search observed $($sliderNavigationTargets.Count) current focused slider targets for the painted Fuzzy weight response"
+    }
+    $sliderNavigationTargetId = [string]$sliderNavigationTargets[0].target_id
+    $null = Save-Phase2Capture 1 'settings_search_slider_focus' {
+        param($state)
+        (Test-Phase2OwnerSnapshot $state $contract $waitContext.owner_instance) -and
+            [long]$state.activation_count -eq [long]$waitContext.activation_count -and
+            [double]$state.dialog_state.settings_draft_fuzzy_weight -eq $baselineWeight -and
+            [double]$state.dialog_state.settings_committed_fuzzy_weight -eq $committedWeight -and
+            (Test-SettingsSearchPaint $state 'search.fuzzy_weight') -and
+            [string]$state.settings_search.highlight.response_id -ceq $sliderTargetId
+    }.GetNewClosure() 'the exact current Fuzzy weight slider response is highlighted and focused'
+
+    Invoke-NativeKeyBatch 'settings-search-slider-right-draft-only' ([uint16[]]@(0x27)) ([string[]]@('Right'))
+    $sliderChanged = Wait-JumpModeObservation {
+        param($state)
+        (Test-Phase2OwnerSnapshot $state $contract $waitContext.owner_instance) -and
+            [long]$state.activation_count -eq [long]$waitContext.activation_count -and
+            [double]$state.dialog_state.settings_draft_fuzzy_weight -gt $baselineWeight -and
+            [double]$state.dialog_state.settings_committed_fuzzy_weight -eq $committedWeight
+    }.GetNewClosure() $CaptureTimeoutSeconds 'native Right changes only the Fuzzy weight draft'
+    if ([double]$sliderChanged.dialog_state.settings_draft_fuzzy_weight -gt 5.0) { throw 'Fuzzy weight draft exceeded its bounded range' }
+    $sliderDraftWeight = [double]$sliderChanged.dialog_state.settings_draft_fuzzy_weight
+    $null = Save-Phase2Capture 2 'settings_search_slider_draft' {
+        param($state)
+        (Test-Phase2OwnerSnapshot $state $contract $waitContext.owner_instance) -and
+            [long]$state.activation_count -eq [long]$waitContext.activation_count -and
+            [double]$state.dialog_state.settings_draft_fuzzy_weight -eq $sliderDraftWeight -and
+            [double]$state.dialog_state.settings_committed_fuzzy_weight -eq $committedWeight -and
+            (Test-SettingsSearchFocusedTarget $state $contract $waitContext.owner_instance 'search.fuzzy_weight' $sliderNavigationTargetId $sliderTargetId)
+    }.GetNewClosure() 'the changed slider draft remains separate from committed settings under the same current focused slider target and response'
+
+    $numericResult = Complete-Phase2HintTarget $contract 'Fuzzy match weight value' 'button' 'settings.search.result/search.fuzzy_weight/value'
+    Invoke-NativeKeyBatch 'settings-search-numeric-result-fresh-enter' ([uint16[]]@(0x0D)) ([string[]]@('Enter'))
+    $numericPaint = Wait-SettingsSearchPaint $contract 'search.fuzzy_weight/value' 'Settings search result handoff to the real Fuzzy weight numeric response'
+    if ([long]$numericPaint.activation_count -ne $waitContext.activation_count -or
+        [double]$numericPaint.dialog_state.settings_draft_fuzzy_weight -ne $sliderDraftWeight -or
+        [double]$numericPaint.dialog_state.settings_committed_fuzzy_weight -ne $committedWeight) {
+        throw 'Fuzzy weight numeric handoff changed an action count or setting value before native editing'
+    }
+    $numericTargetId = [string]$numericPaint.settings_search.highlight.response_id
+    $null = Save-Phase2Capture 3 'settings_search_numeric_focus' {
+        param($state)
+        (Test-Phase2OwnerSnapshot $state $contract $waitContext.owner_instance) -and
+            [long]$state.activation_count -eq [long]$waitContext.activation_count -and
+            [double]$state.dialog_state.settings_draft_fuzzy_weight -eq $sliderDraftWeight -and
+            [double]$state.dialog_state.settings_committed_fuzzy_weight -eq $committedWeight -and
+            (Test-SettingsSearchPaint $state 'search.fuzzy_weight/value') -and
+            [string]$state.settings_search.highlight.response_id -ceq $numericTargetId
+    }.GetNewClosure() 'the exact Fuzzy weight numeric response is highlighted and focused'
+
+    Invoke-NativeKeyBatch 'settings-search-numeric-up-draft-only' ([uint16[]]@(0x26)) ([string[]]@('Up'))
+    $numericChanged = Wait-JumpModeObservation {
+        param($state)
+        (Test-Phase2OwnerSnapshot $state $contract $waitContext.owner_instance) -and
+            [long]$state.activation_count -eq [long]$waitContext.activation_count -and
+            [double]$state.dialog_state.settings_draft_fuzzy_weight -gt $sliderDraftWeight -and
+            [double]$state.dialog_state.settings_committed_fuzzy_weight -eq $committedWeight
+    }.GetNewClosure() $CaptureTimeoutSeconds 'native Up changes only the numeric Fuzzy weight draft'
+    if ([double]$numericChanged.dialog_state.settings_draft_fuzzy_weight -gt 5.0) { throw 'Fuzzy weight numeric draft exceeded its bounded range' }
+
+    $cancel = Complete-Phase2HintTarget $contract 'Cancel' 'button' 'footer.cancel'
+    Invoke-NativeKeyBatch 'settings-search-cancel-draft-fresh-enter' ([uint16[]]@(0x0D)) ([string[]]@('Enter'))
+    $closed = Wait-JumpModeObservation {
+        param($state)
+        $state.navigation_owner.kind -ceq 'root' -and $state.root_focused -and
+            !$state.active_session -and [long]$state.activation_count -eq [long]$waitContext.activation_count -and
+            [bool]$state.jump_mode_enabled -and
+            [double]$state.effective_fuzzy_weight -eq $baselineWeight -and
+            $state.settings_search -and $state.settings_search.query_matches_expected -and
+            [string]$state.settings_search.actual_query -ceq 'fuzzy weight' -and
+            $null -eq $state.settings_search.highlight
+    }.GetNewClosure() $CaptureTimeoutSeconds 'Settings Cancel closes the dirty draft without applying it and retires the real-control highlight'
+    Write-Event 'settings_search_cancel_verified' @{
+        activation_count = $closed.activation_count
+        owner_instance = $waitContext.owner_instance
+        fuzzy_weight_initial = $baselineWeight
+        fuzzy_weight_slider_draft = $sliderDraftWeight
+        fuzzy_weight_numeric_draft = [double]$numericChanged.dialog_state.settings_draft_fuzzy_weight
+        fuzzy_weight_effective_after_cancel = [double]$closed.effective_fuzzy_weight
+        actual_response_ids = @($sliderTargetId, $numericTargetId)
+        captures = @($phase2Captures | ForEach-Object { $_.capture_index })
+        jump_mode_off_native = 'NOT_ATTEMPTED; Jump-off behavior remains covered by deterministic current-response tests'
+    }
+    if ($phase2Captures.Count -ne 3) { throw 'Settings Search workflow did not save all three receipt-bound ROOT/F11 captures' }
+    if (!(Test-Path -LiteralPath $prebuiltSettingsPath -PathType Leaf)) {
+        throw 'isolated settings.json disappeared before the live no-save check after Settings Search Cancel'
+    }
+    $script:settingsSearchNavigationSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $prebuiltSettingsPath).Hash.ToLowerInvariant()
+    if ($script:settingsSearchNavigationSha256 -cne $script:prebuiltSettingsPreInputSha256) {
+        throw 'the isolated settings.json changed during Settings Search navigation before app close'
+    }
+    $script:settingsSearchNavigationHashVerified = $true
+    Write-Event 'settings_search_settings_file_unchanged_while_app_open' @{
+        sha256 = $script:settingsSearchNavigationSha256
+        before_launch_sha256 = $prebuiltSettingsSha256
+        before_first_input_sha256 = $script:prebuiltSettingsPreInputSha256
+        verified_after_cancel = $true
+        verified_while_owned_app_running = $true
+    }
+}
+
+function Get-SettingsSearchSourceDiffSha256 {
+    $diffLines = @(& git -C $repoRoot diff --binary HEAD -- src Cargo.toml Cargo.lock dev/jump_mode/fixture_generator)
+    if ($LASTEXITCODE -ne 0) { throw 'could not calculate tracked build-input source diff for the prebuilt manifest' }
+    $diffText = if ($diffLines.Count -gt 0) { [string]::Join("`n", [string[]]$diffLines) + "`n" } else { '' }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [Convert]::ToHexString($sha.ComputeHash([Text.UTF8Encoding]::new($false).GetBytes($diffText))).ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
+function Get-PrebuiltAbsolutePath([object]$PathValue, [string]$FieldName) {
+    $value = [string]$PathValue
+    if ([string]::IsNullOrWhiteSpace($value) -or ![IO.Path]::IsPathRooted($value)) {
+        throw "prebuilt manifest $FieldName must be an absolute path"
+    }
+    return [IO.Path]::GetFullPath($value)
+}
+
+function Invoke-SettingsSearchPrebuiltNative {
+    if ($Scenario -ne 'SettingsSearch' -or !$NativeOnly -or $FixturesOnly) {
+        throw 'prebuilt native-only mode is valid only for a SettingsSearch app run'
+    }
+    if ([string]::IsNullOrWhiteSpace($PrebuiltArtifactManifest)) { throw 'NativeOnly requires PrebuiltArtifactManifest' }
+    $artifactManifestPath = [IO.Path]::GetFullPath($PrebuiltArtifactManifest)
+    if (!(Test-Path -LiteralPath $artifactManifestPath -PathType Leaf)) { throw 'prebuilt artifact manifest does not exist' }
+    $artifact = Get-Content -Raw -LiteralPath $artifactManifestPath | ConvertFrom-Json
+    if ($artifact.schema_version -ne 1 -or [string]$artifact.fixture_scenario -cne 'phase2-settings') {
+        throw 'prebuilt artifact manifest must be schema 1 for the isolated phase2-settings fixture'
+    }
+    $branch = (& git -C $repoRoot branch --show-current).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'could not read the current source branch for prebuilt artifact validation' }
+    $headSha = (& git -C $repoRoot rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'could not read the current source HEAD for prebuilt artifact validation' }
+    if ($branch -cne [string]$artifact.source_branch -or $branch -cne 'feat/productivity-tools' -or
+        $headSha -cne [string]$artifact.source_head) {
+        throw 'prebuilt artifact branch or HEAD does not match the current productivity-tools source'
+    }
+    $sourceDiffSha = Get-SettingsSearchSourceDiffSha256
+    if ($sourceDiffSha -cne ([string]$artifact.source_diff_sha256).ToLowerInvariant()) {
+        throw 'prebuilt artifact source diff does not match tracked source/Cargo/fixture inputs'
+    }
+    if ([string]$artifact.cargo_profile -cne 'fast-dev' -or
+        (@($artifact.cargo_features | ForEach-Object { [string]$_ } | Sort-Object) -join ',') -cne 'dev-smoke-binaries,qa-framebuffer-capture') {
+        throw 'prebuilt artifact does not identify the required fast-dev QA feature build'
+    }
+
+    $receiptPath = Get-PrebuiltAbsolutePath $artifact.build_receipt_path 'build_receipt_path'
+    $appPath = Get-PrebuiltAbsolutePath $artifact.app_path 'app_path'
+    $fixtureExePath = Get-PrebuiltAbsolutePath $artifact.fixture_exe_path 'fixture_exe_path'
+    $profilePath = Get-PrebuiltAbsolutePath $artifact.fixture_profile_path 'fixture_profile_path'
+    $fixtureManifestPath = Get-PrebuiltAbsolutePath $artifact.fixture_manifest_path 'fixture_manifest_path'
+    if (!(Test-Path -LiteralPath $receiptPath -PathType Leaf) -or
+        !(Test-Path -LiteralPath $appPath -PathType Leaf) -or
+        !(Test-Path -LiteralPath $fixtureExePath -PathType Leaf) -or
+        !(Test-Path -LiteralPath $profilePath -PathType Container) -or
+        !(Test-Path -LiteralPath $fixtureManifestPath -PathType Leaf)) {
+        throw 'prebuilt artifact is missing its build receipt, executable, isolated profile, or fixture manifest'
+    }
+    $expectedManifestPath = [IO.Path]::GetFullPath((Join-Path $profilePath 'fixture_manifest.json'))
+    if (![string]::Equals($fixtureManifestPath, $expectedManifestPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'prebuilt fixture manifest is not the manifest at the isolated profile root'
+    }
+    if ([IO.Path]::GetFileName($appPath) -cne 'multi_launcher.exe' -or
+        [IO.Path]::GetFileName($fixtureExePath) -cne 'jump_mode_fixture.exe' -or
+        ![string]::Equals([IO.Path]::GetDirectoryName($appPath), [IO.Path]::GetDirectoryName($fixtureExePath), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'prebuilt app and fixture executables must be the expected fast-dev artifacts from one output directory'
+    }
+    $receiptHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $receiptPath).Hash.ToLowerInvariant()
+    $appHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $appPath).Hash.ToLowerInvariant()
+    $fixtureExeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $fixtureExePath).Hash.ToLowerInvariant()
+    $fixtureManifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $fixtureManifestPath).Hash.ToLowerInvariant()
+    foreach ($item in @(
+        @{ Field = 'build_receipt_sha256'; Actual = $receiptHash },
+        @{ Field = 'app_sha256'; Actual = $appHash },
+        @{ Field = 'fixture_exe_sha256'; Actual = $fixtureExeHash },
+        @{ Field = 'fixture_manifest_sha256'; Actual = $fixtureManifestHash }
+    )) {
+        if ([string]$artifact.($item.Field) -cne $item.Actual) { throw "prebuilt artifact $($item.Field) does not match its file" }
+    }
+    $buildReceipt = Get-Content -Raw -LiteralPath $receiptPath | ConvertFrom-Json
+    if ([string]$buildReceipt.Reason -cne 'completed' -or [int]$buildReceipt.ExitCode -ne 0 -or [bool]$buildReceipt.RootAlive) {
+        throw 'prebuilt build receipt does not prove a completed zero-exit build with its root gone'
+    }
+    $fixtureManifest = Get-Content -Raw -LiteralPath $fixtureManifestPath | ConvertFrom-Json
+    if ([string]$fixtureManifest.scenario -cne 'phase2-settings' -or
+        [string]$fixtureManifest.phase2_surface -cne 'settings' -or
+        !$fixtureManifest.experimental_jump_mode_enabled -or
+        @($fixtureManifest.enabled_plugins | ForEach-Object { [string]$_ } | Sort-Object) -join ',' -cne 'notes,settings' -or
+        [int]$fixtureManifest.action_count -ne 0 -or
+        !$fixtureManifest.safety.profile_isolated_by_working_directory -or
+        !$fixtureManifest.safety.notes_path_supplied_by_ml_notes_dir -or
+        $fixtureManifest.safety.clipboard_plugin_enabled -or
+        $fixtureManifest.safety.clipboard_modify_plugin_enabled -or
+        $fixtureManifest.safety.macros_enabled -or $fixtureManifest.safety.network_plugin_enabled -or
+        $fixtureManifest.safety.custom_actions_present -or
+        $fixtureManifest.safety.paste_next_hotkey_enabled -or
+        $fixtureManifest.safety.paste_cancel_hotkey_enabled) {
+        throw 'prebuilt fixture manifest does not prove the isolated, Jump-enabled, no-action Settings profile'
+    }
+    foreach ($directory in @('notes', 'templates', 'screenshot-output')) {
+        if (!(Test-Path -LiteralPath (Join-Path $profilePath $directory) -PathType Container)) {
+            throw "isolated fixture profile is missing its $directory directory"
+        }
+    }
+    $settingsPath = Join-Path $profilePath 'settings.json'
+    if (!(Test-Path -LiteralPath $settingsPath -PathType Leaf)) { throw 'isolated fixture settings.json is missing' }
+    $persistedSettings = Get-Content -Raw -LiteralPath $settingsPath | ConvertFrom-Json
+    if ($null -ne $persistedSettings.paste_sequence.next_hotkey -or
+        $null -ne $persistedSettings.paste_sequence.cancel_hotkey -or
+        $persistedSettings.screenshot_save_file -or $persistedSettings.screenshot_auto_save -or
+        $persistedSettings.screenshot_use_editor) {
+        throw 'isolated profile has active Paste Sequence shortcuts or screenshot side effects'
+    }
+    $script:prebuiltSettingsPath = [IO.Path]::GetFullPath($settingsPath)
+    $script:prebuiltSettingsSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:prebuiltSettingsPath).Hash.ToLowerInvariant()
+    $script:headSha = $headSha
+    $script:sourceBranch = $branch
+    $script:sourceDiffSha256 = $sourceDiffSha
+    $script:fixtureHash = $fixtureManifestHash
+    $script:executablePath = $appPath
+    $script:executableHash = $appHash
+    $script:targetDirectory = [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($appPath))
+    $script:profileRoot = $profilePath
+    $script:buildReceiptIdentity = "prebuilt-fast-dev;features=$cargoFeatures;head=$headSha;exe_sha256=$appHash;build_receipt_sha256=$receiptHash"
+    $script:fixtureScenarioStatus = 'PASS'
+    $script:fixtureScenarioReason = 'The externally produced app/fixture hashes, completed build receipt, current source identity and isolated phase2-settings profile were validated before launch.'
+    $script:fixtureScenarioArgument = 'phase2-settings'
+    $script:phase = 'prebuilt_artifacts_validated'
+    Write-Event 'settings_search_prebuilt_artifacts_validated' @{
+        source_head = $headSha
+        source_branch = $branch
+        source_diff_sha256 = $sourceDiffSha
+        app_sha256 = $appHash
+        fixture_exe_sha256 = $fixtureExeHash
+        fixture_manifest_sha256 = $fixtureManifestHash
+        build_receipt_sha256 = $receiptHash
+        fixture_scenario = $fixtureManifest.scenario
+        paste_next_disabled = $true
+        paste_cancel_disabled = $true
+    }
+    Update-Scenarios
+    Test-Phase2WorkflowHelpers
+
+    if (!$interactive -or $sessionId -eq 0) {
+        $script:scenarioStatus = 'NOT_RUN_ENVIRONMENT'
+        $script:scenarioReason = 'Prebuilt artifacts validated, but Windows reports no interactive user session; no app or native input was started.'
+        $script:runStatus = 'NOT_RUN_ENVIRONMENT'
+        $script:phase = 'settings_search_not_run_environment'
+        Update-Scenarios
+        return
+    }
+    if (Test-Path -LiteralPath $captureRoot) { throw 'QA framebuffer output leaf must be absent before app launch' }
+    $qaRequestPath = Join-Path $evidenceRoot 'qa-framebuffer-request.json'
+    $qaRequest = [ordered]@{
+        run_id = $runId
+        request_id = 'settings-search-native'
+        target = 'ROOT'
+        trigger = 'f11'
+        capture_count = $phase2CaptureCount
+        diagnostics = $false
+        output_dir = $captureRoot
+        fixture_manifest_sha256 = $fixtureHash
+        build_receipt_identity = $buildReceiptIdentity
+        jump_mode_observation = [ordered]@{
+            wait_for_active_hints = $false
+            phase2 = [ordered]@{ surface = 'settings'; use_empty_paste_invocation_context = $false }
+            settings_search = [ordered]@{ expected_query = 'fuzzy weight' }
+        }
+    }
+    Write-Json $qaRequestPath $qaRequest
+    Initialize-NativeQueryProbe
+    $psi = [Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $executablePath
+    $psi.WorkingDirectory = $profileRoot
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $false
+    $psi.WindowStyle = [Diagnostics.ProcessWindowStyle]::Normal
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.Environment['ML_NOTES_DIR'] = Join-Path $profileRoot 'notes'
+    $psi.Environment['ML_NOTE_TEMPLATES_DIR'] = Join-Path $profileRoot 'templates'
+    $psi.Environment['ML_QA_FRAMEBUFFER_REQUEST_MANIFEST'] = $qaRequestPath
+    $psi.Environment.Remove('ML_TRACK_C_BENCH_MODE') | Out-Null
+    $script:process = [Diagnostics.Process]::new()
+    $process.StartInfo = $psi
+    if (!$process.Start()) { throw 'failed to start the validated prebuilt Multi Launcher app' }
+    $script:processId = $process.Id
+    $script:processStartUtc = $process.StartTime.ToUniversalTime()
+    $script:processSessionId = $process.SessionId
+    $script:stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $script:stderrTask = $process.StandardError.ReadToEndAsync()
+    Write-Event 'owned_app_started' @{
+        pid = $processId
+        start_time_utc = $processStartUtc.ToString('O')
+        session_id = $processSessionId
+        executable = $executablePath
+        executable_sha256 = $executableHash
+        working_directory = $profileRoot
+        fixture_manifest_sha256 = $fixtureHash
+        build_receipt_identity = $buildReceiptIdentity
+    }
+    $treeObserved = $false
+    for ($attempt = 0; $attempt -lt 25; $attempt++) {
+        $initialTree = @(Get-OwnedTreeSnapshot)
+        if ($initialTree.Count -gt 0) {
+            Merge-OwnedTreeSnapshot $initialTree
+            $treeObserved = $true
+            break
+        }
+        $process.Refresh()
+        if ($process.HasExited) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if (!$treeObserved) { throw 'could not record the prebuilt app process identity in the Windows process table' }
+    $script:phase = 'settings_search_waiting_for_input'
+    $script:scenarioReason = 'Validated prebuilt artifacts are running in the isolated profile; waiting for exact owned ROOT/query/Settings response observations before bounded native input.'
+    Write-Event 'owned_process_tree_observed' @{ processes = $ownedTreeSnapshot }
+    Write-Json $script:manifestPath ([ordered]@{
+        schema_version = 1
+        run_id = $runId
+        milestone = $runMilestone
+        status = $runStatus
+        phase = $phase
+        started_at_utc = $startedAt.ToString('O')
+        repository_root = $repoRoot
+        source_head = $headSha
+        source_branch = $branch
+        source_diff_sha256 = $sourceDiffSha
+        interactive_session = $interactive
+        session_id = $sessionId
+        overall_timeout_seconds = $OverallTimeoutSeconds
+        fixture_profile = $profileRoot
+        fixture_manifest_sha256 = $fixtureHash
+        executable = [ordered]@{ path = $executablePath; sha256 = $executableHash; pid = $processId; started_at_utc = $processStartUtc.ToString('O') }
+        fixture_exe_path = $fixtureExePath
+        fixture_exe_sha256 = $fixtureExeHash
+        build_receipt_path = $receiptPath
+        build_receipt_sha256 = $receiptHash
+        build_receipt_identity = $buildReceiptIdentity
+        capture = [ordered]@{ request = 'qa-framebuffer-request.json'; output_dir = 'capture'; source = 'three native ROOT/F11 captures bound to current Settings Search QA observations'; count = $phase2CaptureCount; scenario = 'SettingsSearch'; surface = 'Settings' }
+        cleanup = $null
+    })
+    $startupObservation = Wait-SettingsSearchStartupReadiness
+    if (!(Test-RetainedProcessIdentity)) { throw 'retained app PID/birth identity changed after Settings Search startup readiness' }
+    $process.Refresh()
+    if ($process.HasExited) {
+        $script:processExitCode = $process.ExitCode
+        throw "isolated app exited after Settings Search startup readiness (exit $script:processExitCode)"
+    }
+    $readyWindow = $process.MainWindowHandle
+    if ($readyWindow -eq [IntPtr]::Zero) { throw 'owned main HWND disappeared after ROOT query readiness' }
+    $readyWindowProcessId = [int][JumpModeNativeProbe]::WindowProcessId($readyWindow)
+    if ($readyWindowProcessId -ne $processId) { throw "ready main HWND belongs to PID $readyWindowProcessId instead of retained PID $processId" }
+    $readyHwnd = ('0x{0:X}' -f $readyWindow.ToInt64())
+    $script:appWindowMetadata = Get-OwnedWindowMetadata
+    if ($script:appWindowMetadata.hwnd -cne $readyHwnd -or
+        [int]$script:appWindowMetadata.process_id -ne $processId) {
+        throw 'owned main-window identity changed between ROOT query readiness and metadata capture'
+    }
+    Write-Event 'settings_search_startup_ready' @{
+        process_id = $processId
+        process_started_at_utc = $processStartUtc.ToString('O')
+        hwnd = $readyHwnd
+        logic_frame_id = $startupObservation.logic_frame_id
+        ui_pass_id = $startupObservation.ui_pass_id
+        query_response_id = [string](@($startupObservation.targets | Where-Object {
+            $_.surface -ceq 'launcher_results' -and $_.is_query_input -and $_.kind -ceq 'text_entry'
+        })[0].target_id)
+        query_response = 'current ROOT launcher query TextEntry observed; no foreground activation or input was sent'
+    }
+    Write-Event 'owned_app_window_metadata' @{ os_version = [Environment]::OSVersion.VersionString; architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString(); session_id = $processSessionId; window = $appWindowMetadata }
+    if (!(Test-Path -LiteralPath $prebuiltSettingsPath -PathType Leaf)) { throw 'isolated settings.json disappeared before Settings Search input' }
+    $script:prebuiltSettingsPreInputSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $prebuiltSettingsPath).Hash.ToLowerInvariant()
+    Write-Event 'settings_search_settings_file_before_first_input' @{
+        before_launch_sha256 = $prebuiltSettingsSha256
+        before_first_input_sha256 = $script:prebuiltSettingsPreInputSha256
+        app_pid = $processId
+        app_started_at_utc = $processStartUtc.ToString('O')
+    }
+    Write-Summary 'BLOCKED' 'The validated prebuilt app is waiting for its exact native Settings Search route. No build or fixture generator is run in NativeOnly mode.'
+    Invoke-SettingsSearchNativeWorkflow
+    $script:scenarioStatus = 'PASS'
+    $script:scenarioReason = 'The exact settings:search query and two real Settings controls were activated through fresh Jump Mode input; slider/numeric edits stayed draft-only and Cancel preserved effective settings. Native Jump-off control interaction was not attempted; that branch is covered by deterministic real-response tests only.'
+    $script:runStatus = 'PASS'
+    $script:phase = 'settings_search_complete'
+    Update-Scenarios
+    Write-Event 'settings_search_native_passed' @{
+        captures = @($phase2Captures | ForEach-Object { $_.capture_index })
+        root_activation_count = $phase2ActivationCount
+        slider_response_id = $phase2Captures[0].settings_search.highlight.response_id
+        numeric_response_id = $phase2Captures[2].settings_search.highlight.response_id
+        jump_off_native = 'NOT_ATTEMPTED; deterministic current-response tests only'
+        settings_file_unchanged_pending_close_verification = $true
+    }
+    Write-Summary 'PASS' 'The prebuilt Settings Search flow, current-response highlight receipts, native draft-only edits, Cancel, and owned app lifecycle passed. Jump-off behavior was not claimed as native evidence; it remains covered by deterministic tests.'
 }
 
 function Invoke-Phase2NotesWorkflow($Contract) {
@@ -2858,10 +3498,11 @@ function Update-Scenarios {
             'QueryProbe' { 'm05-fixture-validation' }
             { $_ -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled') } { 'm08-fixture-validation' }
             'Phase2' { 'm13-fixture-validation' }
+            'SettingsSearch' { 'g3-m1b-prebuilt-artifact-validation' }
             default { 'm01-fixture-validation' }
         }
         status = $fixtureScenarioStatus
-        expected_surface = if ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'typed isolated safe Phase 1 enabled/disabled fixture profiles' } elseif ($Scenario -eq 'Phase2') { "typed isolated Phase 2 $phase2SurfaceKey fixture and required inert stores" } else { 'typed isolated fixture profile with stable safe note data' }
+        expected_surface = if ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'typed isolated safe Phase 1 enabled/disabled fixture profiles' } elseif ($Scenario -eq 'Phase2') { "typed isolated Phase 2 $phase2SurfaceKey fixture and required inert stores" } elseif ($Scenario -eq 'SettingsSearch') { 'externally built, hash-bound isolated phase2-settings profile' } else { 'typed isolated fixture profile with stable safe note data' }
         capture_target = $null
         capture_trigger = $null
         screenshot = $null
@@ -2877,6 +3518,7 @@ function Update-Scenarios {
                 "m08-$($Scenario.ToLowerInvariant())$suffix"
             }
             'Phase2' { "m13-phase2-$phase2SurfaceKey" }
+            'SettingsSearch' { 'g3-m1b-settings-search' }
             default { 'm01-baseline-dashboard' }
         } }
         status = $scenarioStatus
@@ -2884,14 +3526,15 @@ function Update-Scenarios {
             'QueryProbe' { 'active Jump Mode query hint, query focus handoff, and unchanged action count' }
             { $_ -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled') } { "native Phase 1 $Screen dashboard/grid filter, selection, cancellation, note owner, and disabled-gate behavior" }
             'Phase2' { "native production query opener, exact $phase2SurfaceKey owner, and safe observed input behavior" }
+            'SettingsSearch' { 'exact settings:search route, current-response focus highlights, draft-only edits, and Cancel' }
             default { 'actual Multi Launcher ROOT viewport with isolated note dashboard' }
         } }
         capture_target = 'ROOT'
-        capture_trigger = if ($Scenario -in @('Phase1Enabled', 'Phase1Disabled', 'Phase2')) { 'f11' } elseif ($Scenario -eq 'Phase1') { 'child native F11 receipts' } else { 'startup' }
+        capture_trigger = if ($Scenario -in @('Phase1Enabled', 'Phase1Disabled', 'Phase2', 'SettingsSearch')) { 'f11' } elseif ($Scenario -eq 'Phase1') { 'child native F11 receipts' } else { 'startup' }
         screenshot = if ($screenshotPath) { $screenshotPath } else { $null }
         pixel_width = $screenshotWidth
         pixel_height = $screenshotHeight
-        captures = if ($Scenario -eq 'Phase2') { @($phase2Captures.ToArray()) } else { @($phase1Captures.ToArray()) }
+        captures = if ($Scenario -in @('Phase2', 'SettingsSearch')) { @($phase2Captures.ToArray()) } else { @($phase1Captures.ToArray()) }
         orchestration = $phase1Orchestration
         reason = $scenarioReason
     }
@@ -3130,16 +3773,30 @@ try {
         'Phase1Enabled' { 'phase1-enabled' }
         'Phase1Disabled' { 'phase1-disabled' }
         'Phase2' { "phase2-$phase2SurfaceKey" }
+        'SettingsSearch' { 'phase2-settings' }
         default { 'baseline' }
     }
-    Write-Summary 'BLOCKED' "Runner is preparing a fresh $Scenario fixture and validating its typed production semantics before launch."
+    if ($NativeOnly) {
+        Write-Summary 'BLOCKED' 'Runner is validating the supplied Settings Search artifact manifest before any app launch.'
+    } else {
+        Write-Summary 'BLOCKED' "Runner is preparing a fresh $Scenario fixture and validating its typed production semantics before launch."
+    }
     Write-Event 'run_created' @{ run_id = $runId; profile = $profileRoot; interactive = $interactive; session_id = $sessionId; overall_timeout_seconds = $OverallTimeoutSeconds; screen_filter = $Screen }
+
+    if ($Scenario -eq 'SettingsSearch' -and !$NativeOnly) {
+        throw 'SettingsSearch requires -NativeOnly and a validated PrebuiltArtifactManifest; it never builds or generates fixtures.'
+    }
+    if ($NativeOnly -and ($Scenario -ne 'SettingsSearch' -or $FixturesOnly)) {
+        throw 'NativeOnly is supported only for a SettingsSearch app run, not fixture-only mode.'
+    }
 
     if ($Scenario -eq 'Phase1' -and $FixturesOnly) {
         throw 'The Phase1 aggregate orchestrates native GUI child runs and cannot be fixture-only. Validate children separately with -Scenario Phase1Enabled -FixturesOnly and -Scenario Phase1Disabled -FixturesOnly.'
     }
 
-    if ($Scenario -eq 'Phase1') {
+    if ($NativeOnly) {
+        Invoke-SettingsSearchPrebuiltNative
+    } elseif ($Scenario -eq 'Phase1') {
         $phase = 'phase1_children'
         Write-Summary 'BLOCKED' 'Running separate enabled and disabled isolated Phase 1 child scenarios with native ROOT/F11 capture and verified owned cleanup.'
         Invoke-Phase1Orchestration
@@ -3338,7 +3995,7 @@ try {
                 session_name = $env:SESSIONNAME
                 window = $appWindowMetadata
             }
-            fixture_profile = 'profile'
+            fixture_profile = if ($Scenario -eq 'SettingsSearch') { $profileRoot } else { 'profile' }
             fixture_manifest_sha256 = $fixtureHash
             executable = [ordered]@{ path = $executablePath; sha256 = $executableHash; pid = $processId; started_at_utc = $processStartUtc.ToString('O') }
             build_receipt_identity = $buildReceiptIdentity
@@ -3530,6 +4187,30 @@ try {
     }
 } finally {
     Close-OwnedProcess
+    if ($prebuiltSettingsPath) {
+        try {
+            if (!(Test-Path -LiteralPath $prebuiltSettingsPath -PathType Leaf)) {
+                throw 'the isolated settings.json disappeared during the Settings Search run'
+            }
+            $settingsHashAfterClose = (Get-FileHash -Algorithm SHA256 -LiteralPath $prebuiltSettingsPath).Hash.ToLowerInvariant()
+            Write-Event 'settings_search_settings_file_after_owned_close' @{
+                before_launch_sha256 = $prebuiltSettingsSha256
+                before_first_input_sha256 = $script:prebuiltSettingsPreInputSha256
+                unchanged_while_app_open_after_cancel = $script:settingsSearchNavigationHashVerified
+                after_close_sha256 = $settingsHashAfterClose
+                matches_before_launch = ($settingsHashAfterClose -ceq $prebuiltSettingsSha256)
+                matches_before_first_input = if ($script:prebuiltSettingsPreInputSha256) { $settingsHashAfterClose -ceq $script:prebuiltSettingsPreInputSha256 } else { $null }
+                post_close_difference_is_separate_from_live_navigation_check = $true
+            }
+        } catch {
+            $runStatus = 'FAIL'
+            if (!$failureText) { $failureText = $_.Exception.Message }
+            $scenarioStatus = 'FAIL'
+            $scenarioReason = $_.Exception.Message
+            Update-Scenarios
+            Write-Event 'settings_search_settings_file_changed' @{ message = $_.Exception.Message }
+        }
+    }
     if (Test-Path -LiteralPath $evidenceRoot) {
         $cleanup = [ordered]@{
             pid = $processId
@@ -3566,9 +4247,11 @@ try {
             elapsed_ms = [int64]($finishedAt - $startedAt).TotalMilliseconds
             repository_root = $repoRoot
             source_head = if ($headSha) { $headSha } else { $null }
+            source_branch = if ($sourceBranch) { $sourceBranch } else { $null }
+            source_diff_sha256 = if ($sourceDiffSha256) { $sourceDiffSha256 } else { $null }
             interactive_session = $interactive
             session_id = $sessionId
-            fixture_profile = 'profile'
+            fixture_profile = if ($Scenario -eq 'SettingsSearch') { $profileRoot } else { 'profile' }
             environment = [ordered]@{
                 os_version = [Environment]::OSVersion.VersionString
                 architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
@@ -3586,6 +4269,8 @@ try {
                 [ordered]@{ request = 'qa-framebuffer-request.json'; output_dir = 'capture'; source = 'two native ROOT/F11 receipts bound to their exact retained observations and resized owned client area'; count = $phase1Captures.Count; captures = @($phase1Captures.ToArray()); resized_window = $finalSmokeResizeMetadata }
             } elseif ($Scenario -eq 'Phase2') {
                 [ordered]@{ request = 'qa-framebuffer-request.json'; output_dir = 'capture'; source = 'native ROOT/F11 receipts bound to captured retained observations'; surface = $Surface; count = $phase2Captures.Count; captures = @($phase2Captures.ToArray()) }
+            } elseif ($Scenario -eq 'SettingsSearch') {
+                [ordered]@{ request = 'qa-framebuffer-request.json'; output_dir = 'capture'; source = 'prebuilt artifact-bound native ROOT/F11 receipts with same-pass Settings Search observations'; surface = 'Settings'; count = $phase2Captures.Count; captures = @($phase2Captures.ToArray()); jump_off_native = 'NOT_ATTEMPTED' }
             } elseif ($captureReceipt) {
                 [ordered]@{ request = 'qa-framebuffer-request.json'; output_dir = 'capture'; receipt = 'capture/receipt.json'; screenshot = $screenshotPath; width = $screenshotWidth; height = $screenshotHeight; semantics = $captureReceipt.capture_semantics }
             } else { $null }
@@ -3606,6 +4291,8 @@ try {
                 'Both isolated Phase 1 app runs passed: enabled catalog 01–14 and disabled-gate case 18. All fifteen screenshots are receipt-bound native ROOT/F11 captures, and each child process tree was verified gone.'
             } elseif ($Scenario -eq 'Phase2') {
                 "The isolated $Surface production opener and safe native dialog workflow passed. All $($phase2Captures.Count) screenshots are bound to their matching ROOT/F11 captured observations, and owned-process cleanup was verified."
+            } elseif ($Scenario -eq 'SettingsSearch') {
+                'The exact settings:search route, same-pass real-control highlight receipts, draft-only slider edits, Cancel, unchanged isolated settings bytes, and owned-process cleanup passed. Jump-off native interaction was not attempted; deterministic real-response tests cover that branch.'
             } else {
                 'Fixture validation, ROOT capture, and owned-process cleanup passed.'
             }
@@ -3623,6 +4310,8 @@ try {
                 'One or both Phase 1 child scenarios did not satisfy all native input, retained capture, fixture identity, or owned cleanup assertions. See phase1-index.json and each child evidence directory.'
             } elseif ($Scenario -eq 'Phase2') {
                 "The $Surface native workflow did not satisfy every production-action, dialog-state, receipt-binding, or owned-cleanup assertion. See the event log, per-capture records, and failure detail."
+            } elseif ($Scenario -eq 'SettingsSearch') {
+                'The validated prebuilt Settings Search workflow did not satisfy every exact route, current-response highlight, draft-only edit, Cancel, settings-file preservation, receipt, or owned-cleanup assertion. See the event log, per-capture records, and failure detail.'
             } else {
                 'Fixture validation and real ROOT capture completed, with owned-process cleanup recorded. Dashboard fixture content remains blocked until a readiness signal can establish that isolated note results are visible.'
             }

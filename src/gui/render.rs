@@ -4657,6 +4657,14 @@ impl LauncherApp {
         owner_current: bool,
         first_ui_pass: bool,
     ) -> Option<crate::settings_editor::render::SettingsNavigationFrameObserver> {
+        let now = ctx.input(|input| input.time);
+        self.settings_editor
+            .expire_settings_navigation_highlight(now);
+        if let Some(highlight) = self.settings_editor.settings_navigation_highlight.as_ref() {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                (highlight.expires_at - now).max(0.0),
+            ));
+        }
         if self.plugins.settings_catalog_revision()
             != self.settings_editor.search_catalog.plugin_revision()
         {
@@ -4667,6 +4675,14 @@ impl LauncherApp {
                 .is_some_and(|pending| &pending.section == section)
             {
                 self.settings_editor.pending_settings_navigation = None;
+            }
+            if self
+                .settings_editor
+                .settings_navigation_highlight
+                .as_ref()
+                .is_some_and(|highlight| &highlight.section == section)
+            {
+                self.settings_editor.settings_navigation_highlight = None;
             }
             return None;
         }
@@ -4689,10 +4705,12 @@ impl LauncherApp {
         owner_current: bool,
         first_ui_pass: bool,
     ) {
+        let now = self.egui_ctx.input(|input| input.time);
         self.settings_editor.finish_dedicated_navigation_frame(
             observer,
             owner_current,
             first_ui_pass,
+            now,
         );
     }
 
@@ -38734,6 +38752,216 @@ mod tests {
         }
     }
 
+    struct DisabledBuiltinHistoryProbePlugin {
+        settings_ui_calls: Arc<AtomicUsize>,
+    }
+
+    impl Plugin for DisabledBuiltinHistoryProbePlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            Vec::new()
+        }
+
+        fn name(&self) -> &str {
+            "history"
+        }
+
+        fn description(&self) -> &str {
+            "Disabled built-in Settings navigation fixture"
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &["probe_capability"]
+        }
+
+        fn default_settings(&self) -> Option<serde_json::Value> {
+            Some(serde_json::json!({"untouched": true}))
+        }
+
+        fn settings_ui(&mut self, _ui: &mut egui::Ui, _value: &mut serde_json::Value) {
+            self.settings_ui_calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn settings_search_delivery_reveals_disabled_builtin_enable_without_calling_provider() {
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        app.test_skip_history_persistence = true;
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        app.plugins
+            .register_builtin_for_settings_test(DisabledBuiltinHistoryProbePlugin {
+                settings_ui_calls: Arc::clone(&provider_calls),
+            });
+        app.enabled_plugins = Some(std::collections::HashSet::new());
+        app.plugins
+            .sync_enabled_plugins(app.enabled_plugins.as_ref());
+        app.plugin_editor
+            .sync_committed_settings(&cross_owner_test_settings(), app.plugins.plugin_infos());
+        prepare_settings_cross_owner_root(&ctx, &mut app);
+
+        let registration = app
+            .plugins
+            .settings_catalog_snapshot_if_changed(None)
+            .and_then(|snapshot| {
+                snapshot
+                    .plugins
+                    .into_iter()
+                    .find(|plugin| plugin.name == "history")
+            })
+            .expect("the disabled fixture has one current built-in registration");
+        assert_eq!(
+            registration.origin,
+            crate::plugin::PluginCatalogOrigin::Builtin
+        );
+        assert!(registration.has_settings);
+        assert!(!registration.enabled);
+        let requested_id = "plugin.history.max_entries".to_owned();
+        let prerequisite_id = format!(
+            "plugin_editor.builtin.history.{}.enabled",
+            registration.epoch
+        );
+        let committed_settings = persist_cross_owner_test_settings(&app.settings_path);
+
+        app.show_settings = true;
+        app.settings_editor.settings_search_query = "history limit".to_owned();
+        for _ in 0..3 {
+            run_settings_cross_owner_frame(&ctx, &mut app, Vec::new());
+        }
+        let (_, history_response_id, _) = app
+            .settings_editor
+            .test_search_result_responses
+            .iter()
+            .find(|(control_id, _, _)| control_id == &requested_id)
+            .cloned()
+            .expect("the stabilized current results include the exact History response");
+        let history_response = ctx
+            .read_response(history_response_id)
+            .expect("the History search result is an actual current Response");
+        assert!(history_response.enabled());
+        assert!(
+            history_response.interact_rect.is_positive(),
+            "the current History Response has a visible interactive portion"
+        );
+        app.settings_editor.settings_search_selected_id = Some(requested_id.clone());
+        ctx.memory_mut(|memory| memory.request_focus(history_response_id));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(history_response_id),
+            "focus is assigned to the requested current History result, after catalog refresh"
+        );
+        run_settings_cross_owner_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        run_settings_cross_owner_frame(
+            &ctx,
+            &mut app,
+            vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(
+            app.show_plugins,
+            "fresh Search Enter reveals the current disabled builtin prerequisite; selected={:?} pending={:?} diagnostic={:?} history={:?}",
+            app.settings_editor.settings_search_selected_id,
+            app.settings_editor
+                .pending_settings_navigation
+                .as_ref()
+                .map(|pending| (
+                    pending.control_id.as_str(),
+                    &pending.delivery,
+                    pending.catalog_revision,
+                )),
+            app.settings_editor.test_last_navigation_diagnostic,
+            app.settings_editor.test_search_navigation_history,
+        );
+        let pending_prerequisite_route = app
+            .settings_editor
+            .pending_settings_navigation
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.control_id == prerequisite_id
+                    && matches!(
+                        &pending.delivery,
+                        crate::settings_editor::SettingsNavigationDelivery::BuiltinPrerequisite {
+                            requested_control_id,
+                        } if requested_control_id == &requested_id
+                    )
+            });
+        let completed_prerequisite_route = app
+            .settings_editor
+            .settings_navigation_highlight
+            .as_ref()
+            .is_some_and(|highlight| {
+                highlight.control_id == prerequisite_id
+                    && matches!(
+                        &highlight.delivery,
+                        crate::settings_editor::SettingsNavigationDelivery::BuiltinPrerequisite {
+                            requested_control_id,
+                        } if requested_control_id == &requested_id
+                    )
+            });
+        assert!(
+            pending_prerequisite_route || completed_prerequisite_route,
+            "the unavailable result is pending or completed only through its exact Enable prerequisite; pending={:?} highlight={:?}",
+            app.settings_editor.pending_settings_navigation,
+            app.settings_editor.settings_navigation_highlight,
+        );
+        let enabled_response =
+            wait_for_settings_cross_owner_focus(&ctx, &mut app, &prerequisite_id)
+                .expect("the real Plugin Settings checkbox receives the one-shot focus handoff");
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(enabled_response)
+        );
+        assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(app.settings_editor.settings_navigation_highlight.as_ref().is_some_and(
+            |highlight| {
+                highlight.control_id == prerequisite_id
+                    && matches!(
+                        &highlight.delivery,
+                        crate::settings_editor::SettingsNavigationDelivery::BuiltinPrerequisite {
+                            requested_control_id,
+                        } if requested_control_id == &requested_id
+                    )
+            }
+        ));
+        let history_len = app.settings_editor.test_search_navigation_history.len();
+        run_settings_cross_owner_frame(&ctx, &mut app, Vec::new());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(enabled_response)
+        );
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            app.enabled_plugins
+                .as_ref()
+                .is_some_and(|enabled| !enabled.contains("history")),
+            "revealing the prerequisite never enables the plugin"
+        );
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            app.settings_editor.test_search_navigation_history[history_len..]
+                .iter()
+                .any(|event| {
+                    event.contains(&format!("control={prerequisite_id}"))
+                        && event.contains("focus_requested=false")
+                }),
+            "the later observer highlights the same response without requesting focus again"
+        );
+        assert!(!app.settings_save_pending());
+        assert_eq!(
+            std::fs::read(&app.settings_path).unwrap(),
+            committed_settings
+        );
+
+        assert!(app.close_front_dialog());
+        assert!(app.settings_editor.settings_navigation_highlight.is_none());
+        assert!(app.enabled_plugins.as_ref().unwrap().is_empty());
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
+        drop(workspace);
+    }
+
     #[test]
     fn settings_search_cross_owner_theme_waits_through_window_sizing_before_focusing_response() {
         let ctx = egui::Context::default();
@@ -38836,10 +39064,41 @@ mod tests {
         });
         assert_eq!(ctx.memory(|memory| memory.focused()), Some(actual_response));
         assert!(app.settings_editor.pending_settings_navigation.is_none());
+        assert!(
+            app.settings_editor
+                .settings_navigation_highlight
+                .as_ref()
+                .is_some_and(|highlight| {
+                    highlight.control_id == "theme.typography_scale"
+                        && highlight.section
+                            == crate::settings_editor::catalog::SettingsSection::Theme
+                })
+        );
         assert_eq!(app.settings_editor.toast_duration, main_settings_draft);
         assert_eq!(
             std::fs::read(&app.settings_path).unwrap(),
             committed_settings
+        );
+
+        let highlight_history_start = app.settings_editor.test_search_navigation_history.len();
+        run_settings_cross_owner_frame(&ctx, &mut app, Vec::new());
+        assert_eq!(
+            app.settings_editor
+                .test_last_navigation_highlight
+                .as_ref()
+                .map(|(control_id, response_id)| (control_id.as_str(), *response_id)),
+            Some(("theme.typography_scale", actual_response)),
+            "a steady dedicated-owner frame observes the exact current Theme response"
+        );
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(actual_response));
+        assert!(
+            app.settings_editor.test_search_navigation_history[highlight_history_start..]
+                .iter()
+                .any(|event| {
+                    event.contains("control=theme.typography_scale")
+                        && event.contains("focus_requested=false")
+                }),
+            "the highlight observer does not send another focus directive"
         );
 
         let original_typography_scale =
@@ -38861,6 +39120,7 @@ mod tests {
         );
         app.close_theme_settings_dialog();
         assert!(!app.is_theme_settings_dialog_open());
+        assert!(app.settings_editor.settings_navigation_highlight.is_none());
         assert_eq!(app.settings_editor.toast_duration, main_settings_draft);
         assert_eq!(
             std::fs::read(&app.settings_path).unwrap(),
