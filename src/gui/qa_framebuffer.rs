@@ -1,4 +1,5 @@
 use super::LauncherApp;
+use super::jump_mode::ui::visible_top_middle_layer;
 #[cfg(feature = "qa-framebuffer-capture")]
 use super::qr_dialog::QrViewportObservation;
 use eframe::egui::{
@@ -24,6 +25,11 @@ const SCREENSHOT_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 const QR_STARTUP_CAPTURE_TIMEOUT: Duration = Duration::from_secs(120);
 const WRITER_QUEUE_CAPACITY: usize = 2;
 const MAX_CAPTURE_COUNT: u8 = 16;
+
+#[cfg(feature = "qa-framebuffer-capture")]
+pub(crate) fn qa_clipped_response_rect(response: egui::Rect, clip: egui::Rect) -> egui::Rect {
+    response.intersect(clip)
+}
 
 fn selected_reply_timeout(target: CaptureTarget) -> Duration {
     match target {
@@ -103,6 +109,17 @@ struct JumpModeObservationRequest {
     phase2: Option<Phase2DialogRequest>,
     #[serde(default)]
     settings_search: Option<SettingsSearchRequest>,
+    #[serde(default)]
+    target_repair: Option<TargetRepairRequest>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct TargetRepairRequest {
+    #[serde(default)]
+    expected_action_replacement: Option<String>,
+    #[serde(default)]
+    expected_folder_replacement: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -152,6 +169,7 @@ struct JumpModeObservation {
     observed_at_unix_ms: u64,
     fixture_manifest_sha256: String,
     process_pid: u32,
+    pixels_per_point: f32,
     logic_frame_id: u64,
     ui_pass_id: u64,
     ui_pass_index: u32,
@@ -180,6 +198,7 @@ struct JumpModeObservation {
     focused_widget_id: Option<String>,
     focused_navigation_destination: Option<String>,
     dialog_state: Option<QaDialogState>,
+    app_editor_open: bool,
     mkmacro_action_editor_open: bool,
     activation_count: u64,
     last_action: Option<QaActivationObservation>,
@@ -191,6 +210,57 @@ struct JumpModeObservation {
     targets: Vec<JumpModeTargetObservation>,
     navigation_targets: Vec<JumpModeTargetObservation>,
     settings_search: Option<SettingsSearchObservation>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    target_repair: Option<TargetRepairObservation>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    target_repair_action_sheet: Option<TargetRepairActionSheetObservation>,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone, Debug, Serialize)]
+struct TargetRepairObservation {
+    request_token: u64,
+    target_owner: &'static str,
+    record_index: usize,
+    owner_revision: u64,
+    replacement_kind: &'static str,
+    pending: bool,
+    feedback_present: bool,
+    window_visible: bool,
+    sizing_pass: bool,
+    egui_frame_nr: u64,
+    egui_pass_index: usize,
+    #[serde(skip)]
+    window_layer_id: Option<egui::LayerId>,
+    qa_logic_frame_id: u64,
+    qa_ui_pass_id: u64,
+    qa_ui_pass_index: u32,
+    replacement_matches_expected: Option<bool>,
+    replacement_is_empty: bool,
+    controls: Vec<super::TargetRepairControlPaint>,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone, Debug, Serialize)]
+struct TargetRepairActionSheetObservation {
+    #[serde(skip)]
+    sheet_identity: u64,
+    #[serde(skip)]
+    filter: String,
+    #[serde(skip)]
+    layer_id: egui::LayerId,
+    filter_response_id: String,
+    filter_rect: [f32; 4],
+    filter_enabled: bool,
+    filter_painted: bool,
+    filter_focused: bool,
+    selected_action_id: Option<String>,
+    controls: Vec<super::action_sheet::TargetRepairActionSheetControlPaint>,
+    egui_frame_nr: u64,
+    egui_pass_index: usize,
+    qa_logic_frame_id: u64,
+    qa_ui_pass_id: u64,
+    qa_ui_pass_index: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -490,6 +560,17 @@ fn validate_manifest(manifest: &RequestManifest) -> Result<(), String> {
                 "empty Paste invocation context is valid only for the Phase 2 Paste surface".into(),
             );
         }
+    }
+    if let Some(observation) = manifest.jump_mode_observation.as_ref()
+        && observation.target_repair.is_some()
+        && (manifest.trigger != CaptureTrigger::F11
+            || observation.phase2.is_some()
+            || observation.settings_search.is_some()
+            || observation.wait_for_active_hints)
+    {
+        return Err(
+            "target repair observation requires a dedicated ROOT/F11 request without another surface observer".into(),
+        );
     }
     if let Some(settings_search) = manifest
         .jump_mode_observation
@@ -976,6 +1057,9 @@ pub(super) struct FramebufferProbe {
     wait_for_active_hints: bool,
     phase2_request: Option<Phase2DialogRequest>,
     settings_search_expected_query: Option<String>,
+    target_repair_observation_enabled: bool,
+    target_repair_expected_action_replacement: Option<String>,
+    target_repair_expected_folder_replacement: Option<String>,
     activation_count: u64,
     last_action: Option<QaActivationObservation>,
     tab_processed_count: u64,
@@ -1040,6 +1124,14 @@ impl FramebufferProbe {
             settings_search_expected_query: observation_request
                 .and_then(|request| request.settings_search.as_ref())
                 .map(|request| request.expected_query.clone()),
+            target_repair_observation_enabled: observation_request
+                .is_some_and(|request| request.target_repair.is_some()),
+            target_repair_expected_action_replacement: observation_request
+                .and_then(|request| request.target_repair.as_ref())
+                .and_then(|request| request.expected_action_replacement.clone()),
+            target_repair_expected_folder_replacement: observation_request
+                .and_then(|request| request.target_repair.as_ref())
+                .and_then(|request| request.expected_folder_replacement.clone()),
             activation_count: 0,
             last_action: None,
             tab_processed_count: 0,
@@ -1580,11 +1672,26 @@ impl FramebufferProbe {
             return;
         }
         self.activation_count = self.activation_count.saturating_add(1);
+        let redact = self.target_repair_observation_enabled;
         self.last_action = Some(QaActivationObservation {
-            action_id: action.action.clone(),
-            label: action.label.clone(),
-            args: action.args.clone(),
-            query_override: query_override.map(str::to_owned),
+            action_id: redact_target_repair_action(action, redact),
+            label: if redact {
+                "saved target".to_owned()
+            } else {
+                action.label.clone()
+            },
+            args: if redact {
+                action.args.as_ref().map(|_| "[present]".to_owned())
+            } else {
+                action.args.clone()
+            },
+            query_override: query_override.map(|query| {
+                if redact {
+                    "[maintenance query]".to_owned()
+                } else {
+                    query.to_owned()
+                }
+            }),
             source: source.label(),
         });
     }
@@ -1714,6 +1821,12 @@ impl FramebufferProbe {
 }
 
 impl LauncherApp {
+    pub(super) fn qa_framebuffer_target_repair_observation_enabled(&self) -> bool {
+        self.qa_framebuffer
+            .as_ref()
+            .is_some_and(|probe| probe.target_repair_observation_enabled)
+    }
+
     pub(super) fn qa_framebuffer_use_empty_paste_invocation_context(&self) -> bool {
         self.qa_framebuffer
             .as_ref()
@@ -2113,10 +2226,191 @@ impl LauncherApp {
         {
             settings_search.highlight = Some(highlight);
         }
+        if let Some(observation) = jump_mode_observation.as_mut()
+            && let Some(marker) = self
+                .qa_framebuffer
+                .as_ref()
+                .and_then(|probe| probe.retained_pass.as_ref())
+        {
+            if observation.target_repair.is_none() {
+                observation.target_repair = retained_target_repair_paint_if_current(
+                    self,
+                    &ctx,
+                    eligibility,
+                    marker,
+                    observation,
+                );
+            }
+            if observation.target_repair_action_sheet.is_none() {
+                observation.target_repair_action_sheet =
+                    retained_target_repair_action_sheet_if_current(
+                        self,
+                        &ctx,
+                        eligibility,
+                        marker,
+                        observation,
+                    );
+            }
+        }
         if let Some(probe) = self.qa_framebuffer.as_mut() {
             probe.finish_retained_ui_frame(&ctx, eligibility, jump_mode_observation);
         }
     }
+}
+
+fn target_repair_root_still_owned(
+    app: &LauncherApp,
+    ctx: &egui::Context,
+    marker: &RetainedPassMarker,
+    final_eligibility: SurfaceEligibility,
+    action_sheet_is_expected: bool,
+) -> bool {
+    let visible_root = marker.eligibility.logical_root_visible
+        && final_eligibility.logical_root_visible
+        && marker.eligibility.root_visible
+        && final_eligibility.root_visible
+        && app.visible_flag.load(std::sync::atomic::Ordering::Relaxed);
+    let no_foreign_owner = !marker.eligibility.ocr_owner
+        && !final_eligibility.ocr_owner
+        && !marker.eligibility.tool_owner
+        && !final_eligibility.tool_owner
+        && !app.confirm_modal.is_open()
+        && !app.snippet_prompt_dialog.is_open()
+        && app.macro_prompt.pending.is_none()
+        && !app.macro_parameter_prompt.owns_input()
+        && !app.mkmacro_dialog.hotkey_capture
+        && !app.mkmacro_dialog.record_hotkey_capture
+        && !app.mkmacro_dialog.pause_record_hotkey_capture
+        && !app.mkmacro_dialog.marker_record_hotkey_capture;
+    visible_root
+        && no_foreign_owner
+        && app.action_sheet.is_open() == action_sheet_is_expected
+        && visible_top_middle_layer(ctx).is_some()
+}
+
+fn retained_target_repair_paint_if_current(
+    app: &LauncherApp,
+    ctx: &egui::Context,
+    final_eligibility: SurfaceEligibility,
+    marker: &RetainedPassMarker,
+    observation: &JumpModeObservation,
+) -> Option<TargetRepairObservation> {
+    let retained = marker
+        .evidence
+        .as_ref()?
+        .jump_mode_observation
+        .as_ref()?
+        .target_repair
+        .as_ref()?;
+    let layer_id = retained.window_layer_id?;
+    let marker_egui_frame = marker.egui_frame_nr?;
+    let marker_egui_pass = marker.egui_pass_index?;
+    let expected_path_match = match retained.target_owner {
+        "custom_action" => app
+            .qa_framebuffer
+            .as_ref()?
+            .target_repair_expected_action_replacement
+            .as_deref()
+            .map(|expected| app.editor.qa_target_repair_path_matches(expected)),
+        "folder" => app
+            .qa_framebuffer
+            .as_ref()?
+            .target_repair_expected_folder_replacement
+            .as_deref()
+            .map(|expected| app.editor.qa_target_repair_path_matches(expected)),
+        _ => return None,
+    };
+    let retained_pass_matches = marker.logic_frame_id == observation.logic_frame_id
+        && marker.ui_pass_id == observation.ui_pass_id
+        && marker.ui_pass_index == observation.ui_pass_index
+        && retained.qa_logic_frame_id == marker.logic_frame_id
+        && retained.qa_ui_pass_id == marker.ui_pass_id
+        && retained.qa_ui_pass_index == marker.ui_pass_index
+        && retained.egui_frame_nr == marker_egui_frame
+        && retained.egui_pass_index == marker_egui_pass;
+    let current_root_owner_matches = observation.navigation_owner
+        == qa_navigation_owner(app.jump_mode_ui.frame_navigation_owner());
+    let presentation_is_current = app.editor.qa_target_repair_paint_matches_current_state(
+        retained.request_token,
+        retained.target_owner,
+        retained.record_index,
+        retained.owner_revision,
+        retained.replacement_kind,
+        retained.pending,
+        retained.feedback_present,
+        layer_id,
+        marker_egui_frame,
+        marker_egui_pass,
+    );
+    let path_is_current = retained.replacement_matches_expected == expected_path_match;
+    let replacement_empty_is_current =
+        retained.replacement_is_empty == app.editor.qa_target_repair_path_is_empty();
+    (app.show_editor
+        && app.editor.is_dialog_open()
+        && target_repair_root_still_owned(app, ctx, marker, final_eligibility, false)
+        && visible_top_middle_layer(ctx) == Some(layer_id)
+        && retained_pass_matches
+        && current_root_owner_matches
+        && presentation_is_current
+        && path_is_current
+        && replacement_empty_is_current
+        && retained.window_visible
+        && !retained.sizing_pass
+        && retained
+            .controls
+            .iter()
+            .any(|control| control.enabled && control.painted))
+    .then(|| retained.clone())
+}
+
+fn retained_target_repair_action_sheet_if_current(
+    app: &LauncherApp,
+    ctx: &egui::Context,
+    final_eligibility: SurfaceEligibility,
+    marker: &RetainedPassMarker,
+    observation: &JumpModeObservation,
+) -> Option<TargetRepairActionSheetObservation> {
+    let retained = marker
+        .evidence
+        .as_ref()?
+        .jump_mode_observation
+        .as_ref()?
+        .target_repair_action_sheet
+        .as_ref()?;
+    let marker_egui_frame = marker.egui_frame_nr?;
+    let marker_egui_pass = marker.egui_pass_index?;
+    let repair_control_is_painted = retained.controls.iter().any(|control| {
+        matches!(control.kind, "custom_action" | "folder") && control.enabled && control.painted
+    });
+    let retained_pass_matches = marker.logic_frame_id == observation.logic_frame_id
+        && marker.ui_pass_id == observation.ui_pass_id
+        && marker.ui_pass_index == observation.ui_pass_index
+        && retained.qa_logic_frame_id == marker.logic_frame_id
+        && retained.qa_ui_pass_id == marker.ui_pass_id
+        && retained.qa_ui_pass_index == marker.ui_pass_index
+        && retained.egui_frame_nr == marker_egui_frame
+        && retained.egui_pass_index == marker_egui_pass;
+    let current_root_owner_matches = observation.navigation_owner
+        == qa_navigation_owner(app.jump_mode_ui.frame_navigation_owner());
+    let paint_is_current = app
+        .action_sheet
+        .qa_target_repair_paint_matches_current_state(
+            retained.sheet_identity,
+            &retained.filter,
+            retained.selected_action_id.as_deref(),
+            retained.layer_id,
+            marker_egui_frame,
+            marker_egui_pass,
+        );
+    (target_repair_root_still_owned(app, ctx, marker, final_eligibility, true)
+        && visible_top_middle_layer(ctx) == Some(retained.layer_id)
+        && current_root_owner_matches
+        && retained_pass_matches
+        && paint_is_current
+        && retained.filter_enabled
+        && retained.filter_painted
+        && repair_control_is_painted)
+        .then(|| retained.clone())
 }
 
 fn retained_settings_search_paint_if_current(
@@ -2427,11 +2721,15 @@ fn build_jump_mode_observation(
     let focused_egui_id = ctx.memory(|memory| memory.focused());
     let result_generation = app.root_list_geometry.result_generation();
     let result_count = app.results.len();
+    let redact_action_details = app
+        .qa_framebuffer
+        .as_ref()
+        .is_some_and(|probe| probe.target_repair_observation_enabled);
     let selected_index = app.selected;
     let selected_action = selected_index
         .filter(|index| *index < result_count)
         .and_then(|index| app.results.get(index))
-        .map(qa_action_observation);
+        .map(|action| qa_action_observation_for_target_repair(action, redact_action_details));
     let (tab_processed_count, last_tab_processed_logic_frame_id) = app
         .qa_framebuffer
         .as_ref()
@@ -2469,6 +2767,7 @@ fn build_jump_mode_observation(
                 result_count,
                 active_hint_map,
                 focused_egui_id,
+                redact_action_details,
             )
         })
         .collect();
@@ -2489,6 +2788,7 @@ fn build_jump_mode_observation(
                 result_count,
                 active_hint_map,
                 focused_egui_id,
+                redact_action_details,
             )
         })
         .collect();
@@ -2535,6 +2835,70 @@ fn build_jump_mode_observation(
                 actual_query,
                 highlight,
             }
+        });
+    #[cfg(feature = "qa-framebuffer-capture")]
+    let target_repair = app
+        .qa_framebuffer
+        .as_ref()
+        .filter(|probe| probe.target_repair_observation_enabled)
+        .and_then(|_| app.editor.qa_target_repair_paint_for_current_pass(ctx))
+        .map(|paint| TargetRepairObservation {
+            request_token: paint.token,
+            target_owner: paint.target_owner,
+            record_index: paint.record_index,
+            owner_revision: paint.owner_revision,
+            replacement_kind: paint.replacement_kind,
+            pending: paint.pending,
+            feedback_present: paint.feedback_present,
+            window_visible: paint.window_visible,
+            sizing_pass: paint.sizing_pass,
+            egui_frame_nr: paint.egui_frame_nr,
+            egui_pass_index: paint.egui_pass_index,
+            window_layer_id: paint.window_layer_id,
+            qa_logic_frame_id: logic_frame_id,
+            qa_ui_pass_id: ui_pass_id,
+            qa_ui_pass_index: ui_pass_index,
+            replacement_matches_expected: match paint.target_owner {
+                "custom_action" => app
+                    .qa_framebuffer
+                    .as_ref()
+                    .and_then(|probe| probe.target_repair_expected_action_replacement.as_deref())
+                    .map(|expected| app.editor.qa_target_repair_path_matches(expected)),
+                "folder" => app
+                    .qa_framebuffer
+                    .as_ref()
+                    .and_then(|probe| probe.target_repair_expected_folder_replacement.as_deref())
+                    .map(|expected| app.editor.qa_target_repair_path_matches(expected)),
+                _ => None,
+            },
+            replacement_is_empty: paint.replacement_is_empty,
+            controls: paint.controls,
+        });
+    #[cfg(feature = "qa-framebuffer-capture")]
+    let target_repair_action_sheet = app
+        .qa_framebuffer
+        .as_ref()
+        .filter(|probe| probe.target_repair_observation_enabled)
+        .and_then(|_| {
+            app.action_sheet
+                .qa_target_repair_paint_for_current_pass(ctx)
+        })
+        .map(|paint| TargetRepairActionSheetObservation {
+            sheet_identity: paint.sheet_identity,
+            filter: paint.filter,
+            layer_id: paint.layer_id,
+            filter_response_id: paint.filter_response_id,
+            filter_rect: paint.filter_rect,
+            filter_enabled: paint.filter_enabled,
+            filter_painted: paint.filter_painted,
+            filter_focused: paint.filter_focused,
+            selected_action_id: paint.selected_action_id,
+            controls: paint.controls,
+            egui_frame_nr: paint.egui_frame_nr,
+            egui_pass_index: paint.egui_pass_index,
+            qa_logic_frame_id: logic_frame_id,
+            qa_ui_pass_id: ui_pass_id,
+            qa_ui_pass_index: ui_pass_index,
         });
     let selected_target_id = selected_index.and_then(|selected_index| {
         targets
@@ -2585,6 +2949,7 @@ fn build_jump_mode_observation(
         observed_at_unix_ms: unix_millis(),
         fixture_manifest_sha256,
         process_pid,
+        pixels_per_point: ctx.pixels_per_point(),
         logic_frame_id,
         ui_pass_id,
         ui_pass_index,
@@ -2613,6 +2978,7 @@ fn build_jump_mode_observation(
         focused_widget_id,
         focused_navigation_destination,
         dialog_state,
+        app_editor_open: app.show_editor,
         mkmacro_action_editor_open: app.mkmacro_dialog.action_editor.draft.is_some(),
         activation_count,
         last_action,
@@ -2624,6 +2990,10 @@ fn build_jump_mode_observation(
         targets,
         navigation_targets,
         settings_search,
+        #[cfg(feature = "qa-framebuffer-capture")]
+        target_repair,
+        #[cfg(feature = "qa-framebuffer-capture")]
+        target_repair_action_sheet,
     }
 }
 
@@ -2647,6 +3017,7 @@ fn observe_registered_target(
     result_count: usize,
     active_hint_map: Option<&super::jump_mode::HintMap>,
     focused_egui_id: Option<egui::Id>,
+    redact_action_details: bool,
 ) -> JumpModeTargetObservation {
     let rect = target.rect();
     let clipped_rect = target.clipped_rect();
@@ -2664,7 +3035,7 @@ fn observe_registered_target(
     };
     let root_action = root_result_index
         .and_then(|index| app.results.get(index))
-        .map(qa_action_observation);
+        .map(|action| qa_action_observation_for_target_repair(action, redact_action_details));
     JumpModeTargetObservation {
         target_id: format!("{:?}", target.id()),
         semantic_id: qa_semantic_target(target_id.semantic()),
@@ -2944,12 +3315,40 @@ fn qa_dialog_state(
     Some(state)
 }
 
-fn qa_action_observation(action: &crate::actions::Action) -> QaActionObservation {
+fn qa_action_observation_for_target_repair(
+    action: &crate::actions::Action,
+    redact: bool,
+) -> QaActionObservation {
     QaActionObservation {
-        label: action.label.clone(),
-        desc: action.desc.clone(),
-        action: action.action.clone(),
-        args: action.args.clone(),
+        label: if redact {
+            "saved target".to_owned()
+        } else {
+            action.label.clone()
+        },
+        desc: if redact {
+            String::new()
+        } else {
+            action.desc.clone()
+        },
+        action: redact_target_repair_action(action, redact),
+        args: if redact {
+            action.args.as_ref().map(|_| "[present]".to_owned())
+        } else {
+            action.args.clone()
+        },
+    }
+}
+
+fn redact_target_repair_action(action: &crate::actions::Action, redact: bool) -> String {
+    if !redact {
+        return action.action.clone();
+    }
+    if action.action.starts_with("query:") {
+        "maintenance query".to_owned()
+    } else if action.action.starts_with("folder:") {
+        "folder maintenance".to_owned()
+    } else {
+        "saved filesystem target".to_owned()
     }
 }
 
@@ -3554,6 +3953,7 @@ mod tests {
                     use_empty_paste_invocation_context: true,
                 }),
                 settings_search: None,
+                target_repair: None,
             }),
             output_dir: PathBuf::from("capture"),
             fixture_manifest_sha256: "a".repeat(64),
@@ -3749,6 +4149,217 @@ mod tests {
     }
 
     #[test]
+    fn target_repair_ui_retained_paint_survives_only_selected_root_frame_completion() {
+        use crate::target_repair::{ActionTargetKind, SelectedTarget};
+        use crate::universal_actions::{
+            ActionAvailability, ActionId, ActionPresentation, ActionSafety, ActionTarget,
+            ResolvedActionTarget, UniversalAction, UniversalActionOperation, UniversalUiIntent,
+            action_ids,
+        };
+
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let output_dir = workspace.root().join("qa-retained-target-repair");
+        fs::create_dir_all(&output_dir).unwrap();
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let mut app = test_launcher_app_with_jump_mode(&ctx, workspace.root(), true);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 900.0),
+            )),
+            focused: true,
+            ..Default::default()
+        };
+
+        let original = crate::actions::Action {
+            label: "QA repair action".into(),
+            desc: "Inert selected action".into(),
+            action: workspace
+                .root()
+                .join("missing-app.exe")
+                .to_string_lossy()
+                .into_owned(),
+            args: Some("--qa-argument".into()),
+        };
+        let target = ActionTarget::Generic {
+            action: original.clone(),
+        };
+        app.action_sheet.open(
+            ResolvedActionTarget {
+                target: target.clone(),
+                selected_action: original.clone(),
+                custom_action_index: Some(0),
+            },
+            original.clone(),
+            vec![UniversalAction {
+                id: action_ids::CUSTOM_ACTION_REPAIR_TARGET,
+                target,
+                presentation: ActionPresentation::new("Repair target…"),
+                availability: ActionAvailability::Available,
+                safety: ActionSafety::Normal,
+                operation: UniversalActionOperation::UiIntent(
+                    UniversalUiIntent::RepairCustomAction {
+                        index: 0,
+                        action: original.clone(),
+                    },
+                ),
+            }],
+            &app.matcher,
+        );
+        let (mut probe, _writer_rx, _outcome_tx) = test_probe(CaptureTrigger::Startup);
+        probe.output_dir = output_dir.clone();
+        probe.jump_mode_observation_enabled = true;
+        probe.target_repair_observation_enabled = true;
+        app.qa_framebuffer = Some(probe);
+
+        let (output, passes) = app.run_root_frame_for_test(&ctx, input.clone(), true);
+        output.drop_without_applying_deltas();
+        assert_eq!(
+            passes, 2,
+            "the selected action-sheet pass followed a discard"
+        );
+        let action_sheet = app
+            .qa_framebuffer
+            .as_ref()
+            .and_then(|probe| probe.latest_jump_mode_observation.as_ref())
+            .and_then(|observation| observation.target_repair_action_sheet.as_ref())
+            .expect("the current owned action sheet retains its real repair response");
+        assert!(action_sheet.filter_enabled && action_sheet.filter_painted);
+        assert!(action_sheet.controls.iter().any(|control| {
+            control.action_id == action_ids::CUSTOM_ACTION_REPAIR_TARGET.as_str()
+                && control.enabled
+                && control.painted
+        }));
+        assert!(action_sheet.layer_id == visible_top_middle_layer(&ctx).unwrap());
+        assert!(
+            app.action_sheet
+                .qa_target_repair_paint_for_current_pass(&ctx)
+                .is_none()
+        );
+
+        let mut closed_action_sheet_after_paint = false;
+        let mut pass_count = 0;
+        let (output, passes) =
+            app.run_root_frame_for_test_with(&ctx, input.clone(), true, |app, ui| {
+                let mut frame = eframe::Frame::_new_kittest();
+                eframe::App::ui(app, ui, &mut frame);
+                if pass_count == 1 {
+                    closed_action_sheet_after_paint = app
+                        .qa_framebuffer
+                        .as_ref()
+                        .and_then(|probe| probe.retained_pass.as_ref())
+                        .and_then(|marker| marker.evidence.as_ref())
+                        .and_then(|evidence| evidence.jump_mode_observation.as_ref())
+                        .and_then(|observation| observation.target_repair_action_sheet.as_ref())
+                        .is_some_and(|paint| {
+                            paint.controls.iter().any(|control| {
+                                control.action_id
+                                    == action_ids::CUSTOM_ACTION_REPAIR_TARGET.as_str()
+                                    && control.painted
+                            })
+                        });
+                    app.action_sheet.close();
+                }
+                pass_count += 1;
+            });
+        output.drop_without_applying_deltas();
+        assert_eq!(passes, 2);
+        assert!(closed_action_sheet_after_paint);
+        assert!(
+            app.qa_framebuffer
+                .as_ref()
+                .and_then(|probe| probe.latest_jump_mode_observation.as_ref())
+                .is_some_and(|observation| observation.target_repair_action_sheet.is_none())
+        );
+
+        app.show_editor = true;
+        app.editor.open_repair(SelectedTarget::action_with_kind(
+            original,
+            0,
+            ActionTargetKind::FileOrFolder,
+        ));
+        let (output, passes) = app.run_root_frame_for_test(&ctx, input.clone(), true);
+        output.drop_without_applying_deltas();
+        assert_eq!(
+            passes, 2,
+            "the selected repair-dialog pass followed a discard"
+        );
+        let target_dialog = app
+            .qa_framebuffer
+            .as_ref()
+            .and_then(|probe| probe.latest_jump_mode_observation.as_ref())
+            .and_then(|observation| observation.target_repair.as_ref())
+            .expect("the current repair dialog retains its real painted controls");
+        assert!(target_dialog.window_visible && !target_dialog.sizing_pass);
+        assert!(target_dialog.replacement_is_empty);
+        assert!(target_dialog.window_layer_id == visible_top_middle_layer(&ctx));
+        assert!(
+            target_dialog
+                .controls
+                .iter()
+                .any(|control| { control.name == "confirm" && control.enabled && control.painted })
+        );
+        assert!(
+            app.editor
+                .qa_target_repair_paint_for_current_pass(&ctx)
+                .is_none()
+        );
+
+        let mut closed_dialog_after_paint = false;
+        let mut pass_count = 0;
+        let (output, passes) = app.run_root_frame_for_test_with(&ctx, input, true, |app, ui| {
+            let mut frame = eframe::Frame::_new_kittest();
+            eframe::App::ui(app, ui, &mut frame);
+            if pass_count == 1 {
+                closed_dialog_after_paint = app
+                    .qa_framebuffer
+                    .as_ref()
+                    .and_then(|probe| probe.retained_pass.as_ref())
+                    .and_then(|marker| marker.evidence.as_ref())
+                    .and_then(|evidence| evidence.jump_mode_observation.as_ref())
+                    .and_then(|observation| observation.target_repair.as_ref())
+                    .is_some_and(|paint| {
+                        paint
+                            .controls
+                            .iter()
+                            .any(|control| control.name == "confirm" && control.painted)
+                    });
+                app.editor.retire_repair_dialog();
+            }
+            pass_count += 1;
+        });
+        output.drop_without_applying_deltas();
+        assert_eq!(passes, 2);
+        assert!(closed_dialog_after_paint);
+        assert!(
+            app.qa_framebuffer
+                .as_ref()
+                .and_then(|probe| probe.latest_jump_mode_observation.as_ref())
+                .is_some_and(|observation| observation.target_repair.is_none())
+        );
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    #[test]
+    fn target_repair_ui_click_receipt_rect_is_clipped_to_current_visible_region() {
+        let response = egui::Rect::from_min_max(egui::pos2(10.0, 10.0), egui::pos2(90.0, 90.0));
+        let clip = egui::Rect::from_min_max(egui::pos2(50.0, 0.0), egui::pos2(100.0, 60.0));
+        let clickable = qa_clipped_response_rect(response, clip);
+        assert_eq!(
+            clickable,
+            egui::Rect::from_min_max(egui::pos2(50.0, 10.0), egui::pos2(90.0, 60.0))
+        );
+        let chosen_point = clickable.center();
+        assert!(response.contains(chosen_point));
+        assert!(clip.contains(chosen_point));
+
+        let offscreen =
+            egui::Rect::from_min_max(egui::pos2(100.0, 100.0), egui::pos2(120.0, 120.0));
+        assert!(!qa_clipped_response_rect(response, offscreen).is_positive());
+    }
+
+    #[test]
     fn timer_dialog_observation_reports_actual_sound_index() {
         let workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let ctx = egui::Context::default();
@@ -3916,6 +4527,9 @@ mod tests {
             wait_for_active_hints: false,
             phase2_request: None,
             settings_search_expected_query: None,
+            target_repair_observation_enabled: false,
+            target_repair_expected_action_replacement: None,
+            target_repair_expected_folder_replacement: None,
             activation_count: 0,
             last_action: None,
             tab_processed_count: 0,
@@ -4305,6 +4919,7 @@ mod tests {
                 wait_for_active_hints: true,
                 phase2: None,
                 settings_search: None,
+                target_repair: None,
             }),
             output_dir: PathBuf::from("capture"),
             fixture_manifest_sha256: "a".repeat(64),

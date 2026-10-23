@@ -33,9 +33,124 @@ pub(crate) struct ScrollLayoutObservation {
 }
 
 impl ActionsEditor {
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn qa_target_repair_paint_for_current_pass(
+        &self,
+        ctx: &egui::Context,
+    ) -> Option<crate::gui::TargetRepairDialogPaint> {
+        self.dialog.qa_repair_paint_for_current_pass(ctx)
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn qa_target_repair_presentation_matches(
+        &self,
+        token: u64,
+        target_owner: &str,
+        record_index: usize,
+        owner_revision: u64,
+        replacement_kind: &str,
+        pending: bool,
+        feedback_present: bool,
+    ) -> bool {
+        self.dialog.qa_target_repair_presentation_matches(
+            token,
+            target_owner,
+            record_index,
+            owner_revision,
+            replacement_kind,
+            pending,
+            feedback_present,
+        )
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn qa_target_repair_paint_matches_current_state(
+        &self,
+        token: u64,
+        target_owner: &str,
+        record_index: usize,
+        owner_revision: u64,
+        replacement_kind: &str,
+        pending: bool,
+        feedback_present: bool,
+        window_layer_id: egui::LayerId,
+        egui_frame_nr: u64,
+        egui_pass_index: usize,
+    ) -> bool {
+        self.dialog.qa_target_repair_paint_matches_current_state(
+            token,
+            target_owner,
+            record_index,
+            owner_revision,
+            replacement_kind,
+            pending,
+            feedback_present,
+            window_layer_id,
+            egui_frame_nr,
+            egui_pass_index,
+        )
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn qa_target_repair_path_matches(&self, expected: &str) -> bool {
+        self.dialog.qa_target_repair_path_matches(expected)
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn qa_target_repair_path_is_empty(&self) -> bool {
+        self.dialog.qa_target_repair_path_is_empty()
+    }
+
     /// Open the dialog for editing an existing app.
     pub fn open_edit(&mut self, idx: usize, act: &crate::actions::Action) {
         self.dialog.open_edit(idx, act);
+    }
+
+    pub(crate) fn open_repair(&mut self, selected: crate::target_repair::SelectedTarget) {
+        self.dialog.open_repair(selected);
+    }
+
+    pub(crate) fn retire_repair_dialog(&mut self) {
+        self.dialog.retire_repair_presentation();
+    }
+
+    pub(crate) fn repair_dialog_is_open(&self) -> bool {
+        self.dialog.is_repair_presentation_open()
+    }
+
+    pub(crate) fn complete_target_repair(
+        &mut self,
+        completion: &crate::target_repair::RepairCompletion,
+    ) -> bool {
+        self.dialog.complete_target_repair(completion)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_repair_dialog_capture(&self) -> Option<crate::actions::Action> {
+        match self.dialog.test_repair_capture()? {
+            crate::target_repair::SelectedTarget::Action { original, .. } => Some(original),
+            crate::target_repair::SelectedTarget::Folder { .. } => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_repair_token(&self) -> Option<u64> {
+        self.dialog.test_repair_token()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_repair_pending(&mut self, pending: bool) {
+        self.dialog.test_set_repair_pending(pending);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_repair_path(&self) -> Option<&str> {
+        self.dialog.test_repair_path()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_repair_feedback(&self) -> Option<&str> {
+        self.dialog.test_feedback()
     }
 
     /// Returns whether the add dialog is currently open.
@@ -129,6 +244,17 @@ impl ActionsEditor {
                                     if edit.clicked() {
                                         self.dialog.open_edit(idx, act);
                                     }
+                                    if idx < app.custom_len.min(app.actions.len())
+                                        && ui.button("Repair target…").clicked()
+                                    {
+                                        self.dialog.open_repair(
+                                            crate::target_repair::SelectedTarget::action_with_kind(
+                                                act.clone(),
+                                                idx,
+                                                crate::target_repair::ActionTargetKind::FileOrFolder,
+                                            ),
+                                        );
+                                    }
                                     let remove_button = ui.button("Remove");
                                     if with_button_emphasis(
                                         ui,
@@ -172,6 +298,9 @@ impl ActionsEditor {
                 }
             });
 
+        if !open || !self.dialog.open {
+            self.dialog.retire_repair_presentation();
+        }
         app.show_editor = open;
     }
 }
@@ -185,6 +314,9 @@ mod tests {
     use std::sync::{Arc, atomic::AtomicBool};
 
     fn test_app(ctx: &egui::Context, root: &std::path::Path) -> LauncherApp {
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
@@ -192,7 +324,7 @@ mod tests {
             PluginManager::new_inert_for_test(),
             root.join("actions.json").to_string_lossy().into_owned(),
             root.join("settings.json").to_string_lossy().into_owned(),
-            Settings::default(),
+            settings,
             None,
             None,
             None,

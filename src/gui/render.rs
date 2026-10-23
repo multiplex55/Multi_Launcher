@@ -5973,8 +5973,13 @@ impl LauncherApp {
         };
 
         if self.action_sheet.is_open() && !ocr_blocks_launcher_input && !snippet_prompt_owns_input {
-            if let Some(action) = action_sheet::render(&ctx, &mut self.action_sheet, &self.matcher)
-            {
+            let observe_target_repair = self.qa_framebuffer_target_repair_observation_enabled();
+            if let Some(action) = action_sheet::render(
+                &ctx,
+                &mut self.action_sheet,
+                &self.matcher,
+                observe_target_repair,
+            ) {
                 self.close_action_sheet();
                 selected_sheet_action = Some(action);
             } else if first_ui_pass && !self.action_sheet.is_open() {

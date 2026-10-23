@@ -25,6 +25,41 @@ pub(crate) struct ActionSheetState {
     pub(crate) filtered_indices: Vec<usize>,
     pub(crate) selected_index: Option<usize>,
     pub(crate) request_filter_focus: bool,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    qa_identity: u64,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    qa_target_repair_paint: Option<TargetRepairActionSheetPaint>,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct TargetRepairActionSheetPaint {
+    #[serde(skip)]
+    pub(crate) sheet_identity: u64,
+    #[serde(skip)]
+    pub(crate) filter: String,
+    #[serde(skip)]
+    pub(crate) layer_id: egui::LayerId,
+    pub(crate) filter_response_id: String,
+    pub(crate) filter_rect: [f32; 4],
+    pub(crate) filter_enabled: bool,
+    pub(crate) filter_painted: bool,
+    pub(crate) filter_focused: bool,
+    pub(crate) selected_action_id: Option<String>,
+    pub(crate) controls: Vec<TargetRepairActionSheetControlPaint>,
+    pub(crate) egui_frame_nr: u64,
+    pub(crate) egui_pass_index: usize,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct TargetRepairActionSheetControlPaint {
+    pub(crate) action_id: String,
+    pub(crate) kind: &'static str,
+    pub(crate) response_id: String,
+    pub(crate) rect: [f32; 4],
+    pub(crate) enabled: bool,
+    pub(crate) painted: bool,
 }
 
 impl ActionSheetState {
@@ -44,6 +79,10 @@ impl ActionSheetState {
         self.actions = actions;
         self.filter.clear();
         self.request_filter_focus = true;
+        #[cfg(feature = "qa-framebuffer-capture")]
+        {
+            self.qa_identity = self.qa_identity.wrapping_add(1).max(1);
+        }
         self.rebuild_filter(matcher);
     }
 
@@ -55,6 +94,10 @@ impl ActionSheetState {
         self.filtered_indices.clear();
         self.selected_index = None;
         self.request_filter_focus = false;
+        #[cfg(feature = "qa-framebuffer-capture")]
+        {
+            self.qa_target_repair_paint = None;
+        }
     }
 
     pub(crate) fn set_filter(&mut self, filter: String, matcher: &SkimMatcherV2) {
@@ -222,7 +265,14 @@ pub(crate) fn render(
     ctx: &egui::Context,
     state: &mut ActionSheetState,
     matcher: &SkimMatcherV2,
+    observe_target_repair: bool,
 ) -> Option<(UniversalAction, ActivationSource)> {
+    #[cfg(not(feature = "qa-framebuffer-capture"))]
+    let _ = observe_target_repair;
+    #[cfg(feature = "qa-framebuffer-capture")]
+    {
+        state.qa_target_repair_paint = None;
+    }
     if !state.is_open() {
         return None;
     }
@@ -235,6 +285,10 @@ pub(crate) fn render(
     let title = format!("Actions for \"{target_label}\"");
     let mut open = true;
     let mut selected = None;
+    #[cfg(feature = "qa-framebuffer-capture")]
+    let mut qa_filter = None;
+    #[cfg(feature = "qa-framebuffer-capture")]
+    let mut qa_controls = Vec::new();
     egui::Window::new(title)
         .id(egui::Id::new("universal_action_sheet"))
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -249,6 +303,21 @@ pub(crate) fn render(
                     .desired_width(f32::INFINITY)
                     .hint_text("Filter actions"),
             );
+            #[cfg(feature = "qa-framebuffer-capture")]
+            if observe_target_repair {
+                let rect = response.rect;
+                qa_filter = Some((
+                    response.id,
+                    [rect.min.x, rect.min.y, rect.max.x, rect.max.y],
+                    response.enabled() && ui.is_enabled(),
+                    ui.is_visible()
+                        && !ui.is_sizing_pass()
+                        && rect.is_positive()
+                        && rect.intersects(ui.clip_rect()),
+                    ctx.memory(|memory| memory.has_focus(response.id)),
+                    response.layer_id,
+                ));
+            }
             if state.request_filter_focus {
                 response.request_focus();
                 state.request_filter_focus = false;
@@ -281,6 +350,38 @@ pub(crate) fn render(
                             action.is_available(),
                             egui::Button::selectable(state.selected_index == Some(position), label),
                         );
+                        #[cfg(feature = "qa-framebuffer-capture")]
+                        if observe_target_repair {
+                            let kind = if action.id.as_str()
+                                == crate::universal_actions::action_ids::CUSTOM_ACTION_REPAIR_TARGET
+                                    .as_str()
+                            {
+                                Some("custom_action")
+                            } else if action.id.as_str()
+                                == crate::universal_actions::action_ids::FOLDER_REPAIR_TARGET
+                                    .as_str()
+                            {
+                                Some("folder")
+                            } else {
+                                None
+                            };
+                            if let Some(kind) = kind {
+                                let rect = super::qa_framebuffer::qa_clipped_response_rect(
+                                    response.rect,
+                                    ui.clip_rect(),
+                                );
+                                qa_controls.push(TargetRepairActionSheetControlPaint {
+                                    action_id: action.id.as_str().to_owned(),
+                                    kind,
+                                    response_id: format!("{:?}", response.id),
+                                    rect: [rect.min.x, rect.min.y, rect.max.x, rect.max.y],
+                                    enabled: response.enabled() && ui.is_enabled(),
+                                    painted: ui.is_visible()
+                                        && !ui.is_sizing_pass()
+                                        && rect.is_positive(),
+                                });
+                            }
+                        }
                         if response.hovered() && action.is_available() {
                             state.select_filtered_position(position);
                         }
@@ -295,10 +396,92 @@ pub(crate) fn render(
                 });
         });
 
+    #[cfg(feature = "qa-framebuffer-capture")]
+    {
+        let qa_selected_action_id = state
+            .selected_index
+            .and_then(|position| state.filtered_indices.get(position))
+            .and_then(|index| state.actions.get(*index))
+            .map(|action| action.id.to_string());
+        state.qa_target_repair_paint = if observe_target_repair {
+            qa_filter.map(
+                |(
+                    filter_id,
+                    filter_rect,
+                    filter_enabled,
+                    filter_painted,
+                    filter_focused,
+                    layer_id,
+                )| {
+                    TargetRepairActionSheetPaint {
+                        sheet_identity: state.qa_identity,
+                        filter: state.filter.clone(),
+                        layer_id,
+                        filter_response_id: format!("{filter_id:?}"),
+                        filter_rect,
+                        filter_enabled,
+                        filter_painted,
+                        filter_focused,
+                        selected_action_id: qa_selected_action_id,
+                        controls: qa_controls,
+                        egui_frame_nr: ctx.cumulative_frame_nr(),
+                        egui_pass_index: ctx.current_pass_index(),
+                    }
+                },
+            )
+        } else {
+            None
+        };
+    }
+
     if !open {
         state.close();
     }
     selected
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+impl ActionSheetState {
+    pub(crate) fn qa_target_repair_paint_for_current_pass(
+        &self,
+        ctx: &egui::Context,
+    ) -> Option<TargetRepairActionSheetPaint> {
+        let paint = self.qa_target_repair_paint.as_ref()?;
+        (paint.egui_frame_nr == ctx.cumulative_frame_nr()
+            && paint.egui_pass_index == ctx.current_pass_index())
+        .then(|| paint.clone())
+    }
+
+    pub(crate) fn qa_target_repair_paint_matches_current_state(
+        &self,
+        sheet_identity: u64,
+        filter: &str,
+        selected_action_id: Option<&str>,
+        layer_id: egui::LayerId,
+        egui_frame_nr: u64,
+        egui_pass_index: usize,
+    ) -> bool {
+        let selected_now = self
+            .selected_index
+            .and_then(|position| self.filtered_indices.get(position))
+            .and_then(|index| self.actions.get(*index))
+            .map(|action| action.id.as_str());
+        self.is_open()
+            && self.qa_identity == sheet_identity
+            && self.filter == filter
+            && self
+                .qa_target_repair_paint
+                .as_ref()
+                .is_some_and(|paint| paint.layer_id == layer_id)
+            && selected_now == selected_action_id
+            && self.qa_target_repair_paint.as_ref().is_some_and(|paint| {
+                paint.sheet_identity == sheet_identity
+                    && paint.filter == filter
+                    && paint.selected_action_id.as_deref() == selected_action_id
+                    && paint.egui_frame_nr == egui_frame_nr
+                    && paint.egui_pass_index == egui_pass_index
+            })
+    }
 }
 
 #[cfg(test)]

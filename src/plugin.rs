@@ -344,6 +344,7 @@ pub struct PluginInternalServices {
 pub struct PluginManager {
     plugins: Vec<Arc<PluginSlot>>,
     services: PluginInternalServices,
+    missing_scan_inputs: crate::plugins::missing::MissingScanInputs,
     runtime_enablement: Option<Option<HashSet<String>>>,
     next_plugin_epoch: u64,
     settings_catalog_revision: u64,
@@ -654,6 +655,7 @@ impl PluginManager {
         Self {
             plugins: Vec::new(),
             runtime_enablement: None,
+            missing_scan_inputs: crate::plugins::missing::MissingScanInputs::default(),
             services: PluginInternalServices {
                 clipboard_modifier_catalog: shared_default_catalog(),
                 mkmacro_store: store,
@@ -685,6 +687,12 @@ impl PluginManager {
 
     pub fn internal_services(&self) -> &PluginInternalServices {
         &self.services
+    }
+
+    /// Keep explicit missing-target scans aligned with the saved custom
+    /// action prefix. Indexed search rows are intentionally excluded.
+    pub fn set_missing_custom_actions(&self, actions: Arc<Vec<Action>>) {
+        self.missing_scan_inputs.replace_custom_actions(actions);
     }
 
     #[cfg(test)]
@@ -784,6 +792,7 @@ impl PluginManager {
         Self {
             plugins: Vec::new(),
             runtime_enablement: None,
+            missing_scan_inputs: crate::plugins::missing::MissingScanInputs::default(),
             services: PluginInternalServices {
                 clipboard_modifier_catalog: catalog,
                 mkmacro_store: store,
@@ -896,7 +905,14 @@ impl PluginManager {
         self.register_with_settings(MouseGesturesPlugin::default(), plugin_settings);
         self.register_with_settings(MultiManagerPlugin, plugin_settings);
         self.register_with_settings(FavPlugin::default(), plugin_settings);
-        self.register_with_settings(MissingPlugin, plugin_settings);
+        self.register_with_settings(
+            MissingPlugin::new(
+                Arc::clone(&self.services.search_updates),
+                self.missing_scan_inputs.clone(),
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            ),
+            plugin_settings,
+        );
         self.register_with_settings(RecyclePlugin, plugin_settings);
         self.register_with_settings(TempfilePlugin, plugin_settings);
         self.register_with_settings(MediaPlugin, plugin_settings);

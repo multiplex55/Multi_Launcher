@@ -4093,6 +4093,7 @@ fn spawn_gui(
         &plugin_settings,
         Arc::clone(&actions),
     );
+    plugins.set_missing_custom_actions(Arc::new(actions[..custom_len_for_window].to_vec()));
     registration_timer.finish("startup.plugin_registration");
     // Ensure MG service starts even when there is no settings.json/plugin_settings entry yet.
     // Also ensures it is OFF if the plugin is disabled in enabled_plugins.

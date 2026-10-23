@@ -79,6 +79,10 @@ impl HelpWindow {
                             ui.label(
                                 "In Settings, Search settings finds existing controls. Choose a result to reveal and focus that control; search does not change or save it, and it does not enable unavailable controls. Use the owning section's normal Save, Apply, or Cancel controls.",
                             );
+                            ui.label(egui::RichText::new("Saved target repair").strong());
+                            ui.label(
+                                "Type missing and choose the exact check missing command to inspect saved targets. From a saved custom app or folder result, choose Repair target… to edit a replacement path and confirm it. Custom apps can use a file/application or folder; saved folders require a folder. Choosing a path does not launch it. Unavailable or ambiguous saved records are reported without changing them.",
+                            );
                             ui.label(egui::RichText::new("Table Utility").strong());
                             ui.label(
                                 "Type table to open the local table viewer; opened source files are never modified. Paste Text and Open File are explicit inputs; the defaults are Auto delimiter, headers off, and lenient row widths. Parse / Refresh explicitly parses the source. Filter uses case-insensitive literal text; sorting uses numeric order for finite values or lexical order otherwise. Select visible rows and columns before copying quoted TSV or JSON, or saving JSON. The source limit is 10 MiB, with up to 50,000 data rows and 128 columns. Large sources keep their full text and show up to 2,048 preview characters plus a truncation marker. A failed parse leaves the last successful results visible and disables output until the current source parses.",

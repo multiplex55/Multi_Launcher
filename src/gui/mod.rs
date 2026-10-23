@@ -114,6 +114,8 @@ pub(crate) const RADIAL_DESIGNER_WINDOW_TITLE: &str = "Radial Designer";
 
 pub use crate::brightness_service::BRIGHTNESS_QUERIES;
 pub use add_action_dialog::AddActionDialog;
+#[cfg(feature = "qa-framebuffer-capture")]
+pub(crate) use add_action_dialog::{TargetRepairControlPaint, TargetRepairDialogPaint};
 pub use add_bookmark_dialog::AddBookmarkDialog;
 pub use alias_dialog::AliasDialog;
 pub(crate) use batch_rename_dialog::{BatchRenameDialogState, BatchRenameUiCommand};
@@ -1352,6 +1354,8 @@ impl LauncherApp {
         &self,
         selected: crate::target_repair::SelectedTarget,
         replacement: PathBuf,
+        expected_kind: crate::target_repair::FilesystemTargetKind,
+        presentation_token: u64,
     ) -> Result<(), crate::target_repair::RepairFailure> {
         let client = self.target_repair_client.as_ref().ok_or_else(|| {
             crate::target_repair::RepairFailure {
@@ -1367,7 +1371,10 @@ impl LauncherApp {
             self.target_repair_usage_handoff.clone(),
         )?;
         client.submit(
-            crate::target_repair::RepairRequest::new(selected, replacement).with_live_usage(usage),
+            crate::target_repair::RepairRequest::new(selected, replacement)
+                .with_expected_replacement_kind(expected_kind)
+                .with_presentation_token(presentation_token)
+                .with_live_usage(usage),
         )
     }
 
@@ -1378,6 +1385,7 @@ impl LauncherApp {
             .map(crate::target_repair::TargetRepairClient::poll_completions)
             .unwrap_or_default();
         for completion in completions {
+            self.editor.complete_target_repair(&completion);
             match completion.result {
                 Ok(commit) => self
                     .publish_target_repair_actions(commit.custom_actions, commit.actions_version),
@@ -1571,6 +1579,8 @@ impl LauncherApp {
             self.actions = Arc::new(actions);
             catalog_len
         };
+        self.plugins
+            .set_missing_custom_actions(Arc::new(self.actions[..self.custom_len].to_vec()));
         #[cfg(test)]
         track_c_action_observer::add(
             track_c_action_observer::Counter::CatalogAssemblyActions,
@@ -4325,6 +4335,10 @@ impl LauncherApp {
             self.close_ocr_surface();
             return true;
         }
+        if self.panel_stack.last() == Some(&Panel::Editor) && self.editor.repair_dialog_is_open() {
+            self.editor.retire_repair_dialog();
+            return true;
+        }
         let panel = match self.panel_stack.pop() {
             Some(p) => p,
             None => return false,
@@ -4547,6 +4561,7 @@ impl LauncherApp {
                 self.panel_states.calendar_event_details = false;
             }
             Panel::Editor => {
+                self.editor.retire_repair_dialog();
                 self.show_editor = false;
                 self.panel_states.editor = false;
             }
@@ -4805,6 +4820,7 @@ impl LauncherApp {
                 self.panel_states.calendar_event_details = false;
             }
             Panel::Editor => {
+                self.editor.retire_repair_dialog();
                 self.show_editor = false;
                 self.panel_states.editor = false;
             }
@@ -5583,6 +5599,9 @@ mod tests {
     }
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
@@ -5590,7 +5609,7 @@ mod tests {
             PluginManager::new(),
             "actions.json".into(),
             "settings.json".into(),
-            Settings::default(),
+            settings,
             None,
             None,
             None,
@@ -6644,6 +6663,59 @@ mod tests {
             action: format!("{label}:action"),
             args: None,
         }
+    }
+
+    #[test]
+    fn target_repair_ui_editor_close_retires_child_and_rejects_late_completion() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let saved = Action {
+            label: "Repairable item".into(),
+            desc: "Saved description".into(),
+            action: r#"C:\missing\tool.exe"#.into(),
+            args: Some(String::new()),
+        };
+        let selected = crate::target_repair::SelectedTarget::action_with_kind(
+            saved.clone(),
+            0,
+            crate::target_repair::ActionTargetKind::FileOrFolder,
+        );
+        app.show_editor = true;
+        app.panel_states.editor = true;
+        app.panel_stack.push(Panel::Editor);
+        app.editor.open_repair(selected.clone());
+        let retired_token = app.editor.test_repair_token().unwrap();
+        app.editor.test_set_repair_pending(true);
+        let replacement = std::path::PathBuf::from(r#"C:\replacement\tool.exe"#);
+        let late = crate::target_repair::RepairCompletion {
+            request: crate::target_repair::RepairRequest::new(
+                selected.clone(),
+                replacement.clone(),
+            )
+            .with_expected_replacement_kind(crate::target_repair::FilesystemTargetKind::File)
+            .with_presentation_token(retired_token),
+            result: Err(crate::target_repair::RepairFailure {
+                kind: crate::target_repair::RepairFailureKind::WorkerUnavailable,
+                message: "late completion",
+            }),
+        };
+
+        assert!(app.close_front_dialog());
+        assert!(
+            app.show_editor,
+            "Escape first closes the nested repair child"
+        );
+        assert!(!app.editor.repair_dialog_is_open());
+        assert_eq!(app.panel_stack.last(), Some(&Panel::Editor));
+
+        app.editor.open_repair(selected);
+        app.editor.test_set_repair_pending(true);
+        assert_ne!(app.editor.test_repair_token(), Some(retired_token));
+        assert!(!app.editor.complete_target_repair(&late));
+        assert!(app.editor.repair_dialog_is_open());
+        assert_eq!(app.editor.test_repair_feedback(), None);
+        assert_eq!(app.editor.test_repair_dialog_capture(), Some(saved));
+        assert_eq!(app.editor.test_repair_path(), Some(""));
     }
 
     #[test]

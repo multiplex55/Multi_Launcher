@@ -24,6 +24,38 @@ fn bump_folders_version() {
     FOLDERS_VERSION.fetch_add(1, Ordering::SeqCst);
 }
 
+/// Resolve a displayed folder result to the current full owner record.
+///
+/// Legacy search rows contain only a display label and path. Repair needs the
+/// complete saved record and rejects rows that are ambiguous or no longer
+/// match the live folder snapshot.
+pub(crate) fn unique_entry_for_result(
+    action: &Action,
+) -> Result<(FolderEntry, usize, u64), &'static str> {
+    if action.args.is_some() || action.action != action.desc {
+        return Err("The folder result is no longer available for repair.");
+    }
+    let before = folders_version();
+    let entries = LIVE_FOLDERS
+        .snapshot(FOLDERS_FILE)
+        .ok_or("The folder list is unavailable; refresh it before repairing.")?;
+    let after = folders_version();
+    if before != after {
+        return Err("The folder list changed; refresh it before repairing.");
+    }
+    let mut matches = entries.into_iter().enumerate().filter(|(_, entry)| {
+        entry.path == action.action
+            && entry.alias.as_deref().unwrap_or(&entry.label) == action.label
+    });
+    let (index, entry) = matches
+        .next()
+        .ok_or("The folder result is stale; refresh it before repairing.")?;
+    if matches.next().is_some() {
+        return Err("This folder result is ambiguous; select it from the folder list.");
+    }
+    Ok((entry, index, after))
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct FolderEntry {
     pub label: String,

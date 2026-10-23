@@ -3,6 +3,7 @@ use multi_launcher::common::persistence::LoadState;
 use multi_launcher::dashboard::config::{DashboardConfig, GridConfig, OverflowMode, SlotConfig};
 use multi_launcher::dashboard::widgets::{ClickBehavior, PinnedQueryResultsConfig};
 use multi_launcher::file_search::settings::FileSearchSettings;
+use multi_launcher::history::{HISTORY_PINS_FILE, HistoryPin};
 use multi_launcher::hotkey::validation::validate_hotkey_routes;
 use multi_launcher::mkmacro::hotkeys::{HotkeyDiagnosticSeverity, validate_hotkeys};
 use multi_launcher::mkmacro::store::ASSET_DIRECTORY;
@@ -17,13 +18,17 @@ use multi_launcher::paste_sequence::{
     PASTE_SEQUENCES_FILE, PlaybackMode, SequenceDraft, SequenceStore, Step as SequenceStep,
 };
 use multi_launcher::plugin::Plugin;
+use multi_launcher::plugins::bookmarks::BOOKMARKS_FILE;
 use multi_launcher::plugins::clipboard::CLIPBOARD_FILE;
+use multi_launcher::plugins::fav::{FAV_FILE, FavEntry};
+use multi_launcher::plugins::folders::{FOLDERS_FILE, FolderEntry};
 use multi_launcher::plugins::note::{NoteExternalOpen, NotePlugin, NotePluginSettings, load_notes};
 use multi_launcher::plugins::snippets::SNIPPETS_FILE;
 use multi_launcher::plugins::timer::ALARMS_FILE;
 use multi_launcher::plugins::todo::{TODO_FILE, TodoEntry, load_todos_typed};
 use multi_launcher::radial::model::RadialDocument;
 use multi_launcher::settings::{LogFile, Settings};
+use multi_launcher::usage::{USAGE_FILE, UsageEntry};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -39,6 +44,26 @@ const NO_RESULTS_QUERY: &str = "zzzznomatchprobe";
 const FILE_SEARCH_ROOT_DIRECTORY: &str = "file-search-root";
 const FILE_SEARCH_FIXTURE_FILE: &str = "jump-mode-safe-fixture.txt";
 const FILE_SEARCH_FIXTURE_CONTENT: &str = "Jump Mode isolated File Search fixture.\n";
+const TARGET_REPAIR_ACTION_LABEL: &str = "Jump QA Repairable App";
+const TARGET_REPAIR_ACTION_DESCRIPTION: &str =
+    "Inert saved target for the isolated repair scenario.";
+const TARGET_REPAIR_ACTION_ARGS: &str = "--fixture-argument keep-exactly";
+const TARGET_REPAIR_FOLDER_LABEL: &str = "Jump QA Repairable Folder";
+const TARGET_REPAIR_FOLDER_ALIAS: &str = "Jump QA Repairable Folder Alias";
+const TARGET_REPAIR_MISSING_ACTION: &str = "target-repair/missing-source/old application Ω.exe";
+const TARGET_REPAIR_MISSING_FOLDER: &str = "target-repair/missing-source/old folder Ω";
+const TARGET_REPAIR_REPLACEMENT_FILE: &str = "target-repair/replacements/Selected document Ω.txt";
+const TARGET_REPAIR_REPLACEMENT_FOLDER: &str = "target-repair/replacements/Selected folder Ω";
+const TARGET_REPAIR_ACTION_FAVORITE_LABEL: &str = "QA favorite for repairable app";
+const TARGET_REPAIR_FOLDER_FAVORITE_LABEL: &str = "QA favorite for repairable folder";
+const TARGET_REPAIR_UNRELATED_FAVORITE_LABEL: &str = "QA unrelated favorite retained";
+const TARGET_REPAIR_UNRELATED_PATH: &str = "target-repair/unrelated/untouched.exe";
+const TARGET_REPAIR_ACTION_PIN_QUERY: &str = "QA pinned action query";
+const TARGET_REPAIR_FOLDER_PIN_QUERY: &str = "QA pinned folder query";
+const TARGET_REPAIR_UNRELATED_PIN_QUERY: &str = "QA unrelated pin query retained";
+const TARGET_REPAIR_ACTION_USAGE: u32 = 7;
+const TARGET_REPAIR_FOLDER_USAGE: u32 = 5;
+const TARGET_REPAIR_UNRELATED_USAGE: u32 = 11;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -54,9 +79,41 @@ struct FixtureManifest {
     dashboard_slot_ids: Vec<String>,
     note_ids: Vec<String>,
     action_count: usize,
+    #[serde(default)]
+    target_repair: Option<TargetRepairManifest>,
     external_note_open: String,
     no_results_query: String,
     safety: SafetyManifest,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct TargetRepairManifest {
+    action_label: String,
+    action_description: String,
+    action_args: Option<String>,
+    missing_action_path: String,
+    folder_label: String,
+    folder_alias: Option<String>,
+    missing_folder_path: String,
+    replacement_file: String,
+    replacement_folder: String,
+    associations: TargetRepairAssociationsManifest,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct TargetRepairAssociationsManifest {
+    action_favorite_label: String,
+    folder_favorite_label: String,
+    unrelated_favorite_label: String,
+    unrelated_path: String,
+    action_pin_query: String,
+    folder_pin_query: String,
+    unrelated_pin_query: String,
+    action_usage_count: u32,
+    folder_usage_count: u32,
+    unrelated_usage_count: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,6 +145,7 @@ enum FixtureScenario {
     Phase1Enabled,
     Phase1Disabled,
     Phase2(Phase2Surface),
+    TargetRepair,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,6 +205,7 @@ impl FixtureScenario {
             "query-probe" => Ok(Self::QueryProbe),
             "phase1-enabled" => Ok(Self::Phase1Enabled),
             "phase1-disabled" => Ok(Self::Phase1Disabled),
+            "target-repair" => Ok(Self::TargetRepair),
             value if value.starts_with("phase2-") => {
                 let surface = &value["phase2-".len()..];
                 Phase2Surface::parse(surface)
@@ -154,7 +213,7 @@ impl FixtureScenario {
                     .ok_or_else(|| anyhow::anyhow!("unknown Phase 2 surface {surface:?}"))
             }
             value => anyhow::bail!(
-                "unknown fixture scenario {value:?}; expected baseline, query-probe, phase1-enabled, phase1-disabled, or phase2-settings/notes/todo/timer/paste/mkmacro/file-search"
+                "unknown fixture scenario {value:?}; expected baseline, query-probe, phase1-enabled, phase1-disabled, target-repair, or phase2-settings/notes/todo/timer/paste/mkmacro/file-search"
             ),
         }
     }
@@ -162,7 +221,7 @@ impl FixtureScenario {
     fn jump_mode_enabled(self) -> bool {
         matches!(
             self,
-            Self::QueryProbe | Self::Phase1Enabled | Self::Phase2(_)
+            Self::QueryProbe | Self::Phase1Enabled | Self::Phase2(_) | Self::TargetRepair
         )
     }
 
@@ -173,11 +232,22 @@ impl FixtureScenario {
     fn phase2_surface(self) -> Option<Phase2Surface> {
         match self {
             Self::Phase2(surface) => Some(surface),
-            _ => None,
+            Self::TargetRepair
+            | Self::Baseline
+            | Self::QueryProbe
+            | Self::Phase1Enabled
+            | Self::Phase1Disabled => None,
         }
     }
 
     fn enabled_plugins(self) -> Vec<String> {
+        if self == Self::TargetRepair {
+            return vec![
+                "folders".to_owned(),
+                "missing".to_owned(),
+                SAFE_PLUGIN.to_owned(),
+            ];
+        }
         self.phase2_surface().map_or_else(
             || vec![SAFE_PLUGIN.to_owned()],
             |surface| {
@@ -205,6 +275,7 @@ impl FixtureScenario {
                 Phase2Surface::MkMacro => "phase2-mkmacro",
                 Phase2Surface::FileSearch => "phase2-file-search",
             },
+            Self::TargetRepair => "target-repair",
         }
     }
 }
@@ -280,6 +351,9 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         profile.display()
     );
     fs::create_dir_all(profile)?;
+    let target_repair_profile = (scenario == FixtureScenario::TargetRepair)
+        .then(|| fs::canonicalize(profile))
+        .transpose()?;
     let notes_dir = profile.join("notes");
     fs::create_dir(&notes_dir)?;
     let templates_dir = profile.join("templates");
@@ -294,7 +368,10 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     settings.quit_hotkey = None;
     settings.paste_sequence.next_hotkey = None;
     settings.paste_sequence.cancel_hotkey = None;
-    settings.window_size = if scenario.phase1() || scenario.phase2_surface().is_some() {
+    settings.window_size = if scenario.phase1()
+        || scenario.phase2_surface().is_some()
+        || scenario == FixtureScenario::TargetRepair
+    {
         Some((1800, 1000))
     } else {
         Some((900, 560))
@@ -360,7 +437,16 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     }
 
     write_json(&profile.join("settings.json"), &settings)?;
-    write_json(&profile.join("actions.json"), &Vec::<Action>::new())?;
+    let actions = if scenario == FixtureScenario::TargetRepair {
+        vec![target_repair_action(
+            target_repair_profile
+                .as_deref()
+                .expect("Target Repair profile was canonicalized"),
+        )]
+    } else {
+        Vec::new()
+    };
+    write_json(&profile.join("actions.json"), &actions)?;
 
     let dashboard = dashboard_fixture(scenario);
     write_json(&profile.join("dashboard.json"), &dashboard)?;
@@ -379,6 +465,9 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     // Constructors and background pollers can run before plugin allowlists
     // are applied. Every profile therefore owns safe CWD stores up front.
     write_phase2_stores(profile, scenario.phase2_surface())?;
+    if let Some(target_repair_profile) = target_repair_profile.as_deref() {
+        write_target_repair_stores(target_repair_profile)?;
+    }
 
     let manifest = fixture_manifest(note_ids, scenario);
     write_json(&profile.join("fixture_manifest.json"), &manifest)?;
@@ -517,10 +606,23 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         LoadState::Loaded(actions) => actions,
         LoadState::Missing | LoadState::Empty => anyhow::bail!("actions.json is not a typed array"),
     };
-    anyhow::ensure!(
-        actions.is_empty(),
-        "fixture must not configure executable actions"
-    );
+    if scenario == FixtureScenario::TargetRepair {
+        let expected = target_repair_action(&profile);
+        anyhow::ensure!(
+            actions == [expected],
+            "Target Repair fixture must contain only its exact inert custom action"
+        );
+        verify_target_repair_stores(&profile)?;
+    } else {
+        anyhow::ensure!(
+            actions.is_empty(),
+            "fixture must not configure executable actions"
+        );
+        anyhow::ensure!(
+            !profile.join(FOLDERS_FILE).exists(),
+            "non-repair fixtures must not create saved folder entries"
+        );
+    }
 
     let dashboard_path = profile.join("dashboard.json");
     let dashboard = match DashboardConfig::load_typed(&dashboard_path)? {
@@ -749,14 +851,17 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         "fixture manifest is stale"
     );
     anyhow::ensure!(
-        manifest.action_count == 0,
-        "fixture manifest claims executable actions"
+        manifest.action_count == usize::from(scenario == FixtureScenario::TargetRepair),
+        "fixture action count does not match its isolated scenario"
     );
     anyhow::ensure!(manifest.safety.clipboard_modify_plugin_enabled == false);
     anyhow::ensure!(manifest.safety.clipboard_plugin_enabled == false);
     anyhow::ensure!(manifest.safety.macros_enabled == false);
     anyhow::ensure!(manifest.safety.network_plugin_enabled == false);
-    anyhow::ensure!(manifest.safety.custom_actions_present == false);
+    anyhow::ensure!(
+        manifest.safety.custom_actions_present == (scenario == FixtureScenario::TargetRepair),
+        "fixture custom-action claim does not match the isolated scenario"
+    );
     anyhow::ensure!(manifest.safety.reduce_dashboard_work_when_unfocused == false);
     anyhow::ensure!(
         manifest.experimental_jump_mode_enabled == scenario.jump_mode_enabled()
@@ -1259,6 +1364,7 @@ fn fixture_manifest(note_ids: Vec<String>, scenario: FixtureScenario) -> Fixture
             FixtureScenario::Phase1Enabled => "jump-mode-m08-phase1-enabled-v1".to_owned(),
             FixtureScenario::Phase1Disabled => "jump-mode-m08-phase1-disabled-v1".to_owned(),
             FixtureScenario::Baseline => FIXTURE_ID.to_owned(),
+            FixtureScenario::TargetRepair => "jump-mode-m2b-target-repair-v1".to_owned(),
             FixtureScenario::Phase2(surface) => {
                 format!("jump-mode-m13-{}-v1", surface.as_str())
             }
@@ -1271,7 +1377,8 @@ fn fixture_manifest(note_ids: Vec<String>, scenario: FixtureScenario) -> Fixture
         enabled_plugins,
         dashboard_slot_ids: dashboard_slot_ids(scenario),
         note_ids,
-        action_count: 0,
+        action_count: usize::from(scenario == FixtureScenario::TargetRepair),
+        target_repair: (scenario == FixtureScenario::TargetRepair).then(target_repair_manifest),
         external_note_open: "Neither".to_owned(),
         no_results_query: NO_RESULTS_QUERY.to_owned(),
         safety: SafetyManifest {
@@ -1281,7 +1388,7 @@ fn fixture_manifest(note_ids: Vec<String>, scenario: FixtureScenario) -> Fixture
             clipboard_modify_plugin_enabled: false,
             macros_enabled: false,
             network_plugin_enabled: false,
-            custom_actions_present: false,
+            custom_actions_present: scenario == FixtureScenario::TargetRepair,
             dashboard_click_behavior: "fill_query".to_owned(),
             reduce_dashboard_work_when_unfocused: false,
             experimental_jump_mode_enabled: jump_mode_enabled,
@@ -1298,6 +1405,313 @@ fn fixture_manifest(note_ids: Vec<String>, scenario: FixtureScenario) -> Fixture
             paste_cancel_hotkey_enabled: false,
         },
     }
+}
+
+fn target_repair_manifest() -> TargetRepairManifest {
+    TargetRepairManifest {
+        action_label: TARGET_REPAIR_ACTION_LABEL.to_owned(),
+        action_description: TARGET_REPAIR_ACTION_DESCRIPTION.to_owned(),
+        action_args: Some(TARGET_REPAIR_ACTION_ARGS.to_owned()),
+        missing_action_path: TARGET_REPAIR_MISSING_ACTION.to_owned(),
+        folder_label: TARGET_REPAIR_FOLDER_LABEL.to_owned(),
+        folder_alias: Some(TARGET_REPAIR_FOLDER_ALIAS.to_owned()),
+        missing_folder_path: TARGET_REPAIR_MISSING_FOLDER.to_owned(),
+        replacement_file: TARGET_REPAIR_REPLACEMENT_FILE.to_owned(),
+        replacement_folder: TARGET_REPAIR_REPLACEMENT_FOLDER.to_owned(),
+        associations: TargetRepairAssociationsManifest {
+            action_favorite_label: TARGET_REPAIR_ACTION_FAVORITE_LABEL.to_owned(),
+            folder_favorite_label: TARGET_REPAIR_FOLDER_FAVORITE_LABEL.to_owned(),
+            unrelated_favorite_label: TARGET_REPAIR_UNRELATED_FAVORITE_LABEL.to_owned(),
+            unrelated_path: TARGET_REPAIR_UNRELATED_PATH.to_owned(),
+            action_pin_query: TARGET_REPAIR_ACTION_PIN_QUERY.to_owned(),
+            folder_pin_query: TARGET_REPAIR_FOLDER_PIN_QUERY.to_owned(),
+            unrelated_pin_query: TARGET_REPAIR_UNRELATED_PIN_QUERY.to_owned(),
+            action_usage_count: TARGET_REPAIR_ACTION_USAGE,
+            folder_usage_count: TARGET_REPAIR_FOLDER_USAGE,
+            unrelated_usage_count: TARGET_REPAIR_UNRELATED_USAGE,
+        },
+    }
+}
+
+fn target_repair_action(profile: &Path) -> Action {
+    Action {
+        label: TARGET_REPAIR_ACTION_LABEL.to_owned(),
+        desc: TARGET_REPAIR_ACTION_DESCRIPTION.to_owned(),
+        action: target_repair_fixture_path(profile, TARGET_REPAIR_MISSING_ACTION)
+            .to_string_lossy()
+            .into_owned(),
+        args: Some(TARGET_REPAIR_ACTION_ARGS.to_owned()),
+    }
+}
+
+/// Build the fixture's persisted paths from normalized components and keep
+/// them in the ordinary absolute form shared with the PowerShell verifier.
+fn target_repair_fixture_path(profile: &Path, relative: &str) -> PathBuf {
+    let mut path = profile.to_path_buf();
+    for component in relative.split(['/', '\\']).filter(|part| !part.is_empty()) {
+        path.push(component);
+    }
+
+    #[cfg(windows)]
+    {
+        let rendered = path.to_string_lossy();
+        if let Some(unc_path) = rendered.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{unc_path}"));
+        }
+        if let Some(ordinary_path) = rendered.strip_prefix(r"\\?\") {
+            return PathBuf::from(ordinary_path);
+        }
+    }
+
+    path
+}
+
+fn write_target_repair_stores(profile: &Path) -> anyhow::Result<()> {
+    let missing_parent = target_repair_fixture_path(profile, "target-repair/missing-source");
+    fs::create_dir_all(&missing_parent)?;
+    let replacements = target_repair_fixture_path(profile, "target-repair/replacements");
+    fs::create_dir_all(&replacements)?;
+    fs::write(
+        target_repair_fixture_path(profile, TARGET_REPAIR_REPLACEMENT_FILE),
+        b"Inert selected file for the isolated target repair scenario.\n",
+    )?;
+    let replacement_folder = target_repair_fixture_path(profile, TARGET_REPAIR_REPLACEMENT_FOLDER);
+    fs::create_dir(&replacement_folder)?;
+    fs::write(
+        replacement_folder.join("fixture.txt"),
+        b"Inert folder contents.\n",
+    )?;
+    write_json(
+        &profile.join(FOLDERS_FILE),
+        &[FolderEntry {
+            label: TARGET_REPAIR_FOLDER_LABEL.to_owned(),
+            path: target_repair_fixture_path(profile, TARGET_REPAIR_MISSING_FOLDER)
+                .to_string_lossy()
+                .into_owned(),
+            alias: Some(TARGET_REPAIR_FOLDER_ALIAS.to_owned()),
+        }],
+    )?;
+    let action = target_repair_action(profile);
+    let folder_path = target_repair_fixture_path(profile, TARGET_REPAIR_MISSING_FOLDER)
+        .to_string_lossy()
+        .into_owned();
+    let unrelated_path = target_repair_fixture_path(profile, TARGET_REPAIR_UNRELATED_PATH)
+        .to_string_lossy()
+        .into_owned();
+    write_json(
+        &profile.join(FAV_FILE),
+        &[
+            FavEntry {
+                label: TARGET_REPAIR_ACTION_FAVORITE_LABEL.to_owned(),
+                action: action.action.clone(),
+                args: action.args.clone(),
+            },
+            FavEntry {
+                label: TARGET_REPAIR_FOLDER_FAVORITE_LABEL.to_owned(),
+                action: folder_path.clone(),
+                args: None,
+            },
+            FavEntry {
+                label: TARGET_REPAIR_UNRELATED_FAVORITE_LABEL.to_owned(),
+                action: unrelated_path.clone(),
+                args: Some("--leave-unrelated".to_owned()),
+            },
+        ],
+    )?;
+    write_json(
+        &profile.join(BOOKMARKS_FILE),
+        &Vec::<multi_launcher::plugins::bookmarks::BookmarkEntry>::new(),
+    )?;
+    write_json(
+        &profile.join(HISTORY_PINS_FILE),
+        &[
+            target_repair_pin(
+                &action.action,
+                TARGET_REPAIR_ACTION_FAVORITE_LABEL,
+                action.args.clone(),
+                TARGET_REPAIR_ACTION_PIN_QUERY,
+                31,
+            ),
+            target_repair_pin(
+                &folder_path,
+                TARGET_REPAIR_FOLDER_FAVORITE_LABEL,
+                None,
+                TARGET_REPAIR_FOLDER_PIN_QUERY,
+                32,
+            ),
+            target_repair_pin(
+                &unrelated_path,
+                TARGET_REPAIR_UNRELATED_FAVORITE_LABEL,
+                Some("--leave-unrelated".to_owned()),
+                TARGET_REPAIR_UNRELATED_PIN_QUERY,
+                33,
+            ),
+        ],
+    )?;
+    write_json(
+        &profile.join(USAGE_FILE),
+        &[
+            UsageEntry {
+                action: action.action,
+                count: TARGET_REPAIR_ACTION_USAGE,
+            },
+            UsageEntry {
+                action: folder_path,
+                count: TARGET_REPAIR_FOLDER_USAGE,
+            },
+            UsageEntry {
+                action: unrelated_path,
+                count: TARGET_REPAIR_UNRELATED_USAGE,
+            },
+        ],
+    )?;
+    Ok(())
+}
+
+fn target_repair_pin(
+    action_id: &str,
+    label: &str,
+    args: Option<String>,
+    query: &str,
+    timestamp: i64,
+) -> HistoryPin {
+    HistoryPin {
+        action_id: action_id.to_owned(),
+        label: label.to_owned(),
+        desc: "Inert saved Target Repair association.".to_owned(),
+        args,
+        query: query.to_owned(),
+        timestamp,
+    }
+}
+
+fn verify_target_repair_stores(profile: &Path) -> anyhow::Result<()> {
+    let folders =
+        match multi_launcher::plugins::folders::load_folders_typed(profile.join(FOLDERS_FILE))? {
+            LoadState::Loaded(folders) => folders,
+            LoadState::Missing | LoadState::Empty => {
+                anyhow::bail!("Target Repair fixture folders.json must be a loaded array")
+            }
+        };
+    let expected_folder = FolderEntry {
+        label: TARGET_REPAIR_FOLDER_LABEL.to_owned(),
+        path: target_repair_fixture_path(profile, TARGET_REPAIR_MISSING_FOLDER)
+            .to_string_lossy()
+            .into_owned(),
+        alias: Some(TARGET_REPAIR_FOLDER_ALIAS.to_owned()),
+    };
+    anyhow::ensure!(
+        folders == [expected_folder.clone()],
+        "Target Repair fixture must contain only its exact saved folder entry"
+    );
+    anyhow::ensure!(
+        !target_repair_fixture_path(profile, TARGET_REPAIR_MISSING_ACTION).exists()
+            && !target_repair_fixture_path(profile, TARGET_REPAIR_MISSING_FOLDER).exists(),
+        "Target Repair source targets must be absent before the UI scenario"
+    );
+    anyhow::ensure!(
+        target_repair_fixture_path(profile, TARGET_REPAIR_REPLACEMENT_FILE).is_file()
+            && target_repair_fixture_path(profile, TARGET_REPAIR_REPLACEMENT_FOLDER).is_dir(),
+        "Target Repair replacement choices must exist as inert file and folder fixtures"
+    );
+    let action_path = target_repair_action(profile).action;
+    let folder_path = expected_folder.path.clone();
+    let unrelated_path = target_repair_fixture_path(profile, TARGET_REPAIR_UNRELATED_PATH)
+        .to_string_lossy()
+        .into_owned();
+    let favorites = match multi_launcher::plugins::fav::load_favs_typed(profile.join(FAV_FILE))? {
+        LoadState::Loaded(entries) => entries,
+        LoadState::Missing | LoadState::Empty => {
+            anyhow::bail!("Target Repair fixture favorite store must be a loaded array")
+        }
+    };
+    anyhow::ensure!(
+        favorites
+            == [
+                FavEntry {
+                    label: TARGET_REPAIR_ACTION_FAVORITE_LABEL.to_owned(),
+                    action: action_path.clone(),
+                    args: Some(TARGET_REPAIR_ACTION_ARGS.to_owned()),
+                },
+                FavEntry {
+                    label: TARGET_REPAIR_FOLDER_FAVORITE_LABEL.to_owned(),
+                    action: folder_path.clone(),
+                    args: None,
+                },
+                FavEntry {
+                    label: TARGET_REPAIR_UNRELATED_FAVORITE_LABEL.to_owned(),
+                    action: unrelated_path.clone(),
+                    args: Some("--leave-unrelated".to_owned()),
+                },
+            ],
+        "Target Repair fixture favorites must bind both exact records and retain one unrelated row"
+    );
+    let pins = match multi_launcher::history::load_pins_typed(profile.join(HISTORY_PINS_FILE))? {
+        LoadState::Loaded(entries) => entries,
+        LoadState::Missing | LoadState::Empty => {
+            anyhow::bail!("Target Repair fixture pin store must be a loaded array")
+        }
+    };
+    anyhow::ensure!(
+        pins == [
+            target_repair_pin(
+                &action_path,
+                TARGET_REPAIR_ACTION_FAVORITE_LABEL,
+                Some(TARGET_REPAIR_ACTION_ARGS.to_owned()),
+                TARGET_REPAIR_ACTION_PIN_QUERY,
+                31,
+            ),
+            target_repair_pin(
+                &folder_path,
+                TARGET_REPAIR_FOLDER_FAVORITE_LABEL,
+                None,
+                TARGET_REPAIR_FOLDER_PIN_QUERY,
+                32,
+            ),
+            target_repair_pin(
+                &unrelated_path,
+                TARGET_REPAIR_UNRELATED_FAVORITE_LABEL,
+                Some("--leave-unrelated".to_owned()),
+                TARGET_REPAIR_UNRELATED_PIN_QUERY,
+                33,
+            ),
+        ],
+        "Target Repair fixture pins must retain exact query/args associations and one unrelated row"
+    );
+    let usage = match multi_launcher::usage::load_usage_typed(profile.join(USAGE_FILE))? {
+        LoadState::Loaded(entries) => entries,
+        LoadState::Missing | LoadState::Empty => {
+            anyhow::bail!("Target Repair fixture usage store must be a loaded array")
+        }
+    };
+    anyhow::ensure!(
+        usage
+            == [
+                UsageEntry {
+                    action: action_path,
+                    count: TARGET_REPAIR_ACTION_USAGE,
+                },
+                UsageEntry {
+                    action: folder_path,
+                    count: TARGET_REPAIR_FOLDER_USAGE,
+                },
+                UsageEntry {
+                    action: unrelated_path,
+                    count: TARGET_REPAIR_UNRELATED_USAGE,
+                },
+            ],
+        "Target Repair fixture usage must include exact source counts and an unrelated retained count"
+    );
+    anyhow::ensure!(
+        matches!(
+            multi_launcher::plugins::bookmarks::load_bookmarks_typed(
+                profile.join(BOOKMARKS_FILE)
+            )?,
+            LoadState::Loaded(entries) if entries.is_empty()
+        ),
+        "Target Repair fixture bookmark store must remain empty"
+    );
+    Ok(())
 }
 
 fn set_isolated_fixture_dirs(profile: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
@@ -1349,6 +1763,44 @@ mod tests {
         assert!(!fixture.safety.network_plugin_enabled);
         assert!(!fixture.experimental_jump_mode_enabled);
         assert!(!fixture.safety.experimental_jump_mode_enabled);
+    }
+
+    #[test]
+    fn target_repair_fixture_binds_only_generated_inert_records() {
+        let profile = tempfile::tempdir().unwrap();
+        let scenario = FixtureScenario::TargetRepair;
+        let profile_path = fs::canonicalize(profile.path()).unwrap();
+        let actions = vec![target_repair_action(&profile_path)];
+        write_json(&profile_path.join("actions.json"), &actions).unwrap();
+        write_target_repair_stores(&profile_path).unwrap();
+
+        let manifest = fixture_manifest(note_ids(), scenario);
+        assert_eq!(manifest.scenario, "target-repair");
+        assert!(manifest.experimental_jump_mode_enabled);
+        assert_eq!(manifest.enabled_plugins, ["folders", "missing", "notes"]);
+        assert_eq!(manifest.action_count, 1);
+        assert!(manifest.safety.custom_actions_present);
+        assert_eq!(manifest.target_repair, Some(target_repair_manifest()));
+        assert_eq!(actions[0].label, TARGET_REPAIR_ACTION_LABEL);
+        assert_eq!(actions[0].desc, TARGET_REPAIR_ACTION_DESCRIPTION);
+        assert_eq!(actions[0].args.as_deref(), Some(TARGET_REPAIR_ACTION_ARGS));
+        assert!(Path::new(&actions[0].action).is_absolute());
+        #[cfg(windows)]
+        let normalized_folder =
+            target_repair_fixture_path(&profile_path, TARGET_REPAIR_MISSING_FOLDER);
+        #[cfg(windows)]
+        let normalized_unrelated =
+            target_repair_fixture_path(&profile_path, TARGET_REPAIR_UNRELATED_PATH);
+        #[cfg(windows)]
+        for path in [
+            actions[0].action.as_str(),
+            normalized_folder.to_str().unwrap(),
+            normalized_unrelated.to_str().unwrap(),
+        ] {
+            assert!(!path.contains('/'));
+            assert!(!path.starts_with(r"\\?\"));
+        }
+        verify_target_repair_stores(&profile_path).unwrap();
     }
 
     #[test]

@@ -44,6 +44,22 @@ impl<T: Clone> LiveSnapshotRegistry<T> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = committed.to_vec();
     }
+
+    pub(crate) fn snapshot(&self, path: &str) -> Option<Vec<T>> {
+        let key = normalized_path(Path::new(path));
+        let snapshot = self
+            .snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .cloned()?;
+        Some(
+            snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+    }
 }
 
 fn normalized_path(path: &Path) -> PathBuf {

@@ -155,6 +155,8 @@ fn ui_intent_requirement(
     use crate::universal_actions::UniversalUiIntent as I;
     match intent {
         I::EditCustomAction { .. }
+        | I::RepairCustomAction { .. }
+        | I::RepairFolderResult { .. }
         | I::OpenFolderAlias { .. }
         | I::OpenBookmarkAlias { .. }
         | I::EditSnippet { .. }
@@ -166,6 +168,7 @@ fn ui_intent_requirement(
         | I::OpenMkMacro { .. } => InteractionRequirement::LauncherUi,
         I::OpenNoteExternal { .. } => InteractionRequirement::ExternalInput,
         I::RemoveClipboardEntry { .. }
+        | I::AcknowledgeInformation
         | I::PinResult { .. }
         | I::UnpinResult { .. }
         | I::ReplacePin { .. }

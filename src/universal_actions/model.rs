@@ -64,7 +64,9 @@ pub mod action_ids {
         RESULT_RECOMPUTE_PINS => "result.recompute_pins",
         RESULT_FAVORITE => "result.favorite",
         CUSTOM_ACTION_EDIT => "custom_action.edit",
+        CUSTOM_ACTION_REPAIR_TARGET => "custom_action.repair_target",
         FOLDER_SET_ALIAS => "folder.set_alias",
+        FOLDER_REPAIR_TARGET => "folder.repair_target",
         FOLDER_REMOVE => "folder.remove",
         BOOKMARK_SET_ALIAS => "bookmark.set_alias",
         BOOKMARK_REMOVE => "bookmark.remove",
@@ -325,8 +327,17 @@ pub enum NoteExternalEditor {
 /// of egui objects and callbacks.
 #[derive(Clone, Debug, PartialEq)]
 pub enum UniversalUiIntent {
+    /// A selectable informational row that deliberately has no external effect.
+    AcknowledgeInformation,
     EditCustomAction {
         index: usize,
+    },
+    RepairCustomAction {
+        index: usize,
+        action: Action,
+    },
+    RepairFolderResult {
+        action: Action,
     },
     OpenFolderAlias {
         path: String,

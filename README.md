@@ -88,6 +88,16 @@ Multi Launcher is centered around a **single query box**:
   - `layout ...` (window layouts)
   - `mm ...` (MultiManager window workspaces)
 
+### Repair saved targets
+
+Use the `missing` prefix and choose the exact **check missing** command to inspect
+saved targets. From a saved custom app or folder result, choose **Repair
+target…**, select a replacement path, and explicitly confirm it. Custom apps may
+point to a file/application or folder; saved folder entries require a folder.
+Choosing a path never launches it. If the saved record or one of its active
+references cannot be verified safely, repair reports the conflict and leaves
+the saved data unchanged.
+
 ### Optional keyboard hints
 
 Experimental Jump Mode is off by default. To enable it, turn on **Experimental
@@ -142,6 +152,7 @@ unknown popups, and hidden, clipped, or disabled controls are not hint targets.
 | `macro` | Macros | `macro add` / `macro list` |
 | `tab` | Browser tabs (UIA) | `tab slack` / `tab cache` |
 | `fav` | Favorites (pinned commands) | `fav` / `fav add build` |
+| `missing` | Explicitly inspect saved targets and repair missing custom apps or folders | `missing` → `check missing` |
 | `mg` | Mouse gesture management | `mg settings` / `mg add` |
 | `mm` | MultiManager window workspaces | `mm` / `mm reconnect` / `mm send all home` |
 | `keys` / `key` | Send keystrokes | `keys ctrl+shift+t` |

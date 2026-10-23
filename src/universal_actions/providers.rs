@@ -115,7 +115,11 @@ impl UniversalActionProvider for GenericProvider {
                 ActionGroup::Primary,
                 ActionPriority::High,
             ),
-            UniversalActionOperation::InvokePrimary(resolved.selected_action.clone()),
+            if crate::plugins::missing::is_status_action(&resolved.selected_action.action) {
+                UniversalActionOperation::UiIntent(UniversalUiIntent::AcknowledgeInformation)
+            } else {
+                UniversalActionOperation::InvokePrimary(resolved.selected_action.clone())
+            },
         );
         primary.presentation.surface_overrides.insert(
             ActionSurface::ContextMenu,
@@ -136,6 +140,19 @@ impl UniversalActionProvider for GenericProvider {
                 ActionGroup::OpenEdit,
                 ActionPriority::Normal,
                 UniversalUiIntent::EditCustomAction { index },
+            ));
+            actions.push(ui_action(
+                action_ids::CUSTOM_ACTION_REPAIR_TARGET,
+                target,
+                "Repair target…",
+                "Repair",
+                ActionIconKey::Edit,
+                ActionGroup::OpenEdit,
+                ActionPriority::Normal,
+                UniversalUiIntent::RepairCustomAction {
+                    index,
+                    action: resolved.selected_action.clone(),
+                },
             ));
         }
 
@@ -278,6 +295,7 @@ macro_rules! provider {
 
 provider!(FolderProvider, resolved, ActionTarget::Folder { path } => vec![
     ui_action(action_ids::FOLDER_SET_ALIAS, &resolved.target, "Set Alias", "Alias", ActionIconKey::Edit, ActionGroup::OpenEdit, ActionPriority::High, UniversalUiIntent::OpenFolderAlias { path: path.clone() }),
+    ui_action(action_ids::FOLDER_REPAIR_TARGET, &resolved.target, "Repair target…", "Repair", ActionIconKey::Edit, ActionGroup::OpenEdit, ActionPriority::Normal, UniversalUiIntent::RepairFolderResult { action: resolved.selected_action.clone() }),
     destructive(command_action(action_ids::FOLDER_REMOVE, &resolved.target, "Remove Folder", "Remove", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Storage(StorageCommand::FolderRemove(path.clone())), &resolved.selected_action)),
 ]);
 

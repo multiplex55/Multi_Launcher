@@ -378,10 +378,63 @@ impl SelectedTarget {
     }
 
     pub fn folder(original: FolderEntry, index: usize) -> Self {
+        Self::folder_at_version(original, index, crate::plugins::folders::folders_version())
+    }
+
+    pub(crate) fn folder_at_version(
+        original: FolderEntry,
+        index: usize,
+        folders_version: u64,
+    ) -> Self {
         Self::Folder {
             original,
             index,
-            folders_version: crate::plugins::folders::folders_version(),
+            folders_version,
+        }
+    }
+
+    pub fn original_path(&self) -> &str {
+        self.old_path()
+    }
+
+    pub fn is_folder_entry(&self) -> bool {
+        matches!(self, Self::Folder { .. })
+    }
+
+    pub fn same_capture(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Action {
+                    original: left,
+                    index: left_index,
+                    actions_version: left_version,
+                    allowed_kind: left_kind,
+                },
+                Self::Action {
+                    original: right,
+                    index: right_index,
+                    actions_version: right_version,
+                    allowed_kind: right_kind,
+                },
+            ) => {
+                left == right
+                    && left_index == right_index
+                    && left_version == right_version
+                    && left_kind == right_kind
+            }
+            (
+                Self::Folder {
+                    original: left,
+                    index: left_index,
+                    folders_version: left_version,
+                },
+                Self::Folder {
+                    original: right,
+                    index: right_index,
+                    folders_version: right_version,
+                },
+            ) => left == right && left_index == right_index && left_version == right_version,
+            _ => false,
         }
     }
 
@@ -407,6 +460,8 @@ impl SelectedTarget {
 pub struct RepairRequest {
     pub selected: SelectedTarget,
     pub replacement: PathBuf,
+    expected_replacement_kind: Option<FilesystemTargetKind>,
+    presentation_token: Option<u64>,
     live_usage: Option<LiveUsageSnapshot>,
 }
 
@@ -537,8 +592,24 @@ impl RepairRequest {
         Self {
             selected,
             replacement,
+            expected_replacement_kind: None,
+            presentation_token: None,
             live_usage: None,
         }
+    }
+
+    pub fn with_expected_replacement_kind(mut self, kind: FilesystemTargetKind) -> Self {
+        self.expected_replacement_kind = Some(kind);
+        self
+    }
+
+    pub fn with_presentation_token(mut self, token: u64) -> Self {
+        self.presentation_token = Some(token);
+        self
+    }
+
+    pub(crate) fn presentation_token(&self) -> Option<u64> {
+        self.presentation_token
     }
 
     pub fn with_live_usage(mut self, snapshot: LiveUsageSnapshot) -> Self {
@@ -553,6 +624,8 @@ impl fmt::Debug for RepairRequest {
             .debug_struct("RepairRequest")
             .field("selected", &self.selected)
             .field("replacement", &"[redacted]")
+            .field("expected_replacement_kind", &self.expected_replacement_kind)
+            .field("presentation_token", &self.presentation_token)
             .field("live_usage", &self.live_usage.is_some())
             .finish()
     }
@@ -676,7 +749,11 @@ impl TargetRepairCoordinator {
                 ));
             }
         }
-        validate_replacement(&request.replacement, &request.selected)?;
+        validate_replacement(
+            &request.replacement,
+            &request.selected,
+            request.expected_replacement_kind,
+        )?;
         let new_path = request
             .replacement
             .to_str()
@@ -950,6 +1027,7 @@ pub fn inspect_target(path: &str) -> TargetInspection {
 fn validate_replacement(
     replacement: &Path,
     selected: &SelectedTarget,
+    expected_kind: Option<FilesystemTargetKind>,
 ) -> Result<(), RepairFailure> {
     let metadata = fs::metadata(replacement).map_err(|_| {
         failure(
@@ -964,7 +1042,10 @@ fn validate_replacement(
     } else {
         None
     };
-    if actual_kind.is_none_or(|kind| !selected.allows_replacement_kind(kind)) {
+    if actual_kind.is_none_or(|kind| {
+        !selected.allows_replacement_kind(kind)
+            || expected_kind.is_some_and(|expected| kind != expected)
+    }) {
         return Err(failure(
             RepairFailureKind::ReplacementWrongKind,
             "The replacement must be an allowed file or folder target.",

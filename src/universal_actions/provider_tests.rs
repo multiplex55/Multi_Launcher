@@ -37,7 +37,12 @@ fn each_target_gets_primary_and_current_specialized_capabilities() {
             ActionTarget::Folder {
                 path: "C:/work".into(),
             },
-            vec!["result.execute", "folder.set_alias", "folder.remove"],
+            vec![
+                "result.execute",
+                "folder.set_alias",
+                "folder.repair_target",
+                "folder.remove",
+            ],
         ),
         (
             ActionTarget::Bookmark {
@@ -125,6 +130,59 @@ fn each_target_gets_primary_and_current_specialized_capabilities() {
 }
 
 #[test]
+fn target_repair_ui_folder_intent_carries_the_exact_saved_search_action() {
+    let path = "C:/Users/test/Projects";
+    let selected = Action {
+        label: "Projects".into(),
+        desc: path.into(),
+        action: path.into(),
+        args: None,
+    };
+    let resolved = ResolvedActionTarget {
+        target: ActionTarget::Folder { path: path.into() },
+        selected_action: selected.clone(),
+        custom_action_index: None,
+    };
+    let actions = UniversalActionRegistry.resolve(&resolved, &context(ActionSurface::ActionSheet));
+    assert!(matches!(
+        actions
+            .iter()
+            .find(|action| action.id == action_ids::FOLDER_REPAIR_TARGET)
+            .map(|action| &action.operation),
+        Some(UniversalActionOperation::UiIntent(
+            UniversalUiIntent::RepairFolderResult { action }
+        )) if action == &selected
+    ));
+}
+
+#[test]
+fn target_repair_ui_missing_plugin_status_rows_resolve_to_non_executable_information() {
+    let selected = Action {
+        label: "Checking saved targets…".into(),
+        desc: "Maintenance".into(),
+        action: "missing:status:checking".into(),
+        args: None,
+    };
+    let resolved = ResolvedActionTarget {
+        target: ActionTarget::Generic {
+            action: selected.clone(),
+        },
+        selected_action: selected,
+        custom_action_index: None,
+    };
+    let actions = UniversalActionRegistry.resolve(&resolved, &context(ActionSurface::ActionSheet));
+    assert!(matches!(
+        actions
+            .iter()
+            .find(|action| action.id == action_ids::RESULT_EXECUTE)
+            .map(|action| &action.operation),
+        Some(UniversalActionOperation::UiIntent(
+            UniversalUiIntent::AcknowledgeInformation
+        ))
+    ));
+}
+
+#[test]
 fn timer_and_stopwatch_pause_resume_availability_uses_open_time_snapshot() {
     let timer = resolved(ActionTarget::Timer { id: 7 });
     let mut timer_context = context(ActionSurface::ActionSheet);
@@ -202,6 +260,7 @@ fn generic_dynamic_fallback_supports_edit_pins_and_favorite_prefill() {
         [
             "result.execute",
             "custom_action.edit",
+            "custom_action.repair_target",
             "result.pin",
             "result.favorite",
             "result.recompute_pins",
@@ -214,6 +273,15 @@ fn generic_dynamic_fallback_supports_edit_pins_and_favorite_prefill() {
             .map(|action| &action.operation),
         Some(UniversalActionOperation::UiIntent(
             UniversalUiIntent::AddFavorite { action }
+        )) if action == &selected
+    ));
+    assert!(matches!(
+        actions
+            .iter()
+            .find(|action| action.id == action_ids::CUSTOM_ACTION_REPAIR_TARGET)
+            .map(|action| &action.operation),
+        Some(UniversalActionOperation::UiIntent(
+            UniversalUiIntent::RepairCustomAction { index: 9, action }
         )) if action == &selected
     ));
 }

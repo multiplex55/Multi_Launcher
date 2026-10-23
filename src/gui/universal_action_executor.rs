@@ -553,12 +553,51 @@ impl LauncherApp {
 
     fn execute_universal_ui_intent(&mut self, action_id: &str, intent: UniversalUiIntent) {
         match intent {
+            UniversalUiIntent::AcknowledgeInformation => {}
             UniversalUiIntent::EditCustomAction { index } => {
                 if let Some(action) = self.actions.get(index).cloned() {
                     self.editor.open_edit(index, &action);
                     self.show_editor = true;
                 } else {
                     self.report_error_message("universal_action", "Custom action not found");
+                }
+            }
+            UniversalUiIntent::RepairCustomAction { index: _, action } => {
+                let custom_len = self.custom_len.min(self.actions.len());
+                let mut exact_matches = self.actions[..custom_len]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, candidate)| *candidate == &action)
+                    .map(|(index, _)| index);
+                if let Some(exact_index) = exact_matches.next()
+                    && exact_matches.next().is_none()
+                {
+                    self.editor.open_repair(
+                        crate::target_repair::SelectedTarget::action_with_kind(
+                            action,
+                            exact_index,
+                            crate::target_repair::ActionTargetKind::FileOrFolder,
+                        ),
+                    );
+                    self.focus_panel(super::Panel::Editor);
+                } else {
+                    self.report_error_message(
+                        "target.repair",
+                        "The saved action changed; refresh it before repairing.",
+                    );
+                }
+            }
+            UniversalUiIntent::RepairFolderResult { action } => {
+                match crate::plugins::folders::unique_entry_for_result(&action) {
+                    Ok((entry, index, version)) => {
+                        self.editor.open_repair(
+                            crate::target_repair::SelectedTarget::folder_at_version(
+                                entry, index, version,
+                            ),
+                        );
+                        self.focus_panel(super::Panel::Editor);
+                    }
+                    Err(message) => self.report_error_message("target.repair", message),
                 }
             }
             UniversalUiIntent::OpenFolderAlias { path } => self.alias_dialog.open(&path),
@@ -1126,6 +1165,8 @@ mod tests {
         ActionAvailability, ActionGroup, ActionIconKey, ActionPresentation, ActionPriority,
         ActionTarget,
     };
+    use crate::{plugin::PluginManager, settings::Settings};
+    use std::sync::{Arc, atomic::AtomicBool};
 
     fn action() -> Action {
         Action {
@@ -1134,6 +1175,169 @@ mod tests {
             action: r#"C:\work\project"#.into(),
             args: Some("--reuse-window".into()),
         }
+    }
+
+    fn repair_test_app(ctx: &eframe::egui::Context) -> (tempfile::TempDir, LauncherApp) {
+        let root = tempfile::tempdir().expect("create isolated repair UI store directory");
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        let app = LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test(),
+            root.path()
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            root.path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        (root, app)
+    }
+
+    #[test]
+    fn target_repair_ui_rejects_a_stale_custom_result_and_opens_the_exact_current_record() {
+        let ctx = eframe::egui::Context::default();
+        let (_root, mut app) = repair_test_app(&ctx);
+        let current = Action {
+            label: "Current tool".into(),
+            desc: "Current metadata".into(),
+            action: r#"C:\tools\current.exe"#.into(),
+            args: Some("--current".into()),
+        };
+        let stale = Action {
+            action: r#"C:\tools\stale.exe"#.into(),
+            ..current.clone()
+        };
+        app.actions = std::sync::Arc::new(vec![current.clone()]);
+        app.custom_len = 1;
+
+        app.execute_universal_action(
+            universal(
+                action_ids::CUSTOM_ACTION_REPAIR_TARGET,
+                ActionTarget::Generic {
+                    action: stale.clone(),
+                },
+                ActionSafety::Normal,
+                UniversalActionOperation::UiIntent(UniversalUiIntent::RepairCustomAction {
+                    index: 0,
+                    action: stale,
+                }),
+            ),
+            ActionSurface::ActionSheet,
+            ActivationSource::Click,
+        );
+        assert!(
+            !app.editor.is_dialog_open(),
+            "a stale row cannot select a different saved record"
+        );
+
+        app.execute_universal_action(
+            universal(
+                action_ids::CUSTOM_ACTION_REPAIR_TARGET,
+                ActionTarget::Generic {
+                    action: current.clone(),
+                },
+                ActionSafety::Normal,
+                UniversalActionOperation::UiIntent(UniversalUiIntent::RepairCustomAction {
+                    index: 0,
+                    action: current.clone(),
+                }),
+            ),
+            ActionSurface::ActionSheet,
+            ActivationSource::Click,
+        );
+        assert!(app.editor.is_dialog_open());
+        assert_eq!(
+            app.editor
+                .test_repair_dialog_capture()
+                .expect("the current custom record opened the repair dialog"),
+            current
+        );
+    }
+
+    #[test]
+    fn target_repair_ui_re_resolves_unique_full_action_with_optional_arguments() {
+        let ctx = eframe::egui::Context::default();
+        let (_root, mut app) = repair_test_app(&ctx);
+        let base = Action {
+            label: "Same app".into(),
+            desc: "Same description".into(),
+            action: r#"C:\tools\same.exe"#.into(),
+            args: None,
+        };
+        let empty_arguments = Action {
+            args: Some(String::new()),
+            ..base.clone()
+        };
+        let distinct_arguments = Action {
+            args: Some("--profile other".into()),
+            ..base.clone()
+        };
+        app.actions = Arc::new(vec![
+            distinct_arguments.clone(),
+            empty_arguments.clone(),
+            base.clone(),
+        ]);
+        app.custom_len = 3;
+
+        for (stale_index, exact) in [
+            (2, base.clone()),
+            (0, empty_arguments.clone()),
+            (2, distinct_arguments.clone()),
+        ] {
+            app.execute_universal_action(
+                universal(
+                    action_ids::CUSTOM_ACTION_REPAIR_TARGET,
+                    ActionTarget::Generic {
+                        action: exact.clone(),
+                    },
+                    ActionSafety::Normal,
+                    UniversalActionOperation::UiIntent(UniversalUiIntent::RepairCustomAction {
+                        index: stale_index,
+                        action: exact.clone(),
+                    }),
+                ),
+                ActionSurface::ActionSheet,
+                ActivationSource::Click,
+            );
+            assert_eq!(app.editor.test_repair_dialog_capture(), Some(exact));
+            app.editor.retire_repair_dialog();
+        }
+
+        app.actions = Arc::new(vec![base.clone(), base.clone()]);
+        app.custom_len = 2;
+        app.execute_universal_action(
+            universal(
+                action_ids::CUSTOM_ACTION_REPAIR_TARGET,
+                ActionTarget::Generic {
+                    action: base.clone(),
+                },
+                ActionSafety::Normal,
+                UniversalActionOperation::UiIntent(UniversalUiIntent::RepairCustomAction {
+                    index: 0,
+                    action: base,
+                }),
+            ),
+            ActionSurface::ActionSheet,
+            ActivationSource::Click,
+        );
+        assert!(
+            !app.editor.is_dialog_open(),
+            "an ambiguous identical record is not selected arbitrarily"
+        );
     }
 
     fn universal(

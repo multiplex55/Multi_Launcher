@@ -187,6 +187,9 @@ fn execute_with_external(
     original_action: &Action,
     external: &mut dyn FnMut(&str, Option<&str>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    if crate::plugins::missing::is_status_action(&original_action.action) {
+        return Ok(());
+    }
     match command {
         Command::Todo(TodoCommand::Compatibility { .. })
         | Command::Timer(
@@ -1024,6 +1027,30 @@ mod tests {
             })
             .unwrap();
             assert_eq!(calls, [(raw.into(), None)], "{raw}");
+        }
+    }
+
+    #[test]
+    fn target_repair_ui_missing_status_rows_never_reach_external_activation() {
+        for raw in [
+            "missing:status:checking",
+            "missing:status:uncertain",
+            "missing:status:unavailable",
+            "missing:status:complete-query",
+            "missing:status:complete",
+        ] {
+            let original = action(raw);
+            let command = crate::commands::parse_action(&original).unwrap();
+            let mut calls = Vec::new();
+            execute_with_external(command, &original, &mut |target, args| {
+                calls.push((target.to_owned(), args.map(str::to_owned)));
+                Ok(())
+            })
+            .unwrap();
+            assert!(
+                calls.is_empty(),
+                "informational {raw} rows are not launchable"
+            );
         }
     }
 
