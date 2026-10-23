@@ -16,6 +16,7 @@ pub enum MarkupTool {
     Arrow,
     Rectangle,
     Highlight,
+    Marker,
     Text,
 }
 
@@ -49,6 +50,14 @@ pub struct MarkupText {
     pub size: f32,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkupMarker {
+    pub center: Pos2,
+    pub number: u64,
+    pub color: Color32,
+    pub size: f32,
+}
+
 /// Ephemeral state for the Text tool while the user is typing directly onto the canvas.
 ///
 /// This intentionally captures color/size at creation time so each text instance is independent.
@@ -66,6 +75,7 @@ pub enum MarkupLayer {
     Rectangle(MarkupRect),
     Arrow(MarkupArrow),
     Highlight(MarkupRect),
+    Marker(MarkupMarker),
     Text(MarkupText),
 }
 
@@ -166,6 +176,61 @@ fn draw_text(
     );
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MarkerGeometry {
+    text_origin: Pos2,
+    text_bounds: Rect,
+    radius: f32,
+}
+
+fn marker_geometry(
+    center: Pos2,
+    number: u64,
+    size: f32,
+    font: Option<&(ab_glyph::FontArc, egui::FontTweak)>,
+) -> MarkerGeometry {
+    let label = number.to_string();
+    let measured =
+        font.and_then(|(font, tweak)| raster::measure_text_ink_bounds(font, tweak, &label, size));
+    let fallback = raster::TextInkBounds {
+        min: RasterPoint::new(0.0, size * 0.15),
+        max: RasterPoint::new(size * label.chars().count() as f32 * 0.62, size * 0.88),
+    };
+    let measured = measured.unwrap_or(fallback);
+    let measured_center = measured.center();
+    let text_origin = Pos2::new(center.x - measured_center.x, center.y - measured_center.y);
+    let text_bounds = Rect::from_min_max(
+        text_origin + Vec2::new(measured.min.x, measured.min.y),
+        text_origin + Vec2::new(measured.max.x, measured.max.y),
+    );
+    let padding = (size * 0.2).max(2.0);
+    let radius = (measured.width().hypot(measured.height()) * 0.5 + padding).max(size * 0.55);
+    MarkerGeometry {
+        text_origin,
+        text_bounds,
+        radius,
+    }
+}
+
+fn marker_text_color(background: Color32) -> Color32 {
+    let linear = |channel: u8| {
+        let value = channel as f32 / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = 0.2126 * linear(background.r())
+        + 0.7152 * linear(background.g())
+        + 0.0722 * linear(background.b());
+    if luminance > 0.179 {
+        Color32::BLACK
+    } else {
+        Color32::WHITE
+    }
+}
+
 pub fn render_markup_layers(base: &RgbaImage, layers: &[MarkupLayer]) -> RgbaImage {
     let mut img = base.clone();
     let font = default_font_arc();
@@ -208,6 +273,27 @@ pub fn render_markup_layers(base: &RgbaImage, layers: &[MarkupLayer]) -> RgbaIma
             MarkupLayer::Highlight(rect) => {
                 draw_rect_fill(&mut img, rect.rect, rect.color);
             }
+            MarkupLayer::Marker(marker) => {
+                let geometry =
+                    marker_geometry(marker.center, marker.number, marker.size, font.as_ref());
+                raster::draw_circle(
+                    &mut img,
+                    RasterPoint::new(marker.center.x, marker.center.y),
+                    geometry.radius,
+                    RasterColor(marker.color.to_array()),
+                );
+                if let Some((font, tweak)) = &font {
+                    draw_text(
+                        &mut img,
+                        font,
+                        tweak.clone(),
+                        geometry.text_origin,
+                        &marker.number.to_string(),
+                        marker_text_color(marker.color),
+                        marker.size,
+                    );
+                }
+            }
             MarkupLayer::Text(text) => {
                 if let Some((font, tweak)) = &font {
                     draw_text(
@@ -243,6 +329,7 @@ pub struct ScreenshotEditor {
     active_end: Option<Pos2>,
     active_stroke: Option<MarkupStroke>,
     active_text: Option<ActiveText>,
+    last_marker_click_frame: Option<u64>,
     history: MarkupHistory,
     path: PathBuf,
     _clip: bool,
@@ -252,6 +339,7 @@ pub struct ScreenshotEditor {
     color_index: usize,
     thickness: f32,
     text_size: f32,
+    marker_font: Option<(ab_glyph::FontArc, egui::FontTweak)>,
     #[cfg(test)]
     test_content_clip: Option<Rect>,
     #[cfg(test)]
@@ -262,6 +350,23 @@ pub struct ScreenshotEditor {
     test_slider_sizing: Option<[f32; 5]>,
     #[cfg(test)]
     test_tool_row_rect: Option<Rect>,
+    #[cfg(test)]
+    test_image_rect: Option<Rect>,
+    #[cfg(test)]
+    test_marker_preview: Vec<MarkerPreviewObservation>,
+    #[cfg(test)]
+    test_force_marker_discard: bool,
+    #[cfg(test)]
+    test_marker_ui_passes: Vec<(u64, usize)>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+struct MarkerPreviewObservation {
+    number: u64,
+    center: Pos2,
+    radius: f32,
+    ink_bounds: Rect,
 }
 
 fn screenshot_editor_window<'a>(test_width: Option<f32>) -> egui::Window<'a> {
@@ -315,6 +420,7 @@ impl ScreenshotEditor {
             active_end: None,
             active_stroke: None,
             active_text: None,
+            last_marker_click_frame: None,
             history: MarkupHistory::default(),
             path,
             _clip: clip,
@@ -324,6 +430,7 @@ impl ScreenshotEditor {
             color_index: 0,
             thickness: 4.0,
             text_size: 18.0,
+            marker_font: default_font_arc(),
             #[cfg(test)]
             test_content_clip: None,
             #[cfg(test)]
@@ -334,6 +441,14 @@ impl ScreenshotEditor {
             test_slider_sizing: None,
             #[cfg(test)]
             test_tool_row_rect: None,
+            #[cfg(test)]
+            test_image_rect: None,
+            #[cfg(test)]
+            test_marker_preview: Vec::new(),
+            #[cfg(test)]
+            test_force_marker_discard: false,
+            #[cfg(test)]
+            test_marker_ui_passes: Vec::new(),
         }
     }
 
@@ -402,6 +517,32 @@ impl ScreenshotEditor {
 
     fn redo(&mut self) {
         self.history.redo();
+    }
+
+    fn next_marker_number(&self) -> Option<u64> {
+        self.history
+            .layers()
+            .iter()
+            .filter_map(|layer| match layer {
+                MarkupLayer::Marker(marker) => Some(marker.number),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+    }
+
+    fn place_marker(&mut self, center: Pos2) -> bool {
+        let Some(number) = self.next_marker_number() else {
+            return false;
+        };
+        self.push_layer(MarkupLayer::Marker(MarkupMarker {
+            center,
+            number,
+            color: self.current_color(),
+            size: self.text_size,
+        }));
+        true
     }
 
     fn commit_active_text(&mut self) {
@@ -628,6 +769,7 @@ impl ScreenshotEditor {
                     ui.selectable_value(&mut self.tool, MarkupTool::Arrow, "Arrow");
                     ui.selectable_value(&mut self.tool, MarkupTool::Rectangle, "Rect");
                     ui.selectable_value(&mut self.tool, MarkupTool::Highlight, "Highlight");
+                    ui.selectable_value(&mut self.tool, MarkupTool::Marker, "Marker");
                     ui.selectable_value(&mut self.tool, MarkupTool::Text, "Text");
                 });
                 #[cfg(test)]
@@ -748,7 +890,21 @@ impl ScreenshotEditor {
                     self.color_image.size[1] as f32,
                 );
                 let display = img_size * self.zoom;
-                let (response, painter) = ui.allocate_painter(display, Sense::drag());
+                let canvas_sense = if self.tool == MarkupTool::Marker {
+                    Sense::click_and_drag()
+                } else {
+                    Sense::drag()
+                };
+                let (response, painter) = ui.allocate_painter(display, canvas_sense);
+                #[cfg(test)]
+                {
+                    self.test_image_rect = Some(response.rect);
+                    self.test_marker_preview.clear();
+                    if self.tool == MarkupTool::Marker {
+                        self.test_marker_ui_passes
+                            .push((ctx.cumulative_frame_nr(), ctx.current_pass_index()));
+                    }
+                }
                 let zoom = self.zoom;
                 let rect_min = response.rect.min;
                 let to_img = |pos: Pos2| ((pos - rect_min) / zoom).to_pos2();
@@ -759,7 +915,12 @@ impl ScreenshotEditor {
                     Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
                     Color32::WHITE,
                 );
-                if response.drag_started_by(PointerButton::Secondary)
+                let marker_secondary_press = self.tool == MarkupTool::Marker
+                    && response.hovered()
+                    && ctx.input(|input| input.pointer.button_pressed(PointerButton::Secondary));
+                let secondary_drag_started = self.tool != MarkupTool::Marker
+                    && response.drag_started_by(PointerButton::Secondary);
+                if (secondary_drag_started || marker_secondary_press)
                     && let Some(pos) = response.interact_pointer_pos()
                 {
                     self.crop_start = Some(to_img(pos));
@@ -771,8 +932,30 @@ impl ScreenshotEditor {
                 {
                     self.crop_rect = Some(Rect::from_two_pos(start, to_img(pos)));
                 }
-                if response.drag_stopped_by(PointerButton::Secondary) {
+                if response.drag_stopped_by(PointerButton::Secondary)
+                    || (self.tool == MarkupTool::Marker
+                        && response.clicked_by(PointerButton::Secondary))
+                {
                     self.crop_start = None;
+                }
+
+                // A marker is a click tool, not a drag tool. Keep the action on the release
+                // edge and remember the egui frame so a retained/replayed UI pass cannot add it
+                // a second time.
+                let marker_click_frame = ctx.cumulative_frame_nr();
+                if self.tool == MarkupTool::Marker
+                    && response.clicked_by(PointerButton::Primary)
+                    && self.last_marker_click_frame != Some(marker_click_frame)
+                    && let Some(pos) = response.interact_pointer_pos()
+                {
+                    if self.place_marker(to_img(pos)) {
+                        self.last_marker_click_frame = Some(marker_click_frame);
+                    }
+                }
+                #[cfg(test)]
+                if self.test_force_marker_discard {
+                    self.test_force_marker_discard = false;
+                    ctx.request_discard("screenshot marker single-action retained-pass test");
                 }
 
                 if response.drag_started_by(PointerButton::Primary)
@@ -803,6 +986,7 @@ impl ScreenshotEditor {
                                 size: self.text_size,
                             });
                         }
+                        MarkupTool::Marker => {}
                     }
                 }
                 if response.dragged_by(PointerButton::Primary)
@@ -818,7 +1002,7 @@ impl ScreenshotEditor {
                         MarkupTool::Arrow | MarkupTool::Rectangle | MarkupTool::Highlight => {
                             self.active_end = Some(current);
                         }
-                        MarkupTool::Text => {}
+                        MarkupTool::Marker | MarkupTool::Text => {}
                     }
                 }
                 if response.drag_stopped_by(PointerButton::Primary) {
@@ -864,7 +1048,7 @@ impl ScreenshotEditor {
                                 }));
                             }
                         }
-                        MarkupTool::Text => {}
+                        MarkupTool::Marker | MarkupTool::Text => {}
                     }
                     self.active_start = None;
                     self.active_end = None;
@@ -931,6 +1115,34 @@ impl ScreenshotEditor {
                             );
                             painter.rect_filled(draw, 0.0, rect.color);
                         }
+                        MarkupLayer::Marker(marker) => {
+                            let geometry = marker_geometry(
+                                marker.center,
+                                marker.number,
+                                marker.size,
+                                self.marker_font.as_ref(),
+                            );
+                            let center = to_screen(geometry.text_bounds.center());
+                            painter.circle_filled(center, geometry.radius * zoom, marker.color);
+                            let text_color = marker_text_color(marker.color);
+                            let galley = painter.layout_no_wrap(
+                                marker.number.to_string(),
+                                egui::FontId::proportional(marker.size * zoom),
+                                text_color,
+                            );
+                            let text_position = center - galley.mesh_bounds.center().to_vec2();
+                            let ink_bounds = galley.mesh_bounds.translate(text_position.to_vec2());
+                            painter.galley(text_position, galley, text_color);
+                            #[cfg(test)]
+                            self.test_marker_preview.push(MarkerPreviewObservation {
+                                number: marker.number,
+                                center,
+                                radius: geometry.radius * zoom,
+                                ink_bounds,
+                            });
+                            #[cfg(not(test))]
+                            let _ = ink_bounds;
+                        }
                         MarkupLayer::Text(text) => {
                             painter.text(
                                 to_screen(text.position),
@@ -964,7 +1176,7 @@ impl ScreenshotEditor {
                             let draw = Rect::from_min_max(to_screen(rect.min), to_screen(rect.max));
                             painter.rect_filled(draw, 0.0, self.current_color());
                         }
-                        MarkupTool::Pen | MarkupTool::Text => {}
+                        MarkupTool::Pen | MarkupTool::Marker | MarkupTool::Text => {}
                     }
                 }
                 if let Some(stroke) = &self.active_stroke {
@@ -996,13 +1208,14 @@ mod tests {
     use super::*;
     use std::sync::{Arc, atomic::AtomicBool};
 
-    const CONTROLS: [&str; 18] = [
+    const CONTROLS: [&str; 19] = [
         "Save",
         "Copy",
         "Pen",
         "Arrow",
         "Rect",
         "Highlight",
+        "Marker",
         "Text",
         "1",
         "2",
@@ -1025,6 +1238,35 @@ mod tests {
         track: Rect,
         label: Rect,
         value: Rect,
+    }
+
+    fn screenshot_editor_test_app(context: &egui::Context, root: &std::path::Path) -> LauncherApp {
+        let mut settings = crate::settings::Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.enable_toasts = false;
+        settings.show_inline_errors = false;
+        settings.show_error_toasts = false;
+        settings.dashboard.enabled = false;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        LauncherApp::new(
+            context,
+            Arc::new(Vec::new()),
+            0,
+            crate::plugin::PluginManager::new_inert_for_test(),
+            root.join("actions.json").to_string_lossy().into_owned(),
+            root.join("settings.json").to_string_lossy().into_owned(),
+            settings,
+            None,
+            None,
+            Some(std::collections::HashSet::new()),
+            Some(std::collections::HashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
     }
 
     fn control_bounds(
@@ -1216,43 +1458,628 @@ mod tests {
         [zoom, text_size]
     }
 
+    fn screenshot_editor_frame(
+        context: &egui::Context,
+        editor: &mut ScreenshotEditor,
+        app: &mut LauncherApp,
+        screen: Rect,
+        events: Vec<egui::Event>,
+    ) {
+        screenshot_editor_frame_output(context, editor, app, screen, events)
+            .drop_without_applying_deltas();
+    }
+
+    fn screenshot_editor_frame_output(
+        context: &egui::Context,
+        editor: &mut ScreenshotEditor,
+        app: &mut LauncherApp,
+        screen: Rect,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                focused: true,
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                editor.ui(ctx, app);
+            },
+        )
+    }
+
+    fn marker_layers(history: &MarkupHistory) -> Vec<MarkupMarker> {
+        history
+            .layers()
+            .iter()
+            .filter_map(|layer| match layer {
+                MarkupLayer::Marker(marker) => Some(marker.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn generated_grid_image(width: u32, height: u32) -> RgbaImage {
+        RgbaImage::from_fn(width, height, |x, y| {
+            if (x / 8 + y / 8) % 2 == 0 {
+                image::Rgba([34, 54, 74, 255])
+            } else {
+                image::Rgba([56, 76, 96, 255])
+            }
+        })
+    }
+
+    #[test]
+    fn screenshot_marker_history_numbers_follow_retained_layers_across_undo_redo_and_tool_switches()
+    {
+        let image = RgbaImage::from_pixel(40, 30, image::Rgba([20, 30, 40, 255]));
+        let mut editor = ScreenshotEditor::new(
+            image.clone(),
+            PathBuf::from("unused.png"),
+            false,
+            false,
+            MarkupTool::Marker,
+        );
+        editor.color_index = 1;
+        editor.text_size = 24.0;
+        assert_eq!(editor.next_marker_number(), Some(1));
+        assert!(editor.place_marker(Pos2::new(5.0, 5.0)));
+        let first = marker_layers(&editor.history)[0].clone();
+        assert_eq!(first.number, 1);
+        assert_eq!(first.color, ScreenshotEditor::palette()[1]);
+        assert_eq!(first.size, 24.0);
+
+        editor.tool = MarkupTool::Pen;
+        editor.text_size = 32.0;
+        editor.color_index = 4;
+        editor.tool = MarkupTool::Marker;
+        assert!(editor.place_marker(Pos2::new(10.0, 5.0)));
+        assert_eq!(marker_layers(&editor.history)[1].number, 2);
+        editor.undo();
+        assert_eq!(editor.next_marker_number(), Some(2));
+        editor.redo();
+        assert_eq!(marker_layers(&editor.history)[1].number, 2);
+
+        for x in [15.0, 20.0, 25.0] {
+            assert!(editor.place_marker(Pos2::new(x, 10.0)));
+        }
+        assert_eq!(
+            marker_layers(&editor.history)
+                .iter()
+                .map(|marker| marker.number)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5]
+        );
+        editor.undo();
+        editor.undo();
+        editor.undo();
+        assert_eq!(editor.next_marker_number(), Some(3));
+        editor.color_index = 2;
+        editor.text_size = 18.0;
+        assert!(editor.place_marker(Pos2::new(30.0, 10.0)));
+        assert_eq!(
+            marker_layers(&editor.history)
+                .iter()
+                .map(|marker| marker.number)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert!(editor.history.redo_stack.is_empty());
+        let replacement = marker_layers(&editor.history)[2].clone();
+        assert_eq!(replacement.color, ScreenshotEditor::palette()[2]);
+        assert_eq!(replacement.size, 18.0);
+
+        let fresh = ScreenshotEditor::new(
+            image,
+            PathBuf::from("another-unused.png"),
+            false,
+            false,
+            MarkupTool::Marker,
+        );
+        assert_eq!(fresh.next_marker_number(), Some(1));
+    }
+
+    #[test]
+    fn screenshot_marker_raster_bounds_center_digits_and_crop_before_saved_export() {
+        let base = generated_grid_image(132, 96);
+        let font = default_font_arc().expect("the bundled proportional font is available");
+        let bounds_9 = raster::measure_text_ink_bounds(&font.0, &font.1, "9", 24.0).unwrap();
+        let bounds_10 = raster::measure_text_ink_bounds(&font.0, &font.1, "10", 24.0).unwrap();
+        assert!(bounds_9.width() > 0.0 && bounds_9.height() > 0.0);
+        assert!(bounds_10.width() > bounds_9.width());
+
+        let color = ScreenshotEditor::palette()[0];
+        let dark_badge_color = Color32::from_rgb(35, 35, 35);
+        let markers = [
+            MarkupMarker {
+                center: Pos2::new(1.0, 1.0),
+                number: 1,
+                color,
+                size: 24.0,
+            },
+            MarkupMarker {
+                center: Pos2::new(40.0, 30.0),
+                number: 9,
+                color,
+                size: 24.0,
+            },
+            MarkupMarker {
+                center: Pos2::new(82.0, 30.0),
+                number: 10,
+                color: dark_badge_color,
+                size: 24.0,
+            },
+            MarkupMarker {
+                center: Pos2::new(128.0, 92.0),
+                number: 11,
+                color,
+                size: 24.0,
+            },
+        ];
+        let layers = markers
+            .iter()
+            .cloned()
+            .map(MarkupLayer::Marker)
+            .collect::<Vec<_>>();
+
+        for marker in &markers[1..3] {
+            let geometry = marker_geometry(marker.center, marker.number, marker.size, Some(&font));
+            assert!((geometry.text_bounds.center() - marker.center).length() < 0.001);
+            assert!(geometry.radius > geometry.text_bounds.width() * 0.5);
+            assert!(geometry.radius > geometry.text_bounds.height() * 0.5);
+        }
+        let geometry_9 = marker_geometry(Pos2::ZERO, 9, 24.0, Some(&font));
+        let geometry_10 = marker_geometry(Pos2::ZERO, 10, 24.0, Some(&font));
+        assert!(geometry_10.radius > geometry_9.radius);
+
+        let rendered = render_markup_layers(&base, &layers);
+        assert_ne!(rendered.get_pixel(0, 0), base.get_pixel(0, 0));
+        let marker_10 = &markers[2];
+        assert_eq!(marker_text_color(marker_10.color), Color32::WHITE);
+        let white_pixels = rendered
+            .enumerate_pixels()
+            .filter(|(x, y, pixel)| {
+                (pixel[0] > 220 && pixel[1] > 220 && pixel[2] > 220)
+                    && (*x as f32 - marker_10.center.x).abs() < 16.0
+                    && (*y as f32 - marker_10.center.y).abs() < 16.0
+            })
+            .map(|(x, y, _)| (x as f32, y as f32))
+            .collect::<Vec<_>>();
+        assert!(
+            !white_pixels.is_empty(),
+            "marker digits should use contrast text"
+        );
+        let ink_center = Pos2::new(
+            (white_pixels
+                .iter()
+                .map(|point| point.0)
+                .fold(f32::INFINITY, f32::min)
+                + white_pixels
+                    .iter()
+                    .map(|point| point.0)
+                    .fold(f32::NEG_INFINITY, f32::max))
+                * 0.5,
+            (white_pixels
+                .iter()
+                .map(|point| point.1)
+                .fold(f32::INFINITY, f32::min)
+                + white_pixels
+                    .iter()
+                    .map(|point| point.1)
+                    .fold(f32::NEG_INFINITY, f32::max))
+                * 0.5,
+        );
+        assert!((ink_center - marker_10.center).length() <= 1.5);
+
+        let mut editor = ScreenshotEditor::new(
+            base.clone(),
+            PathBuf::from("unused.png"),
+            false,
+            false,
+            MarkupTool::Marker,
+        );
+        editor.history = MarkupHistory::default();
+        for marker in markers {
+            editor.push_layer(MarkupLayer::Marker(marker));
+        }
+        editor.crop_rect = Some(Rect::from_min_max(
+            Pos2::new(0.0, 0.0),
+            Pos2::new(100.0, 72.0),
+        ));
+        let full = render_markup_layers(&base, editor.history.layers());
+        let expected = image::imageops::crop_imm(&full, 0, 0, 100, 72).to_image();
+        let applied = editor.apply_edits();
+        assert_eq!(applied, expected);
+
+        let evidence_dir = std::env::var_os("ML_SCREENSHOT_MARKER_EVIDENCE_DIR");
+        let tempdir = tempfile::tempdir().unwrap();
+        let output_dir = evidence_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(|| tempdir.path().to_path_buf());
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let output_path = output_dir.join("screenshot-marker-cropped.png");
+        editor.save_image(&output_path).unwrap();
+        let saved = image::io::Reader::open(&output_path)
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(saved, applied);
+
+        if std::env::var_os("ML_SCREENSHOT_MARKER_EVIDENCE_DIR").is_some() {
+            let observation = format!(
+                "fixture=generated-grid\nmarkers=1,9,10,11\nfont_size=24\n9_ink={:?}\n10_ink={:?}\n9_radius={}\n10_radius={}\ncrop=100x72\n",
+                geometry_9.text_bounds,
+                geometry_10.text_bounds,
+                geometry_9.radius,
+                geometry_10.radius
+            );
+            std::fs::write(output_dir.join("screenshot-marker-raster.txt"), observation).unwrap();
+        }
+    }
+
+    #[test]
+    fn screenshot_marker_canvas_click_is_single_shot_zoomed_and_matches_preview_export() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let root = tempfile::tempdir().unwrap();
+        let mut app = screenshot_editor_test_app(&context, root.path());
+        context.style_mut_of(context.theme(), |style| style.animation_time = 0.0);
+        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(1000.0, 760.0));
+        let image = generated_grid_image(200, 130);
+        let mut editor = ScreenshotEditor::new(
+            image,
+            root.path().join("unused.png"),
+            false,
+            false,
+            MarkupTool::Marker,
+        );
+        editor.test_window_width = Some(720.0);
+        editor.zoom = 1.5;
+        editor.text_size = 24.0;
+        editor.color_index = 1;
+        for marker in [
+            MarkupMarker {
+                center: Pos2::new(5.0, 5.0),
+                number: 1,
+                color: ScreenshotEditor::palette()[0],
+                size: 24.0,
+            },
+            MarkupMarker {
+                center: Pos2::new(55.0, 25.0),
+                number: 9,
+                color: ScreenshotEditor::palette()[2],
+                size: 28.0,
+            },
+            MarkupMarker {
+                center: Pos2::new(105.0, 25.0),
+                number: 10,
+                color: ScreenshotEditor::palette()[3],
+                size: 32.0,
+            },
+        ] {
+            editor.push_layer(MarkupLayer::Marker(marker));
+        }
+
+        for _ in 0..3 {
+            screenshot_editor_frame(&context, &mut editor, &mut app, screen, Vec::new());
+        }
+        editor.test_marker_ui_passes.clear();
+        let image_rect = editor.test_image_rect.expect("canvas response is retained");
+        assert_eq!(editor.test_marker_preview.len(), 3);
+        for observation in &editor.test_marker_preview {
+            let marker = marker_layers(&editor.history)
+                .into_iter()
+                .find(|marker| marker.number == observation.number)
+                .unwrap();
+            let expected_center = image_rect.min + (marker.center * editor.zoom).to_vec2();
+            assert!((observation.center - expected_center).length() < 0.01);
+            assert!(observation.radius > 0.0);
+            assert!(observation.ink_bounds.is_positive());
+            assert!((observation.ink_bounds.center() - observation.center).length() < 0.1);
+            for corner in [
+                observation.ink_bounds.left_top(),
+                observation.ink_bounds.right_top(),
+                observation.ink_bounds.left_bottom(),
+                observation.ink_bounds.right_bottom(),
+            ] {
+                assert!(
+                    (corner - observation.center).length() <= observation.radius + 0.5,
+                    "digit ink escaped its measured badge: {observation:?}"
+                );
+            }
+        }
+
+        let placed_at = Pos2::new(150.0, 78.0);
+        let screen_pos = image_rect.min + (placed_at * editor.zoom).to_vec2();
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![
+                egui::Event::PointerMoved(screen_pos),
+                egui::Event::PointerButton {
+                    pos: screen_pos,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        assert_eq!(marker_layers(&editor.history).len(), 3);
+        editor.test_force_marker_discard = true;
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: screen_pos,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        let retained_passes = &editor.test_marker_ui_passes;
+        assert!(
+            retained_passes.len() >= 2
+                && retained_passes[retained_passes.len() - 2].0
+                    == retained_passes[retained_passes.len() - 1].0
+                && retained_passes[retained_passes.len() - 2].1
+                    < retained_passes[retained_passes.len() - 1].1,
+            "the release input must be replayed in a later egui pass: {retained_passes:?}"
+        );
+        let markers = marker_layers(&editor.history);
+        assert_eq!(
+            markers.len(),
+            4,
+            "a repeated UI pass must not duplicate a click"
+        );
+        assert_eq!(markers[3].number, 11);
+        assert!((markers[3].center - placed_at).length() < 0.01);
+        assert_eq!(markers[3].color, ScreenshotEditor::palette()[1]);
+        assert_eq!(markers[3].size, 24.0);
+        editor.color_index = 4;
+        editor.text_size = 42.0;
+
+        // A primary drag does not add a click marker.
+        let drag_start = image_rect.min + (Pos2::new(120.0, 85.0) * editor.zoom).to_vec2();
+        let drag_end = drag_start + egui::vec2(36.0, 24.0);
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![
+                egui::Event::PointerMoved(drag_start),
+                egui::Event::PointerButton {
+                    pos: drag_start,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerMoved(drag_end)],
+        );
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: drag_end,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        assert_eq!(marker_layers(&editor.history).len(), 4);
+
+        // The secondary-button crop path remains independent of marker placement.
+        let crop_start = image_rect.min + (Pos2::new(10.0, 10.0) * editor.zoom).to_vec2();
+        let crop_end = image_rect.min + (Pos2::new(178.0, 112.0) * editor.zoom).to_vec2();
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![
+                egui::Event::PointerMoved(crop_start),
+                egui::Event::PointerButton {
+                    pos: crop_start,
+                    button: PointerButton::Secondary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        assert!(
+            (editor
+                .crop_start
+                .expect("an owned secondary press immediately starts the crop")
+                - Pos2::new(10.0, 10.0))
+            .length()
+                < 0.01
+        );
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerMoved(crop_end)],
+        );
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: crop_end,
+                button: PointerButton::Secondary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        assert_eq!(marker_layers(&editor.history).len(), 4);
+        let crop = editor
+            .crop_rect
+            .expect("secondary drag still defines a crop");
+        assert!(crop.is_positive());
+        assert!((crop.min - Pos2::new(10.0, 10.0)).length() < 0.01);
+        assert!((crop.max - Pos2::new(178.0, 112.0)).length() < 0.01);
+
+        for _ in 0..2 {
+            screenshot_editor_frame(&context, &mut editor, &mut app, screen, Vec::new());
+        }
+        assert!(editor.test_marker_preview.iter().any(|observation| {
+            observation.number == 11
+                && (observation.ink_bounds.center() - observation.center).length() < 0.1
+        }));
+        let evidence_dir = std::env::var_os("ML_SCREENSHOT_MARKER_EVIDENCE_DIR");
+        let tempdir = tempfile::tempdir().unwrap();
+        let output_dir = evidence_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(|| tempdir.path().to_path_buf());
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let output_path = output_dir.join("screenshot-marker-ui-crop.png");
+        let expected = editor.apply_edits();
+        editor.save_image(&output_path).unwrap();
+        let saved = image::io::Reader::open(&output_path)
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(saved, expected);
+        assert_eq!(expected.width(), crop.width() as u32);
+        assert_eq!(expected.height(), crop.height() as u32);
+
+        if std::env::var_os("ML_SCREENSHOT_MARKER_EVIDENCE_DIR").is_some() {
+            let observations = editor
+                .test_marker_preview
+                .iter()
+                .map(|observation| {
+                    format!(
+                        "number={} center={:?} radius={} actual_galley_ink={:?}\n",
+                        observation.number,
+                        observation.center,
+                        observation.radius,
+                        observation.ink_bounds
+                    )
+                })
+                .collect::<String>();
+            std::fs::write(
+                output_dir.join("screenshot-marker-ui-preview.txt"),
+                observations,
+            )
+            .unwrap();
+        }
+
+        // Existing tools retain drag-only sensing: Text starts at the initial press, including
+        // an ordinary click with no pointer movement.
+        editor.tool = MarkupTool::Text;
+        screenshot_editor_frame(&context, &mut editor, &mut app, screen, Vec::new());
+        let text_image_rect = editor
+            .test_image_rect
+            .expect("Text canvas response is retained");
+        let text_position = Pos2::new(72.0, 54.0);
+        let text_screen_position = text_image_rect.min + (text_position * editor.zoom).to_vec2();
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![
+                egui::Event::PointerMoved(text_screen_position),
+                egui::Event::PointerButton {
+                    pos: text_screen_position,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        let active_text_position = editor
+            .active_text
+            .as_ref()
+            .expect("Text click creates an insertion point")
+            .position;
+        assert!(
+            (active_text_position - text_position).length() < 0.01,
+            "a Text-tool click should preserve its original press position: {active_text_position:?}"
+        );
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![egui::Event::Text("legacy text".to_owned())],
+        );
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: text_screen_position,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        let output =
+            screenshot_editor_frame_output(&context, &mut editor, &mut app, screen, Vec::new());
+        let marker_button = control_bounds(&output, "Marker")
+            .expect("the Marker tool remains an actual selectable response")
+            .1;
+        output.drop_without_applying_deltas();
+        let marker_button_center = marker_button.center();
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![
+                egui::Event::PointerMoved(marker_button_center),
+                egui::Event::PointerButton {
+                    pos: marker_button_center,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: marker_button_center,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        assert!(editor.active_text.is_none());
+        assert!(
+            matches!(editor.history.layers().last(), Some(MarkupLayer::Text(text)) if text.text == "legacy text")
+        );
+    }
+
     #[test]
     fn screenshot_chrome_scaled_toolbar_controls_remain_reachable_without_editing_image() {
         let context = egui::Context::default();
         context.enable_accesskit();
         let root = tempfile::tempdir().unwrap();
-        let mut settings = crate::settings::Settings::default();
-        settings.hotkey = None;
-        settings.quit_hotkey = None;
-        settings.help_hotkey = None;
-        settings.enable_toasts = false;
-        settings.show_inline_errors = false;
-        settings.show_error_toasts = false;
-        settings.dashboard.enabled = false;
-        settings.paste_sequence.next_hotkey = None;
-        settings.paste_sequence.cancel_hotkey = None;
-        let mut app = LauncherApp::new(
-            &context,
-            Arc::new(Vec::new()),
-            0,
-            crate::plugin::PluginManager::new_inert_for_test(),
-            root.path()
-                .join("actions.json")
-                .to_string_lossy()
-                .into_owned(),
-            root.path()
-                .join("settings.json")
-                .to_string_lossy()
-                .into_owned(),
-            settings,
-            None,
-            None,
-            Some(std::collections::HashSet::new()),
-            Some(std::collections::HashMap::new()),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
-        );
+        let mut app = screenshot_editor_test_app(&context, root.path());
         context.style_mut_of(context.theme(), |style| {
             style.animation_time = 0.0;
             style.override_font_id = Some(egui::FontId::proportional(22.0));

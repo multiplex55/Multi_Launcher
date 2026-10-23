@@ -49,6 +49,34 @@ impl Rect {
     }
 }
 
+/// Tight bounds around the rendered glyphs, relative to the origin passed to [`draw_text`].
+///
+/// Leading and trailing advance widths are deliberately excluded. Callers that center labels
+/// should use these bounds rather than the font's advance box so asymmetric digit shapes remain
+/// visually centered.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextInkBounds {
+    pub min: Point,
+    pub max: Point,
+}
+
+impl TextInkBounds {
+    pub fn width(self) -> f32 {
+        (self.max.x - self.min.x).max(0.0)
+    }
+
+    pub fn height(self) -> f32 {
+        (self.max.y - self.min.y).max(0.0)
+    }
+
+    pub fn center(self) -> Point {
+        Point::new(
+            (self.min.x + self.max.x) * 0.5,
+            (self.min.y + self.max.y) * 0.5,
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Color(pub [u8; 4]);
 
@@ -246,6 +274,60 @@ pub fn default_font_arc() -> Option<(ab_glyph::FontArc, eframe::egui::FontTweak)
         }
     }?;
     Some((font, data.tweak.clone()))
+}
+
+/// Measure the tight glyph bounds produced by [`draw_text`] for a single-line label.
+///
+/// The cursor and font tweak follow the same baseline calculation as `draw_text`, keeping
+/// centered raster annotations aligned with the bundled font's actual ink bounds.
+pub fn measure_text_ink_bounds(
+    font: &ab_glyph::FontArc,
+    tweak: &eframe::egui::FontTweak,
+    text: &str,
+    size: f32,
+) -> Option<TextInkBounds> {
+    use ab_glyph::{Font, ScaleFont, point};
+
+    if text.is_empty() || !size.is_finite() || size <= 0.0 || !tweak.scale.is_finite() {
+        return None;
+    }
+
+    let scaled = font.as_scaled(size * tweak.scale);
+    let line_height = scaled.height();
+    let mut caret = point(0.0, scaled.ascent() + tweak.y_offset * size);
+    let mut bounds: Option<TextInkBounds> = None;
+
+    for character in text.chars() {
+        if character == '\n' {
+            caret.x = 0.0;
+            caret.y += line_height;
+            continue;
+        }
+
+        let mut glyph = scaled.scaled_glyph(character);
+        glyph.position = caret;
+        caret.x += scaled.h_advance(glyph.id);
+        if let Some(outlined) = scaled.outline_glyph(glyph) {
+            let glyph_bounds = outlined.px_bounds();
+            let glyph_min = Point::new(glyph_bounds.min.x, glyph_bounds.min.y);
+            let glyph_max = Point::new(glyph_bounds.max.x, glyph_bounds.max.y);
+            bounds = Some(match bounds {
+                Some(mut bounds) => {
+                    bounds.min.x = bounds.min.x.min(glyph_min.x);
+                    bounds.min.y = bounds.min.y.min(glyph_min.y);
+                    bounds.max.x = bounds.max.x.max(glyph_max.x);
+                    bounds.max.y = bounds.max.y.max(glyph_max.y);
+                    bounds
+                }
+                None => TextInkBounds {
+                    min: glyph_min,
+                    max: glyph_max,
+                },
+            });
+        }
+    }
+
+    bounds
 }
 
 pub fn draw_text(
