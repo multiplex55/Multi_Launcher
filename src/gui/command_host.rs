@@ -8,8 +8,9 @@ use crate::commands::{
     HeadlessCommandHost, HistoryPolicy, JsonUtilityCommandHost, LauncherCommandHost,
     MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, PendingQueryPolicy,
     PinboardCommandHost, QueryPolicy, RadialCommandHost, ResultsPolicy, ScreenDrawCommandHost,
-    ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDestination, ScreenshotMarkup,
-    ScreenshotMode, ToastPolicy, TodoCommandHost, VisibilityPolicy, XmlToolkitCommandHost,
+    ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDelay, ScreenshotDestination,
+    ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost, VisibilityPolicy,
+    XmlToolkitCommandHost,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions};
@@ -1002,6 +1003,91 @@ impl ScreenshotCommandHost for LauncherApp {
 
     fn screenshot_launcher_should_refocus(&self) -> bool {
         self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open()
+    }
+
+    fn schedule_delayed_screenshot(
+        &mut self,
+        delay: ScreenshotDelay,
+        mode: ScreenshotMode,
+        destination: ScreenshotDestination,
+        markup: ScreenshotMarkup,
+        invocation: &CommandInvocation,
+        captured_history_query: Option<&str>,
+    ) -> Result<(), String> {
+        let history_query = captured_history_query.unwrap_or(&self.query).to_owned();
+        self.screenshot_capture
+            .schedule(
+                delay,
+                mode,
+                destination,
+                markup,
+                invocation,
+                &history_query,
+                self.command_root_policy,
+                std::time::Instant::now(),
+                &self.egui_ctx,
+            )
+            .map(|_| ())
+    }
+
+    fn cancel_delayed_screenshot(&mut self) -> Result<(), String> {
+        if self.screenshot_capture.cancel() {
+            self.egui_ctx
+                .request_repaint_of(eframe::egui::ViewportId::ROOT);
+        }
+        Ok(())
+    }
+}
+
+impl LauncherApp {
+    pub(crate) fn finish_screenshot_capture(
+        &mut self,
+        completion: super::screenshot_capture::ScreenshotCaptureCompletion,
+    ) {
+        let Some(image) = completion.image else {
+            if let Some(error) = completion.error {
+                self.report_error_message("launcher", format!("Failed: {error}"));
+            }
+            return;
+        };
+        let clip = completion.destination == ScreenshotDestination::Clipboard;
+        let tool = match completion.markup {
+            ScreenshotMarkup::Rectangle => super::MarkupTool::Rectangle,
+            ScreenshotMarkup::Pen => super::MarkupTool::Pen,
+        };
+        match self.deliver_screenshot_capture(image, clip, tool) {
+            Ok(crate::plugins::screenshot::ScreenshotLaunchOutcome::Completed) => {
+                self.apply_command_outcome_with_root_policy(
+                    CommandOutcome {
+                        focus: self.screenshot_launcher_should_refocus(),
+                        history: HistoryPolicy::Record,
+                        ..CommandOutcome::default()
+                    },
+                    &completion.invocation,
+                    Some(&completion.history_query),
+                    completion.root_policy,
+                );
+            }
+            Ok(crate::plugins::screenshot::ScreenshotLaunchOutcome::Cancelled) => {}
+            Err(error) => {
+                self.report_error_message("launcher", format!("Failed: {error}"));
+            }
+        }
+    }
+
+    fn deliver_screenshot_capture(
+        &mut self,
+        image: image::RgbaImage,
+        clip: bool,
+        tool: super::MarkupTool,
+    ) -> Result<crate::plugins::screenshot::ScreenshotLaunchOutcome, String> {
+        #[cfg(test)]
+        if let Some(deliver) = self.test_screenshot_delivery.take() {
+            return deliver(image, clip, tool);
+        }
+
+        crate::plugins::screenshot::deliver_captured_image(self, image, clip, tool)
+            .map_err(|error| error.to_string())
     }
 }
 

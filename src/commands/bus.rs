@@ -59,7 +59,9 @@ impl CommandBus {
             Command::MultiManager(command) => Ok(handle_multi_manager(host, command)),
             Command::FileSearch(command) => Ok(handle_file_search(host, command)),
             Command::Diff(command) => handle_diff(host, command),
-            Command::Screenshot(command) => handle_screenshot(host, command),
+            Command::Screenshot(command) => {
+                handle_screenshot(host, command, invocation, captured_history_query)
+            }
             Command::Pinboard(command) => handle_pinboard(host, command),
             Command::ScreenDraw(command) => handle_screen_draw(host, command),
             Command::CoordinateTool(command) => handle_coordinate_tool(host, command),

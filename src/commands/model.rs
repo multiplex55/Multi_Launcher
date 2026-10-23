@@ -615,6 +615,21 @@ pub enum ScreenshotCompatibility {
     Shared,
     GuiOnly,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenshotDelay {
+    ThreeSeconds,
+    FiveSeconds,
+    TenSeconds,
+}
+impl ScreenshotDelay {
+    pub const fn duration(self) -> std::time::Duration {
+        match self {
+            Self::ThreeSeconds => std::time::Duration::from_secs(3),
+            Self::FiveSeconds => std::time::Duration::from_secs(5),
+            Self::TenSeconds => std::time::Duration::from_secs(10),
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScreenshotCommand {
     Capture {
@@ -623,11 +638,21 @@ pub enum ScreenshotCommand {
         markup: ScreenshotMarkup,
         compatibility: ScreenshotCompatibility,
     },
+    Schedule {
+        delay: ScreenshotDelay,
+        mode: ScreenshotMode,
+        destination: ScreenshotDestination,
+        markup: ScreenshotMarkup,
+    },
+    CancelDelayed,
+    InvalidDelayed {
+        raw: String,
+    },
     UnknownMode {
         raw: String,
     },
 }
-kinds!(ScreenshotCommand, Self::Capture { .. } => "capture", Self::UnknownMode { .. } => "unknown_mode");
+kinds!(ScreenshotCommand, Self::Capture { .. } => "capture", Self::Schedule { .. } => "schedule", Self::CancelDelayed => "cancel_delayed", Self::InvalidDelayed { .. } => "invalid_delayed", Self::UnknownMode { .. } => "unknown_mode");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PinboardCommand {
     Capture,

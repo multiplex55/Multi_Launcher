@@ -182,6 +182,44 @@ mod settings_search_headless_tests {
     }
 }
 
+#[cfg(test)]
+mod screenshot_delay_headless_tests {
+    use super::*;
+
+    #[test]
+    fn screenshot_delay_headless_routes_require_gui_without_capture_or_external_fallback() {
+        for raw in [
+            "screenshot:delay:3:window",
+            "screenshot:delay:5:region_clip",
+            "screenshot:cancel",
+            "screenshot:delay:4:desktop",
+            "screenshot:delay:3:unknown",
+        ] {
+            let original = Action {
+                label: "Delayed screenshot".into(),
+                desc: String::new(),
+                action: raw.into(),
+                args: Some("unused headless arguments".into()),
+            };
+            let command = crate::commands::parse_action(&original).unwrap();
+            assert!(matches!(command, Command::Screenshot(_)), "{raw}");
+            let mut external_calls = Vec::new();
+            let error = execute_with_external(command, &original, &mut |target, args| {
+                external_calls.push((target.to_owned(), args.map(str::to_owned)));
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Delayed screenshot capture requires the launcher interface"),
+                "{raw}: {error}"
+            );
+            assert!(external_calls.is_empty(), "{raw} fell back externally");
+        }
+    }
+}
+
 fn execute_with_external(
     command: Command,
     original_action: &Action,
@@ -821,6 +859,11 @@ fn execute_clipboard_modify(
 
 fn execute_screenshot(command: ScreenshotCommand, original: &Action) -> anyhow::Result<()> {
     match command {
+        ScreenshotCommand::Schedule { .. }
+        | ScreenshotCommand::CancelDelayed
+        | ScreenshotCommand::InvalidDelayed { .. } => {
+            anyhow::bail!("Delayed screenshot capture requires the launcher interface")
+        }
         ScreenshotCommand::Capture {
             mode,
             destination,

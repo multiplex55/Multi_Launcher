@@ -1,15 +1,54 @@
 use crate::commands::{
     CommandError, CommandOutcome, HistoryPolicy, ScreenshotCommand, ScreenshotCommandHost,
-    ScreenshotCommandResult, ScreenshotDestination, ScreenshotMarkup, ScreenshotMode,
+    ScreenshotCommandResult, ScreenshotDelay, ScreenshotDestination, ScreenshotMarkup,
+    ScreenshotMode,
 };
 
 pub(crate) fn handle_screenshot<H>(
     host: &mut H,
     command: &ScreenshotCommand,
+    invocation: &crate::commands::CommandInvocation,
+    captured_history_query: Option<&str>,
 ) -> Result<CommandOutcome, CommandError>
 where
     H: ScreenshotCommandHost + ?Sized,
 {
+    match command {
+        ScreenshotCommand::Schedule {
+            delay,
+            mode,
+            destination,
+            markup,
+        } => {
+            host.schedule_delayed_screenshot(
+                *delay,
+                *mode,
+                *destination,
+                *markup,
+                invocation,
+                captured_history_query,
+            )
+            .map_err(|error| {
+                CommandError::new("launcher", format!("Failed: {error}")).with_refocus_policy()
+            })?;
+            return Ok(CommandOutcome::default());
+        }
+        ScreenshotCommand::CancelDelayed => {
+            host.cancel_delayed_screenshot().map_err(|error| {
+                CommandError::new("launcher", format!("Failed: {error}")).with_refocus_policy()
+            })?;
+            return Ok(CommandOutcome::default());
+        }
+        ScreenshotCommand::InvalidDelayed { .. } => {
+            return Err(CommandError::new(
+                "launcher",
+                "Invalid delayed screenshot request. Choose a supported delay and capture mode.",
+            )
+            .with_refocus_policy());
+        }
+        ScreenshotCommand::Capture { .. } | ScreenshotCommand::UnknownMode { .. } => {}
+    }
+
     let (mode, destination, markup) = match command {
         ScreenshotCommand::Capture {
             mode,
@@ -25,6 +64,9 @@ where
             ScreenshotDestination::Editor,
             ScreenshotMarkup::Rectangle,
         ),
+        ScreenshotCommand::Schedule { .. }
+        | ScreenshotCommand::CancelDelayed
+        | ScreenshotCommand::InvalidDelayed { .. } => unreachable!("handled above"),
     };
 
     let result = host
@@ -50,6 +92,15 @@ mod tests {
 
     struct Host {
         call: Option<(ScreenshotMode, ScreenshotDestination, ScreenshotMarkup)>,
+        scheduled: Option<(
+            ScreenshotDelay,
+            ScreenshotMode,
+            ScreenshotDestination,
+            ScreenshotMarkup,
+            crate::commands::CommandInvocation,
+            Option<String>,
+        )>,
+        cancelled: usize,
         result: Result<ScreenshotCommandResult, String>,
         refocus: bool,
     }
@@ -58,6 +109,8 @@ mod tests {
         fn default() -> Self {
             Self {
                 call: None,
+                scheduled: None,
+                cancelled: 0,
                 result: Ok(ScreenshotCommandResult::Completed),
                 refocus: false,
             }
@@ -77,6 +130,45 @@ mod tests {
 
         fn screenshot_launcher_should_refocus(&self) -> bool {
             self.refocus
+        }
+
+        fn schedule_delayed_screenshot(
+            &mut self,
+            delay: ScreenshotDelay,
+            mode: ScreenshotMode,
+            destination: ScreenshotDestination,
+            markup: ScreenshotMarkup,
+            invocation: &crate::commands::CommandInvocation,
+            captured_history_query: Option<&str>,
+        ) -> Result<(), String> {
+            self.scheduled = Some((
+                delay,
+                mode,
+                destination,
+                markup,
+                invocation.clone(),
+                captured_history_query.map(str::to_owned),
+            ));
+            Ok(())
+        }
+
+        fn cancel_delayed_screenshot(&mut self) -> Result<(), String> {
+            self.cancelled += 1;
+            Ok(())
+        }
+    }
+
+    fn make_invocation(command: ScreenshotCommand) -> crate::commands::CommandInvocation {
+        crate::commands::CommandInvocation {
+            command: crate::commands::Command::Screenshot(command),
+            original_action: crate::actions::Action {
+                label: "Delayed screenshot".into(),
+                desc: String::new(),
+                action: "screenshot:delay:3:window".into(),
+                args: Some("private-query-context".into()),
+            },
+            query_override: None,
+            source: crate::commands::ActivationSource::Enter,
         }
     }
 
@@ -113,7 +205,8 @@ mod tests {
 
         for (command, expected) in cases {
             let mut host = Host::default();
-            let outcome = handle_screenshot(&mut host, &command).unwrap();
+            let invocation = make_invocation(command.clone());
+            let outcome = handle_screenshot(&mut host, &command, &invocation, None).unwrap();
             assert_eq!(host.call, Some(expected));
             assert_eq!(outcome.history, HistoryPolicy::Record);
             assert_eq!(outcome.query, QueryPolicy::Keep);
@@ -130,6 +223,10 @@ mod tests {
             &ScreenshotCommand::UnknownMode {
                 raw: "future".into(),
             },
+            &make_invocation(ScreenshotCommand::UnknownMode {
+                raw: "future".into(),
+            }),
+            None,
         )
         .unwrap();
 
@@ -158,6 +255,13 @@ mod tests {
                 markup: ScreenshotMarkup::Rectangle,
                 compatibility: crate::commands::ScreenshotCompatibility::Shared,
             },
+            &make_invocation(ScreenshotCommand::Capture {
+                mode: ScreenshotMode::Region,
+                destination: ScreenshotDestination::Editor,
+                markup: ScreenshotMarkup::Rectangle,
+                compatibility: crate::commands::ScreenshotCompatibility::Shared,
+            }),
+            None,
         )
         .unwrap();
 
@@ -182,6 +286,13 @@ mod tests {
                 markup: ScreenshotMarkup::Rectangle,
                 compatibility: crate::commands::ScreenshotCompatibility::Shared,
             },
+            &make_invocation(ScreenshotCommand::Capture {
+                mode: ScreenshotMode::Desktop,
+                destination: ScreenshotDestination::Editor,
+                markup: ScreenshotMarkup::Rectangle,
+                compatibility: crate::commands::ScreenshotCompatibility::Shared,
+            }),
+            None,
         )
         .unwrap_err();
 
@@ -189,5 +300,36 @@ mod tests {
         assert_eq!(error.message, "Failed: capture unavailable");
         assert!(error.refocus);
         assert!(!error.toast);
+    }
+
+    #[test]
+    fn delayed_schedule_and_cancel_are_not_reported_as_capture_success() {
+        let command = ScreenshotCommand::Schedule {
+            delay: ScreenshotDelay::FiveSeconds,
+            mode: ScreenshotMode::Region,
+            destination: ScreenshotDestination::Clipboard,
+            markup: ScreenshotMarkup::Pen,
+        };
+        let invocation = make_invocation(command.clone());
+        let mut host = Host::default();
+        let outcome =
+            handle_screenshot(&mut host, &command, &invocation, Some("captured query")).unwrap();
+
+        assert_eq!(outcome.history, HistoryPolicy::Skip);
+        assert_eq!(host.call, None);
+        let scheduled = host.scheduled.as_ref().expect("request scheduled");
+        assert_eq!(scheduled.0, ScreenshotDelay::FiveSeconds);
+        assert_eq!(scheduled.1, ScreenshotMode::Region);
+        assert_eq!(scheduled.2, ScreenshotDestination::Clipboard);
+        assert_eq!(scheduled.3, ScreenshotMarkup::Pen);
+        assert_eq!(scheduled.4, invocation);
+        assert_eq!(scheduled.5.as_deref(), Some("captured query"));
+
+        let cancel = ScreenshotCommand::CancelDelayed;
+        let cancel_invocation = make_invocation(cancel.clone());
+        let outcome = handle_screenshot(&mut host, &cancel, &cancel_invocation, None).unwrap();
+        assert_eq!(outcome.history, HistoryPolicy::Skip);
+        assert_eq!(host.cancelled, 1);
+        assert_eq!(host.call, None);
     }
 }

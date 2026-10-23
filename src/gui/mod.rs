@@ -71,6 +71,7 @@ mod regex_tester_dialog;
 mod render;
 mod screen_draw_restore;
 mod screen_draw_toolbar;
+pub(crate) mod screenshot_capture;
 mod screenshot_editor;
 mod search;
 mod search_replace_dialog;
@@ -1063,6 +1064,18 @@ pub struct LauncherApp {
     #[cfg(test)]
     pub(crate) test_skip_history_persistence: bool,
     #[cfg(test)]
+    pub(crate) test_screenshot_delivery: Option<
+        Box<
+            dyn FnOnce(
+                    image::RgbaImage,
+                    bool,
+                    MarkupTool,
+                )
+                    -> Result<crate::plugins::screenshot::ScreenshotLaunchOutcome, String>
+                + Send,
+        >,
+    >,
+    #[cfg(test)]
     pub(crate) test_root_rendered_rows: Vec<(usize, String)>,
     #[cfg(test)]
     pub(crate) test_root_rendered_row_ids: Vec<(usize, egui::Id)>,
@@ -1131,6 +1144,7 @@ pub struct LauncherApp {
     pub(crate) note_mutation_search_count: usize,
     image_panels: Vec<ImagePanel>,
     screenshot_editors: Vec<ScreenshotEditor>,
+    pub(crate) screenshot_capture: screenshot_capture::ScreenshotCaptureOwner,
     pub(crate) crop_dialog: crop_dialog::CropDialogState,
     crop_screenshot_operation: Option<mkmacro_dialog::visual_overlay::OperationId>,
     crop_screenshot_capture: Option<Arc<dyn crate::mkmacro::ScreenCaptureBackend>>,
@@ -3411,6 +3425,8 @@ impl LauncherApp {
             #[cfg(test)]
             test_skip_history_persistence: false,
             #[cfg(test)]
+            test_screenshot_delivery: None,
+            #[cfg(test)]
             test_root_rendered_rows: Vec::new(),
             #[cfg(test)]
             test_root_rendered_row_ids: Vec::new(),
@@ -3483,6 +3499,7 @@ impl LauncherApp {
             note_mutation_search_count: 0,
             image_panels: Vec::new(),
             screenshot_editors: Vec::new(),
+            screenshot_capture: screenshot_capture::ScreenshotCaptureOwner::new(),
             crop_dialog: crop_dialog::CropDialogState::default(),
             crop_screenshot_operation: None,
             crop_screenshot_capture: None,

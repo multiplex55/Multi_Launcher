@@ -3415,6 +3415,9 @@ impl LauncherApp {
     ) -> super::track_c_query_observer::GeometryCause {
         self.drain_settings_save(ctx);
         self.brightness_dialog.runtime_tick(ctx);
+        if let Some(completion) = self.screenshot_capture.tick(std::time::Instant::now(), ctx) {
+            self.finish_screenshot_capture(completion);
+        }
         let mut geometry_cause = super::track_c_query_observer::GeometryCause::Other;
         if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
             self.launcher_hwnd = Some(hwnd.0 as usize);
@@ -9359,6 +9362,7 @@ impl eframe::App for LauncherApp {
         self.shutdown_batch_rename_scanner();
         self.shutdown_search_replace_runtime();
         self.sequence_playback.cancel(std::time::Instant::now());
+        self.screenshot_capture.shutdown();
         if let Err(error) = self.shutdown_indexing() {
             self.report_error_message("index.shutdown", error.to_string());
         }
@@ -12883,6 +12887,157 @@ mod tests {
 
         drop(app);
         drop(workspace);
+    }
+
+    #[test]
+    fn screenshot_delay_hidden_runtime_requires_grant_and_records_only_completed_delivery() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let _history_guard =
+            crate::history::replace_history_for_test(std::collections::VecDeque::new());
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+        app.test_skip_history_persistence = true;
+        app.query = "root query remains unchanged".into();
+
+        let capture_calls = Arc::new(AtomicUsize::new(0));
+        let fail_next = Arc::new(AtomicBool::new(false));
+        let capture_modes = Arc::new(Mutex::new(Vec::new()));
+        let capture_calls_from_worker = Arc::clone(&capture_calls);
+        let fail_from_worker = Arc::clone(&fail_next);
+        let observed_modes = Arc::clone(&capture_modes);
+        app.screenshot_capture.set_capture_for_test(move |mode| {
+            capture_calls_from_worker.fetch_add(1, Ordering::AcqRel);
+            observed_modes.lock().unwrap().push(mode);
+            if fail_from_worker.swap(false, Ordering::AcqRel) {
+                Err("injected capture failure".into())
+            } else {
+                Ok(Some(image::RgbaImage::from_pixel(
+                    1,
+                    1,
+                    image::Rgba([31, 32, 33, 255]),
+                )))
+            }
+        });
+
+        let deliveries = Arc::new(Mutex::new(Vec::new()));
+        let observed_deliveries = Arc::clone(&deliveries);
+        app.test_screenshot_delivery = Some(Box::new(move |image, clip, tool| {
+            observed_deliveries
+                .lock()
+                .unwrap()
+                .push((image.get_pixel(0, 0).0, clip, tool));
+            Ok(crate::plugins::screenshot::ScreenshotLaunchOutcome::Completed)
+        }));
+
+        let invocation = crate::commands::CommandInvocation {
+            command: crate::commands::Command::Screenshot(
+                crate::commands::ScreenshotCommand::Schedule {
+                    delay: crate::commands::ScreenshotDelay::ThreeSeconds,
+                    mode: crate::commands::ScreenshotMode::Window,
+                    destination: crate::commands::ScreenshotDestination::Clipboard,
+                    markup: crate::commands::ScreenshotMarkup::Pen,
+                },
+            ),
+            original_action: Action {
+                label: "Delayed window capture".into(),
+                desc: "test screenshot action".into(),
+                action: "screenshot:delay:3:window_clip".into(),
+                args: Some("original args".into()),
+            },
+            query_override: Some("query override at scheduling".into()),
+            source: crate::commands::ActivationSource::Enter,
+        };
+        let schedule_expired = |app: &mut LauncherApp, query: &str| {
+            app.screenshot_capture
+                .schedule(
+                    crate::commands::ScreenshotDelay::ThreeSeconds,
+                    crate::commands::ScreenshotMode::Window,
+                    crate::commands::ScreenshotDestination::Clipboard,
+                    crate::commands::ScreenshotMarkup::Pen,
+                    &invocation,
+                    query,
+                    crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState,
+                    std::time::Instant::now() - Duration::from_secs(4),
+                    &ctx,
+                )
+                .unwrap()
+        };
+        let hidden_tick = |app: &mut LauncherApp| {
+            drop(app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default()));
+        };
+        let finish_hidden_completion = |app: &mut LauncherApp| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while app.screenshot_capture.is_busy() {
+                hidden_tick(app);
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "hidden runtime did not consume screenshot completion"
+                );
+                thread::yield_now();
+            }
+        };
+
+        // Expiry only transitions to AwaitingPresentation on the same hidden
+        // runtime tick; cancellation before a grant never invokes capture.
+        let _cancelled = schedule_expired(&mut app, "cancelled query");
+        hidden_tick(&mut app);
+        assert_eq!(
+            app.screenshot_capture.snapshot().unwrap().phase,
+            super::super::screenshot_capture::ScreenshotCapturePhase::AwaitingPresentation
+        );
+        assert_eq!(capture_calls.load(Ordering::Acquire), 0);
+        assert!(app.test_recorded_history_queries.is_empty());
+        assert!(app.screenshot_capture.cancel());
+        hidden_tick(&mut app);
+        assert!(app.test_recorded_history_queries.is_empty());
+
+        // An actual failed capture is consumed by the hidden tick without
+        // calling the output owner or recording a successful action.
+        fail_next.store(true, Ordering::Release);
+        let failed = schedule_expired(&mut app, "failed query");
+        hidden_tick(&mut app);
+        app.screenshot_capture
+            .grant_presentation(failed, std::time::Instant::now(), &ctx)
+            .unwrap();
+        finish_hidden_completion(&mut app);
+        assert_eq!(capture_calls.load(Ordering::Acquire), 1);
+        assert!(deliveries.lock().unwrap().is_empty());
+        assert!(app.test_recorded_history_queries.is_empty());
+
+        // Current successful completion traverses the production hidden-tick
+        // and LauncherApp history owner, while the narrow test delivery seam
+        // records options/pixels without touching the clipboard or disk.
+        let successful = schedule_expired(&mut app, "captured history query");
+        hidden_tick(&mut app);
+        app.screenshot_capture
+            .grant_presentation(successful, std::time::Instant::now(), &ctx)
+            .unwrap();
+        finish_hidden_completion(&mut app);
+        assert_eq!(capture_calls.load(Ordering::Acquire), 2);
+        assert_eq!(
+            *capture_modes.lock().unwrap(),
+            [crate::commands::ScreenshotMode::Window; 2]
+        );
+        assert_eq!(
+            *deliveries.lock().unwrap(),
+            vec![([31, 32, 33, 255], true, crate::gui::MarkupTool::Pen,)]
+        );
+        assert_eq!(
+            app.test_recorded_history_queries,
+            ["captured history query"]
+        );
+        assert_eq!(app.query, "root query remains unchanged");
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+
+        hidden_tick(&mut app);
+        assert_eq!(
+            app.test_recorded_history_queries,
+            ["captured history query"]
+        );
+        assert_eq!(deliveries.lock().unwrap().len(), 1);
+        assert!(!app.screenshot_capture.is_busy());
     }
 
     #[test]

@@ -1372,6 +1372,55 @@ fn parse_screenshot(s: &str) -> Option<ScreenshotCommand> {
     use ScreenshotDestination as D;
     use ScreenshotMarkup as K;
     use ScreenshotMode as M;
+    if raw == "cancel" {
+        return Some(ScreenshotCommand::CancelDelayed);
+    }
+    if raw.starts_with("delay") || raw.starts_with("cancel:") {
+        let Some((delay_raw, capture_raw)) =
+            raw.strip_prefix("delay:").and_then(|v| v.split_once(':'))
+        else {
+            return Some(ScreenshotCommand::InvalidDelayed { raw: raw.into() });
+        };
+        let delay = match delay_raw {
+            "3" => crate::commands::ScreenshotDelay::ThreeSeconds,
+            "5" => crate::commands::ScreenshotDelay::FiveSeconds,
+            "10" => crate::commands::ScreenshotDelay::TenSeconds,
+            _ => return Some(ScreenshotCommand::InvalidDelayed { raw: raw.into() }),
+        };
+        let Some((mode, destination, markup, _compatibility)) =
+            parse_screenshot_capture(capture_raw)
+        else {
+            return Some(ScreenshotCommand::InvalidDelayed { raw: raw.into() });
+        };
+        return Some(ScreenshotCommand::Schedule {
+            delay,
+            mode,
+            destination,
+            markup,
+        });
+    }
+    let Some((mode, destination, markup, compatibility)) = parse_screenshot_capture(raw) else {
+        return Some(ScreenshotCommand::UnknownMode { raw: raw.into() });
+    };
+    Some(ScreenshotCommand::Capture {
+        mode,
+        destination,
+        markup,
+        compatibility,
+    })
+}
+
+fn parse_screenshot_capture(
+    raw: &str,
+) -> Option<(
+    ScreenshotMode,
+    ScreenshotDestination,
+    ScreenshotMarkup,
+    ScreenshotCompatibility,
+)> {
+    use ScreenshotDestination as D;
+    use ScreenshotMarkup as K;
+    use ScreenshotMode as M;
     let known = match raw {
         "window" => (M::Window, D::Editor, K::Rectangle),
         "region" => (M::Region, D::Editor, K::Rectangle),
@@ -1380,20 +1429,18 @@ fn parse_screenshot(s: &str) -> Option<ScreenshotCommand> {
         "window_clip" => (M::Window, D::Clipboard, K::Rectangle),
         "region_clip" => (M::Region, D::Clipboard, K::Rectangle),
         "desktop_clip" => (M::Desktop, D::Clipboard, K::Rectangle),
-        _ => {
-            return Some(ScreenshotCommand::UnknownMode { raw: raw.into() });
-        }
+        _ => return None,
     };
-    Some(ScreenshotCommand::Capture {
-        mode: known.0,
-        destination: known.1,
-        markup: known.2,
-        compatibility: if raw == "region_markup" {
+    Some((
+        known.0,
+        known.1,
+        known.2,
+        if raw == "region_markup" {
             ScreenshotCompatibility::GuiOnly
         } else {
             ScreenshotCompatibility::Shared
         },
-    })
+    ))
 }
 
 fn parse_shell(s: &str) -> Option<ShellCommand> {
@@ -2119,6 +2166,54 @@ mod tests {
         assert!(
             matches!(parse("screenshot:future").command,Command::Screenshot(ScreenshotCommand::UnknownMode{raw}) if raw=="future")
         );
+    }
+
+    #[test]
+    fn screenshot_delay_choices_are_typed_and_malformed_reserved_values_do_not_fallback() {
+        for (raw, expected) in [
+            ("screenshot:delay:3:window", ScreenshotDelay::ThreeSeconds),
+            (
+                "screenshot:delay:5:region_clip",
+                ScreenshotDelay::FiveSeconds,
+            ),
+            ("screenshot:delay:10:desktop", ScreenshotDelay::TenSeconds),
+        ] {
+            assert!(
+                matches!(
+                    parse(raw).command,
+                    Command::Screenshot(ScreenshotCommand::Schedule { delay, .. }) if delay == expected
+                ),
+                "{raw}"
+            );
+        }
+        for raw in [
+            "screenshot:delay",
+            "screenshot:delay:0:window",
+            "screenshot:delay:4:window",
+            "screenshot:delay:3:future",
+            "screenshot:delay:3:window:extra",
+            "screenshot:cancel:extra",
+        ] {
+            assert!(
+                matches!(
+                    parse(raw).command,
+                    Command::Screenshot(ScreenshotCommand::InvalidDelayed { .. })
+                ),
+                "{raw}"
+            );
+        }
+        assert!(matches!(
+            parse("screenshot:cancel").command,
+            Command::Screenshot(ScreenshotCommand::CancelDelayed)
+        ));
+        assert!(matches!(
+            parse("screenshot:window").command,
+            Command::Screenshot(ScreenshotCommand::Capture { .. })
+        ));
+        assert!(matches!(
+            parse("screenshot:future").command,
+            Command::Screenshot(ScreenshotCommand::UnknownMode { .. })
+        ));
     }
 
     #[test]

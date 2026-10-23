@@ -7,6 +7,8 @@ const RUNNING_UNARMED: u8 = 0;
 const ARMED: u8 = 1;
 const COMPLETED: u8 = 2;
 const DETACHED: u8 = 3;
+#[cfg(test)]
+const REAPED: u8 = 4;
 type SupervisorSpawner = Arc<dyn Fn(Arc<JoinReaper>) -> Result<(), String> + Send + Sync + 'static>;
 
 struct PendingJoin {
@@ -181,6 +183,8 @@ impl JoinReaper {
                 state.pending.swap_remove(index)
             };
             let _ = finished.join.join();
+            #[cfg(test)]
+            finished.completion.store(REAPED, Ordering::Release);
             self.outstanding.fetch_sub(1, Ordering::AcqRel);
         }
     }
@@ -233,10 +237,28 @@ impl ReapPermit {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn reaped_probe(&self) -> ReapCompletionProbe {
+        ReapCompletionProbe(Arc::clone(&self.completion))
+    }
+
     pub(crate) fn reap(mut self, join: JoinHandle<()>) -> Result<(), ReapError> {
         let result = self.owner.submit(join, Arc::clone(&self.completion));
         self.active = false;
         result
+    }
+}
+
+/// Test-only receipt tied to one reserved worker slot. It becomes true only
+/// after the bounded reaper has joined the transferred worker handle.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ReapCompletionProbe(Arc<AtomicU8>);
+
+#[cfg(test)]
+impl ReapCompletionProbe {
+    pub(crate) fn is_reaped(&self) -> bool {
+        self.0.load(Ordering::Acquire) == REAPED
     }
 }
 

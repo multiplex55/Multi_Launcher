@@ -53,8 +53,6 @@ pub fn launch_editor(
     clip: bool,
     tool: crate::gui::MarkupTool,
 ) -> anyhow::Result<ScreenshotLaunchOutcome> {
-    use chrono::Local;
-    use std::borrow::Cow;
     let img = match crate::actions::screenshot::capture_raw(mode) {
         Ok(img) => img,
         Err(err) if crate::actions::screenshot::is_cancel_or_timeout(&err) => {
@@ -62,6 +60,20 @@ pub fn launch_editor(
         }
         Err(err) => return Err(err),
     };
+    deliver_captured_image(app, img, clip, tool)
+}
+
+/// Applies screenshot destination settings after pixel acquisition has
+/// completed. Delayed capture calls this only on the GUI thread and only for
+/// the still-current request generation.
+pub(crate) fn deliver_captured_image(
+    app: &mut crate::gui::LauncherApp,
+    img: image::RgbaImage,
+    clip: bool,
+    tool: crate::gui::MarkupTool,
+) -> anyhow::Result<ScreenshotLaunchOutcome> {
+    use chrono::Local;
+    use std::borrow::Cow;
     if app.get_screenshot_use_editor() {
         app.open_screenshot_editor(img, clip, tool);
     } else if clip {

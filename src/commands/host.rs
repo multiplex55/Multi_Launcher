@@ -209,6 +209,20 @@ pub trait ScreenshotCommandHost {
         destination: super::ScreenshotDestination,
         markup: super::ScreenshotMarkup,
     ) -> Result<ScreenshotCommandResult, String>;
+    fn schedule_delayed_screenshot(
+        &mut self,
+        _delay: super::ScreenshotDelay,
+        _mode: super::ScreenshotMode,
+        _destination: super::ScreenshotDestination,
+        _markup: super::ScreenshotMarkup,
+        _invocation: &super::CommandInvocation,
+        _captured_history_query: Option<&str>,
+    ) -> Result<(), String> {
+        Err("Delayed screenshot capture requires the launcher interface".into())
+    }
+    fn cancel_delayed_screenshot(&mut self) -> Result<(), String> {
+        Err("Delayed screenshot capture requires the launcher interface".into())
+    }
     fn screenshot_launcher_should_refocus(&self) -> bool;
 }
 
