@@ -454,6 +454,11 @@ fn evaluate_mkmacro(
                 | MkAction::Continue => {}
                 MkAction::If(condition) | MkAction::WhileStart { condition }
                     if unattended_condition(condition) => {}
+                MkAction::ReadClipboardText { .. } | MkAction::WriteClipboardText(_) => {
+                    return ActionCapability::Unsupported {
+                        reason: "MkMacro clipboard text actions are not allowed in unattended execution",
+                    };
+                }
                 MkAction::Process(process) if !process.wait => {
                     strong_confirmation = true;
                 }
@@ -866,5 +871,123 @@ mod tests {
                 enablement: ActionEnablement::StrongConfirmationRequired,
             }
         );
+    }
+
+    #[test]
+    fn clipboard_action_policy_rejects_enabled_direct_and_nested_macros_only() {
+        use crate::mkmacro::{
+            MkAction, MkCallMacroPayload, MkMacro, MkMacroDocument, MkStep,
+            MkWriteClipboardTextPayload,
+        };
+
+        let step = |id, action, enabled| MkStep {
+            metadata: Default::default(),
+            id,
+            enabled,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            action,
+        };
+        let macro_ = |id, name: &str, steps| MkMacro {
+            signature: Default::default(),
+            id,
+            name: name.into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: Default::default(),
+            steps,
+        };
+        let read = MkAction::ReadClipboardText {
+            variable: "clipboard_text".into(),
+        };
+        let write = MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+            source: crate::mkmacro::MkValueSource::Literal(crate::mkmacro::MkValue::String(
+                "plain text".into(),
+            )),
+        });
+        let adapter = AvailableAdapter;
+        let empty_targets = [];
+        let roots = roots();
+
+        for action in [read.clone(), write.clone()] {
+            let document = MkMacroDocument {
+                macros: vec![macro_(7, "direct", vec![step(1, action, true)])],
+                ..Default::default()
+            };
+            let bound = bind_mkmacro_action(&document, 7).unwrap();
+            let context = capability_context(&empty_targets, &document, &roots)
+                .with_external_action_adapter(&adapter);
+            assert!(matches!(
+                evaluate_action_capability(&rule(bound), &context),
+                ActionCapability::Unsupported { reason }
+                    if reason.contains("clipboard text")
+            ));
+        }
+
+        let nested_document = MkMacroDocument {
+            macros: vec![
+                macro_(
+                    7,
+                    "parent",
+                    vec![step(
+                        1,
+                        MkAction::CallMacro(MkCallMacroPayload {
+                            macro_id: 8,
+                            ..Default::default()
+                        }),
+                        true,
+                    )],
+                ),
+                macro_(8, "child", vec![step(1, write.clone(), true)]),
+            ],
+            ..Default::default()
+        };
+        let bound = bind_mkmacro_action(&nested_document, 7).unwrap();
+        let context = capability_context(&empty_targets, &nested_document, &roots)
+            .with_external_action_adapter(&adapter);
+        assert!(matches!(
+            evaluate_action_capability(&rule(bound), &context),
+            ActionCapability::Unsupported { reason }
+                if reason.contains("clipboard text")
+        ));
+
+        let disabled_step_document = MkMacroDocument {
+            macros: vec![macro_(
+                7,
+                "disabled step",
+                vec![step(1, write.clone(), false)],
+            )],
+            ..Default::default()
+        };
+        let bound = bind_mkmacro_action(&disabled_step_document, 7).unwrap();
+        let context = capability_context(&empty_targets, &disabled_step_document, &roots)
+            .with_external_action_adapter(&adapter);
+        assert_eq!(
+            evaluate_action_capability(&rule(bound), &context),
+            ActionCapability::Supported {
+                enablement: ActionEnablement::Standard,
+            }
+        );
+
+        let mut disabled_macro_document = MkMacroDocument {
+            macros: vec![macro_(7, "disabled macro", vec![step(1, write, true)])],
+            ..Default::default()
+        };
+        let bound = bind_mkmacro_action(&disabled_macro_document, 7).unwrap();
+        disabled_macro_document.macros[0].enabled = false;
+        assert!(bind_mkmacro_action(&disabled_macro_document, 7).is_err());
+        let context = capability_context(&empty_targets, &disabled_macro_document, &roots)
+            .with_external_action_adapter(&adapter);
+        assert!(matches!(
+            evaluate_action_capability(&rule(bound), &context),
+            ActionCapability::Unsupported {
+                reason: "MkMacro is disabled in the current document"
+            }
+        ));
     }
 }

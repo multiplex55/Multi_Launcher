@@ -5,6 +5,7 @@ use super::{
 use crate::mkmacro::variables::{MkPoint, MkValue, MkValueSource, MkValueType};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::time::Duration;
 
 // Schema 14 adds persisted recorder settings and the expanded physical-key model.
@@ -1518,6 +1519,10 @@ pub enum MkAction {
     UnsetVariable {
         name: String,
     },
+    ReadClipboardText {
+        variable: String,
+    },
+    WriteClipboardText(MkWriteClipboardTextPayload),
     PromptInput(MkPromptInputPayload),
     If(MkCondition),
     Else,
@@ -1558,6 +1563,29 @@ pub enum MkAction {
     UiSelect(MkUiPayload),
     UiFocus(MkUiPayload),
     UiWait(MkUiPayload),
+}
+
+/// Persisted source for the explicit text-to-clipboard action.
+///
+/// The value itself is intentionally omitted from `Debug`, since actions are
+/// included in nested document and runtime diagnostics.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MkWriteClipboardTextPayload {
+    pub source: MkValueSource,
+}
+
+impl fmt::Debug for MkWriteClipboardTextPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let source_kind = match &self.source {
+            MkValueSource::Literal(MkValue::String(_)) => "literal string",
+            MkValueSource::Literal(_) => "non-string literal",
+            MkValueSource::Variable { .. } => "variable reference",
+        };
+        f.debug_struct("MkWriteClipboardTextPayload")
+            .field("source_kind", &source_kind)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -1728,6 +1756,78 @@ mod reusable_model_tests {
             2
         );
         assert!(!super::super::validation::can_run(&diagnostics));
+    }
+}
+
+#[cfg(test)]
+mod clipboard_action_model_tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_action_model_round_trips_and_redacts_write_payload_debug() {
+        let actions = [
+            MkAction::ReadClipboardText {
+                variable: "clipboard_text".into(),
+            },
+            MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+                source: MkValueSource::Literal(MkValue::String(
+                    "private_clipboard_sentinel ${name}".into(),
+                )),
+            }),
+            MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+                source: MkValueSource::Variable {
+                    name: "clipboard_text".into(),
+                },
+            }),
+        ];
+        for action in actions {
+            let encoded = serde_json::to_string(&action).unwrap();
+            assert_eq!(serde_json::from_str::<MkAction>(&encoded).unwrap(), action);
+        }
+
+        let legacy: MkAction = serde_json::from_value(serde_json::json!({
+            "type": "set_variable",
+            "data": {
+                "name": "legacy_text",
+                "value": {"type": "string", "value": "legacy"}
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::from_value::<MkAction>(serde_json::to_value(&legacy).unwrap()).unwrap(),
+            legacy
+        );
+
+        let sentinel = "private_clipboard_sentinel";
+        let action = MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+            source: MkValueSource::Literal(MkValue::String(sentinel.into())),
+        });
+        assert!(!format!("{action:?}").contains(sentinel));
+        let document = MkMacroDocument {
+            macros: vec![MkMacro {
+                signature: Default::default(),
+                id: 1,
+                name: "clipboard fixture".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
+                playback: Default::default(),
+                steps: vec![MkStep {
+                    metadata: Default::default(),
+                    id: 1,
+                    enabled: true,
+                    breakpoint: false,
+                    repeat: 1,
+                    delay_after_ms: 0,
+                    on_error: Default::default(),
+                    action,
+                }],
+            }],
+            ..Default::default()
+        };
+        assert!(!format!("{document:?}").contains(sentinel));
     }
 }
 

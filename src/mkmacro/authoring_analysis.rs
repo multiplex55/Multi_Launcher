@@ -376,6 +376,7 @@ fn descriptors_for_action_with_signature(
     let mut result = Vec::new();
     let label = match &step.action {
         MkAction::SetVariable { .. } => "Set Variable",
+        MkAction::ReadClipboardText { .. } => "Read Clipboard Text",
         MkAction::PromptInput(_) => "Prompt for Input",
         MkAction::ImageFind(_) => "Find Image",
         MkAction::ImageClick(_) => "Click Image",
@@ -425,6 +426,12 @@ fn descriptors_for_action_with_signature(
             MkValueType::String.into(),
             VariableAvailability::DefinitelyAvailable,
             None,
+        ),
+        MkAction::ReadClipboardText { variable } => add(
+            variable,
+            VariableValueType::Known(MkValueType::String),
+            VariableAvailability::DefinitelyAvailable,
+            Some("The value is available only if reading clipboard text succeeds."),
         ),
         MkAction::CallMacro(call) => {
             if let Some(signature) = callee {
@@ -1828,5 +1835,60 @@ mod tests {
             );
             assert_eq!(descriptor.availability, availability, "{name}");
         }
+    }
+
+    #[test]
+    fn clipboard_action_model_read_registers_definite_string_output() {
+        let read = step(
+            9,
+            MkAction::ReadClipboardText {
+                variable: "clipboard_text".into(),
+            },
+        );
+        let catalog = VariableCatalog::before_step(&[read.clone()], usize::MAX);
+        let descriptor = catalog
+            .effective_variables()
+            .iter()
+            .find(|descriptor| descriptor.name == "clipboard_text")
+            .unwrap();
+        assert_eq!(
+            descriptor.value_type,
+            VariableValueType::Known(MkValueType::String)
+        );
+        assert_eq!(
+            descriptor.availability,
+            VariableAvailability::DefinitelyAvailable
+        );
+        assert_eq!(
+            descriptor.source.step().unwrap().action_label,
+            "Read Clipboard Text"
+        );
+
+        let mut continue_read = step(
+            10,
+            MkAction::ReadClipboardText {
+                variable: "maybe_text".into(),
+            },
+        );
+        continue_read.on_error = MkErrorPolicy::Continue;
+        let catalog = VariableCatalog::before_step(&[continue_read], usize::MAX);
+        let maybe_text = catalog
+            .effective_variables()
+            .iter()
+            .find(|descriptor| descriptor.name == "maybe_text")
+            .unwrap();
+        assert_eq!(
+            maybe_text.value_type,
+            VariableValueType::Known(MkValueType::String)
+        );
+        assert_eq!(
+            maybe_text.availability,
+            VariableAvailability::PossiblyUnavailable
+        );
+        assert!(
+            maybe_text
+                .uncertainty_reasons
+                .contains(&VariableUncertaintyReason::ErrorMayContinue)
+        );
     }
 }

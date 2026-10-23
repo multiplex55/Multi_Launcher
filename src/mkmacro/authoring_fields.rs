@@ -525,6 +525,18 @@ pub fn visit_step_fields(step: &mut MkStep, visit: &mut Visitor<'_>) {
         MkAction::UnsetVariable { name } => {
             string(&path, Variable, name, FieldKind::VariableWrite, visit)
         }
+        MkAction::ReadClipboardText { variable } => {
+            string(&path, Variable, variable, FieldKind::VariableWrite, visit)
+        }
+        MkAction::WriteClipboardText(payload) => match &mut payload.source {
+            MkValueSource::Literal(MkValue::String(value)) => {
+                string(&path, Value, value, FieldKind::Text, visit)
+            }
+            MkValueSource::Literal(value) => literal(&path, value, visit),
+            MkValueSource::Variable { name } => {
+                string(&path, Variable, name, FieldKind::VariableRead, visit)
+            }
+        },
         MkAction::PromptInput(value) => {
             string(&path, Title, &mut value.title, FieldKind::Template, visit);
             string(&path, Prompt, &mut value.prompt, FieldKind::Template, visit);
@@ -1028,6 +1040,74 @@ mod tests {
             assert_eq!(edited.delay_after_ms, original.delay_after_ms);
             assert_eq!(edited.breakpoint, original.breakpoint);
         }
+    }
+
+    #[test]
+    fn clipboard_action_model_fields_keep_literal_text_and_variable_roles_distinct() {
+        let actions = [
+            MkAction::ReadClipboardText {
+                variable: "clipboard_text".into(),
+            },
+            MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+                source: MkValueSource::Literal(MkValue::String("${raw}".into())),
+            }),
+            MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+                source: MkValueSource::Variable {
+                    name: "source_text".into(),
+                },
+            }),
+        ];
+        let fields = actions
+            .iter()
+            .enumerate()
+            .map(|(index, action)| {
+                step_fields(&MkStep {
+                    metadata: Default::default(),
+                    id: index as u64 + 1,
+                    enabled: true,
+                    breakpoint: false,
+                    repeat: 1,
+                    delay_after_ms: 0,
+                    on_error: Default::default(),
+                    action: action.clone(),
+                })
+                .into_iter()
+                .map(|field| (field.path.to_string(), field.kind, field.value))
+                .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fields[0],
+            [
+                ("Label".to_owned(), FieldKind::Text, String::new()),
+                ("Comment".to_owned(), FieldKind::Text, String::new()),
+                (
+                    "Variable".to_owned(),
+                    FieldKind::VariableWrite,
+                    "clipboard_text".to_owned()
+                ),
+            ]
+        );
+        assert_eq!(
+            fields[1],
+            [
+                ("Label".to_owned(), FieldKind::Text, String::new()),
+                ("Comment".to_owned(), FieldKind::Text, String::new()),
+                ("Value".to_owned(), FieldKind::Text, "${raw}".to_owned()),
+            ]
+        );
+        assert_eq!(
+            fields[2],
+            [
+                ("Label".to_owned(), FieldKind::Text, String::new()),
+                ("Comment".to_owned(), FieldKind::Text, String::new()),
+                (
+                    "Variable".to_owned(),
+                    FieldKind::VariableRead,
+                    "source_text".to_owned()
+                ),
+            ]
+        );
     }
 
     #[test]

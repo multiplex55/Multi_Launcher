@@ -394,8 +394,9 @@ mod tests {
         AlphaPolicy, ExecutionOptions, LoadDisposition, MKMACROS_FILE, MacroRuntime, MkAction,
         MkCondition, MkCoordinateTarget, MkDelayPayload, MkHotkey, MkImageNotFoundPolicy,
         MkImageOutputs, MkImagePayload, MkKey, MkMouseButton, MkMouseMovePayload, MkMousePayload,
-        MkMouseScrollAxis, MkStep, MkValue, MkWaitOptions, ReturnPoint, RuntimeCommand,
-        RuntimeState, SCHEMA_VERSION, SearchRegion,
+        MkMouseScrollAxis, MkStep, MkValue, MkValueSource, MkWaitOptions,
+        MkWriteClipboardTextPayload, ReturnPoint, RuntimeCommand, RuntimeState, SCHEMA_VERSION,
+        SearchRegion,
     };
     use std::{
         fs, thread,
@@ -2946,6 +2947,9 @@ mod tests {
             MkAction::SetVariable { .. } | MkAction::UnsetVariable { .. } => {
                 (EditorKind::Variable, true)
             }
+            MkAction::ReadClipboardText { .. } | MkAction::WriteClipboardText(_) => {
+                (EditorKind::General, false)
+            }
             MkAction::PromptInput(_) => (EditorKind::PromptInput, true),
             MkAction::Else
             | MkAction::EndIf
@@ -2972,7 +2976,7 @@ mod tests {
         }
     }
 
-    fn detail_examples() -> [(MkAction, &'static str); 4] {
+    fn detail_examples() -> [(MkAction, &'static str); 6] {
         use crate::mkmacro::{MkClickWithinRegionPayload, MkDelayMode, MkDelayPayload, ScreenRect};
         [
             (
@@ -3007,6 +3011,20 @@ mod tests {
             (
                 MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop: 3 }),
                 "Desktop 3",
+            ),
+            (
+                MkAction::ReadClipboardText {
+                    variable: "clipboard_text".into(),
+                },
+                "Clipboard text → clipboard_text (runtime unavailable)",
+            ),
+            (
+                MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+                    source: MkValueSource::Variable {
+                        name: "clipboard_text".into(),
+                    },
+                }),
+                "Variable clipboard_text (runtime unavailable)",
             ),
         ]
     }
@@ -3113,6 +3131,29 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_action_model_loaded_rows_are_named_redacted_and_unavailable() {
+        let sentinel = "private_clipboard_sentinel";
+        let action = MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+            source: MkValueSource::Literal(MkValue::String(sentinel.into())),
+        });
+        assert_eq!(action_catalog::action_name(&action), "Write Clipboard Text");
+        assert_eq!(
+            action_catalog::editor_for_action(&action),
+            action_catalog::EditorKind::General
+        );
+        assert!(!action_catalog::editor_route_recognizes(
+            &action,
+            action_catalog::EditorKind::General
+        ));
+        assert!(!action_catalog::action_details(&action).contains(sentinel));
+        assert!(!format!("{action:?}").contains(sentinel));
+        assert!(!action_catalog::descriptors().iter().any(|descriptor| {
+            action_catalog::descriptor_name_matches_action(descriptor, &action)
+        }));
+        assert!(!crate::mkmacro::executor::has_runtime_support(&action));
+    }
+
+    #[test]
     fn region_delay_and_desktop_details_are_exact() {
         for (action, expected) in detail_examples() {
             assert_eq!(action_catalog::action_details(&action), expected);
@@ -3132,7 +3173,7 @@ mod tests {
     fn region_and_desktop_unsupported_backend_diagnostics_are_explicit() {
         use crate::mkmacro::{Backends, DiagnosticKind, Executor, RunControl};
 
-        let [(region, _), _, _, (desktop, _)] = detail_examples();
+        let [(region, _), _, _, (desktop, _), _, _] = detail_examples();
         for (action, operation) in [(region, "SendInput"), (desktop, "virtual desktop")] {
             let document = document_with_action(action);
             let plan = crate::mkmacro::compile(&document.macros[0]).unwrap();

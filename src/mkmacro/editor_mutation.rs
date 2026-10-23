@@ -190,6 +190,8 @@ fn rewrite_action_pixel_targets(action: &mut MkAction, search_ids: &BTreeMap<u64
         | MkAction::VirtualDesktop(_)
         | MkAction::SetVariable { .. }
         | MkAction::UnsetVariable { .. }
+        | MkAction::ReadClipboardText { .. }
+        | MkAction::WriteClipboardText(_)
         | MkAction::PromptInput(_)
         | MkAction::Else
         | MkAction::EndIf

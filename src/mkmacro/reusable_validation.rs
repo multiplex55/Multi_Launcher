@@ -278,6 +278,65 @@ fn source(
     }
 }
 
+fn clipboard_text_source(
+    source: &MkValueSource,
+    catalog: &VariableCatalog,
+    owner: u64,
+    step: u64,
+    out: &mut Vec<MkDiagnostic>,
+) {
+    match source {
+        MkValueSource::Literal(MkValue::String(_)) => {}
+        MkValueSource::Literal(_) => push(
+            out,
+            owner,
+            Some(step),
+            "clipboard_text_requires_string",
+            "Clipboard text source must be a String",
+        ),
+        MkValueSource::Variable { name } => {
+            if validate_variable_reference(name).is_err() {
+                return; // The shared field analysis reports the malformed reference.
+            }
+            let known = builtin_type(name).map(|kind| (kind, true)).or_else(|| {
+                catalog
+                    .effective_variables()
+                    .iter()
+                    .find(|descriptor| descriptor.name == *name)
+                    .and_then(|descriptor| match descriptor.value_type {
+                        VariableValueType::Known(kind) => Some((
+                            kind,
+                            descriptor.availability == VariableAvailability::DefinitelyAvailable,
+                        )),
+                        VariableValueType::Unknown => None,
+                    })
+            });
+            if let Some((actual, certain)) = known.filter(|(kind, _)| *kind != MkValueType::String)
+            {
+                let message = format!(
+                    "Clipboard text source must be String; this variable is known as {}",
+                    actual.label()
+                );
+                out.push(if certain {
+                    MkDiagnostic::fatal(
+                        owner,
+                        Some(step),
+                        "clipboard_text_requires_string",
+                        message,
+                    )
+                } else {
+                    MkDiagnostic::warning(
+                        owner,
+                        Some(step),
+                        "clipboard_text_may_not_be_string",
+                        message,
+                    )
+                });
+            }
+        }
+    }
+}
+
 pub(crate) fn bindings(
     document: &MkMacroDocument,
     graph: &CallGraph,
@@ -477,6 +536,9 @@ pub(crate) fn bindings(
                     );
                 }
             }
+        }
+        MkAction::WriteClipboardText(payload) => {
+            clipboard_text_source(&payload.source, catalog, owner.id, step.id, out)
         }
         _ => {}
     }

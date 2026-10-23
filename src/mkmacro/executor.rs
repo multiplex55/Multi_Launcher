@@ -4316,6 +4316,12 @@ impl Executor {
                 DiagnosticKind::InvalidPlan,
                 "Reusable action bypassed the frame engine",
             )),
+            MkAction::ReadClipboardText { .. } | MkAction::WriteClipboardText(_) => {
+                Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::UnsupportedOperation,
+                    "Clipboard text actions are not available in this runtime",
+                ))
+            }
             MkAction::KeyDown(k) => g.down_key(k),
             MkAction::KeyUp(k) => g.up_key(k),
             MkAction::KeyPress(k) => {
@@ -6029,7 +6035,7 @@ mod notification_sound_tests {
     use super::{fake::FakeBackend, *};
     use crate::mkmacro::{
         MkErrorPolicy, MkMacro, MkNotifyPayload, MkPlaySoundPayload, MkRetry, MkStep, MkTextMode,
-        compile,
+        MkValueSource, compile,
     };
     use std::sync::mpsc;
 
@@ -6309,6 +6315,44 @@ mod notification_sound_tests {
         assert_eq!(scheduled_rx.try_recv().unwrap(), "ReminderStart.wav");
         assert_eq!(fake.events(), vec!["text:following step"]);
     }
+
+    #[test]
+    fn clipboard_action_policy_runtime_fails_closed_without_backend_or_variable_effects() {
+        let fake = Arc::new(FakeBackend::default());
+        let mut variables =
+            RuntimeVariables::from([("existing".into(), MkValue::String("preserved".into()))]);
+        let original = variables.clone();
+        let mut guard = InputCleanupGuard::new(fake.clone());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::new(fake.clone().backends(), control);
+        let actions = [
+            MkAction::ReadClipboardText {
+                variable: "read_value".into(),
+            },
+            MkAction::WriteClipboardText(crate::mkmacro::MkWriteClipboardTextPayload {
+                source: MkValueSource::Literal(MkValue::String(
+                    "private_clipboard_sentinel".into(),
+                )),
+            }),
+        ];
+        for action in &actions {
+            assert!(!has_runtime_support(action));
+            let error = executor
+                .action(
+                    7,
+                    action,
+                    &MkPlayback::default(),
+                    &mut variables,
+                    &mut guard,
+                )
+                .unwrap_err();
+            assert_eq!(error.kind, DiagnosticKind::UnsupportedOperation);
+            assert!(!error.message.contains("private_clipboard_sentinel"));
+            assert_eq!(variables, original);
+        }
+        assert!(fake.events().is_empty());
+    }
 }
 /// Reports whether every condition in the tree has an available runtime
 /// implementation for the supplied platform OCR capability.
@@ -6334,6 +6378,7 @@ fn has_runtime_support_with_ocr(action: &MkAction, ocr_supported: bool) -> bool 
         | MkAction::UiSelect(_)
         | MkAction::UiFocus(_)
         | MkAction::UiWait(_) => false,
+        MkAction::ReadClipboardText { .. } | MkAction::WriteClipboardText(_) => false,
         MkAction::Notify(_) => cfg!(windows),
         MkAction::WaitUntil { condition, .. } | MkAction::WhileStart { condition } => {
             condition_runtime_support(condition, ocr_supported)
@@ -6501,6 +6546,7 @@ fn action_name(a: &MkAction) -> &'static str {
         MkAction::Process(_) | MkAction::LauncherCommand(_) => "launcher",
         MkAction::WaitUntil { .. } => "condition_evaluator",
         MkAction::PromptInput(_) => "prompt",
+        MkAction::ReadClipboardText { .. } | MkAction::WriteClipboardText(_) => "clipboard",
         MkAction::Notify(_) => "notification",
         MkAction::PlaySound(_) => "sound",
         MkAction::Delay(_)

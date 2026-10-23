@@ -54,6 +54,41 @@ pub enum MkValueSource {
     Literal(MkValue),
     Variable { name: String },
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardTextResolutionError {
+    MissingVariable,
+    NonStringValue,
+}
+
+impl ClipboardTextResolutionError {
+    pub const fn safe_message(self) -> &'static str {
+        match self {
+            Self::MissingVariable => "clipboard text source variable is unavailable",
+            Self::NonStringValue => "clipboard text source must resolve to a String",
+        }
+    }
+}
+
+/// Resolves an explicit clipboard-text source without template expansion or
+/// type coercion. Literal strings, including `${...}` text, are copied exactly.
+pub fn resolve_clipboard_text_source(
+    source: &MkValueSource,
+    variables: &RuntimeVariables,
+) -> Result<String, ClipboardTextResolutionError> {
+    let value = match source {
+        MkValueSource::Literal(value) => value,
+        MkValueSource::Variable { name } => variables
+            .get(name)
+            .ok_or(ClipboardTextResolutionError::MissingVariable)?,
+    };
+    match value {
+        MkValue::String(text) => Ok(text.clone()),
+        MkValue::Number(_) | MkValue::Boolean(_) | MkValue::Point(_) | MkValue::Null => {
+            Err(ClipboardTextResolutionError::NonStringValue)
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MkPoint {
     pub x: i32,
@@ -196,5 +231,56 @@ mod tests {
                 Err("built-in variable is read-only")
             );
         }
+    }
+
+    #[test]
+    fn clipboard_action_model_resolves_exact_strings_and_rejects_other_values() {
+        let mut variables = RuntimeVariables::new();
+        variables.insert("name".into(), MkValue::String("expanded".into()));
+        let literal = MkValueSource::Literal(MkValue::String("${name}".into()));
+        assert_eq!(
+            resolve_clipboard_text_source(&literal, &variables),
+            Ok("${name}".into())
+        );
+
+        let reference = MkValueSource::Variable {
+            name: "value".into(),
+        };
+        variables.insert("value".into(), MkValue::String("exact text".into()));
+        assert_eq!(
+            resolve_clipboard_text_source(&reference, &variables),
+            Ok("exact text".into())
+        );
+
+        for value in [
+            MkValue::Number(4.0),
+            MkValue::Boolean(true),
+            MkValue::Point(MkPoint { x: 3, y: -2 }),
+            MkValue::Null,
+        ] {
+            assert_eq!(
+                resolve_clipboard_text_source(&MkValueSource::Literal(value.clone()), &variables,),
+                Err(ClipboardTextResolutionError::NonStringValue)
+            );
+            variables.insert("value".into(), value);
+            assert_eq!(
+                resolve_clipboard_text_source(&reference, &variables),
+                Err(ClipboardTextResolutionError::NonStringValue)
+            );
+        }
+        assert_eq!(
+            resolve_clipboard_text_source(
+                &MkValueSource::Variable {
+                    name: "missing".into(),
+                },
+                &variables,
+            ),
+            Err(ClipboardTextResolutionError::MissingVariable)
+        );
+        assert!(
+            !ClipboardTextResolutionError::MissingVariable
+                .safe_message()
+                .contains("missing")
+        );
     }
 }

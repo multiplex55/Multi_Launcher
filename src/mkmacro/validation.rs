@@ -627,6 +627,20 @@ fn analyze_document_with_context(
                         );
                     }
                 }
+                MkAction::ReadClipboardText { variable } => {
+                    if let Err(reason) = validate_variable_name(variable) {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_variable",
+                            format!("Clipboard destination variable is invalid: {reason}"),
+                        );
+                    }
+                }
+                // Source type/reference validation is owned by the shared
+                // reusable-binding validator below.
+                MkAction::WriteClipboardText(_) => {}
                 MkAction::PromptInput(payload) => {
                     if let Err(e) = validate_variable_name(&payload.variable) {
                         push(
@@ -3355,5 +3369,107 @@ mod virtual_desktop_validation_tests {
     fn one_based_virtual_desktop_number_is_valid() {
         assert!(diagnostics(1).is_empty());
         assert!(diagnostics(3).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod clipboard_action_model_validation_tests {
+    use super::*;
+
+    fn step(id: u64, action: MkAction) -> MkStep {
+        MkStep {
+            metadata: Default::default(),
+            id,
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            action,
+        }
+    }
+
+    fn diagnostics(actions: Vec<MkAction>) -> Vec<MkDiagnostic> {
+        let owner = MkMacro {
+            signature: Default::default(),
+            id: 41,
+            name: "clipboard validation".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: Default::default(),
+            steps: actions
+                .into_iter()
+                .enumerate()
+                .map(|(index, action)| step(index as u64 + 1, action))
+                .collect(),
+        };
+        validate_document(
+            &MkMacroDocument {
+                macros: vec![owner],
+                ..Default::default()
+            },
+            None,
+        )
+    }
+
+    fn write_literal(value: MkValue) -> MkAction {
+        MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+            source: MkValueSource::Literal(value),
+        })
+    }
+
+    #[test]
+    fn clipboard_action_model_validates_writable_destination_and_exact_string_sources() {
+        let sentinel = "private_clipboard_sentinel";
+        let ds = diagnostics(vec![
+            MkAction::ReadClipboardText {
+                variable: "mouse.x".into(),
+            },
+            write_literal(MkValue::String(format!("${{{sentinel}}}"))),
+            write_literal(MkValue::Number(7.0)),
+            write_literal(MkValue::Boolean(true)),
+            write_literal(MkValue::Point(MkPoint { x: 4, y: 9 })),
+            write_literal(MkValue::Null),
+        ]);
+        assert!(ds.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_variable"
+                && diagnostic.step_id == Some(1)
+                && diagnostic.message.contains("read-only")
+        }));
+        for step_id in 3..=6 {
+            assert!(ds.iter().any(|diagnostic| {
+                diagnostic.code == "clipboard_text_requires_string"
+                    && diagnostic.step_id == Some(step_id)
+            }));
+        }
+        assert!(
+            ds.iter()
+                .all(|diagnostic| !diagnostic.message.contains(sentinel))
+        );
+
+        let known_wrong_type = diagnostics(vec![
+            MkAction::SetVariable {
+                name: sentinel.into(),
+                value: MkValue::Number(8.0),
+            },
+            MkAction::WriteClipboardText(MkWriteClipboardTextPayload {
+                source: MkValueSource::Variable {
+                    name: sentinel.into(),
+                },
+            }),
+        ]);
+        assert!(known_wrong_type.iter().any(|diagnostic| {
+            diagnostic.code == "clipboard_text_requires_string"
+                && diagnostic.step_id == Some(2)
+                && diagnostic.message.contains("Number")
+        }));
+        assert!(
+            known_wrong_type
+                .iter()
+                .all(|diagnostic| !diagnostic.message.contains(sentinel))
+        );
     }
 }

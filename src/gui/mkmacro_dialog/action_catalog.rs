@@ -971,6 +971,7 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         }
         MkAction::RepeatStart { .. } => EditorKind::Repeat,
         MkAction::SetVariable { .. } | MkAction::UnsetVariable { .. } => EditorKind::Variable,
+        MkAction::ReadClipboardText { .. } | MkAction::WriteClipboardText(_) => EditorKind::General,
         MkAction::PromptInput(_) => EditorKind::PromptInput,
         MkAction::Else
         | MkAction::EndIf
@@ -1279,6 +1280,8 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::WaitUntil { .. } => "Wait Until",
         MkAction::SetVariable { .. } => "Set Variable",
         MkAction::UnsetVariable { .. } => "Unset Variable",
+        MkAction::ReadClipboardText { .. } => "Read Clipboard Text",
+        MkAction::WriteClipboardText(_) => "Write Clipboard Text",
         MkAction::PromptInput(_) => "Prompt for Input",
         MkAction::If(_) => "If",
         MkAction::Else => "Else",
@@ -1411,6 +1414,20 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
         }
         MkAction::SetVariable { name, .. } => format!("Set {name}"),
         MkAction::UnsetVariable { name } => format!("Unset {name}"),
+        MkAction::ReadClipboardText { variable } => {
+            format!("Clipboard text → {variable} (runtime unavailable)")
+        }
+        MkAction::WriteClipboardText(payload) => match &payload.source {
+            crate::mkmacro::MkValueSource::Literal(crate::mkmacro::MkValue::String(_)) => {
+                "Literal text (runtime unavailable)".into()
+            }
+            crate::mkmacro::MkValueSource::Variable { name } => {
+                format!("Variable {name} (runtime unavailable)")
+            }
+            crate::mkmacro::MkValueSource::Literal(_) => {
+                "Invalid non-string source (runtime unavailable)".into()
+            }
+        },
         MkAction::PromptInput(p) => format!(
             "Ask ‘{}’ → {}{}",
             p.prompt,
