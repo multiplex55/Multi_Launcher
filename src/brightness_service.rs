@@ -2892,7 +2892,7 @@ pub(crate) mod tests {
         mode: FakeServiceMode,
         wake: BrightnessWakeCallback,
     ) -> (BrightnessService, Arc<FakeServiceHarness>) {
-        fake_service_with_wake(mode, quick_timing(), wake)
+        fake_service_with_wake(mode, dialog_fixture_timing(), wake)
     }
 
     pub(crate) fn fake_service_reusing_dialog_harness(
@@ -2901,7 +2901,7 @@ pub(crate) mod tests {
     ) -> BrightnessService {
         BrightnessService::with_factory_and_wake(
             Box::new(FakeHelperFactory { harness }),
-            quick_timing(),
+            dialog_fixture_timing(),
             wake,
         )
     }
@@ -2915,6 +2915,17 @@ pub(crate) mod tests {
             startup: Duration::from_millis(100),
             operation: Duration::from_millis(100),
             cleanup: Duration::from_millis(100),
+        }
+    }
+
+    fn dialog_fixture_timing() -> ServiceTiming {
+        // UI and coalescing fixtures may be descheduled between real egui
+        // frames under full-suite load. Keep their service deadline bounded,
+        // but long enough that scheduler delay does not mimic a late native reply.
+        ServiceTiming {
+            startup: Duration::from_secs(10),
+            operation: Duration::from_secs(10),
+            cleanup: Duration::from_secs(10),
         }
     }
 
@@ -3027,7 +3038,7 @@ pub(crate) mod tests {
     #[test]
     fn brightness_service_coalesces_one_pending_request_and_preserves_active_order() {
         let (mut service, harness) =
-            fake_service(FakeServiceMode::GateFirstRefresh, quick_timing());
+            fake_service(FakeServiceMode::GateFirstRefresh, dialog_fixture_timing());
         let active = service.refresh().unwrap();
         assert!(harness.wait_for(|state| state.gate_entered));
         let displaced = service.refresh().unwrap();
@@ -3041,14 +3052,16 @@ pub(crate) mod tests {
             state.release_gate = true;
             harness.changed.notify_all();
         }
-        assert!(matches!(
-            receive(&active),
-            BrightnessCompletion::Refreshed(Ok(_))
-        ));
-        assert!(matches!(
-            receive(&latest),
-            BrightnessCompletion::Refreshed(Ok(_))
-        ));
+        let active_completion = receive(&active);
+        assert!(
+            matches!(&active_completion, BrightnessCompletion::Refreshed(Ok(_))),
+            "the active gated request should complete after release; got {active_completion:?}"
+        );
+        let latest_completion = receive(&latest);
+        assert!(
+            matches!(&latest_completion, BrightnessCompletion::Refreshed(Ok(_))),
+            "the coalesced latest request should complete after the active request; got {latest_completion:?}"
+        );
         let operations = harness.lock().operations.clone();
         assert_eq!(operations.len(), 2);
         assert_eq!(operations[0].1, active.id());

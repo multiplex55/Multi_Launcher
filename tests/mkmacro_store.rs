@@ -1039,6 +1039,7 @@ fn schema_eleven_defaults_and_current_reusable_fields_survive_public_store_round
             id: parameter_id,
             name: "message".into(),
             value_type: MkValueType::String,
+            input_kind: MkParameterInputKind::Text,
             description: "typed input".into(),
             default_value: Some(MkValue::String("default".into())),
         }],

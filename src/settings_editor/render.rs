@@ -4027,30 +4027,44 @@ mod settings_shell_tests {
             })
     }
 
+    #[derive(Clone, Copy)]
+    enum SettingsScrollDirection {
+        Earlier,
+        Later,
+    }
+
     fn settings_scroll_until_target(
         ctx: &egui::Context,
         app: &mut LauncherApp,
         jump: &mut crate::gui::jump_mode::ui::JumpModeUi,
         mut targets: Vec<crate::gui::jump_mode::ui::RegisteredTarget>,
         wanted_label: &str,
+        direction: SettingsScrollDirection,
     ) -> Vec<crate::gui::jump_mode::ui::RegisteredTarget> {
-        let scroll_position = target_by_label(&targets, "Expand all").rect().center();
         for _ in 0..16 {
             if targets
                 .iter()
-                .any(|target| target.metadata().label() == wanted_label)
+                .any(|target| target.metadata().label() == wanted_label && target.eligible())
             {
                 return targets;
             }
+            let scroll_clip = app
+                .settings_editor
+                .test_search_query_clip_rect
+                .expect("the current Settings search viewport is recorded");
+            let delta_y = match direction {
+                SettingsScrollDirection::Earlier => 180.0,
+                SettingsScrollDirection::Later => -180.0,
+            };
             targets = settings_jump_frame(
                 ctx,
                 app,
                 jump,
                 vec![
-                    egui::Event::PointerMoved(scroll_position),
+                    egui::Event::PointerMoved(scroll_clip.center()),
                     egui::Event::MouseWheel {
                         unit: egui::MouseWheelUnit::Point,
-                        delta: egui::vec2(0.0, -180.0),
+                        delta: egui::vec2(0.0, delta_y),
                         phase: egui::TouchPhase::Move,
                         modifiers: egui::Modifiers::NONE,
                     },
@@ -4059,7 +4073,17 @@ mod settings_shell_tests {
                 true,
             );
         }
-        target_by_label(&targets, wanted_label);
+        if let Some(target) = targets
+            .iter()
+            .find(|target| target.metadata().label() == wanted_label)
+        {
+            assert!(
+                target.eligible(),
+                "Settings Jump target {wanted_label} did not become eligible after bounded scrolling"
+            );
+        } else {
+            target_by_label(&targets, wanted_label);
+        }
         targets
     }
 
@@ -5203,8 +5227,9 @@ mod settings_shell_tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         };
-        let (_, checkbox_values, checkbox_passes) =
+        let (checkbox_targets, checkbox_values, checkbox_passes) =
             settings_jump_discard_frame(&ctx, &mut app, &mut jump, vec![space]);
+        targets = checkbox_targets;
         assert_eq!(checkbox_passes, 2, "egui retains its second pass");
         assert_eq!(checkbox_values.len(), checkbox_passes);
         assert_ne!(
@@ -5231,8 +5256,9 @@ mod settings_shell_tests {
                 )
                 .collect();
         let before_pointer = app.settings_editor.quit_hotkey_enabled;
-        let (_, pointer_values, pointer_passes) =
+        let (pointer_targets, pointer_values, pointer_passes) =
             settings_jump_discard_frame(&ctx, &mut app, &mut jump, pointer_click);
+        targets = pointer_targets;
         assert_eq!(
             pointer_passes, 2,
             "pointer activation also requests a retry"
@@ -5243,6 +5269,24 @@ mod settings_shell_tests {
             pointer_values[0].quit_hotkey_enabled
         );
 
+        targets = settings_scroll_until_target(
+            &ctx,
+            &mut app,
+            &mut jump,
+            targets,
+            "Enable Next shortcut",
+            SettingsScrollDirection::Later,
+        );
+        assert!(target_by_label(&targets, "Enable Next shortcut").eligible());
+        targets = settings_scroll_until_target(
+            &ctx,
+            &mut app,
+            &mut jump,
+            targets,
+            "Paste Sequences",
+            SettingsScrollDirection::Later,
+        );
+        assert!(target_by_label(&targets, "Paste Sequences").eligible());
         let paste_header = target_by_label(&targets, "Paste Sequences").clone();
         settings_jump_frame(
             &ctx,
@@ -5255,7 +5299,6 @@ mod settings_shell_tests {
         let (collapsed_targets, header_values, header_passes) =
             settings_jump_discard_frame(&ctx, &mut app, &mut jump, vec![enter.clone()]);
         assert_eq!(header_passes, 2, "section toggles survive the retry");
-        assert!(target_by_label(&targets, "Enable Next shortcut").eligible());
         assert!(
             collapsed_targets
                 .iter()
@@ -5263,6 +5306,15 @@ mod settings_shell_tests {
         );
         assert!(header_values.iter().all(|pass| !pass.paste_body_visible));
 
+        targets = settings_scroll_until_target(
+            &ctx,
+            &mut app,
+            &mut jump,
+            collapsed_targets,
+            "Launcher hotkey",
+            SettingsScrollDirection::Earlier,
+        );
+        assert!(target_by_label(&targets, "Launcher hotkey").eligible());
         let launcher_hotkey = target_by_label(&targets, "Launcher hotkey").clone();
         settings_jump_frame(
             &ctx,
@@ -5273,12 +5325,13 @@ mod settings_shell_tests {
             true,
         );
         let original_hotkey = app.settings_editor.hotkey.clone();
-        let (_, hotkey_values, hotkey_passes) = settings_jump_discard_frame(
+        let (hotkey_targets, hotkey_values, hotkey_passes) = settings_jump_discard_frame(
             &ctx,
             &mut app,
             &mut jump,
             vec![egui::Event::Text("q".into())],
         );
+        targets = hotkey_targets;
         assert_eq!(hotkey_passes, 2, "text entry is checked in a retained pass");
         assert_eq!(hotkey_values[0].hotkey, format!("{original_hotkey}q"));
         assert_eq!(hotkey_values[1].hotkey, hotkey_values[0].hotkey);
@@ -5296,7 +5349,9 @@ mod settings_shell_tests {
             &mut jump,
             targets,
             "Experimental Jump Mode",
+            SettingsScrollDirection::Later,
         );
+        assert!(target_by_label(&targets, "Experimental Jump Mode").eligible());
         let jump_mode_toggle = target_by_label(&targets, "Experimental Jump Mode").clone();
         settings_jump_frame(
             &ctx,
