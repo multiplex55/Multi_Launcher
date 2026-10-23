@@ -1866,7 +1866,7 @@ mod tests {
                 variable: "clipboard_text".into(),
             },
         );
-        let catalog = VariableCatalog::before_step(&[read.clone()], usize::MAX);
+        let catalog = VariableCatalog::before_step(std::slice::from_ref(&read), usize::MAX);
         let descriptor = catalog
             .effective_variables()
             .iter()

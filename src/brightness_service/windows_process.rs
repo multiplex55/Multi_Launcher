@@ -119,8 +119,8 @@ impl HelperFactory for WindowsHelperFactory {
             session.session,
             BrightnessRequestId(0),
             0,
-        ) || request_pipe_capacity < MIN_REQUEST_PIPE_CAPACITY_BYTES
-            || request_pipe_capacity > MAX_REPORTED_PIPE_CAPACITY_BYTES
+        ) || !(MIN_REQUEST_PIPE_CAPACITY_BYTES..=MAX_REPORTED_PIPE_CAPACITY_BYTES)
+            .contains(&request_pipe_capacity)
         {
             session.poisoned = true;
             let mut failure = BrightnessFailure::new(BrightnessFailureKind::ProtocolFailure);
@@ -806,7 +806,7 @@ impl NativeMonitorApi for NativeMonitorApiImpl {
                 HDC(std::ptr::null_mut()),
                 None,
                 Some(enumerate_display_callback),
-                LPARAM((&mut context as *mut EnumContext as isize)),
+                LPARAM(&mut context as *mut EnumContext as isize),
             )
         };
         if !result.as_bool() || context.overflow {

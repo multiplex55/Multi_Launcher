@@ -147,35 +147,35 @@ impl SettingsNavigationFrameObserver {
         kind: TargetKind,
     ) {
         #[cfg(test)]
-        let diagnostic_sample = (|| {
-            if self
-                .request()
-                .is_some_and(|request| request.control_id == control_id)
-            {
-                let visible_rect = response.rect.intersect(ui.clip_rect());
-                Some(TestPendingResponseObservation {
-                    control_id: control_id.to_owned(),
-                    sizing_pass: ui.is_sizing_pass(),
-                    ui_visible: ui.is_visible(),
-                    ui_enabled: ui.is_enabled(),
-                    response_enabled: response.enabled(),
-                    response_rect: response.rect,
-                    ui_clip_rect: ui.clip_rect(),
-                    clipped_rect_positive: visible_rect.is_positive(),
-                    interaction_allowed: ui
-                        .ctx()
-                        .memory(|memory| memory.allows_interaction(response.layer_id)),
-                    response_has_focus: response.has_focus(),
-                    focused_id: ui.ctx().memory(|memory| memory.focused()),
-                })
-            } else {
-                None
-            }
-        })();
+        let diagnostic_sample = if self
+            .request()
+            .is_some_and(|request| request.control_id == control_id)
+        {
+            let visible_rect = response.rect.intersect(ui.clip_rect());
+            Some(TestPendingResponseObservation {
+                control_id: control_id.to_owned(),
+                sizing_pass: ui.is_sizing_pass(),
+                ui_visible: ui.is_visible(),
+                ui_enabled: ui.is_enabled(),
+                response_enabled: response.enabled(),
+                response_rect: response.rect,
+                ui_clip_rect: ui.clip_rect(),
+                clipped_rect_positive: visible_rect.is_positive(),
+                interaction_allowed: ui
+                    .ctx()
+                    .memory(|memory| memory.allows_interaction(response.layer_id)),
+                response_has_focus: response.has_focus(),
+                focused_id: ui.ctx().memory(|memory| memory.focused()),
+            })
+        } else {
+            None
+        };
         let (request, first_ui_pass, owner_current, active, already_superseded, already_focused) = {
-            let Ok(mut state) = self.state.lock() else {
+            let Ok(state) = self.state.lock() else {
                 return;
             };
+            #[cfg(test)]
+            let mut state = state;
             #[cfg(test)]
             if let Some(sample) = diagnostic_sample {
                 state.response_observations.push(sample);
@@ -791,6 +791,7 @@ impl SettingsEditor {
         }
 
         if protected_takeover {
+            #[cfg(test)]
             let control_id = self
                 .pending_settings_navigation
                 .as_ref()
@@ -891,6 +892,7 @@ impl SettingsEditor {
         let Some(request) = observer.request() else {
             return;
         };
+        #[cfg(test)]
         let outcome = observer.outcome();
         #[cfg(test)]
         {
@@ -1073,15 +1075,15 @@ impl SettingsEditor {
                             first_ui_pass,
                             &mut jump_targets,
                         );
-                        if let Some(control_id) = activated_result {
-                            if let Some(entry) = self.search_catalog.entry(&control_id).cloned() {
-                                reveal_section = Some(entry.section.clone());
-                                self.activate_settings_search_result(
-                                    app,
-                                    settings_owner_instance,
-                                    entry,
-                                );
-                            }
+                        if let Some(control_id) = activated_result
+                            && let Some(entry) = self.search_catalog.entry(&control_id).cloned()
+                        {
+                            reveal_section = Some(entry.section.clone());
+                            self.activate_settings_search_result(
+                                app,
+                                settings_owner_instance,
+                                entry,
+                            );
                         }
                         if let Some(observer) = jump_targets.navigation_observer.as_ref()
                             && !self
@@ -1261,6 +1263,7 @@ impl SettingsEditor {
                     }
                 });
             });
+        #[cfg(test)]
         let navigation_outcome = jump_targets
             .navigation_observer
             .as_ref()

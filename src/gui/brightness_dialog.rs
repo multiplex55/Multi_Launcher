@@ -679,18 +679,18 @@ impl BrightnessDialog {
         self.drafts.clear();
         self.row_status.clear();
         let mut shutdown_failure = None;
-        if let Some(mut service) = self.service.take() {
-            if let Err(failure) = service.shutdown() {
-                self.retain_shutdown_failure(&failure);
-                shutdown_failure = Some(failure);
-            }
+        if let Some(mut service) = self.service.take()
+            && let Err(failure) = service.shutdown()
+        {
+            self.retain_shutdown_failure(&failure);
+            shutdown_failure = Some(failure);
         }
         #[cfg(test)]
-        if let Some(mut service) = self.test_reopen_service.take() {
-            if let Err(failure) = service.shutdown() {
-                self.retain_shutdown_failure(&failure);
-                shutdown_failure.get_or_insert(failure);
-            }
+        if let Some(mut service) = self.test_reopen_service.take()
+            && let Err(failure) = service.shutdown()
+        {
+            self.retain_shutdown_failure(&failure);
+            shutdown_failure.get_or_insert(failure);
         }
         if let Some(failure) = shutdown_failure {
             self.inventory_fresh = false;

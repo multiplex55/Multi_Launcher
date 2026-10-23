@@ -224,13 +224,13 @@ impl BrightnessFailure {
     fn carrying_set_context_from(mut self, previous: &Self) -> Self {
         self.set_disposition = previous.set_disposition;
         self.set_cause = previous.set_cause.clone().or_else(|| {
-            (previous.set_disposition == Some(BrightnessSetDisposition::Unknown)).then(|| {
+            (previous.set_disposition == Some(BrightnessSetDisposition::Unknown)).then_some(
                 BrightnessSetFailureCause {
                     kind: previous.kind,
                     operation: previous.operation,
                     native_code: previous.native_code,
-                }
-            })
+                },
+            )
         });
         self
     }
@@ -389,13 +389,15 @@ impl Default for BrightnessCancellation {
 
 fn safe_name(value: &str, maximum: usize) -> String {
     let mut output = String::new();
-    let mut characters = 0usize;
-    for character in value.chars().filter(|character| !character.is_control()) {
+    for (characters, character) in value
+        .chars()
+        .filter(|character| !character.is_control())
+        .enumerate()
+    {
         if characters >= maximum || output.len().saturating_add(character.len_utf8()) > maximum {
             break;
         }
         output.push(character);
-        characters += 1;
     }
     output
 }
@@ -967,7 +969,7 @@ impl BrightnessService {
     ) -> Result<BrightnessRequestTicket, BrightnessFailure> {
         let raw_id = self
             .next_request
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 value.checked_add(1)
             })
             .map_err(|_| BrightnessFailure::new(BrightnessFailureKind::Unsupported))?;
@@ -1774,7 +1776,7 @@ pub(crate) mod tests {
             index: usize,
         ) -> Result<NativeBrightnessRange, NativeFailure> {
             self.log.lock().unwrap().reads += 1;
-            let result = self.spec.readings.get(index).cloned().unwrap_or_else(|| {
+            let result = self.spec.readings.get(index).cloned().unwrap_or({
                 Err(NativeFailure {
                     operation: BrightnessOperation::ReadBrightness,
                     code: None,

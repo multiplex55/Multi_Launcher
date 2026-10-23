@@ -580,23 +580,21 @@ impl TableDocument {
             }
             observed_width = observed_width.max(shape.width);
         }
-        if let Some(headers) = decoded_header.as_mut() {
-            if headers.len() < schema_width {
-                add_warning(
-                    &mut diagnostics,
-                    &mut omitted_diagnostics,
-                    TableWarning::HeaderLabelsMissing {
-                        first_column: headers.len() + 1,
-                        count: schema_width - headers.len(),
-                    },
-                );
-                headers
-                    .try_reserve(schema_width - headers.len())
-                    .map_err(|_| {
-                        TableParseError::new(TableParseErrorKind::AllocationFailed, None)
-                    })?;
-                headers.resize(schema_width, None);
-            }
+        if let Some(headers) = decoded_header.as_mut()
+            && headers.len() < schema_width
+        {
+            add_warning(
+                &mut diagnostics,
+                &mut omitted_diagnostics,
+                TableWarning::HeaderLabelsMissing {
+                    first_column: headers.len() + 1,
+                    count: schema_width - headers.len(),
+                },
+            );
+            headers
+                .try_reserve(schema_width - headers.len())
+                .map_err(|_| TableParseError::new(TableParseErrorKind::AllocationFailed, None))?;
+            headers.resize(schema_width, None);
         }
         for (index, cells) in decoded.iter_mut().enumerate() {
             if index % 256 == 0 {
@@ -1454,7 +1452,7 @@ fn collect_header_diagnostics(
 
 fn next_document_id() -> Result<TableDocumentId, TableParseError> {
     NEXT_DOCUMENT_ID
-        .fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |id| {
+        .try_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |id| {
             id.checked_add(1)
         })
         .map(TableDocumentId)
@@ -1463,7 +1461,7 @@ fn next_document_id() -> Result<TableDocumentId, TableParseError> {
 
 fn next_view_id() -> Result<TableViewId, TableProjectionError> {
     NEXT_VIEW_ID
-        .fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |id| {
+        .try_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |id| {
             id.checked_add(1)
         })
         .map(TableViewId)
@@ -1506,22 +1504,12 @@ pub struct TableSort {
     pub mode: TableSortMode,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TableProjectionOptions {
     pub filter: String,
     /// Empty means search every column. A non-empty list is an explicit set.
     pub filter_columns: Vec<usize>,
     pub sort: Option<TableSort>,
-}
-
-impl Default for TableProjectionOptions {
-    fn default() -> Self {
-        Self {
-            filter: String::new(),
-            filter_columns: Vec::new(),
-            sort: None,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1845,22 +1833,20 @@ impl TableProjection {
             .has_headers(false)
             .buffer_capacity(8 * 1024)
             .from_writer(sink);
-        if include_headers {
-            if let Some(headers) = document.headers.as_ref() {
-                let fields: Vec<&str> = selection
-                    .columns
-                    .iter()
-                    .map(|column| {
-                        headers
-                            .get(*column)
-                            .and_then(Option::as_deref)
-                            .unwrap_or("")
-                    })
-                    .collect();
-                writer
-                    .write_record(fields)
-                    .map_err(|_| writer_error(&writer))?;
-            }
+        if include_headers && let Some(headers) = document.headers.as_ref() {
+            let fields: Vec<&str> = selection
+                .columns
+                .iter()
+                .map(|column| {
+                    headers
+                        .get(*column)
+                        .and_then(Option::as_deref)
+                        .unwrap_or("")
+                })
+                .collect();
+            writer
+                .write_record(fields)
+                .map_err(|_| writer_error(&writer))?;
         }
         for (index, row_id) in selection.rows.iter().enumerate() {
             if index % 128 == 0 {
@@ -2345,7 +2331,7 @@ fn sort_visible_rows(
             let mut right = middle;
             while left < middle && right < end {
                 comparisons += 1;
-                if comparisons % 256 == 0 {
+                if comparisons.is_multiple_of(256) {
                     check_projection_cancelled(cancellation)?;
                 }
                 if compare_row_ids(rows[left], rows[right], document, sort, effective)

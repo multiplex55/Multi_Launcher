@@ -292,29 +292,29 @@ fn probe_shield_with_bounded_topmost_reassert(
     dimensions: (i32, i32),
     mut probe: impl FnMut() -> ShieldProbe,
     mut reassert: impl FnMut(ScreenRect, (i32, i32)) -> Result<(), i32>,
-) -> Result<ShieldProbe, ShieldRecoveryFailure> {
+) -> Result<ShieldProbe, Box<ShieldRecoveryFailure>> {
     let initial_probe = probe();
     let initial_reasons = initial_probe.failures(expected);
     if initial_reasons.is_empty() {
         return Ok(initial_probe);
     }
     if initial_reasons.as_slice() != [ShieldFailure::TopmostMissing] {
-        return Err(ShieldRecoveryFailure {
+        return Err(Box::new(ShieldRecoveryFailure {
             initial_probe,
             failed_probe: initial_probe,
             reasons: initial_reasons,
             set_window_pos_error: None,
             reassertion_attempted: false,
-        });
+        }));
     }
     if let Err(error) = reassert(expected, dimensions) {
-        return Err(ShieldRecoveryFailure {
+        return Err(Box::new(ShieldRecoveryFailure {
             initial_probe,
             failed_probe: initial_probe,
             reasons: initial_reasons,
             set_window_pos_error: Some(error),
             reassertion_attempted: true,
-        });
+        }));
     }
 
     let failed_probe = probe();
@@ -322,13 +322,13 @@ fn probe_shield_with_bounded_topmost_reassert(
     if reasons.is_empty() {
         Ok(failed_probe)
     } else {
-        Err(ShieldRecoveryFailure {
+        Err(Box::new(ShieldRecoveryFailure {
             initial_probe,
             failed_probe,
             reasons,
             set_window_pos_error: None,
             reassertion_attempted: true,
-        })
+        }))
     }
 }
 
@@ -1050,7 +1050,7 @@ impl NativeOverlayRenderer {
                     failure.set_window_pos_error,
                     self.closing,
                     window.shield_stages.as_ref(),
-                    Some(&failure),
+                    Some(failure.as_ref()),
                 );
                 Err(platform(format!(
                     "Rectangle input shield monitor {monitor}: {}",

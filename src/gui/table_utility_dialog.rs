@@ -347,7 +347,7 @@ impl TableUtilityDialogState {
         self.clipboard = clipboard;
     }
 
-    pub fn show_with_jump_mode(
+    pub(crate) fn show_with_jump_mode(
         &mut self,
         ctx: &egui::Context,
         scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
@@ -898,7 +898,7 @@ impl TableUtilityDialogState {
                                 " ↓"
                             }
                         });
-                        let slot = ui.allocate_ui_with_layout(
+                        let _slot = ui.allocate_ui_with_layout(
                             egui::vec2(180.0, header_height),
                             egui::Layout::left_to_right(egui::Align::Center),
                             |cell_ui| {
@@ -952,7 +952,7 @@ impl TableUtilityDialogState {
                         );
                         #[cfg(test)]
                         if column == 0 {
-                            self.test_first_header_column_rect = Some(slot.response.rect);
+                            self.test_first_header_column_rect = Some(_slot.response.rect);
                         }
                     }
                 });
@@ -999,7 +999,7 @@ impl TableUtilityDialogState {
                                         let text = document
                                             .bounded_preview(row_id, column)
                                             .unwrap_or_default();
-                                        let cell_response = ui.add_sized(
+                                        let _cell_response = ui.add_sized(
                                             [180.0, RESULT_ROW_HEIGHT],
                                             egui::Label::new(text)
                                                 .truncate()
@@ -1008,7 +1008,7 @@ impl TableUtilityDialogState {
                                         #[cfg(test)]
                                         if visible_index == 0 && column == 0 {
                                             self.test_first_data_column_rect =
-                                                Some(cell_response.rect);
+                                                Some(_cell_response.rect);
                                         }
                                     }
                                     let _ = row;
@@ -1201,13 +1201,12 @@ impl TableUtilityDialogState {
                 .pending_overwrite
                 .as_ref()
                 .map(|pending| &pending.receipt.payload)
+            && let Some(reason) = json.fallback_reason
         {
-            if let Some(reason) = json.fallback_reason {
-                ui.weak(format!(
-                    "JSON Auto used arrays: {}.",
-                    fallback_reason_text(reason)
-                ));
-            }
+            ui.weak(format!(
+                "JSON Auto used arrays: {}.",
+                fallback_reason_text(reason)
+            ));
         }
     }
 
@@ -2000,12 +1999,11 @@ mod tests {
         click_test_widget(&context, &mut dialog, |state| state.test_copy_tsv_response);
         let expected_tsv = "name\tnote\ngamma\t\"line\nbreak\"\nalpha\t\"tab\tinside\"\n";
         await_dialog(&context, &mut dialog, |_| {
-            clipboard
+            !clipboard
                 .written_values
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .len()
-                >= 1
+                .is_empty()
         });
         assert_eq!(clipboard.reads.load(Ordering::SeqCst), 1);
         assert_eq!(clipboard_writes(&clipboard), vec![expected_tsv.to_owned()]);
