@@ -22,7 +22,6 @@ struct SelectedMatchIdentity {
 /// This is intentionally an in-memory transaction. The owning NotePanel still
 /// installs the returned source and owns dirty state and persistence.
 #[derive(Clone, Debug)]
-#[expect(dead_code, reason = "consumed by the M9-B NotePanel integration")]
 pub(crate) struct PreparedNoteReplacement {
     owner_token: Arc<()>,
     note_generation: u64,
@@ -37,7 +36,6 @@ pub(crate) struct PreparedNoteReplacement {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[expect(dead_code, reason = "consumed by the M9-B NotePanel integration")]
 pub(crate) enum StaleNoteReplacement {
     DifferentOwner,
     NoteGeneration,
@@ -48,7 +46,6 @@ pub(crate) enum StaleNoteReplacement {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[expect(dead_code, reason = "consumed by the M9-B NotePanel integration")]
 pub(crate) struct NoteReplacementOutcome {
     pub(crate) content: String,
     pub(crate) changed: bool,
@@ -113,6 +110,18 @@ impl Default for NoteFindState {
 impl NoteFindState {
     pub(crate) fn is_open(&self) -> bool {
         self.open
+    }
+
+    pub(crate) fn content_revision(&self) -> u64 {
+        self.content_revision
+    }
+
+    pub(crate) fn query_revision(&self) -> u64 {
+        self.query_revision
+    }
+
+    pub(crate) fn navigation_revision(&self) -> u64 {
+        self.navigation_revision
     }
 
     pub(crate) fn open(&mut self) {
@@ -225,7 +234,6 @@ impl NoteFindState {
         self.matches.get(previous)
     }
 
-    #[expect(dead_code, reason = "consumed by the M9-B NotePanel integration")]
     pub(crate) fn prepare_replace_current(
         &mut self,
         content: &str,
@@ -252,7 +260,6 @@ impl NoteFindState {
         })
     }
 
-    #[expect(dead_code, reason = "consumed by the M9-B NotePanel integration")]
     pub(crate) fn prepare_replace_all(
         &mut self,
         content: &str,
@@ -281,7 +288,6 @@ impl NoteFindState {
         })
     }
 
-    #[expect(dead_code, reason = "consumed by the M9-B NotePanel integration")]
     pub(crate) fn apply_prepared_replacement(
         &mut self,
         current_content: &str,
@@ -332,7 +338,6 @@ impl NoteFindState {
     /// Complete the pure replacement after the NotePanel has installed
     /// `outcome.content` through its normal mutation path. A changed source
     /// must have crossed `content_changed()` exactly once before this call.
-    #[expect(dead_code, reason = "consumed by the M9-B NotePanel integration")]
     pub(crate) fn commit_replacement_navigation(
         &mut self,
         current_content: &str,

@@ -27,7 +27,7 @@ use multi_launcher::plugins::snippets::SNIPPETS_FILE;
 use multi_launcher::plugins::timer::ALARMS_FILE;
 use multi_launcher::plugins::todo::{TODO_FILE, TodoEntry, load_todos_typed};
 use multi_launcher::radial::model::RadialDocument;
-use multi_launcher::settings::{LogFile, Settings};
+use multi_launcher::settings::{LogFile, NoteViewMode, Settings};
 use multi_launcher::usage::{USAGE_FILE, UsageEntry};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -146,6 +146,8 @@ enum FixtureScenario {
     Phase1Disabled,
     Phase2(Phase2Surface),
     TargetRepair,
+    NoteReplaceEnabled,
+    NoteReplaceDisabled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,6 +208,8 @@ impl FixtureScenario {
             "phase1-enabled" => Ok(Self::Phase1Enabled),
             "phase1-disabled" => Ok(Self::Phase1Disabled),
             "target-repair" => Ok(Self::TargetRepair),
+            "note-replace-enabled" => Ok(Self::NoteReplaceEnabled),
+            "note-replace-disabled" => Ok(Self::NoteReplaceDisabled),
             value if value.starts_with("phase2-") => {
                 let surface = &value["phase2-".len()..];
                 Phase2Surface::parse(surface)
@@ -213,7 +217,7 @@ impl FixtureScenario {
                     .ok_or_else(|| anyhow::anyhow!("unknown Phase 2 surface {surface:?}"))
             }
             value => anyhow::bail!(
-                "unknown fixture scenario {value:?}; expected baseline, query-probe, phase1-enabled, phase1-disabled, target-repair, or phase2-settings/notes/todo/timer/paste/mkmacro/file-search"
+                "unknown fixture scenario {value:?}; expected baseline, query-probe, phase1-enabled, phase1-disabled, target-repair, note-replace-enabled, note-replace-disabled, or phase2-settings/notes/todo/timer/paste/mkmacro/file-search"
             ),
         }
     }
@@ -221,7 +225,11 @@ impl FixtureScenario {
     fn jump_mode_enabled(self) -> bool {
         matches!(
             self,
-            Self::QueryProbe | Self::Phase1Enabled | Self::Phase2(_) | Self::TargetRepair
+            Self::QueryProbe
+                | Self::Phase1Enabled
+                | Self::Phase2(_)
+                | Self::TargetRepair
+                | Self::NoteReplaceEnabled
         )
     }
 
@@ -233,6 +241,8 @@ impl FixtureScenario {
         match self {
             Self::Phase2(surface) => Some(surface),
             Self::TargetRepair
+            | Self::NoteReplaceEnabled
+            | Self::NoteReplaceDisabled
             | Self::Baseline
             | Self::QueryProbe
             | Self::Phase1Enabled
@@ -276,6 +286,8 @@ impl FixtureScenario {
                 Phase2Surface::FileSearch => "phase2-file-search",
             },
             Self::TargetRepair => "target-repair",
+            Self::NoteReplaceEnabled => "note-replace-enabled",
+            Self::NoteReplaceDisabled => "note-replace-disabled",
         }
     }
 }
@@ -371,7 +383,10 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     settings.window_size = if scenario.phase1()
         || scenario.phase2_surface().is_some()
         || scenario == FixtureScenario::TargetRepair
-    {
+        || matches!(
+            scenario,
+            FixtureScenario::NoteReplaceEnabled | FixtureScenario::NoteReplaceDisabled
+        ) {
         Some((1800, 1000))
     } else {
         Some((900, 560))
@@ -407,6 +422,12 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     settings.note.backlinks_enabled = false;
     settings.note.aliases_enabled = false;
     settings.note.templates_enabled = false;
+    if matches!(
+        scenario,
+        FixtureScenario::NoteReplaceEnabled | FixtureScenario::NoteReplaceDisabled
+    ) {
+        settings.note.default_view_mode = NoteViewMode::Edit;
+    }
     settings
         .plugin_settings
         .insert("clipboard_modify".into(), json!({}));
@@ -455,10 +476,7 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     for (index, note_id) in note_ids.iter().enumerate() {
         let ordinal = index + 1;
         let title = fixture_note_title(scenario, ordinal);
-        let note_text = format!(
-            "# {title}\n\nFixture record {ordinal:03} for the isolated Jump Mode runner.\n\nStable fixture ID: `{note_id}`\nTag: #jump_qa_bucket_{:02}\n",
-            ((index % 4) + 1)
-        );
+        let note_text = fixture_note_text(scenario, ordinal, note_id, &title);
         fs::write(notes_dir.join(format!("{note_id}.md")), note_text)?;
     }
 
@@ -545,6 +563,15 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         settings.experimental_jump_mode_enabled == scenario.jump_mode_enabled(),
         "fixture Jump Mode setting does not match the requested scenario"
     );
+    if matches!(
+        scenario,
+        FixtureScenario::NoteReplaceEnabled | FixtureScenario::NoteReplaceDisabled
+    ) {
+        anyhow::ensure!(
+            settings.note.default_view_mode == NoteViewMode::Edit,
+            "NoteReplace fixture must open the generated note in Edit without changing production defaults"
+        );
+    }
     anyhow::ensure!(
         settings.plugin_settings.contains_key("clipboard_modify"),
         "clipboard migration guard is missing"
@@ -686,6 +713,33 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         loaded_note_ids == expected_note_ids,
         "production note loader did not return the stable fixture records"
     );
+    if matches!(
+        scenario,
+        FixtureScenario::NoteReplaceEnabled | FixtureScenario::NoteReplaceDisabled
+    ) {
+        let first = fs::read_to_string(notes_dir.join("jump-qa-note-001.md"))?;
+        let second = fs::read_to_string(notes_dir.join("jump-qa-note-002.md"))?;
+        anyhow::ensure!(
+            first
+                == fixture_note_text(
+                    scenario,
+                    1,
+                    "jump-qa-note-001",
+                    &fixture_note_title(scenario, 1),
+                ),
+            "Note Replace fixture source is not the exact CRLF/Unicode/literal input"
+        );
+        anyhow::ensure!(
+            second
+                == fixture_note_text(
+                    scenario,
+                    2,
+                    "jump-qa-note-002",
+                    &fixture_note_title(scenario, 2),
+                ),
+            "Note Replace fixture's unrelated second note changed"
+        );
+    }
     let mut tag_counts = std::collections::BTreeMap::new();
     for note in &loaded_notes {
         for tag in &note.tags {
@@ -703,6 +757,28 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     // ML_NOTES_DIR was set before settings/plugin construction and before this
     // production plugin starts its watcher/coordinator threads.
     let note_plugin = NotePlugin::new();
+    if matches!(
+        scenario,
+        FixtureScenario::NoteReplaceEnabled | FixtureScenario::NoteReplaceDisabled
+    ) {
+        let expected_title = fixture_note_title(scenario, 1);
+        let loaded_target = loaded_notes
+            .iter()
+            .find(|note| note.slug == "jump-qa-note-001")
+            .ok_or_else(|| anyhow::anyhow!("Note Replace target note was not loaded"))?;
+        anyhow::ensure!(
+            loaded_target.title == expected_title,
+            "production note loader title {:?} does not match fixture title {:?}",
+            loaded_target.title,
+            expected_title
+        );
+        let title_query = format!("note open {expected_title}");
+        let title_actions = note_plugin.search(&title_query);
+        anyhow::ensure!(
+            title_actions.len() == 1 && title_actions[0].action == "note:open:jump-qa-note-001",
+            "production NotePlugin query {title_query:?} must uniquely resolve the generated target note"
+        );
+    }
     let expected_open_actions: Vec<String> = expected_note_ids
         .iter()
         .map(|slug| format!("note:open:{slug}"))
@@ -1347,8 +1423,36 @@ fn note_ids() -> Vec<String> {
 fn fixture_note_title(scenario: FixtureScenario, ordinal: usize) -> String {
     if scenario.phase1() && ordinal <= 2 {
         "Jump QA Shared Note".to_owned()
+    } else if matches!(
+        scenario,
+        FixtureScenario::NoteReplaceEnabled | FixtureScenario::NoteReplaceDisabled
+    ) && ordinal == 1
+    {
+        "Jump QA Replace Note".to_owned()
     } else {
         format!("Jump QA Note {ordinal:03}")
+    }
+}
+
+fn fixture_note_text(
+    scenario: FixtureScenario,
+    ordinal: usize,
+    note_id: &str,
+    title: &str,
+) -> String {
+    if matches!(
+        scenario,
+        FixtureScenario::NoteReplaceEnabled | FixtureScenario::NoteReplaceDisabled
+    ) && ordinal == 1
+    {
+        format!(
+            "# {title}\r\n\r\nTag: #jump_qa_bucket_01\r\n\r\n[shown Ω](<literal Ω $1\\path>)\r\n[shown Ω](<literal Ω $1\\path>)\r\nkeep this line\r\n"
+        )
+    } else {
+        format!(
+            "# {title}\n\nFixture record {ordinal:03} for the isolated Jump Mode runner.\n\nStable fixture ID: `{note_id}`\nTag: #jump_qa_bucket_{:02}\n",
+            ((ordinal - 1) % 4) + 1
+        )
     }
 }
 
@@ -1365,6 +1469,8 @@ fn fixture_manifest(note_ids: Vec<String>, scenario: FixtureScenario) -> Fixture
             FixtureScenario::Phase1Disabled => "jump-mode-m08-phase1-disabled-v1".to_owned(),
             FixtureScenario::Baseline => FIXTURE_ID.to_owned(),
             FixtureScenario::TargetRepair => "jump-mode-m2b-target-repair-v1".to_owned(),
+            FixtureScenario::NoteReplaceEnabled => "jump-mode-m9b-note-replace-on-v1".to_owned(),
+            FixtureScenario::NoteReplaceDisabled => "jump-mode-m9b-note-replace-off-v1".to_owned(),
             FixtureScenario::Phase2(surface) => {
                 format!("jump-mode-m13-{}-v1", surface.as_str())
             }
@@ -1810,6 +1916,31 @@ mod tests {
         assert_eq!(fixture.fixture_id, "jump-mode-m05-query-probe-v1");
         assert!(fixture.experimental_jump_mode_enabled);
         assert!(fixture.safety.experimental_jump_mode_enabled);
+    }
+
+    #[test]
+    fn note_replace_fixture_variants_share_exact_sources_and_only_change_jump_gate() {
+        let enabled = FixtureScenario::NoteReplaceEnabled;
+        let disabled = FixtureScenario::NoteReplaceDisabled;
+        let enabled_manifest = fixture_manifest(note_ids(), enabled);
+        let disabled_manifest = fixture_manifest(note_ids(), disabled);
+        assert_eq!(enabled.label(), "note-replace-enabled");
+        assert_eq!(disabled.label(), "note-replace-disabled");
+        assert!(enabled.jump_mode_enabled());
+        assert!(!disabled.jump_mode_enabled());
+        assert_eq!(enabled_manifest.enabled_plugins, ["notes"]);
+        assert_eq!(disabled_manifest.enabled_plugins, ["notes"]);
+        assert_eq!(enabled_manifest.note_ids, disabled_manifest.note_ids);
+        assert_eq!(enabled_manifest.action_count, 0);
+        assert_eq!(disabled_manifest.action_count, 0);
+        assert_eq!(
+            fixture_note_text(enabled, 1, "jump-qa-note-001", "Jump QA Replace Note"),
+            "# Jump QA Replace Note\r\n\r\nTag: #jump_qa_bucket_01\r\n\r\n[shown Ω](<literal Ω $1\\path>)\r\n[shown Ω](<literal Ω $1\\path>)\r\nkeep this line\r\n"
+        );
+        assert_eq!(
+            fixture_note_text(enabled, 2, "jump-qa-note-002", "Jump QA Note 002"),
+            fixture_note_text(disabled, 2, "jump-qa-note-002", "Jump QA Note 002")
+        );
     }
 
     #[test]

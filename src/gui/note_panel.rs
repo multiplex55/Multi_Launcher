@@ -949,6 +949,137 @@ struct PendingPlainLinkConversion {
     report: PlainLinkConversionReport,
 }
 
+struct RetainedTextEditHistory {
+    undoer: egui::util::undoer::Undoer<(egui::text::CCursorRange, String)>,
+    cursor: egui::text::CCursorRange,
+    origin_id: Option<egui::Id>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplacementUndoDirection {
+    Undo,
+    Redo,
+}
+
+#[derive(Clone, Copy)]
+enum ReplacementHistoryMutation {
+    Undo,
+    Redo,
+    Record { before_revision: u64 },
+}
+
+#[derive(Clone, Copy)]
+struct ReplacementUndoBoundary {
+    before_revision: u64,
+    after_revision: u64,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone, Debug, serde::Serialize, PartialEq)]
+pub(super) struct NoteReplaceControlPaint {
+    pub(super) response_id: String,
+    pub(super) rect: [f32; 4],
+    pub(super) clipped_rect: [f32; 4],
+    pub(super) enabled: bool,
+    pub(super) focused: bool,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone, Debug, serde::Serialize, PartialEq)]
+pub(super) struct NoteReplaceControlsPaint {
+    pub(super) panel_window: Option<NoteReplaceControlPaint>,
+    pub(super) save: Option<NoteReplaceControlPaint>,
+    pub(super) find_toggle: Option<NoteReplaceControlPaint>,
+    pub(super) edit: Option<NoteReplaceControlPaint>,
+    pub(super) render: Option<NoteReplaceControlPaint>,
+    pub(super) find_query: Option<NoteReplaceControlPaint>,
+    pub(super) find_close: Option<NoteReplaceControlPaint>,
+    pub(super) replace_expander: Option<NoteReplaceControlPaint>,
+    pub(super) replacement_input: Option<NoteReplaceControlPaint>,
+    pub(super) replace_one: Option<NoteReplaceControlPaint>,
+    pub(super) replace_all: Option<NoteReplaceControlPaint>,
+    pub(super) reveal_in_edit: Option<NoteReplaceControlPaint>,
+    pub(super) note_editor: Option<NoteReplaceControlPaint>,
+    pub(super) discard_changes: Option<NoteReplaceControlPaint>,
+    pub(super) keep_editing: Option<NoteReplaceControlPaint>,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+impl Default for NoteReplaceControlsPaint {
+    fn default() -> Self {
+        Self {
+            panel_window: None,
+            save: None,
+            find_toggle: None,
+            edit: None,
+            render: None,
+            find_query: None,
+            find_close: None,
+            replace_expander: None,
+            replacement_input: None,
+            replace_one: None,
+            replace_all: None,
+            reveal_in_edit: None,
+            note_editor: None,
+            discard_changes: None,
+            keep_editing: None,
+        }
+    }
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone, Debug, serde::Serialize, PartialEq)]
+pub(super) struct NoteReplacePaint {
+    pub(super) panel_identity: String,
+    pub(super) expected_panel_match: bool,
+    pub(super) root_owner_allowed: bool,
+    pub(super) open: bool,
+    pub(super) dirty: bool,
+    pub(super) discard_prompt: bool,
+    pub(super) view_mode: &'static str,
+    pub(super) find_open: bool,
+    pub(super) content_revision: u64,
+    pub(super) query_revision: u64,
+    pub(super) navigation_revision: u64,
+    pub(super) match_count: usize,
+    pub(super) selected_match_index: Option<usize>,
+    pub(super) selected_match_byte_range: Option<[usize; 2]>,
+    pub(super) source_only_match: bool,
+    pub(super) content_sha256: String,
+    pub(super) egui_frame_nr: u64,
+    pub(super) egui_pass_index: usize,
+    pub(super) controls: NoteReplaceControlsPaint,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoteReplaceControl {
+    NotePanelWindow,
+    Save,
+    FindToggle,
+    Edit,
+    Render,
+    FindQuery,
+    FindClose,
+    ReplaceExpander,
+    ReplacementInput,
+    ReplaceOne,
+    ReplaceAll,
+    RevealInEdit,
+    NoteEditor,
+    DiscardChanges,
+    KeepEditing,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+fn note_view_mode_qa_name(view_mode: NoteViewMode) -> &'static str {
+    match view_mode {
+        NoteViewMode::Edit => "edit",
+        NoteViewMode::Preview => "preview",
+        NoteViewMode::Split => "split",
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlainLinkConfirmOutcome {
     Applied,
@@ -996,6 +1127,17 @@ pub struct NotePanel {
     backlink_page: usize,
     note_find: NoteFindState,
     note_find_preview: Option<NoteFindPreviewIndex>,
+    replacement_text: String,
+    replacement_feedback: Option<FindReplacementFeedback>,
+    replacement_text_widget_id: Option<egui::Id>,
+    retained_text_edit_history: Option<RetainedTextEditHistory>,
+    replacement_undo_boundaries: Vec<ReplacementUndoBoundary>,
+    replacement_redo_boundaries: Vec<ReplacementUndoBoundary>,
+    replacement_history_mutation: Option<ReplacementHistoryMutation>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    note_replace_frame_paint: Option<NoteReplacePaint>,
+    fresh_text_edit_state_slug: Option<String>,
+    fresh_text_edit_state_ids: HashSet<egui::Id>,
     pending_find_navigation: Option<PendingFindNavigation>,
     find_focus_next_frame: bool,
     find_select_query_next_frame: bool,
@@ -1079,6 +1221,14 @@ pub struct NotePanel {
     #[cfg(test)]
     last_find_reveal_button_rect: Option<egui::Rect>,
     #[cfg(test)]
+    last_find_replace_input_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    last_find_replace_expander_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    last_find_replace_button_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    last_find_replace_all_button_rect: Option<egui::Rect>,
+    #[cfg(test)]
     last_find_editor_rects: Vec<egui::Rect>,
     #[cfg(test)]
     last_find_navigation_source: Option<std::ops::Range<usize>>,
@@ -1103,6 +1253,18 @@ enum FindPreviewVisibility {
 enum FindNavigation {
     Next,
     Previous,
+}
+
+#[derive(Clone, Copy)]
+enum FindReplacementAction {
+    Current,
+    All,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FindReplacementFeedback {
+    Updated,
+    NoChange,
 }
 
 #[cfg(test)]
@@ -1417,6 +1579,17 @@ impl NotePanel {
             backlink_page: 0,
             note_find: NoteFindState::default(),
             note_find_preview: None,
+            replacement_text: String::new(),
+            replacement_feedback: None,
+            replacement_text_widget_id: None,
+            retained_text_edit_history: None,
+            replacement_undo_boundaries: Vec::new(),
+            replacement_redo_boundaries: Vec::new(),
+            replacement_history_mutation: None,
+            #[cfg(feature = "qa-framebuffer-capture")]
+            note_replace_frame_paint: None,
+            fresh_text_edit_state_slug: None,
+            fresh_text_edit_state_ids: HashSet::new(),
             pending_find_navigation: None,
             find_focus_next_frame: false,
             find_select_query_next_frame: false,
@@ -1494,6 +1667,14 @@ impl NotePanel {
             last_find_callout_rect: None,
             #[cfg(test)]
             last_find_reveal_button_rect: None,
+            #[cfg(test)]
+            last_find_replace_input_rect: None,
+            #[cfg(test)]
+            last_find_replace_expander_rect: None,
+            #[cfg(test)]
+            last_find_replace_button_rect: None,
+            #[cfg(test)]
+            last_find_replace_all_button_rect: None,
             #[cfg(test)]
             last_find_editor_rects: Vec::new(),
             #[cfg(test)]
@@ -1844,7 +2025,39 @@ impl NotePanel {
 
     fn mark_content_changed(&mut self, now_secs: f64) {
         self.note_find.content_changed();
+        let revision = self.note_find.content_revision();
+        match self.replacement_history_mutation.take() {
+            Some(ReplacementHistoryMutation::Undo) => {
+                if let Some(mut boundary) = self.replacement_undo_boundaries.pop() {
+                    boundary.before_revision = revision;
+                    self.replacement_redo_boundaries.push(boundary);
+                    if let Some(previous) = self.replacement_undo_boundaries.last_mut() {
+                        previous.after_revision = revision;
+                    }
+                }
+            }
+            Some(ReplacementHistoryMutation::Redo) => {
+                if let Some(mut boundary) = self.replacement_redo_boundaries.pop() {
+                    boundary.after_revision = revision;
+                    self.replacement_undo_boundaries.push(boundary);
+                    if let Some(next) = self.replacement_redo_boundaries.last_mut() {
+                        next.before_revision = revision;
+                    }
+                }
+            }
+            Some(ReplacementHistoryMutation::Record { before_revision }) => {
+                self.replacement_redo_boundaries.clear();
+                if let Some(previous) = self.replacement_undo_boundaries.last_mut() {
+                    previous.after_revision = before_revision;
+                }
+            }
+            None => {
+                self.replacement_undo_boundaries.clear();
+                self.replacement_redo_boundaries.clear();
+            }
+        }
         self.note_find_preview = None;
+        self.replacement_feedback = None;
         self.pending_find_navigation = None;
         self.invalidate_markdown_analysis();
         self.markdown_cache.clear_scrollable();
@@ -2044,6 +2257,162 @@ impl NotePanel {
         &self.note.slug
     }
 
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn qa_note_replace_layer_id(&self) -> egui::LayerId {
+        self.show_query_focus_layer()
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn qa_note_replace_paint_matches_state(
+        &self,
+        paint: &NoteReplacePaint,
+        expected_slug: &str,
+    ) -> bool {
+        paint.expected_panel_match
+            && self.note.slug == expected_slug
+            && paint.panel_identity
+                == format!(
+                    "{:?}",
+                    egui::Id::new(("note_panel_window", self.note.slug.clone()))
+                )
+            && paint.open == self.open
+            && paint.dirty == self.has_unsaved_changes()
+            && paint.discard_prompt == self.discard_unsaved_prompt
+            && paint.view_mode == note_view_mode_qa_name(self.view_mode)
+            && paint.find_open == self.note_find.is_open()
+            && paint.content_revision == self.note_find.content_revision()
+            && paint.query_revision == self.note_find.query_revision()
+            && paint.navigation_revision == self.note_find.navigation_revision()
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    fn start_note_replace_paint(&mut self, ctx: &egui::Context, expected_slug: Option<&str>) {
+        self.note_replace_frame_paint = expected_slug
+            .filter(|expected| *expected == self.note.slug && self.open)
+            .map(|_| NoteReplacePaint {
+                panel_identity: format!(
+                    "{:?}",
+                    egui::Id::new(("note_panel_window", self.note.slug.clone()))
+                ),
+                expected_panel_match: true,
+                root_owner_allowed: false,
+                open: self.open,
+                dirty: self.has_unsaved_changes(),
+                discard_prompt: self.discard_unsaved_prompt,
+                view_mode: note_view_mode_qa_name(self.view_mode),
+                find_open: self.note_find.is_open(),
+                content_revision: self.note_find.content_revision(),
+                query_revision: self.note_find.query_revision(),
+                navigation_revision: self.note_find.navigation_revision(),
+                match_count: 0,
+                selected_match_index: None,
+                selected_match_byte_range: None,
+                source_only_match: false,
+                content_sha256: String::new(),
+                egui_frame_nr: ctx.cumulative_frame_nr(),
+                egui_pass_index: ctx.current_pass_index(),
+                controls: NoteReplaceControlsPaint::default(),
+            });
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    fn record_note_replace_control(
+        &mut self,
+        control: NoteReplaceControl,
+        response: &egui::Response,
+    ) {
+        let Some(paint) = self.note_replace_frame_paint.as_mut() else {
+            return;
+        };
+        let rect = response.rect;
+        let clipped = response.interact_rect;
+        let control_paint = NoteReplaceControlPaint {
+            response_id: format!("{:?}", response.id),
+            rect: [rect.min.x, rect.min.y, rect.max.x, rect.max.y],
+            clipped_rect: [clipped.min.x, clipped.min.y, clipped.max.x, clipped.max.y],
+            enabled: response.enabled(),
+            focused: response.has_focus(),
+        };
+        match control {
+            NoteReplaceControl::NotePanelWindow => {
+                paint.controls.panel_window = Some(control_paint);
+            }
+            NoteReplaceControl::Save => paint.controls.save = Some(control_paint),
+            NoteReplaceControl::FindToggle => paint.controls.find_toggle = Some(control_paint),
+            NoteReplaceControl::Edit => paint.controls.edit = Some(control_paint),
+            NoteReplaceControl::Render => paint.controls.render = Some(control_paint),
+            NoteReplaceControl::FindQuery => paint.controls.find_query = Some(control_paint),
+            NoteReplaceControl::FindClose => paint.controls.find_close = Some(control_paint),
+            NoteReplaceControl::ReplaceExpander => {
+                paint.controls.replace_expander = Some(control_paint);
+            }
+            NoteReplaceControl::ReplacementInput => {
+                paint.controls.replacement_input = Some(control_paint);
+            }
+            NoteReplaceControl::ReplaceOne => paint.controls.replace_one = Some(control_paint),
+            NoteReplaceControl::ReplaceAll => paint.controls.replace_all = Some(control_paint),
+            NoteReplaceControl::RevealInEdit => {
+                paint.controls.reveal_in_edit = Some(control_paint);
+            }
+            NoteReplaceControl::NoteEditor => paint.controls.note_editor = Some(control_paint),
+            NoteReplaceControl::DiscardChanges => {
+                paint.controls.discard_changes = Some(control_paint);
+            }
+            NoteReplaceControl::KeepEditing => {
+                paint.controls.keep_editing = Some(control_paint);
+            }
+        }
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    fn finish_note_replace_paint(&mut self, ctx: &egui::Context, app: &LauncherApp) {
+        let match_count = self.find_matches().len();
+        let selected_match_index = self.find_current_index();
+        let selected_match_byte_range = self
+            .find_current_match()
+            .map(|matched| [matched.byte_range.start, matched.byte_range.end]);
+        let source_only_match =
+            self.find_preview_visibility(app) == Some(FindPreviewVisibility::SourceOnly);
+        let dirty = self.has_unsaved_changes();
+        let content_sha256 = format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(self.note.content.as_bytes())
+        );
+        if let Some(paint) = self.note_replace_frame_paint.as_mut() {
+            paint.open = self.open;
+            paint.dirty = dirty;
+            paint.discard_prompt = self.discard_unsaved_prompt;
+            paint.view_mode = note_view_mode_qa_name(self.view_mode);
+            paint.find_open = self.note_find.is_open();
+            paint.content_revision = self.note_find.content_revision();
+            paint.query_revision = self.note_find.query_revision();
+            paint.navigation_revision = self.note_find.navigation_revision();
+            paint.match_count = match_count;
+            paint.selected_match_index = selected_match_index;
+            paint.selected_match_byte_range = selected_match_byte_range;
+            paint.source_only_match = source_only_match;
+            paint.content_sha256 = content_sha256;
+            paint.egui_frame_nr = ctx.cumulative_frame_nr();
+            paint.egui_pass_index = ctx.current_pass_index();
+        }
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn qa_note_replace_paint_for_current_pass(
+        &self,
+        ctx: &egui::Context,
+        expected_slug: &str,
+    ) -> Option<NoteReplacePaint> {
+        let paint = self.note_replace_frame_paint.as_ref()?;
+        (paint.open
+            && paint.expected_panel_match
+            && self.note.slug == expected_slug
+            && paint.egui_frame_nr == ctx.cumulative_frame_nr()
+            && paint.egui_pass_index == ctx.current_pass_index()
+            && self.qa_note_replace_paint_matches_state(paint, expected_slug))
+        .then(|| paint.clone())
+    }
+
     pub(crate) fn request_activation_handoff(&mut self) {
         self.activation_handoff_pending = true;
     }
@@ -2068,18 +2437,26 @@ impl NotePanel {
         }
     }
 
-    pub(crate) fn close_find(&mut self) {
+    pub(crate) fn close_find(&mut self, ctx: &egui::Context) {
+        self.surrender_find_focus(ctx);
         self.note_find.close();
         self.note_find_preview = None;
         self.pending_find_navigation = None;
         self.find_focus_next_frame = false;
         self.find_select_query_next_frame = false;
+        self.find_query_widget_id = None;
+        self.replacement_text_widget_id = None;
     }
 
     pub(crate) fn surrender_find_focus(&self, ctx: &egui::Context) {
-        if let Some(id) = self.find_query_widget_id {
-            ctx.memory_mut(|memory| memory.surrender_focus(id));
-        }
+        ctx.memory_mut(|memory| {
+            if let Some(id) = self.find_query_widget_id {
+                memory.surrender_focus(id);
+            }
+            if let Some(id) = self.replacement_text_widget_id {
+                memory.surrender_focus(id);
+            }
+        });
     }
 
     pub(crate) fn show_query_focus_layer(&self) -> egui::LayerId {
@@ -2205,9 +2582,9 @@ impl NotePanel {
         self.queue_find_navigation(found);
     }
 
-    fn reveal_find_match_in_edit(&mut self) {
+    fn reveal_find_match_in_edit(&mut self, ctx: &egui::Context) {
         let found = self.find_current_match();
-        self.set_view_mode(NoteViewMode::Edit);
+        self.set_view_mode_with_context(ctx, NoteViewMode::Edit);
         self.queue_find_navigation(found);
     }
 
@@ -2323,6 +2700,28 @@ impl NotePanel {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_replacement_text(&self) -> &str {
+        &self.replacement_text
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_find_replace_rects(
+        &self,
+    ) -> (
+        Option<egui::Rect>,
+        Option<egui::Rect>,
+        Option<egui::Rect>,
+        Option<egui::Rect>,
+    ) {
+        (
+            self.last_find_replace_expander_rect,
+            self.last_find_replace_input_rect,
+            self.last_find_replace_button_rect,
+            self.last_find_replace_all_button_rect,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_find_query_widget_id(&self) -> Option<egui::Id> {
         self.find_query_widget_id
     }
@@ -2346,6 +2745,323 @@ impl NotePanel {
         }
     }
 
+    fn set_view_mode_with_context(&mut self, ctx: &egui::Context, view_mode: NoteViewMode) {
+        if self.view_mode == view_mode {
+            return;
+        }
+        self.retain_active_text_edit_history(ctx);
+        self.set_view_mode(view_mode);
+    }
+
+    fn replacement_undo_shortcut(
+        ctx: &egui::Context,
+    ) -> Option<(ReplacementUndoDirection, egui::Modifiers, egui::Key)> {
+        ctx.input(|input| {
+            input.events.iter().rev().find_map(|event| match event {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if *key == egui::Key::Z
+                    && modifiers
+                        .matches_logically(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT) =>
+                {
+                    Some((ReplacementUndoDirection::Redo, *modifiers, *key))
+                }
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.matches_logically(egui::Modifiers::COMMAND)
+                    && *key == egui::Key::Z =>
+                {
+                    Some((ReplacementUndoDirection::Undo, *modifiers, *key))
+                }
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if (modifiers.matches_logically(egui::Modifiers::COMMAND)
+                    && *key == egui::Key::Y)
+                    || (modifiers
+                        .matches_logically(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)
+                        && *key == egui::Key::Z) =>
+                {
+                    Some((ReplacementUndoDirection::Redo, *modifiers, *key))
+                }
+                _ => None,
+            })
+        })
+    }
+
+    fn replacement_history_step(
+        &self,
+        undoer: &mut egui::util::undoer::Undoer<(egui::text::CCursorRange, String)>,
+        current_cursor: egui::text::CCursorRange,
+        direction: ReplacementUndoDirection,
+    ) -> Option<(egui::text::CCursorRange, String)> {
+        let expected_revision = match direction {
+            ReplacementUndoDirection::Undo => {
+                self.replacement_undo_boundaries.last()?.after_revision
+            }
+            ReplacementUndoDirection::Redo => {
+                self.replacement_redo_boundaries.last()?.before_revision
+            }
+        };
+        if self.note_find.content_revision() != expected_revision {
+            return None;
+        }
+
+        let mut current = (current_cursor, self.note.content.clone());
+        loop {
+            let next = match direction {
+                ReplacementUndoDirection::Undo => undoer.undo(&current),
+                ReplacementUndoDirection::Redo => undoer.redo(&current),
+            }?
+            .clone();
+            if next.1 != current.1 {
+                return Some(next);
+            }
+            // egui records cursor-only changes in the same TextEdit Undoer.
+            // Treat those as part of the Replace boundary so a caret move does
+            // not consume a separate Ctrl+Z before the source is restored.
+            current = next;
+        }
+    }
+
+    fn apply_replacement_history_to_editor(&mut self, ctx: &egui::Context, editor_id: egui::Id) {
+        if !self.owns_keyboard_layer(ctx)
+            || ctx.memory(|memory| memory.focused()) != Some(editor_id)
+        {
+            return;
+        }
+        let Some((direction, modifiers, key)) = Self::replacement_undo_shortcut(ctx) else {
+            return;
+        };
+        let Some(mut state) = egui::widgets::text_edit::TextEditState::load(ctx, editor_id) else {
+            return;
+        };
+        let cursor = state.cursor.char_range().unwrap_or_else(|| {
+            egui::text::CCursorRange::one(egui::text::CCursor::new(
+                self.note.content.chars().count(),
+            ))
+        });
+        let mut undoer = state.undoer();
+        let Some((next_cursor, next_content)) =
+            self.replacement_history_step(&mut undoer, cursor, direction)
+        else {
+            return;
+        };
+
+        self.replacement_history_mutation = Some(match direction {
+            ReplacementUndoDirection::Undo => ReplacementHistoryMutation::Undo,
+            ReplacementUndoDirection::Redo => ReplacementHistoryMutation::Redo,
+        });
+        self.replace_content_from_mutation(next_content, ctx.input(|input| input.time));
+        state.set_undoer(undoer);
+        state.cursor.set_char_range(Some(next_cursor));
+        state.store(ctx, editor_id);
+        self.pending_cursor_position = None;
+        self.pending_selection = None;
+        ctx.input_mut(|input| input.consume_key(modifiers, key));
+    }
+
+    fn handle_preview_replacement_history(&mut self, ctx: &egui::Context) {
+        if !matches!(self.view_mode, NoteViewMode::Preview) || !self.owns_keyboard_layer(ctx) {
+            return;
+        }
+        let Some((direction, modifiers, key)) = Self::replacement_undo_shortcut(ctx) else {
+            return;
+        };
+        let focused = ctx.memory(|memory| memory.focused());
+        if focused.is_some_and(|focused| {
+            self.find_query_widget_id == Some(focused)
+                || self.replacement_text_widget_id == Some(focused)
+        }) {
+            return;
+        }
+        let source_editor_id = self
+            .retained_text_edit_history
+            .as_ref()
+            .and_then(|retained| retained.origin_id);
+        if ctx.text_edit_focused() && focused != source_editor_id {
+            return;
+        }
+
+        let Some(mut retained) = self.retained_text_edit_history.take() else {
+            return;
+        };
+        let Some((next_cursor, next_content)) =
+            self.replacement_history_step(&mut retained.undoer, retained.cursor, direction)
+        else {
+            self.retained_text_edit_history = Some(retained);
+            return;
+        };
+
+        self.replacement_history_mutation = Some(match direction {
+            ReplacementUndoDirection::Undo => ReplacementHistoryMutation::Undo,
+            ReplacementUndoDirection::Redo => ReplacementHistoryMutation::Redo,
+        });
+        self.replace_content_from_mutation(next_content, ctx.input(|input| input.time));
+        retained.cursor = next_cursor;
+        self.retained_text_edit_history = Some(retained);
+        self.pending_cursor_position = None;
+        self.pending_selection = None;
+        ctx.input_mut(|input| input.consume_key(modifiers, key));
+    }
+
+    fn retain_active_text_edit_history(&mut self, ctx: &egui::Context) {
+        if !matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split) {
+            return;
+        }
+        // A retained history is authoritative until its destination editor is
+        // actually focused and receives the handoff. An unfocused TextEdit may
+        // still render, but egui normalizes its cursor while it does so.
+        if self.retained_text_edit_history.is_some() {
+            return;
+        }
+        let Some(id) = self.last_textedit_id else {
+            return;
+        };
+        let Some(state) = egui::widgets::text_edit::TextEditState::load(ctx, id) else {
+            return;
+        };
+        let cursor = state.cursor.char_range().unwrap_or_else(|| {
+            egui::text::CCursorRange::one(egui::text::CCursor::new(
+                self.note.content.chars().count(),
+            ))
+        });
+        self.retained_text_edit_history = Some(RetainedTextEditHistory {
+            undoer: state.undoer(),
+            cursor,
+            origin_id: Some(id),
+        });
+    }
+
+    fn install_retained_text_edit_history(&mut self, ctx: &egui::Context, id: egui::Id) {
+        if ctx.memory(|memory| memory.focused()) != Some(id) || !self.owns_keyboard_layer(ctx) {
+            return;
+        }
+        let Some(retained) = self.retained_text_edit_history.take() else {
+            return;
+        };
+        let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+        state.set_undoer(retained.undoer);
+        state.cursor.set_char_range(Some(retained.cursor));
+        state.store(ctx, id);
+    }
+
+    fn finish_retained_text_edit_history_handoff(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        response_has_focus: bool,
+        response_changed: bool,
+    ) {
+        if !response_has_focus
+            || ctx.memory(|memory| memory.focused()) != Some(id)
+            || !self.owns_keyboard_layer(ctx)
+        {
+            return;
+        }
+        let Some(retained) = self.retained_text_edit_history.take() else {
+            return;
+        };
+        let Some(mut state) = egui::widgets::text_edit::TextEditState::load(ctx, id) else {
+            self.retained_text_edit_history = Some(retained);
+            return;
+        };
+        let cursor = state.cursor.char_range().unwrap_or_else(|| {
+            egui::text::CCursorRange::one(egui::text::CCursor::new(
+                self.note.content.chars().count(),
+            ))
+        });
+        let current_state = (cursor, self.note.content.clone());
+        let mut undoer = retained.undoer;
+        // A pointer can focus the destination editor while `show` is already
+        // processing a caret move or text input. Reconcile that actual state
+        // into the parked native history without restoring its stale cursor.
+        if response_changed {
+            undoer.feed_state(ctx.input(|input| input.time), &current_state);
+        } else {
+            // Cursor-only focus changes should retain the replacement redo
+            // branch. The native Undoer can skip this cursor point when the
+            // replacement boundary later restores source content.
+            undoer.add_undo(&current_state);
+        }
+        state.set_undoer(undoer);
+        state.store(ctx, id);
+    }
+
+    fn add_replacement_undo_history(
+        &mut self,
+        ctx: &egui::Context,
+        before_content: &str,
+        after_content: &str,
+        after_cursor: egui::text::CCursorRange,
+        before_revision: u64,
+    ) {
+        let parked = self.retained_text_edit_history.take();
+        let active_id = if matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split) {
+            self.last_textedit_id
+        } else {
+            None
+        };
+        let mut live_state = None;
+        let (mut undoer, before_cursor, origin_id, destination_id) = if let Some(retained) = parked
+        {
+            (retained.undoer, retained.cursor, retained.origin_id, None)
+        } else if let Some(id) = active_id {
+            let state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+            let cursor = state.cursor.char_range().unwrap_or_else(|| {
+                egui::text::CCursorRange::one(egui::text::CCursor::new(
+                    before_content.chars().count(),
+                ))
+            });
+            let undoer = state.undoer();
+            live_state = Some(state);
+            (undoer, cursor, Some(id), Some(id))
+        } else {
+            (
+                egui::util::undoer::Undoer::default(),
+                egui::text::CCursorRange::one(egui::text::CCursor::new(
+                    before_content.chars().count(),
+                )),
+                None,
+                None,
+            )
+        };
+
+        let before_state = (before_cursor, before_content.to_owned());
+        let after_state = (after_cursor, after_content.to_owned());
+        undoer.add_undo(&before_state);
+        // `add_undo` intentionally preserves egui's redo stack. Feed the
+        // changed state first so a new Replace after Undo invalidates that
+        // abandoned branch, then make the transaction's endpoint an undo
+        // point in the same TextEdit history.
+        undoer.feed_state(ctx.input(|input| input.time), &after_state);
+        undoer.add_undo(&after_state);
+        if let (Some(id), Some(mut state)) = (destination_id, live_state) {
+            state.set_undoer(undoer);
+            state.cursor.set_char_range(Some(after_cursor));
+            state.store(ctx, id);
+        } else {
+            self.retained_text_edit_history = Some(RetainedTextEditHistory {
+                undoer,
+                cursor: after_cursor,
+                origin_id,
+            });
+        }
+        self.replacement_undo_boundaries
+            .push(ReplacementUndoBoundary {
+                before_revision,
+                after_revision: self.note_find.content_revision(),
+            });
+    }
+
     #[cfg(test)]
     pub(crate) fn test_last_edit_at_secs(&self) -> Option<f64> {
         self.last_edit_at_secs
@@ -2360,6 +3076,10 @@ impl NotePanel {
     }
 
     pub(crate) fn request_close(&mut self, app: &mut LauncherApp) {
+        self.surrender_find_focus(&app.egui_ctx);
+        if let Some(id) = self.last_textedit_id {
+            app.egui_ctx.memory_mut(|memory| memory.surrender_focus(id));
+        }
         if app.note_save_on_close {
             self.save(app);
             if !self.overwrite_prompt {
@@ -2467,12 +3187,36 @@ impl NotePanel {
         self.replace_content_from_mutation(content, 0.0);
     }
 
-    pub(crate) fn replace_note_after_external_mutation(&mut self, mut note: Note) {
+    pub(crate) fn replace_note_after_external_mutation(
+        &mut self,
+        ctx: &egui::Context,
+        mut note: Note,
+    ) {
         let slug_changed = self.note.slug != note.slug;
         let content = std::mem::take(&mut note.content);
         self.note = note;
         if slug_changed {
+            self.surrender_find_focus(ctx);
+            if let Some(id) = self.last_textedit_id {
+                ctx.memory_mut(|memory| memory.surrender_focus(id));
+            }
             self.note_find.reset_for_new_note();
+            self.replacement_text.clear();
+            self.replacement_feedback = None;
+            self.retained_text_edit_history = None;
+            self.replacement_undo_boundaries.clear();
+            self.replacement_redo_boundaries.clear();
+            self.replacement_history_mutation = None;
+            self.last_textedit_id = None;
+            self.find_query_widget_id = None;
+            self.replacement_text_widget_id = None;
+            self.pending_find_navigation = None;
+            self.pending_selection = None;
+            self.pending_cursor_position = None;
+            self.find_focus_next_frame = false;
+            self.find_select_query_next_frame = false;
+            self.fresh_text_edit_state_slug = Some(self.note.slug.clone());
+            self.fresh_text_edit_state_ids.clear();
         }
         self.replace_content_from_mutation(content, 0.0);
     }
@@ -2499,9 +3243,14 @@ impl NotePanel {
         app: &mut LauncherApp,
         observed_discard: Option<&mut Option<super::query_observation::NoteCloseRenderedDiscard>>,
     ) {
+        #[cfg(feature = "qa-framebuffer-capture")]
+        {
+            self.start_note_replace_paint(ctx, app.qa_framebuffer_note_replace_expected_slug());
+        }
         if !self.open {
             return;
         }
+        self.handle_preview_replacement_history(ctx);
         let mut open = self.open;
         let mut save_now = false;
         let screen_rect = ctx.content_rect();
@@ -2578,6 +3327,13 @@ impl NotePanel {
                     text_id_source.clone(),
                 );
             });
+        #[cfg(feature = "qa-framebuffer-capture")]
+        if let Some(window_response) = window_response.as_ref() {
+            self.record_note_replace_control(
+                NoteReplaceControl::NotePanelWindow,
+                &window_response.response,
+            );
+        }
 
         if self.activation_handoff_pending
             && open
@@ -2748,14 +3504,24 @@ impl NotePanel {
                                 &self.note.slug,
                             );
                         }
+                        #[cfg(feature = "qa-framebuffer-capture")]
+                        self.record_note_replace_control(
+                            NoteReplaceControl::DiscardChanges,
+                            &response,
+                        );
                         discard = response.clicked();
                         let keep_editing_button = ui.button("Keep Editing");
-                        keep_editing = widgets::with_button_emphasis(
+                        let keep_editing_response = widgets::with_button_emphasis(
                             ui,
                             keep_editing_button,
                             ButtonEmphasis::Primary,
-                        )
-                        .clicked();
+                        );
+                        #[cfg(feature = "qa-framebuffer-capture")]
+                        self.record_note_replace_control(
+                            NoteReplaceControl::KeepEditing,
+                            &keep_editing_response,
+                        );
+                        keep_editing = keep_editing_response.clicked();
                     });
                 });
             if discard {
@@ -2831,6 +3597,8 @@ impl NotePanel {
                 });
         }
         self.request_heavy_refresh_retry(ctx);
+        #[cfg(feature = "qa-framebuffer-capture")]
+        self.finish_note_replace_paint(ctx, app);
     }
 
     fn render_toolbar(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) -> bool {
@@ -2840,10 +3608,16 @@ impl NotePanel {
             // controls to another row when they do not fit.
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             let save = ui.button("Save");
-            if widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary).clicked() {
+            let save = widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary);
+            #[cfg(feature = "qa-framebuffer-capture")]
+            self.record_note_replace_control(NoteReplaceControl::Save, &save);
+            if save.clicked() {
                 save_now = true;
             }
-            if ui.button("Find").clicked() {
+            let find = ui.button("Find");
+            #[cfg(feature = "qa-framebuffer-capture")]
+            self.record_note_replace_control(NoteReplaceControl::FindToggle, &find);
+            if find.clicked() {
                 self.open_find();
             }
             let open_resp = ui.button("Open Externally");
@@ -2901,7 +3675,7 @@ impl NotePanel {
             if !app.note_settings.rich_markdown_enabled
                 && matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split)
             {
-                self.set_view_mode(NoteViewMode::Edit);
+                self.set_view_mode_with_context(ui.ctx(), NoteViewMode::Edit);
             }
             if !app.note_settings.can_use_split() && matches!(self.view_mode, NoteViewMode::Split) {
                 let view_mode = if app.note_settings.rich_markdown_enabled {
@@ -2909,26 +3683,34 @@ impl NotePanel {
                 } else {
                     NoteViewMode::Edit
                 };
-                self.set_view_mode(view_mode);
+                self.set_view_mode_with_context(ui.ctx(), view_mode);
             }
-            if matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split)
-                && ui.button("Edit").clicked()
-            {
-                self.set_view_mode(NoteViewMode::Edit);
-                self.focus_textedit_next_frame = true;
+            if matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split) {
+                let edit = ui.button("Edit");
+                #[cfg(feature = "qa-framebuffer-capture")]
+                self.record_note_replace_control(NoteReplaceControl::Edit, &edit);
+                if edit.clicked() {
+                    self.set_view_mode_with_context(ui.ctx(), NoteViewMode::Edit);
+                    self.focus_textedit_next_frame = true;
+                }
             }
-            if !matches!(self.view_mode, NoteViewMode::Preview) && ui.button("Render").clicked() {
-                let previous_editor_id = self.last_textedit_id;
-                self.set_view_mode(NoteViewMode::Preview);
-                if let Some(id) = previous_editor_id {
-                    ui.ctx().memory_mut(|m| m.surrender_focus(id));
+            if !matches!(self.view_mode, NoteViewMode::Preview) {
+                let render = ui.button("Render");
+                #[cfg(feature = "qa-framebuffer-capture")]
+                self.record_note_replace_control(NoteReplaceControl::Render, &render);
+                if render.clicked() {
+                    let previous_editor_id = self.last_textedit_id;
+                    self.set_view_mode_with_context(ui.ctx(), NoteViewMode::Preview);
+                    if let Some(id) = previous_editor_id {
+                        ui.ctx().memory_mut(|m| m.surrender_focus(id));
+                    }
                 }
             }
             if app.note_settings.can_use_split()
                 && !matches!(self.view_mode, NoteViewMode::Split)
                 && ui.button("Split").clicked()
             {
-                self.set_view_mode(NoteViewMode::Split);
+                self.set_view_mode_with_context(ui.ctx(), NoteViewMode::Split);
             }
             if ui.button(self.details_toggle_label()).clicked() {
                 self.set_show_metadata(app, !self.show_metadata);
@@ -2979,9 +3761,14 @@ impl NotePanel {
     fn render_find_strip(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, app: &LauncherApp) {
         let query_id = ui.make_persistent_id(("note_find_query", self.note.slug.clone()));
         self.find_query_widget_id = Some(query_id);
+        let previous_replacement_id = self.replacement_text_widget_id.take();
         #[cfg(test)]
         {
             self.last_find_reveal_button_rect = None;
+            self.last_find_replace_input_rect = None;
+            self.last_find_replace_expander_rect = None;
+            self.last_find_replace_button_rect = None;
+            self.last_find_replace_all_button_rect = None;
         }
         let focus_find_query = self.find_focus_next_frame;
         if focus_find_query {
@@ -3025,6 +3812,7 @@ impl NotePanel {
         }
         let mut close = false;
         let mut reveal = false;
+        let mut replacement_action = None;
         ui.horizontal_wrapped(|ui| {
             ui.label("Find");
             let response = ui.add(
@@ -3033,9 +3821,12 @@ impl NotePanel {
                     .desired_width(220.0)
                     .hint_text("Find in this note"),
             );
+            #[cfg(feature = "qa-framebuffer-capture")]
+            self.record_note_replace_control(NoteReplaceControl::FindQuery, &response);
             find_query_accepted_focus = response.enabled() && response.has_focus();
             if response.changed() {
                 self.set_find_query(query.clone());
+                self.replacement_feedback = None;
             }
             let count = self.find_matches().len();
             let current = self.find_current_index().map_or(0, |index| index + 1);
@@ -3046,8 +3837,74 @@ impl NotePanel {
             if ui.button("Next").clicked() {
                 action = Some(FindNavigation::Next);
             }
-            if ui.button("Close").clicked() {
+            let close_response = ui.button("Close");
+            #[cfg(feature = "qa-framebuffer-capture")]
+            self.record_note_replace_control(NoteReplaceControl::FindClose, &close_response);
+            if close_response.clicked() {
                 close = true;
+            }
+
+            let replace_expander = ui.collapsing("Replace", |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    let replacement_id =
+                        ui.make_persistent_id(("note_find_replacement", self.note.slug.clone()));
+                    self.replacement_text_widget_id = Some(replacement_id);
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.replacement_text)
+                            .id(replacement_id)
+                            .desired_width(180.0)
+                            .hint_text("Replace with"),
+                    );
+                    #[cfg(feature = "qa-framebuffer-capture")]
+                    self.record_note_replace_control(
+                        NoteReplaceControl::ReplacementInput,
+                        &response,
+                    );
+                    if response.changed() {
+                        self.replacement_feedback = None;
+                    }
+                    #[cfg(test)]
+                    {
+                        self.last_find_replace_input_rect = Some(response.rect);
+                    }
+                    let has_current = self.find_current_match().is_some();
+                    let replace = ui.add_enabled(has_current, egui::Button::new("Replace"));
+                    #[cfg(feature = "qa-framebuffer-capture")]
+                    self.record_note_replace_control(NoteReplaceControl::ReplaceOne, &replace);
+                    #[cfg(test)]
+                    {
+                        self.last_find_replace_button_rect = Some(replace.rect);
+                    }
+                    if replace.clicked() {
+                        replacement_action = Some(FindReplacementAction::Current);
+                    }
+                    let has_matches = !self.find_matches().is_empty();
+                    let replace_all = ui.add_enabled(has_matches, egui::Button::new("Replace All"));
+                    #[cfg(feature = "qa-framebuffer-capture")]
+                    self.record_note_replace_control(NoteReplaceControl::ReplaceAll, &replace_all);
+                    #[cfg(test)]
+                    {
+                        self.last_find_replace_all_button_rect = Some(replace_all.rect);
+                    }
+                    if replace_all.clicked() {
+                        replacement_action = Some(FindReplacementAction::All);
+                    }
+                });
+            });
+            #[cfg(feature = "qa-framebuffer-capture")]
+            self.record_note_replace_control(
+                NoteReplaceControl::ReplaceExpander,
+                &replace_expander.header_response,
+            );
+            #[cfg(test)]
+            {
+                self.last_find_replace_expander_rect = Some(replace_expander.header_response.rect);
+            }
+            if self.replacement_text_widget_id.is_none()
+                && let Some(id) = previous_replacement_id
+                && ctx.memory(|memory| memory.has_focus(id))
+            {
+                ctx.memory_mut(|memory| memory.surrender_focus(id));
             }
 
             let visibility = self.find_preview_visibility(app);
@@ -3055,6 +3912,8 @@ impl NotePanel {
                 Some(FindPreviewVisibility::SourceOnly) => {
                     ui.weak("Source match is not displayed in Preview.");
                     let response = ui.button("Reveal in Edit");
+                    #[cfg(feature = "qa-framebuffer-capture")]
+                    self.record_note_replace_control(NoteReplaceControl::RevealInEdit, &response);
                     #[cfg(test)]
                     {
                         self.last_find_reveal_button_rect = Some(response.rect);
@@ -3064,6 +3923,8 @@ impl NotePanel {
                 Some(FindPreviewVisibility::Collapsed) => {
                     ui.weak("Match is in a collapsed section.");
                     let response = ui.button("Reveal in Edit");
+                    #[cfg(feature = "qa-framebuffer-capture")]
+                    self.record_note_replace_control(NoteReplaceControl::RevealInEdit, &response);
                     #[cfg(test)]
                     {
                         self.last_find_reveal_button_rect = Some(response.rect);
@@ -3072,13 +3933,22 @@ impl NotePanel {
                 }
                 Some(FindPreviewVisibility::Visible) | None => {}
             }
+            if let Some(feedback) = self.replacement_feedback {
+                ui.weak(match feedback {
+                    FindReplacementFeedback::Updated => "Markdown source updated.",
+                    FindReplacementFeedback::NoChange => "No source change.",
+                });
+            }
         });
         if focus_find_query && find_query_accepted_focus {
             self.find_focus_next_frame = false;
             self.find_select_query_next_frame = false;
         }
 
-        if let Some(action) = action {
+        if let Some(replacement_action) = replacement_action {
+            self.perform_find_replacement(ctx, replacement_action);
+            ctx.memory_mut(|memory| memory.request_focus(query_id));
+        } else if let Some(action) = action {
             match action {
                 FindNavigation::Next => self.navigate_find_next(),
                 FindNavigation::Previous => self.navigate_find_previous(),
@@ -3086,12 +3956,84 @@ impl NotePanel {
             ctx.memory_mut(|memory| memory.request_focus(query_id));
         }
         if reveal {
-            self.reveal_find_match_in_edit();
+            self.reveal_find_match_in_edit(ctx);
             ctx.memory_mut(|memory| memory.request_focus(query_id));
         }
         if close {
-            self.close_find();
-            ctx.memory_mut(|memory| memory.surrender_focus(query_id));
+            self.close_find(ctx);
+        }
+    }
+
+    fn perform_find_replacement(&mut self, ctx: &egui::Context, action: FindReplacementAction) {
+        let before_revision = self.note_find.content_revision();
+        let prepared = match action {
+            FindReplacementAction::Current => self
+                .note_find
+                .prepare_replace_current(&self.note.content, &self.replacement_text),
+            FindReplacementAction::All => self
+                .note_find
+                .prepare_replace_all(&self.note.content, &self.replacement_text),
+        };
+        let Some(prepared) = prepared else {
+            return;
+        };
+        let Ok(mut outcome) = self
+            .note_find
+            .apply_prepared_replacement(&self.note.content, prepared)
+        else {
+            return;
+        };
+        let before_content = outcome.changed.then(|| self.note.content.clone());
+        if outcome.changed {
+            self.replacement_history_mutation =
+                Some(ReplacementHistoryMutation::Record { before_revision });
+            self.replace_content_from_mutation(outcome.content.clone(), ctx.input(|i| i.time));
+        }
+
+        let commit = self
+            .note_find
+            .commit_replacement_navigation(&self.note.content, &mut outcome);
+        debug_assert!(
+            commit.is_ok(),
+            "the replacement remains owned by this Find state"
+        );
+        self.replacement_feedback = Some(if outcome.changed {
+            FindReplacementFeedback::Updated
+        } else {
+            FindReplacementFeedback::NoChange
+        });
+
+        let after_cursor = outcome.next_match.as_ref().map_or_else(
+            || {
+                egui::text::CCursorRange::one(egui::text::CCursor::new(
+                    outcome.caret_char.min(outcome.content.chars().count()),
+                ))
+            },
+            |found| {
+                egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(found.char_range.start),
+                    egui::text::CCursor::new(found.char_range.end),
+                )
+            },
+        );
+        if outcome.changed {
+            self.add_replacement_undo_history(
+                ctx,
+                before_content
+                    .as_deref()
+                    .expect("changed replacement retains its original source"),
+                &outcome.content,
+                after_cursor,
+                before_revision,
+            );
+        }
+
+        if outcome.next_match.is_some() {
+            self.pending_cursor_position = None;
+            self.queue_find_navigation(outcome.next_match.clone());
+        } else {
+            self.pending_find_navigation = None;
+            self.pending_cursor_position = Some(after_cursor.primary.index.0);
         }
     }
 
@@ -3832,24 +4774,50 @@ impl NotePanel {
         editor_id: egui::Id,
         desired_size: Option<egui::Vec2>,
     ) -> egui::Response {
+        if self.fresh_text_edit_state_slug.as_deref() == Some(self.note.slug.as_str())
+            && self.fresh_text_edit_state_ids.insert(editor_id)
+        {
+            ui.ctx().data_mut(|data| {
+                data.remove::<egui::widgets::text_edit::TextEditState>(editor_id);
+            });
+        }
+        self.install_retained_text_edit_history(ui.ctx(), editor_id);
         let desired_width = desired_size.map_or(f32::INFINITY, |size| size.x);
         let font_size = effective_note_font_size(ui.ctx(), app.note_font_size);
-        let text_edit = egui::TextEdit::multiline(&mut self.note.content)
-            .id(editor_id)
-            .desired_width(desired_width)
-            .font(FontId::monospace(font_size))
-            .lock_focus(true);
+        let pending_navigation_range = self
+            .pending_find_navigation
+            .as_ref()
+            .filter(|navigation| navigation.editor_pending)
+            .map(|navigation| navigation.char_range.clone());
+        if let Some(range) = &pending_navigation_range {
+            let mut state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
+                .unwrap_or_default();
+            restore_char_range(&mut state, (range.start, range.end));
+            state.store(ui.ctx(), editor_id);
+        } else if let Some(char_index) = self.pending_cursor_position {
+            // Install replacement's post-edit caret before TextEdit processes
+            // this source revision so its native Undoer records the same
+            // cursor that the replacement transaction committed.
+            let mut state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
+                .unwrap_or_default();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(char_index.min(self.note.content.chars().count())),
+                )));
+            state.store(ui.ctx(), editor_id);
+        }
+        self.apply_replacement_history_to_editor(ui.ctx(), editor_id);
         let navigation_range = self
             .pending_find_navigation
             .as_ref()
             .filter(|navigation| navigation.editor_pending)
             .map(|navigation| navigation.char_range.clone());
-        if let Some(range) = &navigation_range {
-            let mut state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
-                .unwrap_or_default();
-            restore_char_range(&mut state, (range.start, range.end));
-            state.store(ui.ctx(), editor_id);
-        }
+        let text_edit = egui::TextEdit::multiline(&mut self.note.content)
+            .id(editor_id)
+            .desired_width(desired_width)
+            .font(FontId::monospace(font_size))
+            .lock_focus(true);
         let output = if let Some(size) = desired_size {
             ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.set_width(size.x);
@@ -3861,6 +4829,8 @@ impl NotePanel {
         };
         let response = output.response.response;
         debug_assert_eq!(response.id, editor_id);
+        #[cfg(feature = "qa-framebuffer-capture")]
+        self.record_note_replace_control(NoteReplaceControl::NoteEditor, &response);
         let active_match = if self.note_find.is_open() {
             self.find_current_match().map(|found| found.char_range)
         } else {
@@ -3912,6 +4882,12 @@ impl NotePanel {
                 self.pending_find_navigation = None;
             }
         }
+        self.finish_retained_text_edit_history_handoff(
+            ui.ctx(),
+            editor_id,
+            response.has_focus(),
+            response.changed(),
+        );
         #[cfg(test)]
         {
             self.last_editor_rect = Some(response.rect);
@@ -9432,6 +10408,9 @@ mod tests {
     }
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
@@ -9439,7 +10418,7 @@ mod tests {
             PluginManager::new(),
             "actions.json".into(),
             "settings.json".into(),
-            Settings::default(),
+            settings,
             None,
             None,
             None,
@@ -9666,12 +10645,564 @@ mod tests {
         assert!(first.has_unsaved_changes());
         assert_eq!(first.test_view_mode(), original_mode);
 
+        let ctx = egui::Context::default();
         let mut other_note = empty_note("dog cat");
         other_note.slug = "different-note".into();
-        first.replace_note_after_external_mutation(other_note);
+        first.replace_note_after_external_mutation(&ctx, other_note);
         assert!(!first.is_find_open());
         assert_eq!(first.find_query(), "");
         assert!(first.find_matches().is_empty());
+    }
+
+    #[test]
+    fn note_replace_panel_current_all_literal_and_noop_use_real_responses() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let original = "Cat\r\ncat and cat";
+        let mut note = empty_note(original);
+        note.slug = "replace-panel-literal".into();
+        let mut panel = NotePanel::from_note(note);
+        panel.view_mode = NoteViewMode::Edit;
+        panel.show_metadata = false;
+        panel.open_find();
+        panel.set_find_query("cat");
+        ensure_replace_controls_open(&ctx, &mut panel, &mut app);
+        assert_eq!(panel.find_current_match().unwrap().byte_range, 0..3);
+
+        let replacement = r"literal $1\tail";
+        set_replacement_with_response(&ctx, &mut panel, &mut app, replacement);
+        click_find_replace_button(&ctx, &mut panel, &mut app, false);
+
+        assert_eq!(
+            panel.note_content(),
+            format!("{replacement}\r\ncat and cat"),
+            "Replace changes only the selected original range and preserves CRLF"
+        );
+        let next = panel
+            .find_current_match()
+            .expect("Replace selects the next original match after inserted text");
+        assert_eq!(
+            next.byte_range,
+            replacement.len() + 2..replacement.len() + 5
+        );
+        assert!(panel.has_unsaved_changes());
+        assert_eq!(panel.saved_content_baseline, original);
+        assert_eq!(panel.note.path, std::path::PathBuf::new());
+        assert_eq!(
+            panel.replacement_feedback,
+            Some(FindReplacementFeedback::Updated)
+        );
+
+        click_find_replace_button(&ctx, &mut panel, &mut app, true);
+        let after_all = format!("{replacement}\r\n{replacement} and {replacement}");
+        assert_eq!(panel.note_content(), after_all);
+        assert!(panel.find_current_match().is_none());
+        assert_eq!(
+            panel.replacement_feedback,
+            Some(FindReplacementFeedback::Updated)
+        );
+
+        panel.set_find_query("literal");
+        assert!(panel.find_current_match().is_some());
+        ensure_replace_controls_open(&ctx, &mut panel, &mut app);
+        set_replacement_with_response(&ctx, &mut panel, &mut app, "literal");
+        let last_edit_at = panel.test_last_edit_at_secs();
+        click_find_replace_button(&ctx, &mut panel, &mut app, false);
+        assert_eq!(panel.note_content(), after_all);
+        assert_eq!(panel.test_last_edit_at_secs(), last_edit_at);
+        assert_eq!(
+            panel.replacement_feedback,
+            Some(FindReplacementFeedback::NoChange)
+        );
+
+        let replacement_id = panel
+            .replacement_text_widget_id
+            .expect("the replacement response remains current");
+        ctx.memory_mut(|memory| memory.request_focus(replacement_id));
+        let expander = panel
+            .test_find_replace_rects()
+            .0
+            .expect("the Replace expander is rendered");
+        click_panel_response(&ctx, &mut panel, &mut app, expander);
+        assert_ne!(ctx.memory(|memory| memory.focused()), Some(replacement_id));
+
+        ensure_replace_controls_open(&ctx, &mut panel, &mut app);
+        set_replacement_with_response(&ctx, &mut panel, &mut app, "literal");
+        let replacement_id = panel.replacement_text_widget_id.unwrap();
+        panel.close_find(&ctx);
+        assert_ne!(ctx.memory(|memory| memory.focused()), Some(replacement_id));
+    }
+
+    #[test]
+    fn note_replace_panel_new_slug_detaches_old_editor_undo_before_first_render() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut target_note = empty_note("new note source");
+        target_note.slug = "replace-target-note".into();
+        let mut target_panel = NotePanel::from_note(target_note.clone());
+        target_panel.view_mode = NoteViewMode::Edit;
+        target_panel.show_metadata = false;
+        for _ in 0..3 {
+            render_panel_once(&ctx, &mut target_panel, &mut app);
+        }
+        let target_editor_id = target_panel.last_textedit_id.unwrap();
+        let stale_state = (
+            egui::text::CCursorRange::one(egui::text::CCursor::new(0)),
+            "stale prior note source".to_owned(),
+        );
+        let mut target_state = egui::widgets::text_edit::TextEditState::default();
+        let mut stale_undoer = egui::util::undoer::Undoer::default();
+        stale_undoer.add_undo(&stale_state);
+        target_state.set_undoer(stale_undoer);
+        target_state.store(&ctx, target_editor_id);
+        drop(target_panel);
+
+        let mut source_note = empty_note("old note source");
+        source_note.slug = "replace-source-note".into();
+        let mut panel = NotePanel::from_note(source_note);
+        panel.view_mode = NoteViewMode::Edit;
+        panel.show_metadata = false;
+        for _ in 0..3 {
+            render_panel_once(&ctx, &mut panel, &mut app);
+        }
+        let old_editor_id = panel.last_textedit_id.unwrap();
+        assert_ne!(old_editor_id, target_editor_id);
+
+        panel.replace_note_after_external_mutation(&ctx, target_note);
+        assert!(panel.last_textedit_id.is_none());
+        assert!(panel.retained_text_edit_history.is_none());
+        assert_eq!(panel.note_content(), "new note source");
+        render_panel_once(&ctx, &mut panel, &mut app);
+
+        let fresh_state = egui::widgets::text_edit::TextEditState::load(&ctx, target_editor_id)
+            .expect("the new note's actual TextEdit rendered its fresh state");
+        let current_state = (
+            fresh_state
+                .cursor
+                .char_range()
+                .unwrap_or_else(|| egui::text::CCursorRange::one(egui::text::CCursor::new(0))),
+            panel.note_content().to_owned(),
+        );
+        assert!(
+            !fresh_state.undoer().has_undo(&current_state),
+            "a reused widget ID cannot carry the prior note's undo history"
+        );
+    }
+
+    #[test]
+    fn note_replace_panel_preview_mutation_uses_editor_undo_across_views() {
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.0);
+        let mut app = new_app(&ctx);
+        app.note_settings.rich_markdown_enabled = true;
+        app.note_settings.split_view_enabled = true;
+        let original = "[shown one](<target-one>)\n\n[shown two](<target-two>)".to_owned();
+        let mut note = empty_note(&original);
+        note.slug = "replace-panel-preview-undo".into();
+        let mut panel = NotePanel::from_note(note);
+        panel.view_mode = NoteViewMode::Split;
+        panel.show_metadata = false;
+
+        for _ in 0..3 {
+            render_panel_once(&ctx, &mut panel, &mut app);
+        }
+        let split_editor_id = panel
+            .last_textedit_id
+            .expect("Split initializes its production TextEdit owner");
+        panel.open_find();
+        panel.set_find_query("target");
+        for _ in 0..3 {
+            render_panel_once(&ctx, &mut panel, &mut app);
+        }
+        assert_eq!(panel.find_current_match().unwrap().byte_range, 13..19);
+
+        panel.set_view_mode_with_context(&ctx, NoteViewMode::Preview);
+        for _ in 0..3 {
+            render_panel_once(&ctx, &mut panel, &mut app);
+        }
+        assert_eq!(
+            panel.find_preview_visibility(&app),
+            Some(FindPreviewVisibility::SourceOnly),
+            "the original link destination is source-only before replacement"
+        );
+        ensure_replace_controls_open(&ctx, &mut panel, &mut app);
+        set_replacement_with_response(&ctx, &mut panel, &mut app, "updated");
+        click_find_replace_button(&ctx, &mut panel, &mut app, false);
+
+        let replaced = "[shown one](<updated-one>)\n\n[shown two](<target-two>)";
+        assert_eq!(panel.note_content(), replaced);
+        assert_eq!(panel.find_current_match().unwrap().byte_range, 41..47);
+        assert_eq!(
+            panel.find_preview_visibility(&app),
+            Some(FindPreviewVisibility::SourceOnly),
+            "the next link target remains source-only in Preview"
+        );
+        assert!(
+            panel
+                .last_find_reveal_button_rect
+                .is_some_and(|rect| rect.is_positive())
+        );
+        assert!(panel.has_unsaved_changes());
+
+        let query_id = panel
+            .find_query_widget_id
+            .expect("the actual Find query response remains current");
+        assert!(
+            ctx.memory(|memory| memory.has_focus(query_id)),
+            "the production replacement path restores focus to the Find query"
+        );
+        send_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Z,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(
+            panel.note_content(),
+            replaced,
+            "Find query focus does not let Preview Undo mutate the note"
+        );
+        ctx.memory_mut(|memory| memory.surrender_focus(query_id));
+        if let Some(id) = panel.replacement_text_widget_id {
+            ctx.memory_mut(|memory| memory.surrender_focus(id));
+        }
+        send_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Z,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(
+            panel.note_content(),
+            original,
+            "Preview Undo is available after Find fields surrender keyboard focus"
+        );
+        send_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Y,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(panel.note_content(), replaced);
+
+        let replacement_id = panel
+            .replacement_text_widget_id
+            .expect("the actual replacement TextEdit response is current");
+        ctx.memory_mut(|memory| memory.request_focus(replacement_id));
+        send_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Z,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(
+            panel.note_content(),
+            replaced,
+            "Preview undo never mutates the note while the replacement field owns input"
+        );
+        ctx.memory_mut(|memory| memory.surrender_focus(replacement_id));
+        if let Some(query_id) = panel.find_query_widget_id {
+            ctx.memory_mut(|memory| memory.surrender_focus(query_id));
+        }
+        send_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Z,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(panel.note_content(), original);
+        send_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Z,
+            egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+        );
+        assert_eq!(
+            panel.note_content(),
+            replaced,
+            "Ctrl+Shift+Z redoes the Preview replacement rather than undoing again"
+        );
+        send_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Z,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(panel.note_content(), original);
+        send_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Y,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(panel.note_content(), replaced);
+
+        ensure_replace_controls_open(&ctx, &mut panel, &mut app);
+        let (expander, replacement_field, _, _) = panel.test_find_replace_rects();
+        if let Some(id) = panel.find_query_widget_id {
+            ctx.memory_mut(|memory| memory.surrender_focus(id));
+        }
+        if let Some(id) = panel.replacement_text_widget_id {
+            ctx.memory_mut(|memory| memory.surrender_focus(id));
+        }
+        click_panel_response(
+            &ctx,
+            &mut panel,
+            &mut app,
+            expander.expect("the actual Replace expander response is available"),
+        );
+        for _ in 0..2 {
+            render_panel_once(&ctx, &mut panel, &mut app);
+        }
+        assert!(replacement_field.is_some());
+        assert!(panel.test_find_replace_rects().1.is_none());
+        panel.close_find(&ctx);
+        for _ in 0..2 {
+            render_panel_once(&ctx, &mut panel, &mut app);
+        }
+        assert_eq!(panel.find_query_widget_id, None);
+        assert_eq!(panel.replacement_text_widget_id, None);
+        assert!(panel.owns_keyboard_layer(&ctx));
+        send_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Z,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(
+            panel.note_content(),
+            original,
+            "Preview Undo remains available after collapsing Find's Replace field"
+        );
+        send_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Y,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(panel.note_content(), replaced);
+
+        panel.set_view_mode_with_context(&ctx, NoteViewMode::Edit);
+        for _ in 0..3 {
+            render_panel_once(&ctx, &mut panel, &mut app);
+        }
+        assert_ne!(panel.last_textedit_id, Some(split_editor_id));
+        let editor_id = panel.last_textedit_id.unwrap();
+        let before_caret = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .and_then(|state| state.cursor.char_range())
+            .expect("the editor retains its post-Replace source selection");
+        let editor_rect = panel
+            .last_editor_rect
+            .expect("the live editor response rendered");
+        click_panel_response(&ctx, &mut panel, &mut app, editor_rect);
+        let after_caret = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .and_then(|state| state.cursor.char_range())
+            .expect("the real editor click updates its cursor");
+        assert_ne!(
+            after_caret, before_caret,
+            "the pointer click moves the caret between replacements"
+        );
+
+        panel.open_find();
+        panel.set_find_query("updated");
+        for _ in 0..3 {
+            render_panel_once(&ctx, &mut panel, &mut app);
+        }
+        ensure_replace_controls_open(&ctx, &mut panel, &mut app);
+        set_replacement_with_response(&ctx, &mut panel, &mut app, "second");
+        click_find_replace_button(&ctx, &mut panel, &mut app, false);
+        let replaced_twice = "[shown one](<second-one>)\n\n[shown two](<target-two>)";
+        assert_eq!(panel.note_content(), replaced_twice);
+
+        for _ in 0..3 {
+            render_panel_once(&ctx, &mut panel, &mut app);
+        }
+        let editor_rect = panel
+            .last_editor_rect
+            .expect("the editor response remains available after the second Replace");
+        click_panel_response(&ctx, &mut panel, &mut app, editor_rect);
+        press_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Z,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(
+            panel.note_content(),
+            replaced,
+            "one Undo restores the immediately preceding source even after a caret move"
+        );
+        press_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Z,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(panel.note_content(), original);
+        assert!(!panel.has_unsaved_changes());
+
+        let edit_state =
+            egui::widgets::text_edit::TextEditState::load(&ctx, panel.last_textedit_id.unwrap())
+                .expect("the active Edit TextEdit owns its native undo history");
+        let edit_cursor = edit_state.cursor.char_range().unwrap();
+        assert!(
+            edit_state
+                .undoer()
+                .has_redo(&(edit_cursor, original.clone())),
+            "the native TextEdit redo branch exists before the view handoff"
+        );
+        panel.set_view_mode_with_context(&ctx, NoteViewMode::Split);
+        let parked = panel
+            .retained_text_edit_history
+            .as_ref()
+            .expect("the same native history is parked across the view transition");
+        assert!(
+            parked.undoer.has_redo(&(parked.cursor, original.clone())),
+            "parking preserves the exact native redo boundary"
+        );
+        for _ in 0..3 {
+            render_panel_once(&ctx, &mut panel, &mut app);
+        }
+        let parked = panel
+            .retained_text_edit_history
+            .as_ref()
+            .expect("unfocused Split renders cannot consume the parked history");
+        assert!(
+            parked.undoer.has_redo(&(parked.cursor, original.clone())),
+            "an unfocused TextEdit's cursor normalization cannot erase parked redo"
+        );
+
+        let parked_cursor = parked.cursor;
+        let editor_rect = panel
+            .last_editor_rect
+            .expect("the unfocused Split editor still has a current response");
+        let focus_click = editor_rect.left_top() + egui::vec2(12.0, 12.0);
+        assert!(editor_rect.contains(focus_click));
+        render_panel_with_events(
+            &ctx,
+            &mut panel,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(focus_click),
+                egui::Event::PointerButton {
+                    pos: focus_click,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(split_editor_id));
+        assert!(
+            panel.retained_text_edit_history.is_none(),
+            "the parked history transfers when the destination response receives real pointer focus"
+        );
+        let split_state = egui::widgets::text_edit::TextEditState::load(&ctx, split_editor_id)
+            .expect("the focused Split editor receives the retained state");
+        let split_cursor = split_state.cursor.char_range().unwrap();
+        assert_ne!(
+            split_cursor, parked_cursor,
+            "the first pointer focus keeps the caret placed by that click"
+        );
+        assert!(
+            split_state
+                .undoer()
+                .has_redo(&(split_cursor, original.clone())),
+            "the focused destination editor receives the same redo branch without restoring the parked cursor"
+        );
+        render_panel_with_events(
+            &ctx,
+            &mut panel,
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: focus_click,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        send_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Y,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(panel.note_content(), replaced);
+        assert!(panel.has_unsaved_changes());
+
+        press_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Z,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(panel.note_content(), original);
+        render_panel_with_events(
+            &ctx,
+            &mut panel,
+            &mut app,
+            vec![egui::Event::Text("!".into())],
+        );
+        let typed_after_undo = panel.note_content().to_owned();
+        assert_ne!(typed_after_undo, original);
+        press_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Y,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(
+            panel.note_content(),
+            typed_after_undo,
+            "ordinary typing after undo clears the replacement redo branch"
+        );
+
+        panel.set_find_query("target");
+        ensure_replace_controls_open(&ctx, &mut panel, &mut app);
+        set_replacement_with_response(&ctx, &mut panel, &mut app, "first branch");
+        click_find_replace_button(&ctx, &mut panel, &mut app, false);
+        let first_branch = panel.note_content().to_owned();
+        assert_ne!(first_branch, typed_after_undo);
+        press_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Z,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(panel.note_content(), typed_after_undo);
+
+        set_replacement_with_response(&ctx, &mut panel, &mut app, "new branch");
+        click_find_replace_button(&ctx, &mut panel, &mut app, false);
+        let new_branch = panel.note_content().to_owned();
+        assert_ne!(new_branch, first_branch);
+        press_note_panel_key(
+            &ctx,
+            &mut panel,
+            &mut app,
+            egui::Key::Y,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(
+            panel.note_content(),
+            new_branch,
+            "a new replacement after Undo discards the abandoned Redo branch"
+        );
     }
 
     #[test]
@@ -11634,6 +13165,184 @@ mod tests {
             panel.ui(ctx, app);
         })
         .drop_without_applying_deltas();
+    }
+
+    fn render_panel_with_events(
+        ctx: &egui::Context,
+        panel: &mut NotePanel,
+        app: &mut LauncherApp,
+        events: Vec<egui::Event>,
+    ) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 800.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ctx| panel.ui(ctx, app))
+            .drop_without_applying_deltas();
+    }
+
+    fn windows_command_modifiers(modifiers: egui::Modifiers) -> egui::Modifiers {
+        if modifiers.ctrl {
+            egui::Modifiers {
+                command: true,
+                ..modifiers
+            }
+        } else {
+            modifiers
+        }
+    }
+
+    fn click_panel_response(
+        ctx: &egui::Context,
+        panel: &mut NotePanel,
+        app: &mut LauncherApp,
+        rect: egui::Rect,
+    ) {
+        assert!(rect.is_positive(), "the actual response is visible");
+        let pos = rect.center();
+        render_panel_with_events(
+            ctx,
+            panel,
+            app,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        render_panel_with_events(
+            ctx,
+            panel,
+            app,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+
+    fn ensure_replace_controls_open(
+        ctx: &egui::Context,
+        panel: &mut NotePanel,
+        app: &mut LauncherApp,
+    ) {
+        for _ in 0..3 {
+            render_panel_once(ctx, panel, app);
+        }
+        let (expander, input, _, _) = panel.test_find_replace_rects();
+        if input.is_none() {
+            click_panel_response(
+                ctx,
+                panel,
+                app,
+                expander.expect("Find renders the Replace expander response"),
+            );
+            for _ in 0..2 {
+                render_panel_once(ctx, panel, app);
+            }
+        }
+        assert!(
+            panel
+                .test_find_replace_rects()
+                .1
+                .is_some_and(|rect| rect.is_positive()),
+            "the expanded Replace field has a current visible response"
+        );
+    }
+
+    fn set_replacement_with_response(
+        ctx: &egui::Context,
+        panel: &mut NotePanel,
+        app: &mut LauncherApp,
+        replacement: &str,
+    ) {
+        let input = panel
+            .test_find_replace_rects()
+            .1
+            .expect("the Replace field is expanded");
+        click_panel_response(ctx, panel, app, input);
+        let modifiers = windows_command_modifiers(egui::Modifiers::CTRL);
+        render_panel_with_events(
+            ctx,
+            panel,
+            app,
+            vec![egui::Event::Key {
+                key: egui::Key::A,
+                physical_key: Some(egui::Key::A),
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+        );
+        render_panel_with_events(
+            ctx,
+            panel,
+            app,
+            vec![egui::Event::Text(replacement.to_owned())],
+        );
+        assert_eq!(panel.test_replacement_text(), replacement);
+    }
+
+    fn click_find_replace_button(
+        ctx: &egui::Context,
+        panel: &mut NotePanel,
+        app: &mut LauncherApp,
+        replace_all: bool,
+    ) {
+        let rect = if replace_all {
+            panel.test_find_replace_rects().3
+        } else {
+            panel.test_find_replace_rects().2
+        }
+        .expect("the current Find state rendered the requested action response");
+        click_panel_response(ctx, panel, app, rect);
+    }
+
+    fn press_note_panel_key(
+        ctx: &egui::Context,
+        panel: &mut NotePanel,
+        app: &mut LauncherApp,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+    ) {
+        let editor_id = panel
+            .last_textedit_id
+            .expect("the active Edit or Split view has a TextEdit response");
+        ctx.memory_mut(|memory| memory.request_focus(editor_id));
+        send_note_panel_key(ctx, panel, app, key, modifiers);
+    }
+
+    fn send_note_panel_key(
+        ctx: &egui::Context,
+        panel: &mut NotePanel,
+        app: &mut LauncherApp,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+    ) {
+        let modifiers = windows_command_modifiers(modifiers);
+        render_panel_with_events(
+            ctx,
+            panel,
+            app,
+            vec![egui::Event::Key {
+                key,
+                physical_key: Some(key),
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+        );
     }
 
     fn render_note_body_once(

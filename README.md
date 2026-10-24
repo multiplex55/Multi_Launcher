@@ -272,6 +272,13 @@ Preview and Split identify the containing rendered segment. Hidden Markdown
 targets and collapsed content are identified explicitly, with **Reveal in Edit**
 for exact source selection. Searching does not edit the note or switch modes.
 
+Expand **Replace** in the Find strip to replace the selected match or all current
+matches in the unsaved Markdown source. Replacement text is literal, including
+`$` and backslashes; Replace All uses the original non-overlapping matches and
+does not recursively search inserted text. Replacements participate in the note
+editor's Undo/Redo history and follow the note's normal auto-save, manual Save, and
+discard policy.
+
 Use wiki links (`[[Roadmap]]`) and canonical links (`link://note/roadmap`) for
 backlinks. Add aliases near the top of a note with either `Alias: Display Name`
 or `Aliases: Alpha, Beta`; note search, open, backlinks, and relationship

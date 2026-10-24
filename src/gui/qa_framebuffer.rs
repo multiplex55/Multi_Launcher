@@ -114,6 +114,16 @@ struct JumpModeObservationRequest {
     #[cfg(feature = "qa-framebuffer-capture")]
     #[serde(default)]
     screenshot_countdown: Option<ScreenshotCountdownRequest>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    #[serde(default)]
+    note_replace: Option<NoteReplaceRequest>,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct NoteReplaceRequest {
+    expected_slug: String,
 }
 
 #[cfg(feature = "qa-framebuffer-capture")]
@@ -237,6 +247,55 @@ struct JumpModeObservation {
     #[cfg(feature = "qa-framebuffer-capture")]
     #[serde(skip_serializing_if = "Option::is_none")]
     screenshot_countdown: Option<Vec<ScreenshotCountdownObservation>>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note_replace: Option<super::note_panel::NoteReplacePaint>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note_replace_root: Option<NoteReplaceRootObservation>,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone, Debug, Serialize, PartialEq)]
+struct NoteReplaceRootObservation {
+    root_owner_allowed: bool,
+    query: Option<super::note_panel::NoteReplaceControlPaint>,
+    result_action_id: Option<String>,
+    result: Option<super::note_panel::NoteReplaceControlPaint>,
+    logic_frame_id: u64,
+    ui_pass_id: u64,
+    ui_pass_index: u32,
+    egui_frame_nr: u64,
+    egui_pass_index: usize,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone, Debug)]
+struct NoteReplaceRootPaint {
+    root_owner_allowed: bool,
+    query: Option<super::note_panel::NoteReplaceControlPaint>,
+    result_action_id: Option<String>,
+    result: Option<super::note_panel::NoteReplaceControlPaint>,
+    logic_frame_id: u64,
+    ui_pass_id: u64,
+    ui_pass_index: u32,
+    egui_frame_nr: u64,
+    egui_pass_index: usize,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+fn note_replace_control_paint(
+    response: &egui::Response,
+) -> super::note_panel::NoteReplaceControlPaint {
+    let rect = response.rect;
+    let clipped = response.interact_rect;
+    super::note_panel::NoteReplaceControlPaint {
+        response_id: format!("{:?}", response.id),
+        rect: [rect.min.x, rect.min.y, rect.max.x, rect.max.y],
+        clipped_rect: [clipped.min.x, clipped.min.y, clipped.max.x, clipped.max.y],
+        enabled: response.enabled(),
+        focused: response.has_focus(),
+    }
 }
 
 #[cfg(feature = "qa-framebuffer-capture")]
@@ -632,6 +691,34 @@ fn validate_manifest(manifest: &RequestManifest) -> Result<(), String> {
         return Err(
             "target repair observation requires a dedicated ROOT/F11 request without another surface observer".into(),
         );
+    }
+    #[cfg(feature = "qa-framebuffer-capture")]
+    if let Some(observation) = manifest.jump_mode_observation.as_ref()
+        && let Some(note_replace) = observation.note_replace.as_ref()
+    {
+        if manifest.target != CaptureTarget::Root
+            || manifest.trigger != CaptureTrigger::F11
+            || observation.wait_for_active_hints
+            || observation.phase2.is_some()
+            || observation.settings_search.is_some()
+            || observation.target_repair.is_some()
+            || observation.screenshot_countdown.is_some()
+        {
+            return Err(
+                "Note Replace observation requires a dedicated ROOT/F11 request without another surface observer".into(),
+            );
+        }
+        let slug = note_replace.expected_slug.as_str();
+        if slug.is_empty()
+            || slug.len() > 128
+            || !slug.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+            })
+        {
+            return Err(
+                "Note Replace expected_slug must be 1-128 lowercase ASCII slug characters".into(),
+            );
+        }
     }
     if let Some(settings_search) = manifest
         .jump_mode_observation
@@ -1147,6 +1234,10 @@ pub(super) struct FramebufferProbe {
     screenshot_countdown_request: Option<ScreenshotCountdownRequest>,
     #[cfg(feature = "qa-framebuffer-capture")]
     screenshot_countdown_observations: Vec<ScreenshotCountdownObservation>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    note_replace_expected_slug: Option<String>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    note_replace_root_paint: Option<NoteReplaceRootPaint>,
     activation_count: u64,
     last_action: Option<QaActivationObservation>,
     tab_processed_count: u64,
@@ -1224,6 +1315,12 @@ impl FramebufferProbe {
                 .and_then(|request| request.screenshot_countdown.clone()),
             #[cfg(feature = "qa-framebuffer-capture")]
             screenshot_countdown_observations: Vec::new(),
+            #[cfg(feature = "qa-framebuffer-capture")]
+            note_replace_expected_slug: observation_request
+                .and_then(|request| request.note_replace.as_ref())
+                .map(|request| request.expected_slug.clone()),
+            #[cfg(feature = "qa-framebuffer-capture")]
+            note_replace_root_paint: None,
             activation_count: 0,
             last_action: None,
             tab_processed_count: 0,
@@ -1341,6 +1438,63 @@ impl FramebufferProbe {
         self.current_ui_pass_index = pass_index;
         self.retained_pass = None;
         self.latest_root_list_diagnostic = None;
+        #[cfg(feature = "qa-framebuffer-capture")]
+        {
+            self.note_replace_root_paint =
+                self.note_replace_expected_slug
+                    .as_ref()
+                    .map(|_| NoteReplaceRootPaint {
+                        root_owner_allowed: false,
+                        query: None,
+                        result_action_id: None,
+                        result: None,
+                        logic_frame_id: self.logic_frame_id,
+                        ui_pass_id: self.ui_pass_id,
+                        ui_pass_index: self.current_ui_pass_index,
+                        egui_frame_nr: 0,
+                        egui_pass_index: 0,
+                    });
+        }
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    fn record_note_replace_root_query(
+        &mut self,
+        ctx: &egui::Context,
+        response: &egui::Response,
+        root_owner_allowed: bool,
+    ) {
+        let Some(paint) = self.note_replace_root_paint.as_mut() else {
+            return;
+        };
+        paint.root_owner_allowed = root_owner_allowed && response.enabled();
+        paint.query = Some(note_replace_control_paint(response));
+        paint.egui_frame_nr = ctx.cumulative_frame_nr();
+        paint.egui_pass_index = ctx.current_pass_index();
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    fn record_note_replace_root_result(
+        &mut self,
+        ctx: &egui::Context,
+        response: &egui::Response,
+        action_id: &str,
+        root_owner_allowed: bool,
+    ) {
+        let Some(expected_slug) = self.note_replace_expected_slug.as_deref() else {
+            return;
+        };
+        if action_id != format!("note:open:{expected_slug}") {
+            return;
+        }
+        let Some(paint) = self.note_replace_root_paint.as_mut() else {
+            return;
+        };
+        paint.root_owner_allowed &= root_owner_allowed && response.enabled();
+        paint.result_action_id = Some(action_id.to_owned());
+        paint.result = Some(note_replace_control_paint(response));
+        paint.egui_frame_nr = ctx.cumulative_frame_nr();
+        paint.egui_pass_index = ctx.current_pass_index();
     }
 
     fn record_root_list_diagnostic(
@@ -2216,6 +2370,43 @@ impl LauncherApp {
             .is_some_and(|probe| probe.target_repair_observation_enabled)
     }
 
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn qa_framebuffer_note_replace_expected_slug(&self) -> Option<&str> {
+        self.qa_framebuffer
+            .as_ref()?
+            .note_replace_expected_slug
+            .as_deref()
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn qa_framebuffer_record_note_replace_root_query(
+        &mut self,
+        ctx: &egui::Context,
+        response: &egui::Response,
+        root_visible: bool,
+    ) {
+        let root_owner_allowed =
+            self.qa_framebuffer_note_replace_root_owner_allowed(ctx, root_visible);
+        if let Some(probe) = self.qa_framebuffer.as_mut() {
+            probe.record_note_replace_root_query(ctx, response, root_owner_allowed);
+        }
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn qa_framebuffer_record_note_replace_root_result(
+        &mut self,
+        ctx: &egui::Context,
+        response: &egui::Response,
+        action_id: &str,
+        root_visible: bool,
+    ) {
+        let root_owner_allowed =
+            self.qa_framebuffer_note_replace_root_owner_allowed(ctx, root_visible);
+        if let Some(probe) = self.qa_framebuffer.as_mut() {
+            probe.record_note_replace_root_result(ctx, response, action_id, root_owner_allowed);
+        }
+    }
+
     pub(super) fn qa_framebuffer_use_empty_paste_invocation_context(&self) -> bool {
         self.qa_framebuffer
             .as_ref()
@@ -2621,6 +2812,15 @@ impl LauncherApp {
                 .as_ref()
                 .and_then(|probe| probe.retained_pass.as_ref())
         {
+            if observation.note_replace.is_none() {
+                observation.note_replace = retained_note_replace_paint_if_current(
+                    self,
+                    &ctx,
+                    eligibility,
+                    marker,
+                    observation,
+                );
+            }
             if observation.target_repair.is_none() {
                 observation.target_repair = retained_target_repair_paint_if_current(
                     self,
@@ -2645,6 +2845,67 @@ impl LauncherApp {
             probe.finish_retained_ui_frame(&ctx, eligibility, jump_mode_observation);
         }
     }
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+fn retained_note_replace_paint_if_current(
+    app: &LauncherApp,
+    ctx: &egui::Context,
+    final_eligibility: SurfaceEligibility,
+    marker: &RetainedPassMarker,
+    observation: &JumpModeObservation,
+) -> Option<super::note_panel::NoteReplacePaint> {
+    let retained = marker
+        .evidence
+        .as_ref()?
+        .jump_mode_observation
+        .as_ref()?
+        .note_replace
+        .as_ref()?;
+    let expected_slug = app
+        .qa_framebuffer
+        .as_ref()?
+        .note_replace_expected_slug
+        .as_deref()?;
+    let panel = app
+        .note_panels
+        .iter()
+        .find(|panel| panel.note_slug() == expected_slug)?;
+    let marker_frame = marker.egui_frame_nr?;
+    let marker_pass = marker.egui_pass_index?;
+    let retained_frame_matches = marker.logic_frame_id == observation.logic_frame_id
+        && marker.ui_pass_id == observation.ui_pass_id
+        && marker.ui_pass_index == observation.ui_pass_index
+        && retained.egui_frame_nr == marker_frame
+        && retained.egui_pass_index == marker_pass;
+    let expected_layer = panel.qa_note_replace_layer_id();
+    let visible_root = marker.eligibility.logical_root_visible
+        && final_eligibility.logical_root_visible
+        && marker.eligibility.root_visible
+        && final_eligibility.root_visible
+        && app.visible_flag.load(std::sync::atomic::Ordering::Relaxed)
+        && app.last_visible;
+    let no_competing_owner = !marker.eligibility.ocr_owner
+        && !final_eligibility.ocr_owner
+        && !marker.eligibility.tool_owner
+        && !final_eligibility.tool_owner
+        && !app.confirm_modal.is_open()
+        && !app.snippet_prompt_dialog.is_open()
+        && app.macro_prompt.pending.is_none()
+        && !app.macro_parameter_prompt.owns_input()
+        && !app.mkmacro_dialog.hotkey_capture
+        && !app.mkmacro_dialog.record_hotkey_capture
+        && !app.mkmacro_dialog.pause_record_hotkey_capture
+        && !app.mkmacro_dialog.marker_record_hotkey_capture;
+    let root_owner_matches = retained.root_owner_allowed
+        && app.qa_framebuffer_note_replace_panel_owner_allowed(ctx, expected_slug);
+    (visible_root
+        && no_competing_owner
+        && root_owner_matches
+        && visible_top_middle_layer(ctx) == Some(expected_layer)
+        && retained_frame_matches
+        && panel.qa_note_replace_paint_matches_state(retained, expected_slug))
+    .then(|| retained.clone())
 }
 
 fn target_repair_root_still_owned(
@@ -3226,6 +3487,42 @@ fn build_jump_mode_observation(
             }
         });
     #[cfg(feature = "qa-framebuffer-capture")]
+    let note_replace = app
+        .qa_framebuffer
+        .as_ref()
+        .and_then(|probe| probe.note_replace_expected_slug.as_deref())
+        .and_then(|expected_slug| {
+            app.note_panels
+                .iter()
+                .find(|panel| panel.note_slug() == expected_slug)
+                .and_then(|panel| panel.qa_note_replace_paint_for_current_pass(ctx, expected_slug))
+                .map(|mut paint| {
+                    paint.root_owner_allowed =
+                        app.qa_framebuffer_note_replace_panel_owner_allowed(ctx, expected_slug);
+                    paint
+                })
+        });
+    #[cfg(feature = "qa-framebuffer-capture")]
+    let note_replace_root = app.qa_framebuffer.as_ref().and_then(|probe| {
+        let paint = probe.note_replace_root_paint.as_ref()?;
+        (paint.logic_frame_id == logic_frame_id
+            && paint.ui_pass_id == ui_pass_id
+            && paint.ui_pass_index == ui_pass_index
+            && paint.egui_frame_nr > 0
+            && paint.query.is_some())
+        .then(|| NoteReplaceRootObservation {
+            root_owner_allowed: paint.root_owner_allowed,
+            query: paint.query.clone(),
+            result_action_id: paint.result_action_id.clone(),
+            result: paint.result.clone(),
+            logic_frame_id: paint.logic_frame_id,
+            ui_pass_id: paint.ui_pass_id,
+            ui_pass_index: paint.ui_pass_index,
+            egui_frame_nr: paint.egui_frame_nr,
+            egui_pass_index: paint.egui_pass_index,
+        })
+    });
+    #[cfg(feature = "qa-framebuffer-capture")]
     let target_repair = app
         .qa_framebuffer
         .as_ref()
@@ -3390,6 +3687,10 @@ fn build_jump_mode_observation(
                 .as_ref()
                 .map(|_| probe.screenshot_countdown_observations.clone())
         }),
+        #[cfg(feature = "qa-framebuffer-capture")]
+        note_replace,
+        #[cfg(feature = "qa-framebuffer-capture")]
+        note_replace_root,
     }
 }
 
@@ -4392,6 +4693,8 @@ mod tests {
                 settings_search: None,
                 target_repair: None,
                 screenshot_countdown: None,
+                #[cfg(feature = "qa-framebuffer-capture")]
+                note_replace: None,
             }),
             output_dir: PathBuf::from("capture"),
             fixture_manifest_sha256: "a".repeat(64),
@@ -4970,6 +5273,9 @@ mod tests {
             target_repair_expected_folder_replacement: None,
             screenshot_countdown_request: None,
             screenshot_countdown_observations: Vec::new(),
+            #[cfg(feature = "qa-framebuffer-capture")]
+            note_replace_expected_slug: None,
+            note_replace_root_paint: None,
             activation_count: 0,
             last_action: None,
             tab_processed_count: 0,
@@ -5361,6 +5667,8 @@ mod tests {
                 settings_search: None,
                 target_repair: None,
                 screenshot_countdown: None,
+                #[cfg(feature = "qa-framebuffer-capture")]
+                note_replace: None,
             }),
             output_dir: PathBuf::from("capture"),
             fixture_manifest_sha256: "a".repeat(64),

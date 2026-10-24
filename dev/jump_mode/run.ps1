@@ -2,14 +2,15 @@
 [CmdletBinding()]
 param(
     [switch]$FixturesOnly,
-    [ValidateSet('Baseline', 'QueryProbe', 'Phase1', 'Phase1Enabled', 'Phase1Disabled', 'Phase2', 'SettingsSearch', 'TargetRepair')][string]$Scenario = 'Baseline',
+    [ValidateSet('Baseline', 'QueryProbe', 'Phase1', 'Phase1Enabled', 'Phase1Disabled', 'Phase2', 'SettingsSearch', 'TargetRepair', 'NoteReplace')][string]$Scenario = 'Baseline',
     [ValidateSet('All', 'Dashboard', 'Grid', 'FinalSmoke')][string]$Screen = 'All',
     [ValidateSet('Settings', 'Notes', 'Todo', 'Timer', 'Paste', 'MkMacro', 'FileSearch')][string]$Surface = 'Settings',
     [ValidateRange(5, 120)][int]$CaptureTimeoutSeconds = 45,
     [ValidateRange(1, 30)][int]$GracefulCloseSeconds = 6,
     [ValidateRange(90, 7200)][int]$OverallTimeoutSeconds = 2400,
     [switch]$NativeOnly,
-    [string]$PrebuiltArtifactManifest
+    [string]$PrebuiltArtifactManifest,
+    [string]$NativeBatchDeadlineUtc
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,7 +21,7 @@ $phase2SurfaceKey = switch ($Surface) {
     'FileSearch' { 'file-search' }
     default { $Surface.ToLowerInvariant() }
 }
-$runMilestone = if ($Scenario -eq 'TargetRepair') { 'G3-M2-B' } elseif ($Scenario -eq 'SettingsSearch') { 'G3-M1-B' } elseif ($isFinalSmoke) { 'M15' } elseif ($Scenario -eq 'QueryProbe') { 'M05' } elseif ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'M08' } elseif ($Scenario -eq 'Phase2') { 'M13' } else { 'M01' }
+$runMilestone = if ($Scenario -eq 'NoteReplace') { 'G3-M9-B' } elseif ($Scenario -eq 'TargetRepair') { 'G3-M2-B' } elseif ($Scenario -eq 'SettingsSearch') { 'G3-M1-B' } elseif ($isFinalSmoke) { 'M15' } elseif ($Scenario -eq 'QueryProbe') { 'M05' } elseif ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'M08' } elseif ($Scenario -eq 'Phase2') { 'M13' } else { 'M01' }
 $runStamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
 $runSuffix = [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $scenarioTag = if ($isFinalSmoke) { 'm15_final_smoke' } else { switch ($Scenario) {
@@ -31,6 +32,7 @@ $scenarioTag = if ($isFinalSmoke) { 'm15_final_smoke' } else { switch ($Scenario
     'Phase2' { "m13_phase2_$phase2SurfaceKey" }
     'SettingsSearch' { 'g3_m1b_settings_search' }
     'TargetRepair' { 'g3_m2b_target_repair' }
+    'NoteReplace' { 'g3_m9b_note_replace' }
     default { 'm01_baseline' }
 } }
 $runId = "jump_${scenarioTag}_${runStamp}_$runSuffix"
@@ -54,6 +56,25 @@ $buildStdoutPath = Join-Path $evidenceRoot 'build.stdout.log'
 $buildStderrPath = Join-Path $evidenceRoot 'build.stderr.log'
 $startedAt = [DateTime]::UtcNow
 $runDeadlineUtc = $startedAt.AddSeconds($OverallTimeoutSeconds)
+if (![string]::IsNullOrWhiteSpace($NativeBatchDeadlineUtc)) {
+    if ($Scenario -ne 'NoteReplace' -or !$NativeOnly) {
+        throw 'NativeBatchDeadlineUtc is supported only by NoteReplace NativeOnly runs'
+    }
+    $sharedDeadline = [DateTimeOffset]::MinValue
+    if (![DateTimeOffset]::TryParse(
+        $NativeBatchDeadlineUtc,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind,
+        [ref]$sharedDeadline
+    )) {
+        throw 'NativeBatchDeadlineUtc must be an ISO-8601 timestamp with an explicit offset'
+    }
+    $sharedDeadlineUtc = $sharedDeadline.UtcDateTime
+    if ($sharedDeadlineUtc -le $startedAt) { throw 'NativeBatchDeadlineUtc has already expired' }
+    if ($sharedDeadlineUtc -lt $runDeadlineUtc) { $runDeadlineUtc = $sharedDeadlineUtc }
+} elseif ($Scenario -eq 'NoteReplace' -and $NativeOnly) {
+    throw 'NoteReplace NativeOnly requires the shared two-profile NativeBatchDeadlineUtc'
+}
 $targetDirectory = $null
 $previousTargetDirectory = $env:CARGO_TARGET_DIR
 $nativeQueryProbeInitialized = $false
@@ -86,6 +107,7 @@ $scenarioReason = if ($isFinalSmoke) { 'M15 final representative smoke has not s
     'Phase2' { "Native Phase 2 $Surface workflow has not started." }
     'SettingsSearch' { 'Native Settings search navigation scenario has not started.' }
     'TargetRepair' { 'Native saved-target repair scenario has not started.' }
+    'NoteReplace' { 'Native current-note literal replacement scenario has not started.' }
     default { 'Baseline capture has not started.' }
 } }
 $fixtureScenarioStatus = 'BLOCKED'
@@ -126,6 +148,18 @@ $targetRepairFavoriteStorePath = $null
 $targetRepairPinStorePath = $null
 $targetRepairUsageStorePath = $null
 $targetRepairUnrelatedPath = $null
+$noteReplaceFixtureScenario = $null
+$noteReplaceJumpEnabled = $null
+$noteReplaceSourcePath = $null
+$noteReplaceOtherPath = $null
+$noteReplaceSourceBefore = $null
+$noteReplaceOtherBeforeSha256 = $null
+$noteReplaceSavedSha256 = $null
+$noteReplaceExpectedSourceAfterAll = $null
+$noteReplaceExpectedReplacement = $null
+$noteReplaceExpectedTitle = $null
+$noteReplaceSlug = $null
+$noteReplaceBeforeSha256 = $null
 
 function Get-RemainingRunSeconds([int]$RequestedSeconds = 86400) {
     $remaining = [int][Math]::Floor(($script:runDeadlineUtc - [DateTime]::UtcNow).TotalSeconds)
@@ -3303,6 +3337,766 @@ function Assert-TargetRepairAssociations([string]$ActionPath, [string]$FolderPat
     }
 }
 
+function Get-NoteReplaceCurrentPanel([object]$Observation, [string]$ExpectedIdentity = '') {
+    if ($null -eq $Observation -or $null -eq $Observation.note_replace) { return $null }
+    $paint = $Observation.note_replace
+    if (!$paint.open -or !$paint.expected_panel_match -or
+        [string]::IsNullOrWhiteSpace([string]$paint.panel_identity) -or
+        ($ExpectedIdentity -and [string]$paint.panel_identity -cne $ExpectedIdentity)) {
+        return $null
+    }
+    return $paint
+}
+
+function Get-NoteReplaceRootPaint([object]$Observation) {
+    if ($null -eq $Observation -or $null -eq $Observation.note_replace_root) { return $null }
+    $paint = $Observation.note_replace_root
+    if (!$paint.root_owner_allowed -or
+        [long]$paint.logic_frame_id -ne [long]$Observation.logic_frame_id -or
+        [long]$paint.ui_pass_id -ne [long]$Observation.ui_pass_id -or
+        [long]$paint.ui_pass_index -ne [long]$Observation.ui_pass_index -or
+        $null -eq $paint.query) { return $null }
+    return $paint
+}
+
+function Get-NoteReplaceTextSha256([string]$Text) {
+    $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes($Text)
+    return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
+
+function Assert-NoteReplaceRoot([IntPtr]$ExpectedRoot, [string]$ExpectedPanelIdentity = '') {
+    Assert-OwnedRepairRootForeground $ExpectedRoot
+    $state = Read-JumpModeObservation
+    $ownerAllowed = if ($ExpectedPanelIdentity) {
+        $null -ne (Get-NoteReplaceCurrentPanel $state $ExpectedPanelIdentity) -and
+            [bool]$state.note_replace.root_owner_allowed
+    } else {
+        $null -ne (Get-NoteReplaceRootPaint $state)
+    }
+    if ($null -eq $state -or !$state.root_focused -or !$ownerAllowed) {
+        throw 'NoteReplace input refused because the current owned ROOT observation is unavailable or ineligible'
+    }
+    if ($ExpectedPanelIdentity -and $null -eq (Get-NoteReplaceCurrentPanel $state $ExpectedPanelIdentity)) {
+        throw 'NoteReplace input refused because the current note panel identity changed or closed'
+    }
+    return $state
+}
+
+function Invoke-NoteReplaceKeyBatch(
+    [string]$Name,
+    [uint16[]]$Keys,
+    [string[]]$KeyLabels,
+    [IntPtr]$ExpectedRoot,
+    [string]$ExpectedPanelIdentity = '',
+    [string]$FocusedControl = ''
+) {
+    if ($Keys.Count -eq 0 -or $Keys.Count -ne $KeyLabels.Count) { throw 'NoteReplace key batch is empty or malformed' }
+    $state = Assert-NoteReplaceRoot $ExpectedRoot $ExpectedPanelIdentity
+    if ($FocusedControl) {
+        if ($ExpectedPanelIdentity) {
+            $paint = Get-NoteReplaceCurrentPanel $state $ExpectedPanelIdentity
+            $property = $paint.controls.PSObject.Properties[$FocusedControl]
+            if ($null -eq $property -or $null -eq $property.Value -or !$property.Value.enabled -or !$property.Value.focused) {
+                throw "NoteReplace keyboard input refused because the current $FocusedControl response is not focused"
+            }
+        } elseif (!$state.query_focused) {
+            throw 'NoteReplace launcher input refused because the current query TextEntry is not focused'
+        }
+    }
+    $pressed = [Collections.Generic.List[uint16]]::new()
+    $sendFailure = $null
+    try {
+        foreach ($key in $Keys) {
+            if (![JumpModeNativeProbe]::ModifierIsDown() -and $pressed.Count -eq 0 -and $ExpectedPanelIdentity) {
+                $null = Assert-NoteReplaceRoot $ExpectedRoot $ExpectedPanelIdentity
+            }
+            if (![JumpModeNativeProbe]::SendKey($key, $false)) { throw "SendInput key-down failed in $Name" }
+            $pressed.Add($key)
+        }
+    } catch {
+        $sendFailure = $_.Exception.Message
+    } finally {
+        for ($index = $pressed.Count - 1; $index -ge 0; $index--) {
+            if (![JumpModeNativeProbe]::SendKey($pressed[$index], $true)) {
+                $sendFailure = "SendInput key-up failed while releasing keys from $Name"
+            }
+        }
+    }
+    if ($sendFailure) { throw $sendFailure }
+    if ([JumpModeNativeProbe]::ModifierIsDown()) { throw "a modifier remained held after $Name" }
+    Write-Event 'note_replace_key_batch_sent' @{
+        name = $Name
+        keys = $KeyLabels
+        root_hwnd = ('0x{0:X}' -f $ExpectedRoot.ToInt64())
+        panel_identity = if ($ExpectedPanelIdentity) { $ExpectedPanelIdentity } else { $null }
+        logic_frame_id = [long]$state.logic_frame_id
+        ui_pass_id = [long]$state.ui_pass_id
+    }
+}
+
+function Send-NoteReplaceUnicodeText(
+    [string]$Name,
+    [string]$Text,
+    [IntPtr]$ExpectedRoot,
+    [string]$ExpectedPanelIdentity = '',
+    [string]$FocusedControl = ''
+) {
+    $state = Assert-NoteReplaceRoot $ExpectedRoot $ExpectedPanelIdentity
+    if ($FocusedControl) {
+        if ($ExpectedPanelIdentity) {
+            $paint = Get-NoteReplaceCurrentPanel $state $ExpectedPanelIdentity
+            $property = $paint.controls.PSObject.Properties[$FocusedControl]
+            if ($null -eq $property -or $null -eq $property.Value -or !$property.Value.enabled -or !$property.Value.focused) {
+                throw "NoteReplace text input refused because the current $FocusedControl response is not focused"
+            }
+        } elseif (!$state.query_focused) {
+            throw 'NoteReplace text input refused because the current query TextEntry is not focused'
+        }
+    }
+    $index = 0
+    foreach ($character in $Text.ToCharArray()) {
+        $index++
+        $null = Assert-NoteReplaceRoot $ExpectedRoot $ExpectedPanelIdentity
+        if (![JumpModeNativeProbe]::SendUnicodeChar($character, $false)) {
+            throw "Unicode input failed in $Name character $index"
+        }
+        if (![JumpModeNativeProbe]::SendUnicodeChar($character, $true)) {
+            throw "Unicode key release failed in $Name character $index"
+        }
+    }
+    if ([JumpModeNativeProbe]::ModifierIsDown()) { throw "a modifier remained held after $Name" }
+    Write-Event 'note_replace_text_sent' @{
+        name = $Name
+        utf16_code_units = $Text.Length
+        root_hwnd = ('0x{0:X}' -f $ExpectedRoot.ToInt64())
+        panel_identity = if ($ExpectedPanelIdentity) { $ExpectedPanelIdentity } else { $null }
+        logic_frame_id = [long]$state.logic_frame_id
+        ui_pass_id = [long]$state.ui_pass_id
+    }
+}
+
+function Test-NoteReplaceRect([object]$Control) {
+    if ($null -eq $Control -or $null -eq $Control.rect -or $null -eq $Control.clipped_rect -or
+        $Control.rect.Count -ne 4 -or $Control.clipped_rect.Count -ne 4) { return $false }
+    $r = @($Control.rect | ForEach-Object { [double]$_ })
+    $c = @($Control.clipped_rect | ForEach-Object { [double]$_ })
+    return $r[2] -gt $r[0] -and $r[3] -gt $r[1] -and
+        $c[2] -gt $c[0] -and $c[3] -gt $c[1] -and
+        $c[0] -ge ($r[0] - 0.1) -and $c[1] -ge ($r[1] - 0.1) -and
+        $c[2] -le ($r[2] + 0.1) -and $c[3] -le ($r[3] + 0.1)
+}
+
+function Invoke-NoteReplaceControlClick(
+    [string]$Name,
+    [string]$ControlName,
+    [IntPtr]$ExpectedRoot,
+    [string]$ExpectedPanelIdentity,
+    [switch]$AllowDisabled
+) {
+    $state = Assert-NoteReplaceRoot $ExpectedRoot $ExpectedPanelIdentity
+    $paint = Get-NoteReplaceCurrentPanel $state $ExpectedPanelIdentity
+    $property = $paint.controls.PSObject.Properties[$ControlName]
+    if ($null -eq $property -or !(Test-NoteReplaceRect $property.Value) -or
+        (!$AllowDisabled -and !$property.Value.enabled)) {
+        throw "NoteReplace $ControlName is not a current visible enabled response"
+    }
+    $capturedControl = $property.Value
+    $capturedContentRevision = [long]$paint.content_revision
+    $capturedQueryRevision = [long]$paint.query_revision
+    $capturedNavigationRevision = [long]$paint.navigation_revision
+
+    # Re-read the actual owner immediately before converting and clicking the
+    # response. A valid rectangle from an older frame must not authorize input
+    # after a query, selection, or layout change.
+    $state = Assert-NoteReplaceRoot $ExpectedRoot $ExpectedPanelIdentity
+    $paint = Get-NoteReplaceCurrentPanel $state $ExpectedPanelIdentity
+    $property = $paint.controls.PSObject.Properties[$ControlName]
+    if ($null -eq $property -or $null -eq $property.Value -or
+        [string]$property.Value.response_id -cne [string]$capturedControl.response_id -or
+        (!$AllowDisabled -and !$property.Value.enabled) -or
+        [long]$paint.content_revision -ne $capturedContentRevision -or
+        [long]$paint.query_revision -ne $capturedQueryRevision -or
+        [long]$paint.navigation_revision -ne $capturedNavigationRevision -or
+        (@($property.Value.rect) -join ',') -cne (@($capturedControl.rect) -join ',') -or
+        (@($property.Value.clipped_rect) -join ',') -cne (@($capturedControl.clipped_rect) -join ',')) {
+        throw "NoteReplace $ControlName response or panel revisions changed before native input"
+    }
+    $control = $property.Value
+    if (!(Test-NoteReplaceRect $control)) { throw "NoteReplace $ControlName response became clipped before native input" }
+    $ppp = [double]$state.pixels_per_point
+    if ($ppp -le 0 -or [double]::IsNaN($ppp) -or [double]::IsInfinity($ppp)) {
+        throw 'NoteReplace current response has an invalid root pixel scale'
+    }
+    $rect = $control.clipped_rect
+    $clientX = [int][Math]::Round((([double]$rect[0] + [double]$rect[2]) / 2.0) * $ppp)
+    $clientY = [int][Math]::Round((([double]$rect[1] + [double]$rect[3]) / 2.0) * $ppp)
+    $screenX = 0; $screenY = 0
+    if (![JumpModeNativeProbe]::TryClientToScreen($ExpectedRoot, $clientX, $clientY, [ref]$screenX, [ref]$screenY)) {
+        throw "could not map the current NoteReplace $ControlName response to screen coordinates"
+    }
+    $hit = [JumpModeNativeProbe]::WindowAtScreenPoint($screenX, $screenY)
+    if ($hit -eq [IntPtr]::Zero -or [int][JumpModeNativeProbe]::WindowProcessId($hit) -ne $processId -or
+        [JumpModeNativeProbe]::RootWindow($hit) -ne $ExpectedRoot) {
+        throw "NoteReplace $ControlName response hit test found a foreign or occluding window"
+    }
+    Assert-OwnedRepairRootForeground $ExpectedRoot
+    if (![JumpModeNativeProbe]::ClickScreenPoint($screenX, $screenY)) {
+        throw "SendInput click failed for current NoteReplace $ControlName response"
+    }
+    Write-Event 'note_replace_response_clicked' @{
+        name = $Name
+        control = $ControlName
+        response_id = [string]$control.response_id
+        logic_frame_id = [long]$state.logic_frame_id
+        ui_pass_id = [long]$state.ui_pass_id
+        content_revision = [long]$paint.content_revision
+        query_revision = [long]$paint.query_revision
+    }
+    return $state
+}
+
+function Invoke-NoteReplaceTargetClick(
+    [string]$Name,
+    [object]$Observation,
+    [string]$TargetId,
+    [string]$ExpectedAction,
+    [IntPtr]$ExpectedRoot
+) {
+    $state = Assert-NoteReplaceRoot $ExpectedRoot
+    if ($null -eq $Observation -or [long]$state.logic_frame_id -lt [long]$Observation.logic_frame_id) {
+        throw 'NoteReplace launcher target frame is stale before native input'
+    }
+    $targets = @($state.targets | Where-Object {
+        $_.surface -ceq 'launcher_results' -and [string]$_.target_id -ceq $TargetId -and
+            $_.eligible -and $_.root_action -and [string]$_.root_action.action -ceq $ExpectedAction
+    })
+    if ($targets.Count -ne 1) { throw 'NoteReplace exact launcher target is no longer a unique eligible current response' }
+    $target = $targets[0]
+    if (!(Test-NoteReplaceRect $target)) { throw 'NoteReplace launcher target is clipped or has invalid current geometry' }
+    $ppp = [double]$state.pixels_per_point
+    $rect = $target.clipped_rect
+    $clientX = [int][Math]::Round((([double]$rect[0] + [double]$rect[2]) / 2.0) * $ppp)
+    $clientY = [int][Math]::Round((([double]$rect[1] + [double]$rect[3]) / 2.0) * $ppp)
+    $screenX = 0; $screenY = 0
+    if (![JumpModeNativeProbe]::TryClientToScreen($ExpectedRoot, $clientX, $clientY, [ref]$screenX, [ref]$screenY)) {
+        throw 'could not map the exact NoteReplace launcher result to screen coordinates'
+    }
+    $hit = [JumpModeNativeProbe]::WindowAtScreenPoint($screenX, $screenY)
+    if ($hit -eq [IntPtr]::Zero -or [int][JumpModeNativeProbe]::WindowProcessId($hit) -ne $processId -or
+        [JumpModeNativeProbe]::RootWindow($hit) -ne $ExpectedRoot) {
+        throw 'NoteReplace launcher result hit test found a foreign or occluding window'
+    }
+    $null = Assert-NoteReplaceRoot $ExpectedRoot
+    if (![JumpModeNativeProbe]::ClickScreenPoint($screenX, $screenY)) {
+        throw 'SendInput click failed for the exact NoteReplace launcher result'
+    }
+    Write-Event 'note_replace_launcher_response_clicked' @{
+        name = $Name
+        target_id = $TargetId
+        action_id = $ExpectedAction
+        logic_frame_id = [long]$state.logic_frame_id
+        ui_pass_id = [long]$state.ui_pass_id
+    }
+}
+
+function Invoke-NoteReplaceRootControlClick(
+    [string]$Name,
+    [string]$ControlName,
+    [IntPtr]$ExpectedRoot,
+    [string]$ExpectedActionId = ''
+) {
+    $state = Assert-NoteReplaceRoot $ExpectedRoot
+    $rootPaint = Get-NoteReplaceRootPaint $state
+    if ($null -eq $rootPaint) { throw 'NoteReplace current ROOT response owner is unavailable' }
+    $control = if ($ControlName -ceq 'query') { $rootPaint.query } elseif ($ControlName -ceq 'result') { $rootPaint.result } else { $null }
+    if ($null -eq $control -or !(Test-NoteReplaceRect $control) -or !$control.enabled) {
+        throw "NoteReplace ROOT $ControlName is not a current visible enabled Response"
+    }
+    if ($ControlName -ceq 'result' -and
+        [string]$rootPaint.result_action_id -cne $ExpectedActionId) {
+        throw 'NoteReplace ROOT result Response does not identify the exact generated note action'
+    }
+    $capturedId = [string]$control.response_id
+    $capturedRect = @($control.rect)
+    $capturedClip = @($control.clipped_rect)
+    $capturedQuery = [string]$state.query
+    $capturedGeneration = [long]$state.result_generation
+
+    # Re-read a fresh pass and require the same actual response and result
+    # generation before using its current clipped geometry.
+    $state = Assert-NoteReplaceRoot $ExpectedRoot
+    $rootPaint = Get-NoteReplaceRootPaint $state
+    $control = if ($null -ne $rootPaint -and $ControlName -ceq 'query') {
+        $rootPaint.query
+    } elseif ($null -ne $rootPaint -and $ControlName -ceq 'result') {
+        $rootPaint.result
+    } else { $null }
+    if ($null -eq $control -or !$control.enabled -or
+        [string]$control.response_id -cne $capturedId -or
+        (@($control.rect) -join ',') -cne ($capturedRect -join ',') -or
+        (@($control.clipped_rect) -join ',') -cne ($capturedClip -join ',') -or
+        [string]$state.query -cne $capturedQuery -or
+        [long]$state.result_generation -ne $capturedGeneration -or
+        ($ControlName -ceq 'result' -and [string]$rootPaint.result_action_id -cne $ExpectedActionId)) {
+        throw "NoteReplace ROOT $ControlName response or query/results changed before native input"
+    }
+    if (!(Test-NoteReplaceRect $control)) { throw "NoteReplace ROOT $ControlName response became clipped" }
+    $ppp = [double]$state.pixels_per_point
+    if ($ppp -le 0 -or [double]::IsNaN($ppp) -or [double]::IsInfinity($ppp)) {
+        throw 'NoteReplace ROOT response has an invalid pixel scale'
+    }
+    $rect = $control.clipped_rect
+    $clientX = [int][Math]::Round((([double]$rect[0] + [double]$rect[2]) / 2.0) * $ppp)
+    $clientY = [int][Math]::Round((([double]$rect[1] + [double]$rect[3]) / 2.0) * $ppp)
+    $screenX = 0; $screenY = 0
+    if (![JumpModeNativeProbe]::TryClientToScreen($ExpectedRoot, $clientX, $clientY, [ref]$screenX, [ref]$screenY)) {
+        throw "could not map the current NoteReplace ROOT $ControlName response to screen coordinates"
+    }
+    $hit = [JumpModeNativeProbe]::WindowAtScreenPoint($screenX, $screenY)
+    if ($hit -eq [IntPtr]::Zero -or [int][JumpModeNativeProbe]::WindowProcessId($hit) -ne $processId -or
+        [JumpModeNativeProbe]::RootWindow($hit) -ne $ExpectedRoot) {
+        throw "NoteReplace ROOT $ControlName response hit test found a foreign or occluding window"
+    }
+    Assert-OwnedRepairRootForeground $ExpectedRoot
+    if (![JumpModeNativeProbe]::ClickScreenPoint($screenX, $screenY)) {
+        throw "SendInput click failed for current NoteReplace ROOT $ControlName response"
+    }
+    Write-Event 'note_replace_root_response_clicked' @{
+        name = $Name
+        control = $ControlName
+        response_id = $capturedId
+        action_id = if ($ControlName -ceq 'result') { $ExpectedActionId } else { $null }
+        logic_frame_id = [long]$state.logic_frame_id
+        ui_pass_id = [long]$state.ui_pass_id
+        result_generation = [long]$state.result_generation
+    }
+    return $state
+}
+
+function Wait-NoteReplacePanel([IntPtr]$ExpectedRoot, [long]$ExpectedActivation, [string]$Description) {
+    return Wait-JumpModeObservation {
+        param($state)
+        $state.root_focused -and $state.note_replace.root_owner_allowed -and
+            [long]$state.activation_count -eq $ExpectedActivation -and
+            [string]$state.last_action.action_id -ceq 'note:open:jump-qa-note-001' -and
+            $null -ne (Get-NoteReplaceCurrentPanel $state) -and
+            $state.note_replace.dirty -eq $false -and
+            $state.note_replace.view_mode -ceq 'edit'
+    }.GetNewClosure() $CaptureTimeoutSeconds $Description
+}
+
+function Set-NoteReplaceOpenAction([IntPtr]$ExpectedRoot, [bool]$UseJump) {
+    $query = "note open $script:noteReplaceExpectedTitle"
+    $actionId = 'note:open:jump-qa-note-001'
+    $activationBefore = [long](Read-JumpModeObservation).activation_count
+    $baseline = Read-JumpModeObservation
+    if ([string]$baseline.query -cne $query) {
+        $rootPaint = Get-NoteReplaceRootPaint $baseline
+        $queryResponse = $null
+        if ($null -ne $rootPaint) { $queryResponse = $rootPaint.query }
+        if ($null -eq $queryResponse -or !(Test-NoteReplaceRect $queryResponse) -or !$queryResponse.enabled) {
+            throw 'NoteReplace could not identify one current eligible ROOT query TextEntry response'
+        }
+        $null = Invoke-NoteReplaceRootControlClick 'note-replace-focus-root-query' 'query' $ExpectedRoot
+        $focused = Wait-JumpModeObservation {
+            param($state)
+            $rootPaint = Get-NoteReplaceRootPaint $state
+            $state.root_focused -and $null -ne $rootPaint -and $rootPaint.query.focused -and
+                [string]$state.query -ceq [string]$baseline.query -and
+                [long]$state.activation_count -eq $activationBefore
+        }.GetNewClosure() $CaptureTimeoutSeconds 'current ROOT query TextEntry focus for NoteReplace'
+        $baseline = $focused
+        if (![string]::IsNullOrEmpty([string]$baseline.query)) {
+            Invoke-NoteReplaceKeyBatch 'note-replace-route-select-query' ([uint16[]]@(0x11, 0x41)) ([string[]]@('Ctrl', 'A')) $ExpectedRoot -FocusedControl 'query'
+            Invoke-NoteReplaceKeyBatch 'note-replace-route-clear-query' ([uint16[]]@(0x08)) ([string[]]@('Backspace')) $ExpectedRoot -FocusedControl 'query'
+        }
+        Send-NoteReplaceUnicodeText 'note-replace-route-type-open-note' $query $ExpectedRoot -FocusedControl 'query'
+    }
+    $queryState = Wait-JumpModeObservation {
+        param($state)
+        $rootPaint = Get-NoteReplaceRootPaint $state
+        $state.root_focused -and $null -ne $rootPaint -and $rootPaint.query.enabled -and
+            $state.query_focused -and [string]$state.query -ceq $query -and
+            [int]$state.result_count -eq 1 -and
+            [long]$state.activation_count -eq $activationBefore -and
+            [string]$rootPaint.result_action_id -ceq $actionId -and
+            $null -ne $rootPaint.result -and $rootPaint.result.enabled -and
+            (!$UseJump -or @($state.targets | Where-Object {
+                $_.surface -ceq 'launcher_results' -and $_.eligible -and $_.root_action -and
+                    [string]$_.root_action.action -ceq $actionId
+            }).Count -eq 1)
+    }.GetNewClosure() $CaptureTimeoutSeconds 'exact generated note opener result under the current ROOT query'
+    if ($UseJump) {
+        $target = @($queryState.targets | Where-Object {
+            $_.surface -ceq 'launcher_results' -and $_.eligible -and $_.root_action -and
+                [string]$_.root_action.action -ceq $actionId
+        })[0]
+        Invoke-NoteReplaceKeyBatch 'note-replace-open-hint-leader' ([uint16[]]@(0x10, 0x20)) ([string[]]@('Shift', 'Space')) $ExpectedRoot -FocusedControl 'query'
+        $hinted = Wait-JumpModeObservation {
+            param($state)
+            $state.root_focused -and $state.root_owner_allowed -and $state.jump_mode_enabled -and
+                $state.active_session -and [string]$state.query -ceq $query -and
+                [long]$state.activation_count -eq $activationBefore -and
+                @($state.targets | Where-Object {
+                    $_.surface -ceq 'launcher_results' -and $_.eligible -and $_.root_action -and
+                        [string]$_.root_action.action -ceq $actionId -and [string]$_.hint -match '^[A-Z]+$'
+                }).Count -eq 1
+        }.GetNewClosure() $CaptureTimeoutSeconds 'exact generated note opener in the active hint map'
+        $hintTarget = @($hinted.targets | Where-Object {
+            $_.surface -ceq 'launcher_results' -and $_.eligible -and $_.root_action -and
+                [string]$_.root_action.action -ceq $actionId -and [string]$_.hint -match '^[A-Z]+$'
+        })[0]
+        foreach ($character in ([string]$hintTarget.hint).ToCharArray()) {
+            Invoke-NoteReplaceKeyBatch 'note-replace-open-observed-hint' ([uint16[]]@([char]$character)) ([string[]]@([string]$character)) $ExpectedRoot
+        }
+        $selected = Wait-JumpModeObservation {
+            param($state)
+            !$state.active_session -and $state.root_focused -and $state.root_owner_allowed -and
+                $state.query_focused -and [string]$state.query -ceq $query -and
+                $null -ne $state.outcome -and $state.outcome.kind -ceq 'completed' -and
+                [string]$state.outcome.target_id -ceq [string]$target.target_id -and
+                [string]$state.selected_target_id -ceq [string]$target.target_id -and
+                [string]$state.selected_action.action -ceq $actionId -and
+                [long]$state.activation_count -eq $activationBefore
+        }.GetNewClosure() $CaptureTimeoutSeconds 'focus-only Jump Mode selection of the exact generated note action'
+        Invoke-NoteReplaceKeyBatch 'note-replace-open-fresh-enter' ([uint16[]]@(0x0D)) ([string[]]@('Enter')) $ExpectedRoot -FocusedControl 'query'
+    } else {
+        $null = Invoke-NoteReplaceRootControlClick 'note-replace-disabled-open-note' 'result' $ExpectedRoot $actionId
+    }
+    return Wait-NoteReplacePanel $ExpectedRoot ($activationBefore + 1) 'exact generated note panel after one current production open action'
+}
+
+function Invoke-NoteReplaceNativeWorkflow($StartupObservation) {
+    if (!$script:noteReplaceFixtureScenario -or !$script:noteReplaceSourcePath -or !$script:noteReplaceOtherPath) {
+        throw 'NoteReplace NativeOnly workflow has no validated generated notes fixture identity'
+    }
+    $root = Get-OwnedRootHandle
+    if ($null -eq $StartupObservation -or [string]$StartupObservation.fixture_manifest_sha256 -cne $fixtureHash -or
+        !$StartupObservation.root_focused -or
+        $null -eq (Get-NoteReplaceRootPaint $StartupObservation)) {
+        throw 'NoteReplace startup observation is not bound to the exact foreground ROOT fixture'
+    }
+    if (!(Test-RetainedProcessIdentity) -or [int][JumpModeNativeProbe]::WindowProcessId($root) -ne $processId -or
+        $root -ne [IntPtr]([Convert]::ToInt64(([string]$script:appWindowMetadata.hwnd).Substring(2), 16))) {
+        throw 'NoteReplace ROOT HWND/PID identity changed before the first native input'
+    }
+    $sourceDiskBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceSourcePath).Hash.ToLowerInvariant()
+    $otherDiskBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceOtherPath).Hash.ToLowerInvariant()
+    if ($sourceDiskBefore -cne $script:noteReplaceBeforeSha256 -or $otherDiskBefore -cne $script:noteReplaceOtherBeforeSha256) {
+        throw 'generated NoteReplace source files changed after prebuilt fixture verification and before input'
+    }
+    $script:phase = 'note_replace_opening_generated_note'
+    $opened = Set-NoteReplaceOpenAction $root ([bool]$script:noteReplaceJumpEnabled)
+    $panelIdentity = [string]$opened.note_replace.panel_identity
+    $activationBaseline = [long]$opened.activation_count
+    Write-Event 'note_replace_panel_opened' @{
+        fixture_scenario = $script:noteReplaceFixtureScenario
+        jump_mode_enabled = [bool]$script:noteReplaceJumpEnabled
+        panel_identity = $panelIdentity
+        content_revision = [long]$opened.note_replace.content_revision
+        activation_count = $activationBaseline
+        root_hwnd = ('0x{0:X}' -f $root.ToInt64())
+        source_disk_sha256 = $sourceDiskBefore
+        unrelated_note_disk_sha256 = $otherDiskBefore
+    }
+    if (!$script:noteReplaceJumpEnabled) {
+        $null = Invoke-NoteReplaceControlClick 'note-replace-disabled-open-find' 'find_toggle' $root $panelIdentity
+        $findOpened = Wait-JumpModeObservation {
+            param($state)
+            $state.root_focused -and $state.note_replace.root_owner_allowed -and
+                (Get-NoteReplaceCurrentPanel $state $panelIdentity) -and
+                $state.note_replace.find_open -and $state.note_replace.controls.find_query -and
+                $state.note_replace.controls.find_query.enabled
+        }.GetNewClosure() $CaptureTimeoutSeconds 'Jump-disabled Note Replace Find query response'
+        $null = Invoke-NoteReplaceControlClick 'note-replace-disabled-focus-query' 'find_query' $root $panelIdentity
+        $focused = Wait-JumpModeObservation {
+            param($state)
+            (Get-NoteReplaceCurrentPanel $state $panelIdentity) -and
+                $state.note_replace.controls.find_query -and $state.note_replace.controls.find_query.focused
+        }.GetNewClosure() $CaptureTimeoutSeconds 'Jump-disabled current Find TextEntry focus'
+        Send-NoteReplaceUnicodeText 'note-replace-disabled-search-literal' 'literal Ω $1\path' $root $panelIdentity 'find_query'
+        $searched = Wait-JumpModeObservation {
+            param($state)
+            $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+            $null -ne $paint -and $paint.find_open -and $paint.match_count -eq 2 -and
+                $paint.source_only_match -and [long]$state.activation_count -eq $activationBaseline
+        }.GetNewClosure() $CaptureTimeoutSeconds 'Jump-disabled literal Find result and source-only visibility'
+        $null = Invoke-NoteReplaceControlClick 'note-replace-disabled-close-find' 'find_close' $root $panelIdentity
+        $closed = Wait-JumpModeObservation {
+            param($state)
+            $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+            $null -ne $paint -and !$paint.find_open -and !$paint.dirty -and
+                [long]$state.activation_count -eq $activationBaseline
+        }.GetNewClosure() $CaptureTimeoutSeconds 'Jump-disabled Find closes without changing the note'
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceSourcePath).Hash.ToLowerInvariant() -cne $sourceDiskBefore -or
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceOtherPath).Hash.ToLowerInvariant() -cne $otherDiskBefore) {
+            throw 'Jump-disabled Find-only leg changed a generated note file'
+        }
+        Write-Event 'note_replace_jump_disabled_focus_passed' @{
+            panel_identity = $panelIdentity
+            find_match_count = [int]$searched.note_replace.match_count
+            source_only_match = [bool]$searched.note_replace.source_only_match
+            find_closed = !$closed.note_replace.find_open
+            disk_unchanged = $true
+            activation_count = [long]$closed.activation_count
+        }
+        return [ordered]@{
+            fixture_scenario = $script:noteReplaceFixtureScenario
+            jump_mode_enabled = $false
+            panel_identity = $panelIdentity
+            find_match_count = [int]$searched.note_replace.match_count
+            source_only_match = [bool]$searched.note_replace.source_only_match
+            disk_unchanged = $true
+            activation_count = [long]$closed.activation_count
+        }
+    }
+
+    $marker = ' pre-replacement unsaved Ω'
+    $script:noteReplaceExpectedPreReplace = $script:noteReplaceSourceBefore + $marker
+    $script:noteReplaceExpectedPreReplaceSha256 = Get-NoteReplaceTextSha256 $script:noteReplaceExpectedPreReplace
+    $expectedPreReplaceSha256 = [string]$script:noteReplaceExpectedPreReplaceSha256
+    $null = Invoke-NoteReplaceControlClick 'note-replace-focus-editor-before-find' 'note_editor' $root $panelIdentity
+    $editorForMarker = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.controls.note_editor -and $paint.controls.note_editor.focused
+    }.GetNewClosure() $CaptureTimeoutSeconds 'actual note editor focus before adding the unsaved pre-replacement marker'
+    Invoke-NoteReplaceKeyBatch 'note-replace-move-to-end-before-find' ([uint16[]]@(0x11, 0x23)) ([string[]]@('Ctrl', 'End')) $root $panelIdentity 'note_editor'
+    Send-NoteReplaceUnicodeText 'note-replace-add-unsaved-pre-replacement-marker' $marker $root $panelIdentity 'note_editor'
+    $preReplace = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.dirty -and
+            [string]$paint.content_sha256 -ceq $expectedPreReplaceSha256 -and
+            [long]$state.activation_count -eq $activationBaseline
+    }.GetNewClosure() $CaptureTimeoutSeconds 'unsaved pre-replacement marker in the exact current note source'
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceSourcePath).Hash.ToLowerInvariant() -cne $sourceDiskBefore -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceOtherPath).Hash.ToLowerInvariant() -cne $otherDiskBefore) {
+        throw 'pre-replacement unsaved marker changed a generated note file on disk'
+    }
+    $script:noteReplaceExpectedSourceAfterAll = $script:noteReplaceExpectedPreReplace.Replace(
+        'literal Ω $1\path', [string]$script:noteReplaceExpectedReplacement, [StringComparison]::Ordinal
+    )
+    $script:noteReplaceExpectedAfterReplaceSha256 = Get-NoteReplaceTextSha256 $script:noteReplaceExpectedSourceAfterAll
+    $expectedAfterReplaceSha256 = [string]$script:noteReplaceExpectedAfterReplaceSha256
+    Write-Event 'note_replace_unsaved_marker_added' @{
+        panel_identity = $panelIdentity
+        content_revision = [long]$preReplace.note_replace.content_revision
+        source_sha256 = [string]$preReplace.note_replace.content_sha256
+        disk_unchanged = $true
+    }
+
+    $script:phase = 'note_replace_current_find'
+    $null = Invoke-NoteReplaceControlClick 'note-replace-open-find' 'find_toggle' $root $panelIdentity
+    $findOpen = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.find_open -and $paint.controls.find_query -and
+            $paint.controls.find_query.enabled
+    }.GetNewClosure() $CaptureTimeoutSeconds 'Note Replace Find strip current query response'
+    $null = Invoke-NoteReplaceControlClick 'note-replace-open-replace-expander' 'replace_expander' $root $panelIdentity
+    $expanded = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.find_open -and $paint.controls.replacement_input -and
+            $paint.controls.replace_all
+    }.GetNewClosure() $CaptureTimeoutSeconds 'expanded current literal replacement field and Replace All response'
+    $null = Invoke-NoteReplaceControlClick 'note-replace-focus-original-query' 'find_query' $root $panelIdentity
+    $queryFocused = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.controls.find_query -and $paint.controls.find_query.focused
+    }.GetNewClosure() $CaptureTimeoutSeconds 'actual Find TextEntry focus before typing generated literal query'
+    Send-NoteReplaceUnicodeText 'note-replace-type-original-query' 'literal Ω $1\path' $root $panelIdentity 'find_query'
+    $matches = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.find_open -and $paint.match_count -eq 2 -and
+            $paint.source_only_match -and [long]$state.activation_count -eq $activationBaseline
+    }.GetNewClosure() $CaptureTimeoutSeconds 'two exact literal source-only Unicode matches in current Markdown'
+    $null = Invoke-NoteReplaceControlClick 'note-replace-focus-replacement-input' 'replacement_input' $root $panelIdentity
+    $replacementFocused = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.controls.replacement_input -and $paint.controls.replacement_input.focused
+    }.GetNewClosure() $CaptureTimeoutSeconds 'actual replacement TextEntry focus'
+    Send-NoteReplaceUnicodeText 'note-replace-type-literal-replacement' ([string]$script:noteReplaceExpectedReplacement) $root $panelIdentity 'replacement_input'
+    $readyToReplace = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.match_count -eq 2 -and $paint.controls.replace_all -and
+            $paint.controls.replace_all.enabled -and [long]$state.activation_count -eq $activationBaseline
+    }.GetNewClosure() $CaptureTimeoutSeconds 'enabled current Replace All Response for the two source matches'
+    $preReplaceRevision = [long]$readyToReplace.note_replace.content_revision
+    $null = Invoke-NoteReplaceControlClick 'note-replace-all-original-matches' 'replace_all' $root $panelIdentity
+    $replaced = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.dirty -and $paint.content_revision -gt $preReplaceRevision -and
+            $paint.match_count -eq 0 -and
+            [string]$paint.content_sha256 -ceq $expectedAfterReplaceSha256 -and
+            [long]$state.activation_count -eq $activationBaseline
+    }.GetNewClosure() $CaptureTimeoutSeconds 'Replace All mutates the current unsaved note exactly once'
+    $afterReplaceDisk = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceSourcePath).Hash.ToLowerInvariant()
+    if ($afterReplaceDisk -cne $sourceDiskBefore -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceOtherPath).Hash.ToLowerInvariant() -cne $otherDiskBefore) {
+        throw 'Note Replace All wrote to disk before normal Save or changed the unrelated generated note'
+    }
+    $null = Invoke-NoteReplaceControlClick 'note-replace-focus-new-query' 'find_query' $root $panelIdentity
+    $focusedNewQuery = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.controls.find_query -and $paint.controls.find_query.focused
+    }.GetNewClosure() $CaptureTimeoutSeconds 'current Find response focus for source-only replacement verification'
+    Invoke-NoteReplaceKeyBatch 'note-replace-select-original-search' ([uint16[]]@(0x11, 0x41)) ([string[]]@('Ctrl', 'A')) $root $panelIdentity 'find_query'
+    Send-NoteReplaceUnicodeText 'note-replace-search-inserted-literal' ([string]$script:noteReplaceExpectedReplacement) $root $panelIdentity 'find_query'
+    $replacementSearch = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.find_open -and $paint.match_count -eq 2 -and
+            $paint.dirty -and [long]$state.activation_count -eq $activationBaseline
+    }.GetNewClosure() $CaptureTimeoutSeconds 'literal replacement query finds both inserted occurrences in Markdown source'
+    $null = Invoke-NoteReplaceControlClick 'note-replace-switch-to-preview-for-source-only-reveal' 'render' $root $panelIdentity
+    $sourceOnly = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.view_mode -ceq 'preview' -and $paint.find_open -and
+            $paint.match_count -eq 2 -and $paint.source_only_match -and $paint.dirty -and
+            [long]$state.activation_count -eq $activationBaseline
+    }.GetNewClosure() $CaptureTimeoutSeconds 'Preview shows source-only replacement matches before Reveal in Edit'
+    $null = Invoke-NoteReplaceControlClick 'note-replace-reveal-source-match' 'reveal_in_edit' $root $panelIdentity
+    $revealed = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.view_mode -ceq 'edit' -and $paint.match_count -eq 2 -and
+            $null -ne $paint.selected_match_byte_range -and [long]$state.activation_count -eq $activationBaseline
+    }.GetNewClosure() $CaptureTimeoutSeconds 'source-only Reveal selects an exact replacement occurrence in Edit'
+    $null = Invoke-NoteReplaceControlClick 'note-replace-close-find-before-editor-undo' 'find_close' $root $panelIdentity
+    $editorReady = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and !$paint.find_open -and $paint.controls.note_editor -and
+            $paint.controls.note_editor.enabled -and $paint.controls.note_editor.focused
+    }.GetNewClosure() $CaptureTimeoutSeconds 'note editor current TextEdit focus for replacement Undo'
+    $replacedRevision = [long]$editorReady.note_replace.content_revision
+    Invoke-NoteReplaceKeyBatch 'note-replace-editor-undo' ([uint16[]]@(0x11, 0x5A)) ([string[]]@('Ctrl', 'Z')) $root $panelIdentity 'note_editor'
+    $undone = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.dirty -and $paint.content_revision -gt $replacedRevision -and
+            $paint.match_count -eq 0 -and
+            [string]$paint.content_sha256 -ceq $expectedPreReplaceSha256 -and
+            [long]$state.activation_count -eq $activationBaseline
+    }.GetNewClosure() $CaptureTimeoutSeconds 'one editor-owned Undo restores the exact pre-replacement unsaved source'
+    $undoRevision = [long]$undone.note_replace.content_revision
+    Invoke-NoteReplaceKeyBatch 'note-replace-editor-redo' ([uint16[]]@(0x11, 0x59)) ([string[]]@('Ctrl', 'Y')) $root $panelIdentity 'note_editor'
+    $redone = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.dirty -and $paint.content_revision -gt $undoRevision -and
+            $paint.match_count -eq 2 -and
+            [string]$paint.content_sha256 -ceq $expectedAfterReplaceSha256 -and
+            [long]$state.activation_count -eq $activationBaseline
+    }.GetNewClosure() $CaptureTimeoutSeconds 'one editor-owned Redo restores the unsaved replacement'
+    $null = Invoke-NoteReplaceControlClick 'note-replace-normal-save' 'save' $root $panelIdentity
+    $saved = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and !$paint.dirty -and $paint.content_revision -ge $redone.note_replace.content_revision -and
+            [long]$state.activation_count -eq $activationBaseline
+    }.GetNewClosure() $CaptureTimeoutSeconds 'normal note Save persists the current literal replacement'
+    $savedSource = [IO.File]::ReadAllText($script:noteReplaceSourcePath, [Text.UTF8Encoding]::new($false, $true))
+    if ($savedSource -cne $script:noteReplaceExpectedSourceAfterAll) {
+        throw 'normal Save did not persist the exact literal Replace All output while preserving surrounding CRLF bytes'
+    }
+    $script:noteReplaceSavedSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceSourcePath).Hash.ToLowerInvariant()
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceOtherPath).Hash.ToLowerInvariant() -cne $otherDiskBefore) {
+        throw 'normal Save changed the unrelated generated note'
+    }
+
+    $null = Invoke-NoteReplaceControlClick 'note-replace-reopen-find-for-discard-check' 'find_toggle' $root $panelIdentity
+    $findAgain = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.find_open -and $paint.controls.find_close
+    }.GetNewClosure() $CaptureTimeoutSeconds 'Find strip before testing close/discard'
+    $null = Invoke-NoteReplaceControlClick 'note-replace-close-find-for-discard-check' 'find_close' $root $panelIdentity
+    $closedFind = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and !$paint.find_open -and $paint.controls.note_editor -and $paint.controls.note_editor.enabled
+    }.GetNewClosure() $CaptureTimeoutSeconds 'Find strip closed before creating a post-save unsaved edit'
+    $null = Invoke-NoteReplaceControlClick 'note-replace-focus-editor-for-discard-check' 'note_editor' $root $panelIdentity
+    $editorFocused = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.controls.note_editor -and $paint.controls.note_editor.focused
+    }.GetNewClosure() $CaptureTimeoutSeconds 'actual note editor focus before a separate unsaved edit'
+    Invoke-NoteReplaceKeyBatch 'note-replace-move-to-end-for-discard-check' ([uint16[]]@(0x11, 0x23)) ([string[]]@('Ctrl', 'End')) $root $panelIdentity 'note_editor'
+    Invoke-NoteReplaceKeyBatch 'note-replace-add-newline-for-discard-check' ([uint16[]]@(0x0D)) ([string[]]@('Enter')) $root $panelIdentity 'note_editor'
+    Send-NoteReplaceUnicodeText 'note-replace-add-discard-only-edit' 'unsaved discard marker' $root $panelIdentity 'note_editor'
+    $postSaveDirty = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.dirty -and [long]$state.activation_count -eq $activationBaseline
+    }.GetNewClosure() $CaptureTimeoutSeconds 'separate post-save edit marks only the current note dirty'
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceSourcePath).Hash.ToLowerInvariant() -cne $script:noteReplaceSavedSha256 -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceOtherPath).Hash.ToLowerInvariant() -cne $otherDiskBefore) {
+        throw 'post-save unsaved edit changed one of the generated note files before discard'
+    }
+    Invoke-NoteReplaceKeyBatch 'note-replace-close-dirty-note-with-production-escape' ([uint16[]]@(0x1B)) ([string[]]@('Escape')) $root $panelIdentity 'note_editor'
+    $discardPrompt = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.discard_prompt -and $paint.dirty -and
+            $paint.controls.discard_changes -and $paint.controls.discard_changes.enabled -and
+            [long]$state.activation_count -eq $activationBaseline
+    }.GetNewClosure() $CaptureTimeoutSeconds 'actual NotePanel close opens its unsaved discard prompt'
+    $null = Invoke-NoteReplaceControlClick 'note-replace-confirm-discard' 'discard_changes' $root $panelIdentity
+    $noteReplaceSlug = [string]$script:noteReplaceSlug
+    $discarded = Wait-JumpModeObservation {
+        param($state)
+        $state.root_focused -and $state.note_replace_root.root_owner_allowed -and
+            @($state.opened_note_slugs | Where-Object { [string]$_ -ceq $noteReplaceSlug }).Count -eq 0 -and
+            [long]$state.activation_count -eq $activationBaseline
+    }.GetNewClosure() $CaptureTimeoutSeconds 'actual Discard Changes closes the generated dirty note panel'
+    $sourceAfterDiscard = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceSourcePath).Hash.ToLowerInvariant()
+    $otherAfterDiscard = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceOtherPath).Hash.ToLowerInvariant()
+    if ($sourceAfterDiscard -cne $script:noteReplaceSavedSha256 -or $otherAfterDiscard -cne $otherDiskBefore) {
+        throw 'Discard Changes altered the last saved current note or the unrelated note'
+    }
+    Write-Event 'note_replace_native_workflow_passed' @{
+        fixture_scenario = $script:noteReplaceFixtureScenario
+        jump_mode_enabled = $true
+        panel_identity = $panelIdentity
+        activation_count = [long]$discarded.activation_count
+        original_match_count = [int]$matches.note_replace.match_count
+        replaced_match_count = [int]$sourceOnly.note_replace.match_count
+        source_only_match = [bool]$sourceOnly.note_replace.source_only_match
+        undo_restored_saved_baseline = !$undone.note_replace.dirty
+        redo_restored_replacement = [bool]$redone.note_replace.dirty
+        saved_source_sha256 = $script:noteReplaceSavedSha256
+        unrelated_note_sha256 = $otherAfterDiscard
+        discard_prompt_observed = [bool]$discardPrompt.note_replace.discard_prompt
+        discard_preserved_saved_file = $true
+    }
+    return [ordered]@{
+        fixture_scenario = $script:noteReplaceFixtureScenario
+        jump_mode_enabled = $true
+        panel_identity = $panelIdentity
+        activation_count = [long]$discarded.activation_count
+        original_match_count = [int]$matches.note_replace.match_count
+        replaced_match_count = [int]$sourceOnly.note_replace.match_count
+        source_only_match = [bool]$sourceOnly.note_replace.source_only_match
+        undo_restored_saved_baseline = !$undone.note_replace.dirty
+        redo_restored_replacement = [bool]$redone.note_replace.dirty
+        saved_source_sha256 = $script:noteReplaceSavedSha256
+        unrelated_note_sha256 = $otherAfterDiscard
+        discard_prompt_observed = [bool]$discardPrompt.note_replace.discard_prompt
+        discard_preserved_saved_file = $true
+    }
+}
+
 function Invoke-TargetRepairNativeWorkflow($StartupObservation) {
     if ($null -eq $script:targetRepairFixtureManifest -or
         !$script:targetRepairExpectedActionPath -or !$script:targetRepairExpectedFolderPath) {
@@ -3522,16 +4316,21 @@ function Test-TargetRepairPathIdentity([string]$ActualPath, [string]$ExpectedPat
 }
 
 function Invoke-PrebuiltNativeScenario {
-    if ($Scenario -notin @('SettingsSearch', 'TargetRepair') -or !$NativeOnly -or $FixturesOnly) {
-        throw 'prebuilt native-only mode is valid only for SettingsSearch or TargetRepair'
+    if ($Scenario -notin @('SettingsSearch', 'TargetRepair', 'NoteReplace') -or !$NativeOnly -or $FixturesOnly) {
+        throw 'prebuilt native-only mode is valid only for SettingsSearch, TargetRepair, or NoteReplace'
     }
     if ([string]::IsNullOrWhiteSpace($PrebuiltArtifactManifest)) { throw 'NativeOnly requires PrebuiltArtifactManifest' }
-    $expectedFixtureScenario = if ($Scenario -eq 'TargetRepair') { 'target-repair' } else { 'phase2-settings' }
+    $allowedFixtureScenarios = switch ($Scenario) {
+        'SettingsSearch' { @('phase2-settings') }
+        'TargetRepair' { @('target-repair') }
+        'NoteReplace' { @('note-replace-enabled', 'note-replace-disabled') }
+    }
     $artifactManifestPath = [IO.Path]::GetFullPath($PrebuiltArtifactManifest)
     if (!(Test-Path -LiteralPath $artifactManifestPath -PathType Leaf)) { throw 'prebuilt artifact manifest does not exist' }
     $artifact = Get-Content -Raw -LiteralPath $artifactManifestPath | ConvertFrom-Json
-    if ($artifact.schema_version -ne 1 -or [string]$artifact.fixture_scenario -cne $expectedFixtureScenario) {
-        throw "prebuilt artifact manifest must be schema 1 for the isolated $expectedFixtureScenario fixture"
+    $expectedFixtureScenario = [string]$artifact.fixture_scenario
+    if ($artifact.schema_version -ne 1 -or $expectedFixtureScenario -notin $allowedFixtureScenarios) {
+        throw "prebuilt artifact manifest must be schema 1 for one of the isolated $($allowedFixtureScenarios -join ', ') fixtures"
     }
     $branch = (& git -C $repoRoot branch --show-current).Trim()
     if ($LASTEXITCODE -ne 0) { throw 'could not read the current source branch for prebuilt artifact validation' }
@@ -3548,6 +4347,15 @@ function Invoke-PrebuiltNativeScenario {
     if ([string]$artifact.cargo_profile -cne 'fast-dev' -or
         (@($artifact.cargo_features | ForEach-Object { [string]$_ } | Sort-Object) -join ',') -cne 'dev-smoke-binaries,qa-framebuffer-capture') {
         throw 'prebuilt artifact does not identify the required fast-dev QA feature build'
+    }
+    if ($Scenario -eq 'NoteReplace') {
+        $runnerPath = Get-PrebuiltAbsolutePath $artifact.runner_path 'runner_path'
+        $currentRunnerPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'run.ps1'))
+        if (![string]::Equals($runnerPath, $currentRunnerPath, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]::IsNullOrWhiteSpace([string]$artifact.runner_sha256) -or
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $currentRunnerPath).Hash.ToLowerInvariant() -cne [string]$artifact.runner_sha256) {
+            throw 'NoteReplace prebuilt manifest does not bind the current native runner path and bytes'
+        }
     }
 
     $receiptPath = Get-PrebuiltAbsolutePath $artifact.build_receipt_path 'build_receipt_path'
@@ -3604,7 +4412,7 @@ function Invoke-PrebuiltNativeScenario {
             $fixtureManifest.safety.paste_cancel_hotkey_enabled) {
             throw 'prebuilt fixture manifest does not prove the isolated, Jump-enabled, no-action Settings profile'
         }
-    } else {
+    } elseif ($Scenario -eq 'TargetRepair') {
         if ([string]$fixtureManifest.scenario -cne 'target-repair' -or
             $null -ne $fixtureManifest.phase2_surface -or
             !$fixtureManifest.experimental_jump_mode_enabled -or
@@ -3697,6 +4505,61 @@ function Invoke-PrebuiltNativeScenario {
         }
         $script:targetRepairUnrelatedPath = [string]$favoriteRecords[2].action
         Assert-TargetRepairAssociations $script:targetRepairOriginalActionPath $script:targetRepairOriginalFolderPath
+    } elseif ($Scenario -eq 'NoteReplace') {
+        $noteReplaceScenarios = @('note-replace-enabled', 'note-replace-disabled')
+        if ([string]$fixtureManifest.scenario -notin $noteReplaceScenarios -or
+            [string]$fixtureManifest.scenario -cne $expectedFixtureScenario -or
+            $null -ne $fixtureManifest.phase2_surface -or
+            [int]$fixtureManifest.action_count -ne 0 -or
+            [bool]$fixtureManifest.experimental_jump_mode_enabled -ne ($expectedFixtureScenario -ceq 'note-replace-enabled') -or
+            @($fixtureManifest.enabled_plugins | ForEach-Object { [string]$_ } | Sort-Object) -join ',' -cne 'notes' -or
+            !$fixtureManifest.safety.profile_isolated_by_working_directory -or
+            !$fixtureManifest.safety.notes_path_supplied_by_ml_notes_dir -or
+            $fixtureManifest.safety.clipboard_plugin_enabled -or
+            $fixtureManifest.safety.clipboard_modify_plugin_enabled -or
+            $fixtureManifest.safety.macros_enabled -or $fixtureManifest.safety.network_plugin_enabled -or
+            $fixtureManifest.safety.custom_actions_present -or
+            $fixtureManifest.safety.paste_next_hotkey_enabled -or
+            $fixtureManifest.safety.paste_cancel_hotkey_enabled -or
+            [string]$fixtureManifest.external_note_open -cne 'Neither' -or
+            $fixtureManifest.safety.notes_path_supplied_by_ml_notes_dir -ne $true) {
+            throw 'prebuilt fixture manifest does not prove the exact isolated NoteReplace Jump Mode profile'
+        }
+        if ($null -eq $fixtureManifest.note_ids -or
+            @($fixtureManifest.note_ids | ForEach-Object { [string]$_ }) -notcontains 'jump-qa-note-001' -or
+            @($fixtureManifest.note_ids | ForEach-Object { [string]$_ }) -notcontains 'jump-qa-note-002') {
+            throw 'NoteReplace fixture does not contain the exact two generated note identities'
+        }
+        $notesDirectory = Join-Path $profilePath 'notes'
+        $script:noteReplaceSourcePath = Join-Path $notesDirectory 'jump-qa-note-001.md'
+        $script:noteReplaceOtherPath = Join-Path $notesDirectory 'jump-qa-note-002.md'
+        if (!(Test-Path -LiteralPath $script:noteReplaceSourcePath -PathType Leaf) -or
+            !(Test-Path -LiteralPath $script:noteReplaceOtherPath -PathType Leaf)) {
+            throw 'NoteReplace generated note files are missing from the isolated ML_NOTES_DIR profile'
+        }
+        $oldLiteral = 'literal Ω $1\path'
+        $newLiteral = 'edited Ω $cash\value'
+        $script:noteReplaceExpectedTitle = 'Jump QA Replace Note'
+        $expectedSource = "# $script:noteReplaceExpectedTitle" + "`r`n`r`n" +
+            'Tag: #jump_qa_bucket_01' + "`r`n`r`n" +
+            '[shown Ω](<literal Ω $1\path>)' + "`r`n" +
+            '[shown Ω](<literal Ω $1\path>)' + "`r`n" +
+            'keep this line' + "`r`n"
+        $actualSource = [IO.File]::ReadAllText($script:noteReplaceSourcePath, [Text.UTF8Encoding]::new($false, $true))
+        if ($actualSource -cne $expectedSource) {
+            throw 'NoteReplace current note source does not match the exact generated Unicode/CRLF/literal fixture'
+        }
+        $script:noteReplaceSourceBefore = $actualSource
+        $script:noteReplaceOtherBeforeSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceOtherPath).Hash.ToLowerInvariant()
+        $script:noteReplaceFixtureScenario = $expectedFixtureScenario
+        $script:noteReplaceJumpEnabled = [bool]$fixtureManifest.experimental_jump_mode_enabled
+        $script:noteReplaceExpectedSourceAfterAll = $actualSource.Replace($oldLiteral, $newLiteral, [StringComparison]::Ordinal)
+        $script:noteReplaceExpectedReplacement = $newLiteral
+        $script:noteReplaceSlug = 'jump-qa-note-001'
+        $script:noteReplaceBeforeSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceSourcePath).Hash.ToLowerInvariant()
+        $script:noteReplaceSavedSha256 = $null
+    } else {
+        throw "prebuilt native scenario $Scenario has no fixture validator"
     }
     foreach ($directory in @('notes', 'templates', 'screenshot-output')) {
         if (!(Test-Path -LiteralPath (Join-Path $profilePath $directory) -PathType Container)) {
@@ -3706,6 +4569,9 @@ function Invoke-PrebuiltNativeScenario {
     $settingsPath = Join-Path $profilePath 'settings.json'
     if (!(Test-Path -LiteralPath $settingsPath -PathType Leaf)) { throw 'isolated fixture settings.json is missing' }
     $persistedSettings = Get-Content -Raw -LiteralPath $settingsPath | ConvertFrom-Json
+    if ($Scenario -eq 'NoteReplace' -and [string]$persistedSettings.note.default_view_mode -cne 'edit') {
+        throw 'NoteReplace fixture must use its explicitly generated Edit default view'
+    }
     if ($null -ne $persistedSettings.paste_sequence.next_hotkey -or
         $null -ne $persistedSettings.paste_sequence.cancel_hotkey -or
         $persistedSettings.screenshot_save_file -or $persistedSettings.screenshot_auto_save -or
@@ -3754,21 +4620,28 @@ function Invoke-PrebuiltNativeScenario {
     $qaRequestPath = Join-Path $evidenceRoot 'qa-framebuffer-request.json'
     $qaRequest = [ordered]@{
         run_id = $runId
-        request_id = if ($Scenario -eq 'TargetRepair') { 'target-repair-native' } else { 'settings-search-native' }
+        request_id = switch ($Scenario) {
+            'TargetRepair' { 'target-repair-native' }
+            'NoteReplace' { 'note-replace-native' }
+            default { 'settings-search-native' }
+        }
         target = 'ROOT'
         trigger = 'f11'
-        capture_count = if ($Scenario -eq 'TargetRepair') { 1 } else { $phase2CaptureCount }
+        capture_count = if ($Scenario -in @('TargetRepair', 'NoteReplace')) { 1 } else { $phase2CaptureCount }
         diagnostics = $false
         output_dir = $captureRoot
         fixture_manifest_sha256 = $fixtureHash
         build_receipt_identity = $buildReceiptIdentity
         jump_mode_observation = [ordered]@{
             wait_for_active_hints = $false
-            phase2 = if ($Scenario -eq 'TargetRepair') { $null } else { [ordered]@{ surface = 'settings'; use_empty_paste_invocation_context = $false } }
-            settings_search = if ($Scenario -eq 'TargetRepair') { $null } else { [ordered]@{ expected_query = 'fuzzy weight' } }
+            phase2 = if ($Scenario -in @('TargetRepair', 'NoteReplace')) { $null } else { [ordered]@{ surface = 'settings'; use_empty_paste_invocation_context = $false } }
+            settings_search = if ($Scenario -in @('TargetRepair', 'NoteReplace')) { $null } else { [ordered]@{ expected_query = 'fuzzy weight' } }
             target_repair = if ($Scenario -eq 'TargetRepair') { [ordered]@{
                 expected_action_replacement = $script:targetRepairExpectedActionPath
                 expected_folder_replacement = $script:targetRepairExpectedFolderPath
+            } } else { $null }
+            note_replace = if ($Scenario -eq 'NoteReplace') { [ordered]@{
+                expected_slug = $script:noteReplaceSlug
             } } else { $null }
         }
     }
@@ -3817,11 +4690,15 @@ function Invoke-PrebuiltNativeScenario {
         Start-Sleep -Milliseconds 100
     }
     if (!$treeObserved) { throw 'could not record the prebuilt app process identity in the Windows process table' }
-    $script:phase = if ($Scenario -eq 'TargetRepair') { 'target_repair_waiting_for_input' } else { 'settings_search_waiting_for_input' }
-    $script:scenarioReason = if ($Scenario -eq 'TargetRepair') {
-        'Validated prebuilt artifacts are running in the isolated profile; waiting for the exact owned ROOT query and repair-response observations before bounded native input.'
-    } else {
-        'Validated prebuilt artifacts are running in the isolated profile; waiting for exact owned ROOT/query/Settings response observations before bounded native input.'
+    $script:phase = switch ($Scenario) {
+        'TargetRepair' { 'target_repair_waiting_for_input' }
+        'NoteReplace' { 'note_replace_waiting_for_input' }
+        default { 'settings_search_waiting_for_input' }
+    }
+    $script:scenarioReason = switch ($Scenario) {
+        'TargetRepair' { 'Validated prebuilt artifacts are running in the isolated profile; waiting for the exact owned ROOT query and repair-response observations before bounded native input.' }
+        'NoteReplace' { 'Validated prebuilt artifacts are running in the isolated profile; waiting for the exact current note-panel and replacement-response observations before bounded native input.' }
+        default { 'Validated prebuilt artifacts are running in the isolated profile; waiting for exact owned ROOT/query/Settings response observations before bounded native input.' }
     }
     Write-Event 'owned_process_tree_observed' @{ processes = $ownedTreeSnapshot }
     Write-Json $script:manifestPath ([ordered]@{
@@ -3848,6 +4725,8 @@ function Invoke-PrebuiltNativeScenario {
         build_receipt_identity = $buildReceiptIdentity
         capture = if ($Scenario -eq 'TargetRepair') {
             [ordered]@{ request = 'qa-framebuffer-request.json'; output_dir = 'capture'; source = 'current-pass ROOT response observations for TargetRepair controls; no desktop image capture requested'; count = 0; scenario = 'TargetRepair'; surface = $null }
+        } elseif ($Scenario -eq 'NoteReplace') {
+            [ordered]@{ request = 'qa-framebuffer-request.json'; output_dir = 'capture'; source = 'payload-free current-pass ROOT NoteReplace response observations; no framebuffer image capture requested'; count = 0; scenario = 'NoteReplace'; surface = $null }
         } else {
             [ordered]@{ request = 'qa-framebuffer-request.json'; output_dir = 'capture'; source = 'three native ROOT/F11 captures bound to current Settings Search QA observations'; count = $phase2CaptureCount; scenario = 'SettingsSearch'; surface = 'Settings' }
         }
@@ -3884,7 +4763,11 @@ function Invoke-PrebuiltNativeScenario {
     Write-Event 'owned_app_window_metadata' @{ os_version = [Environment]::OSVersion.VersionString; architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString(); session_id = $processSessionId; window = $appWindowMetadata }
     if (!(Test-Path -LiteralPath $prebuiltSettingsPath -PathType Leaf)) { throw 'isolated settings.json disappeared before Settings Search input' }
     $script:prebuiltSettingsPreInputSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $prebuiltSettingsPath).Hash.ToLowerInvariant()
-    Write-Event $(if ($Scenario -eq 'TargetRepair') { 'target_repair_settings_file_before_first_input' } else { 'settings_search_settings_file_before_first_input' }) @{
+    Write-Event $(switch ($Scenario) {
+        'TargetRepair' { 'target_repair_settings_file_before_first_input' }
+        'NoteReplace' { 'note_replace_settings_file_before_first_input' }
+        default { 'settings_search_settings_file_before_first_input' }
+    }) @{
         before_launch_sha256 = $prebuiltSettingsSha256
         before_first_input_sha256 = $script:prebuiltSettingsPreInputSha256
         app_pid = $processId
@@ -3913,6 +4796,21 @@ function Invoke-PrebuiltNativeScenario {
             process_started_at_utc = $processStartUtc.ToString('O')
         }
         Write-Summary 'PASS' "Both generated saved targets were repaired through the current application UI and same-process owned native picker dialogs. The file-picker cancel left its draft unchanged; exact action/folder metadata and favorite/pin/usage associations were preserved. Primary activation delta: $($targetRepairResult.execution_count_derived_from_primary_activation_delta); new owned child processes: $($targetRepairResult.owned_child_process_count)."
+        return
+    }
+    if ($Scenario -eq 'NoteReplace') {
+        Write-Summary 'BLOCKED' 'The validated prebuilt app is waiting for exact current ROOT query and Note Replace response observations. No note body or replacement text is included in the QA observation.'
+        $noteReplaceResult = Invoke-NoteReplaceNativeWorkflow $startupObservation
+        $script:scenarioStatus = 'PASS'
+        $script:scenarioReason = 'The generated current Markdown note was opened through the actual note command; literal Replace All, source-only Reveal, same-owner Undo/Redo, normal Save, and subsequent discard preserved the second generated note.'
+        if (!$script:noteReplaceJumpEnabled) {
+            $script:scenarioReason = 'The Jump-disabled profile accepted normal current query/editor input and opened the exact generated note without a Jump Mode hint session; this was the short focus-only leg.'
+        }
+        $script:runStatus = 'PASS'
+        $script:phase = 'note_replace_complete'
+        Update-Scenarios
+        Write-Event 'note_replace_native_passed' $noteReplaceResult
+        Write-Summary 'PASS' $script:scenarioReason
         return
     }
     Write-Summary 'BLOCKED' 'The validated prebuilt app is waiting for its exact native Settings Search route. No build or fixture generator is run in NativeOnly mode.'
@@ -4590,10 +5488,11 @@ function Update-Scenarios {
             'Phase2' { 'm13-fixture-validation' }
             'SettingsSearch' { 'g3-m1b-prebuilt-artifact-validation' }
             'TargetRepair' { 'g3-m2b-prebuilt-artifact-validation' }
+            'NoteReplace' { 'g3-m9b-prebuilt-artifact-validation' }
             default { 'm01-fixture-validation' }
         }
         status = $fixtureScenarioStatus
-        expected_surface = if ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'typed isolated safe Phase 1 enabled/disabled fixture profiles' } elseif ($Scenario -eq 'Phase2') { "typed isolated Phase 2 $phase2SurfaceKey fixture and required inert stores" } elseif ($Scenario -eq 'SettingsSearch') { 'externally built, hash-bound isolated phase2-settings profile' } elseif ($Scenario -eq 'TargetRepair') { 'externally built, hash-bound isolated target-repair profile with inert saved action and folder records' } else { 'typed isolated fixture profile with stable safe note data' }
+        expected_surface = if ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'typed isolated safe Phase 1 enabled/disabled fixture profiles' } elseif ($Scenario -eq 'Phase2') { "typed isolated Phase 2 $phase2SurfaceKey fixture and required inert stores" } elseif ($Scenario -eq 'SettingsSearch') { 'externally built, hash-bound isolated phase2-settings profile' } elseif ($Scenario -eq 'TargetRepair') { 'externally built, hash-bound isolated target-repair profile with inert saved action and folder records' } elseif ($Scenario -eq 'NoteReplace') { "externally built, hash-bound isolated $noteReplaceFixtureScenario profile with exact generated current-note sources" } else { 'typed isolated fixture profile with stable safe note data' }
         capture_target = $null
         capture_trigger = $null
         screenshot = $null
@@ -4611,6 +5510,7 @@ function Update-Scenarios {
             'Phase2' { "m13-phase2-$phase2SurfaceKey" }
             'SettingsSearch' { 'g3-m1b-settings-search' }
             'TargetRepair' { 'g3-m2b-target-repair' }
+            'NoteReplace' { 'g3-m9b-note-replace' }
             default { 'm01-baseline-dashboard' }
         } }
         status = $scenarioStatus
@@ -4620,14 +5520,15 @@ function Update-Scenarios {
             'Phase2' { "native production query opener, exact $phase2SurfaceKey owner, and safe observed input behavior" }
             'SettingsSearch' { 'exact settings:search route, current-response focus highlights, draft-only edits, and Cancel' }
             'TargetRepair' { 'exact saved custom-action and folder repair intents, owned native picker cancellation/selection, and explicit confirmation' }
+            'NoteReplace' { 'current unsaved Markdown replacement, same-owner Undo/Redo, normal Save, source-only Reveal, and discard' }
             default { 'actual Multi Launcher ROOT viewport with isolated note dashboard' }
         } }
-        capture_target = if ($Scenario -eq 'TargetRepair') { $null } else { 'ROOT' }
-        capture_trigger = if ($Scenario -eq 'TargetRepair') { 'same-pass current-response observations; no desktop capture' } elseif ($Scenario -in @('Phase1Enabled', 'Phase1Disabled', 'Phase2', 'SettingsSearch')) { 'f11' } elseif ($Scenario -eq 'Phase1') { 'child native F11 receipts' } else { 'startup' }
+        capture_target = if ($Scenario -in @('TargetRepair', 'NoteReplace')) { $null } else { 'ROOT' }
+        capture_trigger = if ($Scenario -eq 'TargetRepair') { 'same-pass current-response observations; no desktop capture' } elseif ($Scenario -eq 'NoteReplace') { 'payload-free current-pass response observations; no desktop capture' } elseif ($Scenario -in @('Phase1Enabled', 'Phase1Disabled', 'Phase2', 'SettingsSearch')) { 'f11' } elseif ($Scenario -eq 'Phase1') { 'child native F11 receipts' } else { 'startup' }
         screenshot = if ($screenshotPath) { $screenshotPath } else { $null }
         pixel_width = $screenshotWidth
         pixel_height = $screenshotHeight
-        captures = if ($Scenario -eq 'TargetRepair') { @() } elseif ($Scenario -in @('Phase2', 'SettingsSearch')) { @($phase2Captures.ToArray()) } else { @($phase1Captures.ToArray()) }
+        captures = if ($Scenario -in @('TargetRepair', 'NoteReplace')) { @() } elseif ($Scenario -in @('Phase2', 'SettingsSearch')) { @($phase2Captures.ToArray()) } else { @($phase1Captures.ToArray()) }
         orchestration = $phase1Orchestration
         reason = $scenarioReason
     }
@@ -4868,6 +5769,7 @@ try {
         'Phase2' { "phase2-$phase2SurfaceKey" }
         'SettingsSearch' { 'phase2-settings' }
         'TargetRepair' { 'target-repair' }
+        'NoteReplace' { 'note-replace-enabled or note-replace-disabled' }
         default { 'baseline' }
     }
     if ($NativeOnly) {
@@ -4883,8 +5785,11 @@ try {
     if ($Scenario -eq 'TargetRepair' -and !$NativeOnly) {
         throw 'TargetRepair requires -NativeOnly and a validated PrebuiltArtifactManifest; it never builds or generates fixtures.'
     }
-    if ($NativeOnly -and ($Scenario -notin @('SettingsSearch', 'TargetRepair') -or $FixturesOnly)) {
-        throw 'NativeOnly is supported only for a SettingsSearch or TargetRepair app run, not fixture-only mode.'
+    if ($Scenario -eq 'NoteReplace' -and !$NativeOnly) {
+        throw 'NoteReplace requires -NativeOnly and a validated PrebuiltArtifactManifest; it never builds or generates fixtures.'
+    }
+    if ($NativeOnly -and ($Scenario -notin @('SettingsSearch', 'TargetRepair', 'NoteReplace') -or $FixturesOnly)) {
+        throw 'NativeOnly is supported only for a SettingsSearch, TargetRepair, or NoteReplace app run, not fixture-only mode.'
     }
 
     if ($Scenario -eq 'Phase1' -and $FixturesOnly) {

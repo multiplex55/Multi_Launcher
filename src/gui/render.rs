@@ -5960,6 +5960,39 @@ impl LauncherApp {
         self.jump_mode_ui.root_input_owner_allowed(allowed)
     }
 
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn qa_framebuffer_note_replace_root_owner_allowed(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        self.native_ui_host_input_allowed(ctx, root_visible)
+            && !self.note_panels.iter().any(|panel| panel.open)
+            && !self.mouse_gestures_dialog.recorder_canvas_active()
+            && !egui::Popup::is_any_open(ctx)
+            && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx).is_none()
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn qa_framebuffer_note_replace_panel_owner_allowed(
+        &self,
+        ctx: &egui::Context,
+        expected_slug: &str,
+    ) -> bool {
+        let Some(panel) = self
+            .note_panels
+            .iter()
+            .find(|panel| panel.note_slug() == expected_slug && panel.open)
+        else {
+            return false;
+        };
+        self.native_ui_host_input_allowed(ctx, self.visible_flag.load(Ordering::Relaxed))
+            && !self.mouse_gestures_dialog.recorder_canvas_active()
+            && !egui::Popup::is_any_open(ctx)
+            && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx)
+                == Some(panel.qa_note_replace_layer_id())
+    }
+
     fn complete_jump_mode_frame(&mut self, ctx: &egui::Context) {
         let root_visible = self.visible_flag.load(Ordering::Relaxed);
         let navigation_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
@@ -6689,6 +6722,12 @@ impl LauncherApp {
                     self.move_cursor_end = false;
                 }
                 let query_response = query_output.response;
+                #[cfg(feature = "qa-framebuffer-capture")]
+                self.qa_framebuffer_record_note_replace_root_query(
+                    &ctx,
+                    &query_response,
+                    frame_logic.should_be_visible,
+                );
                 query_bottom = query_response.rect.bottom();
                 self.last_query_focus_geometry = Some(super::QueryFocusResponseGeometry {
                     response_id: query_response.id,
@@ -6916,8 +6955,7 @@ impl LauncherApp {
                             ctx.input_mut(|input| input.consume_key(modifiers, egui::Key::F));
                         } else if escape && panel.is_find_open() {
                             let modifiers = escape_modifiers.unwrap_or_default();
-                            panel.close_find();
-                            panel.surrender_find_focus(&ctx);
+                            panel.close_find(&ctx);
                             ctx.input_mut(|i| {
                                 i.consume_key(modifiers, egui::Key::Escape)
                             });
@@ -7532,6 +7570,13 @@ impl LauncherApp {
                                             self.selected == Some(idx),
                                             &text_presentation,
                                         );
+                                        #[cfg(feature = "qa-framebuffer-capture")]
+                                        self.qa_framebuffer_record_note_replace_root_result(
+                                            &ctx,
+                                            &resp,
+                                            &action.action,
+                                            frame_logic.should_be_visible,
+                                        );
                                         if let Some(scope) = result_scope.as_ref() {
                                             let metadata = crate::gui::jump_mode::TargetMetadata::new(
                                                 crate::gui::jump_mode::TargetId::root_result(
@@ -7749,6 +7794,13 @@ impl LauncherApp {
                                             },
                                         )
                                         .inner;
+                                    #[cfg(feature = "qa-framebuffer-capture")]
+                                    self.qa_framebuffer_record_note_replace_root_result(
+                                        &ctx,
+                                        &resp,
+                                        &a.action,
+                                        frame_logic.should_be_visible,
+                                    );
                                     if let Some(scope) = result_scope.as_ref() {
                                         let metadata = crate::gui::jump_mode::TargetMetadata::new(
                                             crate::gui::jump_mode::TargetId::root_result(
@@ -42349,6 +42401,128 @@ mod tests {
     }
 
     #[test]
+    fn note_replace_root_uses_current_panel_keyboard_owner_with_jump_on_and_off() {
+        use crate::settings::NoteViewMode;
+
+        let screen_size = egui::vec2(1600.0, 1200.0);
+        let windows_command = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        for jump_mode in [false, true] {
+            let ctx = egui::Context::default();
+            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "launcher query");
+            app.set_jump_mode_enabled(jump_mode);
+            launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen_size);
+
+            let mut panel = launcher_show_owner_note(if jump_mode {
+                "replace-root-jump-on"
+            } else {
+                "replace-root-jump-off"
+            });
+            panel.test_set_view_mode(NoteViewMode::Edit);
+            panel.open_find();
+            panel.set_find_query("target");
+            panel.replace_content_from_mutation("target and target".into(), 1.0);
+            app.note_panels.push(panel);
+            app.update_panel_stack();
+
+            for _ in 0..4 {
+                app.run_root_frame_for_test(
+                    &ctx,
+                    launcher_show_owner_input(true, screen_size),
+                    false,
+                )
+                .0
+                .drop_without_applying_deltas();
+            }
+            let expander = app.note_panels[0]
+                .test_find_replace_rects()
+                .0
+                .expect("the actual Find response rendered");
+            notes_query_mouse_click(&mut app, &ctx, screen_size, expander);
+            for _ in 0..2 {
+                app.run_root_frame_for_test(
+                    &ctx,
+                    launcher_show_owner_input(true, screen_size),
+                    false,
+                )
+                .0
+                .drop_without_applying_deltas();
+            }
+
+            let replacement_rect = app.note_panels[0]
+                .test_find_replace_rects()
+                .1
+                .expect("the expanded replacement TextEdit is current");
+            notes_query_mouse_click(&mut app, &ctx, screen_size, replacement_rect);
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![key_press(egui::Key::A, windows_command)],
+                    ..launcher_show_owner_input(true, screen_size)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![egui::Event::Text("literal $\\1".into())],
+                    ..launcher_show_owner_input(true, screen_size)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+
+            let replace_button = app.note_panels[0]
+                .test_find_replace_rects()
+                .2
+                .expect("the current selected match has an enabled Replace response");
+            notes_query_mouse_click(&mut app, &ctx, screen_size, replace_button);
+            assert_eq!(app.note_panels[0].note_content(), "literal $\\1 and target");
+            assert!(app.note_panels[0].has_unsaved_changes());
+            assert_eq!(app.query, "launcher query");
+
+            for _ in 0..2 {
+                app.run_root_frame_for_test(
+                    &ctx,
+                    launcher_show_owner_input(true, screen_size),
+                    false,
+                )
+                .0
+                .drop_without_applying_deltas();
+            }
+            let editor_id = app.note_panels[0]
+                .test_editor_widget_id()
+                .expect("the current note editor response is rendered");
+            assert!(
+                ctx.read_response(editor_id)
+                    .is_some_and(|response| response.enabled())
+            );
+            ctx.memory_mut(|memory| memory.request_focus(editor_id));
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![key_press(egui::Key::Z, windows_command)],
+                    ..launcher_show_owner_input(true, screen_size)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+            assert_eq!(app.note_panels[0].note_content(), "target and target");
+            assert!(app.note_panels[0].has_unsaved_changes());
+            assert_eq!(app.query, "launcher query");
+            drop(app);
+            drop(_workspace);
+        }
+    }
+
+    #[test]
     fn settings_escape_closes_when_jump_mode_owns_root_navigation() {
         use crate::gui::jump_mode::ui::NavigationOwner;
 
@@ -42503,7 +42677,7 @@ mod tests {
 
         // A later deliberate launcher-query focus remains authoritative after
         // the activation request has been consumed.
-        app.note_panels[0].close_find();
+        app.note_panels[0].close_find(&ctx);
         ctx.memory_mut(|memory| memory.surrender_focus(find_query_id));
         focus_launcher_query(&ctx, &mut app);
         app.run_root_frame_for_test(
@@ -42608,7 +42782,7 @@ mod tests {
 
         // A focused field in an unrelated dialog is preserved across a note
         // activation. The dialog is a real egui window in a distinct layer.
-        app.note_panels[b_index].close_find();
+        app.note_panels[b_index].close_find(&ctx);
         let dialog_input_id = egui::Id::new("activation_unrelated_dialog_input");
         let mut dialog_text = String::new();
         let mut focus_dialog_on_first_render = true;
