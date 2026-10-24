@@ -10,10 +10,23 @@ param(
     [ValidateRange(90, 7200)][int]$OverallTimeoutSeconds = 2400,
     [switch]$NativeOnly,
     [string]$PrebuiltArtifactManifest,
+    [ValidateSet('FileCancel', 'FileConfirm', 'FolderConfirm')][string]$TargetRepairOutcome,
     [string]$NativeBatchDeadlineUtc
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Scenario -eq 'TargetRepair' -and [string]::IsNullOrWhiteSpace($TargetRepairOutcome)) {
+    throw 'TargetRepair requires -TargetRepairOutcome FileCancel, FileConfirm, or FolderConfirm.'
+}
+if ($Scenario -ne 'TargetRepair' -and $TargetRepairOutcome) {
+    throw '-TargetRepairOutcome is valid only with -Scenario TargetRepair.'
+}
+$targetRepairOutcomeKey = switch ($TargetRepairOutcome) {
+    'FileCancel' { 'file-cancel' }
+    'FileConfirm' { 'file-confirm' }
+    'FolderConfirm' { 'folder-confirm' }
+    default { $null }
+}
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $cargoFeatures = 'dev-smoke-binaries,qa-framebuffer-capture'
 $isFinalSmoke = $Scenario -eq 'Phase1Enabled' -and $Screen -eq 'FinalSmoke'
@@ -21,7 +34,7 @@ $phase2SurfaceKey = switch ($Surface) {
     'FileSearch' { 'file-search' }
     default { $Surface.ToLowerInvariant() }
 }
-$runMilestone = if ($Scenario -eq 'NoteReplace') { 'G3-M9-B' } elseif ($Scenario -eq 'TargetRepair') { 'G3-M2-B' } elseif ($Scenario -eq 'SettingsSearch') { 'G3-M1-B' } elseif ($isFinalSmoke) { 'M15' } elseif ($Scenario -eq 'QueryProbe') { 'M05' } elseif ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'M08' } elseif ($Scenario -eq 'Phase2') { 'M13' } else { 'M01' }
+$runMilestone = if ($Scenario -eq 'NoteReplace') { 'G3-M9-B' } elseif ($Scenario -eq 'TargetRepair') { 'G3-M3' } elseif ($Scenario -eq 'SettingsSearch') { 'G3-M1-B' } elseif ($isFinalSmoke) { 'M15' } elseif ($Scenario -eq 'QueryProbe') { 'M05' } elseif ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'M08' } elseif ($Scenario -eq 'Phase2') { 'M13' } else { 'M01' }
 $runStamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
 $runSuffix = [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $scenarioTag = if ($isFinalSmoke) { 'm15_final_smoke' } else { switch ($Scenario) {
@@ -31,7 +44,7 @@ $scenarioTag = if ($isFinalSmoke) { 'm15_final_smoke' } else { switch ($Scenario
     'Phase1Disabled' { 'm08_phase1_disabled' }
     'Phase2' { "m13_phase2_$phase2SurfaceKey" }
     'SettingsSearch' { 'g3_m1b_settings_search' }
-    'TargetRepair' { 'g3_m2b_target_repair' }
+    'TargetRepair' { "g3_m3_target_repair_$($targetRepairOutcomeKey.Replace('-', '_'))" }
     'NoteReplace' { 'g3_m9b_note_replace' }
     default { 'm01_baseline' }
 } }
@@ -147,7 +160,16 @@ $targetRepairFolderStorePath = $null
 $targetRepairFavoriteStorePath = $null
 $targetRepairPinStorePath = $null
 $targetRepairUsageStorePath = $null
+$targetRepairStorePaths = $null
+$targetRepairStoreBeforeSha256 = $null
+$targetRepairStoresUnchangedAfterClose = $false
+$targetRepairOutcome = $TargetRepairOutcome
 $targetRepairUnrelatedPath = $null
+$targetRepairAcceptedKeyDowns = 0
+$targetRepairAcceptedKeyUps = 0
+$targetRepairAcceptedMouseDowns = 0
+$targetRepairAcceptedMouseUps = 0
+$targetRepairPendingInputs = [Collections.Generic.List[string]]::new()
 $noteReplaceFixtureScenario = $null
 $noteReplaceJumpEnabled = $null
 $noteReplaceSourcePath = $null
@@ -435,6 +457,26 @@ public static class JumpModeNativeProbe {
         return false;
     }
 
+    private static bool IsExpectedPressedKey(int actualKey, ushort[] expectedKeys) {
+        foreach (ushort expectedKey in expectedKeys) {
+            if (actualKey == expectedKey) return true;
+            if (expectedKey == 0x10 && (actualKey == 0xA0 || actualKey == 0xA1)) return true;
+            if (expectedKey == 0x11 && (actualKey == 0xA2 || actualKey == 0xA3)) return true;
+            if (expectedKey == 0x12 && (actualKey == 0xA4 || actualKey == 0xA5)) return true;
+        }
+        return false;
+    }
+
+    public static int[] PressedInputsOutside(ushort[] expectedKeys) {
+        System.Collections.Generic.List<int> unexpected = new System.Collections.Generic.List<int>();
+        for (int key = 1; key <= 0xFF; key++) {
+            if ((GetAsyncKeyState(key) & 0x8000) != 0 && !IsExpectedPressedKey(key, expectedKeys)) {
+                unexpected.Add(key);
+            }
+        }
+        return unexpected.ToArray();
+    }
+
     public static bool SendKey(ushort virtualKey, bool keyUp) {
         Input input = new Input();
         input.type = 1;
@@ -442,6 +484,18 @@ public static class JumpModeNativeProbe {
         input.data.keyboard.flags = keyUp ? 0x0002u : 0u;
         Input[] inputs = { input };
         return SendInput(1, inputs, Marshal.SizeOf(typeof(Input))) == 1;
+    }
+
+    public static bool SendLeftMouseButton(bool buttonUp) {
+        Input input = new Input();
+        input.type = 0;
+        input.data.mouse.flags = buttonUp ? 0x0004u : 0x0002u;
+        Input[] inputs = { input };
+        return SendInput(1, inputs, Marshal.SizeOf(typeof(Input))) == 1;
+    }
+
+    public static bool MoveCursorToScreenPoint(int x, int y) {
+        return SetCursorPos(x, y);
     }
 
     public static IntPtr ForegroundWindowHandle() {
@@ -703,6 +757,67 @@ function Read-JumpModeObservation {
     return $observation
 }
 
+function Read-TargetRepairObservationSnapshot {
+    if (!(Test-Path -LiteralPath $jumpObservationPath -PathType Leaf)) {
+        return [pscustomobject]@{ state = 'missing'; observation = $null }
+    }
+    try {
+        $json = [IO.File]::ReadAllText($jumpObservationPath)
+    } catch {
+        return [pscustomobject]@{ state = 'partial'; observation = $null }
+    }
+    if ([string]::IsNullOrWhiteSpace($json)) {
+        return [pscustomobject]@{ state = 'partial'; observation = $null }
+    }
+    try {
+        $observation = ConvertFrom-Json -InputObject $json -ErrorAction Stop
+    } catch {
+        return [pscustomobject]@{ state = 'partial'; observation = $null }
+    }
+    if ($null -eq $observation -or $null -eq $observation.process_pid -or
+        [string]::IsNullOrWhiteSpace([string]$observation.fixture_manifest_sha256)) {
+        return [pscustomobject]@{ state = 'partial'; observation = $null }
+    }
+    if ([int]$observation.process_pid -ne [int]$script:processId) {
+        throw "TargetRepair observation PID $($observation.process_pid) does not match retained app PID $script:processId"
+    }
+    if ([string]$observation.fixture_manifest_sha256 -cne [string]$script:fixtureHash) {
+        throw 'TargetRepair observation fixture hash does not match the verified isolated fixture'
+    }
+    if ($null -eq $observation.logic_frame_id -or $null -eq $observation.ui_pass_id) {
+        return [pscustomobject]@{ state = 'partial'; observation = $null }
+    }
+    return [pscustomobject]@{ state = 'valid'; observation = $observation }
+}
+
+function Test-TargetRepairObservationIsNewer([object]$Candidate, [object]$Baseline) {
+    $candidateFrame = [long]$Candidate.logic_frame_id
+    $baselineFrame = [long]$Baseline.logic_frame_id
+    if ($candidateFrame -gt $baselineFrame) { return $true }
+    return $candidateFrame -eq $baselineFrame -and [long]$Candidate.ui_pass_id -gt [long]$Baseline.ui_pass_id
+}
+
+function Wait-TargetRepairFreshObservation([object]$Baseline, [string]$Description) {
+    $deadline = Get-RunDeadline ([Math]::Min($CaptureTimeoutSeconds, 20))
+    $lastState = 'missing'
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (!(Test-RetainedProcessIdentity)) { throw "retained app PID/birth identity changed while waiting for $Description" }
+        $process.Refresh()
+        if ($process.HasExited) {
+            $script:processExitCode = $process.ExitCode
+            throw "isolated app exited while waiting for $Description (exit $script:processExitCode)"
+        }
+        $snapshot = Read-TargetRepairObservationSnapshot
+        $lastState = [string]$snapshot.state
+        if ($snapshot.state -eq 'valid' -and (Test-TargetRepairObservationIsNewer $snapshot.observation $Baseline)) {
+            return $snapshot.observation
+        }
+        if ($snapshot.state -eq 'valid') { $lastState = 'stale_pass' }
+        Start-Sleep -Milliseconds 100
+    }
+    throw "TargetRepair observation did not reach a fresh owner pass before the deadline for $Description (last state: $lastState)"
+}
+
 function Wait-JumpModeObservation([scriptblock]$Condition, [int]$TimeoutSeconds, [string]$Description) {
     $boundedTimeout = Get-RemainingRunSeconds $TimeoutSeconds
     $deadline = [DateTime]::UtcNow.AddSeconds($boundedTimeout)
@@ -916,17 +1031,257 @@ function Get-OwnedRootHandle {
     return $window
 }
 
-function Assert-OwnedRepairRootForeground([IntPtr]$ExpectedRoot) {
-    Assert-OwnedForeground
-    $currentRoot = Get-OwnedRootHandle
-    if ($currentRoot -ne $ExpectedRoot -or
-        [JumpModeNativeProbe]::ForegroundWindowHandle() -ne $ExpectedRoot -or
+function Add-TargetRepairAcceptedDown([string]$Kind, [string]$Code) {
+    $identity = "$Kind`:$Code"
+    if ($script:targetRepairPendingInputs.Contains($identity)) {
+        throw "TargetRepair accepted a duplicate Down for $identity before its matching Up"
+    }
+    $script:targetRepairPendingInputs.Add($identity)
+    if ($Kind -in @('key', 'unicode')) { $script:targetRepairAcceptedKeyDowns++ }
+    elseif ($Kind -eq 'mouse') { $script:targetRepairAcceptedMouseDowns++ }
+}
+
+function Remove-TargetRepairAcceptedDown([string]$Kind, [string]$Code) {
+    $identity = "$Kind`:$Code"
+    if (!$script:targetRepairPendingInputs.Remove($identity)) { return $false }
+    if ($Kind -in @('key', 'unicode')) { $script:targetRepairAcceptedKeyUps++ }
+    elseif ($Kind -eq 'mouse') { $script:targetRepairAcceptedMouseUps++ }
+    return $true
+}
+
+function Assert-TargetRepairInputFence([uint16[]]$ExpectedKeys = @()) {
+    $expected = @($ExpectedKeys | ForEach-Object { "key:0x{0:X2}" -f [int]$_ })
+    if ($script:targetRepairPendingInputs.Count -ne $expected.Count) {
+        throw "TargetRepair input admission found $($script:targetRepairPendingInputs.Count) owned Down(s) where $($expected.Count) chord key(s) were expected"
+    }
+    foreach ($pending in $script:targetRepairPendingInputs) {
+        if ($pending -notin $expected) {
+            throw "TargetRepair input admission found an unmatched owned input: $pending"
+        }
+    }
+    $unexpected = @([JumpModeNativeProbe]::PressedInputsOutside($ExpectedKeys))
+    if ($unexpected.Count -gt 0) {
+        Write-CleanupEvent 'target_repair_input_admission_refused' @{
+            unexpected_virtual_keys = $unexpected
+            expected_owned_keys = $expected
+            pending_owned_inputs = @($script:targetRepairPendingInputs.ToArray())
+            accepted_key_downs = $script:targetRepairAcceptedKeyDowns
+            accepted_key_ups = $script:targetRepairAcceptedKeyUps
+            accepted_mouse_downs = $script:targetRepairAcceptedMouseDowns
+            accepted_mouse_ups = $script:targetRepairAcceptedMouseUps
+        }
+        throw "TargetRepair refuses new input while unrelated keyboard or mouse input is held: $($unexpected -join ',')"
+    }
+}
+
+function Complete-TargetRepairPendingInputCleanup {
+    $cleanupFailure = $null
+    foreach ($identity in @($script:targetRepairPendingInputs.ToArray())) {
+        $parts = $identity.Split(':', 2)
+        $released = $false
+        for ($attempt = 1; $attempt -le 2 -and !$released; $attempt++) {
+            if ($parts[0] -eq 'key') {
+                $key = [uint16][Convert]::ToInt32($parts[1].Substring(2), 16)
+                $released = [JumpModeNativeProbe]::SendKey($key, $true)
+            } elseif ($parts[0] -eq 'unicode') {
+                $codeUnit = [char][Convert]::ToInt32($parts[1].Substring(2), 16)
+                $released = [JumpModeNativeProbe]::SendUnicodeChar($codeUnit, $true)
+            } elseif ($parts[0] -eq 'mouse' -and $parts[1] -eq 'left') {
+                $released = [JumpModeNativeProbe]::SendLeftMouseButton($true)
+            } else {
+                $cleanupFailure = "unrecognized retained TargetRepair input identity $identity"
+                break
+            }
+        }
+        if ($released) {
+            $null = Remove-TargetRepairAcceptedDown $parts[0] $parts[1]
+        } elseif (!$cleanupFailure) {
+            $cleanupFailure = "matching Up remained unaccepted for retained TargetRepair input $identity"
+        }
+    }
+    if (!$script:nativeQueryProbeInitialized -and $script:targetRepairPendingInputs.Count -gt 0) {
+        $cleanupFailure = 'native input probe is unavailable for retained TargetRepair Up cleanup'
+    }
+    $balanced = !$cleanupFailure -and $script:targetRepairPendingInputs.Count -eq 0 -and
+        ($script:targetRepairAcceptedKeyDowns - $script:targetRepairAcceptedKeyUps) -eq 0 -and
+        ($script:targetRepairAcceptedMouseDowns - $script:targetRepairAcceptedMouseUps) -eq 0
+    Write-CleanupEvent 'target_repair_input_terminal_balance' @{
+        accepted_key_downs = $script:targetRepairAcceptedKeyDowns
+        accepted_key_ups = $script:targetRepairAcceptedKeyUps
+        accepted_mouse_downs = $script:targetRepairAcceptedMouseDowns
+        accepted_mouse_ups = $script:targetRepairAcceptedMouseUps
+        pending_owned_inputs = @($script:targetRepairPendingInputs.ToArray())
+        balanced = $balanced
+        cleanup_failure = $cleanupFailure
+        no_new_down_sent_during_cleanup = $true
+        process_id = $processId
+        process_started_at_utc = if ($processStartUtc) { $processStartUtc.ToString('O') } else { $null }
+    }
+    if (!$balanced) {
+        $message = if ($cleanupFailure) { $cleanupFailure } else { 'an accepted input Down remains unbalanced' }
+        Record-CleanupIssue 'TargetRepair input balance' $message
+    }
+    return $balanced
+}
+
+function Assert-TargetRepairInputOwner([IntPtr]$ExpectedRoot, [IntPtr]$ExpectedForeground) {
+    if (!(Test-RetainedProcessIdentity)) { throw 'retained app PID/birth identity changed before TargetRepair input' }
+    $process.Refresh()
+    if ($process.HasExited) {
+        $script:processExitCode = $process.ExitCode
+        throw "isolated app exited before TargetRepair input (exit $script:processExitCode)"
+    }
+    $currentRoot = $process.MainWindowHandle
+    $foreground = [JumpModeNativeProbe]::ForegroundWindowHandle()
+    if ($currentRoot -ne $ExpectedRoot -or $foreground -ne $ExpectedForeground -or
         [JumpModeNativeProbe]::WindowProcessId($ExpectedRoot) -ne $processId) {
-        throw 'repair input requires the exact retained app root HWND in the foreground'
+        throw 'TargetRepair input owner changed from the exact retained root/modal and foreground'
     }
-    if ([JumpModeNativeProbe]::ModifierIsDown()) {
-        throw 'a Ctrl, Alt, Shift, or Windows key is held before repair root input'
+    if ($ExpectedForeground -ne $ExpectedRoot -and
+        (![JumpModeNativeProbe]::IsVisibleWindow($ExpectedForeground) -or
+            ![JumpModeNativeProbe]::IsOwnedModalForeground($ExpectedRoot, [uint32]$processId))) {
+        throw 'TargetRepair modal input owner is no longer the visible same-process modal of the retained root'
     }
+}
+
+function Assert-OwnedRepairRootForeground([IntPtr]$ExpectedRoot) {
+    Assert-TargetRepairInputFence @()
+    Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedRoot
+    Assert-TargetRepairInputFence @()
+}
+
+function Invoke-TargetRepairUnicodeCodeUnit(
+    [string]$Name,
+    [char]$Character,
+    [IntPtr]$ExpectedRoot,
+    [IntPtr]$ExpectedForeground
+) {
+    $identity = '0x{0:X4}' -f [int]$Character
+    $downAccepted = $false
+    $sendFailure = $null
+    $downBefore = $script:targetRepairAcceptedKeyDowns
+    $upBefore = $script:targetRepairAcceptedKeyUps
+    try {
+        Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground
+        Assert-TargetRepairInputFence @()
+        if (![JumpModeNativeProbe]::SendUnicodeChar($Character, $false)) {
+            throw "Unicode input Down was not accepted in $Name"
+        }
+        $downAccepted = $true
+        Add-TargetRepairAcceptedDown 'unicode' $identity
+    } catch {
+        $sendFailure = $_.Exception.Message
+    } finally {
+        if ($downAccepted) {
+            $released = $false
+            for ($attempt = 1; $attempt -le 2 -and !$released; $attempt++) {
+                if ([JumpModeNativeProbe]::SendUnicodeChar($Character, $true)) {
+                    $released = $true
+                    if (!(Remove-TargetRepairAcceptedDown 'unicode' $identity)) {
+                        $sendFailure = "owned Unicode Up receipt was missing for $Name"
+                    }
+                }
+            }
+            if (!$released) { $sendFailure = "Unicode Up remained unaccepted after bounded cleanup retries from $Name" }
+        }
+        $balanced = $script:targetRepairPendingInputs.Count -eq 0 -and
+            ($script:targetRepairAcceptedKeyDowns - $script:targetRepairAcceptedKeyUps) -eq 0 -and
+            ($script:targetRepairAcceptedMouseDowns - $script:targetRepairAcceptedMouseUps) -eq 0
+        Write-CleanupEvent 'target_repair_input_balance' @{
+            name = $Name
+            input_kind = 'unicode_code_unit'
+            accepted_downs_this_batch = $script:targetRepairAcceptedKeyDowns - $downBefore
+            accepted_ups_this_batch = $script:targetRepairAcceptedKeyUps - $upBefore
+            unicode_code_unit = $identity
+            total_accepted_key_downs = $script:targetRepairAcceptedKeyDowns
+            total_accepted_key_ups = $script:targetRepairAcceptedKeyUps
+            total_accepted_mouse_downs = $script:targetRepairAcceptedMouseDowns
+            total_accepted_mouse_ups = $script:targetRepairAcceptedMouseUps
+            pending_owned_inputs = @($script:targetRepairPendingInputs.ToArray())
+            balanced = $balanced
+            failure = $sendFailure
+            foreground_hwnd = ('0x{0:X}' -f $ExpectedForeground.ToInt64())
+            process_id = $processId
+            process_started_at_utc = if ($processStartUtc) { $processStartUtc.ToString('O') } else { $null }
+        }
+    }
+    if ($sendFailure) { throw $sendFailure }
+    Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground
+    Assert-TargetRepairInputFence @()
+}
+
+function Invoke-TargetRepairOwnedMouseClick(
+    [string]$Name,
+    [int]$ScreenX,
+    [int]$ScreenY,
+    [IntPtr]$ExpectedRoot,
+    [IntPtr]$ExpectedForeground,
+    [IntPtr]$ExpectedHit
+) {
+    $downAccepted = $false
+    $sendFailure = $null
+    $downBefore = $script:targetRepairAcceptedMouseDowns
+    $upBefore = $script:targetRepairAcceptedMouseUps
+    try {
+        Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground
+        Assert-TargetRepairInputFence @()
+        if (![JumpModeNativeProbe]::MoveCursorToScreenPoint($ScreenX, $ScreenY)) {
+            throw "could not move the pointer to the current TargetRepair response for $Name"
+        }
+        Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground
+        Assert-TargetRepairInputFence @()
+        $currentHit = [JumpModeNativeProbe]::WindowAtScreenPoint($ScreenX, $ScreenY)
+        if ($currentHit -ne $ExpectedHit -or $currentHit -eq [IntPtr]::Zero -or
+            [int][JumpModeNativeProbe]::WindowProcessId($currentHit) -ne $processId -or
+            [JumpModeNativeProbe]::RootWindow($currentHit) -ne $ExpectedRoot) {
+            throw "TargetRepair response hit owner changed after moving the pointer for $Name"
+        }
+        Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground
+        Assert-TargetRepairInputFence @()
+        if (![JumpModeNativeProbe]::SendLeftMouseButton($false)) {
+            throw "SendInput mouse Down was not accepted for $Name"
+        }
+        $downAccepted = $true
+        Add-TargetRepairAcceptedDown 'mouse' 'left'
+    } catch {
+        $sendFailure = $_.Exception.Message
+    } finally {
+        if ($downAccepted) {
+            $released = $false
+            for ($attempt = 1; $attempt -le 2 -and !$released; $attempt++) {
+                if ([JumpModeNativeProbe]::SendLeftMouseButton($true)) {
+                    $released = $true
+                    if (!(Remove-TargetRepairAcceptedDown 'mouse' 'left')) {
+                        $sendFailure = "owned mouse Up receipt was missing for $Name"
+                    }
+                }
+            }
+            if (!$released) { $sendFailure = "mouse Up remained unaccepted after bounded cleanup retries from $Name" }
+        }
+        $balanced = $script:targetRepairPendingInputs.Count -eq 0 -and
+            ($script:targetRepairAcceptedKeyDowns - $script:targetRepairAcceptedKeyUps) -eq 0 -and
+            ($script:targetRepairAcceptedMouseDowns - $script:targetRepairAcceptedMouseUps) -eq 0
+        Write-CleanupEvent 'target_repair_input_balance' @{
+            name = $Name
+            input_kind = 'mouse_left'
+            accepted_downs_this_batch = $script:targetRepairAcceptedMouseDowns - $downBefore
+            accepted_ups_this_batch = $script:targetRepairAcceptedMouseUps - $upBefore
+            total_accepted_key_downs = $script:targetRepairAcceptedKeyDowns
+            total_accepted_key_ups = $script:targetRepairAcceptedKeyUps
+            total_accepted_mouse_downs = $script:targetRepairAcceptedMouseDowns
+            total_accepted_mouse_ups = $script:targetRepairAcceptedMouseUps
+            pending_owned_inputs = @($script:targetRepairPendingInputs.ToArray())
+            balanced = $balanced
+            failure = $sendFailure
+            screen_point = @{ x = $ScreenX; y = $ScreenY }
+            hit_hwnd = ('0x{0:X}' -f $ExpectedHit.ToInt64())
+            foreground_hwnd = ('0x{0:X}' -f $ExpectedForeground.ToInt64())
+            process_id = $processId
+            process_started_at_utc = if ($processStartUtc) { $processStartUtc.ToString('O') } else { $null }
+        }
+    }
+    if ($sendFailure) { throw $sendFailure }
+    Assert-TargetRepairInputFence @()
 }
 
 function Assert-OwnedRepairModalForeground([IntPtr]$ExpectedRoot, [IntPtr]$ExpectedModal) {
@@ -943,9 +1298,7 @@ function Assert-OwnedRepairModalForeground([IntPtr]$ExpectedRoot, [IntPtr]$Expec
         ![JumpModeNativeProbe]::IsOwnedModalForeground($ExpectedRoot, [uint32]$processId)) {
         throw 'native picker input refused: foreground is not the exact visible same-process modal owned by the retained launcher HWND'
     }
-    if ([JumpModeNativeProbe]::ModifierIsDown()) {
-        throw 'a Ctrl, Alt, Shift, or Windows key is held before repair picker input'
-    }
+    Assert-TargetRepairInputFence @()
 }
 
 function Invoke-TargetRepairKeyBatch(
@@ -953,32 +1306,75 @@ function Invoke-TargetRepairKeyBatch(
     [uint16[]]$Keys,
     [string[]]$KeyLabels,
     [IntPtr]$ExpectedRoot,
-    [IntPtr]$ExpectedForeground
+    [IntPtr]$ExpectedForeground,
+    [switch]$ExpectPickerReturn
 ) {
     if ($Keys.Count -ne $KeyLabels.Count -or $Keys.Count -eq 0) { throw 'repair key batch is empty or malformed' }
-    if ($ExpectedForeground -eq $ExpectedRoot) {
-        Assert-OwnedRepairRootForeground $ExpectedRoot
-    } else {
-        Assert-OwnedRepairModalForeground $ExpectedRoot $ExpectedForeground
-    }
     $pressed = [Collections.Generic.List[uint16]]::new()
     $sendFailure = $null
+    $downBefore = $script:targetRepairAcceptedKeyDowns
+    $upBefore = $script:targetRepairAcceptedKeyUps
     try {
+        if ($ExpectedForeground -eq $ExpectedRoot) {
+            Assert-OwnedRepairRootForeground $ExpectedRoot
+        } else {
+            Assert-OwnedRepairModalForeground $ExpectedRoot $ExpectedForeground
+        }
         foreach ($key in $Keys) {
+            if ($pressed.Contains($key)) { throw "repair key batch repeats a key before its matching Up in $Name" }
+            Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground
+            Assert-TargetRepairInputFence $pressed.ToArray()
             if (![JumpModeNativeProbe]::SendKey($key, $false)) { throw "SendInput key-down failed in $Name" }
             $pressed.Add($key)
+            Add-TargetRepairAcceptedDown 'key' ('0x{0:X2}' -f [int]$key)
         }
     } catch {
         $sendFailure = $_.Exception.Message
     } finally {
         for ($index = $pressed.Count - 1; $index -ge 0; $index--) {
-            if (![JumpModeNativeProbe]::SendKey($pressed[$index], $true)) {
-                $sendFailure = "SendInput key-up failed while releasing keys from $Name"
+            $released = $false
+            for ($attempt = 1; $attempt -le 2 -and !$released; $attempt++) {
+                if ([JumpModeNativeProbe]::SendKey($pressed[$index], $true)) {
+                    $released = $true
+                    if (!(Remove-TargetRepairAcceptedDown 'key' ('0x{0:X2}' -f [int]$pressed[$index]))) {
+                        $sendFailure = "owned key-up receipt was missing for $Name"
+                    }
+                }
             }
+            if (!$released) {
+                $sendFailure = "SendInput key-up remained unaccepted after bounded cleanup retries from $Name"
+            }
+        }
+        $balanced = $script:targetRepairPendingInputs.Count -eq 0 -and
+            ($script:targetRepairAcceptedKeyDowns - $script:targetRepairAcceptedKeyUps) -eq 0 -and
+            ($script:targetRepairAcceptedMouseDowns - $script:targetRepairAcceptedMouseUps) -eq 0
+        Write-CleanupEvent 'target_repair_input_balance' @{
+            name = $Name
+            input_kind = 'keyboard'
+            accepted_downs_this_batch = $script:targetRepairAcceptedKeyDowns - $downBefore
+            accepted_ups_this_batch = $script:targetRepairAcceptedKeyUps - $upBefore
+            total_accepted_key_downs = $script:targetRepairAcceptedKeyDowns
+            total_accepted_key_ups = $script:targetRepairAcceptedKeyUps
+            total_accepted_mouse_downs = $script:targetRepairAcceptedMouseDowns
+            total_accepted_mouse_ups = $script:targetRepairAcceptedMouseUps
+            pending_owned_inputs = @($script:targetRepairPendingInputs.ToArray())
+            balanced = $balanced
+            failure = $sendFailure
+            foreground_hwnd = ('0x{0:X}' -f $ExpectedForeground.ToInt64())
+            process_id = $processId
+            process_started_at_utc = if ($processStartUtc) { $processStartUtc.ToString('O') } else { $null }
         }
     }
     if ($sendFailure) { throw $sendFailure }
-    if ([JumpModeNativeProbe]::ModifierIsDown()) { throw "a modifier remained held after $Name" }
+    if ($ExpectPickerReturn) {
+        if ($ExpectedForeground -eq $ExpectedRoot) {
+            throw 'TargetRepair picker-return validation requires the exact owned modal as the pre-input foreground'
+        }
+        Assert-TargetRepairInputFence @()
+    } else {
+        Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground
+    }
+    Assert-TargetRepairInputFence @()
     Write-Event 'target_repair_key_batch_sent' @{
         name = $Name
         keys = $KeyLabels
@@ -992,15 +1388,8 @@ function Send-TargetRepairUnicodeText([string]$Name, [string]$Text, [IntPtr]$Exp
     $index = 0
     foreach ($character in $Text.ToCharArray()) {
         $index++
-        Assert-OwnedRepairModalForeground $ExpectedRoot $ExpectedModal
-        if (![JumpModeNativeProbe]::SendUnicodeChar($character, $false)) {
-            throw "Unicode input failed in $Name character $index"
-        }
-        if (![JumpModeNativeProbe]::SendUnicodeChar($character, $true)) {
-            throw "Unicode key release failed in $Name character $index"
-        }
+        Invoke-TargetRepairUnicodeCodeUnit "$Name character $index" $character $ExpectedRoot $ExpectedModal
     }
-    if ([JumpModeNativeProbe]::ModifierIsDown()) { throw "a modifier remained held after $Name" }
     Write-Event 'target_repair_unicode_text_sent' @{
         name = $Name
         utf16_code_units = $Text.Length
@@ -1014,15 +1403,8 @@ function Send-TargetRepairRootUnicodeText([string]$Name, [string]$Text, [IntPtr]
     $index = 0
     foreach ($character in $Text.ToCharArray()) {
         $index++
-        Assert-OwnedRepairRootForeground $ExpectedRoot
-        if (![JumpModeNativeProbe]::SendUnicodeChar($character, $false)) {
-            throw "Unicode input failed in $Name character $index"
-        }
-        if (![JumpModeNativeProbe]::SendUnicodeChar($character, $true)) {
-            throw "Unicode key release failed in $Name character $index"
-        }
+        Invoke-TargetRepairUnicodeCodeUnit "$Name character $index" $character $ExpectedRoot $ExpectedRoot
     }
-    if ([JumpModeNativeProbe]::ModifierIsDown()) { throw "a modifier remained held after $Name" }
     Write-Event 'target_repair_root_text_sent' @{
         name = $Name
         utf16_code_units = $Text.Length
@@ -1040,23 +1422,30 @@ function Invoke-TargetRepairRootClick(
     [long]$ExpectedRequestToken
 ) {
     Assert-OwnedRepairRootForeground $ExpectedRoot
-    $fresh = Read-JumpModeObservation
-    if ($null -eq $fresh -or [long]$fresh.logic_frame_id -lt [long]$Observation.logic_frame_id -or
-        $null -eq $fresh.target_repair -or
-        [long]$fresh.target_repair.request_token -ne $ExpectedRequestToken -or
+    $fresh = Wait-TargetRepairFreshObservation $Observation "repair control $($Control.name)"
+    if ($null -eq $fresh.target_repair) { throw 'TargetRepair owner is missing from the fresh observation' }
+    if ([long]$fresh.target_repair.request_token -ne $ExpectedRequestToken -or
         [long]$fresh.target_repair.owner_revision -ne [long]$Observation.target_repair.owner_revision -or
-        !$fresh.target_repair.window_visible -or $fresh.target_repair.sizing_pass) {
-        throw 'repair dialog identity or current frame changed before its native control click'
+        [string]$fresh.target_repair.target_owner -cne [string]$Observation.target_repair.target_owner -or
+        [int]$fresh.target_repair.record_index -ne [int]$Observation.target_repair.record_index -or
+        [string]$fresh.target_repair.replacement_kind -cne [string]$Observation.target_repair.replacement_kind) {
+        throw 'TargetRepair owner token or revision changed before its native control click'
+    }
+    if (!$fresh.target_repair.window_visible -or $fresh.target_repair.sizing_pass -or $fresh.target_repair.pending) {
+        throw 'TargetRepair owner is hidden, in a sizing pass, or pending before its native control click'
     }
     $current = @($fresh.target_repair.controls | Where-Object {
         [string]$_.name -ceq [string]$Control.name -and [string]$_.response_id -ceq [string]$Control.response_id
     })
-    if ($current.Count -ne 1 -or !$current[0].enabled -or !$current[0].painted) {
-        throw 'repair control is no longer a unique current visible enabled response'
-    }
+    if ($current.Count -ne 1) { throw "TargetRepair control '$($Control.name)' is missing or ambiguous in the fresh owner pass" }
+    if (!$current[0].enabled) { throw "TargetRepair control '$($Control.name)' is disabled in the fresh owner pass" }
+    if (!$current[0].painted) { throw "TargetRepair control '$($Control.name)' is not painted in the fresh owner pass" }
     $ppp = [double]$fresh.pixels_per_point
     $rect = $current[0].rect
-    if ($ppp -le 0 -or $null -eq $rect -or $rect.Count -ne 4) { throw 'repair response has no valid current UI geometry' }
+    if ($ppp -le 0 -or $null -eq $rect -or $rect.Count -ne 4 -or
+        [double]$rect[2] -le [double]$rect[0] -or [double]$rect[3] -le [double]$rect[1]) {
+        throw "TargetRepair control '$($Control.name)' has no positive clipped rectangle in the fresh owner pass"
+    }
     $clientX = [int][Math]::Round((([double]$rect[0] + [double]$rect[2]) / 2.0) * $ppp)
     $clientY = [int][Math]::Round((([double]$rect[1] + [double]$rect[3]) / 2.0) * $ppp)
     $screenX = 0; $screenY = 0
@@ -1068,10 +1457,7 @@ function Invoke-TargetRepairRootClick(
         [JumpModeNativeProbe]::RootWindow($hit) -ne $ExpectedRoot) {
         throw 'repair response hit test found a foreign, occluding, or unexpected window'
     }
-    Assert-OwnedRepairRootForeground $ExpectedRoot
-    if (![JumpModeNativeProbe]::ClickScreenPoint($screenX, $screenY)) {
-        throw "SendInput click failed for current repair response $Name"
-    }
+    Invoke-TargetRepairOwnedMouseClick $Name $screenX $screenY $ExpectedRoot $ExpectedRoot $hit
     Write-Event 'target_repair_response_clicked' @{
         name = $Name
         response_id = [string]$current[0].response_id
@@ -1095,21 +1481,21 @@ function Invoke-TargetRepairActionSheetClick(
     [IntPtr]$ExpectedRoot
 ) {
     Assert-OwnedRepairRootForeground $ExpectedRoot
-    $fresh = Read-JumpModeObservation
-    if ($null -eq $fresh -or [long]$fresh.logic_frame_id -lt [long]$Observation.logic_frame_id -or
-        $null -eq $fresh.target_repair_action_sheet -or
-        !$fresh.target_repair_action_sheet.filter_enabled -or
-        !$fresh.target_repair_action_sheet.filter_painted) {
-        throw 'repair action sheet is no longer a current visible response owner'
-    }
+    $fresh = Wait-TargetRepairFreshObservation $Observation "repair action-sheet $ExpectedKind $ExpectedActionId"
+    if ($null -eq $fresh.target_repair_action_sheet) { throw 'TargetRepair action sheet is missing from the fresh owner pass' }
+    if (!$fresh.target_repair_action_sheet.filter_enabled) { throw 'TargetRepair action-sheet filter is disabled in the fresh owner pass' }
+    if (!$fresh.target_repair_action_sheet.filter_painted) { throw 'TargetRepair action-sheet filter is not painted in the fresh owner pass' }
     $current = @($fresh.target_repair_action_sheet.controls | Where-Object {
         [string]$_.kind -ceq $ExpectedKind -and
             [string]$_.action_id -ceq $ExpectedActionId -and $_.enabled -and $_.painted
     })
-    if ($current.Count -ne 1) { throw "repair action sheet exposed $($current.Count) current enabled $ExpectedKind responses" }
+    if ($current.Count -ne 1) { throw "TargetRepair action sheet exposed $($current.Count) exact $ExpectedKind responses in the fresh owner pass" }
     $ppp = [double]$fresh.pixels_per_point
     $rect = $current[0].rect
-    if ($ppp -le 0 -or $null -eq $rect -or $rect.Count -ne 4) { throw 'repair action response has no valid current UI geometry' }
+    if ($ppp -le 0 -or $null -eq $rect -or $rect.Count -ne 4 -or
+        [double]$rect[2] -le [double]$rect[0] -or [double]$rect[3] -le [double]$rect[1]) {
+        throw 'TargetRepair action-sheet response has no positive clipped rectangle in the fresh owner pass'
+    }
     $clientX = [int][Math]::Round((([double]$rect[0] + [double]$rect[2]) / 2.0) * $ppp)
     $clientY = [int][Math]::Round((([double]$rect[1] + [double]$rect[3]) / 2.0) * $ppp)
     $screenX = 0; $screenY = 0
@@ -1121,8 +1507,7 @@ function Invoke-TargetRepairActionSheetClick(
         [JumpModeNativeProbe]::RootWindow($hit) -ne $ExpectedRoot) {
         throw 'repair action response hit test found a foreign, occluding, or unexpected window'
     }
-    Assert-OwnedRepairRootForeground $ExpectedRoot
-    if (![JumpModeNativeProbe]::ClickScreenPoint($screenX, $screenY)) { throw "SendInput click failed for $Name" }
+    Invoke-TargetRepairOwnedMouseClick $Name $screenX $screenY $ExpectedRoot $ExpectedRoot $hit
     Write-Event 'target_repair_action_sheet_response_clicked' @{
         name = $Name
         action_id = $ExpectedActionId
@@ -1137,7 +1522,15 @@ function Invoke-TargetRepairActionSheetClick(
     return $fresh
 }
 
-function Wait-TargetRepairOwnedPicker([IntPtr]$ExpectedRoot, [IntPtr]$PreviousForeground, [long]$RequestToken, [long]$ExpectedOwnerRevision) {
+function Wait-TargetRepairOwnedPicker(
+    [IntPtr]$ExpectedRoot,
+    [IntPtr]$PreviousForeground,
+    [long]$RequestToken,
+    [long]$ExpectedOwnerRevision,
+    [object]$BaselineObservation,
+    [string]$ExpectedOwner,
+    [string]$ExpectedReplacementKind
+) {
     $deadline = Get-RunDeadline ([Math]::Min($CaptureTimeoutSeconds, 20))
     while ([DateTime]::UtcNow -lt $deadline) {
         if (!(Test-RetainedProcessIdentity)) { throw 'retained app PID/birth identity changed while waiting for its repair picker' }
@@ -1146,10 +1539,17 @@ function Wait-TargetRepairOwnedPicker([IntPtr]$ExpectedRoot, [IntPtr]$PreviousFo
             $script:processExitCode = $process.ExitCode
             throw "isolated app exited while opening its repair picker (exit $script:processExitCode)"
         }
-        $state = Read-JumpModeObservation
-        if ($null -ne $state -and $null -ne $state.target_repair -and
+        $snapshot = Read-TargetRepairObservationSnapshot
+        $state = $snapshot.observation
+        if ($snapshot.state -eq 'valid' -and
+            (Test-TargetRepairObservationIsNewer $state $BaselineObservation) -and
+            $null -ne $state.target_repair -and
             [long]$state.target_repair.request_token -eq $RequestToken -and
-            [long]$state.target_repair.owner_revision -eq $ExpectedOwnerRevision) {
+            [long]$state.target_repair.owner_revision -eq $ExpectedOwnerRevision -and
+            [string]$state.target_repair.target_owner -ceq $ExpectedOwner -and
+            [string]$state.target_repair.replacement_kind -ceq $ExpectedReplacementKind -and
+            $state.target_repair.window_visible -and !$state.target_repair.sizing_pass -and
+            !$state.target_repair.pending) {
             $foreground = [JumpModeNativeProbe]::ForegroundWindowHandle()
             if ($foreground -ne [IntPtr]::Zero -and $foreground -ne $ExpectedRoot -and
                 $foreground -ne $PreviousForeground -and
@@ -1160,6 +1560,7 @@ function Wait-TargetRepairOwnedPicker([IntPtr]$ExpectedRoot, [IntPtr]$PreviousFo
                     root_hwnd = $ExpectedRoot
                     request_token = $RequestToken
                     owner_revision = $ExpectedOwnerRevision
+                    target_repair = $state.target_repair
                     egui_frame_id = [long]$state.logic_frame_id
                     egui_pass_id = [long]$state.ui_pass_id
                 }
@@ -1175,9 +1576,15 @@ function Wait-TargetRepairPickerReturn(
     [IntPtr]$ExpectedModal,
     [long]$RequestToken,
     [long]$ExpectedOwnerRevision,
-    [Nullable[bool]]$ExpectedReplacementMatch
+    [Nullable[bool]]$ExpectedReplacementMatch,
+    [long]$PickerFrameId,
+    [long]$PickerPassId
 ) {
     $deadline = Get-RunDeadline ([Math]::Min($CaptureTimeoutSeconds, 20))
+    $pickerPass = [pscustomobject]@{
+        logic_frame_id = $PickerFrameId
+        ui_pass_id = $PickerPassId
+    }
     while ([DateTime]::UtcNow -lt $deadline) {
         if (!(Test-RetainedProcessIdentity)) { throw 'retained app PID/birth identity changed while returning from its repair picker' }
         $process.Refresh()
@@ -1186,10 +1593,12 @@ function Wait-TargetRepairPickerReturn(
             throw "isolated app exited while returning from its repair picker (exit $script:processExitCode)"
         }
         $root = Get-OwnedRootHandle
-        $state = Read-JumpModeObservation
+        $snapshot = Read-TargetRepairObservationSnapshot
+        $state = $snapshot.observation
         if ($root -eq $ExpectedRoot -and [JumpModeNativeProbe]::ForegroundWindowHandle() -eq $ExpectedRoot -and
             [JumpModeNativeProbe]::IsOwnedModalForeground($ExpectedRoot, [uint32]$processId) -eq $false -and
-            $null -ne $state -and $null -ne $state.target_repair -and
+            $snapshot.state -eq 'valid' -and (Test-TargetRepairObservationIsNewer $state $pickerPass) -and
+            $null -ne $state.target_repair -and
             [long]$state.target_repair.request_token -eq $RequestToken -and
             [long]$state.target_repair.owner_revision -eq $ExpectedOwnerRevision -and
             $state.target_repair.window_visible -and !$state.target_repair.sizing_pass -and
@@ -1231,66 +1640,176 @@ function Wait-TargetRepairDialog([string]$Owner, [string]$ReplacementKind) {
     } ([Math]::Min($CaptureTimeoutSeconds, 20)) "current $Owner target-repair dialog with visible enabled controls"
 }
 
-function Invoke-TargetRepairBrowseAndChoose(
+function Get-TargetRepairStoreHashes {
+    $hashes = [ordered]@{}
+    foreach ($name in @('actions', 'folders', 'favorites', 'pins', 'usage')) {
+        $path = [string]$script:targetRepairStorePaths[$name]
+        if ([string]::IsNullOrWhiteSpace($path) -or !(Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "TargetRepair $name store is missing during durable-byte verification"
+        }
+        $hashes[$name] = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+    }
+    return $hashes
+}
+
+function Assert-TargetRepairStoresUnchanged([string]$Phase) {
+    if ($null -eq $script:targetRepairStoreBeforeSha256) {
+        throw 'TargetRepair durable-store baseline was not captured before input'
+    }
+    $after = Get-TargetRepairStoreHashes
+    foreach ($name in @('actions', 'folders', 'favorites', 'pins', 'usage')) {
+        if ($after[$name] -cne $script:targetRepairStoreBeforeSha256[$name]) {
+            throw "TargetRepair $name store bytes changed during $Phase"
+        }
+    }
+    Write-Event 'target_repair_store_bytes_unchanged' @{
+        phase = $Phase
+        store_sha256 = $after
+        process_id = $processId
+        process_started_at_utc = if ($processStartUtc) { $processStartUtc.ToString('O') } else { $null }
+    }
+}
+
+function Close-TargetRepairDraftWithoutMutation(
     [string]$Name,
     [string]$Owner,
     [string]$ReplacementKind,
-    [string]$ExpectedPath,
-    [IntPtr]$Root,
-    [switch]$CancelFirst
+    [IntPtr]$Root
 ) {
     $dialog = Wait-TargetRepairDialog $Owner $ReplacementKind
-    if ($CancelFirst -and $dialog.target_repair.replacement_is_empty -ne $true) {
-        throw 'cancel-first file picker requires the initially empty repair draft'
+    if ($dialog.target_repair.replacement_is_empty -ne $true) {
+        throw 'TargetRepair draft is not empty before safe Cancel cleanup'
     }
-    $browse = @($dialog.target_repair.controls | Where-Object { $_.name -ceq 'browse' })[0]
-    $previousForeground = $Root
-    $null = Invoke-TargetRepairRootClick "$Name-open-picker" $dialog $browse $Root ([long]$dialog.target_repair.request_token)
-    $picker = Wait-TargetRepairOwnedPicker $Root $previousForeground ([long]$dialog.target_repair.request_token) ([long]$dialog.target_repair.owner_revision)
-    if ($CancelFirst) {
-        Invoke-TargetRepairKeyBatch "$Name-cancel-picker" ([uint16[]]@(0x1B)) ([string[]]@('Escape')) $Root $picker.hwnd
-        $returned = Wait-TargetRepairPickerReturn $Root $picker.hwnd ([long]$picker.request_token) ([long]$picker.owner_revision) $false
-        if ($returned.target_repair.replacement_matches_expected -ne $false) {
-            throw 'cancelled file picker changed the repair draft'
-        }
-        if ($returned.target_repair.replacement_is_empty -ne $true) {
-            throw 'cancelled file picker did not preserve the initially empty repair draft'
-        }
-        $cancelledHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:targetRepairActionStorePath).Hash.ToLowerInvariant()
-        if ($cancelledHash -cne $script:targetRepairActionStoreBeforeSha256) { throw 'cancelled file picker changed actions.json' }
-        $cancelledFolderHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:targetRepairFolderStorePath).Hash.ToLowerInvariant()
-        if ($cancelledFolderHash -cne $script:targetRepairFolderStoreBeforeSha256) { throw 'cancelled file picker changed folders.json' }
-        Assert-TargetRepairAssociations $script:targetRepairOriginalActionPath $script:targetRepairOriginalFolderPath
-        Write-Event 'target_repair_picker_cancel_preserved_draft' @{
-            request_token = [long]$picker.request_token
-            owner_revision = [long]$picker.owner_revision
-            action_store_unchanged = $true
-            favorite_pin_usage_associations_unchanged = $true
-            process_id = $processId
-        }
-        $dialog = $returned
-        $browse = @($dialog.target_repair.controls | Where-Object { $_.name -ceq 'browse' })[0]
-        $previousForeground = $Root
-        $null = Invoke-TargetRepairRootClick "$Name-reopen-picker" $dialog $browse $Root ([long]$dialog.target_repair.request_token)
-        $picker = Wait-TargetRepairOwnedPicker $Root $previousForeground ([long]$dialog.target_repair.request_token) ([long]$dialog.target_repair.owner_revision)
+    $cancel = @($dialog.target_repair.controls | Where-Object {
+        $_.name -ceq 'cancel' -and $_.enabled -and $_.painted
+    })
+    if ($cancel.Count -ne 1) { throw 'TargetRepair safe cleanup has no unique current Cancel response' }
+    $closedChild = Invoke-TargetRepairRootClick "$Name-cancel-empty-repair-draft" $dialog $cancel[0] $Root ([long]$dialog.target_repair.request_token)
+    $state = Wait-JumpModeObservation {
+        param($candidate)
+        $null -eq $candidate.target_repair
+    } ([Math]::Min($CaptureTimeoutSeconds, 15)) 'TargetRepair child dialog closed without applying its empty draft'
+    if ($state.app_editor_open) {
+        Invoke-TargetRepairKeyBatch "$Name-close-parent-editor" ([uint16[]]@(0x1B)) ([string[]]@('Escape')) $Root $Root
+        $state = Wait-JumpModeObservation {
+            param($candidate)
+            $null -eq $candidate.target_repair -and !$candidate.app_editor_open
+        } ([Math]::Min($CaptureTimeoutSeconds, 15)) 'TargetRepair parent editor closed after draft cancellation'
     }
+    Write-Event 'target_repair_empty_draft_closed' @{
+        name = $Name
+        request_token = [long]$closedChild.target_repair.request_token
+        owner_revision = [long]$closedChild.target_repair.owner_revision
+        child_closed = $true
+        parent_editor_closed = !$state.app_editor_open
+        activation_count = [long]$state.activation_count
+        process_id = $processId
+    }
+    return $state
+}
 
-    Invoke-TargetRepairKeyBatch "$Name-focus-path-entry" ([uint16[]]@(0x12, 0x4E)) ([string[]]@('Alt', 'N')) $Root $picker.hwnd
-    Invoke-TargetRepairKeyBatch "$Name-select-path-entry" ([uint16[]]@(0x11, 0x41)) ([string[]]@('Ctrl', 'A')) $Root $picker.hwnd
-    Send-TargetRepairUnicodeText "$Name-type-generated-path" $ExpectedPath $Root $picker.hwnd
-    Invoke-TargetRepairKeyBatch "$Name-confirm-picker-selection" ([uint16[]]@(0x0D)) ([string[]]@('Enter')) $Root $picker.hwnd
-    $returned = Wait-TargetRepairPickerReturn $Root $picker.hwnd ([long]$picker.request_token) ([long]$picker.owner_revision) $true
-    if ($returned.target_repair.replacement_matches_expected -ne $true) { throw 'repair picker returned without the exact expected replacement path' }
-    Write-Event 'target_repair_picker_selected_generated_path' @{
+function Invoke-TargetRepairPickerCancel(
+    [string]$Name,
+    [string]$Owner,
+    [string]$ReplacementKind,
+    [object]$Dialog,
+    [IntPtr]$Root
+) {
+    if ($Dialog.target_repair.replacement_is_empty -ne $true) {
+        throw 'TargetRepair picker cancellation requires the initially empty draft'
+    }
+    $browse = @($Dialog.target_repair.controls | Where-Object {
+        $_.name -ceq 'browse' -and $_.enabled -and $_.painted
+    })
+    if ($browse.Count -ne 1) { throw 'TargetRepair has no unique current Browse response' }
+    $previousForeground = [JumpModeNativeProbe]::ForegroundWindowHandle()
+    if ($previousForeground -ne $Root) { throw 'TargetRepair Browse requires the exact owned root in the foreground' }
+    $null = Invoke-TargetRepairRootClick "$Name-open-picker" $Dialog $browse[0] $Root ([long]$Dialog.target_repair.request_token)
+    $picker = Wait-TargetRepairOwnedPicker $Root $previousForeground `
+        ([long]$Dialog.target_repair.request_token) ([long]$Dialog.target_repair.owner_revision) `
+        $Dialog $Owner $ReplacementKind
+
+    $correlatedRepair = $picker.target_repair
+    if ($null -eq $correlatedRepair -or
+        [long]$correlatedRepair.request_token -ne [long]$picker.request_token -or
+        [long]$correlatedRepair.owner_revision -ne [long]$picker.owner_revision -or
+        [string]$correlatedRepair.target_owner -cne $Owner -or
+        [string]$correlatedRepair.replacement_kind -cne $ReplacementKind -or
+        !$correlatedRepair.window_visible -or $correlatedRepair.sizing_pass -or
+        $correlatedRepair.pending -or $correlatedRepair.replacement_is_empty -ne $true) {
+        throw 'TargetRepair picker observation does not retain the exact visible owner, revision, and empty draft'
+    }
+    $readableSnapshot = Read-TargetRepairObservationSnapshot
+    if ($readableSnapshot.state -eq 'valid') {
+        $readableRepair = $readableSnapshot.observation.target_repair
+        if ($null -eq $readableRepair -or
+            [long]$readableRepair.request_token -ne [long]$picker.request_token -or
+            [long]$readableRepair.owner_revision -ne [long]$picker.owner_revision -or
+            [string]$readableRepair.target_owner -cne $Owner -or
+            [string]$readableRepair.replacement_kind -cne $ReplacementKind -or
+            !$readableRepair.window_visible -or $readableRepair.sizing_pass -or
+            $readableRepair.pending -or $readableRepair.replacement_is_empty -ne $true) {
+            throw 'Readable TargetRepair observation diverged from the correlated empty-draft picker owner'
+        }
+    }
+    Assert-OwnedRepairModalForeground $Root $picker.hwnd
+    Invoke-TargetRepairKeyBatch "$Name-cancel-owned-picker" ([uint16[]]@(0x1B)) ([string[]]@('Escape')) $Root $picker.hwnd -ExpectPickerReturn
+    $returned = Wait-TargetRepairPickerReturn $Root $picker.hwnd ([long]$picker.request_token) `
+        ([long]$picker.owner_revision) $false ([long]$picker.egui_frame_id) ([long]$picker.egui_pass_id)
+    if ($returned.target_repair.replacement_is_empty -ne $true -or
+        $returned.target_repair.replacement_matches_expected -ne $false) {
+        throw 'Cancelled TargetRepair picker changed or populated the repair draft'
+    }
+    Write-Event 'target_repair_picker_cancelled_without_path_input' @{
+        outcome = $targetRepairOutcomeKey
         owner = $Owner
         replacement_kind = $ReplacementKind
         request_token = [long]$picker.request_token
         owner_revision = [long]$picker.owner_revision
-        expected_path_verified_by_current_dialog = $true
-        path_redacted = $true
+        picker_hwnd = ('0x{0:X}' -f $picker.hwnd.ToInt64())
+        input_sent = 'Escape only; no picker path-entry control was focused or edited'
+        returned_frame = [long]$returned.logic_frame_id
+        returned_pass = [long]$returned.ui_pass_id
         process_id = $processId
     }
     return $returned
+}
+
+function Invoke-TargetRepairBrowseOutcome(
+    [string]$Name,
+    [string]$Owner,
+    [string]$ReplacementKind,
+    [IntPtr]$Root
+) {
+    $dialog = Wait-TargetRepairDialog $Owner $ReplacementKind
+    $returned = Invoke-TargetRepairPickerCancel $Name $Owner $ReplacementKind $dialog $Root
+    $script:targetRepairLastRequestToken = [long]$returned.target_repair.request_token
+    $script:targetRepairLastOwnerRevision = [long]$returned.target_repair.owner_revision
+    $null = Close-TargetRepairDraftWithoutMutation $Name $Owner $ReplacementKind $Root
+    Assert-TargetRepairAssociations $script:targetRepairOriginalActionPath $script:targetRepairOriginalFolderPath
+    Assert-TargetRepairStoresUnchanged "$targetRepairOutcome picker cancellation"
+
+    if ($targetRepairOutcome -eq 'FileCancel') {
+        return [ordered]@{
+            status = 'PASS'
+            outcome = $targetRepairOutcomeKey
+            request_token = $script:targetRepairLastRequestToken
+            owner_revision = $script:targetRepairLastOwnerRevision
+            store_bytes_unchanged = $true
+            exact_associations_unchanged = $true
+            path_input_sent = $false
+        }
+    }
+
+    return [ordered]@{
+        status = 'HARNESS_GAP'
+        outcome = $targetRepairOutcomeKey
+        request_token = $script:targetRepairLastRequestToken
+        owner_revision = $script:targetRepairLastOwnerRevision
+        store_bytes_unchanged = $true
+        path_entry_edit_control_proven = $false
+        reason = 'The native picker exposes no verified current path-entry Edit control identity, focus, geometry, and hit receipt. No path text or confirm input was sent.'
+    }
 }
 
 function Get-Phase1ResultTargets($Observation) {
@@ -3264,12 +3783,16 @@ function Assert-TargetRepairActionStore([string]$ExpectedPath) {
     if (!(Test-Path -LiteralPath $script:targetRepairActionStorePath -PathType Leaf)) { throw 'TargetRepair actions.json is missing after repair' }
     $records = @(Get-Content -Raw -LiteralPath $script:targetRepairActionStorePath | ConvertFrom-Json)
     $fixture = $script:targetRepairFixtureManifest
-    if ($records.Count -ne 1 -or
+    if ($records.Count -ne 2 -or
         [string]$records[0].label -cne [string]$fixture.action_label -or
         [string]$records[0].desc -cne [string]$fixture.action_description -or
         [string]$records[0].action -cne $ExpectedPath -or
-        [string]$records[0].args -cne [string]$fixture.action_args) {
-        throw 'TargetRepair actions.json did not preserve the exact generated record metadata, arguments, and chosen path'
+        [string]$records[0].args -cne [string]$fixture.action_args -or
+        [string]$records[1].label -cne [string]$fixture.unrelated_action_label -or
+        [string]$records[1].desc -cne [string]$fixture.unrelated_action_description -or
+        [string]$records[1].action -cne $script:targetRepairUnrelatedActionPath -or
+        [string]$records[1].args -cne '--leave-unrelated') {
+        throw 'TargetRepair actions.json did not preserve the exact repaired record and unrelated inert action'
     }
 }
 
@@ -4099,8 +4622,9 @@ function Invoke-NoteReplaceNativeWorkflow($StartupObservation) {
 
 function Invoke-TargetRepairNativeWorkflow($StartupObservation) {
     if ($null -eq $script:targetRepairFixtureManifest -or
-        !$script:targetRepairExpectedActionPath -or !$script:targetRepairExpectedFolderPath) {
-        throw 'TargetRepair NativeOnly workflow has no validated generated fixture identity'
+        !$script:targetRepairExpectedActionPath -or !$script:targetRepairExpectedFolderPath -or
+        $targetRepairOutcome -notin @('FileCancel', 'FileConfirm', 'FolderConfirm')) {
+        throw 'TargetRepair NativeOnly workflow has no validated outcome-specific generated fixture identity'
     }
     $root = Get-OwnedRootHandle
     $startupHwnd = ('0x{0:X}' -f $root.ToInt64())
@@ -4111,162 +4635,103 @@ function Invoke-TargetRepairNativeWorkflow($StartupObservation) {
     if ($null -eq $StartupObservation -or [string]$StartupObservation.fixture_manifest_sha256 -cne $fixtureHash) {
         throw 'TargetRepair startup observation is not bound to the validated generated fixture'
     }
+    if ([string]$script:targetRepairFixtureManifest.outcome -cne $targetRepairOutcomeKey) {
+        throw 'TargetRepair outcome does not match the generated profile manifest'
+    }
+
     $script:targetRepairPrimaryActivationBaseline = [long]$StartupObservation.activation_count
     $script:ownedAppBaselineTree = @(Get-OwnedTreeSnapshot)
     if (@($script:ownedAppBaselineTree | Where-Object { [int]$_.pid -eq $processId }).Count -ne 1) {
         throw 'TargetRepair did not capture its exact owned process tree before any user input'
     }
-    $script:targetRepairActionStoreBeforeSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:targetRepairActionStorePath).Hash.ToLowerInvariant()
-    $script:targetRepairFolderStoreBeforeSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:targetRepairFolderStorePath).Hash.ToLowerInvariant()
+    $script:targetRepairStoreBeforeSha256 = Get-TargetRepairStoreHashes
 
     $fixture = $script:targetRepairFixtureManifest
     $actionOriginal = [string]$script:targetRepairOriginalActionPath
     $folderOriginal = [string]$script:targetRepairOriginalFolderPath
     $initialActions = @(Get-Content -Raw -LiteralPath $script:targetRepairActionStorePath | ConvertFrom-Json)
     $initialFolders = @(Get-Content -Raw -LiteralPath $script:targetRepairFolderStorePath | ConvertFrom-Json)
-    if ($initialActions.Count -ne 1 -or
+    $expectedUnrelatedPath = Get-TargetRepairProfileRelativePath (Split-Path -Parent $script:targetRepairActionStorePath) ([string]$fixture.associations.unrelated_path)
+    if ($initialActions.Count -ne 2 -or
         [string]$initialActions[0].label -cne [string]$fixture.action_label -or
         [string]$initialActions[0].desc -cne [string]$fixture.action_description -or
-        [string]$initialActions[0].action -cne $actionOriginal -or
+        !(Test-TargetRepairPathIdentity ([string]$initialActions[0].action) $actionOriginal) -or
         [string]$initialActions[0].args -cne [string]$fixture.action_args -or
+        [string]$initialActions[1].label -cne [string]$fixture.unrelated_action_label -or
+        [string]$initialActions[1].desc -cne [string]$fixture.unrelated_action_description -or
+        !(Test-TargetRepairPathIdentity ([string]$initialActions[1].action) $expectedUnrelatedPath) -or
+        [string]$initialActions[1].args -cne '--leave-unrelated' -or
         $initialFolders.Count -ne 1 -or
         [string]$initialFolders[0].label -cne [string]$fixture.folder_label -or
-        [string]$initialFolders[0].path -cne $folderOriginal -or
+        !(Test-TargetRepairPathIdentity ([string]$initialFolders[0].path) $folderOriginal) -or
         [string]$initialFolders[0].alias -cne [string]$fixture.folder_alias) {
-        throw 'TargetRepair isolated stores do not match the exact generated records before native input'
+        throw 'TargetRepair isolated stores do not match the exact ordered generated records before native input'
     }
     Assert-TargetRepairAssociations $actionOriginal $folderOriginal
 
-    Write-Summary 'BLOCKED' 'The owned ROOT is ready. Waiting for the generated missing custom action and saved folder through actual current Jump Mode hints and native picker ownership.'
-    $actionQuery = "app $([string]$fixture.action_label)"
-    $actionResult = Set-TargetRepairQuery $root $actionQuery ([string]$fixture.action_label)
-    Write-Event 'target_repair_action_query_ready' @{
-        query = $actionQuery
-        target_id = @($actionResult.targets | Where-Object { $_.surface -ceq 'launcher_results' -and $_.eligible -and $_.label -ceq [string]$fixture.action_label })[0].target_id
-        result_generation = [long]$actionResult.result_generation
-        activation_count = [long]$actionResult.activation_count
-    }
-    $dialog = Open-TargetRepairActionSheet $root $actionQuery ([string]$fixture.action_label) 'custom_action' 'custom_action.repair_target'
-    if ([string]$dialog.target_repair.target_owner -cne 'custom_action' -or
-        [int]$dialog.target_repair.record_index -ne 0 -or
-        [string]$dialog.target_repair.replacement_kind -cne 'file') {
-        throw 'TargetRepair custom action dialog is not the exact first saved custom File target'
-    }
-    $fileType = @($dialog.target_repair.controls | Where-Object { $_.name -ceq 'file_type' -and $_.enabled -and $_.painted })
-    if ($fileType.Count -ne 1) { throw 'TargetRepair custom action did not expose its current explicit file/application type Response' }
-    $null = Invoke-TargetRepairRootClick 'target-repair-select-file-type' $dialog $fileType[0] $root ([long]$dialog.target_repair.request_token)
-    $dialog = Wait-TargetRepairDialog 'custom_action' 'file'
-    $dialog = Invoke-TargetRepairBrowseAndChoose 'target-repair-action-file' 'custom_action' 'file' $script:targetRepairExpectedActionPath $root -CancelFirst
-    $confirm = @($dialog.target_repair.controls | Where-Object { $_.name -ceq 'confirm' -and $_.enabled -and $_.painted })
-    if ($confirm.Count -ne 1) { throw 'TargetRepair custom action has no current enabled explicit confirm Response' }
-    $actionToken = [long]$dialog.target_repair.request_token
-    $actionRevision = [long]$dialog.target_repair.owner_revision
-    $null = Invoke-TargetRepairRootClick 'target-repair-confirm-action-file' $dialog $confirm[0] $root $actionToken
-    $actionSubmitted = Wait-JumpModeObservation {
-        param($state)
-        [long]$state.activation_count -eq $script:targetRepairPrimaryActivationBaseline -and
-            $state.app_editor_open -and
-            ($null -eq $state.target_repair -or
-                ([long]$state.target_repair.request_token -eq $actionToken -and
-                    [long]$state.target_repair.owner_revision -eq $actionRevision -and
-                    $state.target_repair.pending))
-    } ([Math]::Min($CaptureTimeoutSeconds, 20)) 'custom action repair pending or fast child completion'
-    if ($null -ne $actionSubmitted.target_repair -and
-        ([string]$actionSubmitted.target_repair.target_owner -cne 'custom_action' -or
-            [long]$actionSubmitted.target_repair.request_token -ne $actionToken -or
-            [long]$actionSubmitted.target_repair.owner_revision -ne $actionRevision)) {
-        throw 'TargetRepair action submission did not retain its exact child-dialog identity'
-    }
-    $actionDone = Complete-TargetRepairChildAndCloseParentEditor 'target-repair-action' $actionToken $actionRevision $script:targetRepairPrimaryActivationBaseline $root
-    Assert-TargetRepairActionStore $script:targetRepairExpectedActionPath
-    Assert-TargetRepairAssociations $script:targetRepairExpectedActionPath $folderOriginal
-    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $script:targetRepairFolderStorePath).Hash.ToLowerInvariant() -cne $script:targetRepairFolderStoreBeforeSha256) {
-        throw 'custom action repair unexpectedly changed folders.json'
-    }
-    $actionActivationDelta = [long]$actionDone.activation_count - $script:targetRepairPrimaryActivationBaseline
-    if ($actionActivationDelta -ne 0) { throw 'TargetRepair custom action repair changed the primary action activation count' }
-    Write-Event 'target_repair_action_committed' @{
-        request_token = $actionToken
-        owner_revision = $actionRevision
-        exact_action_metadata_and_args_preserved = $true
-        replacement_verified_in_store = $true
-        unrelated_folder_store_unchanged = $true
-        activation_count = [long]$actionDone.activation_count
-        primary_activation_count_before = $script:targetRepairPrimaryActivationBaseline
-        primary_activation_count_delta = $actionActivationDelta
-        primary_activation_count_unchanged = $true
+    Write-Summary 'BLOCKED' "The owned ROOT is ready for the isolated TargetRepair $targetRepairOutcome outcome."
+    if ($targetRepairOutcome -in @('FileCancel', 'FileConfirm')) {
+        $actionQuery = "app $([string]$fixture.action_label)"
+        $actionResult = Set-TargetRepairQuery $root $actionQuery ([string]$fixture.action_label)
+        Write-Event 'target_repair_action_query_ready' @{
+            outcome = $targetRepairOutcomeKey
+            query = $actionQuery
+            target_id = @($actionResult.targets | Where-Object { $_.surface -ceq 'launcher_results' -and $_.eligible -and $_.label -ceq [string]$fixture.action_label })[0].target_id
+            result_generation = [long]$actionResult.result_generation
+            activation_count = [long]$actionResult.activation_count
+        }
+        $dialog = Open-TargetRepairActionSheet $root $actionQuery ([string]$fixture.action_label) 'custom_action' 'custom_action.repair_target'
+        if ([string]$dialog.target_repair.target_owner -cne 'custom_action' -or
+            [int]$dialog.target_repair.record_index -ne 0 -or
+            [string]$dialog.target_repair.replacement_kind -cne 'file') {
+            throw 'TargetRepair custom action dialog is not the exact first saved custom File target'
+        }
+        $fileType = @($dialog.target_repair.controls | Where-Object {
+            $_.name -ceq 'file_type' -and $_.enabled -and $_.painted
+        })
+        if ($fileType.Count -ne 1) { throw 'TargetRepair custom action did not expose its exact current File type response' }
+        $dialog = Invoke-TargetRepairRootClick 'target-repair-select-file-type' $dialog $fileType[0] $root ([long]$dialog.target_repair.request_token)
+        $dialog = Wait-TargetRepairDialog 'custom_action' 'file'
+        $result = Invoke-TargetRepairBrowseOutcome 'target-repair-action-file' 'custom_action' 'file' $root
+    } else {
+        $folderQuery = "f $([string]$fixture.folder_alias)"
+        $folderResult = Set-TargetRepairQuery $root $folderQuery ([string]$fixture.folder_alias)
+        Write-Event 'target_repair_folder_query_ready' @{
+            outcome = $targetRepairOutcomeKey
+            query = $folderQuery
+            target_id = @($folderResult.targets | Where-Object { $_.surface -ceq 'launcher_results' -and $_.eligible -and $_.label -ceq [string]$fixture.folder_alias })[0].target_id
+            result_generation = [long]$folderResult.result_generation
+            activation_count = [long]$folderResult.activation_count
+        }
+        $dialog = Open-TargetRepairActionSheet $root $folderQuery ([string]$fixture.folder_alias) 'folder' 'folder.repair_target'
+        if ([string]$dialog.target_repair.target_owner -cne 'folder' -or
+            [int]$dialog.target_repair.record_index -ne 0 -or
+            [string]$dialog.target_repair.replacement_kind -cne 'folder') {
+            throw 'TargetRepair folder dialog is not the exact saved FolderEntry target'
+        }
+        $result = Invoke-TargetRepairBrowseOutcome 'target-repair-folder' 'folder' 'folder' $root
     }
 
-    $folderQuery = "f $([string]$fixture.folder_alias)"
-    $folderResult = Set-TargetRepairQuery $root $folderQuery ([string]$fixture.folder_alias)
-    Write-Event 'target_repair_folder_query_ready' @{
-        query = $folderQuery
-        target_id = @($folderResult.targets | Where-Object { $_.surface -ceq 'launcher_results' -and $_.eligible -and $_.label -ceq [string]$fixture.folder_alias })[0].target_id
-        result_generation = [long]$folderResult.result_generation
-        activation_count = [long]$folderResult.activation_count
+    Assert-TargetRepairAssociations $actionOriginal $folderOriginal
+    Assert-TargetRepairStoresUnchanged "$targetRepairOutcome before owned app close"
+    $terminal = Read-JumpModeObservation
+    if ($null -eq $terminal -or $terminal.app_editor_open -or $null -ne $terminal.target_repair) {
+        throw 'TargetRepair did not close its empty child draft before final verification'
     }
-    $dialog = Open-TargetRepairActionSheet $root $folderQuery ([string]$fixture.folder_alias) 'folder' 'folder.repair_target'
-    if ([string]$dialog.target_repair.target_owner -cne 'folder' -or
-        [int]$dialog.target_repair.record_index -ne 0 -or
-        [string]$dialog.target_repair.replacement_kind -cne 'folder') {
-        throw 'TargetRepair folder dialog is not the exact saved FolderEntry target'
-    }
-    $dialog = Invoke-TargetRepairBrowseAndChoose 'target-repair-folder' 'folder' 'folder' $script:targetRepairExpectedFolderPath $root
-    $confirm = @($dialog.target_repair.controls | Where-Object { $_.name -ceq 'confirm' -and $_.enabled -and $_.painted })
-    if ($confirm.Count -ne 1) { throw 'TargetRepair folder has no current enabled explicit confirm Response' }
-    $folderToken = [long]$dialog.target_repair.request_token
-    $folderRevision = [long]$dialog.target_repair.owner_revision
-    $null = Invoke-TargetRepairRootClick 'target-repair-confirm-folder' $dialog $confirm[0] $root $folderToken
-    $folderSubmitted = Wait-JumpModeObservation {
-        param($state)
-        [long]$state.activation_count -eq $script:targetRepairPrimaryActivationBaseline -and
-            $state.app_editor_open -and
-            ($null -eq $state.target_repair -or
-                ([long]$state.target_repair.request_token -eq $folderToken -and
-                    [long]$state.target_repair.owner_revision -eq $folderRevision -and
-                    $state.target_repair.pending))
-    } ([Math]::Min($CaptureTimeoutSeconds, 20)) 'saved folder repair pending or fast child completion'
-    if ($null -ne $folderSubmitted.target_repair -and
-        ([string]$folderSubmitted.target_repair.target_owner -cne 'folder' -or
-            [long]$folderSubmitted.target_repair.request_token -ne $folderToken -or
-            [long]$folderSubmitted.target_repair.owner_revision -ne $folderRevision)) {
-        throw 'TargetRepair folder submission did not retain its exact child-dialog identity'
-    }
-    $folderDone = Complete-TargetRepairChildAndCloseParentEditor 'target-repair-folder' $folderToken $folderRevision $script:targetRepairPrimaryActivationBaseline $root
-    Assert-TargetRepairActionStore $script:targetRepairExpectedActionPath
-    Assert-TargetRepairFolderStore $script:targetRepairExpectedFolderPath
-    Assert-TargetRepairAssociations $script:targetRepairExpectedActionPath $script:targetRepairExpectedFolderPath
+    $activationDelta = [long]$terminal.activation_count - $script:targetRepairPrimaryActivationBaseline
+    if ($activationDelta -ne 0) { throw 'TargetRepair changed the primary activation count without confirming a replacement' }
     $newTree = @(Get-OwnedTreeSnapshot)
     $baselineIdentities = [Collections.Generic.HashSet[string]]::new()
     foreach ($item in $script:ownedAppBaselineTree) { $null = $baselineIdentities.Add("$($item.pid):$($item.creation_time_utc)") }
     $newDescendants = @($newTree | Where-Object { !$baselineIdentities.Contains("$($_.pid):$($_.creation_time_utc)") })
-    if ($newDescendants.Count -ne 0) { throw 'TargetRepair started a new child process instead of only updating the generated stores' }
-    $primaryActivationDelta = [long]$folderDone.activation_count - $script:targetRepairPrimaryActivationBaseline
-    if ($primaryActivationDelta -ne 0 -or $newDescendants.Count -ne 0) {
-        throw 'TargetRepair changed the primary action activation count or created an owned child process'
-    }
-    Write-Event 'target_repair_folder_committed' @{
-        request_token = $folderToken
-        owner_revision = $folderRevision
-        action_store_exact = $true
-        folder_label_alias_and_replacement_exact = $true
-        action_folder_ui_intents_only = $true
-        primary_activation_count_before = $script:targetRepairPrimaryActivationBaseline
-        primary_activation_count_after = [long]$folderDone.activation_count
-        primary_activation_count_delta = $primaryActivationDelta
-        execution_count_derived_from_primary_activation_delta = $primaryActivationDelta
-        child_process_count_unchanged = $true
-        activation_count = [long]$folderDone.activation_count
-    }
-    return [ordered]@{
-        execution_count_derived_from_primary_activation_delta = $primaryActivationDelta
-        primary_activation_count_before = $script:targetRepairPrimaryActivationBaseline
-        primary_activation_count_after = [long]$folderDone.activation_count
-        owned_child_process_count = $newDescendants.Count
-        exact_associations_verified = $true
-    }
-}
+    if ($newDescendants.Count -ne 0) { throw 'TargetRepair started a child process instead of leaving saved records inert' }
 
+    $result.activation_count = [long]$terminal.activation_count
+    $result.primary_activation_count_delta = $activationDelta
+    $result.owned_child_process_count = $newDescendants.Count
+    Write-Event 'target_repair_outcome_verified' $result
+    return $result
+}
 function Get-SettingsSearchSourceDiffSha256 {
     $previousOutputEncoding = [Console]::OutputEncoding
     try {
@@ -4336,7 +4801,7 @@ function Invoke-PrebuiltNativeScenario {
     if ($LASTEXITCODE -ne 0) { throw 'could not read the current source branch for prebuilt artifact validation' }
     $headSha = (& git -C $repoRoot rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0) { throw 'could not read the current source HEAD for prebuilt artifact validation' }
-    if ($branch -cne [string]$artifact.source_branch -or $branch -cne 'feat/productivity-tools' -or
+    if ($branch -cne [string]$artifact.source_branch -or $branch -cne 'qa/post-queue-native-acceptance' -or
         $headSha -cne [string]$artifact.source_head) {
         throw 'prebuilt artifact branch or HEAD does not match the current productivity-tools source'
     }
@@ -4348,13 +4813,13 @@ function Invoke-PrebuiltNativeScenario {
         (@($artifact.cargo_features | ForEach-Object { [string]$_ } | Sort-Object) -join ',') -cne 'dev-smoke-binaries,qa-framebuffer-capture') {
         throw 'prebuilt artifact does not identify the required fast-dev QA feature build'
     }
-    if ($Scenario -eq 'NoteReplace') {
+    if ($Scenario -in @('NoteReplace', 'TargetRepair')) {
         $runnerPath = Get-PrebuiltAbsolutePath $artifact.runner_path 'runner_path'
         $currentRunnerPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'run.ps1'))
         if (![string]::Equals($runnerPath, $currentRunnerPath, [StringComparison]::OrdinalIgnoreCase) -or
             [string]::IsNullOrWhiteSpace([string]$artifact.runner_sha256) -or
             (Get-FileHash -Algorithm SHA256 -LiteralPath $currentRunnerPath).Hash.ToLowerInvariant() -cne [string]$artifact.runner_sha256) {
-            throw 'NoteReplace prebuilt manifest does not bind the current native runner path and bytes'
+            throw "$Scenario prebuilt manifest does not bind the current native runner path and bytes"
         }
     }
 
@@ -4417,7 +4882,7 @@ function Invoke-PrebuiltNativeScenario {
             $null -ne $fixtureManifest.phase2_surface -or
             !$fixtureManifest.experimental_jump_mode_enabled -or
             @($fixtureManifest.enabled_plugins | ForEach-Object { [string]$_ } | Sort-Object) -join ',' -cne 'folders,missing,notes' -or
-            [int]$fixtureManifest.action_count -ne 1 -or
+            [int]$fixtureManifest.action_count -ne 2 -or
             !$fixtureManifest.safety.profile_isolated_by_working_directory -or
             !$fixtureManifest.safety.notes_path_supplied_by_ml_notes_dir -or
             $fixtureManifest.safety.clipboard_plugin_enabled -or
@@ -4430,9 +4895,12 @@ function Invoke-PrebuiltNativeScenario {
         }
         $repair = $fixtureManifest.target_repair
         if ($null -eq $repair -or
+            [string]$repair.outcome -cne $targetRepairOutcomeKey -or
             [string]::IsNullOrWhiteSpace([string]$repair.action_label) -or
             [string]::IsNullOrWhiteSpace([string]$repair.action_description) -or
             [string]::IsNullOrWhiteSpace([string]$repair.action_args) -or
+            [string]::IsNullOrWhiteSpace([string]$repair.unrelated_action_label) -or
+            [string]::IsNullOrWhiteSpace([string]$repair.unrelated_action_description) -or
             [string]::IsNullOrWhiteSpace([string]$repair.folder_label) -or
             [string]::IsNullOrWhiteSpace([string]$repair.folder_alias)) {
             throw 'TargetRepair fixture manifest is missing its exact inert action/folder records'
@@ -4473,6 +4941,13 @@ function Invoke-PrebuiltNativeScenario {
         $script:targetRepairFavoriteStorePath = Join-Path $profilePath 'fav.json'
         $script:targetRepairPinStorePath = Join-Path $profilePath 'history_pins.json'
         $script:targetRepairUsageStorePath = Join-Path $profilePath 'usage.json'
+        $script:targetRepairStorePaths = [ordered]@{
+            actions = $script:targetRepairActionStorePath
+            folders = $script:targetRepairFolderStorePath
+            favorites = $script:targetRepairFavoriteStorePath
+            pins = $script:targetRepairPinStorePath
+            usage = $script:targetRepairUsageStorePath
+        }
         if (!(Test-Path -LiteralPath $script:targetRepairActionStorePath -PathType Leaf) -or
             !(Test-Path -LiteralPath $script:targetRepairFolderStorePath -PathType Leaf) -or
             !(Test-Path -LiteralPath $script:targetRepairFavoriteStorePath -PathType Leaf) -or
@@ -4484,11 +4959,16 @@ function Invoke-PrebuiltNativeScenario {
         $folderRecords = @(Get-Content -Raw -LiteralPath $script:targetRepairFolderStorePath | ConvertFrom-Json)
         $expectedActionSource = Get-TargetRepairProfileRelativePath $profilePath ([string]$repair.missing_action_path)
         $expectedFolderSource = Get-TargetRepairProfileRelativePath $profilePath ([string]$repair.missing_folder_path)
-        if ($actionRecords.Count -ne 1 -or
+        $expectedUnrelatedActionSource = Get-TargetRepairProfileRelativePath $profilePath ([string]$repair.associations.unrelated_path)
+        if ($actionRecords.Count -ne 2 -or
             [string]$actionRecords[0].label -cne [string]$repair.action_label -or
             [string]$actionRecords[0].desc -cne [string]$repair.action_description -or
             !(Test-TargetRepairPathIdentity ([string]$actionRecords[0].action) $expectedActionSource) -or
             [string]$actionRecords[0].args -cne [string]$repair.action_args -or
+            [string]$actionRecords[1].label -cne [string]$repair.unrelated_action_label -or
+            [string]$actionRecords[1].desc -cne [string]$repair.unrelated_action_description -or
+            !(Test-TargetRepairPathIdentity ([string]$actionRecords[1].action) $expectedUnrelatedActionSource) -or
+            [string]$actionRecords[1].args -cne '--leave-unrelated' -or
             $folderRecords.Count -ne 1 -or
             [string]$folderRecords[0].label -cne [string]$repair.folder_label -or
             !(Test-TargetRepairPathIdentity ([string]$folderRecords[0].path) $expectedFolderSource) -or
@@ -4776,26 +5256,21 @@ function Invoke-PrebuiltNativeScenario {
     if ($Scenario -eq 'TargetRepair') {
         Write-Summary 'BLOCKED' 'The validated prebuilt app is waiting for exact owned missing-result and native-picker observations. NativeOnly does not build binaries or generate a fixture.'
         $targetRepairResult = Invoke-TargetRepairNativeWorkflow $startupObservation
-        $script:scenarioStatus = 'PASS'
-        $script:scenarioReason = 'The generated custom action and saved folder were repaired through their actual action-sheet and owned native picker controls; exact favorite/pin/usage associations persisted, and the primary activation delta was zero.'
-        $script:runStatus = 'PASS'
-        $script:phase = 'target_repair_complete'
-        Update-Scenarios
-        Write-Event 'target_repair_native_passed' @{
-            action_target_replaced = $true
-            folder_target_replaced = $true
-            cancelled_file_picker_preserved_old_path = $true
-            action_metadata_args_preserved = $true
-            folder_alias_preserved = $true
-            execution_count_derived_from_primary_activation_delta = $targetRepairResult.execution_count_derived_from_primary_activation_delta
-            primary_activation_count_before = $targetRepairResult.primary_activation_count_before
-            primary_activation_count_after = $targetRepairResult.primary_activation_count_after
-            owned_child_process_count = $targetRepairResult.owned_child_process_count
-            exact_associations_verified = $targetRepairResult.exact_associations_verified
-            process_id = $processId
-            process_started_at_utc = $processStartUtc.ToString('O')
+        $script:scenarioStatus = [string]$targetRepairResult.status
+        $script:scenarioReason = if ($targetRepairResult.status -eq 'PASS') {
+            'The FileCancel outcome reached the actual owned picker, cancelled only through its verified modal owner, retained an empty draft, and preserved all five generated store files byte-for-byte.'
+        } else {
+            [string]$targetRepairResult.reason
         }
-        Write-Summary 'PASS' "Both generated saved targets were repaired through the current application UI and same-process owned native picker dialogs. The file-picker cancel left its draft unchanged; exact action/folder metadata and favorite/pin/usage associations were preserved. Primary activation delta: $($targetRepairResult.execution_count_derived_from_primary_activation_delta); new owned child processes: $($targetRepairResult.owned_child_process_count)."
+        $script:runStatus = [string]$targetRepairResult.status
+        $script:phase = if ($targetRepairResult.status -eq 'PASS') { 'target_repair_file_cancel_complete' } else { 'target_repair_harness_gap' }
+        Update-Scenarios
+        Write-Event 'target_repair_native_outcome' $targetRepairResult
+        if ($targetRepairResult.status -eq 'PASS') {
+            Write-Summary 'PASS' 'FileCancel reached the exact generated custom-action owner, cancelled the same-process picker with a guarded Escape, kept the draft empty, and preserved actions/folders/favorites/pins/usage bytes. No path text or confirmation was sent.'
+        } else {
+            Write-Summary 'HARNESS_GAP' ([string]$targetRepairResult.reason)
+        }
         return
     }
     if ($Scenario -eq 'NoteReplace') {
@@ -5487,12 +5962,12 @@ function Update-Scenarios {
             { $_ -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled') } { 'm08-fixture-validation' }
             'Phase2' { 'm13-fixture-validation' }
             'SettingsSearch' { 'g3-m1b-prebuilt-artifact-validation' }
-            'TargetRepair' { 'g3-m2b-prebuilt-artifact-validation' }
+            'TargetRepair' { 'g3-m3-prebuilt-artifact-validation' }
             'NoteReplace' { 'g3-m9b-prebuilt-artifact-validation' }
             default { 'm01-fixture-validation' }
         }
         status = $fixtureScenarioStatus
-        expected_surface = if ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'typed isolated safe Phase 1 enabled/disabled fixture profiles' } elseif ($Scenario -eq 'Phase2') { "typed isolated Phase 2 $phase2SurfaceKey fixture and required inert stores" } elseif ($Scenario -eq 'SettingsSearch') { 'externally built, hash-bound isolated phase2-settings profile' } elseif ($Scenario -eq 'TargetRepair') { 'externally built, hash-bound isolated target-repair profile with inert saved action and folder records' } elseif ($Scenario -eq 'NoteReplace') { "externally built, hash-bound isolated $noteReplaceFixtureScenario profile with exact generated current-note sources" } else { 'typed isolated fixture profile with stable safe note data' }
+        expected_surface = if ($Scenario -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled')) { 'typed isolated safe Phase 1 enabled/disabled fixture profiles' } elseif ($Scenario -eq 'Phase2') { "typed isolated Phase 2 $phase2SurfaceKey fixture and required inert stores" } elseif ($Scenario -eq 'SettingsSearch') { 'externally built, hash-bound isolated phase2-settings profile' } elseif ($Scenario -eq 'TargetRepair') { "externally built, hash-bound isolated target-repair profile for $targetRepairOutcomeKey with two ordered inert actions" } elseif ($Scenario -eq 'NoteReplace') { "externally built, hash-bound isolated $noteReplaceFixtureScenario profile with exact generated current-note sources" } else { 'typed isolated fixture profile with stable safe note data' }
         capture_target = $null
         capture_trigger = $null
         screenshot = $null
@@ -5509,7 +5984,7 @@ function Update-Scenarios {
             }
             'Phase2' { "m13-phase2-$phase2SurfaceKey" }
             'SettingsSearch' { 'g3-m1b-settings-search' }
-            'TargetRepair' { 'g3-m2b-target-repair' }
+            'TargetRepair' { "g3-m3-target-repair-$targetRepairOutcomeKey" }
             'NoteReplace' { 'g3-m9b-note-replace' }
             default { 'm01-baseline-dashboard' }
         } }
@@ -5519,12 +5994,12 @@ function Update-Scenarios {
             { $_ -in @('Phase1', 'Phase1Enabled', 'Phase1Disabled') } { "native Phase 1 $Screen dashboard/grid filter, selection, cancellation, note owner, and disabled-gate behavior" }
             'Phase2' { "native production query opener, exact $phase2SurfaceKey owner, and safe observed input behavior" }
             'SettingsSearch' { 'exact settings:search route, current-response focus highlights, draft-only edits, and Cancel' }
-            'TargetRepair' { 'exact saved custom-action and folder repair intents, owned native picker cancellation/selection, and explicit confirmation' }
+            'TargetRepair' { "single TargetRepair $targetRepairOutcomeKey outcome, exact empty-draft ownership, no unproven picker filename input, and durable store verification" }
             'NoteReplace' { 'current unsaved Markdown replacement, same-owner Undo/Redo, normal Save, source-only Reveal, and discard' }
             default { 'actual Multi Launcher ROOT viewport with isolated note dashboard' }
         } }
         capture_target = if ($Scenario -in @('TargetRepair', 'NoteReplace')) { $null } else { 'ROOT' }
-        capture_trigger = if ($Scenario -eq 'TargetRepair') { 'same-pass current-response observations; no desktop capture' } elseif ($Scenario -eq 'NoteReplace') { 'payload-free current-pass response observations; no desktop capture' } elseif ($Scenario -in @('Phase1Enabled', 'Phase1Disabled', 'Phase2', 'SettingsSearch')) { 'f11' } elseif ($Scenario -eq 'Phase1') { 'child native F11 receipts' } else { 'startup' }
+        capture_trigger = if ($Scenario -eq 'TargetRepair') { 'payload-free outcome-bound current-response observations; no desktop capture' } elseif ($Scenario -eq 'NoteReplace') { 'payload-free current-pass response observations; no desktop capture' } elseif ($Scenario -in @('Phase1Enabled', 'Phase1Disabled', 'Phase2', 'SettingsSearch')) { 'f11' } elseif ($Scenario -eq 'Phase1') { 'child native F11 receipts' } else { 'startup' }
         screenshot = if ($screenshotPath) { $screenshotPath } else { $null }
         pixel_width = $screenshotWidth
         pixel_height = $screenshotHeight
@@ -5768,7 +6243,7 @@ try {
         'Phase1Disabled' { 'phase1-disabled' }
         'Phase2' { "phase2-$phase2SurfaceKey" }
         'SettingsSearch' { 'phase2-settings' }
-        'TargetRepair' { 'target-repair' }
+        'TargetRepair' { "target-repair $targetRepairOutcomeKey" }
         'NoteReplace' { 'note-replace-enabled or note-replace-disabled' }
         default { 'baseline' }
     }
@@ -6188,7 +6663,42 @@ try {
         Write-Summary $runStatus 'The run did not meet its current acceptance criteria.'
     }
 } finally {
+    if ($Scenario -eq 'TargetRepair') {
+        $null = Complete-TargetRepairPendingInputCleanup
+        if ($script:cleanupIssues.Count -gt 0 -or
+            $script:targetRepairPendingInputs.Count -ne 0 -or
+            $script:targetRepairAcceptedKeyDowns -ne $script:targetRepairAcceptedKeyUps -or
+            $script:targetRepairAcceptedMouseDowns -ne $script:targetRepairAcceptedMouseUps) {
+            $runStatus = 'FAIL'
+            $scenarioStatus = 'FAIL'
+            $scenarioReason = 'TargetRepair ended with an accepted native input Down without a verified matching Up.'
+            Update-Scenarios
+        }
+    }
     Close-OwnedProcess
+    if ($Scenario -eq 'TargetRepair' -and $script:targetRepairStoreBeforeSha256) {
+        try {
+            Assert-TargetRepairAssociations $script:targetRepairOriginalActionPath $script:targetRepairOriginalFolderPath
+            Assert-TargetRepairStoresUnchanged 'owned app close and process retirement'
+            $script:targetRepairStoresUnchangedAfterClose = $true
+            Write-CleanupEvent 'target_repair_final_durable_verification' @{
+                outcome = $targetRepairOutcomeKey
+                all_five_store_hashes_match = $true
+                exact_associations_unchanged = $true
+                after_owned_process_cleanup = $true
+                process_id = $processId
+                process_started_at_utc = if ($processStartUtc) { $processStartUtc.ToString('O') } else { $null }
+            }
+        } catch {
+            $script:targetRepairStoresUnchangedAfterClose = $false
+            $runStatus = 'FAIL'
+            $scenarioStatus = 'FAIL'
+            $scenarioReason = $_.Exception.Message
+            $failureText = $_.Exception.Message
+            Update-Scenarios
+            Write-CleanupEvent 'target_repair_final_durable_verification_failed' @{ message = $_.Exception.Message }
+        }
+    }
     if ($prebuiltSettingsPath) {
         try {
             if (!(Test-Path -LiteralPath $prebuiltSettingsPath -PathType Leaf)) {
@@ -6274,7 +6784,7 @@ try {
             } elseif ($Scenario -eq 'SettingsSearch') {
                 [ordered]@{ request = 'qa-framebuffer-request.json'; output_dir = 'capture'; source = 'prebuilt artifact-bound native ROOT/F11 receipts with same-pass Settings Search observations'; surface = 'Settings'; count = $phase2Captures.Count; captures = @($phase2Captures.ToArray()); jump_off_native = 'NOT_ATTEMPTED' }
             } elseif ($Scenario -eq 'TargetRepair') {
-                [ordered]@{ request = 'qa-framebuffer-request.json'; observation = 'jump-observation.json'; source = 'prebuilt artifact-bound current-pass ROOT repair Response observations; no desktop image capture'; count = 0; scenario = 'TargetRepair'; native_picker_observations = @('file-cancel', 'file-confirm', 'folder-confirm') }
+                [ordered]@{ request = 'qa-framebuffer-request.json'; observation = 'jump-observation.json'; source = 'prebuilt artifact-bound current-pass ROOT repair Response observations; no desktop image capture'; count = 0; scenario = 'TargetRepair'; outcome = $targetRepairOutcomeKey; native_picker_observations = @($targetRepairOutcomeKey); store_bytes_unchanged_after_close = $script:targetRepairStoresUnchangedAfterClose }
             } elseif ($captureReceipt) {
                 [ordered]@{ request = 'qa-framebuffer-request.json'; output_dir = 'capture'; receipt = 'capture/receipt.json'; screenshot = $screenshotPath; width = $screenshotWidth; height = $screenshotHeight; semantics = $captureReceipt.capture_semantics }
             } else { $null }
@@ -6298,7 +6808,7 @@ try {
             } elseif ($Scenario -eq 'SettingsSearch') {
                 'The exact settings:search route, same-pass real-control highlight receipts, draft-only slider edits, Cancel, unchanged isolated settings bytes, and owned-process cleanup passed. Jump-off native interaction was not attempted; deterministic real-response tests cover that branch.'
             } elseif ($Scenario -eq 'TargetRepair') {
-                'The generated saved custom action and folder were repaired through exact current UI Responses and same-process owned native pickers. The file picker was cancelled once without changing the source, then explicitly confirmed; saved metadata, arguments, and alias remained exact, no target was launched, and owned-process cleanup was verified.'
+                'The generated custom action reached its exact same-process owned file picker and was cancelled through a guarded Escape. The repair draft stayed empty, all five saved stores remained byte-for-byte unchanged through process retirement, and no path text or confirmation was sent.'
             } else {
                 'Fixture validation, ROOT capture, and owned-process cleanup passed.'
             }
@@ -6324,6 +6834,8 @@ try {
                 'Fixture validation and real ROOT capture completed, with owned-process cleanup recorded. Dashboard fixture content remains blocked until a readiness signal can establish that isolated note results are visible.'
             }
             Write-Summary $runStatus $blockedDetails
+        } elseif ($runStatus -eq 'HARNESS_GAP' -and $Scenario -eq 'TargetRepair') {
+            Write-Summary 'HARNESS_GAP' ([string]$script:scenarioReason)
         }
         Write-Output "$runMilestone status: $runStatus"
         Write-Output "Evidence: $evidenceRoot"

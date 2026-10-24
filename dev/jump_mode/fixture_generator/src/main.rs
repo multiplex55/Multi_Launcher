@@ -48,6 +48,9 @@ const TARGET_REPAIR_ACTION_LABEL: &str = "Jump QA Repairable App";
 const TARGET_REPAIR_ACTION_DESCRIPTION: &str =
     "Inert saved target for the isolated repair scenario.";
 const TARGET_REPAIR_ACTION_ARGS: &str = "--fixture-argument keep-exactly";
+const TARGET_REPAIR_UNRELATED_ACTION_LABEL: &str = "Jump QA Unrelated Inert App";
+const TARGET_REPAIR_UNRELATED_ACTION_DESCRIPTION: &str =
+    "Unrelated inert saved action retained during target repair.";
 const TARGET_REPAIR_FOLDER_LABEL: &str = "Jump QA Repairable Folder";
 const TARGET_REPAIR_FOLDER_ALIAS: &str = "Jump QA Repairable Folder Alias";
 const TARGET_REPAIR_MISSING_ACTION: &str = "target-repair/missing-source/old application Ω.exe";
@@ -89,9 +92,12 @@ struct FixtureManifest {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct TargetRepairManifest {
+    outcome: TargetRepairOutcome,
     action_label: String,
     action_description: String,
     action_args: Option<String>,
+    unrelated_action_label: String,
+    unrelated_action_description: String,
     missing_action_path: String,
     folder_label: String,
     folder_alias: Option<String>,
@@ -99,6 +105,36 @@ struct TargetRepairManifest {
     replacement_file: String,
     replacement_folder: String,
     associations: TargetRepairAssociationsManifest,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum TargetRepairOutcome {
+    FileCancel,
+    FileConfirm,
+    FolderConfirm,
+}
+
+impl TargetRepairOutcome {
+    fn parse(value: Option<String>) -> anyhow::Result<Self> {
+        match value.as_deref() {
+            Some("file-cancel") => Ok(Self::FileCancel),
+            Some("file-confirm") => Ok(Self::FileConfirm),
+            Some("folder-confirm") => Ok(Self::FolderConfirm),
+            Some(value) => anyhow::bail!("unknown TargetRepair outcome {value:?}"),
+            None => anyhow::bail!(
+                "TargetRepair requires one outcome: file-cancel, file-confirm, or folder-confirm"
+            ),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::FileCancel => "file-cancel",
+            Self::FileConfirm => "file-confirm",
+            Self::FolderConfirm => "folder-confirm",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -327,7 +363,7 @@ fn run() -> anyhow::Result<()> {
     let mode = args
         .next()
         .and_then(|value| value.into_string().ok())
-        .ok_or_else(|| anyhow::anyhow!("usage: jump_mode_fixture <generate|verify> <profile>"))?;
+        .ok_or_else(|| anyhow::anyhow!("usage: jump_mode_fixture <generate|verify> <profile> [scenario] [target-repair-outcome]"))?;
     let profile = args
         .next()
         .map(PathBuf::from)
@@ -341,11 +377,24 @@ fn run() -> anyhow::Result<()> {
         })
         .transpose()?;
     let scenario = FixtureScenario::parse(scenario)?;
+    let target_repair_outcome = if scenario == FixtureScenario::TargetRepair {
+        let outcome = args
+            .next()
+            .map(|value| {
+                value.into_string().map_err(|_| {
+                    anyhow::anyhow!("TargetRepair outcome argument must be valid Unicode")
+                })
+            })
+            .transpose()?;
+        Some(TargetRepairOutcome::parse(outcome)?)
+    } else {
+        None
+    };
     anyhow::ensure!(args.next().is_none(), "unexpected extra argument");
 
     match mode.as_str() {
-        "generate" => generate(&profile, scenario)?,
-        "verify" => verify(&profile, scenario)?,
+        "generate" => generate(&profile, scenario, target_repair_outcome)?,
+        "verify" => verify(&profile, scenario, target_repair_outcome)?,
         _ => anyhow::bail!("unknown mode {mode:?}; expected generate or verify"),
     }
     println!(
@@ -356,7 +405,15 @@ fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
+fn generate(
+    profile: &Path,
+    scenario: FixtureScenario,
+    target_repair_outcome: Option<TargetRepairOutcome>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (scenario == FixtureScenario::TargetRepair) == target_repair_outcome.is_some(),
+        "TargetRepair fixture generation requires exactly one explicit outcome"
+    );
     anyhow::ensure!(
         !profile.exists(),
         "refusing to overwrite an existing fixture profile: {}",
@@ -464,11 +521,11 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
 
     write_json(&profile.join("settings.json"), &settings)?;
     let actions = if scenario == FixtureScenario::TargetRepair {
-        vec![target_repair_action(
+        target_repair_actions(
             target_repair_profile
                 .as_deref()
                 .expect("Target Repair profile was canonicalized"),
-        )]
+        )
     } else {
         Vec::new()
     };
@@ -492,12 +549,20 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         write_target_repair_stores(target_repair_profile)?;
     }
 
-    let manifest = fixture_manifest(note_ids, scenario);
+    let manifest = fixture_manifest(note_ids, scenario, target_repair_outcome);
     write_json(&profile.join("fixture_manifest.json"), &manifest)?;
-    verify(profile, scenario)
+    verify(profile, scenario, target_repair_outcome)
 }
 
-fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
+fn verify(
+    profile: &Path,
+    scenario: FixtureScenario,
+    target_repair_outcome: Option<TargetRepairOutcome>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (scenario == FixtureScenario::TargetRepair) == target_repair_outcome.is_some(),
+        "TargetRepair fixture verification requires exactly one explicit outcome"
+    );
     anyhow::ensure!(profile.is_dir(), "fixture profile is not a directory");
     let profile = fs::canonicalize(profile)?;
     let (notes_dir, _templates_dir) = set_isolated_fixture_dirs(&profile)?;
@@ -639,10 +704,10 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         LoadState::Missing | LoadState::Empty => anyhow::bail!("actions.json is not a typed array"),
     };
     if scenario == FixtureScenario::TargetRepair {
-        let expected = target_repair_action(&profile);
+        let expected = target_repair_actions(&profile);
         anyhow::ensure!(
-            actions == [expected],
-            "Target Repair fixture must contain only its exact inert custom action"
+            actions == expected,
+            "Target Repair fixture must contain its exact repair action followed by one inert unrelated action"
         );
         verify_target_repair_stores(&profile)?;
     } else {
@@ -926,11 +991,16 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     let manifest: FixtureManifest =
         serde_json::from_slice(&fs::read(profile.join("fixture_manifest.json"))?)?;
     anyhow::ensure!(
-        manifest == fixture_manifest(note_ids(), scenario),
+        manifest == fixture_manifest(note_ids(), scenario, target_repair_outcome),
         "fixture manifest is stale"
     );
     anyhow::ensure!(
-        manifest.action_count == usize::from(scenario == FixtureScenario::TargetRepair),
+        manifest.action_count
+            == if scenario == FixtureScenario::TargetRepair {
+                2
+            } else {
+                0
+            },
         "fixture action count does not match its isolated scenario"
     );
     anyhow::ensure!(manifest.safety.clipboard_modify_plugin_enabled == false);
@@ -1460,7 +1530,11 @@ fn fixture_note_text(
     }
 }
 
-fn fixture_manifest(note_ids: Vec<String>, scenario: FixtureScenario) -> FixtureManifest {
+fn fixture_manifest(
+    note_ids: Vec<String>,
+    scenario: FixtureScenario,
+    target_repair_outcome: Option<TargetRepairOutcome>,
+) -> FixtureManifest {
     let jump_mode_enabled = scenario.jump_mode_enabled();
     let phase2_surface = scenario.phase2_surface();
     let enabled_plugins = scenario.enabled_plugins();
@@ -1472,7 +1546,12 @@ fn fixture_manifest(note_ids: Vec<String>, scenario: FixtureScenario) -> Fixture
             FixtureScenario::Phase1Enabled => "jump-mode-m08-phase1-enabled-v1".to_owned(),
             FixtureScenario::Phase1Disabled => "jump-mode-m08-phase1-disabled-v1".to_owned(),
             FixtureScenario::Baseline => FIXTURE_ID.to_owned(),
-            FixtureScenario::TargetRepair => "jump-mode-m2b-target-repair-v1".to_owned(),
+            FixtureScenario::TargetRepair => format!(
+                "jump-mode-m3-target-repair-{}-v1",
+                target_repair_outcome
+                    .expect("TargetRepair fixtures carry an explicit outcome")
+                    .as_str()
+            ),
             FixtureScenario::NoteReplaceEnabled => "jump-mode-m9b-note-replace-on-v1".to_owned(),
             FixtureScenario::NoteReplaceDisabled => "jump-mode-m9b-note-replace-off-v1".to_owned(),
             FixtureScenario::Phase2(surface) => {
@@ -1487,8 +1566,13 @@ fn fixture_manifest(note_ids: Vec<String>, scenario: FixtureScenario) -> Fixture
         enabled_plugins,
         dashboard_slot_ids: dashboard_slot_ids(scenario),
         note_ids,
-        action_count: usize::from(scenario == FixtureScenario::TargetRepair),
-        target_repair: (scenario == FixtureScenario::TargetRepair).then(target_repair_manifest),
+        action_count: if scenario == FixtureScenario::TargetRepair {
+            2
+        } else {
+            0
+        },
+        target_repair: (scenario == FixtureScenario::TargetRepair)
+            .then(|| target_repair_manifest(target_repair_outcome.expect("TargetRepair outcome"))),
         external_note_open: "Neither".to_owned(),
         no_results_query: NO_RESULTS_QUERY.to_owned(),
         safety: SafetyManifest {
@@ -1517,11 +1601,14 @@ fn fixture_manifest(note_ids: Vec<String>, scenario: FixtureScenario) -> Fixture
     }
 }
 
-fn target_repair_manifest() -> TargetRepairManifest {
+fn target_repair_manifest(outcome: TargetRepairOutcome) -> TargetRepairManifest {
     TargetRepairManifest {
+        outcome,
         action_label: TARGET_REPAIR_ACTION_LABEL.to_owned(),
         action_description: TARGET_REPAIR_ACTION_DESCRIPTION.to_owned(),
         action_args: Some(TARGET_REPAIR_ACTION_ARGS.to_owned()),
+        unrelated_action_label: TARGET_REPAIR_UNRELATED_ACTION_LABEL.to_owned(),
+        unrelated_action_description: TARGET_REPAIR_UNRELATED_ACTION_DESCRIPTION.to_owned(),
         missing_action_path: TARGET_REPAIR_MISSING_ACTION.to_owned(),
         folder_label: TARGET_REPAIR_FOLDER_LABEL.to_owned(),
         folder_alias: Some(TARGET_REPAIR_FOLDER_ALIAS.to_owned()),
@@ -1552,6 +1639,24 @@ fn target_repair_action(profile: &Path) -> Action {
             .into_owned(),
         args: Some(TARGET_REPAIR_ACTION_ARGS.to_owned()),
     }
+}
+
+fn target_repair_unrelated_action(profile: &Path) -> Action {
+    Action {
+        label: TARGET_REPAIR_UNRELATED_ACTION_LABEL.to_owned(),
+        desc: TARGET_REPAIR_UNRELATED_ACTION_DESCRIPTION.to_owned(),
+        action: target_repair_fixture_path(profile, TARGET_REPAIR_UNRELATED_PATH)
+            .to_string_lossy()
+            .into_owned(),
+        args: Some("--leave-unrelated".to_owned()),
+    }
+}
+
+fn target_repair_actions(profile: &Path) -> Vec<Action> {
+    vec![
+        target_repair_action(profile),
+        target_repair_unrelated_action(profile),
+    ]
 }
 
 /// Build the fixture's persisted paths from normalized components and keep
@@ -1864,7 +1969,7 @@ mod tests {
         assert_eq!(unique.len(), ids.len());
         assert_eq!(ids.first().map(String::as_str), Some("jump-qa-note-001"));
         assert_eq!(ids.last().map(String::as_str), Some("jump-qa-note-032"));
-        let fixture = fixture_manifest(ids, FixtureScenario::Baseline);
+        let fixture = fixture_manifest(ids, FixtureScenario::Baseline, None);
         assert_eq!(fixture.enabled_plugins, ["notes"]);
         assert_eq!(fixture.action_count, 0);
         assert_eq!(LAUNCHER_HOTKEY, "Ctrl+Alt+F10");
@@ -1879,22 +1984,44 @@ mod tests {
     fn target_repair_fixture_binds_only_generated_inert_records() {
         let profile = tempfile::tempdir().unwrap();
         let scenario = FixtureScenario::TargetRepair;
+        let outcomes = [
+            TargetRepairOutcome::FileCancel,
+            TargetRepairOutcome::FileConfirm,
+            TargetRepairOutcome::FolderConfirm,
+        ];
+        let outcome = outcomes[0];
         let profile_path = fs::canonicalize(profile.path()).unwrap();
-        let actions = vec![target_repair_action(&profile_path)];
+        let actions = target_repair_actions(&profile_path);
         write_json(&profile_path.join("actions.json"), &actions).unwrap();
         write_target_repair_stores(&profile_path).unwrap();
 
-        let manifest = fixture_manifest(note_ids(), scenario);
+        let manifest = fixture_manifest(note_ids(), scenario, Some(outcome));
         assert_eq!(manifest.scenario, "target-repair");
         assert!(manifest.experimental_jump_mode_enabled);
         assert_eq!(manifest.enabled_plugins, ["folders", "missing", "notes"]);
-        assert_eq!(manifest.action_count, 1);
+        assert_eq!(manifest.action_count, 2);
         assert!(manifest.safety.custom_actions_present);
-        assert_eq!(manifest.target_repair, Some(target_repair_manifest()));
+        assert_eq!(
+            manifest.target_repair,
+            Some(target_repair_manifest(outcome))
+        );
         assert_eq!(actions[0].label, TARGET_REPAIR_ACTION_LABEL);
         assert_eq!(actions[0].desc, TARGET_REPAIR_ACTION_DESCRIPTION);
         assert_eq!(actions[0].args.as_deref(), Some(TARGET_REPAIR_ACTION_ARGS));
         assert!(Path::new(&actions[0].action).is_absolute());
+        assert_eq!(actions[1], target_repair_unrelated_action(&profile_path));
+        let fixture_ids = outcomes.map(|outcome| {
+            let manifest = fixture_manifest(note_ids(), scenario, Some(outcome));
+            assert_eq!(
+                manifest.target_repair.as_ref().map(|repair| repair.outcome),
+                Some(outcome)
+            );
+            manifest.fixture_id
+        });
+        assert_eq!(fixture_ids.len(), 3);
+        assert_ne!(fixture_ids[0], fixture_ids[1]);
+        assert_ne!(fixture_ids[0], fixture_ids[2]);
+        assert_ne!(fixture_ids[1], fixture_ids[2]);
         #[cfg(windows)]
         let normalized_folder =
             target_repair_fixture_path(&profile_path, TARGET_REPAIR_MISSING_FOLDER);
@@ -1915,7 +2042,7 @@ mod tests {
 
     #[test]
     fn query_probe_fixture_explicitly_enables_the_experimental_gate() {
-        let fixture = fixture_manifest(note_ids(), FixtureScenario::QueryProbe);
+        let fixture = fixture_manifest(note_ids(), FixtureScenario::QueryProbe, None);
         assert_eq!(fixture.scenario, "query-probe");
         assert_eq!(fixture.fixture_id, "jump-mode-m05-query-probe-v1");
         assert!(fixture.experimental_jump_mode_enabled);
@@ -1926,8 +2053,8 @@ mod tests {
     fn note_replace_fixture_variants_share_exact_sources_and_only_change_jump_gate() {
         let enabled = FixtureScenario::NoteReplaceEnabled;
         let disabled = FixtureScenario::NoteReplaceDisabled;
-        let enabled_manifest = fixture_manifest(note_ids(), enabled);
-        let disabled_manifest = fixture_manifest(note_ids(), disabled);
+        let enabled_manifest = fixture_manifest(note_ids(), enabled, None);
+        let disabled_manifest = fixture_manifest(note_ids(), disabled, None);
         assert_eq!(enabled.label(), "note-replace-enabled");
         assert_eq!(disabled.label(), "note-replace-disabled");
         assert!(enabled.jump_mode_enabled());
@@ -1949,8 +2076,8 @@ mod tests {
 
     #[test]
     fn phase1_fixtures_use_safe_dense_fill_query_slots_and_distinct_note_slugs() {
-        let enabled = fixture_manifest(note_ids(), FixtureScenario::Phase1Enabled);
-        let disabled = fixture_manifest(note_ids(), FixtureScenario::Phase1Disabled);
+        let enabled = fixture_manifest(note_ids(), FixtureScenario::Phase1Enabled, None);
+        let disabled = fixture_manifest(note_ids(), FixtureScenario::Phase1Disabled, None);
         assert!(enabled.experimental_jump_mode_enabled);
         assert!(!disabled.experimental_jump_mode_enabled);
         assert_eq!(enabled.dashboard_slot_ids.len(), 4);
@@ -2005,13 +2132,19 @@ mod tests {
         let mut fixture = serde_json::to_value(fixture_manifest(
             note_ids(),
             FixtureScenario::Phase2(Phase2Surface::Paste),
+            None,
         ))
         .unwrap();
         fixture["unexpected"] = json!(true);
         assert!(serde_json::from_value::<FixtureManifest>(fixture).is_err());
 
         let mut safety = serde_json::to_value(
-            fixture_manifest(note_ids(), FixtureScenario::Phase2(Phase2Surface::Paste)).safety,
+            fixture_manifest(
+                note_ids(),
+                FixtureScenario::Phase2(Phase2Surface::Paste),
+                None,
+            )
+            .safety,
         )
         .unwrap();
         safety["unexpected"] = json!(true);
