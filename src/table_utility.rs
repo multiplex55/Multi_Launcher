@@ -154,7 +154,7 @@ impl TableResourceLimits {
         }
     }
 
-    /// The later explicit CSV route can opt into these larger, strict limits.
+    /// The explicit CSV route uses a larger but still bounded resource profile.
     pub const fn strict_csv_route() -> Self {
         Self {
             max_input_bytes: STRICT_CSV_MAX_INPUT_BYTES,
@@ -216,8 +216,8 @@ impl TableParseOptions {
         }
     }
 
-    /// A strict, explicit-delimiter profile for a future CSV command. It uses
-    /// the same parser and validator as the utility's default profile.
+    /// A strict, explicit-delimiter profile for the CSV route. It uses the
+    /// same parser and validator as the utility's default profile.
     pub const fn strict_csv_route(delimiter: TableDelimiter, has_header: bool) -> Self {
         Self {
             delimiter: DelimiterChoice::Explicit(delimiter),
@@ -1801,7 +1801,13 @@ impl TableProjection {
         selection: &TableSelection,
         include_headers: bool,
     ) -> Result<String, TableExportError> {
-        self.export_tsv_inner(document, selection, include_headers, None)
+        self.export_delimited_inner(
+            document,
+            selection,
+            TableDelimiter::Tab,
+            include_headers,
+            None,
+        )
     }
 
     pub fn export_tsv_with_cancellation(
@@ -1811,13 +1817,49 @@ impl TableProjection {
         include_headers: bool,
         cancellation: &TableCancellationToken,
     ) -> Result<String, TableExportError> {
-        self.export_tsv_inner(document, selection, include_headers, Some(cancellation))
+        self.export_delimited_inner(
+            document,
+            selection,
+            TableDelimiter::Tab,
+            include_headers,
+            Some(cancellation),
+        )
     }
 
-    fn export_tsv_inner(
+    /// Serialize only the requested rows and columns using the chosen
+    /// delimiter. Output is written directly to the document's bounded sink.
+    pub fn export_delimited(
         &self,
         document: &TableDocument,
         selection: &TableSelection,
+        delimiter: TableDelimiter,
+        include_headers: bool,
+    ) -> Result<String, TableExportError> {
+        self.export_delimited_inner(document, selection, delimiter, include_headers, None)
+    }
+
+    pub fn export_delimited_with_cancellation(
+        &self,
+        document: &TableDocument,
+        selection: &TableSelection,
+        delimiter: TableDelimiter,
+        include_headers: bool,
+        cancellation: &TableCancellationToken,
+    ) -> Result<String, TableExportError> {
+        self.export_delimited_inner(
+            document,
+            selection,
+            delimiter,
+            include_headers,
+            Some(cancellation),
+        )
+    }
+
+    fn export_delimited_inner(
+        &self,
+        document: &TableDocument,
+        selection: &TableSelection,
+        delimiter: TableDelimiter,
         include_headers: bool,
         cancellation: Option<&TableCancellationToken>,
     ) -> Result<String, TableExportError> {
@@ -1828,7 +1870,7 @@ impl TableProjection {
             cancellation.map(TableCancellationToken::flag),
         );
         let mut writer = csv::WriterBuilder::new()
-            .delimiter(b'\t')
+            .delimiter(delimiter.byte())
             .terminator(csv::Terminator::Any(b'\n'))
             .has_headers(false)
             .buffer_capacity(8 * 1024)
@@ -1870,6 +1912,31 @@ impl TableProjection {
         })?;
         check_export_cancelled(cancellation)?;
         sink.into_string()
+    }
+
+    /// Return whether object-shaped JSON can represent the selected headers
+    /// without silently renaming, omitting, or overwriting any key.
+    pub fn json_objects_availability(
+        &self,
+        document: &TableDocument,
+        selected_columns: &[usize],
+    ) -> Result<TableObjectShapeAvailability, TableProjectionError> {
+        if self.document != document.id {
+            return Err(TableProjectionError::WrongDocument);
+        }
+        if selected_columns.is_empty() {
+            return Ok(TableObjectShapeAvailability::NoSelectedColumns);
+        }
+        if selected_columns
+            .iter()
+            .any(|column| *column >= document.column_count)
+        {
+            return Err(TableProjectionError::InvalidColumn);
+        }
+        Ok(match object_header_problem(document, selected_columns) {
+            Some(reason) => TableObjectShapeAvailability::Unavailable(reason),
+            None => TableObjectShapeAvailability::Available,
+        })
     }
 
     pub fn export_json(
@@ -1994,6 +2061,13 @@ pub enum JsonShapeFallbackReason {
     HeaderMissing,
     EmptyHeader,
     DuplicateHeader,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TableObjectShapeAvailability {
+    Available,
+    NoSelectedColumns,
+    Unavailable(JsonShapeFallbackReason),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2134,43 +2208,7 @@ fn resolve_json_shape(
     if requested == TableJsonShape::Arrays {
         return Ok((TableResolvedJsonShape::Arrays, None));
     }
-    let headers = document.headers.as_ref();
-    let problem = if !document.has_header {
-        Some(JsonShapeFallbackReason::HeadersDisabled)
-    } else if headers.is_none() {
-        Some(JsonShapeFallbackReason::HeaderMissing)
-    } else if let Some(headers) = headers {
-        if selection
-            .columns
-            .iter()
-            .any(|column| *column >= headers.len())
-            || selection
-                .columns
-                .iter()
-                .any(|column| headers[*column].is_none())
-        {
-            Some(JsonShapeFallbackReason::HeaderMissing)
-        } else if selection
-            .columns
-            .iter()
-            .any(|column| headers[*column].as_deref() == Some(""))
-        {
-            Some(JsonShapeFallbackReason::EmptyHeader)
-        } else {
-            let mut names = std::collections::HashSet::new();
-            if selection.columns.iter().any(|column| {
-                headers[*column]
-                    .as_deref()
-                    .is_some_and(|name| !names.insert(name))
-            }) {
-                Some(JsonShapeFallbackReason::DuplicateHeader)
-            } else {
-                None
-            }
-        }
-    } else {
-        Some(JsonShapeFallbackReason::HeaderMissing)
-    };
+    let problem = object_header_problem(document, &selection.columns);
     if let Some(reason) = problem {
         return match requested {
             TableJsonShape::Auto => Ok((TableResolvedJsonShape::Arrays, Some(reason))),
@@ -2179,6 +2217,39 @@ fn resolve_json_shape(
         };
     }
     Ok((TableResolvedJsonShape::Objects, None))
+}
+
+fn object_header_problem(
+    document: &TableDocument,
+    selected_columns: &[usize],
+) -> Option<JsonShapeFallbackReason> {
+    if !document.has_header {
+        return Some(JsonShapeFallbackReason::HeadersDisabled);
+    }
+    let Some(headers) = document.headers.as_ref() else {
+        return Some(JsonShapeFallbackReason::HeaderMissing);
+    };
+    if selected_columns
+        .iter()
+        .any(|column| headers.get(*column).is_none_or(|header| header.is_none()))
+    {
+        return Some(JsonShapeFallbackReason::HeaderMissing);
+    }
+    if selected_columns
+        .iter()
+        .any(|column| headers[*column].as_deref() == Some(""))
+    {
+        return Some(JsonShapeFallbackReason::EmptyHeader);
+    }
+    let mut names = std::collections::HashSet::new();
+    selected_columns
+        .iter()
+        .any(|column| {
+            headers[*column]
+                .as_deref()
+                .is_some_and(|name| !names.insert(name))
+        })
+        .then_some(JsonShapeFallbackReason::DuplicateHeader)
 }
 
 fn write_json_table(
@@ -2953,6 +3024,126 @@ mod tests {
                 .unwrap()
                 .fallback_reason,
             Some(JsonShapeFallbackReason::HeadersDisabled)
+        );
+    }
+
+    #[test]
+    fn csv_policy_strict_profile_round_trips_bom_multiline_and_literal_cells() {
+        let options = TableParseOptions::strict_csv_route(TableDelimiter::Comma, true);
+        assert_eq!(options.row_width, RowWidthPolicy::Strict);
+        assert_eq!(options.limits, TableResourceLimits::strict_csv_route());
+
+        let bytes = [
+            UTF8_BOM,
+            "id,note\r\n001,\" 雪, line 1\r\nline 2  \"\r\n002,\"$1\\path\"\r\n".as_bytes(),
+        ]
+        .concat();
+        let document = TableDocument::parse_bytes(&bytes, options).unwrap();
+        assert_eq!(document.delimiter(), TableDelimiter::Comma);
+        assert_eq!(document.headers().unwrap()[0].as_deref(), Some("id"));
+        assert_eq!(
+            document.rows()[0].cells(),
+            &["001", " 雪, line 1\r\nline 2  "]
+        );
+        assert_eq!(document.rows()[1].cells(), &["002", "$1\\path"]);
+
+        let projection =
+            TableProjection::build(&document, &TableProjectionOptions::default()).unwrap();
+        let selection = select_all(&document, &projection, &[0, 1]);
+        let csv = projection
+            .export_delimited(&document, &selection, TableDelimiter::Comma, true)
+            .unwrap();
+        assert!(csv.starts_with("id,note\n"));
+        assert!(csv.contains("\" 雪, line 1\r\nline 2  \""));
+        assert!(csv.contains("$1\\path"));
+
+        let round_trip = TableDocument::parse(&csv, options).unwrap();
+        assert_eq!(round_trip.headers(), document.headers());
+        assert_eq!(
+            round_trip
+                .rows()
+                .iter()
+                .map(TableRow::cells)
+                .collect::<Vec<_>>(),
+            document
+                .rows()
+                .iter()
+                .map(TableRow::cells)
+                .collect::<Vec<_>>()
+        );
+
+        let tsv = projection
+            .export_delimited(&document, &selection, TableDelimiter::Tab, true)
+            .unwrap();
+        let tsv_round_trip = TableDocument::parse(
+            &tsv,
+            TableParseOptions::strict_csv_route(TableDelimiter::Tab, true),
+        )
+        .unwrap();
+        assert_eq!(
+            tsv_round_trip
+                .rows()
+                .iter()
+                .map(TableRow::cells)
+                .collect::<Vec<_>>(),
+            round_trip
+                .rows()
+                .iter()
+                .map(TableRow::cells)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn csv_policy_object_shape_availability_is_explicit_and_arrays_remain_available() {
+        let duplicate = parse_comma("name,name\na,b", true);
+        let duplicate_view =
+            TableProjection::build(&duplicate, &TableProjectionOptions::default()).unwrap();
+        assert_eq!(
+            duplicate_view
+                .json_objects_availability(&duplicate, &[0, 1])
+                .unwrap(),
+            TableObjectShapeAvailability::Unavailable(JsonShapeFallbackReason::DuplicateHeader)
+        );
+        let duplicate_selection = select_all(&duplicate, &duplicate_view, &[0, 1]);
+        assert_eq!(
+            duplicate_view
+                .export_json(&duplicate, &duplicate_selection, TableJsonShape::Arrays)
+                .unwrap()
+                .text,
+            "[[\"a\",\"b\"]]"
+        );
+
+        let blank = parse_comma(",value\na,b", true);
+        let blank_view =
+            TableProjection::build(&blank, &TableProjectionOptions::default()).unwrap();
+        assert_eq!(
+            blank_view
+                .json_objects_availability(&blank, &[0, 1])
+                .unwrap(),
+            TableObjectShapeAvailability::Unavailable(JsonShapeFallbackReason::EmptyHeader)
+        );
+        assert_eq!(
+            blank_view.json_objects_availability(&blank, &[]).unwrap(),
+            TableObjectShapeAvailability::NoSelectedColumns
+        );
+        assert_eq!(
+            blank_view.json_objects_availability(&duplicate, &[0]),
+            Err(TableProjectionError::WrongDocument)
+        );
+    }
+
+    #[test]
+    fn csv_policy_delimited_output_uses_the_accepted_output_budget() {
+        let mut options = TableParseOptions::strict_csv_route(TableDelimiter::Comma, true);
+        options.limits.max_output_bytes = 8;
+        let document = TableDocument::parse("name,value\na,1", options).unwrap();
+        let projection =
+            TableProjection::build(&document, &TableProjectionOptions::default()).unwrap();
+        let selection = select_all(&document, &projection, &[0, 1]);
+        assert_eq!(
+            projection.export_delimited(&document, &selection, TableDelimiter::Comma, true,),
+            Err(TableExportError::OutputTooLarge)
         );
     }
 

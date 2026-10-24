@@ -5,9 +5,10 @@
 //! owner.
 
 use crate::table_utility::{
-    DelimiterChoice, TableCancellationToken, TableDocument, TableDocumentId, TableExportError,
-    TableJsonExport, TableJsonShape, TableParseError, TableParseOptions, TableProjection,
-    TableProjectionError, TableProjectionOptions, TableRowId, TableSelection, TableSort,
+    DelimiterChoice, TableCancellationToken, TableDelimiter, TableDocument, TableDocumentId,
+    TableExportError, TableJsonExport, TableJsonShape, TableParseError, TableParseOptions,
+    TableProjection, TableProjectionError, TableProjectionOptions, TableRowId, TableSelection,
+    TableSort,
 };
 use eframe::egui;
 use std::collections::HashSet;
@@ -68,24 +69,50 @@ impl TableExportOperation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TableExportKind {
     Tsv,
+    Delimited(TableDelimiter),
     Json(TableJsonShape),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TableExportBasis {
+    CurrentSource,
+    PreviousValid,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TableExportPayload {
     Tsv(String),
+    Delimited {
+        delimiter: TableDelimiter,
+        text: String,
+    },
     Json(TableJsonExport),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableExportReceipt {
     pub operation: TableExportOperation,
+    pub basis: TableExportBasis,
     pub lifetime: TableSessionLifetime,
+    /// The draft revision at the time this export was requested.
     pub source_revision: TableSourceRevision,
+    /// The accepted immutable source revision backing the document.
+    pub accepted_source_revision: TableSourceRevision,
     pub document: TableDocumentId,
+    pub parse_options: TableParseOptions,
     pub view_revision: TableViewRevision,
     pub selection_revision: TableSelectionRevision,
     pub payload: TableExportPayload,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingTableExport {
+    operation: TableExportOperation,
+    basis: TableExportBasis,
+    source_revision: TableSourceRevision,
+    accepted_source_revision: TableSourceRevision,
+    document: TableDocumentId,
+    parse_options: TableParseOptions,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -179,6 +206,7 @@ struct JobKey {
 enum Work {
     ReadFile {
         path: PathBuf,
+        options: TableParseOptions,
         cancellation: TableCancellationToken,
     },
     Parse {
@@ -227,8 +255,12 @@ struct Completion {
 impl Job {
     fn run(self) -> Completion {
         let result = match self.work {
-            Work::ReadFile { path, cancellation } => {
-                let result = read_table_file(&path, &cancellation);
+            Work::ReadFile {
+                path,
+                options,
+                cancellation,
+            } => {
+                let result = read_table_file(&path, options.limits.max_input_bytes, &cancellation);
                 WorkResult::FileRead(result)
             }
             Work::Parse {
@@ -268,6 +300,15 @@ impl Job {
                                 &cancellation,
                             )
                             .map(TableExportPayload::Tsv),
+                        TableExportKind::Delimited(delimiter) => projection
+                            .export_delimited_with_cancellation(
+                                &document,
+                                &selection,
+                                delimiter,
+                                include_headers,
+                                &cancellation,
+                            )
+                            .map(|text| TableExportPayload::Delimited { delimiter, text }),
                         TableExportKind::Json(shape) => projection
                             .export_json_with_cancellation(
                                 &document,
@@ -475,6 +516,14 @@ impl TableSessionSnapshot {
                 .is_some_and(|document| document.options() == self.parse_options)
     }
 
+    /// A dirty or failed draft may coexist with an explicitly exportable
+    /// immutable last-good document and its original parse options.
+    pub fn has_previous_valid_data(&self) -> bool {
+        self.document.is_some()
+            && self.accepted_source_revision.is_some()
+            && (self.source_dirty || self.accepted_source_revision != Some(self.source_revision))
+    }
+
     pub fn selected_visible_rows(&self) -> Vec<TableRowId> {
         let Some(projection) = &self.projection else {
             return Vec::new();
@@ -521,6 +570,7 @@ pub struct TableUtilitySession {
     source_is_inline_editable: bool,
     source_dirty: bool,
     source_path: Option<PathBuf>,
+    pending_file_path: Option<PathBuf>,
     requested_source: Arc<[u8]>,
     parse_options: TableParseOptions,
     view_options: TableProjectionOptions,
@@ -537,7 +587,7 @@ pub struct TableUtilitySession {
     selected_columns: HashSet<usize>,
     active_key: Option<JobKey>,
     next_export: u64,
-    export_pending: Option<TableExportOperation>,
+    export_pending: Option<PendingTableExport>,
     export_receipt: Option<TableExportReceipt>,
     message: Option<String>,
     open: bool,
@@ -562,6 +612,7 @@ impl TableUtilitySession {
             source_is_inline_editable: true,
             source_dirty: false,
             source_path: None,
+            pending_file_path: None,
             requested_source: Arc::from([]),
             parse_options: TableParseOptions::utility_default(),
             view_options: TableProjectionOptions::default(),
@@ -614,6 +665,7 @@ impl TableUtilitySession {
         self.active_key = None;
         self.export_pending = None;
         self.export_receipt = None;
+        self.pending_file_path = None;
         self.message = None;
         if let Some(worker) = &self.worker {
             worker.cancel_pending();
@@ -645,10 +697,15 @@ impl TableUtilitySession {
     }
 
     pub fn replace_source(&mut self, source: String) -> Result<(), String> {
-        if source.len() > crate::table_utility::TABLE_UTILITY_MAX_INPUT_BYTES {
+        let max_input_bytes = self
+            .parse_options
+            .limits
+            .max_input_bytes
+            .min(crate::table_utility::STRICT_CSV_MAX_INPUT_BYTES);
+        if source.len() > max_input_bytes {
             return Err(format!(
                 "Table source exceeds the {} byte limit; the previous source was kept.",
-                crate::table_utility::TABLE_UTILITY_MAX_INPUT_BYTES
+                max_input_bytes
             ));
         }
         self.advance_source_revision(true);
@@ -685,10 +742,24 @@ impl TableUtilitySession {
         if self.parse_options == options {
             return;
         }
-        self.advance_source_revision(false);
+        let reread_path = matches!(self.source_load_state, TableSourceLoadState::Reading(_))
+            .then(|| self.pending_file_path.clone())
+            .flatten();
+        self.advance_source_revision(true);
         self.parse_options = options;
         self.source_dirty = true;
         self.message = None;
+        if let Some(path) = reread_path {
+            if let Err(message) = self.queue_file_read(path) {
+                let revision = self.source_revision;
+                self.source_load_state = TableSourceLoadState::Failed {
+                    revision,
+                    message: message.clone(),
+                };
+                self.restore_last_parse_state();
+                self.message = Some(message);
+            }
+        }
     }
 
     pub fn set_delimiter(&mut self, delimiter: DelimiterChoice) {
@@ -766,8 +837,19 @@ impl TableUtilitySession {
         }
         self.advance_source_revision(true);
         self.source_dirty = true;
+        self.queue_file_read(path)
+    }
+
+    fn queue_file_read(&mut self, path: PathBuf) -> Result<(), String> {
+        if !self.open {
+            return Err("The Table Utility is closed.".into());
+        }
+        let Some(worker) = self.worker.as_ref() else {
+            return Err("The table worker is unavailable.".to_owned());
+        };
         self.source_load_state = TableSourceLoadState::Reading(self.source_revision);
         self.message = Some("Reading the selected file…".into());
+        self.pending_file_path = Some(path.clone());
         let key = JobKey {
             lifetime: self.lifetime,
             source: self.source_revision,
@@ -777,14 +859,14 @@ impl TableUtilitySession {
             export: None,
         };
         let cancellation = TableCancellationToken::new();
-        if let Some(worker) = self.worker.as_ref() {
-            worker.submit(Job {
-                key,
-                work: Work::ReadFile { path, cancellation },
-            });
-        } else {
-            return Err("The table worker is unavailable.".to_owned());
-        }
+        worker.submit(Job {
+            key,
+            work: Work::ReadFile {
+                path,
+                options: self.parse_options,
+                cancellation,
+            },
+        });
         self.active_key = Some(key);
         Ok(())
     }
@@ -874,25 +956,67 @@ impl TableUtilitySession {
         kind: TableExportKind,
         include_headers: bool,
     ) -> Result<TableExportOperation, String> {
+        self.request_export_with_basis(kind, include_headers, TableExportBasis::CurrentSource)
+    }
+
+    /// Queue an explicit export of the last accepted immutable result even
+    /// while a newer source draft is dirty or failed. The generated receipt
+    /// remains tied to both the accepted document and this draft revision.
+    pub fn request_export_previous_valid(
+        &mut self,
+        kind: TableExportKind,
+        include_headers: bool,
+    ) -> Result<TableExportOperation, String> {
+        self.request_export_with_basis(kind, include_headers, TableExportBasis::PreviousValid)
+    }
+
+    fn request_export_with_basis(
+        &mut self,
+        kind: TableExportKind,
+        include_headers: bool,
+        basis: TableExportBasis,
+    ) -> Result<TableExportOperation, String> {
         if !self.open {
             return Err("The Table Utility is closed.".into());
         }
-        if self.accepted_source_revision != Some(self.source_revision)
-            || self.source_dirty
-            || self
-                .document
-                .as_ref()
-                .is_none_or(|document| document.options() != self.parse_options)
-            || self.projection_state != TableProjectionState::Ready(self.view_revision)
+        if basis == TableExportBasis::PreviousValid
+            && self.has_previous_valid_data()
+            && self.source_work_pending()
         {
             return Err(
-                "Parse the current source and wait for its result view before exporting.".into(),
+                "Wait for the current file read or parse to finish before exporting the previous valid table."
+                    .into(),
             );
         }
         let document = self
             .document
             .clone()
             .ok_or_else(|| "Parse a table before exporting.".to_owned())?;
+        let accepted_source_revision = self
+            .accepted_source_revision
+            .filter(|revision| self.projected_source_revision == Some(*revision))
+            .ok_or_else(|| "Wait for an accepted table result before exporting.".to_owned())?;
+        match basis {
+            TableExportBasis::CurrentSource
+                if accepted_source_revision != self.source_revision
+                    || self.source_dirty
+                    || document.options() != self.parse_options =>
+            {
+                return Err(
+                    "Parse the current source and wait for its result view before exporting."
+                        .into(),
+                );
+            }
+            TableExportBasis::PreviousValid if !self.has_previous_valid_data() => {
+                return Err("There is no previous valid table to export.".into());
+            }
+            _ => {}
+        }
+        if self.projection_state != TableProjectionState::Ready(self.view_revision)
+            || self.projected_view_revision != Some(self.view_revision)
+        {
+            return Err("Wait for the current table view before exporting.".into());
+        }
         let projection = self
             .projection
             .clone()
@@ -916,6 +1040,8 @@ impl TableUtilitySession {
         }
         let operation = TableExportOperation(self.next_export);
         self.next_export = self.next_export.wrapping_add(1);
+        let document_id = document.id();
+        let parse_options = document.options();
         let key = JobKey {
             lifetime: self.lifetime,
             source: self.source_revision,
@@ -937,7 +1063,14 @@ impl TableUtilitySession {
                 cancellation,
             },
         };
-        self.export_pending = Some(operation);
+        self.export_pending = Some(PendingTableExport {
+            operation,
+            basis,
+            source_revision: self.source_revision,
+            accepted_source_revision,
+            document: document_id,
+            parse_options,
+        });
         self.export_receipt = None;
         self.active_key = Some(key);
         self.worker
@@ -966,17 +1099,24 @@ impl TableUtilitySession {
 
     pub fn export_receipt_is_current(&self, receipt: &TableExportReceipt) -> bool {
         self.open
-            && !self.source_dirty
             && receipt.lifetime == self.lifetime
             && receipt.source_revision == self.source_revision
+            && Some(receipt.accepted_source_revision) == self.accepted_source_revision
             && receipt.view_revision == self.view_revision
             && receipt.selection_revision == self.selection_revision
-            && self.accepted_source_revision == Some(receipt.source_revision)
-            && self.projected_source_revision == Some(receipt.source_revision)
+            && self.projected_source_revision == Some(receipt.accepted_source_revision)
             && self.projected_view_revision == Some(receipt.view_revision)
             && self.document.as_ref().is_some_and(|document| {
-                document.id() == receipt.document && document.options() == self.parse_options
+                document.id() == receipt.document && document.options() == receipt.parse_options
             })
+            && match receipt.basis {
+                TableExportBasis::CurrentSource => {
+                    !self.source_dirty
+                        && receipt.accepted_source_revision == receipt.source_revision
+                        && receipt.parse_options == self.parse_options
+                }
+                TableExportBasis::PreviousValid => true,
+            }
             && self
                 .projection
                 .as_ref()
@@ -1046,6 +1186,7 @@ impl TableUtilitySession {
                 {
                     return;
                 }
+                self.pending_file_path = None;
                 match result {
                     Ok((path, bytes)) => match String::from_utf8(bytes) {
                         Ok(source) => {
@@ -1125,9 +1266,14 @@ impl TableUtilitySession {
                 let Some(operation) = key.export else {
                     return;
                 };
-                if !self.export_is_current(operation)
+                let Some(pending) = self
+                    .export_pending
+                    .filter(|pending| pending.operation == operation)
+                else {
+                    return;
+                };
+                if !self.export_is_current(operation, &key)
                     || key.lifetime != self.lifetime
-                    || key.source != self.source_revision
                     || key.view != self.view_revision
                     || key.selection != self.selection_revision
                     || key.kind != JobKind::Export
@@ -1141,9 +1287,12 @@ impl TableUtilitySession {
                         if let Some(document) = document {
                             self.export_receipt = Some(TableExportReceipt {
                                 operation,
+                                basis: pending.basis,
                                 lifetime: key.lifetime,
-                                source_revision: key.source,
+                                source_revision: pending.source_revision,
+                                accepted_source_revision: pending.accepted_source_revision,
                                 document,
+                                parse_options: pending.parse_options,
                                 view_revision: key.view,
                                 selection_revision: key.selection,
                                 payload,
@@ -1157,17 +1306,39 @@ impl TableUtilitySession {
         }
     }
 
-    fn export_is_current(&self, operation: TableExportOperation) -> bool {
+    fn export_is_current(&self, operation: TableExportOperation, key: &JobKey) -> bool {
+        let Some(pending) = self.export_pending else {
+            return false;
+        };
         self.open
-            && !self.source_dirty
-            && self.export_pending == Some(operation)
-            && self.accepted_source_revision == Some(self.source_revision)
-            && self.projected_source_revision == Some(self.source_revision)
+            && pending.operation == operation
+            && pending.source_revision == self.source_revision
+            && pending.source_revision == key.source
+            && self.accepted_source_revision == Some(pending.accepted_source_revision)
+            && self.document.as_ref().is_some_and(|document| {
+                document.id() == pending.document && document.options() == pending.parse_options
+            })
+            && self.projected_source_revision == Some(pending.accepted_source_revision)
             && self.projected_view_revision == Some(self.view_revision)
-            && self
-                .document
-                .as_ref()
-                .is_some_and(|document| document.options() == self.parse_options)
+            && match pending.basis {
+                TableExportBasis::CurrentSource => {
+                    !self.source_dirty
+                        && pending.accepted_source_revision == self.source_revision
+                        && pending.parse_options == self.parse_options
+                }
+                TableExportBasis::PreviousValid => self.has_previous_valid_data(),
+            }
+    }
+
+    fn has_previous_valid_data(&self) -> bool {
+        self.document.is_some()
+            && self.accepted_source_revision.is_some()
+            && (self.source_dirty || self.accepted_source_revision != Some(self.source_revision))
+    }
+
+    fn source_work_pending(&self) -> bool {
+        matches!(self.source_load_state, TableSourceLoadState::Reading(_))
+            || matches!(self.parse_state, TableParseState::Pending(_))
     }
 
     fn restore_last_parse_state(&mut self) {
@@ -1185,6 +1356,7 @@ impl TableUtilitySession {
         self.export_receipt = None;
         if cancel_read {
             self.source_load_state = TableSourceLoadState::Idle;
+            self.pending_file_path = None;
         }
         if matches!(self.parse_state, TableParseState::Pending(_)) {
             self.restore_last_parse_state();
@@ -1321,7 +1493,7 @@ impl TableUtilitySession {
             selected_rows: self.selected_rows.clone(),
             selected_columns: self.selected_columns.clone(),
             selected_visible_row_count: self.selected_visible_row_count,
-            export_pending: self.export_pending,
+            export_pending: self.export_pending.map(|pending| pending.operation),
             message: self.message.clone(),
         }
     }
@@ -1382,8 +1554,10 @@ fn source_is_inline_editable(source: &str) -> bool {
 
 fn read_table_file(
     path: &std::path::Path,
+    max_input_bytes: usize,
     cancellation: &TableCancellationToken,
 ) -> Result<(PathBuf, Vec<u8>), FileReadError> {
+    let max_input_bytes = max_input_bytes.min(crate::table_utility::STRICT_CSV_MAX_INPUT_BYTES);
     let path = path.canonicalize().map_err(|error| {
         FileReadError::Failed(format!("Could not resolve the selected file: {error}"))
     })?;
@@ -1402,10 +1576,10 @@ fn read_table_file(
         if read == 0 {
             return Ok((path, bytes));
         }
-        if bytes.len().saturating_add(read) > crate::table_utility::TABLE_UTILITY_MAX_INPUT_BYTES {
+        if bytes.len().saturating_add(read) > max_input_bytes {
             return Err(FileReadError::Failed(format!(
-                "The selected file exceeds the {} byte table limit; the previous source was kept.",
-                crate::table_utility::TABLE_UTILITY_MAX_INPUT_BYTES
+                "The selected file exceeds the {} byte limit for the current table profile; the previous source was kept.",
+                max_input_bytes
             )));
         }
         bytes.try_reserve(read).map_err(|_| {
@@ -1518,6 +1692,253 @@ mod tests {
             .map(|row| document.row(*row).expect("projected row").cells()[0].as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, ["bravo", "beta"]);
+        session.shutdown();
+    }
+
+    #[test]
+    fn csv_policy_session_file_limit_comes_from_current_profile_and_requeues_read() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let exact_path = directory.path().join("exact.csv");
+        let exact_bytes = b"h,v\nx,1\n";
+        assert_eq!(exact_bytes.len(), 8);
+        std::fs::write(&exact_path, exact_bytes).expect("write exact profile limit");
+
+        let too_large_path = directory.path().join("over.csv");
+        let too_large_bytes = b"h,v\nx,10\n";
+        assert_eq!(too_large_bytes.len(), 9);
+        std::fs::write(&too_large_path, too_large_bytes).expect("write over-limit file");
+
+        let ctx = egui::Context::default();
+        let mut session = TableUtilitySession::new();
+        session.open(&ctx).expect("start session worker");
+        session
+            .request_file_read(exact_path.clone())
+            .expect("start read under table profile");
+
+        // The read has not been consumed by the UI owner yet. Changing the
+        // typed policy invalidates it and queues the same path with CSV's
+        // selected byte limit and parse options.
+        let mut csv_options = TableParseOptions::strict_csv_route(TableDelimiter::Comma, true);
+        csv_options.limits.max_input_bytes = exact_bytes.len();
+        let initial_revision = session.snapshot().source_revision;
+        session.set_parse_options(csv_options);
+        assert_ne!(session.snapshot().source_revision, initial_revision);
+
+        let exact_path = std::fs::canonicalize(exact_path).unwrap();
+        let accepted = {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                session.poll();
+                let snapshot = session.snapshot();
+                if snapshot.source_path.as_ref() == Some(&exact_path)
+                    && matches!(snapshot.source_load_state, TableSourceLoadState::Idle)
+                    && snapshot.accepted_options_are_current()
+                    && snapshot.document.is_some()
+                    && snapshot.projection_state
+                        == TableProjectionState::Ready(snapshot.view_revision)
+                {
+                    break snapshot;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "profile read did not finish: {:?} / {:?} / {:?}",
+                    snapshot.source_load_state,
+                    snapshot.parse_state,
+                    snapshot.projection_state
+                );
+                thread::yield_now();
+            }
+        };
+        assert_eq!(accepted.source.as_ref(), "h,v\nx,1\n");
+        let document = accepted.document.as_ref().unwrap();
+        assert_eq!(document.options(), csv_options);
+        assert_eq!(document.rows()[0].cells(), &["x", "1"]);
+        let accepted_document_id = document.id();
+
+        let operation = session
+            .request_export(TableExportKind::Delimited(TableDelimiter::Comma), true)
+            .expect("queue CSV export for accepted profile");
+        let receipt = {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                session.poll();
+                if let Some(receipt) = session.take_export_receipt(operation) {
+                    break receipt;
+                }
+                assert!(Instant::now() < deadline, "CSV export did not complete");
+                thread::yield_now();
+            }
+        };
+        assert_eq!(
+            receipt.payload,
+            TableExportPayload::Delimited {
+                delimiter: TableDelimiter::Comma,
+                text: "h,v\nx,1\n".to_owned(),
+            }
+        );
+        assert_eq!(receipt.parse_options, csv_options);
+
+        session
+            .request_file_read(too_large_path.clone())
+            .expect("queue file one byte over the selected profile");
+        let too_large_path = std::fs::canonicalize(too_large_path).unwrap();
+        let refused = {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                session.poll();
+                let snapshot = session.snapshot();
+                if matches!(
+                    snapshot.source_load_state,
+                    TableSourceLoadState::Failed { .. }
+                ) {
+                    break snapshot;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "over-limit CSV read did not fail"
+                );
+                thread::yield_now();
+            }
+        };
+        assert_eq!(refused.source.as_ref(), "h,v\nx,1\n");
+        assert_eq!(refused.source_path.as_ref(), Some(&exact_path));
+        assert_eq!(
+            refused.document.as_ref().unwrap().id(),
+            accepted_document_id
+        );
+        assert_eq!(refused.document.as_ref().unwrap().options(), csv_options);
+        assert!(!refused.accepted_options_are_current());
+        assert_eq!(std::fs::metadata(too_large_path).unwrap().len(), 9);
+        session.shutdown();
+    }
+
+    #[test]
+    fn csv_policy_session_failed_draft_keeps_good_options_for_explicit_export() {
+        let ctx = egui::Context::default();
+        let mut session = TableUtilitySession::new();
+        let csv_options = TableParseOptions::strict_csv_route(TableDelimiter::Comma, true);
+        session.set_parse_options(csv_options);
+        session.open(&ctx).expect("start session worker");
+        session
+            .paste_source("name,value\nalpha,001\n".to_owned())
+            .expect("queue valid CSV");
+        let accepted = ready_snapshot(&mut session);
+        let accepted_revision = accepted.accepted_source_revision.unwrap();
+        let accepted_document = accepted.document.as_ref().unwrap();
+        let accepted_document_id = accepted_document.id();
+        assert_eq!(accepted_document.options(), csv_options);
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let missing_path = directory.path().join("missing.csv");
+        session
+            .request_file_read(missing_path)
+            .expect("queue a replacement source read");
+        let read_busy = session
+            .request_export_previous_valid(TableExportKind::Delimited(TableDelimiter::Comma), true)
+            .expect_err("previous-valid export must not replace a pending file read");
+        assert!(read_busy.contains("file read or parse to finish"));
+        assert!(matches!(
+            session.snapshot().source_load_state,
+            TableSourceLoadState::Reading(_)
+        ));
+        assert_eq!(session.export_pending, None);
+        let read_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            session.poll();
+            if matches!(
+                session.snapshot().source_load_state,
+                TableSourceLoadState::Failed { .. }
+            ) {
+                break;
+            }
+            assert!(
+                Instant::now() < read_deadline,
+                "missing file read did not fail"
+            );
+            thread::yield_now();
+        }
+        assert_eq!(
+            session.snapshot().document.as_ref().unwrap().id(),
+            accepted_document_id
+        );
+
+        session
+            .replace_source("name,value\nshort\n".to_owned())
+            .expect("retain malformed draft");
+        session.request_parse();
+        let parse_busy = session
+            .request_export_previous_valid(TableExportKind::Delimited(TableDelimiter::Comma), true)
+            .expect_err("previous-valid export must not replace a pending parse");
+        assert!(parse_busy.contains("file read or parse to finish"));
+        assert!(matches!(
+            session.snapshot().parse_state,
+            TableParseState::Pending(_)
+        ));
+        assert_eq!(session.export_pending, None);
+        let failed = {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                session.poll();
+                let snapshot = session.snapshot();
+                if matches!(snapshot.parse_state, TableParseState::Failed { .. }) {
+                    break snapshot;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "strict malformed CSV did not fail"
+                );
+                thread::yield_now();
+            }
+        };
+        assert!(failed.has_previous_valid_data());
+        assert!(failed.source_dirty);
+        assert_eq!(failed.document.as_ref().unwrap().id(), accepted_document_id);
+        assert_eq!(failed.document.as_ref().unwrap().options(), csv_options);
+        assert_ne!(
+            failed.accepted_source_revision,
+            Some(failed.source_revision)
+        );
+        assert!(!failed.accepted_options_are_current());
+        assert!(
+            session
+                .request_export(TableExportKind::Delimited(TableDelimiter::Comma), true)
+                .is_err()
+        );
+
+        let operation = session
+            .request_export_previous_valid(TableExportKind::Delimited(TableDelimiter::Comma), true)
+            .expect("explicitly queue export of last-good CSV");
+        let receipt = {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                session.poll();
+                if let Some(receipt) = session.take_export_receipt(operation) {
+                    break receipt;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "previous-valid CSV export did not complete"
+                );
+                thread::yield_now();
+            }
+        };
+        assert_eq!(receipt.basis, TableExportBasis::PreviousValid);
+        assert_eq!(receipt.source_revision, failed.source_revision);
+        assert_eq!(receipt.accepted_source_revision, accepted_revision);
+        assert_eq!(receipt.parse_options, csv_options);
+        assert_eq!(
+            receipt.payload,
+            TableExportPayload::Delimited {
+                delimiter: TableDelimiter::Comma,
+                text: "name,value\nalpha,001\n".to_owned(),
+            }
+        );
+
+        session
+            .inline_source_changed("name,value\nbeta,002\n".to_owned())
+            .expect("new draft invalidates the old receipt");
+        assert!(!session.export_receipt_is_current(&receipt));
+        assert!(session.take_export_receipt(operation).is_none());
         session.shutdown();
     }
 

@@ -1521,6 +1521,7 @@ fn bounded_text(text: &str, max_chars: usize) -> String {
 fn payload_text(payload: &TableExportPayload) -> Option<&str> {
     match payload {
         TableExportPayload::Tsv(text) => Some(text),
+        TableExportPayload::Delimited { text, .. } => Some(text),
         TableExportPayload::Json(json) => Some(json.text.as_str()),
     }
 }
