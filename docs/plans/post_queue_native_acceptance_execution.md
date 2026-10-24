@@ -17,8 +17,8 @@ Authority: `CODEX_GOAL_POST_QUEUE_NATIVE_ACCEPTANCE.md`, its checked-in Kickstar
 
 | Checkpoint | State | Evidence / next gate |
 |---|---|---|
-| B0-A | BASELINE COMMIT/PUSH PENDING | Verified successor and isolated branch; ledger-only baseline follows |
-| B0-B | PENDING | Installed tool/environment facts, actual runners/arguments, per-scenario source/binary/fixture binding and strict input/pixel guards |
+| B0-A | COMPLETE | Baseline c2c05199579f1eb693de43c0423ca3a227e202fd, ledger only; normal upstream push succeeded |
+| B0-B | COMPLETE | Installed facts and runner syntax inspected; target/multi-goal-queue/post-queue-acceptance/b0/facts.json; per-scenario manifests are required before launches |
 | M1 | PENDING | Shield input isolation/release/retry/topmost recovery |
 | M2 | PENDING | Pin click-through actual routing and recovery; OS-source live acquisition separate |
 | M3 | PENDING | Exact saved-target file Cancel/file confirm/folder confirm, durable bytes/references |
@@ -40,3 +40,11 @@ Only disposable profiles/data/windows; fake clipboard/actions where available; n
 ## Inherited evidence, not current native acceptance
 
 Read predecessor execution records and final external handoff. G1 focused/lint passed; optional native not attempted. G2 final full6793PASS/1XMLFAIL/1query-oracleTIMEOUT/48skipped; isolated0.022/39.258-second passes do not erase grouped results or establish baseline attribution. G3 eleven features implemented, focused/default+dev-QA lint passed; required native gaps persist in Settings, repair, pin routing, Notes and DFF. DFF footer deterministic fix postdates its last native binary. Previously accepted compositor, imgdiff and delayed-capture programs are not to be repeated as a substitute for the missing effects. Original records remain read-only.
+
+## B0-B environment and runner inventory
+
+Baseline c2c05199579f1eb693de43c0423ca3a227e202fd pushed normally, upstream matches, before any application build/test/edit. Windows10 Home22H2 build19045.6466; rustc1.99.1/cargo1.99.1, nextest0.9.135. Existing fast-dev inheritsdev with line-tabledebug; no profile changes. Existing ignored queue-focus config is retries0/slow15 terminate4/global10m. Tool and instruction/source digests in ignored b0/facts.json, along with actual PowerShell/session/interactive/stack facts. No nested AGENTS found under affected src/dev paths. No native input/pixel sampling or application edit yet.
+
+Inspected current owned-process wrapper: exact original root handle, PID/birth ancestry inventory, bounded cleanup and per-process post-cleanup states; sandbox CIM needs normal escalation. Native runners inspected before invoking: passive_overlay_smoke supports --rectangle-input-isolation and --rectangle-shield-probe; pin_opacity_smoke currently has no selective CLI and calls the full native program; DFF requires --fixture-identity/repeated --root/--out, inert action sink; imgdiff requires --fixture-identity/--a/--b/--out and generated inputs. Existing jump runner has SettingsSearch/TargetRepair/NoteReplace, NativeOnly with bound prebuilt artifact manifest; NoteReplace requires shared NativeBatchDeadlineUtc. Existing DFF ignored driver/support/binder and native-common helpers are available as reference, never retroactive current-binary proof. No new universal framework.
+
+Before each launch parent must bind current source SHA/clean tracked source or exact diff hashes, Cargo/build command and binary SHA, synthetic fixture hashes/nonces and expected owned regions; receipt must record HWND/PID/birth/current control/foreground/hit/layer/clip/coverage/modifier guards immediately before action or pixels. No-input failure and phase-specific gaps retained. Planner is preparing only M1; independent M1 pre-input safety review is read-only. All earlier source agents remain inactive.
