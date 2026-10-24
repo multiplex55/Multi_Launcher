@@ -49,7 +49,7 @@ Mandatory inherited limitations, NOT REUSED_VERIFIED native acceptance:
 | M11-A | COMPLETE | Bounded discovery/native identity/single-worker lifecycle;17 unique selected PASS composed;8905ec0c committed/pushed |
 | M11-B | COMPLETE | Same worker streamed SHA256/byte verification/validated-alias provenance;14unique selected PASS composed;4447ab3d committed/pushed |
 | M11-C | IMPLEMENTED_VERIFIED_WITH_NATIVE_GAP | 11 unique selected PASS composed; final exact footer regression PASS; native Start/read checkpoint verified, Cancel/restart/action/retirement acceptance incomplete; checkpoint commit follows |
-| M12-A | PENDING | Independent final review/cross-tool selected tests/docs/format/commits BEFORE final clean Clippy |
+| M12-A | SOURCE/REVIEW/TESTS COMPLETE; FINAL LINT PENDING | Independent final review/cross-tool selected tests/docs/format/commits BEFORE final clean Clippy |
 
 ## Verification policy
 
@@ -495,3 +495,52 @@ CorrectedactualUI94452 FAILnativeacceptance06:38:23–06:38:35ET/rootfalse/all2A
 M11-C existingnative-receipt exactreview foundCONCRETEproductionfooterfeedback (notjustunexplainedharness): reserveinteractY+2itemSpacings+2, actualdefaultSeparator.spacing6; ResizeuseslastContentSize/grows4perpass, fivepassesmatchrecorded20px whileotherUIrooteditorstable. NativeunchangedgenonlyprovesCancelhandlernotobserved, notSessionCanceldefect. ParentREOPENEDsourceclosurebeforecommit, solewriterexactsharedseparatorSpacing allocation/reservationfix (preserve6default) +SAMEresponseflow stablefooterrawrectacrossconsecutivefixedviewportidle/heldreadframes. No sourceDrop/worker/domainchanges/newtests/matrix/nativecampaign. ExistingnativegapstaysUNVERIFIED afterdeterministicfix; binary3a63...pre-fix evidence retained/boundoldsource, no claimcorrectednativePASS. ParentcommitawaitsnewexactregressionPASS; prior11PASSstillhistoricalcomposed evidence.
 
 M11-C final source closure: shared FOOTER_SEPARATOR_SPACING=6 drives both reservation and actual Separator allocation. Existing exact response-flow test now checks raw Start/Cancel/Close stability over eight normal1180x860 held-read frames and collapsed/expanded diagnostics at620x420. run-response-separator-fixed69126 PASS1/1.192s (1.241s batch), compile1m46, owned06:49:33-06:51:27ET/rootfalse/all8Absent. Original command5+otherdialog/lifecycle5+correctedresponse1 =11unique composedPASS, not a clean eleven-test batch; all prior failures retained. Writer formatting and parent diff-check PASS. Native evidence remains bound to the pre-fix binary and incomplete; no further campaign or source/binary proof substitution. C implementation/review complete; commit follows, then M12 default-feature fixes/final selected checks/review/docs/Clippy-last. Five unrelated/unknown untracked paths remain excluded, including clipboard_modifiers.json of unproven provenance.
+
+
+## M12 final acceptance and handoff
+
+M11-C commit 9db1841312243141f130b0bcf52226df14f0fe8c pushed normally; default integration branch remains untouched. M12 source compatibility checkpoint is bounded to confirmed non-QA Action Sheet observation gating, settings highlight unused bindings, and three observed table bindings. Independent baseline-to-current review is running; final scoped utility/ownership selectors are fixed before execution. No additional native campaign or full G3 Nextest.
+
+| Contract | Feature | Deterministic evidence | Native/output limits |
+|---|---|---|---|
+| C1 | Settings search | M1-A/B9+9 composedPASS | Native numeric/Cancel/no-save/JumpOFF incomplete |
+| C2 | Target repair | M2-A/B20+16 composedPASS | File/folder picker native incomplete |
+| C3 | Clipboard lines | 6+24PASS | Fake clipboard only |
+| C4 | Paste pickers | 11PASS/reuseverified | Deterministic fake playback |
+| C5 | Markers | 7composedPASS/generated PNGs | No personal capture |
+| C6 | Delayed capture | 24+31PASS | Owned Window +RegionCancel nativePASS |
+| C7 | Image compare | 15+19PASS | Owned wipe/difference/retirement nativePASS |
+| C8 | Pin opacity | 5composedPASS/reuse | 6 compositor phases/exports/resetPASS; click-through native gap |
+| C9 | Note replace | 10+10PASS | Native open/unsaved markerPASS; Replace/Undo/save/discard/OFF gap |
+| C10 | CSV | 10+13PASS | State/generatedfile/fakeclipboard evidence |
+| C11 | Duplicate Finder | 17+14+11 unique composed PASS; final footer regression PASS | Native Start/read checkpoint PASS; Cancel/restart/actions/retirement incomplete (pre-fix binary) |
+
+These rows distinguish implemented behavior from native acceptance. C11 cancellation immediately invalidates publication and clears results while its retained worker drains; terminal Partial results remain separate. No late cancelled worker may republish obsolete groups. Earlier milestone wording about retaining Cancelled groups was reconciled to this safety contract rather than adding a second publication stream. Copy/Open/Reveal only use currently revalidated distinct-file members; the finder never deletes, renames or rewrites sources.
+
+Cross-goal compatibility: `table` keeps Auto/header-off/lenient/numeric defaults and existing limits; `csv` adds comma/header-on/strict/lexical defaults and larger explicit bounded limits through the same engine. `imgdiff` is separate from legacy `diff` grammar. Existing Settings, Paste Sequence pickers and native pin owners were extended/reused; no duplicate subsystem or global hotkey was added for these new commands. New application test profiles disable Paste Sequence Next/Cancel shortcuts before construction, preserving production defaults.
+
+M12 independent final review: baseline325981a0-to-current task diff and direct shared seams inspected read-only, no new substantive correctness/compatibility blocker. Prior ownership/persistence/privacy/lifecycle fixes remain coherent. Remaining conditions: default feature corrections, exact final utility and ownership groups, clean scoped Clippy, committed docs. Native gaps above prevent fully verified acceptance; they are not evidence of another established unsafe implementation. Sole writer's three-file cfg/binding fix is frozen and parent-inspected; formatter check PASS. Default all-targets check is active with separate1800s owned ceiling.
+
+M12 default all-targets check31389 PASS2m31, owned06:53:30-06:56:08ET/rootfalse/all12Absent. Seven actual non-QA unused fixture-observation bindings remain: DFF content/roots/row_range and record arguments namespace/group_index/member_index; Note Replace expander. Narrow sole-writer correction released after process closure, preserve actual Response captures in test/dev/QA and unconditional production behavior. No broad allow/vendor cleanup. Default check will not be redundantly repeated; final default-feature Clippy covers the corrected target set. Existing vendor warnings are separate and unchanged.
+
+M12 list-utilities30249 compile-only FAIL101/no tests listed or run, owned06:57:10-06:59:31ET/rootfalse/all6Absent. Parent exact diff and compiler found wrong-function parameter rename: show_known_member runtime arguments were underscored while run_known_action fixture-only metadata parameters remained original, producing21 cascading E0425 diagnostics. Tiny sole-writer owner correction released after closure: restore ordinary show_known_member names, underscore only run_known_action metadata parameters, retain fixture JSON names/readers. Same five-test selector re-list after formatting; original failure retained. This is compiler feedback, not a behavioral test failure or reason to expand scope.
+
+M12 source compatibility commit db6bbc1f56858b7b4e4309fc2a2ce12d351e8a4e pushed normally. Corrected list-utilities-owner-fixed67675 PASS exactly5, compile1m12, owned07:00:20-07:01:40ET/rootfalse/all9Absent. run-utilities12669 PASS5/5 in1.195s, owned07:02:08-07:02:20ET/rootfalse/all5Absent. list-ownership39871 PASS exactly4/rootfalse/all5Absent. run-ownership94337 PASS4/4 in2.306s, owned07:02:53-07:03:05ET/rootfalse/all6Absent. No zero-match, retry, broad suite or new native run. Baseline-to-current rustfmt --edition2024 --check --config skip_children=true checked110 changed Rust files PASS; parent scoped diff-check PASS after removing ledger EOF blank. Original failed compile receipt remains.
+
+Final selected commands (same explicit --lib target and configuration for list/run):
+
+```text
+cargo nextest {list,run} -p multi_launcher --lib --features dev-smoke-binaries,qa-framebuffer-capture --cargo-profile fast-dev --config-file target/multi-goal-queue/nextest.toml --profile queue-focus -E 'test(imgdiff_dialog_reentry_reuses_idle_session_and_retires_old_upload_budget)|test(imgdiff_root_jump_focuses_wipe_without_mutating_and_current_owners_gate_controls)|test(csv_route_opens_once_through_typed_host)|test(table_dialog_jump_focus_does_not_paste_and_escape_closes_after_jump_cancel)|test(dff_dialog_response_flow_cancels_drains_restarts_and_uses_current_verified_actions)'
+cargo nextest {list,run} -p multi_launcher --lib --features dev-smoke-binaries,qa-framebuffer-capture --cargo-profile fast-dev --config-file target/multi-goal-queue/nextest.toml --profile queue-focus -E 'test(note_find_shortcut_and_escape_leave_dirty_note_open_until_the_next_escape)|test(launcher_show_owner_focused_note_editor_and_find_keep_input_and_cancel_show_intent)|test(settings_search_catalog_covers_builtin_and_dedicated_control_inventory)|test(settings_search_catalog_g3_retains_disabled_builtin_ids_and_order)'
+```
+
+Final lint sequence is deliberately LAST, after source/test/format/review/docs/checkpoint commits. Both commands have separate owned1800s ceilings; actual outcomes go to target/multi-goal-queue/g3/m12/final-handoff.json and final report, without reopening tracked content after the eventual successful final gate:
+
+```text
+cargo clippy -p multi_launcher --all-targets --profile fast-dev -- -D warnings
+cargo clippy -p multi_launcher --all-targets --profile fast-dev --features dev-smoke-binaries,qa-framebuffer-capture -- -D warnings
+```
+
+Final status before lint: implementation and deterministic scoped tests delivered; required native acceptance remains incomplete in C1/C2/C8/C9/C11 and inherited G2 shield/hardware rows. This is not full acceptance PASS. No known unresolved source correctness/safety defect from final review. M12 permits an explicit implemented-with-unverified-acceptance handoff. Five unrelated/unknown untracked files are preserved and excluded. All currently recorded owned processes are Absent; no system clipboard/real brightness operation, personal capture or scanned-source mutation. Earlier G1/G2 branches and master remain unchanged, cumulative ancestry retained; no PR/merge/rebase/reset/force push.
+
+The single post-queue user review can concentrate on Settings numeric navigation/Cancel with Jump off, exact file/folder repair picker accept/cancel, pin click-through recovery, Note Replace All/one-step Undo/Redo/save/discard, and DFF Cancel/drain/restart/current Open/Reveal/Copy at normal/minimum size. Real brightness and shield native input remain evidence gaps; do not mistake isolated test PASS for native proof. This guide is a final review handoff, not an intermediate user gate.
