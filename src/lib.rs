@@ -39,6 +39,7 @@ pub mod file_search;
 pub mod help_window;
 pub mod history;
 pub mod hotkey;
+pub(crate) mod image_compare;
 pub mod image_crop;
 pub mod indexer;
 pub mod json_transform;

@@ -7955,7 +7955,7 @@ fn windows_error_to_io(error: windows::core::Error) -> std::io::Error {
 }
 
 #[cfg(windows)]
-fn native_file_identity(file: &std::fs::File) -> std::io::Result<NativeFileIdentity> {
+pub(crate) fn native_file_identity(file: &std::fs::File) -> std::io::Result<NativeFileIdentity> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
