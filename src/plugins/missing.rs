@@ -241,10 +241,10 @@ impl Drop for MissingPlugin {
             let _ = sender.try_send(ScanCommand::Shutdown);
             drop(sender);
         }
-        if let (Some(worker), Some(reaper)) = (self.worker.take(), self.reaper.take()) {
-            if let Err(error) = reaper.reap(worker) {
-                tracing::error!(%error, "missing-target scan join supervision failed");
-            }
+        if let (Some(worker), Some(reaper)) = (self.worker.take(), self.reaper.take())
+            && let Err(error) = reaper.reap(worker)
+        {
+            tracing::error!(%error, "missing-target scan join supervision failed");
         }
     }
 }
@@ -315,15 +315,15 @@ fn run_scans(
             updates.cancel_ticket(SOURCE, ticket);
             continue;
         }
-        if let Ok(mut worker_state) = state.lock() {
-            if worker_state.active_ticket == Some(ticket) {
-                worker_state.cache = Some(ScanCache {
-                    input_revision: input.revision,
-                    created: Instant::now(),
-                    actions: result,
-                });
-                worker_state.active_ticket = None;
-            }
+        if let Ok(mut worker_state) = state.lock()
+            && worker_state.active_ticket == Some(ticket)
+        {
+            worker_state.cache = Some(ScanCache {
+                input_revision: input.revision,
+                created: Instant::now(),
+                actions: result,
+            });
+            worker_state.active_ticket = None;
         }
         updates.publish_ticket(SOURCE, ticket);
     }

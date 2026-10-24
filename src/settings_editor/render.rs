@@ -2423,11 +2423,11 @@ impl SettingsEditor {
             _ => return None,
         };
         let target = self.search_catalog.entry(target_id)?;
-        let same_owner = match (&entry.owner, &target.owner) {
-            (SettingsOwner::Application, SettingsOwner::Application) => true,
-            (SettingsOwner::Theme, SettingsOwner::Theme) => true,
-            _ => false,
-        };
+        let same_owner = matches!(
+            (&entry.owner, &target.owner),
+            (SettingsOwner::Application, SettingsOwner::Application)
+                | (SettingsOwner::Theme, SettingsOwner::Theme)
+        );
         if !same_owner
             || self.search_catalog.plugin_revision() != app.plugins.settings_catalog_revision()
             || !self

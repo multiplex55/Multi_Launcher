@@ -1270,14 +1270,15 @@ impl TableUtilityDialogState {
                     crate::gui::jump_mode::TargetKind::Button,
                     order,
                 );
-                if csv.clicked() && commit_enabled {
-                    if let Some(document) = snapshot.document.as_deref() {
-                        self.queue_export_with_headers(
-                            TableExportKind::Delimited(document.delimiter()),
-                            ExportAction::Clipboard,
-                            document.options().has_header,
-                        );
-                    }
+                if csv.clicked()
+                    && commit_enabled
+                    && let Some(document) = snapshot.document.as_deref()
+                {
+                    self.queue_export_with_headers(
+                        TableExportKind::Delimited(document.delimiter()),
+                        ExportAction::Clipboard,
+                        document.options().has_header,
+                    );
                 }
 
                 let previous = ui.add_enabled(
@@ -1301,13 +1302,14 @@ impl TableUtilityDialogState {
                     crate::gui::jump_mode::TargetKind::Button,
                     order,
                 );
-                if previous.clicked() && commit_enabled {
-                    if let Some(document) = snapshot.document.as_deref() {
-                        self.queue_previous_valid_csv(
-                            document.delimiter(),
-                            document.options().has_header,
-                        );
-                    }
+                if previous.clicked()
+                    && commit_enabled
+                    && let Some(document) = snapshot.document.as_deref()
+                {
+                    self.queue_previous_valid_csv(
+                        document.delimiter(),
+                        document.options().has_header,
+                    );
                 }
             } else {
                 let mut include_headers_choice = self.include_headers;

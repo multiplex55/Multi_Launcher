@@ -348,7 +348,6 @@ impl ScreenshotCaptureOwner {
         let mode = request.mode;
         let expected_window_target = request.expected_window_target;
         let capture = Arc::clone(&self.capture);
-        let excluded_windows = excluded_windows;
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
         let reap_permit = thread_reaper::reserve().map_err(str::to_owned)?;

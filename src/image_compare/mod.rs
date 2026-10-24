@@ -268,7 +268,7 @@ mod tests {
     }
 
     fn test_dib_24(width: i32, height: i32) -> Vec<u8> {
-        let stride = ((width as usize * 3 + 3) / 4) * 4;
+        let stride = (width as usize * 3).div_ceil(4) * 4;
         let mut bytes = vec![0u8; 40 + stride * height.unsigned_abs() as usize];
         bytes[0..4].copy_from_slice(&40u32.to_le_bytes());
         bytes[4..8].copy_from_slice(&width.to_le_bytes());

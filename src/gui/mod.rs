@@ -1406,7 +1406,7 @@ impl LauncherApp {
         expected_kind: crate::target_repair::FilesystemTargetKind,
         presentation_token: u64,
     ) -> Result<(), crate::target_repair::RepairFailure> {
-        let client = self.target_repair_client.as_ref().ok_or_else(|| {
+        let client = self.target_repair_client.as_ref().ok_or({
             crate::target_repair::RepairFailure {
                 kind: crate::target_repair::RepairFailureKind::WorkerUnavailable,
                 message: "Target repair is unavailable.",

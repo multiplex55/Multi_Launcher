@@ -292,7 +292,7 @@ fn rects_intersect(a: RECT, b: RECT) -> bool {
 }
 
 fn foreground_is_excluded(hwnd: usize, excluded_windows: &[usize]) -> bool {
-    excluded_windows.iter().any(|excluded| *excluded == hwnd)
+    excluded_windows.contains(&hwnd)
 }
 
 #[cfg(test)]

@@ -749,16 +749,16 @@ impl TableUtilitySession {
         self.parse_options = options;
         self.source_dirty = true;
         self.message = None;
-        if let Some(path) = reread_path {
-            if let Err(message) = self.queue_file_read(path) {
-                let revision = self.source_revision;
-                self.source_load_state = TableSourceLoadState::Failed {
-                    revision,
-                    message: message.clone(),
-                };
-                self.restore_last_parse_state();
-                self.message = Some(message);
-            }
+        if let Some(path) = reread_path
+            && let Err(message) = self.queue_file_read(path)
+        {
+            let revision = self.source_revision;
+            self.source_load_state = TableSourceLoadState::Failed {
+                revision,
+                message: message.clone(),
+            };
+            self.restore_last_parse_state();
+            self.message = Some(message);
         }
     }
 

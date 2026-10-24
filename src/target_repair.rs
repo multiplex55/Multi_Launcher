@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{
     Arc, Condvar, Mutex,
     atomic::{AtomicU64, Ordering},
@@ -894,10 +894,10 @@ impl TargetRepairCoordinator {
                         committed
                     }
                     Err(error) => {
-                        if error.kind == RepairFailureKind::RecoveryConflict {
-                            if let Some(operation) = usage_operation.as_ref() {
-                                operation.mark_recovery_conflict();
-                            }
+                        if error.kind == RepairFailureKind::RecoveryConflict
+                            && let Some(operation) = usage_operation.as_ref()
+                        {
+                            operation.mark_recovery_conflict();
                         }
                         if error.kind != RepairFailureKind::RecoveryConflict {
                             watch_fence.resolve();
@@ -965,10 +965,10 @@ impl TargetRepairCoordinator {
                         committed
                     }
                     Err(error) => {
-                        if error.kind == RepairFailureKind::RecoveryConflict {
-                            if let Some(operation) = usage_operation.as_ref() {
-                                operation.mark_recovery_conflict();
-                            }
+                        if error.kind == RepairFailureKind::RecoveryConflict
+                            && let Some(operation) = usage_operation.as_ref()
+                        {
+                            operation.mark_recovery_conflict();
                         }
                         if error.kind != RepairFailureKind::RecoveryConflict {
                             watch_fence.resolve();
@@ -2602,11 +2602,8 @@ impl TargetRepairClient {
 
     pub fn poll_completions(&self) -> Vec<RepairCompletion> {
         let mut completions = Vec::new();
-        loop {
-            match self.completion_rx.try_recv() {
-                Ok(completion) => completions.push(completion),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-            }
+        while let Ok(completion) = self.completion_rx.try_recv() {
+            completions.push(completion);
         }
         self.lifecycle.acknowledge_completions(completions.len());
         completions
@@ -3298,7 +3295,7 @@ mod tests {
         revision.fetch_add(1, Ordering::AcqRel);
         let result = persist_transaction(
             root,
-            &[change.clone()],
+            std::slice::from_ref(&change),
             disk_reader,
             write_store,
             Some(&snapshot),

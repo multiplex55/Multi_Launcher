@@ -240,10 +240,10 @@ impl DuplicateFinderDialogState {
         self.status = None;
         self.bump_target_revision();
         #[cfg(any(test, feature = "dev-smoke-binaries"))]
-        if self.release_fixture_gate_on_close {
-            if let Some(checkpoint) = self.first_read_checkpoint.as_ref() {
-                checkpoint.release();
-            }
+        if self.release_fixture_gate_on_close
+            && let Some(checkpoint) = self.first_read_checkpoint.as_ref()
+        {
+            checkpoint.release();
         }
     }
 
@@ -701,11 +701,12 @@ impl DuplicateFinderDialogState {
                 crate::gui::jump_mode::TargetKind::Button,
                 order,
             );
-            if pick.clicked() && commit_enabled {
-                if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                    self.add_selected_root(path)
-                        .unwrap_or_else(|error| self.status = Some(error));
-                }
+            if pick.clicked()
+                && commit_enabled
+                && let Some(path) = rfd::FileDialog::new().pick_folder()
+            {
+                self.add_selected_root(path)
+                    .unwrap_or_else(|error| self.status = Some(error));
             }
             let add = ui.add_enabled(enabled, egui::Button::new("Add Root"));
             self.record_response("add-root", &add);

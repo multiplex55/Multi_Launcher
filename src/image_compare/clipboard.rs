@@ -71,7 +71,7 @@ pub(super) fn load_windows_clipboard(
     let global = HGLOBAL(handle.0);
     // GlobalSize examines the provider-owned allocation without copying it.
     let size = unsafe { GlobalSize(global) };
-    if size < 40 || size > MAX_CLIPBOARD_DIB_BYTES {
+    if !(40..=MAX_CLIPBOARD_DIB_BYTES).contains(&size) {
         return Err(ImageCompareError::Unsupported(format!(
             "clipboard DIB storage size {size} is outside the supported bound"
         )));

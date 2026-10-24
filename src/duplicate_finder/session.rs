@@ -557,10 +557,10 @@ impl Drop for DuplicateFinderSession {
             }
             self.shared.changed.notify_all();
         }
-        if let Some(WorkerSlot::Running(WorkerOwner { join, reap_permit })) = worker_slot.take() {
-            if let Err(error) = reap_permit.reap(join) {
-                tracing::error!(%error, "failed to transfer duplicate discovery worker to join reaper");
-            }
+        if let Some(WorkerSlot::Running(WorkerOwner { join, reap_permit })) = worker_slot.take()
+            && let Err(error) = reap_permit.reap(join)
+        {
+            tracing::error!(%error, "failed to transfer duplicate discovery worker to join reaper");
         }
     }
 }

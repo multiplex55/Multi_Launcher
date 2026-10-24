@@ -1250,7 +1250,7 @@ fn rgba_color_image(
             return Err("image presentation was superseded".into());
         }
         let _ = row_index;
-        pixels.extend(row.chunks_exact(4).map(|pixel| {
+        pixels.extend(row.as_chunks::<4>().0.iter().map(|pixel| {
             egui::Color32::from_rgba_unmultiplied(pixel[0], pixel[1], pixel[2], pixel[3])
         }));
     }
@@ -1758,8 +1758,8 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         loop {
             let snapshot = dialog.session.snapshot();
-            if snapshot.input_a.is_some() {
-                let caption = input_caption(ImageSide::A, snapshot.input_a.as_ref().unwrap());
+            if let Some(input_a) = snapshot.input_a.as_ref() {
+                let caption = input_caption(ImageSide::A, input_a);
                 assert!(caption.contains("Current input A: owned-a.png (2 × 1)"));
                 assert!(
                     snapshot.input_b.is_none(),

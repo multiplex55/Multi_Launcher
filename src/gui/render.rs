@@ -24579,7 +24579,7 @@ mod tests {
         parking.before_next_restore(move || {
             let (revision, ()) = revision.request_with_focus_intent_and_invocation(
                 crate::visibility::RootFocusIntent::PreserveForeground,
-                Some(0x5C4E_3E),
+                Some(0x005C_4E3E),
                 || {
                     visible.store(false, Ordering::SeqCst);
                     restore.store(false, Ordering::SeqCst);
@@ -24631,7 +24631,7 @@ mod tests {
             focus_intent,
             crate::visibility::RootFocusIntent::PreserveForeground
         );
-        assert_eq!(invocation_id, Some(0x5C4E_3E));
+        assert_eq!(invocation_id, Some(0x005C_4E3E));
         assert!(!app.visible_flag.load(Ordering::Acquire));
         assert!(!app.restore_flag.load(Ordering::Acquire));
         assert!(!app.last_visible);

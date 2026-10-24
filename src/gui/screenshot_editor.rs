@@ -986,10 +986,9 @@ impl ScreenshotEditor {
                     && response.clicked_by(PointerButton::Primary)
                     && self.last_marker_click_frame != Some(marker_click_frame)
                     && let Some(pos) = response.interact_pointer_pos()
+                    && self.place_marker(to_img(pos))
                 {
-                    if self.place_marker(to_img(pos)) {
-                        self.last_marker_click_frame = Some(marker_click_frame);
-                    }
+                    self.last_marker_click_frame = Some(marker_click_frame);
                 }
                 #[cfg(test)]
                 if self.test_force_marker_discard {

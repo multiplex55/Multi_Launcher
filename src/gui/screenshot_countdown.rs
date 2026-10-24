@@ -129,6 +129,7 @@ pub(crate) struct ScreenshotCountdownTestNative {
 }
 
 #[cfg(test)]
+#[derive(Default)]
 struct TestNativeState {
     alive: bool,
     visible: bool,
@@ -152,24 +153,6 @@ impl Default for ScreenshotCountdownTestNative {
                 valid_identity: true,
                 ..Default::default()
             })),
-        }
-    }
-}
-
-#[cfg(test)]
-impl Default for TestNativeState {
-    fn default() -> Self {
-        Self {
-            alive: false,
-            visible: false,
-            root_hidden: false,
-            acknowledge_visibility: false,
-            allow_destroy: false,
-            valid_identity: false,
-            root_hwnd: None,
-            title: None,
-            signals: None,
-            operations: Vec::new(),
         }
     }
 }
@@ -722,7 +705,7 @@ impl ScreenshotCountdownPresentation {
                             Some(CountdownEvent::Closed(id))
                         }
                         Err(error) => {
-                            let event = if !active.close_timeout_reported
+                            if !active.close_timeout_reported
                                 && now.saturating_duration_since(active.stage_started_at)
                                     > WINDOW_CLOSE_TIMEOUT
                             {
@@ -731,8 +714,7 @@ impl ScreenshotCountdownPresentation {
                             } else {
                                 ctx.request_repaint_after(NATIVE_POLL_INTERVAL);
                                 None
-                            };
-                            event
+                            }
                         }
                     }
                 } else if can_finish_native_retirement(
@@ -1130,7 +1112,7 @@ mod native {
                 unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
             }
             WM_COMMAND
-                if (wparam.0 & 0xFFFF) as usize == CANCEL_CONTROL_ID
+                if (wparam.0 & 0xFFFF) == CANCEL_CONTROL_ID
                     && (wparam.0 >> 16) as u32 == BN_CLICKED
                     && lparam.0 as usize
                         == unsafe { &*(reference_data as *const ChildSignals) }

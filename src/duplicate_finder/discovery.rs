@@ -61,18 +61,10 @@ pub(super) trait DiscoveryJob: Send + Sync + 'static {
     ) -> DiscoverySnapshot;
 }
 
+#[derive(Default)]
 pub(super) struct NativeDiscoveryJob {
     #[cfg(any(test, feature = "dev-smoke-binaries"))]
     first_read_checkpoint: Option<std::sync::Arc<super::content::FirstReadCheckpointGate>>,
-}
-
-impl Default for NativeDiscoveryJob {
-    fn default() -> Self {
-        Self {
-            #[cfg(any(test, feature = "dev-smoke-binaries"))]
-            first_read_checkpoint: None,
-        }
-    }
 }
 
 #[cfg(any(test, feature = "dev-smoke-binaries"))]
