@@ -1666,14 +1666,15 @@ mod tests {
     fn m7d_query_statuses_preserve_zero_scalar_and_failure_distinctions() {
         let parsed_sources = Arc::new(Mutex::new(Vec::new()));
         let closed_documents = Arc::new(Mutex::new(Vec::new()));
-        let session = XmlEngineSession::start_with_engine(fake_engine(
-            parsed_sources,
-            closed_documents,
-            None,
-            None,
-            None,
-        ))
-        .unwrap();
+        let (query_started_sender, query_started_receiver) = mpsc::channel();
+        // If an assertion unwinds before the explicit release, dropping the
+        // sender disconnects the fake worker's blocking receive and lets it exit.
+        let (query_release_sender, query_release_receiver) = mpsc::channel();
+        let mut engine = fake_engine(parsed_sources, closed_documents, None, None, None);
+        engine.blocked_query_expression = Some("items".into());
+        engine.query_started = Some(query_started_sender);
+        engine.query_release = Some(query_release_receiver);
+        let session = XmlEngineSession::start_with_engine(engine).unwrap();
         let revision = session.replace_source("valid".into()).unwrap();
         let parsed = wait_for(&session, |snapshot| {
             snapshot.revision == Some(revision) && snapshot.parse == XmlParseStatus::Ready
@@ -1711,10 +1712,21 @@ mod tests {
 
         let node_request = xpath_request(&parsed, 1, "items", vec![], 1);
         session.request_xpath(node_request.clone()).unwrap();
+        query_started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the first query is held by the fake engine before publication");
         assert_eq!(
             session.snapshot().xpath,
             XmlXPathStatus::Pending(node_request.clone())
         );
+        let pending = session.snapshot();
+        assert_eq!(pending.revision, Some(revision));
+        assert_eq!(pending.parse, XmlParseStatus::Ready);
+        assert_eq!(pending.tree, parsed.tree);
+        assert_eq!(pending.output, parsed.output);
+        query_release_sender
+            .send(())
+            .expect("release the query even if later assertions unwind");
         let nodes = wait_for(
             &session,
             |snapshot| matches!(&snapshot.xpath, XmlXPathStatus::Nodes { request, .. } if request == &node_request),

@@ -10922,7 +10922,7 @@ mod tests {
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     static MACRO_ACTIVATION_TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -20182,6 +20182,55 @@ mod tests {
         provider_generation: u64,
         catalog_versions: crate::radial::dynamic::MutableResultCatalogVersions,
         frame_index: usize,
+        progress_enabled: bool,
+    }
+
+    fn track_c2g_progress(
+        enabled: bool,
+        case: TrackC2GCase,
+        count: usize,
+        fixture_signature: Option<u64>,
+        phase: &'static str,
+        step: Option<usize>,
+        kind: Option<&'static str>,
+        frame: Option<usize>,
+        elapsed: Option<Duration>,
+    ) {
+        if !enabled {
+            return;
+        }
+        eprintln!(
+            "track_c2g_progress case={} count={} fixture={:?} phase={} step={:?} kind={:?} frame={:?} elapsed_ns={}",
+            case.token(),
+            count,
+            fixture_signature.map(|signature| format!("{signature:016x}")),
+            phase,
+            step,
+            kind,
+            frame,
+            elapsed.map_or_else(|| "-".to_owned(), |value| value.as_nanos().to_string()),
+        );
+    }
+
+    fn track_c2g_validation_identity(
+        enabled: bool,
+        case: TrackC2GCase,
+        count: usize,
+        fixture_signature: u64,
+        step: usize,
+        kind: &'static str,
+        frame: usize,
+        state_id: u64,
+        geometry_id: u64,
+        viewport_id: u64,
+    ) {
+        if enabled {
+            eprintln!(
+                "track_c2g_progress case={} count={} fixture={fixture_signature:016x} phase=validated_identity step={step} kind={kind} frame={frame} state={state_id:016x} geometry={geometry_id:016x} viewport={viewport_id:016x}",
+                case.token(),
+                count,
+            );
+        }
     }
 
     fn track_c2g_prepare_state(
@@ -20189,9 +20238,42 @@ mod tests {
         count: usize,
         case: TrackC2GCase,
     ) -> TrackC2GState {
+        track_c2g_prepare_state_with_progress(root, count, case, false)
+    }
+
+    fn track_c2g_prepare_state_with_progress(
+        root: &std::path::Path,
+        count: usize,
+        case: TrackC2GCase,
+        progress_enabled: bool,
+    ) -> TrackC2GState {
         use crate::performance::track_c_workloads::action_fixture;
 
+        let preparation_started = Instant::now();
+        track_c2g_progress(
+            progress_enabled,
+            case,
+            count,
+            None,
+            "prepare_start",
+            None,
+            None,
+            None,
+            None,
+        );
         let catalog = action_fixture(count).values;
+        let fixture_signature = track_c2g_fixture_signature(case, count, &catalog);
+        track_c2g_progress(
+            progress_enabled,
+            case,
+            count,
+            Some(fixture_signature),
+            "catalog_ready",
+            None,
+            None,
+            None,
+            Some(preparation_started.elapsed()),
+        );
         let ctx = egui::Context::default();
         let mut app = root_list_app_at(&ctx, catalog.clone(), root);
         app.folder_aliases.clear();
@@ -20228,7 +20310,29 @@ mod tests {
         assert!(app.completion_index.is_some());
         assert!(app.completion_rebuild_after.is_none());
         assert!(!app.action_completion_dirty && !app.command_completion_dirty);
+        track_c2g_progress(
+            progress_enabled,
+            case,
+            count,
+            Some(fixture_signature),
+            "initial_search_start",
+            None,
+            None,
+            None,
+            Some(preparation_started.elapsed()),
+        );
         app.search();
+        track_c2g_progress(
+            progress_enabled,
+            case,
+            count,
+            Some(fixture_signature),
+            "initial_search_complete",
+            None,
+            None,
+            None,
+            Some(preparation_started.elapsed()),
+        );
 
         let expected_provider_action = provider_action
             .as_ref()
@@ -20268,11 +20372,57 @@ mod tests {
         app.last_visible = true;
         app.follow_mouse = false;
         focus_launcher_query(&ctx, &mut app);
+        track_c2g_progress(
+            progress_enabled,
+            case,
+            count,
+            Some(fixture_signature),
+            "settle_frames_start",
+            None,
+            None,
+            Some(0),
+            Some(preparation_started.elapsed()),
+        );
         for frame in 0..9 {
+            let frame_started = Instant::now();
             run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
                 .drop_without_applying_deltas();
+            track_c2g_progress(
+                progress_enabled,
+                case,
+                count,
+                Some(fixture_signature),
+                "settle_frame_complete",
+                None,
+                None,
+                Some(frame),
+                Some(frame_started.elapsed()),
+            );
         }
+        let refresh_started = Instant::now();
+        track_c2g_progress(
+            progress_enabled,
+            case,
+            count,
+            Some(fixture_signature),
+            "dashboard_refresh_wait_start",
+            None,
+            None,
+            Some(9),
+            Some(preparation_started.elapsed()),
+        );
         app.dashboard_data_cache.wait_for_refresh();
+        track_c2g_progress(
+            progress_enabled,
+            case,
+            count,
+            Some(fixture_signature),
+            "dashboard_refresh_wait_complete",
+            None,
+            None,
+            Some(9),
+            Some(refresh_started.elapsed()),
+        );
         assert_eq!(app.plugins.search_generation(), provider_generation);
         assert_eq!(app.results, expected_initial);
         assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
@@ -20281,7 +20431,17 @@ mod tests {
         assert_eq!(app.track_c_query_observer.snapshot().frame_count, 0);
         provider_calls.store(0, Ordering::SeqCst);
 
-        let fixture_signature = track_c2g_fixture_signature(case, count, &catalog);
+        track_c2g_progress(
+            progress_enabled,
+            case,
+            count,
+            Some(fixture_signature),
+            "prepare_complete",
+            None,
+            None,
+            Some(9),
+            Some(preparation_started.elapsed()),
+        );
         TrackC2GState {
             app,
             ctx,
@@ -20295,6 +20455,7 @@ mod tests {
             provider_generation,
             catalog_versions,
             frame_index: 9,
+            progress_enabled,
         }
     }
 
@@ -20578,18 +20739,95 @@ mod tests {
         let provider_generation_before = state.app.plugins.search_generation();
         let frame = state.frame_index;
         state.frame_index = state.frame_index.saturating_add(1);
-        let started = Instant::now();
+        let step_started = Instant::now();
+        track_c2g_progress(
+            state.progress_enabled,
+            state.case,
+            state.count,
+            Some(state.fixture_signature),
+            "render_start",
+            Some(step_index),
+            Some(kind),
+            Some(frame),
+            None,
+        );
+        let render_started = Instant::now();
         let output = run_root_list_frame(&state.ctx, &mut state.app, frame, width, height, events);
         output.drop_without_applying_deltas();
-        let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let render_elapsed = render_started.elapsed();
+        let elapsed_ns = render_elapsed.as_nanos().min(u64::MAX as u128) as u64;
+        track_c2g_progress(
+            state.progress_enabled,
+            state.case,
+            state.count,
+            Some(state.fixture_signature),
+            "render_complete",
+            Some(step_index),
+            Some(kind),
+            Some(frame),
+            Some(render_elapsed),
+        );
         let after = state.app.track_c_query_observer.snapshot();
         let provider_calls_after = state.provider_calls.load(Ordering::SeqCst) as u64;
+        if state.progress_enabled {
+            eprintln!(
+                "track_c2g_progress case={} count={} fixture={:016x} phase=query_observer step={} kind={} frame={} observer_frames={} intents={} completed={} superseded={} cancelled={} receipts={} provider_calls={}",
+                state.case.token(),
+                state.count,
+                state.fixture_signature,
+                step_index,
+                kind,
+                frame,
+                after.frame_count,
+                after.intent_count,
+                after.completed_count,
+                after.superseded_count,
+                after.cancelled_count,
+                after.receipt_count,
+                provider_calls_after,
+            );
+        }
+        let validation_started = Instant::now();
+        track_c2g_progress(
+            state.progress_enabled,
+            state.case,
+            state.count,
+            Some(state.fixture_signature),
+            "validation_start",
+            Some(step_index),
+            Some(kind),
+            Some(frame),
+            Some(step_started.elapsed()),
+        );
         let (full_state_id, geometry_id, viewport_id) = track_c2g_validate_frame(
             state,
             expected_query,
             &track_c2g_expected_state_for_query(state, expected_query, capacity_deferred),
             capacity_deferred,
             expected_selected,
+        );
+        track_c2g_validation_identity(
+            state.progress_enabled,
+            state.case,
+            state.count,
+            state.fixture_signature,
+            step_index,
+            kind,
+            frame,
+            full_state_id,
+            geometry_id,
+            viewport_id,
+        );
+        track_c2g_progress(
+            state.progress_enabled,
+            state.case,
+            state.count,
+            Some(state.fixture_signature),
+            "validation_complete",
+            Some(step_index),
+            Some(kind),
+            Some(frame),
+            Some(validation_started.elapsed()),
         );
         let app = &state.app;
         let geometry_by_cause = track_c2g_geometry_pairs(before, after);
@@ -20643,6 +20881,17 @@ mod tests {
             "geometry_id": format!("{geometry_id:016x}"),
             "viewport_id": format!("{viewport_id:016x}"),
         });
+        track_c2g_progress(
+            state.progress_enabled,
+            state.case,
+            state.count,
+            Some(state.fixture_signature),
+            "step_complete",
+            Some(step_index),
+            Some(kind),
+            Some(frame),
+            Some(step_started.elapsed()),
+        );
         TrackC2GFrameObservation {
             json,
             provider_calls_delta: provider_calls_after.saturating_sub(provider_calls_before),
@@ -20690,6 +20939,17 @@ mod tests {
         use crate::gui::track_c_query_observer::{Cause, Terminal};
 
         let started = Instant::now();
+        track_c2g_progress(
+            state.progress_enabled,
+            state.case,
+            state.count,
+            Some(state.fixture_signature),
+            "sequence_start",
+            None,
+            None,
+            Some(state.frame_index),
+            None,
+        );
         let mut steps = Vec::with_capacity(state.case.step_count());
         match state.case {
             TrackC2GCase::TypedSuffixSequence => {
@@ -21075,9 +21335,10 @@ mod tests {
             assert_eq!(state.provider_calls.load(Ordering::SeqCst), 0);
         }
         assert_eq!(steps.len(), state.case.step_count());
+        let step_count = steps.len();
         let last_actions_id =
             crate::performance::track_c_workloads::action_fixture_identity(&state.app.results);
-        serde_json::json!({
+        let sample = serde_json::json!({
             "sequence_elapsed_ns": sequence_elapsed_ns,
             "sequence_frame_count": snapshot.frame_count,
             "intents": receipts,
@@ -21091,7 +21352,19 @@ mod tests {
             "full_state_id": format!("{:016x}", track_c2g_full_state_id(&state.app)),
             "geometry_id": format!("{:016x}", track_c2g_geometry_id(&state.app)),
             "viewport_id": format!("{:016x}", track_c2g_viewport_id(&state.app)),
-        })
+        });
+        track_c2g_progress(
+            state.progress_enabled,
+            state.case,
+            state.count,
+            Some(state.fixture_signature),
+            "sequence_complete",
+            Some(step_count),
+            None,
+            Some(state.frame_index),
+            Some(started.elapsed()),
+        );
+        sample
     }
 
     fn track_c2g_run_record(
@@ -21099,10 +21372,53 @@ mod tests {
         count: usize,
         root: &std::path::Path,
     ) -> serde_json::Value {
-        let mut state = track_c2g_prepare_state(root, count, case);
+        track_c2g_run_record_with_progress(case, count, root, false)
+    }
+
+    fn track_c2g_run_record_with_progress(
+        case: TrackC2GCase,
+        count: usize,
+        root: &std::path::Path,
+        progress_enabled: bool,
+    ) -> serde_json::Value {
+        track_c2g_progress(
+            progress_enabled,
+            case,
+            count,
+            None,
+            "record_start",
+            None,
+            None,
+            None,
+            None,
+        );
+        let mut state = track_c2g_prepare_state_with_progress(root, count, case, progress_enabled);
         let sample = track_c2g_run_sequence(&mut state);
+        let fixture_signature = state.fixture_signature;
+        track_c2g_progress(
+            progress_enabled,
+            case,
+            count,
+            Some(state.fixture_signature),
+            "teardown_start",
+            None,
+            None,
+            Some(state.frame_index),
+            None,
+        );
         drop(state.capacity.take());
         drop(state);
+        track_c2g_progress(
+            progress_enabled,
+            case,
+            count,
+            Some(fixture_signature),
+            "teardown_complete",
+            None,
+            None,
+            None,
+            None,
+        );
         sample
     }
 
@@ -21140,7 +21456,7 @@ mod tests {
             );
         };
         for case in TrackC2GCase::ALL {
-            let sample = track_c2g_run_record(case, 100, workspace.root());
+            let sample = track_c2g_run_record_with_progress(case, 100, workspace.root(), true);
             assert_eq!(sample["steps"].as_array().unwrap().len(), case.step_count());
             assert_eq!(
                 sample["intents"].as_array().unwrap().len(),
@@ -21151,8 +21467,12 @@ mod tests {
             }
         }
         for count in [1_000, 10_000] {
-            let sample =
-                track_c2g_run_record(TrackC2GCase::ViewportControls, count, workspace.root());
+            let sample = track_c2g_run_record_with_progress(
+                TrackC2GCase::ViewportControls,
+                count,
+                workspace.root(),
+                true,
+            );
             assert_eq!(sample["intents"].as_array().unwrap().len(), 0);
             assert_viewport_recipe(&sample);
         }
