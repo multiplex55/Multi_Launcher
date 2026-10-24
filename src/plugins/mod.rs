@@ -11,6 +11,7 @@ pub mod clipboard_modify;
 pub mod color_picker;
 pub mod convert_panel;
 pub mod crop;
+pub mod csv;
 pub mod data;
 pub mod date_arithmetic;
 pub mod diff;

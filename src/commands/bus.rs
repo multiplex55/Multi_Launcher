@@ -154,7 +154,7 @@ mod tests {
         ocr_requests: usize,
         json_utility_intents: Vec<crate::commands::JsonUtilityIntent>,
         xml_toolkit_opens: usize,
-        table_utility_opens: usize,
+        table_utility_profiles: Vec<crate::table_utility::TableUtilityProfile>,
         batch_rename_opens: usize,
         search_replace_opens: usize,
         hotfolder_commands: Vec<crate::commands::HotFolderCommand>,
@@ -431,8 +431,8 @@ mod tests {
         }
     }
     impl crate::commands::TableUtilityCommandHost for FakeHost {
-        fn open_table_utility(&mut self) {
-            self.table_utility_opens += 1;
+        fn open_table_utility(&mut self, profile: crate::table_utility::TableUtilityProfile) {
+            self.table_utility_profiles.push(profile);
         }
     }
     impl crate::commands::BatchRenameCommandHost for FakeHost {
@@ -859,18 +859,23 @@ mod tests {
     #[test]
     fn table_command_opens_once_through_typed_host_and_requires_gui_headlessly() {
         let mut host = FakeHost::default();
-        let outcome = CommandBus
+        let table = CommandBus
             .dispatch(
                 &invocation(Command::TableUtility(
-                    crate::commands::TableUtilityCommand::Open,
+                    crate::commands::TableUtilityCommand::Open {
+                        profile: crate::table_utility::TableUtilityProfile::Table,
+                    },
                 )),
                 &mut host,
             )
             .expect("typed Table Utility command");
 
-        assert_eq!(host.table_utility_opens, 1);
+        assert_eq!(
+            host.table_utility_profiles,
+            [crate::table_utility::TableUtilityProfile::Table]
+        );
         assert_eq!(host.headless_calls, 0);
-        assert_eq!(outcome, crate::commands::CommandOutcome::default());
+        assert_eq!(table, crate::commands::CommandOutcome::default());
 
         let action = Action {
             label: "Open Table Utility".into(),
@@ -879,11 +884,35 @@ mod tests {
             args: None,
         };
         let error = crate::commands::headless::execute(
-            Command::TableUtility(crate::commands::TableUtilityCommand::Open),
+            Command::TableUtility(crate::commands::TableUtilityCommand::Open {
+                profile: crate::table_utility::TableUtilityProfile::Table,
+            }),
             &action,
         )
         .expect_err("headless callers cannot open a window");
         assert!(error.to_string().contains("require the launcher interface"));
+    }
+
+    #[test]
+    fn csv_route_opens_once_through_typed_host() {
+        let mut host = FakeHost::default();
+        let outcome = CommandBus
+            .dispatch(
+                &invocation(Command::TableUtility(
+                    crate::commands::TableUtilityCommand::Open {
+                        profile: crate::table_utility::TableUtilityProfile::Csv,
+                    },
+                )),
+                &mut host,
+            )
+            .expect("typed CSV command");
+
+        assert_eq!(
+            host.table_utility_profiles,
+            [crate::table_utility::TableUtilityProfile::Csv]
+        );
+        assert_eq!(host.headless_calls, 0);
+        assert_eq!(outcome, crate::commands::CommandOutcome::default());
     }
 
     #[test]

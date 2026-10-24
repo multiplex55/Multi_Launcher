@@ -5,7 +5,7 @@ where
     H: TableUtilityCommandHost + ?Sized,
 {
     match command {
-        TableUtilityCommand::Open => host.open_table_utility(),
+        TableUtilityCommand::Open { profile } => host.open_table_utility(profile),
     }
     CommandOutcome::default()
 }

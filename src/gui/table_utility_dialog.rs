@@ -4,7 +4,8 @@ use crate::clipboard_modify::clipboard::{
 use crate::common::atomic_file;
 use crate::table_utility::{
     DelimiterChoice, EffectiveSortMode, RowWidthPolicy, TableDelimiter, TableDocument,
-    TableJsonShape, TableSort, TableSortDirection, TableSortMode, TableWarning,
+    TableJsonShape, TableObjectShapeAvailability, TableSort, TableSortDirection, TableSortMode,
+    TableUtilityProfile, TableWarning,
 };
 use crate::table_utility_session::{
     TableExportKind, TableExportOperation, TableExportPayload, TableExportReceipt,
@@ -53,6 +54,7 @@ enum SaveOutcome {
 pub struct TableUtilityDialogState {
     pub open: bool,
     session: TableUtilitySession,
+    profile: TableUtilityProfile,
     clipboard: Arc<dyn ClipboardBackend>,
     source_editor: String,
     source_editor_revision: Option<u64>,
@@ -66,6 +68,8 @@ pub struct TableUtilityDialogState {
     session_open_error: Option<String>,
     #[cfg(test)]
     test_delimiter_option_ids: Vec<(DelimiterChoice, egui::Id)>,
+    #[cfg(test)]
+    test_row_width_option_ids: Vec<(RowWidthPolicy, egui::Id)>,
     #[cfg(test)]
     test_first_header_column_rect: Option<egui::Rect>,
     #[cfg(test)]
@@ -87,13 +91,35 @@ pub struct TableUtilityDialogState {
     #[cfg(test)]
     test_open_response: Option<TestWidgetResponse>,
     #[cfg(test)]
+    test_header_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
     test_copy_tsv_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_copy_csv_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_copy_previous_csv_response: Option<TestWidgetResponse>,
     #[cfg(test)]
     test_copy_json_response: Option<TestWidgetResponse>,
     #[cfg(test)]
     test_save_json_response: Option<TestWidgetResponse>,
     #[cfg(test)]
     test_source_editor_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_filter_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_first_sort_header_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_first_column_select_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_column_select_responses: Vec<(usize, TestWidgetResponse)>,
+    #[cfg(test)]
+    test_first_row_select_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_json_objects_option_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_json_arrays_option_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_no_output_selection_hint: bool,
     #[cfg(test)]
     test_source_preview_chars: usize,
     #[cfg(test)]
@@ -113,6 +139,7 @@ impl Default for TableUtilityDialogState {
         Self {
             open: false,
             session: TableUtilitySession::new(),
+            profile: TableUtilityProfile::Table,
             clipboard: Arc::new(ArboardClipboardBackend),
             source_editor: String::new(),
             source_editor_revision: None,
@@ -126,6 +153,8 @@ impl Default for TableUtilityDialogState {
             session_open_error: None,
             #[cfg(test)]
             test_delimiter_option_ids: Vec::new(),
+            #[cfg(test)]
+            test_row_width_option_ids: Vec::new(),
             #[cfg(test)]
             test_first_header_column_rect: None,
             #[cfg(test)]
@@ -147,13 +176,35 @@ impl Default for TableUtilityDialogState {
             #[cfg(test)]
             test_open_response: None,
             #[cfg(test)]
+            test_header_response: None,
+            #[cfg(test)]
             test_copy_tsv_response: None,
+            #[cfg(test)]
+            test_copy_csv_response: None,
+            #[cfg(test)]
+            test_copy_previous_csv_response: None,
             #[cfg(test)]
             test_copy_json_response: None,
             #[cfg(test)]
             test_save_json_response: None,
             #[cfg(test)]
             test_source_editor_response: None,
+            #[cfg(test)]
+            test_filter_response: None,
+            #[cfg(test)]
+            test_first_sort_header_response: None,
+            #[cfg(test)]
+            test_first_column_select_response: None,
+            #[cfg(test)]
+            test_column_select_responses: Vec::new(),
+            #[cfg(test)]
+            test_first_row_select_response: None,
+            #[cfg(test)]
+            test_json_objects_option_response: None,
+            #[cfg(test)]
+            test_json_arrays_option_response: None,
+            #[cfg(test)]
+            test_no_output_selection_hint: false,
             #[cfg(test)]
             test_source_preview_chars: 0,
             #[cfg(test)]
@@ -174,6 +225,29 @@ impl TableUtilityDialogState {
     pub fn open(&mut self) {
         self.open = true;
         self.pending_overwrite = None;
+    }
+
+    pub(crate) fn open_with_profile(&mut self, profile: TableUtilityProfile) {
+        if self.profile != profile {
+            self.profile = profile;
+            self.pending_export = None;
+            self.pending_overwrite = None;
+            self.status = None;
+            self.session
+                .set_parse_options(profile.initial_parse_options());
+            if let Some(sort) = self.session.view_options().sort {
+                self.session.set_sort(Some(TableSort {
+                    mode: profile.sort_mode(),
+                    ..sort
+                }));
+            }
+        }
+        self.open();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn profile_for_test(&self) -> TableUtilityProfile {
+        self.profile
     }
 
     pub fn close(&mut self) {
@@ -364,10 +438,21 @@ impl TableUtilityDialogState {
         {
             self.test_paste_response = None;
             self.test_open_response = None;
+            self.test_header_response = None;
             self.test_copy_tsv_response = None;
+            self.test_copy_csv_response = None;
+            self.test_copy_previous_csv_response = None;
             self.test_copy_json_response = None;
             self.test_save_json_response = None;
             self.test_source_editor_response = None;
+            self.test_filter_response = None;
+            self.test_first_sort_header_response = None;
+            self.test_first_column_select_response = None;
+            self.test_column_select_responses.clear();
+            self.test_first_row_select_response = None;
+            self.test_json_objects_option_response = None;
+            self.test_json_arrays_option_response = None;
+            self.test_no_output_selection_hint = false;
             self.test_source_preview_chars = 0;
             self.test_source_preview_truncated = false;
             self.test_rendered_row_range = None;
@@ -413,7 +498,11 @@ impl TableUtilityDialogState {
         let mut visual_order = 0_u64;
         let mut close_requested = false;
         let committing_owner = first_ui_pass && response_owner_current;
-        egui::Window::new("Table Utility")
+        let title = match self.profile {
+            TableUtilityProfile::Table => "Table Utility",
+            TableUtilityProfile::Csv => "CSV Viewer",
+        };
+        egui::Window::new(title)
             .id(egui::Id::new(Some("Table Utility")))
             .collapsible(false)
             .resizable(true)
@@ -519,6 +608,12 @@ impl TableUtilityDialogState {
         scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         order: &mut u64,
     ) {
+        ui.label(match self.profile {
+            TableUtilityProfile::Table => "Table profile · Auto delimiter · lenient rows",
+            TableUtilityProfile::Csv => {
+                "CSV profile · comma/tab delimiter · strict rows · 16 MiB input limit"
+            }
+        });
         ui.horizontal_wrapped(|ui| {
             let paste = ui.add_enabled(enabled, egui::Button::new("Paste Text"));
             #[cfg(test)]
@@ -574,6 +669,12 @@ impl TableUtilityDialogState {
                     .add_filter("Delimited text", &["csv", "tsv", "txt"])
                     .pick_file();
                 if let Some(path) = selected_path {
+                    if self.profile.is_csv()
+                        && let Some(delimiter) = delimiter_for_path(&path)
+                    {
+                        self.session
+                            .set_delimiter(DelimiterChoice::Explicit(delimiter));
+                    }
                     match self.session.request_file_read(path) {
                         Ok(()) => self.status = None,
                         Err(error) => self.status = Some(error),
@@ -593,11 +694,13 @@ impl TableUtilityDialogState {
                         DelimiterChoice::Explicit(TableDelimiter::Tab) => "TSV tab",
                     })
                     .show_ui(ui, |ui| {
-                        let _auto =
-                            ui.selectable_value(&mut delimiter, DelimiterChoice::Auto, "Auto");
-                        #[cfg(test)]
-                        self.test_delimiter_option_ids
-                            .push((DelimiterChoice::Auto, _auto.id));
+                        if !self.profile.is_csv() {
+                            let _auto =
+                                ui.selectable_value(&mut delimiter, DelimiterChoice::Auto, "Auto");
+                            #[cfg(test)]
+                            self.test_delimiter_option_ids
+                                .push((DelimiterChoice::Auto, _auto.id));
+                        }
                         let _comma = ui.selectable_value(
                             &mut delimiter,
                             DelimiterChoice::Explicit(TableDelimiter::Comma),
@@ -622,7 +725,11 @@ impl TableUtilityDialogState {
                 ui,
                 &delimiter_response.inner.response,
                 "parse/delimiter",
-                "Choose Auto, CSV, or TSV delimiter handling",
+                if self.profile.is_csv() {
+                    "Choose comma or tab delimiter handling"
+                } else {
+                    "Choose Auto, CSV, or TSV delimiter handling"
+                },
                 crate::gui::jump_mode::TargetKind::Button,
                 order,
             );
@@ -645,35 +752,64 @@ impl TableUtilityDialogState {
             if has_header_response.changed() && commit_enabled {
                 self.session.set_has_header(has_header);
             }
+            #[cfg(test)]
+            {
+                self.test_header_response = Some(TestWidgetResponse {
+                    id: has_header_response.id,
+                    rect: has_header_response.rect,
+                    enabled: has_header_response.enabled(),
+                });
+            }
 
-            let mut width_policy = snapshot.parse_options.row_width;
-            let width_response = ui.add_enabled_ui(combo_enabled, |ui| {
-                egui::ComboBox::from_id_salt("table-row-width")
-                    .selected_text(match width_policy {
-                        RowWidthPolicy::Lenient => "Lenient row widths",
-                        RowWidthPolicy::Strict => "Strict row widths",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut width_policy, RowWidthPolicy::Lenient, "Lenient");
-                        ui.selectable_value(&mut width_policy, RowWidthPolicy::Strict, "Strict");
-                    })
-            });
-            self.combo_anchor_ids[1] = Some(width_response.inner.response.id);
-            register_target(
-                scope,
-                ui,
-                &width_response.inner.response,
-                "parse/row-width",
-                "Choose lenient or strict row width handling",
-                crate::gui::jump_mode::TargetKind::Button,
-                order,
-            );
-            if combo_commit_enabled && width_policy != snapshot.parse_options.row_width {
-                self.session
-                    .set_parse_options(crate::table_utility::TableParseOptions {
-                        row_width: width_policy,
-                        ..snapshot.parse_options
-                    });
+            #[cfg(test)]
+            self.test_row_width_option_ids.clear();
+            if self.profile.is_csv() {
+                // CSV is a strict profile, not a user-selectable parser mode.
+                ui.label("Strict row widths");
+            } else {
+                let mut width_policy = snapshot.parse_options.row_width;
+                let width_response = ui.add_enabled_ui(combo_enabled, |ui| {
+                    egui::ComboBox::from_id_salt("table-row-width")
+                        .selected_text(match width_policy {
+                            RowWidthPolicy::Lenient => "Lenient row widths",
+                            RowWidthPolicy::Strict => "Strict row widths",
+                        })
+                        .show_ui(ui, |ui| {
+                            let lenient = ui.selectable_value(
+                                &mut width_policy,
+                                RowWidthPolicy::Lenient,
+                                "Lenient",
+                            );
+                            #[cfg(test)]
+                            self.test_row_width_option_ids
+                                .push((RowWidthPolicy::Lenient, lenient.id));
+                            let strict = ui.selectable_value(
+                                &mut width_policy,
+                                RowWidthPolicy::Strict,
+                                "Strict",
+                            );
+                            #[cfg(test)]
+                            self.test_row_width_option_ids
+                                .push((RowWidthPolicy::Strict, strict.id));
+                        })
+                });
+                self.combo_anchor_ids[1] = Some(width_response.inner.response.id);
+                register_target(
+                    scope,
+                    ui,
+                    &width_response.inner.response,
+                    "parse/row-width",
+                    "Choose lenient or strict row width handling",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    order,
+                );
+                if combo_commit_enabled && width_policy != snapshot.parse_options.row_width {
+                    self.session
+                        .set_parse_options(crate::table_utility::TableParseOptions {
+                            row_width: width_policy,
+                            ..snapshot.parse_options
+                        });
+                }
             }
 
             let parse = ui.add_enabled(enabled, egui::Button::new("Parse / Refresh"));
@@ -697,8 +833,19 @@ impl TableUtilityDialogState {
         ) {
             ui.label("Reading the selected file on the table worker…");
         }
-        if !snapshot.accepted_options_are_current() && snapshot.document.is_some() {
-            ui.weak("The results below are the last successful parse, with its recorded delimiter and options.");
+        if !snapshot.accepted_options_are_current()
+            && let Some(document) = snapshot.document.as_ref()
+        {
+            ui.weak(format!(
+                "Showing the last successful parse ({}, {}, {} row widths); the current source/settings have not parsed successfully.",
+                delimiter_label(document.delimiter()),
+                if document.options().has_header {
+                    "headers on"
+                } else {
+                    "headers off"
+                },
+                row_width_label(document.options().row_width),
+            ));
         }
         if let Some(document) = &snapshot.document {
             ui.horizontal_wrapped(|ui| {
@@ -822,6 +969,14 @@ impl TableUtilityDialogState {
                     .desired_width(240.0)
                     .hint_text("case-insensitive literal search"),
             );
+            #[cfg(test)]
+            {
+                self.test_filter_response = Some(TestWidgetResponse {
+                    id: response.id,
+                    rect: response.rect,
+                    enabled: response.enabled(),
+                });
+            }
             register_target(
                 scope,
                 ui,
@@ -927,9 +1082,18 @@ impl TableUtilityDialogState {
                                         } else {
                                             TableSortDirection::Ascending
                                         },
-                                        mode: TableSortMode::AutoNumeric,
+                                        mode: self.profile.sort_mode(),
                                     });
                                     self.session.set_sort(sort);
+                                }
+                                #[cfg(test)]
+                                if column == 0 {
+                                    self.test_first_sort_header_response =
+                                        Some(TestWidgetResponse {
+                                            id: sort_response.id,
+                                            rect: sort_response.rect,
+                                            enabled: sort_response.enabled(),
+                                        });
                                 }
                                 let mut selected = snapshot.selected_columns.contains(&column);
                                 let column_response = cell_ui.add_sized(
@@ -947,6 +1111,24 @@ impl TableUtilityDialogState {
                                 );
                                 if column_response.changed() && commit_enabled {
                                     self.session.set_column_selected(column, selected);
+                                }
+                                #[cfg(test)]
+                                self.test_column_select_responses.push((
+                                    column,
+                                    TestWidgetResponse {
+                                        id: column_response.id,
+                                        rect: column_response.rect,
+                                        enabled: column_response.enabled(),
+                                    },
+                                ));
+                                #[cfg(test)]
+                                if column == 0 {
+                                    self.test_first_column_select_response =
+                                        Some(TestWidgetResponse {
+                                            id: column_response.id,
+                                            rect: column_response.rect,
+                                            enabled: column_response.enabled(),
+                                        });
                                 }
                             },
                         );
@@ -995,6 +1177,15 @@ impl TableUtilityDialogState {
                                     if row_response.changed() && commit_enabled {
                                         self.session.set_row_selected(row_id, selected);
                                     }
+                                    #[cfg(test)]
+                                    if visible_index == 0 {
+                                        self.test_first_row_select_response =
+                                            Some(TestWidgetResponse {
+                                                id: row_response.id,
+                                                rect: row_response.rect,
+                                                enabled: row_response.enabled(),
+                                            });
+                                    }
                                     for column in 0..document.column_count() {
                                         let text = document
                                             .bounded_preview(row_id, column)
@@ -1039,45 +1230,131 @@ impl TableUtilityDialogState {
         order: &mut u64,
         close_requested: &mut bool,
     ) {
-        let ready = enabled && snapshot.can_export() && snapshot.selected_visible_row_count > 0;
+        let current_selection_ready = enabled && snapshot.can_export();
+        let selected_columns = snapshot.selected_column_indices();
+        let object_availability = snapshot
+            .document
+            .as_deref()
+            .zip(snapshot.projection.as_deref())
+            .map(|(document, projection)| {
+                projection.json_objects_availability(document, &selected_columns)
+            });
+        let objects_available = matches!(
+            object_availability,
+            Some(Ok(TableObjectShapeAvailability::Available))
+        );
+        let json_ready = current_selection_ready
+            && (self.json_shape != TableJsonShape::Objects || objects_available);
+        let previous_csv_ready =
+            enabled && self.profile.is_csv() && previous_valid_csv_is_exportable(snapshot);
         ui.horizontal_wrapped(|ui| {
-            let mut include_headers_choice = self.include_headers;
-            let include_headers = ui.add_enabled(
-                enabled,
-                egui::Checkbox::new(&mut include_headers_choice, "Include TSV headers"),
-            );
-            if include_headers.changed() && commit_enabled {
-                self.include_headers = include_headers_choice;
-            }
-            register_target(
-                scope,
-                ui,
-                &include_headers,
-                "output/include-headers",
-                "Include selected column headers in TSV output",
-                crate::gui::jump_mode::TargetKind::Button,
-                order,
-            );
-            let tsv = ui.add_enabled(ready, egui::Button::new("Copy Selected Columns"));
-            #[cfg(test)]
-            {
-                self.test_copy_tsv_response = Some(TestWidgetResponse {
-                    id: tsv.id,
-                    rect: tsv.rect,
-                    enabled: tsv.enabled(),
-                });
-            }
-            register_target(
-                scope,
-                ui,
-                &tsv,
-                "output/copy-tsv",
-                "Copy the current visible row and column selection as TSV",
-                crate::gui::jump_mode::TargetKind::Button,
-                order,
-            );
-            if tsv.clicked() && commit_enabled {
-                self.queue_export(TableExportKind::Tsv, ExportAction::Clipboard);
+            if self.profile.is_csv() {
+                let csv = ui.add_enabled(
+                    current_selection_ready,
+                    egui::Button::new("Copy Selected CSV"),
+                );
+                #[cfg(test)]
+                {
+                    self.test_copy_csv_response = Some(TestWidgetResponse {
+                        id: csv.id,
+                        rect: csv.rect,
+                        enabled: csv.enabled(),
+                    });
+                }
+                register_target(
+                    scope,
+                    ui,
+                    &csv,
+                    "output/copy-csv",
+                    "Copy the current visible row and column selection as CSV",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    order,
+                );
+                if csv.clicked() && commit_enabled {
+                    if let Some(document) = snapshot.document.as_deref() {
+                        self.queue_export_with_headers(
+                            TableExportKind::Delimited(document.delimiter()),
+                            ExportAction::Clipboard,
+                            document.options().has_header,
+                        );
+                    }
+                }
+
+                let previous = ui.add_enabled(
+                    previous_csv_ready,
+                    egui::Button::new("Copy Previous Valid CSV"),
+                );
+                #[cfg(test)]
+                {
+                    self.test_copy_previous_csv_response = Some(TestWidgetResponse {
+                        id: previous.id,
+                        rect: previous.rect,
+                        enabled: previous.enabled(),
+                    });
+                }
+                register_target(
+                    scope,
+                    ui,
+                    &previous,
+                    "output/copy-previous-valid-csv",
+                    "Copy the previous successfully parsed CSV selection",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    order,
+                );
+                if previous.clicked() && commit_enabled {
+                    if let Some(document) = snapshot.document.as_deref() {
+                        self.queue_previous_valid_csv(
+                            document.delimiter(),
+                            document.options().has_header,
+                        );
+                    }
+                }
+            } else {
+                let mut include_headers_choice = self.include_headers;
+                let include_headers = ui.add_enabled(
+                    enabled,
+                    egui::Checkbox::new(&mut include_headers_choice, "Include TSV headers"),
+                );
+                if include_headers.changed() && commit_enabled {
+                    self.include_headers = include_headers_choice;
+                }
+                register_target(
+                    scope,
+                    ui,
+                    &include_headers,
+                    "output/include-headers",
+                    "Include selected column headers in TSV output",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    order,
+                );
+                let tsv = ui.add_enabled(
+                    current_selection_ready,
+                    egui::Button::new("Copy Selected Columns"),
+                );
+                #[cfg(test)]
+                {
+                    self.test_copy_tsv_response = Some(TestWidgetResponse {
+                        id: tsv.id,
+                        rect: tsv.rect,
+                        enabled: tsv.enabled(),
+                    });
+                }
+                register_target(
+                    scope,
+                    ui,
+                    &tsv,
+                    "output/copy-tsv",
+                    "Copy the current visible row and column selection as TSV",
+                    crate::gui::jump_mode::TargetKind::Button,
+                    order,
+                );
+                if tsv.clicked() && commit_enabled {
+                    self.queue_export_with_headers(
+                        TableExportKind::Tsv,
+                        ExportAction::Clipboard,
+                        self.include_headers,
+                    );
+                }
             }
 
             let mut json_shape_choice = self.json_shape;
@@ -1090,16 +1367,35 @@ impl TableUtilityDialogState {
                     })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut json_shape_choice, TableJsonShape::Auto, "Auto");
-                        ui.selectable_value(
-                            &mut json_shape_choice,
-                            TableJsonShape::Objects,
-                            "Objects",
-                        );
-                        ui.selectable_value(
+                        ui.add_enabled_ui(objects_available, |ui| {
+                            let response = ui.selectable_value(
+                                &mut json_shape_choice,
+                                TableJsonShape::Objects,
+                                "Objects",
+                            );
+                            #[cfg(test)]
+                            {
+                                self.test_json_objects_option_response = Some(TestWidgetResponse {
+                                    id: response.id,
+                                    rect: response.rect,
+                                    enabled: response.enabled(),
+                                });
+                            }
+                            response
+                        });
+                        let arrays = ui.selectable_value(
                             &mut json_shape_choice,
                             TableJsonShape::Arrays,
                             "Arrays",
                         );
+                        #[cfg(test)]
+                        {
+                            self.test_json_arrays_option_response = Some(TestWidgetResponse {
+                                id: arrays.id,
+                                rect: arrays.rect,
+                                enabled: arrays.enabled(),
+                            });
+                        }
                     })
             });
             self.combo_anchor_ids[2] = Some(json_shape.inner.response.id);
@@ -1115,7 +1411,7 @@ impl TableUtilityDialogState {
                 crate::gui::jump_mode::TargetKind::Button,
                 order,
             );
-            let copy_json = ui.add_enabled(ready, egui::Button::new("Copy JSON"));
+            let copy_json = ui.add_enabled(json_ready, egui::Button::new("Copy JSON"));
             register_target(
                 scope,
                 ui,
@@ -1126,9 +1422,10 @@ impl TableUtilityDialogState {
                 order,
             );
             if copy_json.clicked() && commit_enabled {
-                self.queue_export(
+                self.queue_export_with_headers(
                     TableExportKind::Json(self.json_shape),
                     ExportAction::Clipboard,
+                    false,
                 );
             }
             #[cfg(test)]
@@ -1140,7 +1437,7 @@ impl TableUtilityDialogState {
                 });
             }
 
-            let save_json = ui.add_enabled(ready, egui::Button::new("Save JSON As…"));
+            let save_json = ui.add_enabled(json_ready, egui::Button::new("Save JSON As…"));
             #[cfg(test)]
             {
                 self.test_save_json_response = Some(TestWidgetResponse {
@@ -1169,9 +1466,10 @@ impl TableUtilityDialogState {
                     if ensure_destination_is_not_source(snapshot.source_path.as_deref(), &path)
                         .is_ok()
                     {
-                        self.queue_export(
+                        self.queue_export_with_headers(
                             TableExportKind::Json(self.json_shape),
                             ExportAction::SaveJson(path),
+                            false,
                         );
                     } else {
                         self.status = Some(
@@ -1196,6 +1494,24 @@ impl TableUtilityDialogState {
                 *close_requested = true;
             }
         });
+        ui.weak(format!(
+            "Output selection: {} visible rows × {} columns.",
+            snapshot.selected_visible_row_count,
+            selected_columns.len()
+        ));
+        if snapshot.selected_visible_row_count == 0 || selected_columns.is_empty() {
+            #[cfg(test)]
+            {
+                self.test_no_output_selection_hint = true;
+            }
+            ui.weak("Select at least one visible row and one column to copy or save output.");
+        }
+        if let Some(Ok(TableObjectShapeAvailability::Unavailable(reason))) = object_availability {
+            ui.weak(format!(
+                "JSON Objects unavailable: {}. Arrays remain available.",
+                fallback_reason_text(reason)
+            ));
+        }
         if self.json_shape == TableJsonShape::Auto
             && let Some(TableExportPayload::Json(json)) = self
                 .pending_overwrite
@@ -1210,11 +1526,32 @@ impl TableUtilityDialogState {
         }
     }
 
-    fn queue_export(&mut self, kind: TableExportKind, action: ExportAction) {
+    fn queue_export_with_headers(
+        &mut self,
+        kind: TableExportKind,
+        action: ExportAction,
+        include_headers: bool,
+    ) {
         self.status = None;
-        match self.session.request_export(kind, self.include_headers) {
+        match self.session.request_export(kind, include_headers) {
             Ok(operation) => {
                 self.pending_export = Some(PendingExport { operation, action });
+            }
+            Err(error) => self.status = Some(error),
+        }
+    }
+
+    fn queue_previous_valid_csv(&mut self, delimiter: TableDelimiter, has_header: bool) {
+        self.status = None;
+        match self
+            .session
+            .request_export_previous_valid(TableExportKind::Delimited(delimiter), has_header)
+        {
+            Ok(operation) => {
+                self.pending_export = Some(PendingExport {
+                    operation,
+                    action: ExportAction::Clipboard,
+                })
             }
             Err(error) => self.status = Some(error),
         }
@@ -1526,6 +1863,54 @@ fn payload_text(payload: &TableExportPayload) -> Option<&str> {
     }
 }
 
+fn delimiter_for_path(path: &Path) -> Option<TableDelimiter> {
+    let extension = path.extension()?.to_str()?;
+    if extension.eq_ignore_ascii_case("csv") {
+        Some(TableDelimiter::Comma)
+    } else if extension.eq_ignore_ascii_case("tsv") {
+        Some(TableDelimiter::Tab)
+    } else {
+        None
+    }
+}
+
+fn delimiter_label(delimiter: TableDelimiter) -> &'static str {
+    match delimiter {
+        TableDelimiter::Comma => "comma-delimited",
+        TableDelimiter::Tab => "tab-delimited",
+    }
+}
+
+fn row_width_label(policy: RowWidthPolicy) -> &'static str {
+    match policy {
+        RowWidthPolicy::Lenient => "lenient",
+        RowWidthPolicy::Strict => "strict",
+    }
+}
+
+fn previous_valid_csv_is_exportable(snapshot: &TableSessionSnapshot) -> bool {
+    let (Some(document), Some(projection)) =
+        (snapshot.document.as_deref(), snapshot.projection.as_deref())
+    else {
+        return false;
+    };
+    snapshot.has_previous_valid_data()
+        && !snapshot.reading_source
+        && !matches!(snapshot.source_load_state, TableSourceLoadState::Reading(_))
+        && !matches!(
+            snapshot.parse_state,
+            crate::table_utility_session::TableParseState::Pending(_)
+        )
+        && snapshot.projection_state
+            == crate::table_utility_session::TableProjectionState::Ready(snapshot.view_revision)
+        && projection.document_id() == document.id()
+        && document.options().row_width == RowWidthPolicy::Strict
+        && document.options().limits
+            == crate::table_utility::TableResourceLimits::strict_csv_route()
+        && snapshot.selected_visible_row_count > 0
+        && !snapshot.selected_column_indices().is_empty()
+}
+
 fn clipboard_message(error: &ClipboardError) -> &'static str {
     match error {
         ClipboardError::NonText => "The clipboard does not contain text.",
@@ -1791,6 +2176,17 @@ mod tests {
             }],
         );
         moved
+    }
+
+    fn type_into_test_widget(
+        ctx: &egui::Context,
+        dialog: &mut TableUtilityDialogState,
+        id: egui::Id,
+        text: &str,
+    ) {
+        let response = click_response(ctx, dialog, id);
+        assert!(response.enabled());
+        table_frame(ctx, dialog, vec![egui::Event::Text(text.to_owned())]);
     }
 
     fn await_dialog(
@@ -2141,6 +2537,391 @@ mod tests {
             after_idle.projection.as_ref().unwrap().visible_rows()[0],
             first_visible
         );
+        dialog.shutdown();
+    }
+
+    #[test]
+    fn csv_workflow_opens_sorts_filters_selects_and_copies_the_current_profile() {
+        let directory = tempfile::tempdir().expect("temporary CSV workspace");
+        let source_path = directory.path().join("inventory.CSV");
+        let source_bytes = b"code,name,note\n10,Beta,tail\n2,ALPHA,\"comma,inside\"\n1,\xC3\x89clair,\"tab\tinside\"\n";
+        fs::write(&source_path, source_bytes).expect("write the owned CSV fixture");
+
+        let context = egui::Context::default();
+        let clipboard = ClipboardProbe::default();
+        let mut dialog = TableUtilityDialogState::default();
+        dialog.set_clipboard_backend_for_test(Arc::new(clipboard.clone()));
+        dialog.open_with_profile(TableUtilityProfile::Csv);
+        table_frame(&context, &mut dialog, Vec::new());
+        assert_eq!(dialog.profile_for_test(), TableUtilityProfile::Csv);
+        assert_eq!(
+            dialog.session.parse_options(),
+            TableUtilityProfile::Csv.initial_parse_options()
+        );
+        assert!(
+            dialog.test_row_width_option_ids.is_empty(),
+            "the CSV profile must not offer a lenient row-width option"
+        );
+
+        dialog.test_open_file_path = Some(source_path.clone());
+        click_test_widget(&context, &mut dialog, |state| state.test_open_response);
+        let loaded = await_dialog(&context, &mut dialog, |snapshot| {
+            snapshot.accepted_options_are_current()
+                && matches!(
+                    snapshot.projection_state,
+                    TableProjectionState::Ready(revision) if revision == snapshot.view_revision
+                )
+        });
+        let accepted_id = loaded.document.as_ref().expect("CSV document").id();
+        assert_eq!(
+            loaded.parse_options.delimiter,
+            DelimiterChoice::Explicit(TableDelimiter::Comma)
+        );
+        assert!(loaded.parse_options.has_header);
+        assert_eq!(loaded.parse_options.row_width, RowWidthPolicy::Strict);
+        assert_eq!(
+            loaded.parse_options.limits,
+            crate::table_utility::TableResourceLimits::strict_csv_route()
+        );
+
+        click_test_widget(&context, &mut dialog, |state| {
+            state.test_first_sort_header_response
+        });
+        let sorted = await_dialog(&context, &mut dialog, |snapshot| {
+            snapshot
+                .projection
+                .as_ref()
+                .and_then(|projection| projection.effective_sort_mode())
+                == Some(EffectiveSortMode::Lexical)
+                && snapshot.projection_state == TableProjectionState::Ready(snapshot.view_revision)
+        });
+        let document = sorted
+            .document
+            .as_ref()
+            .expect("accepted CSV remains current");
+        let projection = sorted.projection.as_ref().expect("sorted projection");
+        let sorted_codes = projection
+            .visible_rows()
+            .iter()
+            .map(|row| document.row(*row).expect("visible row").cells()[0].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(sorted_codes, ["1", "10", "2"]);
+
+        let filter_id = dialog
+            .test_filter_response
+            .expect("filter is an actual TextEdit response")
+            .id;
+        type_into_test_widget(&context, &mut dialog, filter_id, "alpha");
+        let filtered = await_dialog(&context, &mut dialog, |snapshot| {
+            snapshot.projection_state == TableProjectionState::Ready(snapshot.view_revision)
+                && snapshot
+                    .projection
+                    .as_ref()
+                    .is_some_and(|projection| projection.visible_rows().len() == 1)
+        });
+        assert_eq!(filtered.selected_visible_row_count, 1);
+        assert_eq!(dialog.session.view_options().filter, "alpha");
+
+        click_test_widget(&context, &mut dialog, |state| {
+            state
+                .test_column_select_responses
+                .iter()
+                .find_map(|(column, response)| (*column == 1).then_some(*response))
+        });
+        let selected = dialog.session.snapshot();
+        assert_eq!(selected.selected_column_indices(), [0, 2]);
+        assert_eq!(selected.selected_visible_row_count, 1);
+
+        click_test_widget(&context, &mut dialog, |state| state.test_copy_csv_response);
+        await_dialog(&context, &mut dialog, |_| {
+            clipboard_writes(&clipboard).len() == 1
+        });
+        assert_eq!(
+            clipboard_writes(&clipboard),
+            ["code,note\n2,\"comma,inside\"\n"]
+        );
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            fs::read(&source_path).expect("source is read-only"),
+            source_bytes
+        );
+
+        let source_revision = selected.source_revision;
+        let options = selected.parse_options;
+        dialog.open_with_profile(TableUtilityProfile::Csv);
+        assert_eq!(dialog.session.snapshot().source_revision, source_revision);
+        assert_eq!(dialog.session.parse_options(), options);
+        assert_eq!(dialog.session.view_options().filter, "alpha");
+        assert_eq!(
+            dialog
+                .session
+                .snapshot()
+                .document
+                .as_ref()
+                .map(|document| document.id()),
+            Some(accepted_id)
+        );
+
+        dialog.open_with_profile(TableUtilityProfile::Table);
+        let switched = dialog.session.snapshot();
+        assert_eq!(dialog.profile_for_test(), TableUtilityProfile::Table);
+        assert_eq!(
+            switched.parse_options,
+            TableUtilityProfile::Table.initial_parse_options()
+        );
+        assert!(!switched.accepted_options_are_current());
+        assert!(!switched.can_export());
+        assert_eq!(
+            switched.document.as_ref().map(|document| document.id()),
+            Some(accepted_id)
+        );
+        dialog.shutdown();
+    }
+
+    #[test]
+    fn csv_workflow_extensions_select_delimiters_only_for_csv_profile() {
+        let directory = tempfile::tempdir().expect("temporary CSV workspace");
+        let tsv_path = directory.path().join("inventory.TSV");
+        let tsv_bytes = b"name\tvalue\nalpha\t1\nbeta\t2\n";
+        fs::write(&tsv_path, tsv_bytes).expect("write TSV fixture");
+        let csv_path = directory.path().join("inventory.csv");
+        let csv_bytes = b"name,value\nalpha,1\nbeta,2\n";
+        fs::write(&csv_path, csv_bytes).expect("write CSV fixture");
+
+        let context = egui::Context::default();
+        let mut dialog = TableUtilityDialogState::default();
+        dialog.open_with_profile(TableUtilityProfile::Csv);
+        table_frame(&context, &mut dialog, Vec::new());
+
+        dialog.test_open_file_path = Some(tsv_path.clone());
+        click_test_widget(&context, &mut dialog, |state| state.test_open_response);
+        let tsv = await_dialog(&context, &mut dialog, |snapshot| {
+            snapshot.accepted_options_are_current()
+                && snapshot.projection_state == TableProjectionState::Ready(snapshot.view_revision)
+        });
+        assert_eq!(tsv.source.as_ref().as_bytes(), tsv_bytes);
+        assert_eq!(
+            tsv.parse_options.delimiter,
+            DelimiterChoice::Explicit(TableDelimiter::Tab)
+        );
+        assert!(tsv.parse_options.has_header);
+        assert_eq!(tsv.parse_options.row_width, RowWidthPolicy::Strict);
+
+        dialog.open_with_profile(TableUtilityProfile::Table);
+        assert_eq!(
+            dialog.session.parse_options(),
+            TableUtilityProfile::Table.initial_parse_options()
+        );
+        dialog.test_open_file_path = Some(csv_path.clone());
+        click_test_widget(&context, &mut dialog, |state| state.test_open_response);
+        let table = await_dialog(&context, &mut dialog, |snapshot| {
+            snapshot.accepted_options_are_current()
+                && snapshot.projection_state == TableProjectionState::Ready(snapshot.view_revision)
+        });
+        assert_eq!(table.source.as_ref().as_bytes(), csv_bytes);
+        assert_eq!(table.parse_options.delimiter, DelimiterChoice::Auto);
+        assert!(!table.parse_options.has_header);
+        assert_eq!(table.parse_options.row_width, RowWidthPolicy::Lenient);
+        dialog.open_with_profile(TableUtilityProfile::Csv);
+        let prior_table_data = dialog.session.snapshot();
+        assert!(prior_table_data.has_previous_valid_data());
+        assert_eq!(
+            prior_table_data
+                .document
+                .as_ref()
+                .unwrap()
+                .options()
+                .row_width,
+            RowWidthPolicy::Lenient
+        );
+        table_frame(&context, &mut dialog, Vec::new());
+        assert!(
+            !dialog.test_copy_previous_csv_response.unwrap().enabled,
+            "a prior Table-profile document is not a previous-valid CSV result"
+        );
+        assert_eq!(
+            fs::read(&tsv_path)
+                .expect("TSV remains read-only")
+                .as_slice(),
+            &tsv_bytes[..]
+        );
+        assert_eq!(
+            fs::read(&csv_path)
+                .expect("CSV remains read-only")
+                .as_slice(),
+            &csv_bytes[..]
+        );
+        dialog.shutdown();
+    }
+
+    #[test]
+    fn csv_workflow_failed_reparse_copies_only_the_previous_valid_options() {
+        let directory = tempfile::tempdir().expect("temporary CSV workspace");
+        let valid_path = directory.path().join("valid.csv");
+        let malformed_path = directory.path().join("draft.txt");
+        let valid_bytes = b"name,value\nalpha,1\nbeta,2\n";
+        let malformed_bytes = b"name,value\nshort\n";
+        fs::write(&valid_path, valid_bytes).expect("write valid CSV");
+        fs::write(&malformed_path, malformed_bytes).expect("write malformed draft");
+
+        let context = egui::Context::default();
+        let clipboard = ClipboardProbe::default();
+        let mut dialog = TableUtilityDialogState::default();
+        dialog.set_clipboard_backend_for_test(Arc::new(clipboard.clone()));
+        dialog.open_with_profile(TableUtilityProfile::Csv);
+        table_frame(&context, &mut dialog, Vec::new());
+        dialog.test_open_file_path = Some(valid_path.clone());
+        click_test_widget(&context, &mut dialog, |state| state.test_open_response);
+        let loaded = await_dialog(&context, &mut dialog, |snapshot| {
+            snapshot.accepted_options_are_current()
+                && snapshot.projection_state == TableProjectionState::Ready(snapshot.view_revision)
+        });
+        let accepted_id = loaded.document.as_ref().unwrap().id();
+        let accepted_options = loaded.document.as_ref().unwrap().options();
+        assert!(accepted_options.has_header);
+
+        click_test_widget(&context, &mut dialog, |state| state.test_header_response);
+        assert!(!dialog.session.parse_options().has_header);
+        dialog.test_open_file_path = Some(malformed_path.clone());
+        click_test_widget(&context, &mut dialog, |state| state.test_open_response);
+        let failed = await_dialog(&context, &mut dialog, |snapshot| {
+            matches!(snapshot.parse_state, TableParseState::Failed { .. })
+                && !snapshot.reading_source
+                && !matches!(snapshot.source_load_state, TableSourceLoadState::Reading(_))
+        });
+        assert_eq!(
+            failed.document.as_ref().map(|document| document.id()),
+            Some(accepted_id)
+        );
+        assert_eq!(
+            failed.document.as_ref().unwrap().options(),
+            accepted_options
+        );
+        assert_eq!(accepted_options.row_width, RowWidthPolicy::Strict);
+        assert!(!failed.parse_options.has_header);
+        assert!(failed.has_previous_valid_data());
+        assert!(!failed.accepted_options_are_current());
+        assert!(!failed.can_export());
+
+        table_frame(&context, &mut dialog, Vec::new());
+        assert!(!dialog.test_copy_csv_response.unwrap().enabled);
+        assert!(dialog.test_copy_previous_csv_response.unwrap().enabled);
+        assert_eq!(
+            clipboard_writes(&clipboard),
+            Vec::<String>::new(),
+            "opening and parsing never writes clipboard implicitly"
+        );
+        click_test_widget(&context, &mut dialog, |state| {
+            state.test_copy_previous_csv_response
+        });
+        await_dialog(&context, &mut dialog, |_| {
+            clipboard_writes(&clipboard).len() == 1
+        });
+        assert_eq!(
+            clipboard_writes(&clipboard),
+            ["name,value\nalpha,1\nbeta,2\n"],
+            "previous-valid export uses the accepted comma/header profile"
+        );
+        assert_eq!(
+            fs::read(&valid_path).expect("valid source remains untouched"),
+            valid_bytes
+        );
+        assert_eq!(
+            fs::read(&malformed_path).expect("malformed source remains untouched"),
+            malformed_bytes
+        );
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 0);
+        dialog.shutdown();
+    }
+
+    #[test]
+    fn csv_workflow_invalid_object_headers_and_empty_columns_fail_closed() {
+        let directory = tempfile::tempdir().expect("temporary CSV workspace");
+        let source_path = directory.path().join("duplicate.csv");
+        fs::write(&source_path, b"name,name\nalpha,beta\n").expect("write duplicate-header CSV");
+
+        let context = egui::Context::default();
+        let clipboard = ClipboardProbe::default();
+        let mut dialog = TableUtilityDialogState::default();
+        dialog.set_clipboard_backend_for_test(Arc::new(clipboard.clone()));
+        dialog.open_with_profile(TableUtilityProfile::Csv);
+        table_frame(&context, &mut dialog, Vec::new());
+        dialog.test_open_file_path = Some(source_path.clone());
+        click_test_widget(&context, &mut dialog, |state| state.test_open_response);
+        let loaded = await_dialog(&context, &mut dialog, |snapshot| {
+            snapshot.accepted_options_are_current()
+                && snapshot.projection_state == TableProjectionState::Ready(snapshot.view_revision)
+        });
+        let selected_columns = loaded.selected_column_indices();
+        assert_eq!(selected_columns.len(), 2);
+        assert!(selected_columns.contains(&0) && selected_columns.contains(&1));
+
+        assert!(dialog.test_copy_json_response.unwrap().enabled);
+        click_test_widget(&context, &mut dialog, |state| state.test_copy_json_response);
+        await_dialog(&context, &mut dialog, |_| {
+            clipboard_writes(&clipboard).len() == 1
+        });
+        assert_eq!(
+            clipboard_writes(&clipboard),
+            ["[[\"alpha\",\"beta\"]]"],
+            "JSON Auto falls back to arrays when duplicate headers make objects invalid"
+        );
+
+        let shape_anchor = dialog.combo_anchor_ids[2].expect("JSON shape ComboBox response");
+        click_response(&context, &mut dialog, shape_anchor);
+        table_frame(&context, &mut dialog, Vec::new());
+        let objects_option = dialog
+            .test_json_objects_option_response
+            .expect("Objects is an actual ComboBox option response");
+        assert!(
+            !objects_option.enabled,
+            "duplicate headers disable object keys"
+        );
+        let arrays_option = dialog
+            .test_json_arrays_option_response
+            .expect("Arrays is an actual ComboBox option response");
+        assert!(arrays_option.enabled, "JSON Arrays remains available");
+        click_response(&context, &mut dialog, arrays_option.id);
+        assert_eq!(dialog.json_shape, TableJsonShape::Arrays);
+        assert!(!dialog.owned_combo_popup_is_current(&context));
+        click_test_widget(&context, &mut dialog, |state| state.test_copy_json_response);
+        await_dialog(&context, &mut dialog, |_| {
+            clipboard_writes(&clipboard).len() == 2
+        });
+        assert_eq!(
+            clipboard_writes(&clipboard),
+            ["[[\"alpha\",\"beta\"]]", "[[\"alpha\",\"beta\"]]"]
+        );
+
+        dialog.json_shape = TableJsonShape::Objects;
+        table_frame(&context, &mut dialog, Vec::new());
+        assert!(!dialog.test_copy_json_response.unwrap().enabled);
+        dialog.json_shape = TableJsonShape::Arrays;
+        table_frame(&context, &mut dialog, Vec::new());
+        assert!(dialog.test_copy_csv_response.unwrap().enabled);
+        assert!(dialog.test_copy_json_response.unwrap().enabled);
+
+        for column in [0, 1] {
+            click_test_widget(&context, &mut dialog, |state| {
+                state
+                    .test_column_select_responses
+                    .iter()
+                    .find_map(|(candidate, response)| (*candidate == column).then_some(*response))
+            });
+        }
+        table_frame(&context, &mut dialog, Vec::new());
+        assert!(
+            dialog
+                .session
+                .snapshot()
+                .selected_column_indices()
+                .is_empty()
+        );
+        assert!(!dialog.test_copy_csv_response.unwrap().enabled);
+        assert!(!dialog.test_copy_json_response.unwrap().enabled);
+        assert!(dialog.test_no_output_selection_hint);
+        assert_eq!(clipboard_writes(&clipboard).len(), 2);
+        assert_eq!(fs::read(&source_path).unwrap(), b"name,name\nalpha,beta\n");
         dialog.shutdown();
     }
 

@@ -15,6 +15,7 @@ use crate::plugins::clipboard_modify::ClipboardModifyPlugin;
 use crate::plugins::color_picker::ColorPickerPlugin;
 use crate::plugins::convert_panel::ConvertPanelPlugin;
 use crate::plugins::crop::CropPlugin;
+use crate::plugins::csv::CsvPlugin;
 use crate::plugins::data::DataPlugin;
 use crate::plugins::date_arithmetic::DateArithmeticPlugin;
 use crate::plugins::diff::DiffPlugin;
@@ -939,6 +940,7 @@ impl PluginManager {
         self.register_with_settings(XmlToolkitPlugin, plugin_settings);
         self.register_with_settings(ImageComparePlugin, plugin_settings);
         self.register_with_settings(TableUtilityPlugin, plugin_settings);
+        self.register_with_settings(CsvPlugin, plugin_settings);
         self.register_with_settings(BatchRenamePlugin, plugin_settings);
         self.register_with_settings(SearchReplacePlugin, plugin_settings);
         self.register_with_settings(HotFolderPlugin, plugin_settings);

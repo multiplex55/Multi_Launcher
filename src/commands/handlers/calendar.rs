@@ -282,7 +282,7 @@ mod tests {
         fn open_xml_toolkit(&mut self) {}
     }
     impl TableUtilityCommandHost for Host {
-        fn open_table_utility(&mut self) {}
+        fn open_table_utility(&mut self, _: crate::table_utility::TableUtilityProfile) {}
     }
     impl crate::commands::BatchRenameCommandHost for Host {
         fn open_batch_rename(&mut self) {}

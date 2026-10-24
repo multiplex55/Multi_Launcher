@@ -118,7 +118,7 @@ pub trait XmlToolkitCommandHost {
 }
 
 pub trait TableUtilityCommandHost {
-    fn open_table_utility(&mut self);
+    fn open_table_utility(&mut self, profile: crate::table_utility::TableUtilityProfile);
 }
 
 pub trait BatchRenameCommandHost {

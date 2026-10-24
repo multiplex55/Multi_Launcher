@@ -29183,7 +29183,10 @@ mod tests {
             .set_clipboard_backend_for_test(Arc::new(clipboard.clone()));
         app.set_jump_mode_enabled(true);
         prepare_actual_query_frame(&context, &mut app);
-        crate::commands::TableUtilityCommandHost::open_table_utility(&mut app);
+        crate::commands::TableUtilityCommandHost::open_table_utility(
+            &mut app,
+            crate::table_utility::TableUtilityProfile::Table,
+        );
         for _ in 0..3 {
             run_dialog_frame(&context, &mut app);
         }

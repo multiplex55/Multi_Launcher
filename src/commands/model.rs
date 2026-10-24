@@ -852,10 +852,12 @@ kinds!(XmlToolkitCommand, Self::Open => "open");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TableUtilityCommand {
-    Open,
+    Open {
+        profile: crate::table_utility::TableUtilityProfile,
+    },
 }
 
-kinds!(TableUtilityCommand, Self::Open => "open");
+kinds!(TableUtilityCommand, Self::Open { .. } => "open");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BatchRenameCommand {

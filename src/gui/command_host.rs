@@ -826,7 +826,8 @@ impl XmlToolkitCommandHost for LauncherApp {
 }
 
 impl crate::commands::TableUtilityCommandHost for LauncherApp {
-    fn open_table_utility(&mut self) {
+    fn open_table_utility(&mut self, profile: crate::table_utility::TableUtilityProfile) {
+        self.table_utility_dialog.open_with_profile(profile);
         self.focus_panel(super::Panel::TableUtilityDialog);
     }
 }

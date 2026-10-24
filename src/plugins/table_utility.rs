@@ -46,6 +46,7 @@ impl Plugin for TableUtilityPlugin {
 mod tests {
     use super::*;
     use crate::commands::{Command, TableUtilityCommand, parse_action};
+    use crate::table_utility::TableUtilityProfile;
 
     #[test]
     fn table_command_search_is_exact_case_insensitive_and_typed() {
@@ -55,7 +56,9 @@ mod tests {
             assert_eq!(actions[0].action, "table:open");
             assert_eq!(
                 parse_action(&actions[0]).unwrap(),
-                Command::TableUtility(TableUtilityCommand::Open)
+                Command::TableUtility(TableUtilityCommand::Open {
+                    profile: TableUtilityProfile::Table,
+                })
             );
         }
         for query in ["tables", "table csv", "table:"] {

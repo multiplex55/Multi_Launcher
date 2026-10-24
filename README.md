@@ -843,24 +843,37 @@ owning settings section or editor; use that owner's existing **Save** or
 
 ## Table Utility
 
-Type `table` to open the local table viewer. **Paste Text** and **Open File**
-are explicit source actions; opening the dialog never reads the clipboard or
-file system, and an opened source file is never modified. The default parser
-detects comma or tab delimiters, treats the first record as data (**Has Header**
-is off), and accepts uneven row widths with diagnostics. **Parse / Refresh**
-explicitly parses the current source. You can enable headers, change delimiter
-or row width policy, filter rows with case-insensitive literal text, sort a
-column, and select the rows and columns to export. Sorting uses numeric order
-when every populated value is finite; otherwise it uses lexical order.
+Type `table` for the general table viewer or `csv` for the strict CSV viewer.
+**Paste Text** and **Open File** are explicit source actions; opening either
+dialog never reads the clipboard implicitly, and opened source files are never
+modified. The `table` profile defaults to automatic comma/tab detection, no
+header, lenient row widths, and numeric sorting when every populated value is a
+finite number. It accepts sources up to 10 MiB, 50,000 data rows, 128 columns,
+and 48 MiB of materialized cells.
 
-**Copy Selected Columns** produces quoted TSV, while **Copy JSON** and **Save
-JSON As** use the same current selection. Large sources remain intact but use
-a bounded preview of up to 2,048 content characters plus a truncation marker
-instead of an oversized inline editor.
-The source limit is 10 MiB, with up to 50,000 data rows and 128 columns. If a
-source edit or parse fails, the last successful table stays visible with its
-original parse settings; outputs remain disabled until the current source
-parses successfully.
+The `csv` profile defaults to comma delimiter, headers on, strict row widths,
+and Unicode-lowercase lexical sorting. It accepts up to 16 MiB, 100,000 data
+rows, 256 columns, and 64 MiB of materialized cells. Opening `.csv` or `.tsv`
+files in this profile selects comma or tab respectively; other file extensions
+and pasted text use the visible delimiter choice. Both profiles filter with
+case-insensitive literal text, sort without changing source row storage, and
+keep equal-sort ties in their original row order. Every cell remains a string,
+preserving leading zeroes, large identifiers, and whitespace. Both profiles
+share a one-million-cell limit. **Parse / Refresh** explicitly parses the
+current source.
+
+The table profile copies selected columns as quoted TSV. The CSV profile copies
+the selection as quoted CSV using the successful parse's delimiter and header
+setting. Table output is limited to 16 MiB per output; CSV output is limited to
+64 MiB per output. **Copy JSON** and **Save JSON As** use the same current selection;
+JSON Auto uses objects only when selected headers are nonempty and unique,
+otherwise it explains why arrays were used. A failed CSV reparse keeps its last
+successful results and options labeled separately, and offers an explicit
+**Copy Previous Valid CSV** only after source reading and parsing have settled.
+After a failed table edit, the last successful data remains visible, but outputs
+stay disabled until the current source parses successfully.
+Large sources remain intact but use a bounded preview of up to 2,048 content
+characters plus a truncation marker instead of an oversized inline editor.
 
 ## Image Comparison
 

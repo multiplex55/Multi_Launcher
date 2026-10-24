@@ -251,6 +251,42 @@ mod image_compare_headless_tests {
     }
 }
 
+#[cfg(test)]
+mod csv_route_headless_tests {
+    use super::*;
+
+    #[test]
+    fn csv_route_requires_launcher_without_external_fallback() {
+        let original = Action {
+            label: "Open CSV Utility".into(),
+            desc: String::new(),
+            action: "csv:open".into(),
+            args: None,
+        };
+        let command = crate::commands::parse_action(&original).unwrap();
+        assert_eq!(
+            command,
+            Command::TableUtility(TableUtilityCommand::Open {
+                profile: crate::table_utility::TableUtilityProfile::Csv,
+            })
+        );
+
+        let mut external_calls = Vec::new();
+        let error = execute_with_external(command, &original, &mut |target, args| {
+            external_calls.push((target.to_owned(), args.map(str::to_owned)));
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Table Utility commands require the launcher interface")
+        );
+        assert!(external_calls.is_empty());
+    }
+}
+
 fn execute_with_external(
     command: Command,
     original_action: &Action,

@@ -120,6 +120,35 @@ pub enum DelimiterChoice {
     Explicit(TableDelimiter),
 }
 
+/// The invoking route selects a policy for the shared table engine. The
+/// profile is presentation/session policy, not a second parser.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TableUtilityProfile {
+    #[default]
+    Table,
+    Csv,
+}
+
+impl TableUtilityProfile {
+    pub const fn initial_parse_options(self) -> TableParseOptions {
+        match self {
+            Self::Table => TableParseOptions::utility_default(),
+            Self::Csv => TableParseOptions::strict_csv_route(TableDelimiter::Comma, true),
+        }
+    }
+
+    pub const fn sort_mode(self) -> TableSortMode {
+        match self {
+            Self::Table => TableSortMode::AutoNumeric,
+            Self::Csv => TableSortMode::Lexical,
+        }
+    }
+
+    pub const fn is_csv(self) -> bool {
+        matches!(self, Self::Csv)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RowWidthPolicy {
     /// Short rows are padded and reported; extra columns widen the schema.
