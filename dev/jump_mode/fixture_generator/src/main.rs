@@ -27,7 +27,7 @@ use multi_launcher::plugins::snippets::SNIPPETS_FILE;
 use multi_launcher::plugins::timer::ALARMS_FILE;
 use multi_launcher::plugins::todo::{TODO_FILE, TodoEntry, load_todos_typed};
 use multi_launcher::radial::model::RadialDocument;
-use multi_launcher::settings::{LogFile, NoteViewMode, Settings};
+use multi_launcher::settings::{LogFile, NoteViewMode, PasteSequencePreferences, Settings};
 use multi_launcher::usage::{USAGE_FILE, UsageEntry};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -374,12 +374,17 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
     let screenshot_dir = profile.join("screenshot-output");
     fs::create_dir(&screenshot_dir)?;
 
-    let mut settings = Settings::default();
-    settings.hotkey = Some(LAUNCHER_HOTKEY.into());
-    settings.help_hotkey = None;
-    settings.quit_hotkey = None;
-    settings.paste_sequence.next_hotkey = None;
-    settings.paste_sequence.cancel_hotkey = None;
+    let mut settings = Settings {
+        hotkey: Some(LAUNCHER_HOTKEY.into()),
+        help_hotkey: None,
+        quit_hotkey: None,
+        paste_sequence: PasteSequencePreferences {
+            next_hotkey: None,
+            cancel_hotkey: None,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     settings.window_size = if scenario.phase1()
         || scenario.phase2_surface().is_some()
         || scenario == FixtureScenario::TargetRepair
@@ -445,12 +450,12 @@ fn generate(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         .plugin_settings
         .insert("notes".into(), serialized_note_settings);
     if scenario.phase2_surface() == Some(Phase2Surface::FileSearch) {
-        let mut file_search_settings = FileSearchSettings::default();
-        file_search_settings.global_search_roots =
-            vec![fs::canonicalize(profile)?.join(FILE_SEARCH_ROOT_DIRECTORY)];
-        file_search_settings.everything_enabled = false;
-        file_search_settings.ripgrep_executable_path =
-            fs::canonicalize(profile)?.join("fixture-rg-unavailable.exe");
+        let file_search_settings = FileSearchSettings {
+            global_search_roots: vec![fs::canonicalize(profile)?.join(FILE_SEARCH_ROOT_DIRECTORY)],
+            everything_enabled: false,
+            ripgrep_executable_path: fs::canonicalize(profile)?.join("fixture-rg-unavailable.exe"),
+            ..Default::default()
+        };
         settings.plugin_settings.insert(
             "file_search".into(),
             serde_json::to_value(file_search_settings)?,
@@ -797,9 +802,7 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         let config = typed_configs
             .get(slot_id)
             .ok_or_else(|| anyhow::anyhow!("missing typed config for {slot_id:?}"))?;
-        let expected_query = if scenario.phase1() {
-            "note list"
-        } else if slot_id == "jump-qa-note-list" {
+        let expected_query = if scenario.phase1() || slot_id == "jump-qa-note-list" {
             "note list"
         } else {
             "note search"
@@ -955,8 +958,7 @@ fn verify(profile: &Path, scenario: FixtureScenario) -> anyhow::Result<()> {
         "fixture empty-context capability must be enabled only for the Phase 2 Paste profile"
     );
     anyhow::ensure!(
-        manifest.safety.paste_next_hotkey_enabled == false
-            && manifest.safety.paste_cancel_hotkey_enabled == false,
+        !manifest.safety.paste_next_hotkey_enabled && !manifest.safety.paste_cancel_hotkey_enabled,
         "fixture manifest must record disabled Paste Sequence shortcuts"
     );
     anyhow::ensure!(
@@ -1135,10 +1137,12 @@ fn phase2_recorder_hotkey() -> MkHotkey {
 }
 
 fn phase2_macro_document(surface: Option<Phase2Surface>) -> MkMacroDocument {
-    let mut document = MkMacroDocument::default();
-    document.settings = MkMacroSettings {
-        record_toggle_hotkey: phase2_recorder_hotkey(),
-        recorder: Default::default(),
+    let mut document = MkMacroDocument {
+        settings: MkMacroSettings {
+            record_toggle_hotkey: phase2_recorder_hotkey(),
+            recorder: Default::default(),
+        },
+        ..Default::default()
     };
     if surface == Some(Phase2Surface::MkMacro) {
         document.macros.push(MkMacro {
@@ -2033,10 +2037,12 @@ mod tests {
 
     #[test]
     fn fixture_hotkey_passes_production_route_validation_and_f12_conflicts() {
-        let mut settings = Settings::default();
-        settings.hotkey = Some(LAUNCHER_HOTKEY.to_owned());
-        settings.quit_hotkey = None;
-        settings.help_hotkey = None;
+        let mut settings = Settings {
+            hotkey: Some(LAUNCHER_HOTKEY.to_owned()),
+            quit_hotkey: None,
+            help_hotkey: None,
+            ..Default::default()
+        };
         assert!(validate_hotkey_routes(&settings, &RadialDocument::starter(), None).is_ok());
 
         settings.hotkey = Some("Ctrl+Alt+F12".to_owned());
