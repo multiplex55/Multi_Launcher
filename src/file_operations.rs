@@ -24,6 +24,9 @@ use std::time::SystemTime;
 pub const MAX_RENAME_SCAN_DIRECTORIES: usize = 4_096;
 pub const MAX_RENAME_SCAN_DEPTH: usize = 256;
 pub const MAX_RENAME_SCAN_ISSUE_SAMPLES: usize = 64;
+const FILE_ATTRIBUTE_OFFLINE_BITS: u32 = 0x0000_1000;
+const FILE_ATTRIBUTE_RECALL_ON_OPEN_BITS: u32 = 0x0004_0000;
+const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS_BITS: u32 = 0x0040_0000;
 pub(crate) const MAX_RENAME_HASH_BYTES_PER_FILE: u64 = 1 << 30;
 pub(crate) const MAX_RENAME_HASH_BYTES_PER_BATCH: u64 = 4 << 30;
 
@@ -90,6 +93,7 @@ pub(crate) fn test_native_watch_root(
             canonical_path: path.to_path_buf(),
             identity,
             recursive: false,
+            exclude_cloud_placeholders: false,
             generation: RenameScanGeneration(0),
             chain: vec![DirectoryProof {
                 lookup_path: path.to_path_buf(),
@@ -577,6 +581,8 @@ pub struct RenameScanRequest {
     scope: RenameScanScope,
     generation: RenameScanGeneration,
     metadata_only_root: bool,
+    exclude_cloud_placeholders: bool,
+    expected_duplicate_root: Option<DuplicateDiscoveryRootIdentity>,
 }
 
 impl RenameScanRequest {
@@ -594,6 +600,8 @@ impl RenameScanRequest {
             },
             generation,
             metadata_only_root: false,
+            exclude_cloud_placeholders: false,
+            expected_duplicate_root: None,
         }
     }
 
@@ -691,11 +699,13 @@ impl RenameScanIssue {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RenameScanSummary {
     directories_scanned: usize,
+    directories_admitted: usize,
     entries_seen: usize,
     files_seen: usize,
     directories_seen: usize,
     other_entries_seen: usize,
     reparse_entries_excluded: usize,
+    cloud_placeholders_excluded: usize,
     inaccessible_entries: usize,
     issue_count: usize,
     issues_truncated: bool,
@@ -705,6 +715,10 @@ pub struct RenameScanSummary {
 impl RenameScanSummary {
     pub fn directories_scanned(&self) -> usize {
         self.directories_scanned
+    }
+
+    pub(crate) fn directories_admitted(&self) -> usize {
+        self.directories_admitted
     }
 
     pub fn entries_seen(&self) -> usize {
@@ -725,6 +739,10 @@ impl RenameScanSummary {
 
     pub fn reparse_entries_excluded(&self) -> usize {
         self.reparse_entries_excluded
+    }
+
+    pub(crate) fn cloud_placeholders_excluded(&self) -> usize {
+        self.cloud_placeholders_excluded
     }
 
     pub fn inaccessible_entries(&self) -> usize {
@@ -755,6 +773,7 @@ pub struct RenameScanRow {
     length: Option<u64>,
     modified: Option<SystemTime>,
     reparse_point: bool,
+    cloud_placeholder: bool,
 }
 
 impl RenameScanRow {
@@ -793,6 +812,10 @@ impl RenameScanRow {
     pub fn is_reparse_point(&self) -> bool {
         self.reparse_point
     }
+
+    pub(crate) fn is_cloud_placeholder(&self) -> bool {
+        self.cloud_placeholder
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -806,6 +829,29 @@ pub struct RenameScanResult {
     snapshot: Option<RenameInputSnapshot>,
     proof: Option<Arc<ScanProof>>,
     summary: RenameScanSummary,
+}
+
+pub(crate) struct DuplicateDiscoveryRow {
+    pub(crate) path: PathBuf,
+    pub(crate) kind: SnapshotEntryKind,
+    pub(crate) identity: NativeFileIdentity,
+    pub(crate) length: Option<u64>,
+    pub(crate) modified: Option<SystemTime>,
+    pub(crate) cloud_placeholder: bool,
+}
+
+pub(crate) struct DuplicateDiscoveryScanResult {
+    pub(crate) status: RenameScanStatus,
+    pub(crate) canonical_root: Option<PathBuf>,
+    pub(crate) root_identity: Option<NativeFileIdentity>,
+    pub(crate) rows: Vec<DuplicateDiscoveryRow>,
+    pub(crate) summary: RenameScanSummary,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DuplicateDiscoveryRootIdentity {
+    pub(crate) canonical_root: PathBuf,
+    pub(crate) identity: NativeFileIdentity,
 }
 
 /// Read-only bytes captured from a file row in a complete native scan. The
@@ -923,6 +969,27 @@ impl RenameScanResult {
 
     pub fn summary(&self) -> &RenameScanSummary {
         &self.summary
+    }
+
+    pub(crate) fn into_duplicate_discovery(self) -> DuplicateDiscoveryScanResult {
+        DuplicateDiscoveryScanResult {
+            status: self.status,
+            canonical_root: self.canonical_root,
+            root_identity: self.root_identity,
+            rows: self
+                .rows
+                .into_iter()
+                .map(|row| DuplicateDiscoveryRow {
+                    path: row.path,
+                    kind: row.kind,
+                    identity: row.identity,
+                    length: row.length,
+                    modified: row.modified,
+                    cloud_placeholder: row.cloud_placeholder,
+                })
+                .collect(),
+            summary: self.summary,
+        }
     }
 
     /// Convert this exact, complete result into the M8-A snapshot only when
@@ -1447,6 +1514,7 @@ struct RootProof {
     canonical_path: PathBuf,
     identity: NativeFileIdentity,
     recursive: bool,
+    exclude_cloud_placeholders: bool,
     generation: RenameScanGeneration,
     chain: Vec<DirectoryProof>,
 }
@@ -1498,6 +1566,7 @@ struct OpenedObject<H> {
     reparse_point: bool,
     length: Option<u64>,
     modified: Option<SystemTime>,
+    cloud_placeholder: bool,
     handle: H,
 }
 
@@ -1517,6 +1586,7 @@ struct EnumeratedName {
     name: OsString,
     is_directory: bool,
     is_reparse_point: bool,
+    cloud_placeholder: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1573,6 +1643,7 @@ trait RenameScanBackend {
         &self,
         directory: &OpenDirectory<Self::Handle>,
         remaining_entries: usize,
+        remaining_path_bytes: usize,
         cancellation: &ScanCancellation,
     ) -> Result<Vec<EnumeratedName>, BackendFailure>;
 
@@ -1612,6 +1683,80 @@ struct PendingRow {
     length: Option<u64>,
     modified: Option<SystemTime>,
     reparse_point: bool,
+    cloud_placeholder: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DuplicateDiscoveryScanLimits {
+    pub(crate) max_entries: usize,
+    pub(crate) max_files: usize,
+    pub(crate) max_directories: usize,
+    pub(crate) max_depth: usize,
+    pub(crate) max_path_bytes: usize,
+}
+
+pub(crate) fn remaining_duplicate_discovery_directory_budget(
+    maximum: usize,
+    already_admitted: usize,
+    roots_reserved_for_later: usize,
+) -> usize {
+    maximum
+        .saturating_sub(already_admitted)
+        .saturating_sub(roots_reserved_for_later)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScanBounds {
+    max_entries: usize,
+    max_files: usize,
+    max_directories: usize,
+    max_scheduled_directories: Option<usize>,
+    max_depth: usize,
+    max_path_bytes: usize,
+    build_rename_snapshot: bool,
+}
+
+fn dff_cloud_attribute_preflight(
+    exclude_cloud_placeholders: bool,
+    query_attributes: impl FnOnce() -> std::io::Result<u32>,
+) -> std::io::Result<()> {
+    if !exclude_cloud_placeholders {
+        return Ok(());
+    }
+    let attributes = query_attributes()?;
+    if has_cloud_placeholder_attributes(attributes) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "cloud-placeholder object excluded before open",
+        ));
+    }
+    Ok(())
+}
+
+impl ScanBounds {
+    fn rename_snapshot() -> Self {
+        Self {
+            max_entries: batch_rename::MAX_SNAPSHOT_ENTRIES,
+            max_files: batch_rename::MAX_SNAPSHOT_ENTRIES,
+            max_directories: MAX_RENAME_SCAN_DIRECTORIES,
+            max_scheduled_directories: None,
+            max_depth: MAX_RENAME_SCAN_DEPTH,
+            max_path_bytes: usize::MAX,
+            build_rename_snapshot: true,
+        }
+    }
+
+    fn duplicate_discovery(limits: DuplicateDiscoveryScanLimits) -> Self {
+        Self {
+            max_entries: limits.max_entries,
+            max_files: limits.max_files,
+            max_directories: limits.max_directories,
+            max_scheduled_directories: Some(limits.max_directories),
+            max_depth: limits.max_depth,
+            max_path_bytes: limits.max_path_bytes,
+            build_rename_snapshot: false,
+        }
+    }
 }
 
 struct DirectoryFrame<H> {
@@ -1619,12 +1764,69 @@ struct DirectoryFrame<H> {
     guarded_chain: OpenDirectoryChain<H>,
     relative_path: PathBuf,
     chain: Vec<DirectoryProof>,
+    path_bytes: usize,
+}
+
+fn path_storage_bytes(path: &Path) -> usize {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str().encode_wide().count().saturating_mul(2)
+    }
+    #[cfg(not(windows))]
+    {
+        path.as_os_str().as_encoded_bytes().len()
+    }
+}
+
+fn directory_proof_path_bytes(chain: &[DirectoryProof]) -> usize {
+    chain.iter().fold(0usize, |total, proof| {
+        total
+            .saturating_add(path_storage_bytes(&proof.lookup_path))
+            .saturating_add(path_storage_bytes(&proof.canonical_path))
+    })
+}
+
+fn has_cloud_placeholder_attributes(attributes: u32) -> bool {
+    attributes
+        & (FILE_ATTRIBUTE_OFFLINE_BITS
+            | FILE_ATTRIBUTE_RECALL_ON_OPEN_BITS
+            | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS_BITS)
+        != 0
+}
+
+fn identity_is_supported(identity: NativeFileIdentity) -> bool {
+    identity.file_id != [0; 16]
 }
 
 fn scan_with_backend<B: RenameScanBackend>(
     backend: &B,
     request: RenameScanRequest,
     cancellation: &ScanCancellation,
+) -> RenameScanResult {
+    scan_with_backend_bounded(
+        backend,
+        request,
+        cancellation,
+        ScanBounds::rename_snapshot(),
+    )
+}
+
+fn scan_with_backend_bounded<B: RenameScanBackend>(
+    backend: &B,
+    request: RenameScanRequest,
+    cancellation: &ScanCancellation,
+    bounds: ScanBounds,
+) -> RenameScanResult {
+    scan_with_backend_bounded_progress(backend, request, cancellation, bounds, &mut |_| {})
+}
+
+fn scan_with_backend_bounded_progress<B: RenameScanBackend>(
+    backend: &B,
+    request: RenameScanRequest,
+    cancellation: &ScanCancellation,
+    bounds: ScanBounds,
+    progress: &mut dyn FnMut(&RenameScanSummary),
 ) -> RenameScanResult {
     let mut result = empty_scan_result(&request, RenameScanStatus::InvalidRoot);
     if cancellation.is_cancelled() {
@@ -1642,6 +1844,24 @@ fn scan_with_backend<B: RenameScanBackend>(
     };
     result.canonical_root = Some(admission.proof.canonical_path.clone());
     result.root_identity = Some(admission.proof.identity);
+    if let Some(expected) = request.expected_duplicate_root.as_ref()
+        && (expected.identity != admission.proof.identity
+            || batch_rename::compare_paths_windows_ordinal(
+                &expected.canonical_root,
+                &admission.proof.canonical_path,
+            ) != std::cmp::Ordering::Equal)
+    {
+        result.status = RenameScanStatus::ChangedDuringScan;
+        record_failure(
+            &mut result.summary,
+            BackendFailure::new(
+                BackendFailureKind::RootChanged,
+                Some(&admission.proof.canonical_path),
+                "the admitted root identity changed after duplicate-scan preflight",
+            ),
+        );
+        return result;
+    }
     let Some(root_directory) = admission.directories.last() else {
         result.status = RenameScanStatus::InvalidRoot;
         record_issue(
@@ -1654,7 +1874,22 @@ fn scan_with_backend<B: RenameScanBackend>(
         );
         return result;
     };
+    if bounds.max_scheduled_directories.is_some() {
+        // The selected root itself consumes one admitted directory even
+        // before its first enumeration. Keep this separate from scanned
+        // progress because an early partial result may still own queued child
+        // directory admissions.
+        result.summary.directories_admitted = 1;
+    }
 
+    let admission_chain_path_bytes = directory_proof_path_bytes(&admission.proof.chain)
+        .saturating_mul(2)
+        .saturating_add(path_storage_bytes(request.root.as_path()))
+        .saturating_add(path_storage_bytes(&admission.proof.selected_path))
+        .saturating_add(path_storage_bytes(&admission.proof.canonical_path));
+    let root_frame_path_bytes = directory_proof_path_bytes(&admission.proof.chain);
+    let mut queued_frame_path_bytes = root_frame_path_bytes;
+    let mut discovered_directory_handle_path_bytes = 0usize;
     let mut pending_rows = Vec::new();
     let mut directories = VecDeque::new();
     directories.push_back(DirectoryFrame {
@@ -1662,34 +1897,66 @@ fn scan_with_backend<B: RenameScanBackend>(
         guarded_chain: admission.directories.clone(),
         relative_path: PathBuf::new(),
         chain: admission.proof.chain.clone(),
+        path_bytes: root_frame_path_bytes,
     });
     let mut scan_status = RenameScanStatus::Complete;
+    let mut result_path_bytes = path_storage_bytes(&admission.proof.canonical_path);
+    if admission_chain_path_bytes
+        .saturating_add(root_frame_path_bytes)
+        .saturating_add(result_path_bytes)
+        > bounds.max_path_bytes
+    {
+        result.status = RenameScanStatus::ResourceLimit;
+        record_failure(
+            &mut result.summary,
+            BackendFailure::new(
+                BackendFailureKind::ResourceLimit,
+                Some(&admission.proof.canonical_path),
+                format!(
+                    "discovery path storage limit of {} bytes reached",
+                    bounds.max_path_bytes
+                ),
+            ),
+        );
+        return result;
+    }
 
     while let Some(frame) = directories.pop_front() {
+        queued_frame_path_bytes = queued_frame_path_bytes.saturating_sub(frame.path_bytes);
+        let active_frame_path_bytes = frame.path_bytes;
         if cancellation.is_cancelled() {
             scan_status = RenameScanStatus::Cancelled;
             break;
         }
-        if result.summary.directories_scanned >= MAX_RENAME_SCAN_DIRECTORIES {
+        if result.summary.directories_scanned >= bounds.max_directories {
             scan_status = RenameScanStatus::ResourceLimit;
             record_failure(
                 &mut result.summary,
                 BackendFailure::new(
                     BackendFailureKind::ResourceLimit,
                     Some(&frame.directory.canonical_path),
-                    format!("directory limit of {MAX_RENAME_SCAN_DIRECTORIES} reached"),
+                    format!("directory limit of {} reached", bounds.max_directories),
                 ),
             );
             break;
         }
-        if frame.chain.len() > MAX_RENAME_SCAN_DEPTH {
+        let relative_depth = if bounds.build_rename_snapshot {
+            frame.chain.len()
+        } else {
+            frame
+                .relative_path
+                .components()
+                .filter(|component| !matches!(component, Component::CurDir | Component::RootDir))
+                .count()
+        };
+        if relative_depth > bounds.max_depth {
             scan_status = RenameScanStatus::ResourceLimit;
             record_failure(
                 &mut result.summary,
                 BackendFailure::new(
                     BackendFailureKind::ResourceLimit,
                     Some(&frame.directory.canonical_path),
-                    format!("directory depth limit of {MAX_RENAME_SCAN_DEPTH} reached"),
+                    format!("directory depth limit of {} reached", bounds.max_depth),
                 ),
             );
             break;
@@ -1703,20 +1970,49 @@ fn scan_with_backend<B: RenameScanBackend>(
             record_failure(&mut result.summary, error);
             break;
         }
-        let remaining_entries =
-            batch_rename::MAX_SNAPSHOT_ENTRIES.saturating_sub(result.summary.entries_seen);
-        let mut names =
-            match backend.enumerate_directory(&frame.directory, remaining_entries, cancellation) {
-                Ok(names) => names,
-                Err(error) => {
-                    record_failure(&mut result.summary, error.clone());
-                    scan_status = status_for_directory_failure(
-                        error.kind,
-                        result.summary.directories_scanned == 0,
-                    );
-                    break;
-                }
-            };
+        let remaining_entries = bounds
+            .max_entries
+            .saturating_sub(result.summary.entries_seen);
+        let fixed_path_bytes = admission_chain_path_bytes
+            .saturating_add(result_path_bytes)
+            .saturating_add(queued_frame_path_bytes)
+            .saturating_add(discovered_directory_handle_path_bytes)
+            .saturating_add(active_frame_path_bytes);
+        let remaining_path_bytes = bounds.max_path_bytes.saturating_sub(fixed_path_bytes);
+        let mut names = match backend.enumerate_directory(
+            &frame.directory,
+            remaining_entries,
+            remaining_path_bytes,
+            cancellation,
+        ) {
+            Ok(names) => names,
+            Err(error) => {
+                record_failure(&mut result.summary, error.clone());
+                scan_status = status_for_directory_failure(
+                    error.kind,
+                    result.summary.directories_scanned == 0,
+                );
+                break;
+            }
+        };
+        let names_path_bytes = names.iter().fold(0usize, |total, entry| {
+            total.saturating_add(path_storage_bytes(Path::new(&entry.name)))
+        });
+        if fixed_path_bytes.saturating_add(names_path_bytes) > bounds.max_path_bytes {
+            scan_status = RenameScanStatus::ResourceLimit;
+            record_failure(
+                &mut result.summary,
+                BackendFailure::new(
+                    BackendFailureKind::ResourceLimit,
+                    Some(&frame.directory.canonical_path),
+                    format!(
+                        "discovery path storage limit of {} bytes reached while enumerating names",
+                        bounds.max_path_bytes
+                    ),
+                ),
+            );
+            break;
+        }
         if cancellation.is_cancelled() {
             scan_status = RenameScanStatus::Cancelled;
             break;
@@ -1738,6 +2034,7 @@ fn scan_with_backend<B: RenameScanBackend>(
             .then_with(|| left.name.cmp(&right.name))
         });
         result.summary.directories_scanned += 1;
+        progress(&result.summary);
 
         for entry in names {
             if cancellation.is_cancelled() {
@@ -1747,22 +2044,67 @@ fn scan_with_backend<B: RenameScanBackend>(
             if entry.name == OsStr::new(".") || entry.name == OsStr::new("..") {
                 continue;
             }
-            if result.summary.entries_seen >= batch_rename::MAX_SNAPSHOT_ENTRIES {
+            if result.summary.entries_seen >= bounds.max_entries {
                 scan_status = RenameScanStatus::ResourceLimit;
                 record_failure(
                     &mut result.summary,
                     BackendFailure::new(
                         BackendFailureKind::ResourceLimit,
                         Some(&frame.directory.canonical_path),
-                        format!(
-                            "entry limit of {} reached",
-                            batch_rename::MAX_SNAPSHOT_ENTRIES
-                        ),
+                        format!("entry limit of {} reached", bounds.max_entries),
                     ),
                 );
                 break;
             }
             result.summary.entries_seen += 1;
+            if result.summary.entries_seen.is_multiple_of(256) {
+                progress(&result.summary);
+            }
+            if admission.proof.exclude_cloud_placeholders && entry.cloud_placeholder {
+                result.summary.cloud_placeholders_excluded += 1;
+                record_issue(
+                    &mut result.summary,
+                    RenameScanIssue {
+                        path: Some(frame.directory.canonical_path.join(&entry.name)),
+                        kind: RenameScanIssueKind::ReparsePointExcluded,
+                        message: "cloud placeholder skipped from directory metadata without opening or requesting hydration".into(),
+                    },
+                );
+                continue;
+            }
+            if admission.proof.exclude_cloud_placeholders && entry.is_reparse_point {
+                result.summary.reparse_entries_excluded += 1;
+                record_issue(
+                    &mut result.summary,
+                    RenameScanIssue {
+                        path: Some(frame.directory.canonical_path.join(&entry.name)),
+                        kind: RenameScanIssueKind::ReparsePointExcluded,
+                        message:
+                            "reparse entry skipped from directory metadata without opening or following it"
+                                .into(),
+                    },
+                );
+                continue;
+            }
+            if admission.proof.recursive
+                && entry.is_directory
+                && !entry.is_reparse_point
+                && let Some(max_scheduled_directories) = bounds.max_scheduled_directories
+                && result.summary.directories_admitted >= max_scheduled_directories
+            {
+                scan_status = RenameScanStatus::ResourceLimit;
+                record_failure(
+                    &mut result.summary,
+                    BackendFailure::new(
+                        BackendFailureKind::ResourceLimit,
+                        Some(&frame.directory.canonical_path.join(&entry.name)),
+                        format!(
+                            "scheduled directory limit of {max_scheduled_directories} reached before child acquisition"
+                        ),
+                    ),
+                );
+                break;
+            }
             let opened = match backend.open_child(
                 &frame.directory,
                 &frame.chain,
@@ -1800,21 +2142,56 @@ fn scan_with_backend<B: RenameScanBackend>(
                 scan_status = RenameScanStatus::ChangedDuringScan;
                 break;
             }
+            if opened.kind == SnapshotEntryKind::File
+                && result.summary.files_seen >= bounds.max_files
+            {
+                record_failure(
+                    &mut result.summary,
+                    BackendFailure::new(
+                        BackendFailureKind::ResourceLimit,
+                        Some(&opened.canonical_path),
+                        format!("file limit of {} reached", bounds.max_files),
+                    ),
+                );
+                scan_status = RenameScanStatus::ResourceLimit;
+                break;
+            }
             let relative_path = frame.relative_path.join(&entry.name);
-            pending_rows.push(PendingRow {
-                relative_path: relative_path.clone(),
-                path: opened.canonical_path.clone(),
-                kind: opened.kind,
-                identity: opened.identity,
-                parent_identity: frame.directory.identity,
-                parent_chain: frame.chain.clone(),
-                length: opened.length,
-                modified: opened.modified,
-                reparse_point: opened.reparse_point,
-            });
+            let row_path_bytes = path_storage_bytes(&opened.canonical_path)
+                .saturating_add(path_storage_bytes(&relative_path));
+            let next_path_bytes = result_path_bytes.saturating_add(row_path_bytes);
+            let live_path_bytes = admission_chain_path_bytes
+                .saturating_add(next_path_bytes)
+                .saturating_add(queued_frame_path_bytes)
+                .saturating_add(discovered_directory_handle_path_bytes)
+                .saturating_add(active_frame_path_bytes)
+                .saturating_add(names_path_bytes)
+                .saturating_add(path_storage_bytes(&opened.canonical_path))
+                .saturating_add(path_storage_bytes(&opened.lookup_path));
+            if live_path_bytes > bounds.max_path_bytes {
+                record_failure(
+                    &mut result.summary,
+                    BackendFailure::new(
+                        BackendFailureKind::ResourceLimit,
+                        Some(&opened.canonical_path),
+                        format!(
+                            "discovery path storage limit of {} bytes reached",
+                            bounds.max_path_bytes
+                        ),
+                    ),
+                );
+                scan_status = RenameScanStatus::ResourceLimit;
+                break;
+            }
             match opened.kind {
                 SnapshotEntryKind::File => result.summary.files_seen += 1,
-                SnapshotEntryKind::Directory => result.summary.directories_seen += 1,
+                SnapshotEntryKind::Directory => {
+                    result.summary.directories_seen += 1;
+                    if bounds.max_scheduled_directories.is_some() {
+                        result.summary.directories_admitted =
+                            result.summary.directories_admitted.saturating_add(1);
+                    }
+                }
                 SnapshotEntryKind::Other => result.summary.other_entries_seen += 1,
             }
             if opened.kind == SnapshotEntryKind::File
@@ -1831,21 +2208,85 @@ fn scan_with_backend<B: RenameScanBackend>(
                 scan_status = RenameScanStatus::Unsupported;
                 break;
             }
-            if opened.reparse_point {
-                result.summary.reparse_entries_excluded += 1;
+            if admission.proof.exclude_cloud_placeholders
+                && opened.kind == SnapshotEntryKind::Directory
+                && !identity_is_supported(opened.identity)
+            {
+                record_issue(
+                    &mut result.summary,
+                    RenameScanIssue {
+                        path: Some(opened.canonical_path.clone()),
+                        kind: RenameScanIssueKind::UnsupportedIdentity,
+                        message:
+                            "directory identity is unsupported; its descendants were not traversed"
+                                .into(),
+                    },
+                );
+                if scan_status == RenameScanStatus::Complete {
+                    scan_status = RenameScanStatus::Partial;
+                }
+                continue;
+            }
+            let excluded_cloud_placeholder =
+                admission.proof.exclude_cloud_placeholders && opened.cloud_placeholder;
+            if opened.reparse_point || excluded_cloud_placeholder {
+                if excluded_cloud_placeholder {
+                    result.summary.cloud_placeholders_excluded += 1;
+                } else {
+                    result.summary.reparse_entries_excluded += 1;
+                }
                 record_issue(
                     &mut result.summary,
                     RenameScanIssue {
                         path: Some(opened.canonical_path.clone()),
                         kind: RenameScanIssueKind::ReparsePointExcluded,
-                        message: "reparse point retained as an ineligible sibling blocker; traversal was skipped".into(),
+                        message: if excluded_cloud_placeholder {
+                            "cloud placeholder skipped without requesting hydration".into()
+                        } else {
+                            "reparse point retained as an ineligible sibling blocker; traversal was skipped".into()
+                        },
                     },
                 );
             }
             if opened.kind == SnapshotEntryKind::Directory
                 && admission.proof.recursive
                 && !opened.reparse_point
+                && !excluded_cloud_placeholder
             {
+                let child_chain_path_bytes = directory_proof_path_bytes(&frame.chain)
+                    .saturating_add(path_storage_bytes(&opened.lookup_path))
+                    .saturating_add(path_storage_bytes(&opened.canonical_path));
+                let child_relative_path_bytes = path_storage_bytes(&relative_path);
+                let child_directory_handle_path_bytes = path_storage_bytes(&opened.lookup_path)
+                    .saturating_add(path_storage_bytes(&opened.canonical_path));
+                let child_frame_path_bytes =
+                    child_chain_path_bytes.saturating_add(child_relative_path_bytes);
+                let live_with_child = admission_chain_path_bytes
+                    .saturating_add(result_path_bytes)
+                    .saturating_add(row_path_bytes)
+                    .saturating_add(queued_frame_path_bytes)
+                    .saturating_add(discovered_directory_handle_path_bytes)
+                    .saturating_add(active_frame_path_bytes)
+                    .saturating_add(names_path_bytes)
+                    .saturating_add(path_storage_bytes(&opened.canonical_path))
+                    .saturating_add(path_storage_bytes(&opened.lookup_path))
+                    .saturating_add(child_frame_path_bytes)
+                    .saturating_add(child_directory_handle_path_bytes);
+                if live_with_child > bounds.max_path_bytes {
+                    record_failure(
+                        &mut result.summary,
+                        BackendFailure::new(
+                            BackendFailureKind::ResourceLimit,
+                            Some(&opened.canonical_path),
+                            format!(
+                                "discovery path storage limit of {} bytes reached",
+                                bounds.max_path_bytes
+                            ),
+                        ),
+                    );
+                    scan_status = RenameScanStatus::ResourceLimit;
+                    break;
+                }
                 let mut child_chain = frame.chain.clone();
                 child_chain.push(DirectoryProof {
                     lookup_path: opened.lookup_path.clone(),
@@ -1876,13 +2317,35 @@ fn scan_with_backend<B: RenameScanBackend>(
                 let child_directory = Arc::new(child_directory);
                 let mut guarded_chain = frame.guarded_chain.clone();
                 guarded_chain.push(Arc::clone(&child_directory));
+                discovered_directory_handle_path_bytes = discovered_directory_handle_path_bytes
+                    .saturating_add(child_directory_handle_path_bytes);
+                queued_frame_path_bytes =
+                    queued_frame_path_bytes.saturating_add(child_frame_path_bytes);
                 directories.push_back(DirectoryFrame {
                     directory: child_directory,
                     guarded_chain,
-                    relative_path,
+                    relative_path: relative_path.clone(),
                     chain: child_chain,
+                    path_bytes: child_frame_path_bytes,
                 });
             }
+            result_path_bytes = next_path_bytes;
+            pending_rows.push(PendingRow {
+                relative_path,
+                path: opened.canonical_path,
+                kind: opened.kind,
+                identity: opened.identity,
+                parent_identity: frame.directory.identity,
+                parent_chain: if bounds.build_rename_snapshot {
+                    frame.chain.clone()
+                } else {
+                    Vec::new()
+                },
+                length: opened.length,
+                modified: opened.modified,
+                reparse_point: opened.reparse_point,
+                cloud_placeholder: opened.cloud_placeholder,
+            });
         }
         if scan_status != RenameScanStatus::Complete && scan_status != RenameScanStatus::Partial {
             break;
@@ -1910,49 +2373,64 @@ fn scan_with_backend<B: RenameScanBackend>(
             .then_with(|| left.relative_path.cmp(&right.relative_path))
     });
     let mut rows = Vec::with_capacity(pending_rows.len());
-    let mut proofs = HashMap::with_capacity(pending_rows.len());
-    let mut entries = Vec::with_capacity(pending_rows.len());
+    let mut proofs = bounds
+        .build_rename_snapshot
+        .then(|| HashMap::with_capacity(pending_rows.len()));
+    let mut entries = bounds
+        .build_rename_snapshot
+        .then(|| Vec::with_capacity(pending_rows.len()));
     for (index, pending) in pending_rows.into_iter().enumerate() {
-        // The row count is capped at MAX_SNAPSHOT_ENTRIES (10,000), so every
-        // index is representable in the stable u64 domain reference.
+        // The duplicate-discovery adapter has a larger bounded metadata result
+        // but does not expose rename references or construct a rename snapshot.
         let reference = SnapshotEntryRef(index as u64);
         let source_order = index as u64;
+        if let Some(proofs) = proofs.as_mut() {
+            proofs.insert(
+                reference,
+                EntryProof {
+                    path: pending.path.clone(),
+                    identity: pending.identity,
+                    length: pending.length,
+                    modified: pending.modified,
+                    parent_chain: pending.parent_chain.clone(),
+                },
+            );
+        }
+        if let Some(entries) = entries.as_mut() {
+            entries.push(
+                RenameSnapshotEntry::new(
+                    reference,
+                    pending.path.clone(),
+                    source_order,
+                    EntryInclusion::Included,
+                    false,
+                )
+                .with_kind(pending.kind),
+            );
+        }
         rows.push(RenameScanRow {
             entry_ref: reference,
-            relative_path: pending.relative_path.clone(),
-            path: pending.path.clone(),
+            relative_path: pending.relative_path,
+            path: pending.path,
             kind: pending.kind,
             identity: pending.identity,
             parent_identity: pending.parent_identity,
             length: pending.length,
             modified: pending.modified,
             reparse_point: pending.reparse_point,
+            cloud_placeholder: pending.cloud_placeholder,
         });
-        proofs.insert(
-            reference,
-            EntryProof {
-                path: pending.path.clone(),
-                identity: pending.identity,
-                length: pending.length,
-                modified: pending.modified,
-                parent_chain: pending.parent_chain.clone(),
-            },
-        );
-        entries.push(
-            RenameSnapshotEntry::new(
-                reference,
-                pending.path,
-                source_order,
-                EntryInclusion::Included,
-                false,
-            )
-            .with_kind(pending.kind),
-        );
     }
     result.rows = rows;
     result.status = scan_status;
 
-    if scan_status == RenameScanStatus::Complete {
+    if scan_status == RenameScanStatus::Complete && bounds.build_rename_snapshot {
+        let Some(proofs) = proofs else {
+            unreachable!("rename scans retain their proofs")
+        };
+        let Some(entries) = entries else {
+            unreachable!("rename scans retain their entries")
+        };
         let root = match ExplicitDirectoryRoot::new(admission.proof.canonical_path.clone()) {
             Ok(root) => root,
             Err(error) => {
@@ -2268,6 +2746,7 @@ fn recheck_with_backend<B: RenameScanBackend>(
             match backend.enumerate_directory(
                 parent,
                 batch_rename::MAX_SNAPSHOT_ENTRIES,
+                usize::MAX,
                 cancellation,
             ) {
                 Ok(names) => {
@@ -2766,6 +3245,7 @@ fn check_guarded_destinations(
             .enumerate_directory(
                 parent,
                 batch_rename::MAX_SNAPSHOT_ENTRIES,
+                usize::MAX,
                 &ScanCancellation::new(),
             )
             .map_err(|error| error.to_string())?;
@@ -2832,6 +3312,92 @@ pub fn scan_rename_root(
             },
         );
         result
+    }
+}
+
+/// Bounded, metadata-only traversal for duplicate discovery. It deliberately
+/// shares the validated no-follow backend with rename scans while selecting
+/// independent limits and omitting the rename snapshot/proof allocation.
+pub(crate) fn scan_duplicate_discovery_root_with_progress(
+    root: ExplicitDirectoryRoot,
+    expected_root: DuplicateDiscoveryRootIdentity,
+    generation: RenameScanGeneration,
+    limits: DuplicateDiscoveryScanLimits,
+    cancellation: &ScanCancellation,
+    progress: &mut dyn FnMut(&RenameScanSummary),
+) -> DuplicateDiscoveryScanResult {
+    let mut request = RenameScanRequest::new(root, true, generation);
+    request.exclude_cloud_placeholders = true;
+    request.expected_duplicate_root = Some(expected_root);
+    #[cfg(windows)]
+    {
+        scan_with_backend_bounded_progress(
+            &NativeRenameScanBackend,
+            request,
+            cancellation,
+            ScanBounds::duplicate_discovery(limits),
+            progress,
+        )
+        .into_duplicate_discovery()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (limits, progress);
+        let mut result = empty_scan_result(&request, RenameScanStatus::Unsupported);
+        record_issue(
+            &mut result.summary,
+            RenameScanIssue {
+                path: Some(request.root.as_path().to_path_buf()),
+                kind: RenameScanIssueKind::UnsupportedIdentity,
+                message:
+                    "duplicate discovery requires handle-based local file identity, available only on Windows"
+                        .into(),
+            },
+        );
+        result.into_duplicate_discovery()
+    }
+}
+
+/// Admit one DFF root without enumerating it. Controllers use this short-lived
+/// metadata-only proof to deduplicate different path spellings of the same
+/// Windows directory before starting a traversal.
+pub(crate) fn inspect_duplicate_discovery_root(
+    root: ExplicitDirectoryRoot,
+    generation: RenameScanGeneration,
+) -> Result<DuplicateDiscoveryRootIdentity, (RenameScanStatus, RenameScanSummary)> {
+    let mut request = RenameScanRequest::new(root, true, generation);
+    request.metadata_only_root = true;
+    request.exclude_cloud_placeholders = true;
+    #[cfg(windows)]
+    {
+        match NativeRenameScanBackend.admit_root(&request) {
+            Ok(admission) => Ok(DuplicateDiscoveryRootIdentity {
+                canonical_root: admission.proof.canonical_path,
+                identity: admission.proof.identity,
+            }),
+            Err(error) => {
+                let status = status_for_root_failure(error.kind);
+                let mut summary = RenameScanSummary::default();
+                record_failure(&mut summary, error);
+                Err((status, summary))
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = request;
+        let mut summary = RenameScanSummary::default();
+        record_issue(
+            &mut summary,
+            RenameScanIssue {
+                path: None,
+                kind: RenameScanIssueKind::UnsupportedIdentity,
+                message:
+                    "duplicate discovery requires handle-based local file identity, available only on Windows"
+                        .into(),
+            },
+        );
+        Err((RenameScanStatus::Unsupported, summary))
     }
 }
 
@@ -3502,13 +4068,29 @@ impl RenameScanBackend for NativeRenameScanBackend {
                 Component::Prefix(prefix) => current.push(prefix.as_os_str()),
                 Component::RootDir => {
                     current.push(component.as_os_str());
-                    let opened = open_native_object(&current, false)
-                        .map_err(|error| classify_root_io(&current, error))?;
+                    let opened =
+                        open_native_object(&current, false, request.exclude_cloud_placeholders)
+                            .map_err(|error| classify_root_io(&current, error))?;
+                    if request.exclude_cloud_placeholders && opened.cloud_placeholder {
+                        return Err(BackendFailure::new(
+                            BackendFailureKind::UnsupportedIdentity,
+                            Some(&current),
+                            "cloud-placeholder roots and ancestors are not hydrated or traversed",
+                        ));
+                    }
                     if opened.kind != SnapshotEntryKind::Directory || opened.reparse_point {
                         return Err(BackendFailure::new(
                             BackendFailureKind::InvalidRoot,
                             Some(&current),
                             "the selected root or one of its ancestors is not a plain directory",
+                        ));
+                    }
+                    if request.exclude_cloud_placeholders && !identity_is_supported(opened.identity)
+                    {
+                        return Err(BackendFailure::new(
+                            BackendFailureKind::UnsupportedIdentity,
+                            Some(&current),
+                            "the selected root or an ancestor has no stable Windows file ID",
                         ));
                     }
                     if let Some(expected_parent) = prior_canonical.as_deref()
@@ -3540,13 +4122,29 @@ impl RenameScanBackend for NativeRenameScanBackend {
                 }
                 Component::Normal(name) => {
                     current.push(name);
-                    let opened = open_native_object(&current, false)
-                        .map_err(|error| classify_root_io(&current, error))?;
+                    let opened =
+                        open_native_object(&current, false, request.exclude_cloud_placeholders)
+                            .map_err(|error| classify_root_io(&current, error))?;
+                    if request.exclude_cloud_placeholders && opened.cloud_placeholder {
+                        return Err(BackendFailure::new(
+                            BackendFailureKind::UnsupportedIdentity,
+                            Some(&current),
+                            "cloud-placeholder roots and ancestors are not hydrated or traversed",
+                        ));
+                    }
                     if opened.kind != SnapshotEntryKind::Directory || opened.reparse_point {
                         return Err(BackendFailure::new(
                             BackendFailureKind::InvalidRoot,
                             Some(&current),
                             "the selected root or one of its ancestors is not a plain directory",
+                        ));
+                    }
+                    if request.exclude_cloud_placeholders && !identity_is_supported(opened.identity)
+                    {
+                        return Err(BackendFailure::new(
+                            BackendFailureKind::UnsupportedIdentity,
+                            Some(&current),
+                            "the selected root or an ancestor has no stable Windows file ID",
                         ));
                     }
                     if let Some(expected_parent) = prior_canonical.as_deref()
@@ -3598,6 +4196,7 @@ impl RenameScanBackend for NativeRenameScanBackend {
             canonical_path: root_proof.canonical_path.clone(),
             identity: root_proof.identity,
             recursive: request.scope == RenameScanScope::Recursive,
+            exclude_cloud_placeholders: request.exclude_cloud_placeholders,
             generation: request.generation,
             chain,
         };
@@ -3639,9 +4238,15 @@ impl RenameScanBackend for NativeRenameScanBackend {
         &self,
         directory: &OpenDirectory<Self::Handle>,
         remaining_entries: usize,
+        remaining_path_bytes: usize,
         cancellation: &ScanCancellation,
     ) -> Result<Vec<EnumeratedName>, BackendFailure> {
-        enumerate_native_directory(directory, remaining_entries, cancellation)
+        enumerate_native_directory(
+            directory,
+            remaining_entries,
+            remaining_path_bytes,
+            cancellation,
+        )
     }
 
     fn open_child(
@@ -3674,7 +4279,7 @@ impl RenameScanBackend for NativeRenameScanBackend {
             ));
         }
         let lookup_path = parent.canonical_path.join(name);
-        let opened = open_native_object(&lookup_path, false)
+        let opened = open_native_object(&lookup_path, false, root.exclude_cloud_placeholders)
             .map_err(|error| classify_child_io(&lookup_path, error))?;
         if let Some(expected) = expected
             && (expected.is_reparse_point != opened.reparse_point
@@ -3739,7 +4344,7 @@ impl RenameScanBackend for NativeRenameScanBackend {
                 "only a verified plain directory can be queued for enumeration",
             ));
         }
-        let listed = open_native_object(&child.lookup_path, true)
+        let listed = open_native_object(&child.lookup_path, true, root.exclude_cloud_placeholders)
             .map_err(|error| classify_child_io(&child.lookup_path, error))?;
         if listed.kind != SnapshotEntryKind::Directory
             || listed.reparse_point
@@ -3787,6 +4392,7 @@ impl RenameScanBackend for NativeRenameScanBackend {
             let opened = open_native_object(
                 &expected.lookup_path,
                 is_final && final_access == DirectoryOpenAccess::Enumerate,
+                root.exclude_cloud_placeholders,
             )
             .map_err(|error| classify_chain_io(&expected.lookup_path, error, root))?;
             if opened.kind != SnapshotEntryKind::Directory || opened.reparse_point {
@@ -4502,6 +5108,7 @@ impl RenameScanBackend for NativeRenameScanBackend {
         &self,
         directory: &OpenDirectory<Self::Handle>,
         _remaining_entries: usize,
+        _remaining_path_bytes: usize,
         _cancellation: &ScanCancellation,
     ) -> Result<Vec<EnumeratedName>, BackendFailure> {
         Err(BackendFailure::new(
@@ -4651,7 +5258,8 @@ fn verified_parent_chain(
             return Err("the recorded parent path contains traversal".to_owned());
         };
         current.push(name);
-        let opened = open_native_object(&current, true).map_err(|error| error.to_string())?;
+        let opened =
+            open_native_object(&current, true, false).map_err(|error| error.to_string())?;
         if opened.kind != SnapshotEntryKind::Directory || opened.reparse_point {
             return Err(format!(
                 "the recorded parent is not a plain directory: {}",
@@ -4715,7 +5323,7 @@ fn observe_watch_file_native(
     let opened = if require_read_lock {
         open_native_verified_file(&lookup_path)
     } else {
-        open_native_object(&lookup_path, false)
+        open_native_object(&lookup_path, false, false)
     }
     .map_err(map_watch_file_io)?;
     if opened.reparse_point {
@@ -4802,7 +5410,7 @@ fn admit_watch_parent_chain(
             return Err(native_watch_error(NativeWatchErrorKind::InvalidPath));
         };
         current.push(name);
-        let opened = open_native_object(&current, false).map_err(map_watch_file_io)?;
+        let opened = open_native_object(&current, false, false).map_err(map_watch_file_io)?;
         if opened.reparse_point {
             return Err(native_watch_error(NativeWatchErrorKind::ReparsePoint));
         }
@@ -4919,6 +5527,7 @@ fn open_native_mutation_file(path: &Path) -> std::io::Result<OpenedObject<std::f
         reparse_point,
         length: (!is_directory).then_some(metadata.len()),
         modified: metadata.modified().ok(),
+        cloud_placeholder: false,
         handle: file,
     })
 }
@@ -4984,6 +5593,7 @@ fn open_native_replace_file(path: &Path) -> std::io::Result<OpenedObject<std::fs
         reparse_point,
         length: (!is_directory).then_some(metadata.len()),
         modified: metadata.modified().ok(),
+        cloud_placeholder: false,
         handle: file,
     })
 }
@@ -7420,6 +8030,7 @@ fn open_native_readonly_content_file(path: &Path) -> std::io::Result<OpenedObjec
         reparse_point,
         length: (!is_directory).then_some(metadata.len()),
         modified: metadata.modified().ok(),
+        cloud_placeholder: false,
         handle: file,
     })
 }
@@ -7489,6 +8100,7 @@ fn open_native_verified_file(path: &Path) -> std::io::Result<OpenedObject<std::f
         reparse_point,
         length: (!is_directory).then_some(metadata.len()),
         modified: metadata.modified().ok(),
+        cloud_placeholder: false,
         handle: file,
     })
 }
@@ -7553,6 +8165,7 @@ fn open_native_occupancy_file(path: &Path) -> std::io::Result<OpenedObject<std::
         reparse_point,
         length: (!is_directory).then_some(metadata.len()),
         modified: metadata.modified().ok(),
+        cloud_placeholder: false,
         handle: file,
     })
 }
@@ -7788,6 +8401,7 @@ fn hash_reader(
 fn open_native_object(
     path: &Path,
     enumerate_children: bool,
+    exclude_cloud_placeholders: bool,
 ) -> std::io::Result<OpenedObject<std::fs::File>> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::MetadataExt;
@@ -7795,11 +8409,16 @@ fn open_native_object(
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_NO_RECALL, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_FLAGS_AND_ATTRIBUTES, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows::core::PCWSTR;
 
+    dff_cloud_attribute_preflight(exclude_cloud_placeholders, || {
+        query_native_path_attributes(path)
+    })
+    .map_err(|error| native_contextual_io_error("GetFileAttributesW", error))?;
     let mut wide_path = extended_local_path(path)?;
     wide_path.push(0);
     let desired_access = FILE_READ_ATTRIBUTES.0
@@ -7813,7 +8432,13 @@ fn open_native_object(
     // through enumeration and child opens, then releases it before returning
     // the path/ID proof to the caller.
     let share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE;
-    let flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS;
+    let flags = FILE_FLAG_OPEN_REPARSE_POINT
+        | FILE_FLAG_BACKUP_SEMANTICS
+        | if exclude_cloud_placeholders {
+            FILE_FLAG_OPEN_NO_RECALL
+        } else {
+            FILE_FLAGS_AND_ATTRIBUTES(0)
+        };
     // SAFETY: the path is a validated local, NUL-terminated UTF-16 path. The
     // API opens an existing object with reparse-point resolution disabled and
     // grants only identity/metadata or directory-list access. The returned
@@ -7838,6 +8463,16 @@ fn open_native_object(
         .map_err(|error| native_contextual_io_error("File::metadata", error))?;
     let attributes = metadata.file_attributes();
     let reparse_point = attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
+    let cloud_placeholder = has_cloud_placeholder_attributes(attributes);
+    if exclude_cloud_placeholders && cloud_placeholder {
+        return Err(native_contextual_io_error(
+            "DFF cloud placeholder recheck",
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "cloud-placeholder object became ineligible during open",
+            ),
+        ));
+    }
     let is_directory = attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
     let kind = if reparse_point {
         SnapshotEntryKind::Other
@@ -7860,8 +8495,27 @@ fn open_native_object(
         reparse_point,
         length: (!is_directory).then_some(metadata.len()),
         modified: metadata.modified().ok(),
+        cloud_placeholder,
         handle: file,
     })
+}
+
+#[cfg(windows)]
+fn query_native_path_attributes(path: &Path) -> std::io::Result<u32> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::GetFileAttributesW;
+    use windows::core::PCWSTR;
+
+    let mut wide_path = extended_local_path(path)?;
+    wide_path.push(0);
+    // The DFF caller refuses failed attribute queries before opening and also
+    // rechecks attributes from the no-recall handle after opening.
+    let attributes = unsafe { GetFileAttributesW(PCWSTR(wide_path.as_ptr())) };
+    if attributes == u32::MAX {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(attributes)
+    }
 }
 
 #[cfg(windows)]
@@ -8036,6 +8690,7 @@ fn strip_extended_prefix(path: OsString) -> PathBuf {
 fn enumerate_native_directory(
     directory: &OpenDirectory<std::fs::File>,
     remaining_entries: usize,
+    remaining_path_bytes: usize,
     cancellation: &ScanCancellation,
 ) -> Result<Vec<EnumeratedName>, BackendFailure> {
     use std::mem::offset_of;
@@ -8050,6 +8705,7 @@ fn enumerate_native_directory(
     const BUFFER_WORDS: usize = 8_192;
     let mut buffer = vec![0_u64; BUFFER_WORDS];
     let mut entries = Vec::new();
+    let mut names_path_bytes = 0usize;
     let mut information_class = FileIdBothDirectoryRestartInfo;
     loop {
         if cancellation.is_cancelled() {
@@ -8168,16 +8824,26 @@ fn enumerate_native_directory(
                     return Err(BackendFailure::new(
                         BackendFailureKind::ResourceLimit,
                         Some(&directory.canonical_path),
+                        format!("entry limit of {remaining_entries} reached"),
+                    ));
+                }
+                let next_names_path_bytes =
+                    names_path_bytes.saturating_add(path_storage_bytes(Path::new(&name)));
+                if next_names_path_bytes > remaining_path_bytes {
+                    return Err(BackendFailure::new(
+                        BackendFailureKind::ResourceLimit,
+                        Some(&directory.canonical_path),
                         format!(
-                            "entry limit of {} reached",
-                            batch_rename::MAX_SNAPSHOT_ENTRIES
+                            "discovery path storage limit of {remaining_path_bytes} bytes reached while enumerating names"
                         ),
                     ));
                 }
+                names_path_bytes = next_names_path_bytes;
                 entries.push(EnumeratedName {
                     name,
                     is_directory: attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
                     is_reparse_point: attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0,
+                    cloud_placeholder: has_cloud_placeholder_attributes(attributes),
                 });
             }
             if next_offset == 0 {
@@ -8251,6 +8917,7 @@ fn classify_chain_io(path: &Path, error: std::io::Error, root: &RootProof) -> Ba
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn m8d_hash_cancellation_stops_between_chunks_and_compensation_finishes() {
@@ -8318,6 +8985,7 @@ mod tests {
         identity: NativeFileIdentity,
         kind: SnapshotEntryKind,
         reparse_point: bool,
+        cloud_placeholder: bool,
         length: Option<u64>,
         modified: Option<SystemTime>,
         children: Vec<EnumeratedName>,
@@ -8330,7 +8998,9 @@ mod tests {
         directory_list_inaccessible: Mutex<HashSet<PathBuf>>,
         unsupported: Mutex<HashSet<PathBuf>>,
         mid_open_substitution: Mutex<Option<(PathBuf, u64)>>,
+        cloud_before_next_open: Mutex<Option<PathBuf>>,
         resource_limited: AtomicBool,
+        child_open_calls: AtomicUsize,
     }
 
     impl FakeBackend {
@@ -8360,6 +9030,7 @@ mod tests {
                         SnapshotEntryKind::Directory
                     },
                     reparse_point,
+                    cloud_placeholder: false,
                     length: None,
                     modified: None,
                     children: Vec::new(),
@@ -8374,6 +9045,7 @@ mod tests {
                     identity: Self::identity(id),
                     kind: SnapshotEntryKind::File,
                     reparse_point: false,
+                    cloud_placeholder: false,
                     length: Some(1),
                     modified: Some(std::time::UNIX_EPOCH),
                     children: Vec::new(),
@@ -8394,6 +9066,7 @@ mod tests {
                     name: OsString::from(name),
                     is_directory: false,
                     is_reparse_point: false,
+                    cloud_placeholder: false,
                 });
             path
         }
@@ -8411,6 +9084,7 @@ mod tests {
                     name: OsString::from(name),
                     is_directory: true,
                     is_reparse_point: false,
+                    cloud_placeholder: false,
                 });
             path
         }
@@ -8428,6 +9102,7 @@ mod tests {
                     name: OsString::from(name),
                     is_directory: true,
                     is_reparse_point: true,
+                    cloud_placeholder: false,
                 });
             path
         }
@@ -8460,6 +9135,10 @@ mod tests {
 
         fn substitute_parent_during_next_open(&self, path: &Path, new_id: u64) {
             *self.mid_open_substitution.lock().unwrap() = Some((path.to_path_buf(), new_id));
+        }
+
+        fn mark_cloud_before_next_open(&self, path: &Path) {
+            *self.cloud_before_next_open.lock().unwrap() = Some(path.to_path_buf());
         }
 
         fn object(&self, path: &Path) -> Result<FakeObject, BackendFailure> {
@@ -8524,6 +9203,7 @@ mod tests {
                 canonical_path: selected.to_path_buf(),
                 identity: object.identity,
                 recursive: request.scope == RenameScanScope::Recursive,
+                exclude_cloud_placeholders: request.exclude_cloud_placeholders,
                 generation: request.generation,
                 chain,
             };
@@ -8536,6 +9216,7 @@ mod tests {
             &self,
             directory: &OpenDirectory<Self::Handle>,
             remaining_entries: usize,
+            remaining_path_bytes: usize,
             cancellation: &ScanCancellation,
         ) -> Result<Vec<EnumeratedName>, BackendFailure> {
             if cancellation.is_cancelled() {
@@ -8572,6 +9253,16 @@ mod tests {
                     "fake directory exceeds the remaining entry budget",
                 ));
             }
+            let path_bytes = entries.iter().fold(0usize, |total, entry| {
+                total.saturating_add(path_storage_bytes(Path::new(&entry.name)))
+            });
+            if path_bytes > remaining_path_bytes {
+                return Err(BackendFailure::new(
+                    BackendFailureKind::ResourceLimit,
+                    Some(&directory.canonical_path),
+                    "fake directory exceeds the remaining path-byte budget",
+                ));
+            }
             Ok(entries)
         }
 
@@ -8605,7 +9296,47 @@ mod tests {
             {
                 self.change_identity(&changed_parent, new_id);
             }
+            let mark_cloud = {
+                let mut next = self.cloud_before_next_open.lock().unwrap();
+                if next.as_ref() == Some(&path) {
+                    next.take();
+                    true
+                } else {
+                    false
+                }
+            };
+            if mark_cloud {
+                self.objects
+                    .lock()
+                    .unwrap()
+                    .get_mut(&path)
+                    .ok_or_else(|| {
+                        BackendFailure::new(
+                            BackendFailureKind::ObjectChanged,
+                            Some(&path),
+                            "injected cloud-state target disappeared",
+                        )
+                    })?
+                    .cloud_placeholder = true;
+            }
             let object = self.object(&path)?;
+            if root.exclude_cloud_placeholders {
+                dff_cloud_attribute_preflight(true, || {
+                    Ok(if object.cloud_placeholder {
+                        FILE_ATTRIBUTE_OFFLINE_BITS
+                    } else {
+                        0
+                    })
+                })
+                .map_err(|error| {
+                    BackendFailure::new(
+                        BackendFailureKind::UnsupportedIdentity,
+                        Some(&path),
+                        error.to_string(),
+                    )
+                })?;
+            }
+            self.child_open_calls.fetch_add(1, Ordering::AcqRel);
             if let Some(expected) = expected
                 && (expected.is_reparse_point != object.reparse_point
                     || (!expected.is_reparse_point
@@ -8626,6 +9357,7 @@ mod tests {
                 reparse_point: object.reparse_point,
                 length: object.length,
                 modified: object.modified,
+                cloud_placeholder: object.cloud_placeholder,
                 handle: path,
             })
         }
@@ -8758,6 +9490,238 @@ mod tests {
             recursive,
             RenameScanGeneration(generation),
         )
+    }
+
+    #[test]
+    fn dff_discovery_skips_cloud_and_reparse_entries_before_opening_them() {
+        let temp = test_root();
+        let root = temp.path();
+        let backend = FakeBackend::new_root(root);
+        backend.add_file(root, "ordinary.bin", 2);
+        backend.add_file(root, "cloud.bin", 3);
+        let reparse = backend.add_reparse_directory(root, "linked", 4);
+        backend.add_file(&reparse, "outside.bin", 5);
+        backend
+            .objects
+            .lock()
+            .unwrap()
+            .get_mut(root)
+            .unwrap()
+            .children
+            .iter_mut()
+            .find(|entry| entry.name == OsStr::new("cloud.bin"))
+            .unwrap()
+            .cloud_placeholder = true;
+
+        let mut request = request(root, true, 100);
+        request.exclude_cloud_placeholders = true;
+        let result = scan_with_backend_bounded(
+            &backend,
+            request,
+            &ScanCancellation::new(),
+            ScanBounds::duplicate_discovery(DuplicateDiscoveryScanLimits {
+                max_entries: 20,
+                max_files: 20,
+                max_directories: 20,
+                max_depth: 20,
+                max_path_bytes: usize::MAX,
+            }),
+        );
+
+        assert_eq!(result.status(), RenameScanStatus::Complete);
+        assert_eq!(result.rows().len(), 1);
+        assert_eq!(
+            result.rows()[0].path().file_name(),
+            Some(OsStr::new("ordinary.bin"))
+        );
+        assert_eq!(result.summary().cloud_placeholders_excluded(), 1);
+        assert_eq!(result.summary().reparse_entries_excluded(), 1);
+        assert_eq!(backend.child_open_calls.load(Ordering::Acquire), 1);
+        assert!(result.snapshot.is_none());
+    }
+
+    #[test]
+    fn dff_discovery_path_budget_bounds_enumerated_names_before_child_open() {
+        let temp = test_root();
+        let root = temp.path();
+        let backend = FakeBackend::new_root(root);
+        backend.add_file(root, "a-name-longer-than-the-remaining-budget.bin", 2);
+
+        let mut request = request(root, true, 101);
+        request.exclude_cloud_placeholders = true;
+        let root_bytes = path_storage_bytes(root);
+        // The fake root has one proof path, one retained directory handle,
+        // one queued/active frame, request/display/canonical paths, and the
+        // returned canonical-root path. Leave too little for the enumerated
+        // filename so both native and injected backends must stop pre-open.
+        let limits = DuplicateDiscoveryScanLimits {
+            max_entries: 20,
+            max_files: 20,
+            max_directories: 20,
+            max_depth: 20,
+            max_path_bytes: root_bytes.saturating_mul(10).saturating_add(2),
+        };
+        let result = scan_with_backend_bounded(
+            &backend,
+            request,
+            &ScanCancellation::new(),
+            ScanBounds::duplicate_discovery(limits),
+        );
+
+        assert_eq!(result.status(), RenameScanStatus::ResourceLimit);
+        assert!(result.rows().is_empty());
+        assert_eq!(backend.child_open_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn dff_discovery_rechecks_cloud_state_before_opening_an_enumerated_child() {
+        let temp = test_root();
+        let root = temp.path();
+        let backend = FakeBackend::new_root(root);
+        let cloud_path = backend.add_file(root, "became-cloud.bin", 2);
+        backend.mark_cloud_before_next_open(&cloud_path);
+
+        let mut request = request(root, true, 102);
+        request.exclude_cloud_placeholders = true;
+        let result = scan_with_backend_bounded(
+            &backend,
+            request,
+            &ScanCancellation::new(),
+            ScanBounds::duplicate_discovery(DuplicateDiscoveryScanLimits {
+                max_entries: 20,
+                max_files: 20,
+                max_directories: 20,
+                max_depth: 20,
+                max_path_bytes: usize::MAX,
+            }),
+        );
+
+        assert_ne!(result.status(), RenameScanStatus::Complete);
+        assert!(result.rows().is_empty());
+        assert_eq!(backend.child_open_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn dff_discovery_fails_closed_when_cloud_attribute_query_fails() {
+        let mut query_calls = 0;
+        let failure = dff_cloud_attribute_preflight(true, || {
+            query_calls += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected attribute-query failure",
+            ))
+        });
+        assert_eq!(query_calls, 1);
+        assert_eq!(
+            failure.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+
+        let mut excluded_query_calls = 0;
+        assert!(
+            dff_cloud_attribute_preflight(false, || {
+                excluded_query_calls += 1;
+                Err(std::io::Error::other(
+                    "must not be queried for rename scans",
+                ))
+            })
+            .is_ok()
+        );
+        assert_eq!(excluded_query_calls, 0);
+    }
+
+    #[test]
+    fn dff_discovery_bounds_queued_directories_before_acquiring_child_handles() {
+        let temp = test_root();
+        let root = temp.path();
+        let backend = FakeBackend::new_root(root);
+        backend.add_directory(root, "one", 2);
+        backend.add_directory(root, "two", 3);
+
+        let mut request = request(root, true, 103);
+        request.exclude_cloud_placeholders = true;
+        let result = scan_with_backend_bounded(
+            &backend,
+            request,
+            &ScanCancellation::new(),
+            ScanBounds::duplicate_discovery(DuplicateDiscoveryScanLimits {
+                max_entries: 20,
+                max_files: 20,
+                max_directories: 1,
+                max_depth: 20,
+                max_path_bytes: usize::MAX,
+            }),
+        );
+
+        assert_eq!(result.status(), RenameScanStatus::ResourceLimit);
+        assert_eq!(result.summary().directories_scanned(), 1);
+        assert_eq!(backend.child_open_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn dff_discovery_partial_root_charges_queued_directories_to_the_next_root() {
+        let first_temp = test_root();
+        let first_root = first_temp.path();
+        let first_backend = FakeBackend::new_root(first_root);
+        let healthy = first_backend.add_directory(first_root, "a-healthy", 2);
+        first_backend.add_directory(&healthy, "a1-still-queued", 4);
+        let blocked = first_backend.add_directory(first_root, "b-blocked", 3);
+        first_backend.deny_directory_listing(&blocked);
+
+        let total_directory_limit = 5;
+        let first_root_budget =
+            remaining_duplicate_discovery_directory_budget(total_directory_limit, 0, 1);
+        assert_eq!(first_root_budget, 4, "one slot is reserved for root two");
+        let mut first_request = request(first_root, true, 104);
+        first_request.exclude_cloud_placeholders = true;
+        let first = scan_with_backend_bounded(
+            &first_backend,
+            first_request,
+            &ScanCancellation::new(),
+            ScanBounds::duplicate_discovery(DuplicateDiscoveryScanLimits {
+                max_entries: 20,
+                max_files: 20,
+                max_directories: first_root_budget,
+                max_depth: 20,
+                max_path_bytes: usize::MAX,
+            }),
+        );
+        assert_eq!(first.status(), RenameScanStatus::Partial);
+        // Scanned counts directory attempts, including the blocked listing.
+        assert_eq!(first.summary().directories_scanned(), 3);
+        assert_eq!(first.summary().directories_admitted(), 4);
+
+        // The first root stopped after its blocked child while a healthy
+        // grandchild remained queued. That admission still consumes the
+        // aggregate cap, so root two gets only its own root slot.
+        let second_root_budget = remaining_duplicate_discovery_directory_budget(
+            total_directory_limit,
+            first.summary().directories_admitted(),
+            0,
+        );
+        assert_eq!(second_root_budget, 1);
+        let second_temp = test_root();
+        let second_root = second_temp.path();
+        let second_backend = FakeBackend::new_root(second_root);
+        second_backend.add_directory(second_root, "must-not-open", 4);
+        let mut second_request = request(second_root, true, 105);
+        second_request.exclude_cloud_placeholders = true;
+        let second = scan_with_backend_bounded(
+            &second_backend,
+            second_request,
+            &ScanCancellation::new(),
+            ScanBounds::duplicate_discovery(DuplicateDiscoveryScanLimits {
+                max_entries: 20,
+                max_files: 20,
+                max_directories: second_root_budget,
+                max_depth: 20,
+                max_path_bytes: usize::MAX,
+            }),
+        );
+        assert_eq!(second.status(), RenameScanStatus::ResourceLimit);
+        assert_eq!(second.summary().directories_scanned(), 1);
+        assert_eq!(second.summary().directories_admitted(), 1);
+        assert_eq!(second_backend.child_open_calls.load(Ordering::Acquire), 0);
     }
 
     #[test]

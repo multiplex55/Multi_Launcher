@@ -34,6 +34,7 @@ pub mod coordinate_tool;
 pub mod dashboard;
 pub mod date_arithmetic;
 pub mod diff;
+pub(crate) mod duplicate_finder;
 pub mod file_operations;
 pub mod file_search;
 pub mod help_window;
