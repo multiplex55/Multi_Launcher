@@ -34,6 +34,9 @@ mod emoji_plugin;
 #[path = "../plugin_cases/help_plugin.rs"]
 mod help_plugin;
 
+#[path = "../plugin_cases/image_compare_plugin.rs"]
+mod image_compare_plugin;
+
 #[path = "../plugin_cases/ip_plugin.rs"]
 mod ip_plugin;
 

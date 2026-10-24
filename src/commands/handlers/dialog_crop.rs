@@ -21,6 +21,7 @@ where
         }
         Command::Dialog(DialogCommand::DashboardSettings) => host.open_dashboard_settings_dialog(),
         Command::Dialog(DialogCommand::Theme) => host.open_theme_dialog(),
+        Command::Dialog(DialogCommand::ImageCompare) => host.open_image_compare_dialog(),
         Command::Timer(TimerCommand::TimerDialog) => host.open_timer_dialog(),
         Command::Timer(TimerCommand::AlarmDialog) => host.open_alarm_dialog(),
         Command::Shell(ShellCommand::Dialog) => host.open_shell_dialog(),
@@ -140,6 +141,9 @@ mod tests {
         fn open_theme_dialog(&mut self) {
             self.mark("theme");
         }
+        fn open_image_compare_dialog(&mut self) {
+            self.mark("image_compare");
+        }
         fn open_volume_dialog(&mut self) {
             self.mark("volume");
         }
@@ -214,6 +218,10 @@ mod tests {
                 "dashboard_settings",
             ),
             (Command::Dialog(DialogCommand::Theme), "theme"),
+            (
+                Command::Dialog(DialogCommand::ImageCompare),
+                "image_compare",
+            ),
             (Command::System(SystemCommand::VolumeDialog), "volume"),
             (
                 Command::System(SystemCommand::BrightnessDialog),

@@ -50,10 +50,11 @@ pub(crate) enum NavigationDialogKind {
     MouseGestureSettings,
     HotkeyDirectory,
     TableUtility,
+    ImageCompare,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 15] = [
+    pub(crate) const ALL: [Self; 16] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -69,6 +70,7 @@ impl NavigationDialogKind {
         Self::MouseGestureSettings,
         Self::HotkeyDirectory,
         Self::TableUtility,
+        Self::ImageCompare,
     ];
 
     const fn index(self) -> usize {
@@ -88,6 +90,7 @@ impl NavigationDialogKind {
             Self::MouseGestureSettings => 12,
             Self::HotkeyDirectory => 13,
             Self::TableUtility => 14,
+            Self::ImageCompare => 15,
         }
     }
 
@@ -108,6 +111,7 @@ impl NavigationDialogKind {
             Self::MouseGestureSettings => "mouse-gesture-settings",
             Self::HotkeyDirectory => "hotkey-directory",
             Self::TableUtility => "table-utility",
+            Self::ImageCompare => "image-compare",
         }
     }
 
@@ -131,6 +135,7 @@ impl NavigationDialogKind {
             Self::MouseGestureSettings => egui::Id::new(Some("Mouse Gesture Settings")),
             Self::HotkeyDirectory => egui::Id::new(Some("Hotkey Directory")),
             Self::TableUtility => egui::Id::new(Some("Table Utility")),
+            Self::ImageCompare => egui::Id::new(Some("Image Comparison")),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -411,6 +416,7 @@ impl NavigationViewportBinding {
                 kind: NavigationDialogKind::RegexTester
                     | NavigationDialogKind::XmlToolkit
                     | NavigationDialogKind::TableUtility
+                    | NavigationDialogKind::ImageCompare
                     | NavigationDialogKind::RadialDesigner,
                 ..
             } | NavigationOwner::XmlOverwriteConfirmation { .. }
@@ -3920,6 +3926,9 @@ mod tests {
                     }
                     NavigationDialogKind::TableUtility => {
                         egui::Window::new("Table Utility").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::ImageCompare => {
+                        egui::Window::new("Image Comparison").show(ctx, |_| {});
                     }
                     NavigationDialogKind::MouseSettings => {
                         egui::Window::new("Mouse Settings").show(ctx, |_| {});

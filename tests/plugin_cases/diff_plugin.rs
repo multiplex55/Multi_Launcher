@@ -57,6 +57,35 @@ fn quotes_windows_paths_and_rejects_malformed_quote() {
 }
 
 #[test]
+fn image_words_remain_ordinary_diff_payloads() {
+    for (query, expected) in [
+        (
+            "diff image",
+            DiffOpenPayload {
+                left: Some("image".into()),
+                right: None,
+            },
+        ),
+        (
+            "diff \"image\"",
+            DiffOpenPayload {
+                left: Some("image".into()),
+                right: None,
+            },
+        ),
+        (
+            "diff image second.txt",
+            DiffOpenPayload {
+                left: Some("image".into()),
+                right: Some("second.txt".into()),
+            },
+        ),
+    ] {
+        assert_eq!(payload(query), expected, "{query:?}");
+    }
+}
+
+#[test]
 fn does_not_interfere_with_other_prefixes() {
     assert!(DiffPlugin::default().search("fs file query").is_empty());
     assert!(DiffPlugin::default().search("folder docs").is_empty());

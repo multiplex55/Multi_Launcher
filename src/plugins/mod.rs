@@ -23,6 +23,7 @@ pub mod hash_generator;
 pub mod help;
 pub mod history;
 pub mod hotfolder;
+pub mod image_compare;
 pub mod ip;
 pub mod json_utility;
 pub mod keys;

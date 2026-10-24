@@ -26,6 +26,11 @@ path = "src/bin/pin_opacity_smoke.rs"
 required-features = ["dev-smoke-binaries"]
 
 [[bin]]
+name = "image_compare_smoke"
+path = "src/bin/image_compare_smoke.rs"
+required-features = ["dev-smoke-binaries"]
+
+[[bin]]
 name = "radial_acceptance"
 path = "src/bin/radial_acceptance.rs"
 required-features = ["dev-smoke-binaries"]

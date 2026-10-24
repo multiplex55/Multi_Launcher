@@ -402,6 +402,20 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         )
         .with_gui_failure_policy());
     }
+    if s.starts_with("imgdiff:") {
+        if s == "imgdiff:open" && action.args.is_none() {
+            return Ok(Command::Dialog(DialogCommand::ImageCompare));
+        }
+        return Err(CommandError::new(
+            "image_compare",
+            if action.args.is_some() {
+                "Image comparison does not accept a path or content payload"
+            } else {
+                "unknown image comparison command"
+            },
+        )
+        .with_gui_failure_policy());
+    }
     if s.starts_with("hotfolder:") {
         let command = match (s, action.args.is_none()) {
             ("hotfolder:open", true) => Some(HotFolderCommand::Open),
@@ -2956,5 +2970,31 @@ mod paste_sequence_parser_tests {
             parse_action(&action("paste:run:not-an-id")).unwrap(),
             Command::PasteSequence(PasteSequenceCommand::InvalidRun)
         );
+    }
+
+    #[test]
+    fn imgdiff_open_is_typed_and_its_reserved_namespace_fails_closed() {
+        assert_eq!(
+            parse_action(&action("imgdiff:open")).unwrap(),
+            Command::Dialog(DialogCommand::ImageCompare)
+        );
+        for (raw, args) in [
+            ("imgdiff:open", Some("C:\\private\\image.png")),
+            ("imgdiff:future", None),
+        ] {
+            let error = parse_action(&Action {
+                label: "image comparison".into(),
+                desc: String::new(),
+                action: raw.into(),
+                args: args.map(str::to_owned),
+            })
+            .unwrap_err();
+            assert_eq!(error.domain, "image_compare");
+            assert!(error.toast && error.refocus);
+        }
+        assert!(matches!(
+            parse_action(&action("imgdiffusion:open")).unwrap(),
+            Command::External(_)
+        ));
     }
 }

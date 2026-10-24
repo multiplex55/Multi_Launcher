@@ -495,7 +495,7 @@ impl ImageCompareSession {
     }
 
     #[cfg(test)]
-    fn submit_raw_for_test(
+    pub(crate) fn submit_raw_for_test(
         &self,
         side: ImageSide,
         width: u32,
@@ -515,7 +515,9 @@ impl ImageCompareSession {
     }
 
     #[cfg(test)]
-    fn reaper_probe_for_test(&self) -> Option<crate::thread_reaper::ReapCompletionProbe> {
+    pub(crate) fn reaper_probe_for_test(
+        &self,
+    ) -> Option<crate::thread_reaper::ReapCompletionProbe> {
         self.worker
             .lock()
             .unwrap()

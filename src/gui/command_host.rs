@@ -228,6 +228,10 @@ impl DialogCommandHost for LauncherApp {
         self.help_window.open = true;
     }
 
+    fn open_image_compare_dialog(&mut self) {
+        self.focus_panel(super::Panel::ImageCompareDialog);
+    }
+
     fn open_timer_dialog(&mut self) {
         self.timer_dialog.open_timer();
     }

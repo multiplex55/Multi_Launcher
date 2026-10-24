@@ -33,6 +33,9 @@ pub(crate) mod hotfolder_runtime;
 mod hotkey_directory_dialog;
 #[cfg(feature = "perf-harness")]
 pub use hotfolder_runtime::HotFolderIdleFixture;
+mod image_compare_dialog;
+#[cfg(feature = "dev-smoke-binaries")]
+pub mod image_compare_smoke;
 pub mod image_crop_editor;
 mod image_panel;
 mod indexing;
@@ -144,6 +147,7 @@ pub use file_search_dialog::{
 };
 pub use file_search_preview_dialog::FileSearchPreviewDialogState;
 pub use hash_generator_dialog::HashGeneratorDialogState;
+pub use image_compare_dialog::ImageCompareDialogState;
 pub use image_panel::ImagePanel;
 pub use json_utility_dialog::JsonUtilityDialogState;
 pub use macro_dialog::MacroDialog;
@@ -739,6 +743,7 @@ pub enum Panel {
     MultiManagerSettingsDialog,
     RadialEditor,
     TableUtilityDialog,
+    ImageCompareDialog,
 }
 
 impl Panel {
@@ -784,6 +789,7 @@ impl Panel {
             Self::SearchReplaceDialog => "Search and Replace",
             Self::XmlToolkitDialog => "XML Toolkit",
             Self::TableUtilityDialog => "Table Utility",
+            Self::ImageCompareDialog => "Image Comparison",
             Self::QrDialog => "QR Generator",
             Self::ConvertPanel => "Converter",
             Self::VolumeDialog => "Volume",
@@ -846,6 +852,7 @@ struct PanelStates {
     search_replace_dialog: bool,
     xml_toolkit_dialog: bool,
     table_utility_dialog: bool,
+    image_compare_dialog: bool,
     qr_dialog: bool,
     convert_panel: bool,
     volume_dialog: bool,
@@ -1177,6 +1184,7 @@ pub struct LauncherApp {
     pub regex_tester_dialog: RegexTesterDialogState,
     pub xml_toolkit_dialog: XmlToolkitDialogState,
     pub table_utility_dialog: TableUtilityDialogState,
+    pub image_compare_dialog: ImageCompareDialogState,
     pub qr_dialog: QrDialogState,
     pub clipboard_modify_config_diagnostic: Option<String>,
     clipboard_modify_watcher: Option<crate::clipboard_modify::watch::ClipboardModifyWatcher>,
@@ -3540,6 +3548,7 @@ impl LauncherApp {
             regex_tester_dialog,
             xml_toolkit_dialog: XmlToolkitDialogState::default(),
             table_utility_dialog: TableUtilityDialogState::default(),
+            image_compare_dialog: ImageCompareDialogState::new(ctx),
             qr_dialog: QrDialogState::default(),
             clipboard_modify_config_diagnostic,
             clipboard_modify_watcher,
@@ -4199,7 +4208,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 56] = [
+    const TRACKED_PANELS: [Panel; 57] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4256,6 +4265,7 @@ impl LauncherApp {
         Panel::MultiManagerDialog,
         Panel::MultiManagerSettingsDialog,
         Panel::RadialEditor,
+        Panel::ImageCompareDialog,
     ];
 
     fn is_panel_open(&self, panel: Panel) -> bool {
@@ -4300,6 +4310,7 @@ impl LauncherApp {
             Panel::SearchReplaceDialog => self.search_replace_dialog.open,
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open,
             Panel::TableUtilityDialog => self.table_utility_dialog.open,
+            Panel::ImageCompareDialog => self.image_compare_dialog.open,
             Panel::QrDialog => self.qr_dialog.open,
             Panel::ConvertPanel => self.convert_panel.open,
             Panel::VolumeDialog => self.volume_dialog.open,
@@ -4560,6 +4571,10 @@ impl LauncherApp {
                 self.table_utility_dialog.close();
                 self.panel_states.table_utility_dialog = false;
             }
+            Panel::ImageCompareDialog => {
+                self.image_compare_dialog.close();
+                self.panel_states.image_compare_dialog = false;
+            }
             Panel::JsonUtilityDialog => {
                 self.json_utility_dialog.close();
                 self.panel_states.json_utility_dialog = false;
@@ -4819,6 +4834,10 @@ impl LauncherApp {
                 self.table_utility_dialog.close();
                 self.panel_states.table_utility_dialog = false;
             }
+            Panel::ImageCompareDialog => {
+                self.image_compare_dialog.close();
+                self.panel_states.image_compare_dialog = false;
+            }
             Panel::JsonUtilityDialog => {
                 self.json_utility_dialog.close();
                 self.panel_states.json_utility_dialog = false;
@@ -4948,6 +4967,7 @@ impl LauncherApp {
             }
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open(),
             Panel::TableUtilityDialog => self.table_utility_dialog.open(),
+            Panel::ImageCompareDialog => self.image_compare_dialog.open(),
             Panel::ConvertPanel => self.convert_panel.open = true,
             Panel::VolumeDialog => self.volume_dialog.ensure_open(),
             Panel::BrightnessDialog => {
@@ -5098,6 +5118,7 @@ impl LauncherApp {
         check!(search_replace_dialog, Panel::SearchReplaceDialog);
         check!(xml_toolkit_dialog, Panel::XmlToolkitDialog);
         check!(table_utility_dialog, Panel::TableUtilityDialog);
+        check!(image_compare_dialog, Panel::ImageCompareDialog);
         check!(qr_dialog, Panel::QrDialog);
         check!(convert_panel, Panel::ConvertPanel);
         check!(volume_dialog, Panel::VolumeDialog);

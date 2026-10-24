@@ -87,6 +87,10 @@ impl HelpWindow {
                             ui.label(
                                 "Type table to open the local table viewer; opened source files are never modified. Paste Text and Open File are explicit inputs; the defaults are Auto delimiter, headers off, and lenient row widths. Parse / Refresh explicitly parses the source. Filter uses case-insensitive literal text; sorting uses numeric order for finite values or lexical order otherwise. Select visible rows and columns before copying quoted TSV or JSON, or saving JSON. The source limit is 10 MiB, with up to 50,000 data rows and 128 columns. Large sources keep their full text and show up to 2,048 preview characters plus a truncation marker. A failed parse leaves the last successful results visible and disables output until the current source parses.",
                             );
+                            ui.label(egui::RichText::new("Image Comparison").strong());
+                            ui.label(
+                                "Type imgdiff to compare two session-only images. Open A… and Open B… choose PNG, JPEG, BMP, or GIF files (16,777,216 pixels per image maximum); Paste A and Paste B read bounded CF_DIB images only when selected. A failed replacement keeps the last accepted image. A, B, Wipe, and Difference show top-left-aligned images without resizing; the exact RGBA comparison includes alpha and transparent-pixel RGB values. Inputs and results are cleared when the dialog closes.",
+                            );
                             ui.label("Older query: Ctrl+Up");
                             ui.label("Newer query / restore draft: Ctrl+Down");
                             ui.label(egui::RichText::new("Experimental Jump Mode").strong());

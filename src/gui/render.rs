@@ -4538,6 +4538,48 @@ impl LauncherApp {
         );
     }
 
+    fn show_image_compare(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        first_ui_pass: bool,
+        owner_transition_pending: bool,
+    ) {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let instance = match owner {
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::ImageCompare,
+                instance,
+            } => Some(instance),
+            _ => None,
+        };
+        let native_owner_current = !owner_transition_pending
+            && self.image_compare_native_ui_owner_current(ctx, root_visible);
+        let scope = instance
+            .filter(|_| native_owner_current && self.jump_mode_enabled())
+            .and_then(|instance| {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("image-compare", instance),
+                    crate::gui::jump_mode::TargetGeneration(instance),
+                    "image-compare/view",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )
+            });
+        self.image_compare_dialog.show_with_jump_mode(
+            ctx,
+            scope.as_ref(),
+            instance,
+            owner,
+            self.native_ui_application_input_allowed(ctx),
+            native_owner_current,
+            first_ui_pass,
+        );
+    }
+
     fn jump_mode_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         self.jump_mode_enabled()
             && self.native_ui_host_input_allowed(ctx, root_visible)
@@ -5329,6 +5371,21 @@ impl LauncherApp {
                 .overwrite_confirmation_layer_is_current(ctx)
     }
 
+    fn image_compare_native_ui_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+
+        self.image_compare_dialog.open
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && !egui::Popup::is_any_open(ctx)
+            && NavigationDialogKind::ImageCompare
+                .layer_id()
+                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+    }
+
     fn snippet_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
 
@@ -5388,6 +5445,7 @@ impl LauncherApp {
                         | super::Panel::RegexTesterDialog
                         | super::Panel::XmlToolkitDialog
                         | super::Panel::TableUtilityDialog
+                        | super::Panel::ImageCompareDialog
                         | super::Panel::MouseSettingsDialog
                         | super::Panel::MouseGesturesDialog
                         | super::Panel::MouseGestureSettingsDialog
@@ -5463,6 +5521,10 @@ impl LauncherApp {
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::TableUtility,
                 self.table_utility_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::ImageCompare,
+                self.image_compare_dialog.open,
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::MouseSettings,
@@ -9262,6 +9324,12 @@ impl LauncherApp {
             first_ui_pass,
             owner_transition_pending,
         );
+        self.show_image_compare(
+            &ctx,
+            frame_logic.should_be_visible,
+            first_ui_pass,
+            owner_transition_pending,
+        );
         self.render_hotfolder_manager(&ctx, first_ui_pass);
         #[cfg(feature = "qa-framebuffer-capture")]
         if self.qa_framebuffer_needs_qr_observation() {
@@ -9494,6 +9562,11 @@ impl LauncherApp {
         self.finish_and_paint_jump_mode_ui_pass(&ctx, frame_logic.should_be_visible);
         #[cfg(feature = "qa-framebuffer-capture")]
         self.qa_framebuffer_finish_ui_pass(&ctx, frame_logic.should_be_visible);
+        // egui_glow applies texture frees only after it paints the frame. The
+        // image comparison owner retains its combined CPU/GPU lease until
+        // this callback has crossed that renderer boundary.
+        self.image_compare_dialog
+            .paint_retirement_fence(ui.painter());
     }
 
     fn stage_ui_frame_receipt(
@@ -9789,6 +9862,7 @@ impl eframe::App for LauncherApp {
         self.hotfolder_runtime.join_reaper();
         self.xml_toolkit_dialog.shutdown();
         self.table_utility_dialog.shutdown();
+        self.image_compare_dialog.shutdown();
         if let Err(failure) = self.brightness_dialog.shutdown() {
             self.report_error_message(
                 "brightness.shutdown",
@@ -29190,6 +29264,257 @@ mod tests {
         .drop_without_applying_deltas();
         assert!(!app.table_utility_dialog.open);
         assert_eq!(clipboard.reads.load(Ordering::SeqCst), 0);
+        drop(workspace);
+    }
+
+    #[test]
+    fn imgdiff_root_jump_focuses_wipe_without_mutating_and_current_owners_gate_controls() {
+        use crate::gui::jump_mode::SurfaceId;
+        use crate::gui::jump_mode::TargetKind;
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.test_skip_history_persistence = true;
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        crate::commands::DialogCommandHost::open_image_compare_dialog(&mut app);
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        let instance = app
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::ImageCompare)
+            .expect("the current Image Comparison window has an instance");
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::ImageCompare,
+                instance,
+            }
+        );
+        assert_eq!(
+            crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx),
+            NavigationDialogKind::ImageCompare.layer_id()
+        );
+        let slider_target = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Set the A/B wipe position")
+            .expect("the real wipe slider is registered for Jump");
+        assert_eq!(slider_target.metadata().kind(), TargetKind::Slider);
+        let slider_id = slider_target.response_id();
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        let hint = dialog_hint_for_label(&app, "Set the A/B wipe position");
+        let (output, retained_passes) = app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![
+                    egui::Event::Text(hint.to_ascii_lowercase()),
+                    key_press(egui::Key::Enter, egui::Modifiers::NONE),
+                ],
+                ..actual_query_input(true)
+            },
+            true,
+        );
+        output.drop_without_applying_deltas();
+        assert!(retained_passes >= 2);
+        assert!(
+            ctx.read_response(slider_id)
+                .is_some_and(|response| response.enabled())
+        );
+        release_dialog_hint_enter(&ctx, &mut app);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(slider_id));
+        assert_eq!(app.image_compare_dialog.test_view_name(), "wipe");
+        assert_eq!(app.image_compare_dialog.test_wipe_fraction(), 0.5);
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(
+            app.image_compare_dialog.test_wipe_fraction() > 0.5,
+            "a separate arrow press changes the focused real slider"
+        );
+        assert!(app.test_activation_trace.is_empty());
+
+        // A real open popup owns input even when the Image Comparison window
+        // remains the top middle layer.
+        let popup_id = egui::Id::new("imgdiff-test-popup");
+        egui::Popup::open_id(&ctx, popup_id);
+        let popup_layer = egui::LayerId::new(egui::Order::Foreground, popup_id);
+        app.run_root_frame_for_test_with(&ctx, actual_query_input(true), false, |app, ui| {
+            app.render_root_ui(ui);
+            egui::Popup::new(
+                popup_id,
+                ui.ctx().clone(),
+                egui::pos2(360.0, 280.0),
+                popup_layer,
+            )
+            .show(|popup_ui| popup_ui.label("foreign popup"));
+        })
+        .0
+        .drop_without_applying_deltas();
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert!(
+            app.image_compare_dialog
+                .response_for_test("view/wipe-fraction")
+                .is_some_and(|(_, _, enabled)| !enabled)
+        );
+        egui::Popup::close_id(&ctx, popup_id);
+        run_dialog_frame(&ctx, &mut app);
+
+        let foreign_id = egui::Id::new("imgdiff-unsupported-foreign-window");
+        let foreign_layer = egui::LayerId::new(egui::Order::Middle, foreign_id);
+        let render_with_foreign_window = |app: &mut LauncherApp, ui: &mut egui::Ui| {
+            app.render_root_ui(ui);
+            egui::Window::new("Unsupported foreign window")
+                .id(foreign_id)
+                .show(ui.ctx(), |ui| ui.label("not an integrated owner"));
+            ui.ctx().move_to_top(foreign_layer);
+        };
+        for _ in 0..2 {
+            app.run_root_frame_for_test_with(
+                &ctx,
+                actual_query_input(true),
+                false,
+                render_with_foreign_window,
+            )
+            .0
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Blocked
+        );
+        assert!(
+            app.image_compare_dialog
+                .response_for_test("view/wipe-fraction")
+                .is_some_and(|(_, _, enabled)| !enabled)
+        );
+        let surface = SurfaceId::dialog("image-compare", instance);
+        assert!(
+            !app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.id().surface() == &surface && target.eligible())
+        );
+        assert!(app.test_activation_trace.is_empty());
+
+        for _ in 0..2 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        assert_eq!(
+            app.jump_mode_ui.frame_navigation_owner(),
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::ImageCompare,
+                instance,
+            }
+        );
+
+        // Escape first cancels Jump and leaves the dialog open; a fresh Escape
+        // then closes the dialog through the ordinary root owner.
+        start_actual_root_jump_mode(&ctx, &mut app);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(app.image_compare_dialog.open);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        app.set_jump_mode_enabled(false);
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.image_compare_dialog.open);
+
+        // With Jump disabled, the same actual B-end response remains usable.
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        crate::commands::DialogCommandHost::open_image_compare_dialog(&mut app);
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let (_, b_end_rect, enabled) = app
+            .image_compare_dialog
+            .response_for_test("view/wipe-b-end")
+            .expect("the actual B-end response is rendered with Jump off");
+        assert!(enabled);
+        let position = b_end_rect.center();
+        for pressed in [true, false] {
+            app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::PointerMoved(position),
+                        egui::Event::PointerButton {
+                            pos: position,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..actual_query_input(true)
+                },
+                false,
+            )
+            .0
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(app.image_compare_dialog.test_wipe_fraction(), 1.0);
+        assert!(app.test_activation_trace.is_empty());
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.image_compare_dialog.open);
         drop(workspace);
     }
 

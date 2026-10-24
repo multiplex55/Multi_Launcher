@@ -31,6 +31,7 @@ It’s designed to be “one hotkey away” from:
 - [Paste Sequences](#paste-sequences)
 - [Hotkey Directory](#hotkey-directory)
 - [Table Utility](#table-utility)
+- [Image Comparison](#image-comparison)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
 - [XML Toolkit](#xml-toolkit)
 - [Hash Generator](#hash-generator)
@@ -853,6 +854,23 @@ The source limit is 10 MiB, with up to 50,000 data rows and 128 columns. If a
 source edit or parse fails, the last successful table stays visible with its
 original parse settings; outputs remain disabled until the current source
 parses successfully.
+
+## Image Comparison
+
+Type `imgdiff` to open the session-only image comparison dialog. **Open A…**
+and **Open B…** choose files independently; **Paste A** and **Paste B** read
+the image clipboard only when explicitly selected. File inputs support PNG,
+JPEG, BMP, and GIF, with a limit of 16,777,216 pixels per image. The bounded
+clipboard reader accepts CF_DIB images. Failed replacements keep
+the last accepted image.
+
+Choose **A**, **B**, **Wipe**, or **Difference** to inspect the pair. Images are
+aligned at their top-left corners without scaling or registration; uncovered
+areas use a checkerboard. Difference uses exact RGBA bytes, including alpha
+and RGB values in transparent pixels, and distinguishes Changed, A-only,
+B-only, and Neither. Inputs and results remain in the current session and are
+cleared when the dialog closes. This is separate from the text-oriented `diff`
+command.
 
 ## JSON and screen color utilities
 

@@ -27,6 +27,7 @@ use crate::plugins::hash_generator::HashGeneratorPlugin;
 use crate::plugins::help::HelpPlugin;
 use crate::plugins::history::HistoryPlugin;
 use crate::plugins::hotfolder::HotFolderPlugin;
+use crate::plugins::image_compare::ImageComparePlugin;
 use crate::plugins::ip::IpPlugin;
 use crate::plugins::json_utility::JsonUtilityPlugin;
 use crate::plugins::keys::KeysPlugin;
@@ -936,6 +937,7 @@ impl PluginManager {
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(JsonUtilityPlugin, plugin_settings);
         self.register_with_settings(XmlToolkitPlugin, plugin_settings);
+        self.register_with_settings(ImageComparePlugin, plugin_settings);
         self.register_with_settings(TableUtilityPlugin, plugin_settings);
         self.register_with_settings(BatchRenamePlugin, plugin_settings);
         self.register_with_settings(SearchReplacePlugin, plugin_settings);

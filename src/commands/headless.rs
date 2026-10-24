@@ -220,6 +220,37 @@ mod screenshot_delay_headless_tests {
     }
 }
 
+#[cfg(test)]
+mod image_compare_headless_tests {
+    use super::*;
+
+    #[test]
+    fn imgdiff_headless_route_requires_gui_without_external_fallback() {
+        let original = Action {
+            label: "Open Image Comparison".into(),
+            desc: String::new(),
+            action: "imgdiff:open".into(),
+            args: None,
+        };
+        let command = crate::commands::parse_action(&original).unwrap();
+        assert_eq!(command, Command::Dialog(DialogCommand::ImageCompare));
+
+        let mut external_calls = Vec::new();
+        let error = execute_with_external(command, &original, &mut |target, args| {
+            external_calls.push((target.to_owned(), args.map(str::to_owned)));
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Image comparison requires the launcher interface")
+        );
+        assert!(external_calls.is_empty());
+    }
+}
+
 fn execute_with_external(
     command: Command,
     original_action: &Action,
@@ -274,6 +305,9 @@ fn execute_with_external(
         }
         Command::Dialog(DialogCommand::SettingsSearch { .. }) => {
             anyhow::bail!("Settings search requires the launcher interface")
+        }
+        Command::Dialog(DialogCommand::ImageCompare) => {
+            anyhow::bail!("Image comparison requires the launcher interface")
         }
         Command::Dialog(DialogCommand::Qr { .. }) => {
             anyhow::bail!("QR Generator requires the launcher interface")
