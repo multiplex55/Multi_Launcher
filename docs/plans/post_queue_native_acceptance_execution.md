@@ -22,12 +22,12 @@ Authority: `CODEX_GOAL_POST_QUEUE_NATIVE_ACCEPTANCE.md`, its checked-in Kickstar
 | M1 | PRODUCT_DEFECT (terminal checkpoint; unresolved) | Probe/recovery, drag isolation/cancellation/balance/cleanup passed; Escape reached passive receiver; ordinary post-cancel click NOT_RUN; no further M1 campaign |
 | M2 | HARNESS_DEFECT (terminal; native NOT_RUN) | New child completed-pass guard regression still fails after exact causal recheck; correction budget exhausted; attempted patch retained, both source files restored to HEAD; no native build/input/pixels |
 | M3 | HARNESS_DEFECT (terminal; partial native proof) | Exact action/folder Repair entry proved; folder picker Escape/fresh return/live bytes proved; file picker/confirm gaps retained; all owned processes retired |
-| M4 | PENDING | Notes live Replace/Undo/Redo/Save/Discard, Jump ON/OFF |
-| M5 | PENDING | Fresh-binary DFF footer/Cancel/drain/restart/current actions/retirement/source preservation |
-| M6 | PENDING | Settings slider/numeric/Cancel persistence, Jump ON/OFF |
-| M7 | PENDING | XML publication race and query-oracle contention diagnosis; bounded final full suite |
-| M8 | PENDING | Read-only physical monitor inventory if safely supported; no real Set |
-| M9 | PENDING | Final independent review/two small owner groups/three handoff documents/Clippy last/Git closure |
+| M4 | HARNESS_DEFECT (terminal; native unverified) | Four bounded sessions; note workflow not reached, all notes unchanged and processes closed |
+| M5 | HARNESS_DEFECT (terminal; partial native proof) | Footer/Start/held-read/Cancel proved; Release/drain/restart/actions/join unverified; files unchanged |
+| M6 | HARNESS_DEFECT (terminal; native NOT_RUN) | Guard regression failed causal recheck; complete eight-file attempt archived/restored |
+| M7 | PASS_FOCUSED; FULL_FAILED (terminal) | XML full pass; current full 6965pass/3fail/1timeout/48skip; no second full run |
+| M8 | NOT_RUN (terminal; hardware UNKNOWN) | No safe existing inventory runner/session; zero hardware calls/real Set |
+| M9 | COMPLETE (bounded execution; sign-off blocked) | Review clear of new findings; groups6+5pass; both final Clippy configurations pass on f53bb839 |
 
 ## Attempt and safety contract
 
@@ -170,7 +170,14 @@ Group2 filter: `test(=gui::duplicate_finder_smoke::tests::dff_dialog_completed_r
 
 One full command (from isolated exact1e2aa4ea worktree): `cargo nextest run --workspace --cargo-profile fast-dev --config-file G:/Repos/rust/Multi_Launcher/target/multi-goal-queue/nextest.toml --profile queue-focus --no-fail-fast`. Result6965PASS3FAIL1TIMEOUT48skip remains unchanged; no corrected full run.
 
-Clippy outcome: PENDING_FINAL_GATES. All substantive source/test/format/docs changes must be committed before the two final all-target gates. Subsequent edits are limited to outcome metadata in the three reports. Manual artifacts and protected/source branch checks are finalized in the closing metadata.
+Clippy outcome: BOTH_FINAL_CONFIGURATIONS_PASS on source `f53bb83906548e1dd12ea2cee85949f5b14014fc`. All substantive source/test/format/docs changes must be committed before the two final all-target gates. Subsequent edits are limited to outcome metadata in the three reports. Manual artifacts and protected/source branch checks are finalized in the closing metadata.
 
 M9 initial default all-target Clippy failed101 on one first-party `collapsible_if` at duplicate_finder_dialog.rs528 in dev/test receipt candidate collection; all20recorded processesAbsent. Released only the equivalent nested-if let-chain correction; no warning suppression, domain behavior change, M5 alias fix, native run or additional Nextest group. Fix will be inspected/formatted/committed before rerunning default and dev+QA final gates. The initial failure remains recorded.
 Default all-target Clippy corrected gate PASS (1m50compile/1m55total/all15Absent) on8bace0bf. Initial dev+QA gate failed101/all8Absent on three M1 dev-harness style expressions: nested bounds/expected_hit overlap condition at visual_overlay_windows.rs1417 and map_or(true) at visual_overlay_rectangle_smoke.rs808/839. Released only equivalent short-circuit collapse/is_none_or forms; no Escape/hook/guard behavior change, native rerun or warning suppression. Both configurations will be rerun against the resulting committed source; initial failures stay recorded.
+## Final outcome metadata — 2026-10-24
+
+Bounded M1–M9 execution is complete. Terminal sign-off: **BLOCKED_PRODUCT_DEFECT**, because the observed M1 Escape leakage remains unfixed; native gaps and current full-suite failures remain explicit.
+
+Final verified source commit: `f53bb83906548e1dd12ea2cee85949f5b14014fc`. Default all-target Clippy PASS48.96s compile/53.37s total/all15Absent; dev-smoke-binaries,qa-framebuffer-capture all-target Clippy PASS1m56compile/2m03.58total/all22Absent. Both use fast-dev and `-- -D warnings`, independently owned1800s caps, after all source/test/format/substantive docs commits. Initial one-default/three-QA style diagnostics were fixed equivalently in8bace0bf/f53bb839, committed/pushed before final clean gates; no domain behavior or M1 Escape fix. Source review was independently clear before these equivalent parent-inspected style changes. No additional code verification follows the last clean gate.
+
+Closing edits are only outcome metadata in this ledger, results and manual checklist. All checkpoints through verified source f53bb839 were pushed normally; the enclosing metadata-only final commit/push is reported in the final handoff, avoiding a self-referential SHA inside its own tree. Original base6eee8680/baselinec2c05199 and protected master/G1/G2/G3/big-start refs remain unchanged. No merge/PR/reset/rebase/force operation. All owned native/Cargo/test/lint processes retired, accepted input balanced; forced native cleanup remains separately recorded. Five unrelated original untracked files remain excluded; protected clipboard configuration was never read or changed. No real brightness Set or new native pixel sampling. Owned exact-SHA detached full-test worktree remains as local evidence; earlier worktrees untouched. Mandatory checklist gives the single hands-on review and bound M4 runtime artifact provenance, not a final-HEAD binary claim.

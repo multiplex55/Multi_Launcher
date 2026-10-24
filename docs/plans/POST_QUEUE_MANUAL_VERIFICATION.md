@@ -2,7 +2,7 @@
 
 **Acceptance sign-off: BLOCKED_PRODUCT_DEFECT.** Known selection-shield Escape leakage is unresolved. Use this sheet for the single deliberate hands-on review; a manual pass cannot establish that an unfixed source defect was repaired.
 
-Prepared 2026-10-24 for branch `qa/post-queue-native-acceptance`. Last Rust source checkpoint: `1e2aa4ea9904b513ebf9064e28e2b57a0a6d55ac`; final gate/commit metadata is in [results](POST_QUEUE_NATIVE_ACCEPTANCE_RESULTS.md) and [execution ledger](post_queue_native_acceptance_execution.md). Native evidence host: Windows 10 Home 22H2 / build 19045.6466, one 2560×1440 display at (0, 0), 96 DPI. Multi-monitor, negative-origin and higher-DPI acceptance remains unproved.
+Prepared 2026-10-24 for branch `qa/post-queue-native-acceptance`. Last Rust source checkpoint: `f53bb83906548e1dd12ea2cee85949f5b14014fc`; final gate/commit metadata is in [results](POST_QUEUE_NATIVE_ACCEPTANCE_RESULTS.md) and [execution ledger](post_queue_native_acceptance_execution.md). Native evidence host: Windows 10 Home 22H2 / build 19045.6466, one 2560×1440 display at (0, 0), 96 DPI. Multi-monitor, negative-origin and higher-DPI acceptance remains unproved.
 
 Run the bound M4 manual runtime artifact below, whose source was committed as `2b000ee140af56911267e1f32f8676053f6289b7` (compiled from HEAD `87c69b85` plus diff `cb31ce08`, fully recorded in results). Independent review confirmed later retained dev/test changes preserve normal runtime behavior. **This is not a final-HEAD build or an M6 native pass.** Use disposable profiles only; do not run master or your regular profile. The separate DFF smoke uses fake effects.
 
@@ -255,3 +255,5 @@ Optional brightness consent and baseline restored, if applicable:
 ```
 
 Keep one result log per workflow/mode. Preserve failed disposable fixtures until evidence is saved. Close only the processes, windows and directories created for this review. Final cross-owner and lint outcomes are in the results report.
+
+Final gate metadata (2026-10-24): M9 cross-owner groups6/6 and5/5 passed; both final all-target Clippy configurations passed with warnings denied on source f53bb839. Current full suite remains6965pass/3fail/1timeout/48skipped. All owned processes closed; native acceptance remains BLOCKED_PRODUCT_DEFECT. The enclosing final metadata commit/push is identified in the handoff; these gate results do not change the M4 executable build identity or erase any manual gap.
