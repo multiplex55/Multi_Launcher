@@ -985,7 +985,7 @@ pub(super) struct NoteReplaceControlPaint {
 }
 
 #[cfg(feature = "qa-framebuffer-capture")]
-#[derive(Clone, Debug, serde::Serialize, PartialEq)]
+#[derive(Clone, Debug, Default, serde::Serialize, PartialEq)]
 pub(super) struct NoteReplaceControlsPaint {
     pub(super) panel_window: Option<NoteReplaceControlPaint>,
     pub(super) save: Option<NoteReplaceControlPaint>,
@@ -1002,29 +1002,6 @@ pub(super) struct NoteReplaceControlsPaint {
     pub(super) note_editor: Option<NoteReplaceControlPaint>,
     pub(super) discard_changes: Option<NoteReplaceControlPaint>,
     pub(super) keep_editing: Option<NoteReplaceControlPaint>,
-}
-
-#[cfg(feature = "qa-framebuffer-capture")]
-impl Default for NoteReplaceControlsPaint {
-    fn default() -> Self {
-        Self {
-            panel_window: None,
-            save: None,
-            find_toggle: None,
-            edit: None,
-            render: None,
-            find_query: None,
-            find_close: None,
-            replace_expander: None,
-            replacement_input: None,
-            replace_one: None,
-            replace_all: None,
-            reveal_in_edit: None,
-            note_editor: None,
-            discard_changes: None,
-            keep_editing: None,
-        }
-    }
 }
 
 #[cfg(feature = "qa-framebuffer-capture")]

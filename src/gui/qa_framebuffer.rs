@@ -2209,12 +2209,12 @@ impl LauncherApp {
         else {
             return;
         };
-        if let Some(snapshot) = snapshot {
-            if observation.completion_status.is_none() {
-                observation.capture_phase = screenshot_capture_phase_name(snapshot.phase);
-                observation.capture_started_at_unix_ms = snapshot.capture_started_at_unix_ms;
-                observation.acquisition_count = snapshot.acquisition_count;
-            }
+        if let Some(snapshot) = snapshot
+            && observation.completion_status.is_none()
+        {
+            observation.capture_phase = screenshot_capture_phase_name(snapshot.phase);
+            observation.capture_started_at_unix_ms = snapshot.capture_started_at_unix_ms;
+            observation.acquisition_count = snapshot.acquisition_count;
         }
         if native.is_some() {
             observation.native = native;
