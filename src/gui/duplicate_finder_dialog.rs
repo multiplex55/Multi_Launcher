@@ -586,7 +586,7 @@ impl DuplicateFinderDialogState {
                         + 2.0 * ui.spacing().item_spacing.y
                         + FOOTER_SEPARATOR_SPACING;
                     let body_max_height = (ui.available_height() - footer_reserve).max(0.0);
-                    let content = egui::ScrollArea::vertical()
+                    let _content = egui::ScrollArea::vertical()
                         .id_salt("duplicate-finder-content")
                         .auto_shrink([false, false])
                         .min_scrolled_height(0.0)
@@ -625,8 +625,8 @@ impl DuplicateFinderDialogState {
                     #[cfg(any(test, feature = "dev-smoke-binaries"))]
                     self.record_scroll_area(
                         "content-scroll",
-                        content.id,
-                        content.inner_rect,
+                        _content.id,
+                        _content.inner_rect,
                         ui.clip_rect(),
                         ui.is_enabled(),
                     );
@@ -913,7 +913,7 @@ impl DuplicateFinderDialogState {
         }
 
         if snapshot.status != DiscoveryStatus::Scanning {
-            let roots = egui::ScrollArea::vertical()
+            let _roots = egui::ScrollArea::vertical()
                 .id_salt("duplicate-finder-root-statuses")
                 .auto_shrink([false, false])
                 .min_scrolled_height(0.0)
@@ -940,8 +940,8 @@ impl DuplicateFinderDialogState {
             #[cfg(any(test, feature = "dev-smoke-binaries"))]
             self.record_scroll_area(
                 "root-status-scroll",
-                roots.id,
-                roots.inner_rect,
+                _roots.id,
+                _roots.inner_rect,
                 ui.clip_rect(),
                 ui.is_enabled(),
             );
@@ -1006,7 +1006,7 @@ impl DuplicateFinderDialogState {
                 "The visible result list reached its display limit; scan totals remain unchanged.",
             );
         }
-        let row_range = egui::ScrollArea::vertical()
+        let _row_range = egui::ScrollArea::vertical()
             .id_salt("duplicate-finder-results")
             .auto_shrink([false, false])
             .min_scrolled_height(0.0)
@@ -1031,8 +1031,8 @@ impl DuplicateFinderDialogState {
         {
             self.record_scroll_area(
                 "results-scroll",
-                row_range.id,
-                row_range.inner_rect,
+                _row_range.id,
+                _row_range.inner_rect,
                 ui.clip_rect(),
                 ui.is_enabled(),
             );
@@ -1347,9 +1347,9 @@ impl DuplicateFinderDialogState {
         size_group_index: usize,
         verified: &VerifiedKnownFile,
         action: KnownFileAction,
-        namespace: &'static str,
-        group_index: usize,
-        member_index: usize,
+        _namespace: &'static str,
+        _group_index: usize,
+        _member_index: usize,
     ) {
         let result = (|| {
             let proof = proof_for_known_alias(snapshot, size_group_index, verified)?;
@@ -1374,9 +1374,9 @@ impl DuplicateFinderDialogState {
                 },
                 "result": if result.is_ok() { "accepted" } else { "refused" },
                 "generation": snapshot.generation,
-                "group_kind": namespace,
-                "group_index": group_index,
-                "member_index": member_index,
+                "group_kind": _namespace,
+                "group_index": _group_index,
+                "member_index": _member_index,
             }));
         }
         self.status = Some(match result {

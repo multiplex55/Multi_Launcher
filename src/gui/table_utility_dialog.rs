@@ -775,22 +775,22 @@ impl TableUtilityDialogState {
                             RowWidthPolicy::Strict => "Strict row widths",
                         })
                         .show_ui(ui, |ui| {
-                            let lenient = ui.selectable_value(
+                            let _lenient = ui.selectable_value(
                                 &mut width_policy,
                                 RowWidthPolicy::Lenient,
                                 "Lenient",
                             );
                             #[cfg(test)]
                             self.test_row_width_option_ids
-                                .push((RowWidthPolicy::Lenient, lenient.id));
-                            let strict = ui.selectable_value(
+                                .push((RowWidthPolicy::Lenient, _lenient.id));
+                            let _strict = ui.selectable_value(
                                 &mut width_policy,
                                 RowWidthPolicy::Strict,
                                 "Strict",
                             );
                             #[cfg(test)]
                             self.test_row_width_option_ids
-                                .push((RowWidthPolicy::Strict, strict.id));
+                                .push((RowWidthPolicy::Strict, _strict.id));
                         })
                 });
                 self.combo_anchor_ids[1] = Some(width_response.inner.response.id);
@@ -1383,7 +1383,7 @@ impl TableUtilityDialogState {
                             }
                             response
                         });
-                        let arrays = ui.selectable_value(
+                        let _arrays = ui.selectable_value(
                             &mut json_shape_choice,
                             TableJsonShape::Arrays,
                             "Arrays",
@@ -1391,9 +1391,9 @@ impl TableUtilityDialogState {
                         #[cfg(test)]
                         {
                             self.test_json_arrays_option_response = Some(TestWidgetResponse {
-                                id: arrays.id,
-                                rect: arrays.rect,
-                                enabled: arrays.enabled(),
+                                id: _arrays.id,
+                                rect: _arrays.rect,
+                                enabled: _arrays.enabled(),
                             });
                         }
                     })

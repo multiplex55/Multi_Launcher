@@ -6574,7 +6574,10 @@ impl LauncherApp {
         };
 
         if self.action_sheet.is_open() && !ocr_blocks_launcher_input && !snippet_prompt_owns_input {
+            #[cfg(feature = "qa-framebuffer-capture")]
             let observe_target_repair = self.qa_framebuffer_target_repair_observation_enabled();
+            #[cfg(not(feature = "qa-framebuffer-capture"))]
+            let observe_target_repair = false;
             if let Some(action) = action_sheet::render(
                 &ctx,
                 &mut self.action_sheet,

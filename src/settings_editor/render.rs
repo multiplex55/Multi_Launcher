@@ -164,6 +164,8 @@ impl SettingsNavigationFrameObserver {
         response: &egui::Response,
         painted_rect: egui::Rect,
     ) {
+        #[cfg(not(feature = "qa-framebuffer-capture"))]
+        let _ = (ui, painted_rect);
         if let Ok(mut state) = self.state.lock() {
             state.outcome.highlighted_response = Some(response.id);
             #[cfg(feature = "qa-framebuffer-capture")]

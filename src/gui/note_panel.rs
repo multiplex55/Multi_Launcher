@@ -3844,7 +3844,7 @@ impl NotePanel {
                 close = true;
             }
 
-            let replace_expander = ui.collapsing("Replace", |ui| {
+            let _replace_expander = ui.collapsing("Replace", |ui| {
                 ui.horizontal_wrapped(|ui| {
                     let replacement_id =
                         ui.make_persistent_id(("note_find_replacement", self.note.slug.clone()));
@@ -3894,11 +3894,11 @@ impl NotePanel {
             #[cfg(feature = "qa-framebuffer-capture")]
             self.record_note_replace_control(
                 NoteReplaceControl::ReplaceExpander,
-                &replace_expander.header_response,
+                &_replace_expander.header_response,
             );
             #[cfg(test)]
             {
-                self.last_find_replace_expander_rect = Some(replace_expander.header_response.rect);
+                self.last_find_replace_expander_rect = Some(_replace_expander.header_response.rect);
             }
             if self.replacement_text_widget_id.is_none()
                 && let Some(id) = previous_replacement_id
