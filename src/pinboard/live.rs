@@ -156,6 +156,34 @@ impl PinLiveFrameSlot {
         true
     }
 
+    #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+    fn set_status_if_publication_epoch(
+        &self,
+        generation: PinCaptureGeneration,
+        publication_epoch: u64,
+        status: PinLiveStatus,
+    ) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if generation != self.generation
+            || state.cancelled
+            || state.publication_epoch != publication_epoch
+            || matches!(state.status, PinLiveStatus::Paused)
+            || is_terminal_status(&state.status)
+            || is_terminal_status(&status)
+        {
+            return false;
+        }
+        let changed = state.status != status;
+        state.status = status;
+        drop(state);
+        if changed {
+            self.notify_child();
+        }
+        true
+    }
+
     fn set_child_wake_notifier(&self, notifier: Option<PinLiveChildWake>) {
         if let Ok(mut child_wake) = self.child_wake.lock() {
             *child_wake = notifier;
@@ -606,6 +634,103 @@ impl PinLiveCaptureSession {
     pub(crate) fn cancel_and_take_worker(&mut self) -> Option<JoinHandle<()>> {
         self.cancel();
         self.worker.take()
+    }
+
+    /// Creates a real bounded live-session owner for the generated native
+    /// opacity smoke. Pixel frames are synthetic and are never read from the
+    /// desktop; publication, frame leases, pause/cancel, and pinboard budgeting
+    /// still use the production live-session path.
+    #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+    pub(crate) fn spawn_generated_smoke(
+        binding: PinSourceBinding,
+        generation: PinCaptureGeneration,
+        reservation: ImageBudgetReservation,
+        gpu_budget: Arc<SharedGpuBudget>,
+        initial_image: RgbaImage,
+    ) -> Result<(Self, SyncSender<RgbaImage>), String> {
+        let (frames_tx, frames_rx) = mpsc::sync_channel::<RgbaImage>(1);
+        let worker = Box::new(
+            move |binding: PinSourceBinding,
+                  generation: PinCaptureGeneration,
+                  reservation: ImageBudgetReservation,
+                  _gpu_budget: Arc<SharedGpuBudget>,
+                  signal: Arc<WorkerSignal>,
+                  slot: Arc<PinLiveFrameSlot>,
+                  first_tx: SyncSender<Result<(), String>>| {
+                let cpu_budget = reservation.shared_budget();
+                let content_size = (
+                    binding.captured_bounds.width,
+                    binding.captured_bounds.height,
+                );
+                let publication_epoch = slot.publication_epoch();
+                publish_first_frame(
+                    binding,
+                    generation,
+                    1,
+                    content_size,
+                    initial_image,
+                    reservation,
+                    publication_epoch,
+                    &slot,
+                    &first_tx,
+                )?;
+
+                let activated = signal.wait_until_activated();
+                if activated.cancelled {
+                    return Ok(());
+                }
+                let mut sequence = 1_u64;
+                while !signal.snapshot().cancelled {
+                    let flags = signal.snapshot();
+                    if flags.paused {
+                        let resumed = signal.wait_while_paused();
+                        if resumed.cancelled {
+                            break;
+                        }
+                        continue;
+                    }
+                    let image = match frames_rx.recv_timeout(FRAME_INTERVAL) {
+                        Ok(image) => image,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    };
+                    let publication_epoch = slot.publication_epoch();
+                    if signal.snapshot().paused {
+                        continue;
+                    }
+                    let bytes = image.as_raw().len();
+                    let frame_reservation = match cpu_budget.reserve(bytes) {
+                        Ok(reservation) => reservation,
+                        Err(error) => {
+                            slot.set_status_if_publication_epoch(
+                                generation,
+                                publication_epoch,
+                                PinLiveStatus::TemporarilyUnavailable(error.to_string()),
+                            );
+                            continue;
+                        }
+                    };
+                    sequence = sequence
+                        .checked_add(1)
+                        .ok_or_else(|| "generated live frame sequence exhausted".to_owned())?;
+                    if !publish_next_frame(
+                        binding,
+                        generation,
+                        sequence,
+                        content_size,
+                        image,
+                        frame_reservation,
+                        publication_epoch,
+                        &slot,
+                    )? {
+                        continue;
+                    }
+                }
+                Ok(())
+            },
+        );
+        let session = Self::spawn(binding, generation, reservation, gpu_budget, worker)?;
+        Ok((session, frames_tx))
     }
 }
 
@@ -2166,6 +2291,80 @@ mod tests {
             image::Rgba([10, 11, 12, 255])
         );
         drop(retained_completed_frame);
+        assert_eq!(budget.used_bytes(), 0);
+    }
+
+    #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+    #[test]
+    fn generated_smoke_pause_rejects_stale_status_and_resumes_with_next_frame() {
+        let budget = Arc::new(SharedImageBudget {
+            limit: 32,
+            reserved_and_allocated_bytes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let generation = PinCaptureGeneration(std::num::NonZeroU64::new(77).unwrap());
+        let source_binding = binding(PinSourceCrop {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 2,
+        });
+        let (mut session, frames) = PinLiveCaptureSession::spawn_generated_smoke(
+            source_binding,
+            generation,
+            budget.reserve(16).unwrap(),
+            Arc::new(SharedGpuBudget::default()),
+            RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255])),
+        )
+        .unwrap();
+        let first_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(result) = session.try_first_frame_result() {
+                result.unwrap();
+                break;
+            }
+            assert!(
+                Instant::now() < first_deadline,
+                "first frame did not arrive"
+            );
+            thread::yield_now();
+        }
+        assert_eq!(session.current_frame().unwrap().sequence, 1);
+        assert!(session.activate());
+        let publication_epoch = session.source.slot.publication_epoch();
+        assert!(session.pause());
+        assert_eq!(session.status(), PinLiveStatus::Paused);
+        assert!(!session.source.slot.set_status_if_publication_epoch(
+            generation,
+            publication_epoch,
+            PinLiveStatus::TemporarilyUnavailable("injected allocation pressure".into()),
+        ));
+        assert_eq!(session.status(), PinLiveStatus::Paused);
+        assert_eq!(session.current_frame().unwrap().sequence, 1);
+
+        assert!(session.resume());
+        frames
+            .try_send(RgbaImage::from_pixel(2, 2, image::Rgba([40, 50, 60, 255])))
+            .unwrap();
+        let updated_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(frame) = session.current_frame()
+                && frame.sequence == 2
+            {
+                assert_eq!(
+                    *frame.image.pixels().get_pixel(0, 0),
+                    image::Rgba([40, 50, 60, 255])
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < updated_deadline,
+                "resumed frame did not arrive"
+            );
+            thread::yield_now();
+        }
+        assert_eq!(session.status(), PinLiveStatus::Live);
+        session.cancel_and_join().unwrap();
+        drop(session);
         assert_eq!(budget.used_bytes(), 0);
     }
 

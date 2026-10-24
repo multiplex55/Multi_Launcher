@@ -1311,8 +1311,9 @@ Use `pinboard capture` to select a screen region and open it as an in-memory flo
 Each pin has a session-only **Opacity** control from 10% to 100%, defaulting to
 100%, in both its toolbar and **Pin List** row. The requested value is shown
 separately from the confirmed native value while a change is pending or has
-failed. Opacity changes the displayed window only; **Copy Image** and **Save As**
-use the original image pixels.
+failed. Use **Reset opacity to 100%** in a pin toolbar or **Reset 100%** in the
+Pin List to restore full opacity. Opacity changes the displayed window only;
+**Copy Image** and **Save As** use the original image pixels.
 
 Use `pinboard live` to select a crop inside one external window and refresh it
 through Windows Graphics Capture, capped at approximately 10 frames per second.

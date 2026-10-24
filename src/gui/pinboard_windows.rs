@@ -514,6 +514,8 @@ struct PinWindowRuntime {
     dimensions: (u32, u32),
     #[cfg(all(windows, feature = "dev-smoke-binaries"))]
     smoke_position_points: Option<egui::Pos2>,
+    #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+    smoke_inner_size_points: Option<egui::Vec2>,
     state: Mutex<PinWindowState>,
 }
 
@@ -548,9 +550,13 @@ struct PinWindowState {
     native_destroyed: bool,
     capture_visibility: Option<CaptureVisibilityState>,
     #[cfg(all(windows, feature = "dev-smoke-binaries"))]
-    smoke_image_region: Option<(egui::Rect, egui::Rect, f32)>,
+    smoke_image_region: Option<(egui::Rect, egui::Rect, f32, u64, usize)>,
+    #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+    smoke_opacity_reset_region: Option<(egui::Id, egui::Rect, egui::Rect, f32, bool, usize)>,
     #[cfg(test)]
     last_opacity_slider_widget: Option<(egui::Id, egui::Rect, bool)>,
+    #[cfg(test)]
+    last_opacity_reset_widget: Option<(egui::Id, egui::Rect, bool)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -813,8 +819,10 @@ pub(crate) struct PinWindowPresenter {
     last_recover_all_widget_id: Option<egui::Id>,
     #[cfg(test)]
     last_opacity_slider_widgets: BTreeMap<(PinId, u64), (egui::Id, egui::Rect, bool)>,
+    #[cfg(test)]
+    last_opacity_reset_widgets: BTreeMap<(PinId, u64), (egui::Id, egui::Rect, bool)>,
     #[cfg(all(windows, feature = "dev-smoke-binaries"))]
-    smoke_positions: BTreeMap<PinId, egui::Pos2>,
+    smoke_geometry: BTreeMap<PinId, (egui::Pos2, egui::Vec2)>,
 }
 
 impl PinWindowPresenter {
@@ -876,14 +884,16 @@ impl PinWindowPresenter {
             last_recover_all_widget_id: None,
             #[cfg(test)]
             last_opacity_slider_widgets: BTreeMap::new(),
+            #[cfg(test)]
+            last_opacity_reset_widgets: BTreeMap::new(),
             #[cfg(all(windows, feature = "dev-smoke-binaries"))]
-            smoke_positions: BTreeMap::new(),
+            smoke_geometry: BTreeMap::new(),
         }
     }
 
     #[cfg(all(windows, feature = "dev-smoke-binaries"))]
-    fn configure_smoke_positions(&mut self, positions: BTreeMap<PinId, egui::Pos2>) {
-        self.smoke_positions = positions;
+    fn configure_smoke_geometry(&mut self, geometry: BTreeMap<PinId, (egui::Pos2, egui::Vec2)>) {
+        self.smoke_geometry = geometry;
     }
 
     pub(crate) fn visibility_coordinator(&self) -> Box<dyn PinWindowVisibilityCoordinator> {
@@ -1032,7 +1042,15 @@ impl PinWindowPresenter {
                         image_source,
                         dimensions,
                         #[cfg(all(windows, feature = "dev-smoke-binaries"))]
-                        smoke_position_points: self.smoke_positions.get(&pin.id()).copied(),
+                        smoke_position_points: self
+                            .smoke_geometry
+                            .get(&pin.id())
+                            .map(|(position, _)| *position),
+                        #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+                        smoke_inner_size_points: self
+                            .smoke_geometry
+                            .get(&pin.id())
+                            .map(|(_, size)| *size),
                         state: Mutex::new(PinWindowState {
                             texture: None,
                             texture_sequence: None,
@@ -1060,8 +1078,12 @@ impl PinWindowPresenter {
                             capture_visibility: None,
                             #[cfg(all(windows, feature = "dev-smoke-binaries"))]
                             smoke_image_region: None,
+                            #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+                            smoke_opacity_reset_region: None,
                             #[cfg(test)]
                             last_opacity_slider_widget: None,
+                            #[cfg(test)]
+                            last_opacity_reset_widget: None,
                         }),
                     });
                     if let Some(preparation) = runtime.image_source.live_preparation() {
@@ -1238,6 +1260,8 @@ impl PinWindowPresenter {
         let mut recover_all_widget_id = None;
         #[cfg(test)]
         let mut opacity_slider_widgets = BTreeMap::new();
+        #[cfg(test)]
+        let mut opacity_reset_widgets = BTreeMap::new();
         egui::Window::new("Screenshot Pins")
             .id(egui::Id::new("screenshot-pin-list"))
             .open(open)
@@ -1405,6 +1429,28 @@ impl PinWindowPresenter {
                                                     },
                                                 });
                                             }
+                                            let reset = ui.add_enabled(
+                                                entry.controls_available && !shutting_down,
+                                                egui::Button::new("Reset 100%"),
+                                            );
+                                            #[cfg(test)]
+                                            opacity_reset_widgets.insert(
+                                                (entry.pin_id, entry.lifetime),
+                                                (reset.id, reset.rect, reset.enabled()),
+                                            );
+                                            if reset.clicked() && ctx.current_pass_index() == 0 {
+                                                actions.push(PinListAction::Control {
+                                                    pin_id: entry.pin_id,
+                                                    lifetime: entry.lifetime,
+                                                    change: PinControlChange {
+                                                        always_on_top: None,
+                                                        click_through: None,
+                                                        opacity_percent: Some(
+                                                            crate::pinboard::MAX_PIN_OPACITY_PERCENT,
+                                                        ),
+                                                    },
+                                                });
+                                            }
                                         });
                                         let opacity_status = entry.opacity.status_text();
                                         if entry.opacity.native_error.is_some() {
@@ -1457,6 +1503,7 @@ impl PinWindowPresenter {
         {
             self.last_recover_all_widget_id = recover_all_widget_id;
             self.last_opacity_slider_widgets = opacity_slider_widgets;
+            self.last_opacity_reset_widgets = opacity_reset_widgets;
         }
 
         for action in actions {
@@ -1602,6 +1649,17 @@ impl PinWindowPresenter {
         lifetime: u64,
     ) -> Option<(egui::Id, egui::Rect, bool)> {
         self.last_opacity_slider_widgets
+            .get(&(pin_id, lifetime))
+            .copied()
+    }
+
+    #[cfg(test)]
+    fn opacity_reset_widget_for_test(
+        &self,
+        pin_id: PinId,
+        lifetime: u64,
+    ) -> Option<(egui::Id, egui::Rect, bool)> {
+        self.last_opacity_reset_widgets
             .get(&(pin_id, lifetime))
             .copied()
     }
@@ -2666,8 +2724,16 @@ fn pin_viewport_id(pin_id: PinId, lifetime: u64) -> egui::ViewportId {
 }
 
 fn pin_viewport_builder(runtime: &PinWindowRuntime) -> egui::ViewportBuilder {
-    let width = runtime.dimensions.0.min(DEFAULT_PINNER_WIDTH as u32) as f32;
-    let height = runtime.dimensions.1.min(DEFAULT_PINNER_HEIGHT as u32) as f32;
+    let default_size = (
+        runtime.dimensions.0.min(DEFAULT_PINNER_WIDTH as u32) as f32,
+        runtime.dimensions.1.min(DEFAULT_PINNER_HEIGHT as u32) as f32,
+    );
+    #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+    let (width, height) = runtime
+        .smoke_inner_size_points
+        .map_or(default_size, |size| (size.x, size.y));
+    #[cfg(not(all(windows, feature = "dev-smoke-binaries")))]
+    let (width, height) = default_size;
     let (always_on_top, click_through) = runtime
         .state
         .lock()
@@ -3223,6 +3289,30 @@ fn render_pin_viewport(
             if opacity_response.changed() && first_pass {
                 control_change.opacity_percent = Some(next_opacity);
             }
+            let opacity_reset_response =
+                ui.add_enabled(native_ready, egui::Button::new("Reset opacity to 100%"));
+            #[cfg(all(windows, feature = "dev-smoke-binaries"))]
+            if let Ok(mut state) = runtime.state.lock() {
+                state.smoke_opacity_reset_region = Some((
+                    opacity_reset_response.id,
+                    opacity_reset_response.rect,
+                    ui.clip_rect(),
+                    child_pixels_per_point,
+                    opacity_reset_response.enabled(),
+                    ui.ctx().current_pass_index(),
+                ));
+            }
+            #[cfg(test)]
+            if let Ok(mut state) = runtime.state.lock() {
+                state.last_opacity_reset_widget = Some((
+                    opacity_reset_response.id,
+                    opacity_reset_response.rect,
+                    opacity_reset_response.enabled(),
+                ));
+            }
+            if opacity_reset_response.clicked() && first_pass {
+                control_change.opacity_percent = Some(crate::pinboard::MAX_PIN_OPACITY_PERCENT);
+            }
             if ui.button("Close").clicked() && first_pass {
                 close_clicked = true;
             }
@@ -3268,6 +3358,8 @@ fn render_pin_viewport(
                             _image_response.rect,
                             ui.clip_rect(),
                             ui.ctx().pixels_per_point(),
+                            ui.ctx().cumulative_frame_nr(),
+                            ui.ctx().current_pass_index(),
                         ));
                     }
                 } else {
@@ -5472,6 +5564,24 @@ mod tests {
         }
     }
 
+    fn pointer_click(point: egui::Pos2) -> [Vec<egui::Event>; 3] {
+        [
+            vec![egui::Event::PointerMoved(point)],
+            vec![egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ]
+    }
+
     fn key_event(key: egui::Key) -> egui::Event {
         egui::Event::Key {
             key,
@@ -6933,12 +7043,12 @@ mod tests {
         board
             .get_mut(first)
             .unwrap()
-            .set_opacity_percent(30)
+            .set_opacity_percent(crate::pinboard::MIN_PIN_OPACITY_PERCENT)
             .unwrap();
         board
             .get_mut(second)
             .unwrap()
-            .set_opacity_percent(90)
+            .set_opacity_percent(crate::pinboard::MIN_PIN_OPACITY_PERCENT)
             .unwrap();
 
         let ctx = egui::Context::default();
@@ -6968,8 +7078,18 @@ mod tests {
         );
 
         for (pin_id, runtime, hwnd, expected) in [
-            (first, &first_runtime, 0x401, 30),
-            (second, &second_runtime, 0x402, 90),
+            (
+                first,
+                &first_runtime,
+                0x401,
+                crate::pinboard::MIN_PIN_OPACITY_PERCENT,
+            ),
+            (
+                second,
+                &second_runtime,
+                0x402,
+                crate::pinboard::MIN_PIN_OPACITY_PERCENT,
+            ),
         ] {
             let output = ctx.run_ui(child_input(runtime.viewport_id, 1.0), |child| {
                 callbacks[&pin_id](child)
@@ -6996,6 +7116,41 @@ mod tests {
             output.drop_without_applying_deltas();
         }
 
+        let reset_widget = first_runtime
+            .state
+            .lock()
+            .unwrap()
+            .last_opacity_reset_widget
+            .expect("the child toolbar rendered its actual Reset response");
+        assert!(reset_widget.2 && reset_widget.1.is_positive());
+        let reset_attempts = fake_native.opacity_attempts().len();
+        for events in [
+            vec![egui::Event::PointerMoved(reset_widget.1.center())],
+            vec![egui::Event::PointerButton {
+                pos: reset_widget.1.center(),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![egui::Event::PointerButton {
+                pos: reset_widget.1.center(),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ] {
+            let mut input = child_input(first_runtime.viewport_id, 1.0);
+            input.events = events;
+            let output = ctx.run_ui(input, |child| callbacks[&first](child));
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(fake_native.opacity_for_test(0x401), 100);
+        assert_eq!(
+            fake_native.opacity_for_test(0x402),
+            crate::pinboard::MIN_PIN_OPACITY_PERCENT
+        );
+        assert_eq!(fake_native.opacity_attempts().len(), reset_attempts + 1);
+
         let (first_widget_id, _, _) = first_runtime
             .state
             .lock()
@@ -7016,17 +7171,20 @@ mod tests {
         child_focus_handoff.drop_without_applying_deltas();
         let mut child_key_input = child_input(first_runtime.viewport_id, 1.0);
         child_key_input.events = vec![
-            key_event(egui::Key::ArrowRight),
-            key_release_event(egui::Key::ArrowRight),
+            key_event(egui::Key::ArrowLeft),
+            key_release_event(egui::Key::ArrowLeft),
         ];
         let toolbar_edit = ctx.run_ui(child_key_input, |child| callbacks[&first](child));
         let toolbar_value = first_runtime.state.lock().unwrap().opacity_percent;
         assert!(
-            toolbar_value > 30,
+            toolbar_value < 100,
             "the actual child toolbar slider accepts keyboard adjustment"
         );
         assert_eq!(fake_native.opacity_for_test(0x401), toolbar_value);
-        assert_eq!(fake_native.opacity_for_test(0x402), 90);
+        assert_eq!(
+            fake_native.opacity_for_test(0x402),
+            crate::pinboard::MIN_PIN_OPACITY_PERCENT
+        );
         assert_eq!(ctx.memory(|memory| memory.focused()), Some(first_widget_id));
         assert_no_pin_control_commands(&toolbar_edit, "toolbar opacity-only edit");
         toolbar_edit.drop_without_applying_deltas();
@@ -7046,8 +7204,12 @@ mod tests {
         let second_list_widget = presenter
             .opacity_slider_widget_for_test(second, second_runtime.lifetime)
             .expect("the Pin List rendered the second actual opacity response");
+        let second_reset_widget = presenter
+            .opacity_reset_widget_for_test(second, second_runtime.lifetime)
+            .expect("the Pin List rendered the second actual Reset response");
         assert!(first_list_widget.2 && second_list_widget.2);
         assert!(first_list_widget.1.is_positive() && second_list_widget.1.is_positive());
+        assert!(second_reset_widget.2 && second_reset_widget.1.is_positive());
 
         let list_focus_handoff = ctx.run_ui(root_input(Vec::new()), |root| {
             root.ctx()
@@ -7085,7 +7247,10 @@ mod tests {
             "the actual Pin List slider routes through validated list control ownership"
         );
         assert_eq!(fake_native.opacity_for_test(0x401), list_value);
-        assert_eq!(fake_native.opacity_for_test(0x402), 90);
+        assert_eq!(
+            fake_native.opacity_for_test(0x402),
+            crate::pinboard::MIN_PIN_OPACITY_PERCENT
+        );
         assert_eq!(
             fake_native.opacity_attempts().len(),
             attempts_before_list_edit + 1,
@@ -7098,24 +7263,60 @@ mod tests {
         assert_no_pin_control_commands(&list_edit, "Pin List opacity-only edit");
         list_edit.drop_without_applying_deltas();
 
+        let reset_attempts = fake_native.opacity_attempts().len();
+        for events in pointer_click(second_reset_widget.1.center()) {
+            let output = ctx.run_ui(root_input(events), |root| {
+                presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
+            });
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(
+            first_runtime.state.lock().unwrap().opacity_percent,
+            list_value
+        );
+        assert_eq!(fake_native.opacity_for_test(0x401), list_value);
+        assert_eq!(fake_native.opacity_for_test(0x402), 100);
+        assert_eq!(fake_native.opacity_attempts().len(), reset_attempts + 1);
+
+        let refreshed_list = ctx.run_ui(root_input(Vec::new()), |root| {
+            presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
+        });
+        refreshed_list.drop_without_applying_deltas();
+        let first_list_widget_after_reset = presenter
+            .opacity_slider_widget_for_test(first, first_runtime.lifetime)
+            .expect("the refreshed Pin List exposes the current first slider response");
+        assert!(first_list_widget_after_reset.2);
+        assert!(first_list_widget_after_reset.1.is_positive());
+        let deliberate_edit_focus = ctx.run_ui(root_input(Vec::new()), |root| {
+            root.ctx()
+                .memory_mut(|memory| memory.request_focus(first_list_widget_after_reset.0));
+            presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
+            assert_eq!(
+                root.ctx().memory(|memory| memory.focused()),
+                Some(first_list_widget_after_reset.0),
+                "a deliberate keyboard edit starts from the refreshed current response"
+            );
+        });
+        deliberate_edit_focus.drop_without_applying_deltas();
+
         *fake_native.opacity_failure.lock().unwrap() = Some("injected UI opacity failure".into());
         assert_eq!(
             ctx.memory(|memory| memory.focused()),
-            Some(first_list_widget.0),
-            "the focused Pin List response remains active for the next deliberate edit"
+            Some(first_list_widget_after_reset.0),
+            "the deliberately refocused current Pin List response remains active for the next edit"
         );
         let mut failed_key_input = root_input(vec![
-            key_event(egui::Key::ArrowRight),
-            key_release_event(egui::Key::ArrowRight),
+            key_event(egui::Key::ArrowLeft),
+            key_release_event(egui::Key::ArrowLeft),
         ]);
         failed_key_input.viewport_id = egui::ViewportId::ROOT;
         let failed_list_edit = ctx.run_ui(failed_key_input, |root| {
             presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
         });
         let failed_desired = first_runtime.state.lock().unwrap().opacity_percent;
-        assert!(failed_desired > list_value);
+        assert!(failed_desired < list_value);
         assert_eq!(fake_native.opacity_for_test(0x401), list_value);
-        assert_eq!(fake_native.opacity_for_test(0x402), 90);
+        assert_eq!(fake_native.opacity_for_test(0x402), 100);
         {
             let state = first_runtime.state.lock().unwrap();
             let binding = state.native.as_ref().unwrap();
@@ -7142,9 +7343,138 @@ mod tests {
         assert!(feedback_text.contains(&format!("Opacity requested: {failed_desired}%")));
         assert!(feedback_text.contains("injected UI opacity failure"));
         assert!(feedback_text.contains(&format!("last successful: {list_value}%")));
-        assert_eq!(fake_native.opacity_attempts().len(), 5);
+        assert_eq!(fake_native.opacity_attempts().len(), 7);
         assert_no_pin_control_commands(&failed_feedback, "idle Pin List opacity feedback");
         failed_feedback.drop_without_applying_deltas();
+
+        *fake_native.opacity_failure.lock().unwrap() = None;
+        let refreshed_first_row = ctx.run_ui(root_input(Vec::new()), |root| {
+            presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
+        });
+        refreshed_first_row.drop_without_applying_deltas();
+        let first_retry_slider = presenter
+            .opacity_slider_widget_for_test(first, first_runtime.lifetime)
+            .expect("the current first-pin slider response is available for a successful non-full change");
+        assert!(first_retry_slider.2 && first_retry_slider.1.is_positive());
+        let focus_retry_slider = ctx.run_ui(root_input(Vec::new()), |root| {
+            root.ctx()
+                .memory_mut(|memory| memory.request_focus(first_retry_slider.0));
+            presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
+            assert_eq!(
+                root.ctx().memory(|memory| memory.focused()),
+                Some(first_retry_slider.0)
+            );
+        });
+        focus_retry_slider.drop_without_applying_deltas();
+        let attempts_before_successful_nonfull = fake_native.opacity_attempts().len();
+        let mut lower_first_input = root_input(vec![
+            key_event(egui::Key::ArrowLeft),
+            key_release_event(egui::Key::ArrowLeft),
+        ]);
+        lower_first_input.viewport_id = egui::ViewportId::ROOT;
+        let lower_first = ctx.run_ui(lower_first_input, |root| {
+            presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
+        });
+        let layered_success = first_runtime.state.lock().unwrap().opacity_percent;
+        assert!(layered_success < 100);
+        assert_eq!(fake_native.opacity_for_test(0x401), layered_success);
+        assert_eq!(
+            fake_native.opacity_attempts().len(),
+            attempts_before_successful_nonfull + 1
+        );
+        {
+            let state = first_runtime.state.lock().unwrap();
+            let binding = state.native.as_ref().unwrap();
+            assert!(
+                state
+                    .applied_opacity
+                    .as_ref()
+                    .is_some_and(|applied| { applied.matches(binding, layered_success) })
+            );
+            assert!(
+                state
+                    .last_successful_opacity
+                    .as_ref()
+                    .is_some_and(|applied| { applied.matches(binding, layered_success) })
+            );
+            assert_eq!(state.native_error, None);
+        }
+        assert_no_pin_control_commands(&lower_first, "first-pin layered opacity edit");
+        lower_first.drop_without_applying_deltas();
+
+        *fake_native.opacity_failure.lock().unwrap() = Some("injected UI opacity failure".into());
+        let failed_reset_layout = ctx.run_ui(root_input(Vec::new()), |root| {
+            presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
+        });
+        failed_reset_layout.drop_without_applying_deltas();
+        let attempts_before_failed_reset = fake_native.opacity_attempts().len();
+        let first_reset_widget = presenter
+            .opacity_reset_widget_for_test(first, first_runtime.lifetime)
+            .expect("the first pin exposes its current Reset response");
+        assert!(first_reset_widget.2 && first_reset_widget.1.is_positive());
+        for events in pointer_click(first_reset_widget.1.center()) {
+            let output = ctx.run_ui(root_input(events), |root| {
+                presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
+            });
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(
+            fake_native.opacity_attempts().len(),
+            attempts_before_failed_reset,
+            "the fake API preserves its existing no-log behavior for failed 100% style removal"
+        );
+        {
+            let state = first_runtime.state.lock().unwrap();
+            let binding = state.native.as_ref().unwrap();
+            assert_eq!(state.opacity_percent, 100);
+            assert!(state.applied_opacity.is_none());
+            assert_eq!(
+                state.native_error.as_deref(),
+                Some("injected UI opacity failure")
+            );
+            assert!(
+                state
+                    .last_successful_opacity
+                    .as_ref()
+                    .is_some_and(|applied| { applied.matches(binding, layered_success) })
+            );
+            assert!(!state.opacity_sync_pending);
+        }
+        *fake_native.opacity_failure.lock().unwrap() = None;
+        let retry_layout = ctx.run_ui(root_input(Vec::new()), |root| {
+            presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
+        });
+        retry_layout.drop_without_applying_deltas();
+        let retry_reset_widget = presenter
+            .opacity_reset_widget_for_test(first, first_runtime.lifetime)
+            .expect("the current first-pin Reset response retries an unacknowledged 100%");
+        assert!(retry_reset_widget.2 && retry_reset_widget.1.is_positive());
+        for events in pointer_click(retry_reset_widget.1.center()) {
+            let output = ctx.run_ui(root_input(events), |root| {
+                presenter.show_pin_list(root.ctx(), &mut board, &mut pin_list_open);
+            });
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(
+            fake_native.opacity_attempts().len(),
+            attempts_before_failed_reset + 1
+        );
+        assert_eq!(fake_native.opacity_for_test(0x401), 100);
+        let state = first_runtime.state.lock().unwrap();
+        assert_eq!(state.native_error, None);
+        assert!(
+            state
+                .applied_opacity
+                .as_ref()
+                .is_some_and(|applied| applied.matches(state.native.as_ref().unwrap(), 100))
+        );
+        assert!(
+            state
+                .last_successful_opacity
+                .as_ref()
+                .is_some_and(|applied| { applied.matches(state.native.as_ref().unwrap(), 100) })
+        );
+        drop(state);
 
         presenter.shutdown().unwrap();
     }
@@ -7226,7 +7556,7 @@ mod tests {
                 PinControlChange {
                     always_on_top: None,
                     click_through: Some(false),
-                    opacity_percent: Some(70),
+                    opacity_percent: Some(crate::pinboard::MAX_PIN_OPACITY_PERCENT),
                 },
                 fake_native.as_ref(),
                 ROOT_HWND,

@@ -5,12 +5,16 @@
 //! windows, not for an external/OS capture source.
 
 use super::*;
+use crate::pinboard::live::PinLiveCaptureSession;
+use crate::pinboard::source::{PinSourceBinding, PinSourceCrop, PinSourceWindowIdentity};
 use crate::pinboard::{Pin, PinSnapshot};
 use image::RgbaImage;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows::Win32::Foundation::{BOOL, COLORREF, FILETIME, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Dwm::DwmFlush;
@@ -25,12 +29,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
     GetWindowThreadProcessId, IsWindow, IsWindowVisible, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WindowFromPoint,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetForegroundWindow, WindowFromPoint,
 };
 
 const ROOT_COLOR: [u8; 4] = [24, 52, 88, 255];
 const FIRST_COLOR: [u8; 4] = [236, 42, 38, 255];
 const SECOND_COLOR: [u8; 4] = [24, 210, 92, 255];
+const UPDATED_SECOND_COLOR: [u8; 4] = [36, 92, 224, 255];
 const SAMPLE_TOLERANCE: u8 = 14;
 const MIN_INPUT_IDLE: Duration = Duration::from_millis(750);
 const FRAME_REPAINT: Duration = Duration::from_millis(40);
@@ -69,13 +74,15 @@ struct FixedSavePicker(PathBuf);
 impl PinSavePicker for FixedSavePicker {
     fn save_file(
         &self,
-        _pin_id: PinId,
+        pin_id: PinId,
         cancellation: &PinPickerCancellation,
     ) -> Result<Option<PathBuf>, String> {
         if !cancellation.try_admit_dialog() {
             return Ok(None);
         }
-        Ok(Some(self.0.clone()))
+        Ok(Some(
+            self.0.join(format!("generated-pin-{}.png", pin_id.get())),
+        ))
     }
 }
 
@@ -83,25 +90,44 @@ impl PinSavePicker for FixedSavePicker {
 enum Stage {
     AwaitInitialWindows,
     SampleInitial,
-    RequestThirty,
-    AwaitThirty,
-    SampleReduced,
-    RequestClickThrough,
-    AwaitClickThrough,
-    InjectRootClick,
-    AwaitRootClick,
-    CopyImage,
-    AwaitCopy,
-    SaveImage,
-    AwaitSave,
+    RequestStaticFifty,
+    AwaitStaticFifty,
+    SampleStaticFifty,
+    RequestLiveFifty,
+    AwaitLiveFifty,
+    SampleBothFifty,
+    RequestLiveFrame,
+    AwaitLiveFrame,
+    SampleLiveFrame,
+    CopyStaticImage,
+    AwaitStaticCopy,
+    SaveStaticImage,
+    AwaitStaticSave,
+    CopyLiveImage,
+    AwaitLiveCopy,
+    SaveLiveImage,
+    AwaitLiveSave,
     RequestHide,
     AwaitHidden,
     RequestRestore,
     AwaitRestoredOpacity,
     SampleRestored,
+    InjectReset,
+    AwaitReset,
+    SampleReset,
+    RequestClickThrough,
+    AwaitClickThrough,
+    InjectRootClick,
+    AwaitRootClick,
     ClosePins,
     AwaitRetirement,
     Finish,
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedLivePixels {
+    Initial,
+    Updated,
 }
 
 #[derive(Clone, Copy)]
@@ -194,8 +220,11 @@ struct SmokeApp {
     second: PinId,
     first_pixels: RgbaImage,
     second_pixels: RgbaImage,
+    live_frame_pixels: RgbaImage,
+    live_frame_sender: SyncSender<RgbaImage>,
     clipboard: Arc<Mutex<Option<RgbaImage>>>,
-    save_path: PathBuf,
+    first_save_path: PathBuf,
+    second_save_path: PathBuf,
     log: SmokeLog,
     result: Arc<Mutex<Option<Result<(), String>>>>,
     nonce: u128,
@@ -234,20 +263,17 @@ impl SmokeApp {
         }
         let first_pixels = RgbaImage::from_pixel(240, 160, image::Rgba(FIRST_COLOR));
         let second_pixels = RgbaImage::from_pixel(240, 160, image::Rgba(SECOND_COLOR));
+        let live_frame_pixels = RgbaImage::from_pixel(240, 160, image::Rgba(UPDATED_SECOND_COLOR));
         let mut board = Pinboard::default();
         let first = insert_generated_pin(&mut board, 1, first_pixels.clone())?;
-        let second = insert_generated_pin(&mut board, 2, second_pixels.clone())?;
-        board
-            .get_mut(second)
-            .ok_or_else(|| "generated second pin disappeared".to_owned())?
-            .set_opacity_percent(90)
-            .map_err(|error| error.to_string())?;
-
+        let (second, live_frame_sender) =
+            insert_generated_live_pin(&mut board, 2, second_pixels.clone())?;
         let clipboard = Arc::new(Mutex::new(None));
-        let save_path = output_dir.join("generated-pin.png");
+        let first_save_path = output_dir.join(format!("generated-pin-{}.png", first.get()));
+        let second_save_path = output_dir.join(format!("generated-pin-{}.png", second.get()));
         let presenter = PinWindowPresenter::with_native_api_and_targets(
             Arc::new(SystemPinNativeApi),
-            Arc::new(FixedSavePicker(save_path.clone())),
+            Arc::new(FixedSavePicker(output_dir.clone())),
             Arc::new(MemoryImageClipboard(Arc::clone(&clipboard))),
         );
         let visibility_identity = board
@@ -260,7 +286,7 @@ impl SmokeApp {
         let process_id = unsafe { GetCurrentProcessId() };
         let process_birth = current_process_birth()?;
         log.line(format!(
-            "phase=created nonce={nonce:032x} pid={process_id} process_birth={process_birth} backend=eframe-glow source=generated-static-canvas"
+            "phase=created nonce={nonce:032x} pid={process_id} process_birth={process_birth} backend=eframe-glow source=generated-static-plus-live-budget-session"
         ));
         Ok(Self {
             board,
@@ -271,8 +297,11 @@ impl SmokeApp {
             second,
             first_pixels,
             second_pixels,
+            live_frame_pixels,
+            live_frame_sender,
             clipboard,
-            save_path,
+            first_save_path,
+            second_save_path,
             log,
             result,
             nonce,
@@ -405,126 +434,206 @@ impl SmokeApp {
 
         match self.stage {
             Stage::AwaitInitialWindows => {
-                let readiness = self.presentation_ready(100, 90);
+                let readiness = self.presentation_ready(100, 100);
                 if self.observe_readiness("initial presentation", readiness) {
                     self.set_stage(Stage::SampleInitial);
                 }
             }
-            Stage::SampleInitial => match self.verify_composition(100, 90, "initial") {
-                Ok(()) => self.set_stage(Stage::RequestThirty),
+            Stage::SampleInitial => match self.verify_composition(
+                100,
+                100,
+                "initial-static-live-100-100",
+                ExpectedLivePixels::Initial,
+            ) {
+                Ok(()) => self.set_stage(Stage::RequestStaticFifty),
                 Err(error) => self.composition_result(error),
             },
-            Stage::RequestThirty => match self.apply_control(
+            Stage::RequestStaticFifty => match self.apply_control(
                 ctx,
                 self.first,
                 PinControlChange {
-                    opacity_percent: Some(30),
+                    opacity_percent: Some(50),
                     ..Default::default()
                 },
             ) {
-                Ok(()) => self.set_stage(Stage::AwaitThirty),
+                Ok(()) => self.set_stage(Stage::AwaitStaticFifty),
                 Err(error) => self.native_control_error(error),
             },
-            Stage::AwaitThirty => {
-                let readiness = self.presentation_ready(30, 90);
-                if self.observe_readiness("30/90 presentation", readiness) {
-                    self.set_stage(Stage::SampleReduced);
+            Stage::AwaitStaticFifty => {
+                let readiness = self.presentation_ready(50, 100);
+                if self.observe_readiness("static 50/live 100 presentation", readiness) {
+                    self.set_stage(Stage::SampleStaticFifty);
                 }
             }
-            Stage::SampleReduced => match self.verify_composition(30, 90, "independent-30-90") {
-                Ok(()) => self.set_stage(Stage::RequestClickThrough),
-                Err(error) => self.composition_result(error),
-            },
-            Stage::RequestClickThrough => match self.apply_control(
+            Stage::SampleStaticFifty => {
+                match self.verify_composition(
+                    50,
+                    100,
+                    "static-50-live-100",
+                    ExpectedLivePixels::Initial,
+                ) {
+                    Ok(()) => self.set_stage(Stage::RequestLiveFifty),
+                    Err(error) => self.composition_result(error),
+                }
+            }
+            Stage::RequestLiveFifty => match self.apply_control(
                 ctx,
-                self.first,
+                self.second,
                 PinControlChange {
-                    click_through: Some(true),
+                    opacity_percent: Some(50),
                     ..Default::default()
                 },
             ) {
-                Ok(()) => self.set_stage(Stage::AwaitClickThrough),
+                Ok(()) => self.set_stage(Stage::AwaitLiveFifty),
                 Err(error) => self.native_control_error(error),
             },
-            Stage::AwaitClickThrough => {
-                let readiness = self.presentation_ready(30, 90).and_then(|()| {
-                    self.click_through_enabled(self.first).and_then(|enabled| {
-                        if enabled {
-                            Ok(())
-                        } else {
-                            Err("GAP: first pin click-through state is not active".into())
-                        }
-                    })
-                });
-                if self.observe_readiness("click-through presentation", readiness) {
-                    self.set_stage(Stage::InjectRootClick);
+            Stage::AwaitLiveFifty => {
+                let readiness = self.presentation_ready(50, 50);
+                if self.observe_readiness("static/live 50 presentation", readiness) {
+                    self.set_stage(Stage::SampleBothFifty);
                 }
             }
-            Stage::InjectRootClick => match self.inject_click_through(ctx) {
-                Ok(before) => {
-                    self.click_count_before = Some(before);
-                    self.set_stage(Stage::AwaitRootClick);
+            Stage::SampleBothFifty => {
+                match self.verify_composition(
+                    50,
+                    50,
+                    "static-live-50-50",
+                    ExpectedLivePixels::Initial,
+                ) {
+                    Ok(()) => self.set_stage(Stage::RequestLiveFrame),
+                    Err(error) => self.composition_result(error),
                 }
-                Err((is_gap, error)) => {
-                    if is_gap {
-                        self.gap(error);
-                    } else {
-                        self.defect(error);
-                    }
+            }
+            Stage::RequestLiveFrame => match self
+                .live_frame_sender
+                .try_send(self.live_frame_pixels.clone())
+            {
+                Ok(()) => {
+                    self.log
+                        .line("phase=generated-live-frame request=sequence-2");
+                    self.set_stage(Stage::AwaitLiveFrame);
                 }
+                Err(error) => self.defect(format!(
+                    "generated live-frame update could not be queued: {error}"
+                )),
             },
-            Stage::AwaitRootClick => {
-                if self
-                    .click_count_before
-                    .is_some_and(|before| self.click_count == before + 1)
+            Stage::AwaitLiveFrame => {
+                let frame = self.board.get(self.second).and_then(Pin::live_frame);
+                if let Some(frame) = frame
+                    && frame.sequence >= 2
+                    && frame.image.pixels() == &self.live_frame_pixels
                 {
                     self.log.line(format!(
-                        "phase=click-through-routing result=observed root_click_count={}",
-                        self.click_count
+                        "phase=generated-live-frame result=published sequence={} dimensions=240x160 source=synthetic-production-budget-session",
+                        frame.sequence
                     ));
-                    self.set_stage(Stage::CopyImage);
+                    self.set_stage(Stage::SampleLiveFrame);
                 }
             }
-            Stage::CopyImage => match self.start_action(self.first, PinActionKind::Copy) {
+            Stage::SampleLiveFrame => match self.verify_composition(
+                50,
+                50,
+                "updated-live-frame-static-live-50-50",
+                ExpectedLivePixels::Updated,
+            ) {
+                Ok(()) => self.set_stage(Stage::CopyStaticImage),
+                Err(error) => self.composition_result(error),
+            },
+            Stage::CopyStaticImage => match self.start_action(self.first, PinActionKind::Copy) {
                 Ok(id) => {
                     self.copy_request_id = Some(id);
-                    self.set_stage(Stage::AwaitCopy);
+                    self.set_stage(Stage::AwaitStaticCopy);
                 }
                 Err(error) => self.defect(error),
             },
-            Stage::AwaitCopy => match self.action_finished(self.first, self.copy_request_id) {
+            Stage::AwaitStaticCopy => {
+                match self.action_finished(self.first, self.copy_request_id) {
+                    Ok(true) => {
+                        let copied = self.clipboard.lock().ok().and_then(|value| value.clone());
+                        if copied.as_ref() == Some(&self.first_pixels) {
+                            self.log
+                                .line("phase=generated-static-clipboard-copy result=exact-rgba");
+                            self.set_stage(Stage::SaveStaticImage);
+                        } else {
+                            self.defect(
+                                "the fake image clipboard did not receive the static pin RGBA",
+                            );
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => self.defect(error),
+                }
+            }
+            Stage::SaveStaticImage => match self.start_action(self.first, PinActionKind::SaveAs) {
+                Ok(id) => {
+                    self.save_request_id = Some(id);
+                    self.set_stage(Stage::AwaitStaticSave);
+                }
+                Err(error) => self.defect(error),
+            },
+            Stage::AwaitStaticSave => {
+                match self.action_finished(self.first, self.save_request_id) {
+                    Ok(true) => match image::open(&self.first_save_path) {
+                        Ok(image) if image.to_rgba8() == self.first_pixels => {
+                            self.log.line(format!(
+                                "phase=generated-static-png-export result=exact-rgba dimensions=240x160 path={}",
+                                self.first_save_path.display()
+                            ));
+                            self.set_stage(Stage::CopyLiveImage);
+                        }
+                        Ok(_) => self
+                            .defect("the static pin PNG export changed its original RGBA pixels"),
+                        Err(error) => self.defect(format!(
+                            "the static pin PNG export could not be read: {error}"
+                        )),
+                    },
+                    Ok(false) => {}
+                    Err(error) => self.defect(error),
+                }
+            }
+            Stage::CopyLiveImage => match self.start_action(self.second, PinActionKind::Copy) {
+                Ok(id) => {
+                    self.copy_request_id = Some(id);
+                    self.set_stage(Stage::AwaitLiveCopy);
+                }
+                Err(error) => self.defect(error),
+            },
+            Stage::AwaitLiveCopy => match self.action_finished(self.second, self.copy_request_id) {
                 Ok(true) => {
                     let copied = self.clipboard.lock().ok().and_then(|value| value.clone());
-                    if copied.as_ref() == Some(&self.first_pixels) {
+                    if copied.as_ref() == Some(&self.live_frame_pixels) {
                         self.log
-                            .line("phase=generated-clipboard-copy result=exact-rgba");
-                        self.set_stage(Stage::SaveImage);
+                            .line("phase=generated-live-clipboard-copy result=exact-rgba");
+                        self.set_stage(Stage::SaveLiveImage);
                     } else {
-                        self.defect("the fake image clipboard did not receive the original RGBA");
+                        self.defect(
+                            "the fake image clipboard did not receive the updated live RGBA",
+                        );
                     }
                 }
                 Ok(false) => {}
                 Err(error) => self.defect(error),
             },
-            Stage::SaveImage => match self.start_action(self.first, PinActionKind::SaveAs) {
+            Stage::SaveLiveImage => match self.start_action(self.second, PinActionKind::SaveAs) {
                 Ok(id) => {
                     self.save_request_id = Some(id);
-                    self.set_stage(Stage::AwaitSave);
+                    self.set_stage(Stage::AwaitLiveSave);
                 }
                 Err(error) => self.defect(error),
             },
-            Stage::AwaitSave => match self.action_finished(self.first, self.save_request_id) {
-                Ok(true) => match image::open(&self.save_path) {
-                    Ok(image) if image.to_rgba8() == self.first_pixels => {
+            Stage::AwaitLiveSave => match self.action_finished(self.second, self.save_request_id) {
+                Ok(true) => match image::open(&self.second_save_path) {
+                    Ok(image) if image.to_rgba8() == self.live_frame_pixels => {
                         self.log.line(format!(
-                            "phase=generated-png-export result=exact-rgba dimensions=240x160"
+                            "phase=generated-live-png-export result=exact-rgba dimensions=240x160 path={}",
+                            self.second_save_path.display()
                         ));
                         self.set_stage(Stage::RequestHide);
                     }
-                    Ok(_) => self.defect("the owned PNG export changed the original RGBA pixels"),
-                    Err(error) => {
-                        self.defect(format!("the owned PNG export could not be read: {error}"))
-                    }
+                    Ok(_) => self.defect("the live pin PNG export changed its updated RGBA pixels"),
+                    Err(error) => self.defect(format!(
+                        "the live pin PNG export could not be read: {error}"
+                    )),
                 },
                 Ok(false) => {}
                 Err(error) => self.defect(error),
@@ -576,7 +685,7 @@ impl SmokeApp {
                 .poll_restored(self.visibility_identity)
             {
                 PinVisibilityAck::Acknowledged => {
-                    let readiness = self.presentation_ready(30, 90);
+                    let readiness = self.presentation_ready(50, 50);
                     if self.observe_readiness("restored presentation", readiness) {
                         self.log
                             .line("phase=restore result=visible-and-opacity-reapplied");
@@ -591,14 +700,110 @@ impl SmokeApp {
                 }
                 PinVisibilityAck::Failed(error) => self.visibility_failure("pin restore", error),
             },
-            Stage::SampleRestored => match self.verify_composition(30, 90, "after-hide-restore") {
+            Stage::SampleRestored => match self.verify_composition(
+                50,
+                50,
+                "after-hide-restore-static-live-50-50",
+                ExpectedLivePixels::Updated,
+            ) {
                 Ok(()) => {
                     self.log
                         .line("phase=hide-restore-opacity result=reapplied-and-composited");
-                    self.set_stage(Stage::ClosePins);
+                    self.set_stage(Stage::InjectReset);
                 }
                 Err(error) => self.composition_result(error),
             },
+            Stage::InjectReset => match self.inject_opacity_reset(ctx, self.second, 50) {
+                Ok(()) => self.set_stage(Stage::AwaitReset),
+                Err((is_gap, error)) => {
+                    if is_gap {
+                        self.gap(error);
+                    } else {
+                        self.defect(error);
+                    }
+                }
+            },
+            Stage::AwaitReset => {
+                let readiness = self.presentation_ready(50, 100);
+                if self.observe_readiness("actual Reset 100% control", readiness) {
+                    self.set_stage(Stage::SampleReset);
+                }
+            }
+            Stage::SampleReset => match self.verify_composition(
+                50,
+                100,
+                "reset-live-100-static-remains-50",
+                ExpectedLivePixels::Updated,
+            ) {
+                Ok(()) => self.set_stage(Stage::RequestClickThrough),
+                Err(error) => self.composition_result(error),
+            },
+            Stage::RequestClickThrough => match self.apply_control(
+                ctx,
+                self.first,
+                PinControlChange {
+                    click_through: Some(true),
+                    ..Default::default()
+                },
+            ) {
+                Ok(()) => self.set_stage(Stage::AwaitClickThrough),
+                Err(error) => self.native_control_error(error),
+            },
+            Stage::AwaitClickThrough => {
+                let readiness = self.presentation_ready(50, 100).and_then(|()| {
+                    self.click_through_enabled(self.first).and_then(|enabled| {
+                        if enabled {
+                            Ok(())
+                        } else {
+                            Err("GAP: first pin click-through state is not active".into())
+                        }
+                    })
+                });
+                if self.observe_readiness("click-through presentation", readiness) {
+                    self.set_stage(Stage::InjectRootClick);
+                }
+            }
+            Stage::InjectRootClick => match self.click_through_input_idle_age() {
+                Ok(age) if age < MIN_INPUT_IDLE => {
+                    self.last_readiness_reason = Some(format!(
+                        "waiting for owned input idle guard: {}ms / {}ms",
+                        age.as_millis(),
+                        MIN_INPUT_IDLE.as_millis()
+                    ));
+                }
+                Ok(_) => match self.inject_click_through(ctx) {
+                    Ok(before) => {
+                        self.click_count_before = Some(before);
+                        self.set_stage(Stage::AwaitRootClick);
+                    }
+                    Err((is_gap, error)) => {
+                        if is_gap {
+                            self.gap(error);
+                        } else {
+                            self.defect(error);
+                        }
+                    }
+                },
+                Err((is_gap, error)) => {
+                    if is_gap {
+                        self.gap(error);
+                    } else {
+                        self.defect(error);
+                    }
+                }
+            },
+            Stage::AwaitRootClick => {
+                if self
+                    .click_count_before
+                    .is_some_and(|before| self.click_count == before + 1)
+                {
+                    self.log.line(format!(
+                        "phase=click-through-routing result=observed root_click_count={}",
+                        self.click_count
+                    ));
+                    self.set_stage(Stage::ClosePins);
+                }
+            }
             Stage::ClosePins => {
                 let first_closed = self.presenter.close(self.first, &mut self.board);
                 let second_closed = self.presenter.close(self.second, &mut self.board);
@@ -675,23 +880,29 @@ impl SmokeApp {
         }
         let client = client_rect(hwnd)?;
         let pixels_per_point = ctx.pixels_per_point().max(f32::EPSILON);
-        let positions = BTreeMap::from([
+        let geometry = BTreeMap::from([
             (
                 self.first,
-                egui::pos2(
-                    origin.x as f32 / pixels_per_point + 34.0,
-                    origin.y as f32 / pixels_per_point + 55.0,
+                (
+                    egui::pos2(
+                        origin.x as f32 / pixels_per_point + 34.0,
+                        origin.y as f32 / pixels_per_point + 55.0,
+                    ),
+                    egui::vec2(240.0, 420.0),
                 ),
             ),
             (
                 self.second,
-                egui::pos2(
-                    origin.x as f32 / pixels_per_point + 356.0,
-                    origin.y as f32 / pixels_per_point + 55.0,
+                (
+                    egui::pos2(
+                        origin.x as f32 / pixels_per_point + 356.0,
+                        origin.y as f32 / pixels_per_point + 55.0,
+                    ),
+                    egui::vec2(240.0, 420.0),
                 ),
             ),
         ]);
-        self.presenter.configure_smoke_positions(positions);
+        self.presenter.configure_smoke_geometry(geometry);
         self.presenter
             .set_root_native_identity((hwnd.0 as usize, birth));
         self.root_hwnd = Some(hwnd);
@@ -925,8 +1136,18 @@ impl SmokeApp {
             || region.2 <= 0.0
         {
             return Err(format!(
-                "GAP: generated pin {} image Response is clipped",
-                id.get()
+                "GAP: generated pin {} image Response is clipped: response={:?} clip={:?} child_client={} child_frame={} pass={}",
+                id.get(),
+                region.0,
+                region.1,
+                client_rect(HWND(binding.hwnd as *mut _))
+                    .map(|client| format!(
+                        "[{},{},{},{}]",
+                        client.left, client.top, client.right, client.bottom
+                    ))
+                    .unwrap_or_else(|error| format!("unavailable:{error}")),
+                region.3,
+                region.4
             ));
         }
         let client_origin = client_screen_origin(HWND(binding.hwnd as *mut _))?;
@@ -1006,7 +1227,12 @@ impl SmokeApp {
         first_opacity: u8,
         second_opacity: u8,
         label: &str,
+        expected_live_pixels: ExpectedLivePixels,
     ) -> Result<(), String> {
+        let expected_second_pixel = match expected_live_pixels {
+            ExpectedLivePixels::Initial => self.second_pixels.get_pixel(0, 0).0,
+            ExpectedLivePixels::Updated => self.live_frame_pixels.get_pixel(0, 0).0,
+        };
         self.presentation_ready(first_opacity, second_opacity)?;
         let (root, canvas, _client, root_point) = self.current_root_canvas()?;
         let (first_runtime, first_binding, first_point, _, _, first_click_through) =
@@ -1061,7 +1287,7 @@ impl SmokeApp {
         let first_actual = self.read_owned_sample(&first_sample)?;
         let second_actual = self.read_owned_sample(&second_sample)?;
         let first_expected = blend(FIRST_COLOR, ROOT_COLOR, first_opacity);
-        let second_expected = blend(SECOND_COLOR, ROOT_COLOR, second_opacity);
+        let second_expected = blend(expected_second_pixel, ROOT_COLOR, second_opacity);
         self.samples.push(serde_json::json!({
             "phase": label,
             "root": {
@@ -1120,13 +1346,20 @@ impl SmokeApp {
             .get(self.first)
             .and_then(Pin::snapshot)
             .map(PinSnapshot::pixels);
-        let original_b = self
+        let current_b = self
             .board
             .get(self.second)
-            .and_then(Pin::snapshot)
-            .map(PinSnapshot::pixels);
-        if original_a != Some(&self.first_pixels) || original_b != Some(&self.second_pixels) {
-            return Err("pin opacity changed an original generated RGBA image".into());
+            .and_then(Pin::live_frame)
+            .map(|frame| frame.image);
+        let second_image_matches =
+            current_b
+                .as_ref()
+                .is_some_and(|image| match expected_live_pixels {
+                    ExpectedLivePixels::Initial => image.pixels() == &self.second_pixels,
+                    ExpectedLivePixels::Updated => image.pixels() == &self.live_frame_pixels,
+                });
+        if original_a != Some(&self.first_pixels) || !second_image_matches {
+            return Err("opacity changed a generated pin's original RGBA pixels".into());
         }
         let _ = (first_runtime, second_runtime);
         Ok(())
@@ -1275,6 +1508,275 @@ impl SmokeApp {
         Ok(state.click_through)
     }
 
+    fn inject_opacity_reset(
+        &self,
+        _ctx: &egui::Context,
+        id: PinId,
+        expected_opacity: u8,
+    ) -> Result<(), (bool, String)> {
+        let root = self
+            .root_hwnd
+            .ok_or_else(|| (true, "exact root HWND is unavailable".into()))?;
+        self.current_root_canvas().map_err(|error| (true, error))?;
+        let (runtime, binding, _, _, _, click_through) = self
+            .current_pin(id, expected_opacity)
+            .map_err(|error| (true, error))?;
+        if click_through {
+            return Err((
+                true,
+                "generated Reset pin is click-through; no input sent".into(),
+            ));
+        }
+        let child = HWND(binding.hwnd as *mut _);
+        let response = Self::current_opacity_reset_response(&runtime, &binding)
+            .map_err(|error| (true, error))?;
+        let (response_id, response_rect, clip_rect, pixels_per_point, enabled, pass_index) =
+            response;
+        if !enabled
+            || !response_rect.is_finite()
+            || !response_rect.is_positive()
+            || !clip_rect.contains_rect(response_rect)
+            || !pixels_per_point.is_finite()
+            || pixels_per_point <= 0.0
+        {
+            return Err((
+                true,
+                "the actual Reset response is disabled, stale, or clipped; no input sent".into(),
+            ));
+        }
+
+        let initial_foreground = unsafe { GetForegroundWindow() };
+        if initial_foreground != root && initial_foreground != child {
+            return Err((
+                true,
+                "neither the exact root nor its generated pin is foreground; no input sent".into(),
+            ));
+        }
+        if initial_foreground == root {
+            let _ = unsafe { SetForegroundWindow(child) };
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while unsafe { GetForegroundWindow() } != child {
+                if unsafe { GetForegroundWindow() } != root {
+                    return Err((
+                        true,
+                        "foreground left the owned root while activating the exact pin; no input sent"
+                            .into(),
+                    ));
+                }
+                if Instant::now() >= deadline {
+                    return Err((
+                        true,
+                        "the exact generated pin could not become foreground; no input sent".into(),
+                    ));
+                }
+                thread::yield_now();
+            }
+        }
+
+        let origin = client_screen_origin(child).map_err(|error| (true, error))?;
+        let button = logical_rect_to_pixels(response_rect, origin, pixels_per_point);
+        let client = client_rect(child).map_err(|error| (true, error))?;
+        let mut native_bounds = RECT::default();
+        unsafe { GetWindowRect(child, &mut native_bounds) }
+            .map_err(|error| (true, format!("exact pin bounds are unavailable: {error}")))?;
+        let outer = PixelRect {
+            left: native_bounds.left,
+            top: native_bounds.top,
+            right: native_bounds.right,
+            bottom: native_bounds.bottom,
+        };
+        if button.right <= button.left
+            || button.bottom <= button.top
+            || !client.contains_rect(button)
+            || !outer.contains_rect(button)
+        {
+            return Err((
+                true,
+                "the actual Reset response is outside the exact pin client; no input sent".into(),
+            ));
+        }
+        let point = POINT {
+            x: button.left + (button.right - button.left) / 2,
+            y: button.top + (button.bottom - button.top) / 2,
+        };
+        if !button.contains(point) || unsafe { WindowFromPoint(point) } != child {
+            return Err((
+                true,
+                "the actual Reset response is not the current native hit target; no input sent"
+                    .into(),
+            ));
+        }
+        let idle = input_idle_age()
+            .map_err(|error| (true, error))?
+            .ok_or_else(|| {
+                (
+                    true,
+                    "input idle state is unavailable; no input sent".into(),
+                )
+            })?;
+        if idle < MIN_INPUT_IDLE {
+            return Err((
+                true,
+                format!("input idle guard refused Reset at {}ms", idle.as_millis()),
+            ));
+        }
+        if let Some(held) = first_held_virtual_key() {
+            return Err((
+                true,
+                format!("virtual key/button 0x{held:02x} is held; no input sent"),
+            ));
+        }
+
+        let move_event = absolute_mouse_move(point).map_err(|error| (true, error))?;
+        let (again, again_binding, _, _, _, click_through) = self
+            .current_pin(id, expected_opacity)
+            .map_err(|error| (true, error))?;
+        let current_response = Self::current_opacity_reset_response(&again, &again_binding)
+            .map_err(|error| (true, error))?;
+        let current_root = self.current_root_canvas().map_err(|error| (true, error))?.0;
+        let mut current_bounds = RECT::default();
+        let current_bounds_valid = unsafe { GetWindowRect(child, &mut current_bounds) }.is_ok()
+            && (PixelRect {
+                left: current_bounds.left,
+                top: current_bounds.top,
+                right: current_bounds.right,
+                bottom: current_bounds.bottom,
+            })
+            .contains_rect(button);
+        let final_idle = input_idle_age()
+            .map_err(|error| (true, error))?
+            .ok_or_else(|| {
+                (
+                    true,
+                    "input idle state became unavailable; no input sent".into(),
+                )
+            })?;
+        if final_idle < MIN_INPUT_IDLE
+            || first_held_virtual_key().is_some()
+            || unsafe { GetForegroundWindow() } != child
+            || current_root != root
+            || again_binding != binding
+            || click_through
+            || current_response != response
+            || unsafe { !IsWindow(child) }.as_bool()
+            || !unsafe { IsWindowVisible(child) }.as_bool()
+            || unsafe { WindowFromPoint(point) } != child
+            || !client_rect(child)
+                .is_ok_and(|rect| rect.contains_rect(button) && rect.contains(point))
+            || !current_bounds_valid
+        {
+            return Err((
+                true,
+                "pin identity, current Reset response, foreground, or hit target changed at the final input fence; no input sent"
+                    .into(),
+            ));
+        }
+        let events = [move_event, left_button(true), left_button(false)];
+        self.log.line(format!(
+            "phase=reset-100-input preflight=passed pin={} hwnd=0x{:x} lifetime={} response={response_id:?} pass={pass_index} point={},{} idle_ms={} held_keys=none",
+            id.get(), binding.hwnd, binding.lifetime, point.x, point.y, final_idle.as_millis()
+        ));
+        let inserted = unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) } as usize;
+        if inserted != events.len() {
+            if inserted >= 2 {
+                let release = [left_button(false)];
+                let _ = unsafe { SendInput(&release, std::mem::size_of::<INPUT>() as i32) };
+            }
+            return Err((
+                true,
+                format!("SendInput inserted {inserted}/3 events for the guarded Reset click"),
+            ));
+        }
+        let _ = unsafe { SetForegroundWindow(root) };
+        let restore_deadline = Instant::now() + Duration::from_secs(1);
+        while unsafe { GetForegroundWindow() } != root {
+            if unsafe { GetForegroundWindow() } != child {
+                return Err((
+                    true,
+                    "foreground left the owned pin before the root could be restored".into(),
+                ));
+            }
+            if Instant::now() >= restore_deadline {
+                return Err((
+                    true,
+                    "the exact generated root could not regain foreground after Reset".into(),
+                ));
+            }
+            thread::yield_now();
+        }
+        Ok(())
+    }
+
+    fn current_opacity_reset_response(
+        runtime: &PinWindowRuntime,
+        binding: &NativeWindowBinding,
+    ) -> Result<(egui::Id, egui::Rect, egui::Rect, f32, bool, usize), String> {
+        let state = runtime
+            .state
+            .lock()
+            .map_err(|_| "pin state lock was poisoned during Reset validation".to_owned())?;
+        if state.native.as_ref() != Some(binding)
+            || state.close_requested
+            || state.native_destroyed
+            || !state.root_registered
+        {
+            return Err("the exact pin identity is not an active root-owned child".into());
+        }
+        state
+            .smoke_opacity_reset_region
+            .ok_or_else(|| "the current Reset response has not been rendered".into())
+    }
+
+    fn click_through_input_idle_age(&self) -> Result<Duration, (bool, String)> {
+        let root = self
+            .root_hwnd
+            .ok_or_else(|| (true, "root HWND is unavailable".into()))?;
+        if unsafe { GetForegroundWindow() } != root {
+            return Err((
+                true,
+                "the exact generated root is not foreground while waiting for idle input; no input sent"
+                    .into(),
+            ));
+        }
+        let (current_root, canvas, client, _) =
+            self.current_root_canvas().map_err(|error| (true, error))?;
+        if current_root != root {
+            return Err((true, "the exact root canvas changed; no input sent".into()));
+        }
+        let (_, binding, point, _, _, click_through) = self
+            .current_pin(self.first, 50)
+            .map_err(|error| (true, error))?;
+        if !canvas.contains(point)
+            || !client.contains(point)
+            || !click_through
+            || unsafe { WindowFromPoint(point) } != root
+        {
+            return Err((
+                true,
+                "the exact click-through target is no longer owned and hit-testable; no input sent"
+                    .into(),
+            ));
+        }
+        if let Some(held) = first_held_virtual_key() {
+            return Err((
+                true,
+                format!("virtual key/button 0x{held:02x} is held; no input sent"),
+            ));
+        }
+        input_idle_age()
+            .map_err(|error| (true, error))?
+            .ok_or_else(|| {
+                (
+                    true,
+                    format!(
+                        "input idle state is unavailable for exact pin {} (HWND 0x{:x}); no input sent",
+                        self.first.get(),
+                        binding.hwnd
+                    ),
+                )
+            })
+    }
+
     fn inject_click_through(&self, _ctx: &egui::Context) -> Result<usize, (bool, String)> {
         let root = self
             .root_hwnd
@@ -1291,7 +1793,7 @@ impl SmokeApp {
             return Err((true, "the exact root canvas changed; no input sent".into()));
         }
         let (_, binding, point, _, _, click_through) = self
-            .current_pin(self.first, 30)
+            .current_pin(self.first, 50)
             .map_err(|error| (true, error))?;
         if !canvas.contains(point) || !client.contains(point) {
             return Err((
@@ -1316,7 +1818,7 @@ impl SmokeApp {
             .read_owned_sample(&SamplePoint {
                 point,
                 root,
-                visual_pin: Some((self.first, 30, true, binding.clone())),
+                visual_pin: Some((self.first, 50, true, binding.clone())),
                 expected_hit: root,
             })
             .map_err(|error| {
@@ -1354,7 +1856,7 @@ impl SmokeApp {
                     && current_canvas.contains(point)
                     && current_client.contains(point)
             })
-            || !self.current_pin(self.first, 30).is_ok_and(
+            || !self.current_pin(self.first, 50).is_ok_and(
                 |(_, current, _, _, _, click_through)| current == binding && click_through,
             )
             || unsafe { WindowFromPoint(point) } != root
@@ -1390,7 +1892,7 @@ impl SmokeApp {
             || final_geometry.0 != root
             || !final_geometry.1.contains(point)
             || !final_geometry.2.contains(point)
-            || !self.current_pin(self.first, 30).is_ok_and(
+            || !self.current_pin(self.first, 50).is_ok_and(
                 |(_, current, _, _, _, click_through)| current == binding && click_through,
             )
             || unsafe { WindowFromPoint(point) } != root
@@ -1574,7 +2076,7 @@ impl SmokeApp {
             "pid": self.process_id,
             "process_birth": self.process_birth,
             "backend": "eframe-glow",
-            "source": "generated-static-presenter",
+            "source": "generated-static-plus-live-budget-session",
             "os_source_capture": "unverified",
             "root_hwnd": self.root_hwnd.map(|hwnd| hwnd.0 as usize),
             "pin_ids": [self.first.get(), self.second.get()],
@@ -1674,7 +2176,6 @@ impl eframe::App for SmokeApp {
             }
         }
         let _ = self.board.cancel_capture(self.visibility_identity);
-        let _ = fs::remove_file(&self.save_path);
     }
 }
 
@@ -1700,6 +2201,86 @@ fn insert_generated_pin(
     board
         .commit_capture(identity)
         .map_err(|error| error.to_string())
+}
+
+fn insert_generated_live_pin(
+    board: &mut Pinboard,
+    operation_id: u64,
+    initial_image: RgbaImage,
+) -> Result<(PinId, SyncSender<RgbaImage>), String> {
+    let operation_id = crate::pinboard::PinCaptureOperationId::new(operation_id)
+        .ok_or_else(|| "generated live-pin operation identity was invalid".to_owned())?;
+    let capture = board
+        .reserve_live_capture(operation_id)
+        .map_err(|error| format!("reserve generated live pin: {error}"))?;
+    let (width, height) = initial_image.dimensions();
+    let rect = crate::mkmacro::ScreenRect::new(0, 0, width, height);
+    board
+        .reserve_selected_rect(capture, rect)
+        .map_err(|error| error.to_string())?;
+    let binding = PinSourceBinding {
+        // This feature-only source is explicitly synthetic. It has no HWND
+        // and is never sent to the Windows Graphics Capture backend.
+        window: PinSourceWindowIdentity {
+            hwnd: 0,
+            process_id: 0,
+            thread_id: 0,
+        },
+        captured_bounds: rect,
+        crop: PinSourceCrop {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        },
+    };
+    let reservation = board
+        .take_live_reservation(capture)
+        .map_err(|error| error.to_string())?;
+    let (mut session, frame_sender) = match PinLiveCaptureSession::spawn_generated_smoke(
+        binding,
+        capture.generation,
+        reservation,
+        board.gpu_budget(),
+        initial_image,
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            let _ = board.cancel_capture(capture);
+            return Err(error);
+        }
+    };
+    let first_frame_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(result) = session.try_first_frame_result() {
+            match result {
+                Ok(()) => break,
+                Err(error) => {
+                    board.retire_live_session(session);
+                    let _ = board.cancel_capture(capture);
+                    return Err(error);
+                }
+            }
+        }
+        if Instant::now() >= first_frame_deadline {
+            board.retire_live_session(session);
+            let _ = board.cancel_capture(capture);
+            return Err("GAP: generated live session did not publish its first frame".into());
+        }
+        thread::yield_now();
+    }
+    if let Err(error) = board.stage_live_capture(capture, binding, session) {
+        let _ = board.cancel_capture(capture);
+        return Err(error.to_string());
+    }
+    let pin_id = match board.commit_capture(capture) {
+        Ok(pin_id) => pin_id,
+        Err(error) => {
+            let _ = board.cancel_capture(capture);
+            return Err(error.to_string());
+        }
+    };
+    Ok((pin_id, frame_sender))
 }
 
 fn current_process_birth() -> Result<u64, String> {
@@ -1925,7 +2506,6 @@ pub(super) fn run() -> Result<(), String> {
             })
             .to_string(),
         );
-        let _ = fs::remove_file(output_dir.join("generated-pin.png"));
         return Err(format!("GAP: eframe Glow smoke window failed: {error}"));
     }
     let outcome = result
@@ -1936,6 +2516,5 @@ pub(super) fn run() -> Result<(), String> {
     if let Err(error) = &outcome {
         log.line(format!("run=terminal result={error}"));
     }
-    let _ = fs::remove_file(output_dir.join("generated-pin.png"));
     outcome
 }
