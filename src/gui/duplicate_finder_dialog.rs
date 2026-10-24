@@ -525,19 +525,19 @@ impl DuplicateFinderDialogState {
     pub(crate) fn smoke_response_candidates(&self) -> Vec<SmokeResponseCandidate> {
         let mut candidates = Vec::new();
         for key in ["start", "cancel", "close", "fixture-release"] {
-            if let Some(response) = self.responses.get(key) {
-                if let Some(layer_id) = response.layer_id {
-                    candidates.push(SmokeResponseCandidate {
-                        kind: SmokeResponseKind::Control(key),
-                        id: response.id,
-                        layer_id,
-                        rect: response.rect,
-                        response_rect: response.response_rect,
-                        enabled: response.enabled,
-                        interaction_eligible: self.responses_interaction_eligible,
-                        generation: None,
-                    });
-                }
+            if let Some(response) = self.responses.get(key)
+                && let Some(layer_id) = response.layer_id
+            {
+                candidates.push(SmokeResponseCandidate {
+                    kind: SmokeResponseKind::Control(key),
+                    id: response.id,
+                    layer_id,
+                    rect: response.rect,
+                    response_rect: response.response_rect,
+                    enabled: response.enabled,
+                    interaction_eligible: self.responses_interaction_eligible,
+                    generation: None,
+                });
             }
         }
         candidates.extend(self.result_action_responses.iter().filter_map(|action| {
