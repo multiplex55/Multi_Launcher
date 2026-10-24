@@ -105,9 +105,34 @@ enum ResultRow {
 #[derive(Clone, Copy, Debug)]
 struct TestWidgetResponse {
     id: egui::Id,
+    layer_id: Option<egui::LayerId>,
     rect: egui::Rect,
     response_rect: egui::Rect,
     enabled: bool,
+}
+
+#[cfg(any(test, feature = "dev-smoke-binaries"))]
+#[derive(Clone, Debug)]
+pub(crate) enum SmokeResponseKind {
+    Control(&'static str),
+    ResultAction {
+        action: &'static str,
+        group_index: usize,
+        member_index: Option<usize>,
+    },
+}
+
+#[cfg(any(test, feature = "dev-smoke-binaries"))]
+#[derive(Clone, Debug)]
+pub(crate) struct SmokeResponseCandidate {
+    pub(crate) kind: SmokeResponseKind,
+    pub(crate) id: egui::Id,
+    pub(crate) layer_id: egui::LayerId,
+    pub(crate) rect: egui::Rect,
+    pub(crate) response_rect: egui::Rect,
+    pub(crate) enabled: bool,
+    pub(crate) interaction_eligible: bool,
+    pub(crate) generation: Option<u64>,
 }
 
 #[cfg(any(test, feature = "dev-smoke-binaries"))]
@@ -291,17 +316,27 @@ impl DuplicateFinderDialogState {
                         "id": response.id.value(),
                         "enabled": response.enabled,
                         "visible": response.rect.is_positive(),
-                        "response_current": true,
-                        "interaction_eligible": self.responses_interaction_eligible
-                            && response.enabled
-                            && response.rect.is_positive()
-                            && layer_current,
+                        "response_current": false,
+                        "interaction_eligible": false,
+                        "input_hit_eligible": false,
+                        "layer": response.layer_id.map(|layer| {
+                            serde_json::json!({
+                                "order": format!("{:?}", layer.order),
+                                "id": layer.id.value(),
+                            })
+                        }),
                         "painted_frame": frame_id,
                         "rect": {
                             "min_x": response.rect.min.x,
                             "min_y": response.rect.min.y,
                             "max_x": response.rect.max.x,
                             "max_y": response.rect.max.y,
+                        },
+                        "response_rect": {
+                            "min_x": response.response_rect.min.x,
+                            "min_y": response.response_rect.min.y,
+                            "max_x": response.response_rect.max.x,
+                            "max_y": response.response_rect.max.y,
                         },
                         "layer_current": layer_current,
                     })
@@ -396,11 +431,15 @@ impl DuplicateFinderDialogState {
                     "generation": action.generation,
                     "enabled": action.response.enabled,
                     "visible": action.response.rect.is_positive(),
-                    "response_current": true,
-                    "interaction_eligible": self.responses_interaction_eligible
-                        && action.response.enabled
-                        && action.response.rect.is_positive()
-                        && layer_current,
+                    "response_current": false,
+                    "interaction_eligible": false,
+                    "input_hit_eligible": false,
+                    "layer": action.response.layer_id.map(|layer| {
+                        serde_json::json!({
+                            "order": format!("{:?}", layer.order),
+                            "id": layer.id.value(),
+                        })
+                    }),
                     "painted_frame": frame_id,
                     "layer_current": layer_current,
                     "rect": {
@@ -408,6 +447,12 @@ impl DuplicateFinderDialogState {
                         "min_y": action.response.rect.min.y,
                         "max_x": action.response.rect.max.x,
                         "max_y": action.response.rect.max.y,
+                    },
+                    "response_rect": {
+                        "min_x": action.response.response_rect.min.x,
+                        "min_y": action.response.response_rect.min.y,
+                        "max_x": action.response.response_rect.max.x,
+                        "max_y": action.response.response_rect.max.y,
                     },
                 })
             })
@@ -474,6 +519,50 @@ impl DuplicateFinderDialogState {
             "identity_unverified_path_actions_available": false,
             "action_receipts": self.fixture_action_receipts.clone(),
         })
+    }
+
+    #[cfg(any(test, feature = "dev-smoke-binaries"))]
+    pub(crate) fn smoke_response_candidates(&self) -> Vec<SmokeResponseCandidate> {
+        let mut candidates = Vec::new();
+        for key in ["start", "cancel", "close", "fixture-release"] {
+            if let Some(response) = self.responses.get(key) {
+                if let Some(layer_id) = response.layer_id {
+                    candidates.push(SmokeResponseCandidate {
+                        kind: SmokeResponseKind::Control(key),
+                        id: response.id,
+                        layer_id,
+                        rect: response.rect,
+                        response_rect: response.response_rect,
+                        enabled: response.enabled,
+                        interaction_eligible: self.responses_interaction_eligible,
+                        generation: None,
+                    });
+                }
+            }
+        }
+        candidates.extend(self.result_action_responses.iter().filter_map(|action| {
+            let layer_id = action.response.layer_id?;
+            Some(SmokeResponseCandidate {
+                kind: SmokeResponseKind::ResultAction {
+                    action: action.action,
+                    group_index: action.group_index,
+                    member_index: action.member_index,
+                },
+                id: action.response.id,
+                layer_id,
+                rect: action.response.rect,
+                response_rect: action.response.response_rect,
+                enabled: action.response.enabled,
+                interaction_eligible: self.responses_interaction_eligible,
+                generation: Some(action.generation),
+            })
+        }));
+        candidates
+    }
+
+    #[cfg(any(test, feature = "dev-smoke-binaries"))]
+    pub(crate) fn smoke_generation(&self) -> u64 {
+        self.session.view().snapshot.generation
     }
 
     #[cfg(any(test, feature = "dev-smoke-binaries"))]
@@ -977,6 +1066,7 @@ impl DuplicateFinderDialogState {
                     self.record_geometry(
                         "diagnostics-scroll",
                         id,
+                        None,
                         rect.intersect(ui.clip_rect()),
                         rect,
                         ui.is_enabled(),
@@ -1525,6 +1615,7 @@ impl DuplicateFinderDialogState {
             self.record_geometry(
                 key,
                 response.id,
+                Some(response.layer_id),
                 response.interact_rect,
                 response.rect,
                 response.enabled(),
@@ -1543,7 +1634,7 @@ impl DuplicateFinderDialogState {
         clip_rect: egui::Rect,
         enabled: bool,
     ) {
-        self.record_geometry(key, id, rect.intersect(clip_rect), rect, enabled);
+        self.record_geometry(key, id, None, rect.intersect(clip_rect), rect, enabled);
     }
 
     #[cfg(any(test, feature = "dev-smoke-binaries"))]
@@ -1551,6 +1642,7 @@ impl DuplicateFinderDialogState {
         &mut self,
         key: &'static str,
         id: egui::Id,
+        layer_id: Option<egui::LayerId>,
         rect: egui::Rect,
         response_rect: egui::Rect,
         enabled: bool,
@@ -1560,6 +1652,7 @@ impl DuplicateFinderDialogState {
             key,
             TestWidgetResponse {
                 id,
+                layer_id,
                 rect,
                 response_rect,
                 enabled,
@@ -1591,6 +1684,7 @@ impl DuplicateFinderDialogState {
                 generation,
                 response: TestWidgetResponse {
                     id: response.id,
+                    layer_id: Some(response.layer_id),
                     rect: response.interact_rect,
                     response_rect: response.rect,
                     enabled: response.enabled(),
@@ -2670,6 +2764,37 @@ mod tests {
         );
         assert_eq!(
             std::fs::read(&second_path).expect("second generated file remains readable"),
+            b"identical generated content"
+        );
+
+        let stale_path = expected_open.with_extension("temporarily-stale");
+        assert!(
+            !stale_path.exists(),
+            "the stale-path fixture name is unused"
+        );
+        std::fs::rename(&expected_open, &stale_path)
+            .expect("temporarily remove the exact scanned alias");
+        click_result_action(&context, &mut dialog, "open", 0, Some(0));
+        let stale_receipt = dialog
+            .fixture_action_receipts
+            .last()
+            .expect("the stale action has an observable refusal receipt");
+        assert_eq!(stale_receipt["action"], "open");
+        assert_eq!(stale_receipt["result"], "refused");
+        assert_eq!(
+            *actions.opened.lock().unwrap(),
+            vec![expected_open.clone()],
+            "a renamed scan alias never reaches the file-action sink",
+        );
+        assert_eq!(
+            actions.revalidated.lock().unwrap().len(),
+            4,
+            "failed revalidation does not produce an accepted proof",
+        );
+        std::fs::rename(&stale_path, &expected_open)
+            .expect("restore the generated source before fixture cleanup");
+        assert_eq!(
+            std::fs::read(&expected_open).expect("restored source remains readable"),
             b"identical generated content"
         );
         assert_eq!(
