@@ -16,6 +16,7 @@ pub mod data;
 pub mod date_arithmetic;
 pub mod diff;
 pub mod dropcalc;
+pub mod duplicate_finder;
 pub mod emoji;
 pub mod fav;
 pub mod file_search;

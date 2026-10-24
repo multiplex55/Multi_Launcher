@@ -21,6 +21,9 @@ pub mod crop_dialog;
 mod dashboard_editor_dialog;
 mod data_recovery_dialog;
 mod diff_dialog;
+mod duplicate_finder_dialog;
+#[cfg(feature = "dev-smoke-binaries")]
+pub mod duplicate_finder_smoke;
 mod event_channel;
 mod fav_dialog;
 mod file_search_dialog;
@@ -141,6 +144,7 @@ pub(crate) use data_recovery_dialog::{
     DataRecoveryDialog, DataRecoveryUiAction, PendingRecoveryIntent, SafeStartupDiagnostic,
 };
 pub use diff_dialog::DiffDialogState;
+pub use duplicate_finder_dialog::DuplicateFinderDialogState;
 pub use fav_dialog::FavDialog;
 pub use file_search_dialog::{
     FileSearchDialogState, FileSearchMode, FileSearchScopeMode, FileSearchUiCommand,
@@ -744,6 +748,7 @@ pub enum Panel {
     RadialEditor,
     TableUtilityDialog,
     ImageCompareDialog,
+    DuplicateFinderDialog,
 }
 
 impl Panel {
@@ -790,6 +795,7 @@ impl Panel {
             Self::XmlToolkitDialog => "XML Toolkit",
             Self::TableUtilityDialog => "Table Utility",
             Self::ImageCompareDialog => "Image Comparison",
+            Self::DuplicateFinderDialog => "Duplicate Finder",
             Self::QrDialog => "QR Generator",
             Self::ConvertPanel => "Converter",
             Self::VolumeDialog => "Volume",
@@ -853,6 +859,7 @@ struct PanelStates {
     xml_toolkit_dialog: bool,
     table_utility_dialog: bool,
     image_compare_dialog: bool,
+    duplicate_finder_dialog: bool,
     qr_dialog: bool,
     convert_panel: bool,
     volume_dialog: bool,
@@ -1185,6 +1192,7 @@ pub struct LauncherApp {
     pub xml_toolkit_dialog: XmlToolkitDialogState,
     pub table_utility_dialog: TableUtilityDialogState,
     pub image_compare_dialog: ImageCompareDialogState,
+    pub(crate) duplicate_finder_dialog: DuplicateFinderDialogState,
     pub qr_dialog: QrDialogState,
     pub clipboard_modify_config_diagnostic: Option<String>,
     clipboard_modify_watcher: Option<crate::clipboard_modify::watch::ClipboardModifyWatcher>,
@@ -3549,6 +3557,7 @@ impl LauncherApp {
             xml_toolkit_dialog: XmlToolkitDialogState::default(),
             table_utility_dialog: TableUtilityDialogState::default(),
             image_compare_dialog: ImageCompareDialogState::new(ctx),
+            duplicate_finder_dialog: DuplicateFinderDialogState::new(ctx),
             qr_dialog: QrDialogState::default(),
             clipboard_modify_config_diagnostic,
             clipboard_modify_watcher,
@@ -4208,7 +4217,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 57] = [
+    const TRACKED_PANELS: [Panel; 58] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4266,6 +4275,7 @@ impl LauncherApp {
         Panel::MultiManagerSettingsDialog,
         Panel::RadialEditor,
         Panel::ImageCompareDialog,
+        Panel::DuplicateFinderDialog,
     ];
 
     fn is_panel_open(&self, panel: Panel) -> bool {
@@ -4311,6 +4321,7 @@ impl LauncherApp {
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open,
             Panel::TableUtilityDialog => self.table_utility_dialog.open,
             Panel::ImageCompareDialog => self.image_compare_dialog.open,
+            Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.open,
             Panel::QrDialog => self.qr_dialog.open,
             Panel::ConvertPanel => self.convert_panel.open,
             Panel::VolumeDialog => self.volume_dialog.open,
@@ -4575,6 +4586,10 @@ impl LauncherApp {
                 self.image_compare_dialog.close();
                 self.panel_states.image_compare_dialog = false;
             }
+            Panel::DuplicateFinderDialog => {
+                self.duplicate_finder_dialog.close();
+                self.panel_states.duplicate_finder_dialog = false;
+            }
             Panel::JsonUtilityDialog => {
                 self.json_utility_dialog.close();
                 self.panel_states.json_utility_dialog = false;
@@ -4838,6 +4853,10 @@ impl LauncherApp {
                 self.image_compare_dialog.close();
                 self.panel_states.image_compare_dialog = false;
             }
+            Panel::DuplicateFinderDialog => {
+                self.duplicate_finder_dialog.close();
+                self.panel_states.duplicate_finder_dialog = false;
+            }
             Panel::JsonUtilityDialog => {
                 self.json_utility_dialog.close();
                 self.panel_states.json_utility_dialog = false;
@@ -4968,6 +4987,7 @@ impl LauncherApp {
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open(),
             Panel::TableUtilityDialog => self.table_utility_dialog.open(),
             Panel::ImageCompareDialog => self.image_compare_dialog.open(),
+            Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.open(),
             Panel::ConvertPanel => self.convert_panel.open = true,
             Panel::VolumeDialog => self.volume_dialog.ensure_open(),
             Panel::BrightnessDialog => {
@@ -5119,6 +5139,7 @@ impl LauncherApp {
         check!(xml_toolkit_dialog, Panel::XmlToolkitDialog);
         check!(table_utility_dialog, Panel::TableUtilityDialog);
         check!(image_compare_dialog, Panel::ImageCompareDialog);
+        check!(duplicate_finder_dialog, Panel::DuplicateFinderDialog);
         check!(qr_dialog, Panel::QrDialog);
         check!(convert_panel, Panel::ConvertPanel);
         check!(volume_dialog, Panel::VolumeDialog);

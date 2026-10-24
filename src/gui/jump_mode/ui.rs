@@ -51,10 +51,11 @@ pub(crate) enum NavigationDialogKind {
     HotkeyDirectory,
     TableUtility,
     ImageCompare,
+    DuplicateFinder,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 16] = [
+    pub(crate) const ALL: [Self; 17] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -71,6 +72,7 @@ impl NavigationDialogKind {
         Self::HotkeyDirectory,
         Self::TableUtility,
         Self::ImageCompare,
+        Self::DuplicateFinder,
     ];
 
     const fn index(self) -> usize {
@@ -91,6 +93,7 @@ impl NavigationDialogKind {
             Self::HotkeyDirectory => 13,
             Self::TableUtility => 14,
             Self::ImageCompare => 15,
+            Self::DuplicateFinder => 16,
         }
     }
 
@@ -112,6 +115,7 @@ impl NavigationDialogKind {
             Self::HotkeyDirectory => "hotkey-directory",
             Self::TableUtility => "table-utility",
             Self::ImageCompare => "image-compare",
+            Self::DuplicateFinder => "duplicate-finder",
         }
     }
 
@@ -136,6 +140,7 @@ impl NavigationDialogKind {
             Self::HotkeyDirectory => egui::Id::new(Some("Hotkey Directory")),
             Self::TableUtility => egui::Id::new(Some("Table Utility")),
             Self::ImageCompare => egui::Id::new(Some("Image Comparison")),
+            Self::DuplicateFinder => egui::Id::new(Some("Duplicate Finder")),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -417,6 +422,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::XmlToolkit
                     | NavigationDialogKind::TableUtility
                     | NavigationDialogKind::ImageCompare
+                    | NavigationDialogKind::DuplicateFinder
                     | NavigationDialogKind::RadialDesigner,
                 ..
             } | NavigationOwner::XmlOverwriteConfirmation { .. }
@@ -3929,6 +3935,9 @@ mod tests {
                     }
                     NavigationDialogKind::ImageCompare => {
                         egui::Window::new("Image Comparison").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::DuplicateFinder => {
+                        egui::Window::new("Duplicate Finder").show(ctx, |_| {});
                     }
                     NavigationDialogKind::MouseSettings => {
                         egui::Window::new("Mouse Settings").show(ctx, |_| {});

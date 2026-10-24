@@ -91,6 +91,7 @@ pub trait DialogCommandHost {
     fn open_dashboard_settings_dialog(&mut self);
     fn open_theme_dialog(&mut self);
     fn open_image_compare_dialog(&mut self) {}
+    fn open_duplicate_finder_dialog(&mut self) {}
     fn open_volume_dialog(&mut self);
     fn open_brightness_dialog(&mut self);
     fn open_cpu_list_dialog(&mut self, count: usize);

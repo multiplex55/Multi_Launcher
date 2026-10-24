@@ -4580,6 +4580,48 @@ impl LauncherApp {
         );
     }
 
+    fn show_duplicate_finder(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        first_ui_pass: bool,
+        owner_transition_pending: bool,
+    ) {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+
+        let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let instance = match owner {
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::DuplicateFinder,
+                instance,
+            } => Some(instance),
+            _ => None,
+        };
+        let native_owner_current = !owner_transition_pending
+            && self.duplicate_finder_native_ui_owner_current(ctx, root_visible);
+        let scope = instance
+            .filter(|_| native_owner_current && self.jump_mode_enabled())
+            .and_then(|instance| {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("duplicate-finder", instance),
+                    crate::gui::jump_mode::TargetGeneration(instance),
+                    "duplicate-finder/roots",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )
+            });
+        self.duplicate_finder_dialog.show_with_jump_mode(
+            ctx,
+            scope.as_ref(),
+            instance,
+            owner,
+            self.native_ui_application_input_allowed(ctx),
+            native_owner_current,
+            first_ui_pass,
+        );
+    }
+
     fn jump_mode_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         self.jump_mode_enabled()
             && self.native_ui_host_input_allowed(ctx, root_visible)
@@ -5386,6 +5428,21 @@ impl LauncherApp {
                 .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
     }
 
+    fn duplicate_finder_native_ui_owner_current(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> bool {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+
+        self.duplicate_finder_dialog.open
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && !egui::Popup::is_any_open(ctx)
+            && NavigationDialogKind::DuplicateFinder
+                .layer_id()
+                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+    }
+
     fn snippet_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
 
@@ -5446,6 +5503,7 @@ impl LauncherApp {
                         | super::Panel::XmlToolkitDialog
                         | super::Panel::TableUtilityDialog
                         | super::Panel::ImageCompareDialog
+                        | super::Panel::DuplicateFinderDialog
                         | super::Panel::MouseSettingsDialog
                         | super::Panel::MouseGesturesDialog
                         | super::Panel::MouseGestureSettingsDialog
@@ -5525,6 +5583,10 @@ impl LauncherApp {
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::ImageCompare,
                 self.image_compare_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::DuplicateFinder,
+                self.duplicate_finder_dialog.open,
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::MouseSettings,
@@ -9382,6 +9444,12 @@ impl LauncherApp {
             first_ui_pass,
             owner_transition_pending,
         );
+        self.show_duplicate_finder(
+            &ctx,
+            frame_logic.should_be_visible,
+            first_ui_pass,
+            owner_transition_pending,
+        );
         self.render_hotfolder_manager(&ctx, first_ui_pass);
         #[cfg(feature = "qa-framebuffer-capture")]
         if self.qa_framebuffer_needs_qr_observation() {
@@ -9619,6 +9687,8 @@ impl LauncherApp {
         // this callback has crossed that renderer boundary.
         self.image_compare_dialog
             .paint_retirement_fence(ui.painter());
+        // Duplicate discovery shares its retained worker with the dialog;
+        // close is requested by the panel owner and the session reaps on drop.
     }
 
     fn stage_ui_frame_receipt(
@@ -9915,6 +9985,7 @@ impl eframe::App for LauncherApp {
         self.xml_toolkit_dialog.shutdown();
         self.table_utility_dialog.shutdown();
         self.image_compare_dialog.shutdown();
+        self.duplicate_finder_dialog.shutdown();
         if let Err(failure) = self.brightness_dialog.shutdown() {
             self.report_error_message(
                 "brightness.shutdown",

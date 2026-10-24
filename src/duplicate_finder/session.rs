@@ -8,7 +8,7 @@ use super::model::{
 use crate::file_operations::ScanCancellation;
 use crate::thread_reaper::{self, ReapPermit};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -102,6 +102,16 @@ struct WorkerOwner {
     reap_permit: ReapPermit,
 }
 
+enum WorkerSlot {
+    Running(WorkerOwner),
+    Retiring(Arc<AtomicU8>),
+}
+
+const WORKER_RETIREMENT_PENDING: u8 = 0;
+const WORKER_RETIREMENT_JOINED: u8 = 1;
+const WORKER_RETIREMENT_PANICKED: u8 = 2;
+const WORKER_RETIREMENT_REAPER_FAILED: u8 = 3;
+
 #[cfg(test)]
 pub(super) type TestReapPermitReserver =
     Arc<dyn Fn() -> Result<ReapPermit, &'static str> + Send + Sync + 'static>;
@@ -113,7 +123,7 @@ pub(crate) struct DuplicateFinderSession {
     limits: DiscoveryLimits,
     job: Arc<dyn DiscoveryJob>,
     shared: Arc<SessionShared>,
-    worker: Mutex<Option<WorkerOwner>>,
+    worker: Mutex<Option<WorkerSlot>>,
     #[cfg(test)]
     test_reap_permit_reserver: Option<TestReapPermitReserver>,
 }
@@ -128,7 +138,7 @@ impl DuplicateFinderSession {
     pub(crate) fn new() -> Self {
         Self::with_job_and_wake(
             DiscoveryLimits::default(),
-            Arc::new(NativeDiscoveryJob),
+            Arc::new(NativeDiscoveryJob::default()),
             Arc::new(|| {}),
         )
     }
@@ -136,7 +146,19 @@ impl DuplicateFinderSession {
     pub(crate) fn with_wake(wake: Arc<dyn Fn() + Send + Sync + 'static>) -> Self {
         Self::with_job_and_wake(
             DiscoveryLimits::default(),
-            Arc::new(NativeDiscoveryJob),
+            Arc::new(NativeDiscoveryJob::default()),
+            wake,
+        )
+    }
+
+    #[cfg(any(test, feature = "dev-smoke-binaries"))]
+    pub(crate) fn with_wake_and_first_read_checkpoint(
+        wake: Arc<dyn Fn() + Send + Sync + 'static>,
+        checkpoint: Arc<super::content::FirstReadCheckpointGate>,
+    ) -> Self {
+        Self::with_job_and_wake(
+            DiscoveryLimits::default(),
+            Arc::new(NativeDiscoveryJob::with_first_read_checkpoint(checkpoint)),
             wake,
         )
     }
@@ -268,10 +290,10 @@ impl DuplicateFinderSession {
         Ok(cancelled)
     }
 
-    /// Close invalidates all further publication but does not join the worker.
-    /// `reopen` may reuse this owner only after the retained handle is finished.
+    /// Close invalidates publication and transfers any retained handle to the
+    /// bounded reaper. `reopen` remains busy until its post-join receipt arrives.
     pub(crate) fn close(&self) {
-        let _worker = self.worker.lock().unwrap();
+        let mut worker_slot = self.worker.lock().unwrap();
         let mut state = self.shared.state.lock().unwrap();
         if !state.closed {
             state.closed = true;
@@ -297,34 +319,83 @@ impl DuplicateFinderSession {
             self.shared.changed.notify_all();
         }
         drop(state);
-        drop(_worker);
+        let running_worker = match worker_slot.take() {
+            Some(WorkerSlot::Running(worker)) => Some(worker),
+            Some(retiring) => {
+                *worker_slot = Some(retiring);
+                None
+            }
+            None => None,
+        };
+        if let Some(WorkerOwner { join, reap_permit }) = running_worker {
+            let joined = Arc::new(AtomicU8::new(WORKER_RETIREMENT_PENDING));
+            let retirement = Arc::clone(&joined);
+            let wake = Arc::clone(&self.shared.wake);
+            if let Err(error) = reap_permit.reap_with_callback(join, move |panicked| {
+                retirement.store(
+                    if panicked {
+                        WORKER_RETIREMENT_PANICKED
+                    } else {
+                        WORKER_RETIREMENT_JOINED
+                    },
+                    Ordering::Release,
+                );
+                wake();
+            }) {
+                joined.store(WORKER_RETIREMENT_REAPER_FAILED, Ordering::Release);
+                tracing::error!(%error, "failed to transfer closed duplicate discovery worker to join reaper");
+            }
+            *worker_slot = Some(WorkerSlot::Retiring(joined));
+        }
+        drop(worker_slot);
         (self.shared.wake)();
     }
 
-    /// Reopen the same session after its old worker has actually terminated.
-    /// A blocked filesystem call keeps the handle in this owner and prevents a
-    /// second worker from receiving a fresh scan allowance.
+    /// Reopen the same session after the bounded reaper has joined its old
+    /// worker. A blocked filesystem call retains the retirement receipt and
+    /// prevents a second worker from receiving a fresh scan allowance.
     pub(crate) fn reopen(&self) -> Result<(), DuplicateFinderSessionError> {
         let mut worker_slot = self.worker.lock().unwrap();
         let mut state = self.shared.state.lock().unwrap();
         if !state.closed {
             return Ok(());
         }
-        if worker_slot
-            .as_ref()
-            .is_some_and(|worker| !worker.join.is_finished())
-        {
+        let retirement_state = match worker_slot.as_ref() {
+            Some(WorkerSlot::Retiring(joined)) => Some(joined.load(Ordering::Acquire)),
+            _ => None,
+        };
+        if worker_slot.as_ref().is_some_and(
+            |slot| matches!(slot, WorkerSlot::Running(worker) if !worker.join.is_finished()),
+        ) {
             return Err(DuplicateFinderSessionError::WorkerRetiring);
         }
+        if retirement_state == Some(WORKER_RETIREMENT_PENDING) {
+            return Err(DuplicateFinderSessionError::WorkerRetiring);
+        }
+        if retirement_state == Some(WORKER_RETIREMENT_PANICKED) {
+            worker_slot.take();
+            state.active = None;
+            state.pending = None;
+            return Err(DuplicateFinderSessionError::WorkerPanicked);
+        }
+        if retirement_state == Some(WORKER_RETIREMENT_REAPER_FAILED) {
+            return Err(DuplicateFinderSessionError::WorkerCapacity(
+                "the prior duplicate discovery worker could not be safely transferred to the join reaper".into(),
+            ));
+        }
         if let Some(worker) = worker_slot.take() {
-            let WorkerOwner { join, reap_permit } = worker;
-            if join.join().is_err() {
-                drop(reap_permit);
-                state.active = None;
-                state.pending = None;
-                return Err(DuplicateFinderSessionError::WorkerPanicked);
+            match worker {
+                WorkerSlot::Running(WorkerOwner { join, reap_permit }) => {
+                    if join.join().is_err() {
+                        drop(reap_permit);
+                        state.active = None;
+                        state.pending = None;
+                        return Err(DuplicateFinderSessionError::WorkerPanicked);
+                    }
+                    drop(reap_permit);
+                }
+                WorkerSlot::Retiring(_) => {}
             }
-            drop(reap_permit);
         }
 
         if state.generation == u64::MAX {
@@ -359,30 +430,37 @@ impl DuplicateFinderSession {
 
     fn ensure_worker(&self) -> Result<(), DuplicateFinderSessionError> {
         let mut worker_slot = self.worker.lock().unwrap();
-        if worker_slot
-            .as_ref()
-            .is_some_and(|worker| !worker.join.is_finished())
-        {
-            return Ok(());
+        match worker_slot.as_ref() {
+            Some(WorkerSlot::Running(worker)) if !worker.join.is_finished() => return Ok(()),
+            Some(WorkerSlot::Retiring(joined))
+                if joined.load(Ordering::Acquire) == WORKER_RETIREMENT_PENDING =>
+            {
+                return Err(DuplicateFinderSessionError::WorkerRetiring);
+            }
+            _ => {}
         }
         if let Some(worker) = worker_slot.take() {
-            let WorkerOwner { join, reap_permit } = worker;
-            let panicked = join.join().is_err();
-            drop(reap_permit);
-            if panicked {
-                let mut state = self.shared.state.lock().unwrap();
-                state.active = None;
-                if let Some(pending) = state.pending.take()
-                    && !state.closed
-                    && state.generation == pending.generation
-                {
-                    state.snapshot = Arc::new(failed_snapshot(
-                        pending.generation,
-                        "the prior duplicate discovery worker panicked before starting the queued scan".into(),
-                    ));
-                    state.progress = None;
+            match worker {
+                WorkerSlot::Running(WorkerOwner { join, reap_permit }) => {
+                    let panicked = join.join().is_err();
+                    drop(reap_permit);
+                    if panicked {
+                        let mut state = self.shared.state.lock().unwrap();
+                        state.active = None;
+                        if let Some(pending) = state.pending.take()
+                            && !state.closed
+                            && state.generation == pending.generation
+                        {
+                            state.snapshot = Arc::new(failed_snapshot(
+                                pending.generation,
+                                "the prior duplicate discovery worker panicked before starting the queued scan".into(),
+                            ));
+                            state.progress = None;
+                        }
+                        return Err(DuplicateFinderSessionError::WorkerPanicked);
+                    }
                 }
-                return Err(DuplicateFinderSessionError::WorkerPanicked);
+                WorkerSlot::Retiring(_) => {}
             }
         }
         {
@@ -415,6 +493,7 @@ impl DuplicateFinderSession {
         let completion = reap_permit.completion_notifier();
         let shared = Arc::clone(&self.shared);
         let job = Arc::clone(&self.job);
+        let exit_wake = Arc::clone(&shared.wake);
         let limits = self.limits;
         let join = thread::Builder::new()
             .name("duplicate-discovery-session".into())
@@ -422,9 +501,10 @@ impl DuplicateFinderSession {
                 let completion = completion;
                 worker_loop(shared, job, limits);
                 drop(completion);
+                (exit_wake)();
             })
             .map_err(|error| DuplicateFinderSessionError::WorkerStart(error.to_string()))?;
-        *worker_slot = Some(WorkerOwner { join, reap_permit });
+        *worker_slot = Some(WorkerSlot::Running(WorkerOwner { join, reap_permit }));
         Ok(())
     }
 
@@ -448,11 +528,19 @@ impl DuplicateFinderSession {
     pub(super) fn reaper_probe_for_test(
         &self,
     ) -> Option<crate::thread_reaper::ReapCompletionProbe> {
-        self.worker
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|worker| worker.reap_permit.reaped_probe())
+        match self.worker.lock().unwrap().as_ref() {
+            Some(WorkerSlot::Running(worker)) => Some(worker.reap_permit.reaped_probe()),
+            Some(WorkerSlot::Retiring(_)) | None => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn worker_reaped_for_test(&self) -> bool {
+        matches!(
+            self.worker.lock().unwrap().as_ref(),
+            Some(WorkerSlot::Retiring(joined))
+                if joined.load(Ordering::Acquire) != WORKER_RETIREMENT_PENDING
+        )
     }
 }
 
@@ -469,7 +557,7 @@ impl Drop for DuplicateFinderSession {
             }
             self.shared.changed.notify_all();
         }
-        if let Some(WorkerOwner { join, reap_permit }) = worker_slot.take() {
+        if let Some(WorkerSlot::Running(WorkerOwner { join, reap_permit })) = worker_slot.take() {
             if let Err(error) = reap_permit.reap(join) {
                 tracing::error!(%error, "failed to transfer duplicate discovery worker to join reaper");
             }
@@ -595,6 +683,8 @@ fn worker_loop(shared: Arc<SessionShared>, job: Arc<dyn DiscoveryJob>, limits: D
             let mut state = shared.state.lock().unwrap();
             loop {
                 if state.closed {
+                    drop(state);
+                    (shared.wake)();
                     return;
                 }
                 if let Some(request) = state.pending.take() {
@@ -633,7 +723,7 @@ fn worker_loop(shared: Arc<SessionShared>, job: Arc<dyn DiscoveryJob>, limits: D
             &cancellation,
             &mut publish,
         );
-        let current = {
+        {
             let mut state = shared.state.lock().unwrap();
             if state
                 .active
@@ -648,10 +738,10 @@ fn worker_loop(shared: Arc<SessionShared>, job: Arc<dyn DiscoveryJob>, limits: D
                 state.snapshot = Arc::new(result);
             }
             shared.changed.notify_all();
-            current
-        };
-        if current {
-            (shared.wake)();
         }
+        // The active scan slot can retire without publishing, for example
+        // after cancel or close. The GUI still needs a repaint to observe that
+        // the retained worker has drained and can be reused or joined.
+        (shared.wake)();
     }
 }

@@ -9,6 +9,9 @@ mod discovery;
 mod model;
 mod session;
 
+#[cfg(any(test, feature = "dev-smoke-binaries"))]
+pub(crate) use content::FirstReadCheckpointGate;
+
 pub(crate) use model::{
     ContentProgress, DiscoveryDiagnostic, DiscoveryProgress, DiscoverySnapshot, DiscoveryStage,
     DiscoveryStatus, DuplicateTotals, FileAlias, IdentityUnverifiedMatch, IdentityUnverifiedPath,

@@ -20,6 +20,7 @@ use crate::plugins::data::DataPlugin;
 use crate::plugins::date_arithmetic::DateArithmeticPlugin;
 use crate::plugins::diff::DiffPlugin;
 use crate::plugins::dropcalc::DropCalcPlugin;
+use crate::plugins::duplicate_finder::DuplicateFinderPlugin;
 use crate::plugins::emoji::EmojiPlugin;
 use crate::plugins::fav::FavPlugin;
 use crate::plugins::file_search::FileSearchPlugin;
@@ -939,6 +940,7 @@ impl PluginManager {
         self.register_with_settings(JsonUtilityPlugin, plugin_settings);
         self.register_with_settings(XmlToolkitPlugin, plugin_settings);
         self.register_with_settings(ImageComparePlugin, plugin_settings);
+        self.register_with_settings(DuplicateFinderPlugin, plugin_settings);
         self.register_with_settings(TableUtilityPlugin, plugin_settings);
         self.register_with_settings(CsvPlugin, plugin_settings);
         self.register_with_settings(BatchRenamePlugin, plugin_settings);

@@ -22,6 +22,7 @@ where
         Command::Dialog(DialogCommand::DashboardSettings) => host.open_dashboard_settings_dialog(),
         Command::Dialog(DialogCommand::Theme) => host.open_theme_dialog(),
         Command::Dialog(DialogCommand::ImageCompare) => host.open_image_compare_dialog(),
+        Command::Dialog(DialogCommand::DuplicateFinder) => host.open_duplicate_finder_dialog(),
         Command::Timer(TimerCommand::TimerDialog) => host.open_timer_dialog(),
         Command::Timer(TimerCommand::AlarmDialog) => host.open_alarm_dialog(),
         Command::Shell(ShellCommand::Dialog) => host.open_shell_dialog(),

@@ -32,6 +32,7 @@ It’s designed to be “one hotkey away” from:
 - [Hotkey Directory](#hotkey-directory)
 - [Table Utility](#table-utility)
 - [Image Comparison](#image-comparison)
+- [Duplicate Finder](#duplicate-finder)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
 - [XML Toolkit](#xml-toolkit)
 - [Hash Generator](#hash-generator)
@@ -891,6 +892,23 @@ and RGB values in transparent pixels, and distinguishes Changed, A-only,
 B-only, and Neither. Inputs and results remain in the current session and are
 cleared when the dialog closes. This is separate from the text-oriented `diff`
 command.
+
+## Duplicate Finder
+
+Type `dff` and choose **Open Duplicate Finder**. Select one or more folders and
+press **Start Scan**; browsing or opening the dialog does not scan files. The
+scanner is read-only and bounded to 32 roots, 250,000 files, 350,000 entries,
+100,000 directories, a depth of 256, and 64 MiB of retained path metadata.
+Reparse points and cloud placeholders are excluded. Files are first grouped by
+size, then verified with streamed hashes and exact byte comparison. Hard-link
+aliases represent one file identity, not additional copies. Matches without a
+reliable file identity are shown separately and excluded from verified totals.
+
+**Open**, **Reveal**, and **Copy Paths** revalidate each displayed path against
+the selected root and scanned file identity before acting. Reported duplicate
+bytes are logical totals; hard links and filesystem allocation mean they are
+not a promise of recoverable disk space. The tool never deletes or changes
+files.
 
 ## JSON and screen color utilities
 

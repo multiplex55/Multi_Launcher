@@ -154,6 +154,7 @@ mod tests {
         ocr_requests: usize,
         json_utility_intents: Vec<crate::commands::JsonUtilityIntent>,
         xml_toolkit_opens: usize,
+        duplicate_finder_opens: usize,
         table_utility_profiles: Vec<crate::table_utility::TableUtilityProfile>,
         batch_rename_opens: usize,
         search_replace_opens: usize,
@@ -202,6 +203,9 @@ mod tests {
         fn open_regex_tester_dialog(&mut self) {}
         fn open_help_dialog(&mut self) {
             self.dialog_calls += 1;
+        }
+        fn open_duplicate_finder_dialog(&mut self) {
+            self.duplicate_finder_opens += 1;
         }
         fn open_timer_dialog(&mut self) {
             self.dialog_calls += 1;
@@ -913,6 +917,36 @@ mod tests {
         );
         assert_eq!(host.headless_calls, 0);
         assert_eq!(outcome, crate::commands::CommandOutcome::default());
+    }
+
+    #[test]
+    fn dff_command_opens_once_through_typed_host_and_requires_gui_headlessly() {
+        let mut host = FakeHost::default();
+        let action = Action {
+            label: "Open Duplicate Finder".into(),
+            desc: String::new(),
+            action: "dff:open".into(),
+            args: None,
+        };
+        let command = crate::commands::parse_action(&action).unwrap();
+        let outcome = CommandBus
+            .dispatch(&invocation(command), &mut host)
+            .expect("the typed dialog command is routed to its owner");
+
+        assert_eq!(host.duplicate_finder_opens, 1);
+        assert_eq!(host.headless_calls, 0);
+        assert_eq!(outcome, crate::commands::CommandOutcome::default());
+
+        let error = crate::commands::headless::execute(
+            crate::commands::parse_action(&action).unwrap(),
+            &action,
+        )
+        .expect_err("headless execution cannot open Duplicate Finder");
+        assert!(
+            error
+                .to_string()
+                .contains("requires the launcher interface")
+        );
     }
 
     #[test]

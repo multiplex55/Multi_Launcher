@@ -434,6 +434,20 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         )
         .with_gui_failure_policy());
     }
+    if s.starts_with("dff:") {
+        if s == "dff:open" && action.args.is_none() {
+            return Ok(Command::Dialog(DialogCommand::DuplicateFinder));
+        }
+        return Err(CommandError::new(
+            "duplicate_finder",
+            if action.args.is_some() {
+                "Duplicate Finder does not accept a path or content payload"
+            } else {
+                "unknown Duplicate Finder command"
+            },
+        )
+        .with_gui_failure_policy());
+    }
     if s.starts_with("hotfolder:") {
         let command = match (s, action.args.is_none()) {
             ("hotfolder:open", true) => Some(HotFolderCommand::Open),
@@ -3056,6 +3070,42 @@ mod csv_route_parser_tests {
         }
         assert!(matches!(
             parse_action(&action("csvwhatever:open", None)).unwrap(),
+            Command::External(_)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod duplicate_finder_route_parser_tests {
+    use super::*;
+
+    fn action(raw: &str, args: Option<&str>) -> Action {
+        Action {
+            label: raw.into(),
+            desc: String::new(),
+            action: raw.into(),
+            args: args.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn dff_command_is_typed_and_its_reserved_namespace_fails_closed() {
+        assert_eq!(
+            parse_action(&action("dff:open", None)).unwrap(),
+            Command::Dialog(DialogCommand::DuplicateFinder)
+        );
+
+        for (raw, args) in [
+            ("dff:open", Some("C:\\private\\folder")),
+            ("dff:scan", None),
+            ("dff:open:again", None),
+        ] {
+            let error = parse_action(&action(raw, args)).unwrap_err();
+            assert_eq!(error.domain, "duplicate_finder");
+            assert!(error.toast && error.refocus);
+        }
+        assert!(matches!(
+            parse_action(&action("dffusion:open", None)).unwrap(),
             Command::External(_)
         ));
     }

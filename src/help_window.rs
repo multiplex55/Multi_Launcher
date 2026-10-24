@@ -91,6 +91,10 @@ impl HelpWindow {
                             ui.label(
                                 "Type imgdiff to compare two session-only images. Open A… and Open B… choose PNG, JPEG, BMP, or GIF files (16,777,216 pixels per image maximum); Paste A and Paste B read bounded CF_DIB images only when selected. A failed replacement keeps the last accepted image. A, B, Wipe, and Difference show top-left-aligned images without resizing; the exact RGBA comparison includes alpha and transparent-pixel RGB values. Inputs and results are cleared when the dialog closes.",
                             );
+                            ui.label(egui::RichText::new("Duplicate Finder").strong());
+                            ui.label(
+                                "Type dff to open Duplicate Finder, select folders, and explicitly start a read-only scan. It is bounded to 32 roots, 250,000 files, 350,000 entries, 100,000 directories, depth 256, and 64 MiB of path metadata. Reparse points and cloud placeholders are excluded. Same-sized files are checked with streamed hashes and exact byte comparison; hard-link aliases count as one file identity. Matches without reliable identity are separated from verified totals. Open, Reveal, and Copy Paths revalidate each exact displayed alias; logical duplicate bytes are not guaranteed recoverable disk space. No files are changed.",
+                            );
                             ui.label("Older query: Ctrl+Up");
                             ui.label("Newer query / restore draft: Ctrl+Down");
                             ui.label(egui::RichText::new("Experimental Jump Mode").strong());

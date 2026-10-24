@@ -14,6 +14,7 @@ type SupervisorSpawner = Arc<dyn Fn(Arc<JoinReaper>) -> Result<(), String> + Sen
 struct PendingJoin {
     join: JoinHandle<()>,
     completion: Arc<AtomicU8>,
+    after_join: Option<Box<dyn FnOnce(bool) + Send + 'static>>,
 }
 
 #[derive(Default)]
@@ -93,12 +94,14 @@ impl JoinReaper {
         self: &Arc<Self>,
         join: JoinHandle<()>,
         completion: Arc<AtomicU8>,
+        after_join: Option<Box<dyn FnOnce(bool) + Send + 'static>>,
     ) -> Result<(), ReapError> {
         let mut state = self.state.lock().unwrap();
         debug_assert!(state.pending.len() < REAPER_CAPACITY);
         state.pending.push(PendingJoin {
             join,
             completion: Arc::clone(&completion),
+            after_join,
         });
         #[cfg(test)]
         if let Some(hook) = self.registration_hook.lock().unwrap().clone() {
@@ -149,6 +152,7 @@ impl JoinReaper {
             self.outstanding.fetch_sub(completed, Ordering::AcqRel);
             for pending in detached {
                 drop(pending.join);
+                drop(pending.after_join);
             }
             return Err(ReapError::SupervisorSpawn(message));
         }
@@ -182,10 +186,13 @@ impl JoinReaper {
                     .expect("completion count must name a registered handle");
                 state.pending.swap_remove(index)
             };
-            let _ = finished.join.join();
+            let panicked = finished.join.join().is_err();
             #[cfg(test)]
             finished.completion.store(REAPED, Ordering::Release);
             self.outstanding.fetch_sub(1, Ordering::AcqRel);
+            if let Some(after_join) = finished.after_join {
+                after_join(panicked);
+            }
         }
     }
 }
@@ -243,7 +250,29 @@ impl ReapPermit {
     }
 
     pub(crate) fn reap(mut self, join: JoinHandle<()>) -> Result<(), ReapError> {
-        let result = self.owner.submit(join, Arc::clone(&self.completion));
+        self.submit(join, None)
+    }
+
+    /// Transfer a worker handle to the bounded supervisor and invoke `after_join`
+    /// only after the supervisor has actually joined that handle. The callback
+    /// receives whether the worker panicked, runs outside reaper locks, and can
+    /// safely publish retirement to its owner.
+    pub(crate) fn reap_with_callback(
+        mut self,
+        join: JoinHandle<()>,
+        after_join: impl FnOnce(bool) + Send + 'static,
+    ) -> Result<(), ReapError> {
+        self.submit(join, Some(Box::new(after_join)))
+    }
+
+    fn submit(
+        &mut self,
+        join: JoinHandle<()>,
+        after_join: Option<Box<dyn FnOnce(bool) + Send + 'static>>,
+    ) -> Result<(), ReapError> {
+        let result = self
+            .owner
+            .submit(join, Arc::clone(&self.completion), after_join);
         self.active = false;
         result
     }

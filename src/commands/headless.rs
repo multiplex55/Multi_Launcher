@@ -252,6 +252,37 @@ mod image_compare_headless_tests {
 }
 
 #[cfg(test)]
+mod duplicate_finder_headless_tests {
+    use super::*;
+
+    #[test]
+    fn dff_command_headless_requires_gui_without_external_fallback() {
+        let original = Action {
+            label: "Open Duplicate Finder".into(),
+            desc: String::new(),
+            action: "dff:open".into(),
+            args: None,
+        };
+        let command = crate::commands::parse_action(&original).unwrap();
+        assert_eq!(command, Command::Dialog(DialogCommand::DuplicateFinder));
+
+        let mut external_calls = Vec::new();
+        let error = execute_with_external(command, &original, &mut |target, args| {
+            external_calls.push((target.to_owned(), args.map(str::to_owned)));
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Duplicate Finder requires the launcher interface")
+        );
+        assert!(external_calls.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod csv_route_headless_tests {
     use super::*;
 
@@ -344,6 +375,9 @@ fn execute_with_external(
         }
         Command::Dialog(DialogCommand::ImageCompare) => {
             anyhow::bail!("Image comparison requires the launcher interface")
+        }
+        Command::Dialog(DialogCommand::DuplicateFinder) => {
+            anyhow::bail!("Duplicate Finder requires the launcher interface")
         }
         Command::Dialog(DialogCommand::Qr { .. }) => {
             anyhow::bail!("QR Generator requires the launcher interface")

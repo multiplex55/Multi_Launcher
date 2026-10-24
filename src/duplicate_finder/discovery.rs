@@ -61,7 +61,30 @@ pub(super) trait DiscoveryJob: Send + Sync + 'static {
     ) -> DiscoverySnapshot;
 }
 
-pub(super) struct NativeDiscoveryJob;
+pub(super) struct NativeDiscoveryJob {
+    #[cfg(any(test, feature = "dev-smoke-binaries"))]
+    first_read_checkpoint: Option<std::sync::Arc<super::content::FirstReadCheckpointGate>>,
+}
+
+impl Default for NativeDiscoveryJob {
+    fn default() -> Self {
+        Self {
+            #[cfg(any(test, feature = "dev-smoke-binaries"))]
+            first_read_checkpoint: None,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "dev-smoke-binaries"))]
+impl NativeDiscoveryJob {
+    pub(super) fn with_first_read_checkpoint(
+        checkpoint: std::sync::Arc<super::content::FirstReadCheckpointGate>,
+    ) -> Self {
+        Self {
+            first_read_checkpoint: Some(checkpoint),
+        }
+    }
+}
 
 #[derive(Clone)]
 struct SelectedRoot {
@@ -687,6 +710,24 @@ impl DiscoveryJob for NativeDiscoveryJob {
             return snapshot;
         }
         if snapshot.status != DiscoveryStatus::Cancelled {
+            #[cfg(any(test, feature = "dev-smoke-binaries"))]
+            if let Some(checkpoint) = self.first_read_checkpoint.as_ref() {
+                super::content::verify_discovered_content_with_checkpoint(
+                    &mut snapshot,
+                    limits,
+                    cancellation,
+                    progress,
+                    std::sync::Arc::clone(checkpoint),
+                );
+            } else {
+                super::content::verify_discovered_content(
+                    &mut snapshot,
+                    limits,
+                    cancellation,
+                    progress,
+                );
+            }
+            #[cfg(not(any(test, feature = "dev-smoke-binaries")))]
             super::content::verify_discovered_content(
                 &mut snapshot,
                 limits,
@@ -1017,7 +1058,7 @@ mod tests {
     #[cfg(windows)]
     fn scan_native(roots: Vec<PathBuf>) -> DiscoverySnapshot {
         let cancellation = ScanCancellation::new();
-        NativeDiscoveryJob.scan(
+        NativeDiscoveryJob::default().scan(
             roots,
             41,
             DiscoveryLimits::default(),

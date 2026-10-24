@@ -14,6 +14,84 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(any(test, feature = "dev-smoke-binaries"))]
+use std::sync::{Arc, Condvar, Mutex};
+
+/// One-shot, fixture-owned checkpoint immediately before the first real content
+/// read. It is attached to one NativeDiscoveryJob and never installed globally.
+#[cfg(any(test, feature = "dev-smoke-binaries"))]
+pub(crate) struct FirstReadCheckpointGate {
+    state: Mutex<FirstReadCheckpointState>,
+    changed: Condvar,
+    wake: Arc<dyn Fn() + Send + Sync + 'static>,
+}
+
+#[cfg(any(test, feature = "dev-smoke-binaries"))]
+#[derive(Default)]
+struct FirstReadCheckpointState {
+    claimed: bool,
+    reached: bool,
+    released: bool,
+}
+
+#[cfg(any(test, feature = "dev-smoke-binaries"))]
+impl FirstReadCheckpointGate {
+    pub(crate) fn new() -> Self {
+        Self::with_wake(Arc::new(|| {}))
+    }
+
+    pub(crate) fn with_wake(wake: Arc<dyn Fn() + Send + Sync + 'static>) -> Self {
+        Self {
+            state: Mutex::new(FirstReadCheckpointState::default()),
+            changed: Condvar::new(),
+            wake,
+        }
+    }
+
+    fn wait_at_first_read(&self, cancellation: &ScanCancellation) -> io::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        if state.claimed {
+            return Ok(());
+        }
+        state.claimed = true;
+        state.reached = true;
+        self.changed.notify_all();
+        drop(state);
+        (self.wake)();
+        let mut state = self.state.lock().unwrap();
+        while !state.released {
+            state = self.changed.wait(state).unwrap();
+        }
+        if cancellation.is_cancelled() {
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "the fixture released a cancelled duplicate content read",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        let mut state = self.state.lock().unwrap();
+        let changed = !state.released;
+        state.released = true;
+        self.changed.notify_all();
+        drop(state);
+        if changed {
+            (self.wake)();
+        }
+    }
+
+    pub(crate) fn reached(&self) -> bool {
+        self.state.lock().unwrap().reached
+    }
+
+    pub(crate) fn released(&self) -> bool {
+        self.state.lock().unwrap().released
+    }
+}
+
 const CONTENT_READ_BUFFER_SIZE: usize = 64 * 1024;
 const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(250);
 const PROGRESS_MIN_BYTES: u64 = 8 * 1024 * 1024;
@@ -30,21 +108,57 @@ trait ContentReadBackend {
     fn validate(&self, reader: &Self::Reader, cancellation: &ScanCancellation) -> io::Result<()>;
 }
 
-struct NativeContentReadBackend;
+struct NativeContentReadBackend {
+    #[cfg(any(test, feature = "dev-smoke-binaries"))]
+    first_read_checkpoint: Option<std::sync::Arc<FirstReadCheckpointGate>>,
+}
+
+struct NativeContentReader {
+    file: DuplicateDiscoveryContentFile,
+    cancellation: ScanCancellation,
+    #[cfg(any(test, feature = "dev-smoke-binaries"))]
+    first_read_checkpoint: Option<std::sync::Arc<FirstReadCheckpointGate>>,
+    #[cfg(any(test, feature = "dev-smoke-binaries"))]
+    checkpoint_checked: bool,
+}
+
+impl Read for NativeContentReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        #[cfg(any(test, feature = "dev-smoke-binaries"))]
+        if !self.checkpoint_checked {
+            self.checkpoint_checked = true;
+            if let Some(gate) = self.first_read_checkpoint.as_ref() {
+                // This is the actual scanner reader. Cancellation intentionally
+                // leaves the one-shot fixture gate blocked until its current
+                // response releases it, proving the worker slot remains owned.
+                gate.wait_at_first_read(&self.cancellation)?;
+            }
+        }
+        self.file.read(buffer)
+    }
+}
 
 impl ContentReadBackend for NativeContentReadBackend {
-    type Reader = DuplicateDiscoveryContentFile;
+    type Reader = NativeContentReader;
 
     fn open(
         &self,
         request: DuplicateDiscoveryContentRequest,
         cancellation: &ScanCancellation,
     ) -> io::Result<Self::Reader> {
-        file_operations::open_duplicate_discovery_content_file(request, cancellation)
+        let file = file_operations::open_duplicate_discovery_content_file(request, cancellation)?;
+        Ok(NativeContentReader {
+            file,
+            cancellation: cancellation.clone(),
+            #[cfg(any(test, feature = "dev-smoke-binaries"))]
+            first_read_checkpoint: self.first_read_checkpoint.clone(),
+            #[cfg(any(test, feature = "dev-smoke-binaries"))]
+            checkpoint_checked: false,
+        })
     }
 
     fn validate(&self, reader: &Self::Reader, cancellation: &ScanCancellation) -> io::Result<()> {
-        reader.revalidate(cancellation)
+        reader.file.revalidate(cancellation)
     }
 }
 
@@ -177,12 +291,37 @@ pub(super) fn verify_discovered_content(
     cancellation: &ScanCancellation,
     publish: &mut dyn FnMut(DiscoveryProgress),
 ) {
+    let backend = NativeContentReadBackend {
+        #[cfg(any(test, feature = "dev-smoke-binaries"))]
+        first_read_checkpoint: None,
+    };
     verify_discovered_content_with(
         snapshot,
         limits,
         cancellation,
         publish,
-        &NativeContentReadBackend,
+        &backend,
+        &Sha256Factory,
+    );
+}
+
+#[cfg(any(test, feature = "dev-smoke-binaries"))]
+pub(super) fn verify_discovered_content_with_checkpoint(
+    snapshot: &mut DiscoverySnapshot,
+    limits: DiscoveryLimits,
+    cancellation: &ScanCancellation,
+    publish: &mut dyn FnMut(DiscoveryProgress),
+    checkpoint: std::sync::Arc<FirstReadCheckpointGate>,
+) {
+    let backend = NativeContentReadBackend {
+        first_read_checkpoint: Some(checkpoint),
+    };
+    verify_discovered_content_with(
+        snapshot,
+        limits,
+        cancellation,
+        publish,
+        &backend,
         &Sha256Factory,
     );
 }
@@ -2215,7 +2354,7 @@ mod tests {
         std::fs::write(&empty_b, b"").expect("write second empty file");
 
         let cancellation = ScanCancellation::new();
-        let snapshot = NativeDiscoveryJob.scan(
+        let snapshot = NativeDiscoveryJob::default().scan(
             vec![temp.path().to_path_buf()],
             73,
             DiscoveryLimits::default(),

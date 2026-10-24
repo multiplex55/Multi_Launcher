@@ -438,8 +438,9 @@ pub enum DialogCommand {
     DashboardSettings,
     Theme,
     ImageCompare,
+    DuplicateFinder,
 }
-kinds!(DialogCommand, Self::Qr { .. } => "qr", Self::RegexTester => "regex_tester", Self::Help => "help", Self::Convert => "convert", Self::Settings => "settings", Self::SettingsSearch { .. } => "settings_search", Self::DashboardSettings => "dashboard_settings", Self::Theme => "theme", Self::ImageCompare => "image_compare");
+kinds!(DialogCommand, Self::Qr { .. } => "qr", Self::RegexTester => "regex_tester", Self::Help => "help", Self::Convert => "convert", Self::Settings => "settings", Self::SettingsSearch { .. } => "settings_search", Self::DashboardSettings => "dashboard_settings", Self::Theme => "theme", Self::ImageCompare => "image_compare", Self::DuplicateFinder => "duplicate_finder");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CalendarCommand {
     Open { view: String },
