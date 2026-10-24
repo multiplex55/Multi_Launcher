@@ -9,6 +9,7 @@ param(
     [ValidateRange(1, 30)][int]$GracefulCloseSeconds = 6,
     [ValidateRange(90, 7200)][int]$OverallTimeoutSeconds = 2400,
     [switch]$NativeOnly,
+    [switch]$FixtureInputSelfTest,
     [string]$PrebuiltArtifactManifest,
     [ValidateSet('FileCancel', 'FileConfirm', 'FolderConfirm')][string]$TargetRepairOutcome,
     [string]$NativeBatchDeadlineUtc
@@ -163,13 +164,12 @@ $targetRepairUsageStorePath = $null
 $targetRepairStorePaths = $null
 $targetRepairStoreBeforeSha256 = $null
 $targetRepairStoresUnchangedAfterClose = $false
-$targetRepairOutcome = $TargetRepairOutcome
 $targetRepairUnrelatedPath = $null
-$targetRepairAcceptedKeyDowns = 0
-$targetRepairAcceptedKeyUps = 0
-$targetRepairAcceptedMouseDowns = 0
-$targetRepairAcceptedMouseUps = 0
-$targetRepairPendingInputs = [Collections.Generic.List[string]]::new()
+$fixtureInputAcceptedKeyDowns = 0
+$fixtureInputAcceptedKeyUps = 0
+$fixtureInputAcceptedMouseDowns = 0
+$fixtureInputAcceptedMouseUps = 0
+$fixtureInputPendingInputs = [Collections.Generic.List[string]]::new()
 $noteReplaceFixtureScenario = $null
 $noteReplaceJumpEnabled = $null
 $noteReplaceSourcePath = $null
@@ -182,6 +182,7 @@ $noteReplaceExpectedReplacement = $null
 $noteReplaceExpectedTitle = $null
 $noteReplaceSlug = $null
 $noteReplaceBeforeSha256 = $null
+$script:noteReplaceLastCoherentObservationSummary = $null
 
 function Get-RemainingRunSeconds([int]$RequestedSeconds = 86400) {
     $remaining = [int][Math]::Floor(($script:runDeadlineUtc - [DateTime]::UtcNow).TotalSeconds)
@@ -757,7 +758,7 @@ function Read-JumpModeObservation {
     return $observation
 }
 
-function Read-TargetRepairObservationSnapshot {
+function Read-TargetRepairObservationSnapshot([string]$ScenarioName = 'TargetRepair') {
     if (!(Test-Path -LiteralPath $jumpObservationPath -PathType Leaf)) {
         return [pscustomobject]@{ state = 'missing'; observation = $null }
     }
@@ -779,10 +780,10 @@ function Read-TargetRepairObservationSnapshot {
         return [pscustomobject]@{ state = 'partial'; observation = $null }
     }
     if ([int]$observation.process_pid -ne [int]$script:processId) {
-        throw "TargetRepair observation PID $($observation.process_pid) does not match retained app PID $script:processId"
+        throw "$ScenarioName observation PID $($observation.process_pid) does not match retained app PID $script:processId"
     }
     if ([string]$observation.fixture_manifest_sha256 -cne [string]$script:fixtureHash) {
-        throw 'TargetRepair observation fixture hash does not match the verified isolated fixture'
+        throw "$ScenarioName observation fixture hash does not match the verified isolated fixture"
     }
     if ($null -eq $observation.logic_frame_id -or $null -eq $observation.ui_pass_id) {
         return [pscustomobject]@{ state = 'partial'; observation = $null }
@@ -828,7 +829,12 @@ function Wait-JumpModeObservation([scriptblock]$Condition, [int]$TimeoutSeconds,
             throw "isolated app exited while waiting for $Description (exit $script:processExitCode)"
         }
         $observation = Read-JumpModeObservation
-        if ($null -ne $observation -and (& $Condition $observation)) { return $observation }
+        if ($null -ne $observation) {
+            if ($Scenario -eq 'NoteReplace') {
+                $script:noteReplaceLastCoherentObservationSummary = Get-NoteReplaceObservationSummary $observation
+            }
+            if (& $Condition $observation) { return $observation }
+        }
         Start-Sleep -Milliseconds 100
     }
     throw "timed out after $boundedTimeout seconds waiting for $Description"
@@ -1031,86 +1037,161 @@ function Get-OwnedRootHandle {
     return $window
 }
 
-function Add-TargetRepairAcceptedDown([string]$Kind, [string]$Code) {
-    $identity = "$Kind`:$Code"
-    if ($script:targetRepairPendingInputs.Contains($identity)) {
-        throw "TargetRepair accepted a duplicate Down for $identity before its matching Up"
-    }
-    $script:targetRepairPendingInputs.Add($identity)
-    if ($Kind -in @('key', 'unicode')) { $script:targetRepairAcceptedKeyDowns++ }
-    elseif ($Kind -eq 'mouse') { $script:targetRepairAcceptedMouseDowns++ }
-}
-
-function Remove-TargetRepairAcceptedDown([string]$Kind, [string]$Code) {
-    $identity = "$Kind`:$Code"
-    if (!$script:targetRepairPendingInputs.Remove($identity)) { return $false }
-    if ($Kind -in @('key', 'unicode')) { $script:targetRepairAcceptedKeyUps++ }
-    elseif ($Kind -eq 'mouse') { $script:targetRepairAcceptedMouseUps++ }
+function Invoke-FixtureInputDown([string]$Kind, [string]$Code, [scriptblock]$SubmitDown) {
+    if (![bool](& $SubmitDown)) { return $false }
+    Add-FixtureInputAcceptedDown $Kind $Code
     return $true
 }
 
-function Assert-TargetRepairInputFence([uint16[]]$ExpectedKeys = @()) {
+function Invoke-FixtureInputUp([string]$Kind, [string]$Code, [scriptblock]$SubmitUp) {
+    if (![bool](& $SubmitUp)) { return $false }
+    if (!(Remove-FixtureInputAcceptedDown $Kind $Code)) {
+        throw "fixture input Up has no matching accepted Down: $Kind`:$Code"
+    }
+    return $true
+}
+
+function Get-FixtureInputFenceStatus(
+    [string[]]$PendingInputs,
+    [uint16[]]$ExpectedKeys,
+    [int[]]$UnexpectedInputs
+) {
     $expected = @($ExpectedKeys | ForEach-Object { "key:0x{0:X2}" -f [int]$_ })
-    if ($script:targetRepairPendingInputs.Count -ne $expected.Count) {
-        throw "TargetRepair input admission found $($script:targetRepairPendingInputs.Count) owned Down(s) where $($expected.Count) chord key(s) were expected"
+    if ($PendingInputs.Count -ne $expected.Count) {
+        return [pscustomobject]@{ allowed = $false; reason = 'owned input count differs from the expected chord' }
     }
-    foreach ($pending in $script:targetRepairPendingInputs) {
+    foreach ($pending in $PendingInputs) {
         if ($pending -notin $expected) {
-            throw "TargetRepair input admission found an unmatched owned input: $pending"
+            return [pscustomobject]@{ allowed = $false; reason = "unmatched owned input $pending" }
         }
     }
-    $unexpected = @([JumpModeNativeProbe]::PressedInputsOutside($ExpectedKeys))
-    if ($unexpected.Count -gt 0) {
-        Write-CleanupEvent 'target_repair_input_admission_refused' @{
-            unexpected_virtual_keys = $unexpected
-            expected_owned_keys = $expected
-            pending_owned_inputs = @($script:targetRepairPendingInputs.ToArray())
-            accepted_key_downs = $script:targetRepairAcceptedKeyDowns
-            accepted_key_ups = $script:targetRepairAcceptedKeyUps
-            accepted_mouse_downs = $script:targetRepairAcceptedMouseDowns
-            accepted_mouse_ups = $script:targetRepairAcceptedMouseUps
+    if ($UnexpectedInputs.Count -gt 0) {
+        return [pscustomobject]@{ allowed = $false; reason = "unrelated held inputs: $($UnexpectedInputs -join ',')" }
+    }
+    return [pscustomobject]@{ allowed = $true; reason = $null }
+}
+
+function Invoke-FixtureInputSelfTest {
+    $saved = @{
+        keyDowns = $script:fixtureInputAcceptedKeyDowns
+        keyUps = $script:fixtureInputAcceptedKeyUps
+        mouseDowns = $script:fixtureInputAcceptedMouseDowns
+        mouseUps = $script:fixtureInputAcceptedMouseUps
+        pending = $script:fixtureInputPendingInputs
+    }
+    $script:fixtureInputAcceptedKeyDowns = 0
+    $script:fixtureInputAcceptedKeyUps = 0
+    $script:fixtureInputAcceptedMouseDowns = 0
+    $script:fixtureInputAcceptedMouseUps = 0
+    $script:fixtureInputPendingInputs = [Collections.Generic.List[string]]::new()
+    try {
+        $rejectedDown = Invoke-FixtureInputDown 'key' '0x11' { $false }
+        if ($rejectedDown -or $script:fixtureInputPendingInputs.Count -ne 0) {
+            throw 'self-test failed: rejected Down was recorded as owned'
         }
-        throw "TargetRepair refuses new input while unrelated keyboard or mouse input is held: $($unexpected -join ',')"
+        if (!(Invoke-FixtureInputDown 'key' '0x11' { $true })) { throw 'self-test failed: accepted Ctrl Down was lost' }
+        $rejectedUp = Invoke-FixtureInputUp 'key' '0x11' { $false }
+        if ($rejectedUp -or $script:fixtureInputPendingInputs.Count -ne 1) {
+            throw 'self-test failed: failed Up did not remain pending'
+        }
+        $unexpected = Get-FixtureInputFenceStatus @($script:fixtureInputPendingInputs.ToArray()) @([uint16]0x11) @([int]0x41)
+        if ($unexpected.allowed) { throw 'self-test failed: unrelated held A was admitted' }
+        $expectedChord = Get-FixtureInputFenceStatus @($script:fixtureInputPendingInputs.ToArray()) @([uint16]0x11) @()
+        if (!$expectedChord.allowed) { throw 'self-test failed: the accepted Ctrl chord was refused' }
+        if ($script:fixtureInputPendingInputs.Count -eq 0 -or
+            $script:fixtureInputAcceptedKeyDowns -eq $script:fixtureInputAcceptedKeyUps) {
+            throw 'self-test failed: a terminal imbalance was not detectable'
+        }
+        if (!(Invoke-FixtureInputUp 'key' '0x11' { $true }) -or
+            $script:fixtureInputPendingInputs.Count -ne 0 -or
+            $script:fixtureInputAcceptedKeyDowns -ne $script:fixtureInputAcceptedKeyUps) {
+            throw 'self-test failed: accepted Down and matching Up did not balance'
+        }
+        Write-Output 'Fixture input ledger self-test passed (five admission and balance cases; no native input).'
+    } finally {
+        $script:fixtureInputAcceptedKeyDowns = $saved.keyDowns
+        $script:fixtureInputAcceptedKeyUps = $saved.keyUps
+        $script:fixtureInputAcceptedMouseDowns = $saved.mouseDowns
+        $script:fixtureInputAcceptedMouseUps = $saved.mouseUps
+        $script:fixtureInputPendingInputs = $saved.pending
     }
 }
 
-function Complete-TargetRepairPendingInputCleanup {
+function Add-FixtureInputAcceptedDown([string]$Kind, [string]$Code) {
+    $identity = "$Kind`:$Code"
+    if ($script:fixtureInputPendingInputs.Contains($identity)) {
+        throw "TargetRepair accepted a duplicate Down for $identity before its matching Up"
+    }
+    $script:fixtureInputPendingInputs.Add($identity)
+    if ($Kind -in @('key', 'unicode')) { $script:fixtureInputAcceptedKeyDowns++ }
+    elseif ($Kind -eq 'mouse') { $script:fixtureInputAcceptedMouseDowns++ }
+}
+
+function Remove-FixtureInputAcceptedDown([string]$Kind, [string]$Code) {
+    $identity = "$Kind`:$Code"
+    if (!$script:fixtureInputPendingInputs.Remove($identity)) { return $false }
+    if ($Kind -in @('key', 'unicode')) { $script:fixtureInputAcceptedKeyUps++ }
+    elseif ($Kind -eq 'mouse') { $script:fixtureInputAcceptedMouseUps++ }
+    return $true
+}
+
+function Assert-FixtureInputFence([uint16[]]$ExpectedKeys = @()) {
+    $expected = @($ExpectedKeys | ForEach-Object { "key:0x{0:X2}" -f [int]$_ })
+    $unexpected = @([JumpModeNativeProbe]::PressedInputsOutside($ExpectedKeys))
+    $status = Get-FixtureInputFenceStatus @($script:fixtureInputPendingInputs.ToArray()) $ExpectedKeys $unexpected
+    if (!$status.allowed) {
+        $eventPrefix = if ($Scenario -eq 'NoteReplace') { 'note_replace' } else { 'target_repair' }
+        Write-CleanupEvent "${eventPrefix}_input_admission_refused" @{
+            unexpected_virtual_keys = $unexpected
+            expected_owned_keys = $expected
+            pending_owned_inputs = @($script:fixtureInputPendingInputs.ToArray())
+            accepted_key_downs = $script:fixtureInputAcceptedKeyDowns
+            accepted_key_ups = $script:fixtureInputAcceptedKeyUps
+            accepted_mouse_downs = $script:fixtureInputAcceptedMouseDowns
+            accepted_mouse_ups = $script:fixtureInputAcceptedMouseUps
+            refusal_reason = $status.reason
+        }
+        throw "Fixture input admission refused: $($status.reason)"
+    }
+}
+
+function Complete-FixtureInputCleanup([string]$ScenarioName = 'TargetRepair') {
     $cleanupFailure = $null
-    foreach ($identity in @($script:targetRepairPendingInputs.ToArray())) {
+    foreach ($identity in @($script:fixtureInputPendingInputs.ToArray())) {
         $parts = $identity.Split(':', 2)
         $released = $false
         for ($attempt = 1; $attempt -le 2 -and !$released; $attempt++) {
             if ($parts[0] -eq 'key') {
                 $key = [uint16][Convert]::ToInt32($parts[1].Substring(2), 16)
-                $released = [JumpModeNativeProbe]::SendKey($key, $true)
+                $released = Invoke-FixtureInputUp 'key' ('0x{0:X2}' -f [int]$key) { [JumpModeNativeProbe]::SendKey($key, $true) }.GetNewClosure()
             } elseif ($parts[0] -eq 'unicode') {
                 $codeUnit = [char][Convert]::ToInt32($parts[1].Substring(2), 16)
-                $released = [JumpModeNativeProbe]::SendUnicodeChar($codeUnit, $true)
+                $released = Invoke-FixtureInputUp 'unicode' $parts[1] { [JumpModeNativeProbe]::SendUnicodeChar($codeUnit, $true) }.GetNewClosure()
             } elseif ($parts[0] -eq 'mouse' -and $parts[1] -eq 'left') {
-                $released = [JumpModeNativeProbe]::SendLeftMouseButton($true)
+                $released = Invoke-FixtureInputUp 'mouse' 'left' { [JumpModeNativeProbe]::SendLeftMouseButton($true) }
             } else {
-                $cleanupFailure = "unrecognized retained TargetRepair input identity $identity"
+                $cleanupFailure = "unrecognized retained $ScenarioName input identity $identity"
                 break
             }
         }
-        if ($released) {
-            $null = Remove-TargetRepairAcceptedDown $parts[0] $parts[1]
-        } elseif (!$cleanupFailure) {
-            $cleanupFailure = "matching Up remained unaccepted for retained TargetRepair input $identity"
+        if (!$released -and !$cleanupFailure) {
+            $cleanupFailure = "matching Up remained unaccepted for retained $ScenarioName input $identity"
         }
     }
-    if (!$script:nativeQueryProbeInitialized -and $script:targetRepairPendingInputs.Count -gt 0) {
-        $cleanupFailure = 'native input probe is unavailable for retained TargetRepair Up cleanup'
+    if (!$script:nativeQueryProbeInitialized -and $script:fixtureInputPendingInputs.Count -gt 0) {
+        $cleanupFailure = "native input probe is unavailable for retained $ScenarioName Up cleanup"
     }
-    $balanced = !$cleanupFailure -and $script:targetRepairPendingInputs.Count -eq 0 -and
-        ($script:targetRepairAcceptedKeyDowns - $script:targetRepairAcceptedKeyUps) -eq 0 -and
-        ($script:targetRepairAcceptedMouseDowns - $script:targetRepairAcceptedMouseUps) -eq 0
-    Write-CleanupEvent 'target_repair_input_terminal_balance' @{
-        accepted_key_downs = $script:targetRepairAcceptedKeyDowns
-        accepted_key_ups = $script:targetRepairAcceptedKeyUps
-        accepted_mouse_downs = $script:targetRepairAcceptedMouseDowns
-        accepted_mouse_ups = $script:targetRepairAcceptedMouseUps
-        pending_owned_inputs = @($script:targetRepairPendingInputs.ToArray())
+    $balanced = !$cleanupFailure -and $script:fixtureInputPendingInputs.Count -eq 0 -and
+        ($script:fixtureInputAcceptedKeyDowns - $script:fixtureInputAcceptedKeyUps) -eq 0 -and
+        ($script:fixtureInputAcceptedMouseDowns - $script:fixtureInputAcceptedMouseUps) -eq 0
+    $eventPrefix = if ($ScenarioName -eq 'NoteReplace') { 'note_replace' } else { 'target_repair' }
+    Write-CleanupEvent "${eventPrefix}_input_terminal_balance" @{
+        scenario = $ScenarioName
+        accepted_key_downs = $script:fixtureInputAcceptedKeyDowns
+        accepted_key_ups = $script:fixtureInputAcceptedKeyUps
+        accepted_mouse_downs = $script:fixtureInputAcceptedMouseDowns
+        accepted_mouse_ups = $script:fixtureInputAcceptedMouseUps
+        pending_owned_inputs = @($script:fixtureInputPendingInputs.ToArray())
         balanced = $balanced
         cleanup_failure = $cleanupFailure
         no_new_down_sent_during_cleanup = $true
@@ -1119,7 +1200,7 @@ function Complete-TargetRepairPendingInputCleanup {
     }
     if (!$balanced) {
         $message = if ($cleanupFailure) { $cleanupFailure } else { 'an accepted input Down remains unbalanced' }
-        Record-CleanupIssue 'TargetRepair input balance' $message
+        Record-CleanupIssue "$ScenarioName input balance" $message
     }
     return $balanced
 }
@@ -1145,59 +1226,62 @@ function Assert-TargetRepairInputOwner([IntPtr]$ExpectedRoot, [IntPtr]$ExpectedF
 }
 
 function Assert-OwnedRepairRootForeground([IntPtr]$ExpectedRoot) {
-    Assert-TargetRepairInputFence @()
+    Assert-FixtureInputFence @()
     Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedRoot
-    Assert-TargetRepairInputFence @()
+    Assert-FixtureInputFence @()
 }
 
-function Invoke-TargetRepairUnicodeCodeUnit(
+function Invoke-FixtureUnicodeCodeUnit(
     [string]$Name,
     [char]$Character,
     [IntPtr]$ExpectedRoot,
-    [IntPtr]$ExpectedForeground
+    [IntPtr]$ExpectedForeground,
+    [scriptblock]$OwnerCheck,
+    [string]$ReceiptPrefix = 'target_repair'
 ) {
     $identity = '0x{0:X4}' -f [int]$Character
     $downAccepted = $false
     $sendFailure = $null
-    $downBefore = $script:targetRepairAcceptedKeyDowns
-    $upBefore = $script:targetRepairAcceptedKeyUps
+    $downBefore = $script:fixtureInputAcceptedKeyDowns
+    $upBefore = $script:fixtureInputAcceptedKeyUps
     try {
-        Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground
-        Assert-TargetRepairInputFence @()
-        if (![JumpModeNativeProbe]::SendUnicodeChar($Character, $false)) {
+        if ($OwnerCheck) { $null = & $OwnerCheck @() }
+        else { Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground }
+        Assert-FixtureInputFence @()
+        if (!(Invoke-FixtureInputDown 'unicode' $identity { [JumpModeNativeProbe]::SendUnicodeChar($Character, $false) }.GetNewClosure())) {
             throw "Unicode input Down was not accepted in $Name"
         }
         $downAccepted = $true
-        Add-TargetRepairAcceptedDown 'unicode' $identity
     } catch {
         $sendFailure = $_.Exception.Message
     } finally {
         if ($downAccepted) {
             $released = $false
             for ($attempt = 1; $attempt -le 2 -and !$released; $attempt++) {
-                if ([JumpModeNativeProbe]::SendUnicodeChar($Character, $true)) {
-                    $released = $true
-                    if (!(Remove-TargetRepairAcceptedDown 'unicode' $identity)) {
-                        $sendFailure = "owned Unicode Up receipt was missing for $Name"
-                    }
+                try {
+                    $released = Invoke-FixtureInputUp 'unicode' $identity {
+                        [JumpModeNativeProbe]::SendUnicodeChar($Character, $true)
+                    }.GetNewClosure()
+                } catch {
+                    $sendFailure = $_.Exception.Message
                 }
             }
             if (!$released) { $sendFailure = "Unicode Up remained unaccepted after bounded cleanup retries from $Name" }
         }
-        $balanced = $script:targetRepairPendingInputs.Count -eq 0 -and
-            ($script:targetRepairAcceptedKeyDowns - $script:targetRepairAcceptedKeyUps) -eq 0 -and
-            ($script:targetRepairAcceptedMouseDowns - $script:targetRepairAcceptedMouseUps) -eq 0
-        Write-CleanupEvent 'target_repair_input_balance' @{
+        $balanced = $script:fixtureInputPendingInputs.Count -eq 0 -and
+            ($script:fixtureInputAcceptedKeyDowns - $script:fixtureInputAcceptedKeyUps) -eq 0 -and
+            ($script:fixtureInputAcceptedMouseDowns - $script:fixtureInputAcceptedMouseUps) -eq 0
+        Write-CleanupEvent "${ReceiptPrefix}_input_balance" @{
             name = $Name
             input_kind = 'unicode_code_unit'
-            accepted_downs_this_batch = $script:targetRepairAcceptedKeyDowns - $downBefore
-            accepted_ups_this_batch = $script:targetRepairAcceptedKeyUps - $upBefore
+            accepted_downs_this_batch = $script:fixtureInputAcceptedKeyDowns - $downBefore
+            accepted_ups_this_batch = $script:fixtureInputAcceptedKeyUps - $upBefore
             unicode_code_unit = $identity
-            total_accepted_key_downs = $script:targetRepairAcceptedKeyDowns
-            total_accepted_key_ups = $script:targetRepairAcceptedKeyUps
-            total_accepted_mouse_downs = $script:targetRepairAcceptedMouseDowns
-            total_accepted_mouse_ups = $script:targetRepairAcceptedMouseUps
-            pending_owned_inputs = @($script:targetRepairPendingInputs.ToArray())
+            total_accepted_key_downs = $script:fixtureInputAcceptedKeyDowns
+            total_accepted_key_ups = $script:fixtureInputAcceptedKeyUps
+            total_accepted_mouse_downs = $script:fixtureInputAcceptedMouseDowns
+            total_accepted_mouse_ups = $script:fixtureInputAcceptedMouseUps
+            pending_owned_inputs = @($script:fixtureInputPendingInputs.ToArray())
             balanced = $balanced
             failure = $sendFailure
             foreground_hwnd = ('0x{0:X}' -f $ExpectedForeground.ToInt64())
@@ -1206,71 +1290,84 @@ function Invoke-TargetRepairUnicodeCodeUnit(
         }
     }
     if ($sendFailure) { throw $sendFailure }
-    Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground
-    Assert-TargetRepairInputFence @()
+    if ($OwnerCheck) { $null = & $OwnerCheck @() }
+    else { Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground }
+    Assert-FixtureInputFence @()
 }
 
-function Invoke-TargetRepairOwnedMouseClick(
+function Invoke-TargetRepairUnicodeCodeUnit(
+    [string]$Name,
+    [char]$Character,
+    [IntPtr]$ExpectedRoot,
+    [IntPtr]$ExpectedForeground
+) {
+    Invoke-FixtureUnicodeCodeUnit $Name $Character $ExpectedRoot $ExpectedForeground $null 'target_repair'
+}
+
+function Invoke-FixtureOwnedMouseClick(
     [string]$Name,
     [int]$ScreenX,
     [int]$ScreenY,
     [IntPtr]$ExpectedRoot,
     [IntPtr]$ExpectedForeground,
-    [IntPtr]$ExpectedHit
+    [IntPtr]$ExpectedHit,
+    [scriptblock]$OwnerCheck,
+    [string]$ReceiptPrefix = 'target_repair'
 ) {
     $downAccepted = $false
     $sendFailure = $null
-    $downBefore = $script:targetRepairAcceptedMouseDowns
-    $upBefore = $script:targetRepairAcceptedMouseUps
+    $downBefore = $script:fixtureInputAcceptedMouseDowns
+    $upBefore = $script:fixtureInputAcceptedMouseUps
     try {
-        Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground
-        Assert-TargetRepairInputFence @()
+        if ($OwnerCheck) { $null = & $OwnerCheck @() }
+        else { Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground }
+        Assert-FixtureInputFence @()
         if (![JumpModeNativeProbe]::MoveCursorToScreenPoint($ScreenX, $ScreenY)) {
-            throw "could not move the pointer to the current TargetRepair response for $Name"
+            throw "could not move the pointer to the current fixture response for $Name"
         }
-        Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground
-        Assert-TargetRepairInputFence @()
+        if ($OwnerCheck) { $null = & $OwnerCheck @() }
+        else { Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground }
+        Assert-FixtureInputFence @()
         $currentHit = [JumpModeNativeProbe]::WindowAtScreenPoint($ScreenX, $ScreenY)
         if ($currentHit -ne $ExpectedHit -or $currentHit -eq [IntPtr]::Zero -or
             [int][JumpModeNativeProbe]::WindowProcessId($currentHit) -ne $processId -or
             [JumpModeNativeProbe]::RootWindow($currentHit) -ne $ExpectedRoot) {
-            throw "TargetRepair response hit owner changed after moving the pointer for $Name"
+            throw "fixture response hit owner changed after moving the pointer for $Name"
         }
-        Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground
-        Assert-TargetRepairInputFence @()
-        if (![JumpModeNativeProbe]::SendLeftMouseButton($false)) {
+        if ($OwnerCheck) { $null = & $OwnerCheck @() }
+        else { Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground }
+        Assert-FixtureInputFence @()
+        if (!(Invoke-FixtureInputDown 'mouse' 'left' { [JumpModeNativeProbe]::SendLeftMouseButton($false) })) {
             throw "SendInput mouse Down was not accepted for $Name"
         }
         $downAccepted = $true
-        Add-TargetRepairAcceptedDown 'mouse' 'left'
     } catch {
         $sendFailure = $_.Exception.Message
     } finally {
         if ($downAccepted) {
             $released = $false
             for ($attempt = 1; $attempt -le 2 -and !$released; $attempt++) {
-                if ([JumpModeNativeProbe]::SendLeftMouseButton($true)) {
-                    $released = $true
-                    if (!(Remove-TargetRepairAcceptedDown 'mouse' 'left')) {
-                        $sendFailure = "owned mouse Up receipt was missing for $Name"
-                    }
+                try {
+                    $released = Invoke-FixtureInputUp 'mouse' 'left' { [JumpModeNativeProbe]::SendLeftMouseButton($true) }
+                } catch {
+                    $sendFailure = $_.Exception.Message
                 }
             }
             if (!$released) { $sendFailure = "mouse Up remained unaccepted after bounded cleanup retries from $Name" }
         }
-        $balanced = $script:targetRepairPendingInputs.Count -eq 0 -and
-            ($script:targetRepairAcceptedKeyDowns - $script:targetRepairAcceptedKeyUps) -eq 0 -and
-            ($script:targetRepairAcceptedMouseDowns - $script:targetRepairAcceptedMouseUps) -eq 0
-        Write-CleanupEvent 'target_repair_input_balance' @{
+        $balanced = $script:fixtureInputPendingInputs.Count -eq 0 -and
+            ($script:fixtureInputAcceptedKeyDowns - $script:fixtureInputAcceptedKeyUps) -eq 0 -and
+            ($script:fixtureInputAcceptedMouseDowns - $script:fixtureInputAcceptedMouseUps) -eq 0
+        Write-CleanupEvent "${ReceiptPrefix}_input_balance" @{
             name = $Name
             input_kind = 'mouse_left'
-            accepted_downs_this_batch = $script:targetRepairAcceptedMouseDowns - $downBefore
-            accepted_ups_this_batch = $script:targetRepairAcceptedMouseUps - $upBefore
-            total_accepted_key_downs = $script:targetRepairAcceptedKeyDowns
-            total_accepted_key_ups = $script:targetRepairAcceptedKeyUps
-            total_accepted_mouse_downs = $script:targetRepairAcceptedMouseDowns
-            total_accepted_mouse_ups = $script:targetRepairAcceptedMouseUps
-            pending_owned_inputs = @($script:targetRepairPendingInputs.ToArray())
+            accepted_downs_this_batch = $script:fixtureInputAcceptedMouseDowns - $downBefore
+            accepted_ups_this_batch = $script:fixtureInputAcceptedMouseUps - $upBefore
+            total_accepted_key_downs = $script:fixtureInputAcceptedKeyDowns
+            total_accepted_key_ups = $script:fixtureInputAcceptedKeyUps
+            total_accepted_mouse_downs = $script:fixtureInputAcceptedMouseDowns
+            total_accepted_mouse_ups = $script:fixtureInputAcceptedMouseUps
+            pending_owned_inputs = @($script:fixtureInputPendingInputs.ToArray())
             balanced = $balanced
             failure = $sendFailure
             screen_point = @{ x = $ScreenX; y = $ScreenY }
@@ -1281,7 +1378,18 @@ function Invoke-TargetRepairOwnedMouseClick(
         }
     }
     if ($sendFailure) { throw $sendFailure }
-    Assert-TargetRepairInputFence @()
+    Assert-FixtureInputFence @()
+}
+
+function Invoke-TargetRepairOwnedMouseClick(
+    [string]$Name,
+    [int]$ScreenX,
+    [int]$ScreenY,
+    [IntPtr]$ExpectedRoot,
+    [IntPtr]$ExpectedForeground,
+    [IntPtr]$ExpectedHit
+) {
+    Invoke-FixtureOwnedMouseClick $Name $ScreenX $ScreenY $ExpectedRoot $ExpectedForeground $ExpectedHit $null 'target_repair'
 }
 
 function Assert-OwnedRepairModalForeground([IntPtr]$ExpectedRoot, [IntPtr]$ExpectedModal) {
@@ -1298,35 +1406,43 @@ function Assert-OwnedRepairModalForeground([IntPtr]$ExpectedRoot, [IntPtr]$Expec
         ![JumpModeNativeProbe]::IsOwnedModalForeground($ExpectedRoot, [uint32]$processId)) {
         throw 'native picker input refused: foreground is not the exact visible same-process modal owned by the retained launcher HWND'
     }
-    Assert-TargetRepairInputFence @()
+    Assert-FixtureInputFence @()
 }
 
-function Invoke-TargetRepairKeyBatch(
+function Invoke-FixtureKeyBatch(
     [string]$Name,
     [uint16[]]$Keys,
     [string[]]$KeyLabels,
     [IntPtr]$ExpectedRoot,
     [IntPtr]$ExpectedForeground,
-    [switch]$ExpectPickerReturn
+    [switch]$ExpectPickerReturn,
+    [scriptblock]$OwnerCheck,
+    [string]$ReceiptPrefix = 'target_repair',
+    [switch]$AllowOwnerChangeAfter
 ) {
-    if ($Keys.Count -ne $KeyLabels.Count -or $Keys.Count -eq 0) { throw 'repair key batch is empty or malformed' }
+    if ($Keys.Count -ne $KeyLabels.Count -or $Keys.Count -eq 0) { throw 'fixture key batch is empty or malformed' }
     $pressed = [Collections.Generic.List[uint16]]::new()
     $sendFailure = $null
-    $downBefore = $script:targetRepairAcceptedKeyDowns
-    $upBefore = $script:targetRepairAcceptedKeyUps
+    $downBefore = $script:fixtureInputAcceptedKeyDowns
+    $upBefore = $script:fixtureInputAcceptedKeyUps
     try {
-        if ($ExpectedForeground -eq $ExpectedRoot) {
+        if ($OwnerCheck) {
+            $null = & $OwnerCheck @()
+        } elseif ($ExpectedForeground -eq $ExpectedRoot) {
             Assert-OwnedRepairRootForeground $ExpectedRoot
         } else {
             Assert-OwnedRepairModalForeground $ExpectedRoot $ExpectedForeground
         }
         foreach ($key in $Keys) {
-            if ($pressed.Contains($key)) { throw "repair key batch repeats a key before its matching Up in $Name" }
-            Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground
-            Assert-TargetRepairInputFence $pressed.ToArray()
-            if (![JumpModeNativeProbe]::SendKey($key, $false)) { throw "SendInput key-down failed in $Name" }
+            if ($pressed.Contains($key)) { throw "fixture key batch repeats a key before its matching Up in $Name" }
+            if ($OwnerCheck) { $null = & $OwnerCheck $pressed.ToArray() }
+            else { Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground }
+            Assert-FixtureInputFence $pressed.ToArray()
+            $code = '0x{0:X2}' -f [int]$key
+            if (!(Invoke-FixtureInputDown 'key' $code { [JumpModeNativeProbe]::SendKey($key, $false) }.GetNewClosure())) {
+                throw "SendInput key-down failed in $Name"
+            }
             $pressed.Add($key)
-            Add-TargetRepairAcceptedDown 'key' ('0x{0:X2}' -f [int]$key)
         }
     } catch {
         $sendFailure = $_.Exception.Message
@@ -1334,30 +1450,31 @@ function Invoke-TargetRepairKeyBatch(
         for ($index = $pressed.Count - 1; $index -ge 0; $index--) {
             $released = $false
             for ($attempt = 1; $attempt -le 2 -and !$released; $attempt++) {
-                if ([JumpModeNativeProbe]::SendKey($pressed[$index], $true)) {
-                    $released = $true
-                    if (!(Remove-TargetRepairAcceptedDown 'key' ('0x{0:X2}' -f [int]$pressed[$index]))) {
-                        $sendFailure = "owned key-up receipt was missing for $Name"
-                    }
+                $key = $pressed[$index]
+                $code = '0x{0:X2}' -f [int]$key
+                try {
+                    $released = Invoke-FixtureInputUp 'key' $code { [JumpModeNativeProbe]::SendKey($key, $true) }.GetNewClosure()
+                } catch {
+                    $sendFailure = $_.Exception.Message
                 }
             }
             if (!$released) {
                 $sendFailure = "SendInput key-up remained unaccepted after bounded cleanup retries from $Name"
             }
         }
-        $balanced = $script:targetRepairPendingInputs.Count -eq 0 -and
-            ($script:targetRepairAcceptedKeyDowns - $script:targetRepairAcceptedKeyUps) -eq 0 -and
-            ($script:targetRepairAcceptedMouseDowns - $script:targetRepairAcceptedMouseUps) -eq 0
-        Write-CleanupEvent 'target_repair_input_balance' @{
+        $balanced = $script:fixtureInputPendingInputs.Count -eq 0 -and
+            ($script:fixtureInputAcceptedKeyDowns - $script:fixtureInputAcceptedKeyUps) -eq 0 -and
+            ($script:fixtureInputAcceptedMouseDowns - $script:fixtureInputAcceptedMouseUps) -eq 0
+        Write-CleanupEvent "${ReceiptPrefix}_input_balance" @{
             name = $Name
             input_kind = 'keyboard'
-            accepted_downs_this_batch = $script:targetRepairAcceptedKeyDowns - $downBefore
-            accepted_ups_this_batch = $script:targetRepairAcceptedKeyUps - $upBefore
-            total_accepted_key_downs = $script:targetRepairAcceptedKeyDowns
-            total_accepted_key_ups = $script:targetRepairAcceptedKeyUps
-            total_accepted_mouse_downs = $script:targetRepairAcceptedMouseDowns
-            total_accepted_mouse_ups = $script:targetRepairAcceptedMouseUps
-            pending_owned_inputs = @($script:targetRepairPendingInputs.ToArray())
+            accepted_downs_this_batch = $script:fixtureInputAcceptedKeyDowns - $downBefore
+            accepted_ups_this_batch = $script:fixtureInputAcceptedKeyUps - $upBefore
+            total_accepted_key_downs = $script:fixtureInputAcceptedKeyDowns
+            total_accepted_key_ups = $script:fixtureInputAcceptedKeyUps
+            total_accepted_mouse_downs = $script:fixtureInputAcceptedMouseDowns
+            total_accepted_mouse_ups = $script:fixtureInputAcceptedMouseUps
+            pending_owned_inputs = @($script:fixtureInputPendingInputs.ToArray())
             balanced = $balanced
             failure = $sendFailure
             foreground_hwnd = ('0x{0:X}' -f $ExpectedForeground.ToInt64())
@@ -1370,18 +1487,33 @@ function Invoke-TargetRepairKeyBatch(
         if ($ExpectedForeground -eq $ExpectedRoot) {
             throw 'TargetRepair picker-return validation requires the exact owned modal as the pre-input foreground'
         }
-        Assert-TargetRepairInputFence @()
-    } else {
+        Assert-FixtureInputFence @()
+    } elseif ($OwnerCheck -and !$AllowOwnerChangeAfter) {
+        $null = & $OwnerCheck @()
+    } elseif (!$OwnerCheck -and !$AllowOwnerChangeAfter) {
         Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedForeground
     }
-    Assert-TargetRepairInputFence @()
-    Write-Event 'target_repair_key_batch_sent' @{
+    Assert-FixtureInputFence @()
+    Write-Event "${ReceiptPrefix}_key_batch_sent" @{
         name = $Name
         keys = $KeyLabels
         foreground_hwnd = ('0x{0:X}' -f $ExpectedForeground.ToInt64())
         process_id = $processId
         process_started_at_utc = $processStartUtc.ToString('O')
     }
+}
+
+function Invoke-TargetRepairKeyBatch(
+    [string]$Name,
+    [uint16[]]$Keys,
+    [string[]]$KeyLabels,
+    [IntPtr]$ExpectedRoot,
+    [IntPtr]$ExpectedForeground,
+    [switch]$ExpectPickerReturn
+) {
+    Invoke-FixtureKeyBatch -Name $Name -Keys $Keys -KeyLabels $KeyLabels `
+        -ExpectedRoot $ExpectedRoot -ExpectedForeground $ExpectedForeground `
+        -ExpectPickerReturn:$ExpectPickerReturn -ReceiptPrefix 'target_repair'
 }
 
 function Send-TargetRepairUnicodeText([string]$Name, [string]$Text, [IntPtr]$ExpectedRoot, [IntPtr]$ExpectedModal) {
@@ -3882,25 +4014,178 @@ function Get-NoteReplaceRootPaint([object]$Observation) {
     return $paint
 }
 
+function Get-NoteReplaceObservationSummary([object]$Observation) {
+    $paint = if ($null -ne $Observation) { $Observation.note_replace } else { $null }
+    return [ordered]@{
+        logic_frame_id = if ($null -ne $Observation) { $Observation.logic_frame_id } else { $null }
+        ui_pass_id = if ($null -ne $Observation) { $Observation.ui_pass_id } else { $null }
+        ui_pass_index = if ($null -ne $Observation) { $Observation.ui_pass_index } else { $null }
+        root_focused = if ($null -ne $Observation) { [bool]$Observation.root_focused } else { $null }
+        root_owner_allowed = if ($null -ne $Observation.note_replace_root) { [bool]$Observation.note_replace_root.root_owner_allowed } else { $null }
+        expected_slug = $script:noteReplaceSlug
+        expected_slug_open = if ($null -ne $Observation.opened_note_slugs -and $script:noteReplaceSlug) {
+            @($Observation.opened_note_slugs | Where-Object { [string]$_ -ceq [string]$script:noteReplaceSlug }).Count -gt 0
+        } else { $null }
+        panel_identity = if ($null -ne $paint) { $paint.panel_identity } else { $null }
+        content_revision = if ($null -ne $paint) { $paint.content_revision } else { $null }
+        query_revision = if ($null -ne $paint) { $paint.query_revision } else { $null }
+        navigation_revision = if ($null -ne $paint) { $paint.navigation_revision } else { $null }
+        source_sha256 = if ($null -ne $paint) { $paint.content_sha256 } else { $null }
+        focused_widget_id = if ($null -ne $Observation) { $Observation.focused_widget_id } else { $null }
+    }
+}
+
+function Read-NoteReplaceRootObservation(
+    [IntPtr]$ExpectedRoot,
+    [string]$ExpectedPanelIdentity = '',
+    [uint16[]]$ExpectedOwnedKeys = @(),
+    [int]$TimeoutSeconds = 1,
+    [switch]$RequireQueryResponse
+) {
+    $boundedTimeout = [Math]::Max(1, [Math]::Min($TimeoutSeconds, $CaptureTimeoutSeconds))
+    $deadline = Get-RunDeadline $boundedTimeout
+    $attempts = 0
+    $firstTransientState = $null
+    $lastReadState = 'missing'
+    while ([DateTime]::UtcNow -lt $deadline) {
+        Assert-TargetRepairInputOwner $ExpectedRoot $ExpectedRoot
+        Assert-FixtureInputFence $ExpectedOwnedKeys
+        $attempts++
+        $snapshot = Read-TargetRepairObservationSnapshot 'NoteReplace'
+        $lastReadState = [string]$snapshot.state
+        if ($snapshot.state -ne 'valid') {
+            if ($null -eq $firstTransientState) { $firstTransientState = $lastReadState }
+            Start-Sleep -Milliseconds 20
+            continue
+        }
+
+        $state = $snapshot.observation
+        $previousCoherentSummary = $script:noteReplaceLastCoherentObservationSummary
+        $safeSummary = Get-NoteReplaceObservationSummary $state
+        $script:noteReplaceLastCoherentObservationSummary = $safeSummary
+        $panel = if ($ExpectedPanelIdentity) {
+            Get-NoteReplaceCurrentPanel $state $ExpectedPanelIdentity
+        } else { $null }
+        $rootPaint = Get-NoteReplaceRootPaint $state
+        $ownerAllowed = if ($ExpectedPanelIdentity) {
+            $null -ne $panel -and $null -ne $state.note_replace -and [bool]$state.note_replace.root_owner_allowed
+        } else {
+            $null -ne $rootPaint
+        }
+        if (!$state.root_focused -or !$ownerAllowed) {
+            Write-CleanupEvent 'note_replace_observation_owner_refused' @{
+                classification = 'complete_ineligible_owner'
+                read_state = 'valid'
+                attempt_count = $attempts
+                last_coherent_observation = $safeSummary
+            }
+            throw 'NoteReplace input refused because a complete current ROOT observation is ineligible'
+        }
+
+        if ($RequireQueryResponse) {
+            $query = $rootPaint.query
+            $fullClip = $null -ne $query -and
+                ((@($query.rect) -join ',') -ceq (@($query.clipped_rect) -join ','))
+            if ($null -eq $query -or !$query.enabled -or !$fullClip -or !(Test-NoteReplaceRect $query)) {
+                Write-CleanupEvent 'note_replace_observation_query_refused' @{
+                    classification = 'complete_ineligible_query_response'
+                    read_state = 'valid'
+                    attempt_count = $attempts
+                    query_response_id = if ($query) { $query.response_id } else { $null }
+                    query_enabled = if ($query) { [bool]$query.enabled } else { $null }
+                    query_fully_clipped = $fullClip
+                    last_coherent_observation = $safeSummary
+                }
+                throw 'NoteReplace startup refused because the complete current ROOT query Response is not enabled and fully visible'
+            }
+        }
+
+        if ($null -ne $firstTransientState) {
+            Write-Event 'note_replace_observation_reacquired' @{
+                classification = $firstTransientState
+                attempt_count = $attempts
+                previous_last_coherent_observation = $previousCoherentSummary
+                recovered_observation = $safeSummary
+            }
+        }
+        return $state
+    }
+
+    Write-CleanupEvent 'note_replace_observation_reacquire_failed' @{
+        classification = $lastReadState
+        attempt_count = $attempts
+        last_coherent_observation = $script:noteReplaceLastCoherentObservationSummary
+    }
+    throw "NoteReplace observation remained $lastReadState while reacquiring the exact owned ROOT pass for $boundedTimeout seconds"
+}
+
+function Wait-NoteReplaceStartupReadiness {
+    $deadline = Get-RunDeadline $CaptureTimeoutSeconds
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (!(Test-RetainedProcessIdentity)) { throw 'retained app PID/birth identity changed while waiting for NoteReplace startup readiness' }
+        $process.Refresh()
+        if ($process.HasExited) {
+            $script:processExitCode = $process.ExitCode
+            throw "isolated app exited before NoteReplace ROOT readiness (exit $script:processExitCode)"
+        }
+        $window = $process.MainWindowHandle
+        if ($window -eq [IntPtr]::Zero) {
+            Start-Sleep -Milliseconds 20
+            continue
+        }
+        $windowProcessId = [int][JumpModeNativeProbe]::WindowProcessId($window)
+        if ($windowProcessId -ne $processId) {
+            throw "NoteReplace startup HWND belongs to PID $windowProcessId instead of retained PID $processId"
+        }
+        return Read-NoteReplaceRootObservation $window '' @() $CaptureTimeoutSeconds -RequireQueryResponse
+    }
+    throw 'NoteReplace did not publish an owned main HWND before startup readiness timed out'
+}
+
 function Get-NoteReplaceTextSha256([string]$Text) {
     $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes($Text)
     return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
 }
 
-function Assert-NoteReplaceRoot([IntPtr]$ExpectedRoot, [string]$ExpectedPanelIdentity = '') {
-    Assert-OwnedRepairRootForeground $ExpectedRoot
-    $state = Read-JumpModeObservation
-    $ownerAllowed = if ($ExpectedPanelIdentity) {
-        $null -ne (Get-NoteReplaceCurrentPanel $state $ExpectedPanelIdentity) -and
-            [bool]$state.note_replace.root_owner_allowed
+function Get-NoteReplaceCharacterIndexFromUtf8ByteOffset([string]$Text, [int]$ByteOffset) {
+    $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes($Text)
+    if ($ByteOffset -lt 0 -or $ByteOffset -gt $bytes.Length) {
+        throw 'NoteReplace match byte offset is outside the exact source bytes'
+    }
+    try {
+        return ([Text.UTF8Encoding]::new($false, $true)).GetString($bytes, 0, $ByteOffset).Length
+    } catch {
+        throw 'NoteReplace selected match byte offset splits a UTF-8 code point'
+    }
+}
+
+function Assert-NoteReplaceRoot(
+    [IntPtr]$ExpectedRoot,
+    [string]$ExpectedPanelIdentity = '',
+    [uint16[]]$ExpectedOwnedKeys = @()
+) {
+    return Read-NoteReplaceRootObservation $ExpectedRoot $ExpectedPanelIdentity $ExpectedOwnedKeys
+}
+
+function Assert-NoteReplaceFocusedOwner(
+    [IntPtr]$ExpectedRoot,
+    [string]$ExpectedPanelIdentity = '',
+    [string]$FocusedControl = '',
+    [uint16[]]$ExpectedOwnedKeys = @()
+) {
+    $state = Assert-NoteReplaceRoot $ExpectedRoot $ExpectedPanelIdentity $ExpectedOwnedKeys
+    if (!$FocusedControl) { return $state }
+    $focused = $false
+    if ($FocusedControl -ceq 'query') {
+        $rootPaint = Get-NoteReplaceRootPaint $state
+        $focused = $null -ne $rootPaint -and $null -ne $rootPaint.query -and [bool]$rootPaint.query.focused
     } else {
-        $null -ne (Get-NoteReplaceRootPaint $state)
+        $paint = Get-NoteReplaceCurrentPanel $state $ExpectedPanelIdentity
+        $response = if ($null -ne $paint) { $paint.controls.PSObject.Properties[$FocusedControl] } else { $null }
+        $focused = $null -ne $response -and $null -ne $response.Value -and [bool]$response.Value.focused
     }
-    if ($null -eq $state -or !$state.root_focused -or !$ownerAllowed) {
-        throw 'NoteReplace input refused because the current owned ROOT observation is unavailable or ineligible'
-    }
-    if ($ExpectedPanelIdentity -and $null -eq (Get-NoteReplaceCurrentPanel $state $ExpectedPanelIdentity)) {
-        throw 'NoteReplace input refused because the current note panel identity changed or closed'
+    if (!$focused) {
+        throw "NoteReplace native keyboard input refused because the exact '$FocusedControl' TextEntry is not the current focused owner"
     }
     return $state
 }
@@ -3911,42 +4196,18 @@ function Invoke-NoteReplaceKeyBatch(
     [string[]]$KeyLabels,
     [IntPtr]$ExpectedRoot,
     [string]$ExpectedPanelIdentity = '',
-    [string]$FocusedControl = ''
+    [string]$FocusedControl = '',
+    [switch]$AllowOwnerChangeAfter
 ) {
     if ($Keys.Count -eq 0 -or $Keys.Count -ne $KeyLabels.Count) { throw 'NoteReplace key batch is empty or malformed' }
     $state = Assert-NoteReplaceRoot $ExpectedRoot $ExpectedPanelIdentity
-    if ($FocusedControl) {
-        if ($ExpectedPanelIdentity) {
-            $paint = Get-NoteReplaceCurrentPanel $state $ExpectedPanelIdentity
-            $property = $paint.controls.PSObject.Properties[$FocusedControl]
-            if ($null -eq $property -or $null -eq $property.Value -or !$property.Value.enabled -or !$property.Value.focused) {
-                throw "NoteReplace keyboard input refused because the current $FocusedControl response is not focused"
-            }
-        } elseif (!$state.query_focused) {
-            throw 'NoteReplace launcher input refused because the current query TextEntry is not focused'
-        }
-    }
-    $pressed = [Collections.Generic.List[uint16]]::new()
-    $sendFailure = $null
-    try {
-        foreach ($key in $Keys) {
-            if (![JumpModeNativeProbe]::ModifierIsDown() -and $pressed.Count -eq 0 -and $ExpectedPanelIdentity) {
-                $null = Assert-NoteReplaceRoot $ExpectedRoot $ExpectedPanelIdentity
-            }
-            if (![JumpModeNativeProbe]::SendKey($key, $false)) { throw "SendInput key-down failed in $Name" }
-            $pressed.Add($key)
-        }
-    } catch {
-        $sendFailure = $_.Exception.Message
-    } finally {
-        for ($index = $pressed.Count - 1; $index -ge 0; $index--) {
-            if (![JumpModeNativeProbe]::SendKey($pressed[$index], $true)) {
-                $sendFailure = "SendInput key-up failed while releasing keys from $Name"
-            }
-        }
-    }
-    if ($sendFailure) { throw $sendFailure }
-    if ([JumpModeNativeProbe]::ModifierIsDown()) { throw "a modifier remained held after $Name" }
+    $ownerCheck = {
+        param([uint16[]]$ExpectedOwnedKeys)
+        $null = Assert-NoteReplaceFocusedOwner $ExpectedRoot $ExpectedPanelIdentity $FocusedControl $ExpectedOwnedKeys
+    }.GetNewClosure()
+    Invoke-FixtureKeyBatch -Name $Name -Keys $Keys -KeyLabels $KeyLabels `
+        -ExpectedRoot $ExpectedRoot -ExpectedForeground $ExpectedRoot -OwnerCheck $ownerCheck `
+        -ReceiptPrefix 'note_replace' -AllowOwnerChangeAfter:$AllowOwnerChangeAfter
     Write-Event 'note_replace_key_batch_sent' @{
         name = $Name
         keys = $KeyLabels
@@ -3965,29 +4226,15 @@ function Send-NoteReplaceUnicodeText(
     [string]$FocusedControl = ''
 ) {
     $state = Assert-NoteReplaceRoot $ExpectedRoot $ExpectedPanelIdentity
-    if ($FocusedControl) {
-        if ($ExpectedPanelIdentity) {
-            $paint = Get-NoteReplaceCurrentPanel $state $ExpectedPanelIdentity
-            $property = $paint.controls.PSObject.Properties[$FocusedControl]
-            if ($null -eq $property -or $null -eq $property.Value -or !$property.Value.enabled -or !$property.Value.focused) {
-                throw "NoteReplace text input refused because the current $FocusedControl response is not focused"
-            }
-        } elseif (!$state.query_focused) {
-            throw 'NoteReplace text input refused because the current query TextEntry is not focused'
-        }
-    }
+    $ownerCheck = {
+        param([uint16[]]$ExpectedOwnedKeys)
+        $null = Assert-NoteReplaceFocusedOwner $ExpectedRoot $ExpectedPanelIdentity $FocusedControl $ExpectedOwnedKeys
+    }.GetNewClosure()
     $index = 0
     foreach ($character in $Text.ToCharArray()) {
         $index++
-        $null = Assert-NoteReplaceRoot $ExpectedRoot $ExpectedPanelIdentity
-        if (![JumpModeNativeProbe]::SendUnicodeChar($character, $false)) {
-            throw "Unicode input failed in $Name character $index"
-        }
-        if (![JumpModeNativeProbe]::SendUnicodeChar($character, $true)) {
-            throw "Unicode key release failed in $Name character $index"
-        }
+        Invoke-FixtureUnicodeCodeUnit "$Name character $index" $character $ExpectedRoot $ExpectedRoot $ownerCheck 'note_replace'
     }
-    if ([JumpModeNativeProbe]::ModifierIsDown()) { throw "a modifier remained held after $Name" }
     Write-Event 'note_replace_text_sent' @{
         name = $Name
         utf16_code_units = $Text.Length
@@ -4062,10 +4309,40 @@ function Invoke-NoteReplaceControlClick(
         [JumpModeNativeProbe]::RootWindow($hit) -ne $ExpectedRoot) {
         throw "NoteReplace $ControlName response hit test found a foreign or occluding window"
     }
-    Assert-OwnedRepairRootForeground $ExpectedRoot
-    if (![JumpModeNativeProbe]::ClickScreenPoint($screenX, $screenY)) {
-        throw "SendInput click failed for current NoteReplace $ControlName response"
-    }
+    $ownerCheck = {
+        $freshState = Assert-NoteReplaceRoot $ExpectedRoot $ExpectedPanelIdentity
+        $freshPaint = Get-NoteReplaceCurrentPanel $freshState $ExpectedPanelIdentity
+        $freshProperty = if ($null -ne $freshPaint) { $freshPaint.controls.PSObject.Properties[$ControlName] } else { $null }
+        if ($null -eq $freshProperty -or $null -eq $freshProperty.Value -or
+            [string]$freshProperty.Value.response_id -cne [string]$capturedControl.response_id -or
+            (!$AllowDisabled -and !$freshProperty.Value.enabled) -or
+            [long]$freshPaint.content_revision -ne $capturedContentRevision -or
+            [long]$freshPaint.query_revision -ne $capturedQueryRevision -or
+            [long]$freshPaint.navigation_revision -ne $capturedNavigationRevision -or
+            (@($freshProperty.Value.rect) -join ',') -cne (@($capturedControl.rect) -join ',') -or
+            (@($freshProperty.Value.clipped_rect) -join ',') -cne (@($capturedControl.clipped_rect) -join ',')) {
+            throw "NoteReplace $ControlName owner or current response changed at the native input boundary"
+        }
+        $freshRect = $freshProperty.Value.clipped_rect
+        $freshScale = [double]$freshState.pixels_per_point
+        $freshClientX = [int][Math]::Round((([double]$freshRect[0] + [double]$freshRect[2]) / 2.0) * $freshScale)
+        $freshClientY = [int][Math]::Round((([double]$freshRect[1] + [double]$freshRect[3]) / 2.0) * $freshScale)
+        $freshX = 0; $freshY = 0
+        if (![JumpModeNativeProbe]::TryClientToScreen($ExpectedRoot, $freshClientX, $freshClientY, [ref]$freshX, [ref]$freshY)) {
+            throw "could not remap the current NoteReplace $ControlName response to screen coordinates"
+        }
+        if ($freshX -ne $screenX -or $freshY -ne $screenY) {
+            throw "NoteReplace $ControlName screen point no longer matches the current clipped response"
+        }
+        $freshHit = [JumpModeNativeProbe]::WindowAtScreenPoint($freshX, $freshY)
+        if ($freshHit -ne $hit -or $freshHit -eq [IntPtr]::Zero -or
+            [int][JumpModeNativeProbe]::WindowProcessId($freshHit) -ne $processId -or
+            [JumpModeNativeProbe]::RootWindow($freshHit) -ne $ExpectedRoot) {
+            throw "NoteReplace $ControlName native hit owner changed at the input boundary"
+        }
+        Assert-OwnedRepairRootForeground $ExpectedRoot
+    }.GetNewClosure()
+    Invoke-FixtureOwnedMouseClick $Name $screenX $screenY $ExpectedRoot $ExpectedRoot $hit $ownerCheck 'note_replace'
     Write-Event 'note_replace_response_clicked' @{
         name = $Name
         control = $ControlName
@@ -4109,10 +4386,40 @@ function Invoke-NoteReplaceTargetClick(
         [JumpModeNativeProbe]::RootWindow($hit) -ne $ExpectedRoot) {
         throw 'NoteReplace launcher result hit test found a foreign or occluding window'
     }
-    $null = Assert-NoteReplaceRoot $ExpectedRoot
-    if (![JumpModeNativeProbe]::ClickScreenPoint($screenX, $screenY)) {
-        throw 'SendInput click failed for the exact NoteReplace launcher result'
-    }
+    $capturedTargetId = [string]$target.target_id
+    $capturedRect = @($target.rect)
+    $capturedClip = @($target.clipped_rect)
+    $ownerCheck = {
+        $freshState = Assert-NoteReplaceRoot $ExpectedRoot
+        if ([long]$freshState.result_generation -ne [long]$Observation.result_generation -or
+            [string]$freshState.query -cne [string]$Observation.query) {
+            throw 'NoteReplace launcher query or result generation changed at the native input boundary'
+        }
+        $freshTargets = @($freshState.targets | Where-Object {
+            $_.surface -ceq 'launcher_results' -and [string]$_.target_id -ceq $capturedTargetId -and
+                $_.eligible -and $_.root_action -and [string]$_.root_action.action -ceq $ExpectedAction
+        })
+        if ($freshTargets.Count -ne 1 -or
+            (@($freshTargets[0].rect) -join ',') -cne ($capturedRect -join ',') -or
+            (@($freshTargets[0].clipped_rect) -join ',') -cne ($capturedClip -join ',')) {
+            throw 'NoteReplace launcher result Response or geometry changed at the native input boundary'
+        }
+        $freshRect = $freshTargets[0].clipped_rect
+        $freshScale = [double]$freshState.pixels_per_point
+        $freshClientX = [int][Math]::Round((([double]$freshRect[0] + [double]$freshRect[2]) / 2.0) * $freshScale)
+        $freshClientY = [int][Math]::Round((([double]$freshRect[1] + [double]$freshRect[3]) / 2.0) * $freshScale)
+        $freshX = 0; $freshY = 0
+        if (![JumpModeNativeProbe]::TryClientToScreen($ExpectedRoot, $freshClientX, $freshClientY, [ref]$freshX, [ref]$freshY)) {
+            throw 'could not remap the current NoteReplace launcher result to screen coordinates'
+        }
+        $freshHit = [JumpModeNativeProbe]::WindowAtScreenPoint($freshX, $freshY)
+        if ($freshX -ne $screenX -or $freshY -ne $screenY -or $freshHit -ne $hit -or
+            $freshHit -eq [IntPtr]::Zero -or [int][JumpModeNativeProbe]::WindowProcessId($freshHit) -ne $processId -or
+            [JumpModeNativeProbe]::RootWindow($freshHit) -ne $ExpectedRoot) {
+            throw 'NoteReplace launcher result hit owner or current screen point changed before native input'
+        }
+    }.GetNewClosure()
+    Invoke-FixtureOwnedMouseClick 'note-replace-launcher-result' $screenX $screenY $ExpectedRoot $ExpectedRoot $hit $ownerCheck 'note_replace'
     Write-Event 'note_replace_launcher_response_clicked' @{
         name = $Name
         target_id = $TargetId
@@ -4180,10 +4487,40 @@ function Invoke-NoteReplaceRootControlClick(
         [JumpModeNativeProbe]::RootWindow($hit) -ne $ExpectedRoot) {
         throw "NoteReplace ROOT $ControlName response hit test found a foreign or occluding window"
     }
-    Assert-OwnedRepairRootForeground $ExpectedRoot
-    if (![JumpModeNativeProbe]::ClickScreenPoint($screenX, $screenY)) {
-        throw "SendInput click failed for current NoteReplace ROOT $ControlName response"
-    }
+    $ownerCheck = {
+        $freshState = Assert-NoteReplaceRoot $ExpectedRoot
+        $freshPaint = Get-NoteReplaceRootPaint $freshState
+        $freshControl = if ($null -ne $freshPaint -and $ControlName -ceq 'query') {
+            $freshPaint.query
+        } elseif ($null -ne $freshPaint -and $ControlName -ceq 'result') {
+            $freshPaint.result
+        } else { $null }
+        if ($null -eq $freshControl -or !$freshControl.enabled -or
+            [string]$freshControl.response_id -cne $capturedId -or
+            (@($freshControl.rect) -join ',') -cne ($capturedRect -join ',') -or
+            (@($freshControl.clipped_rect) -join ',') -cne ($capturedClip -join ',') -or
+            [string]$freshState.query -cne $capturedQuery -or
+            [long]$freshState.result_generation -ne $capturedGeneration -or
+            ($ControlName -ceq 'result' -and [string]$freshPaint.result_action_id -cne $ExpectedActionId)) {
+            throw "NoteReplace ROOT $ControlName owner or Response changed at the native input boundary"
+        }
+        $freshRect = $freshControl.clipped_rect
+        $freshScale = [double]$freshState.pixels_per_point
+        $freshClientX = [int][Math]::Round((([double]$freshRect[0] + [double]$freshRect[2]) / 2.0) * $freshScale)
+        $freshClientY = [int][Math]::Round((([double]$freshRect[1] + [double]$freshRect[3]) / 2.0) * $freshScale)
+        $freshX = 0; $freshY = 0
+        if (![JumpModeNativeProbe]::TryClientToScreen($ExpectedRoot, $freshClientX, $freshClientY, [ref]$freshX, [ref]$freshY)) {
+            throw "could not remap the current NoteReplace ROOT $ControlName response to screen coordinates"
+        }
+        $freshHit = [JumpModeNativeProbe]::WindowAtScreenPoint($freshX, $freshY)
+        if ($freshX -ne $screenX -or $freshY -ne $screenY -or $freshHit -ne $hit -or
+            $freshHit -eq [IntPtr]::Zero -or [int][JumpModeNativeProbe]::WindowProcessId($freshHit) -ne $processId -or
+            [JumpModeNativeProbe]::RootWindow($freshHit) -ne $ExpectedRoot) {
+            throw "NoteReplace ROOT $ControlName hit owner or current screen point changed before native input"
+        }
+        Assert-OwnedRepairRootForeground $ExpectedRoot
+    }.GetNewClosure()
+    Invoke-FixtureOwnedMouseClick "note-replace-root-$ControlName" $screenX $screenY $ExpectedRoot $ExpectedRoot $hit $ownerCheck 'note_replace'
     Write-Event 'note_replace_root_response_clicked' @{
         name = $Name
         control = $ControlName
@@ -4211,8 +4548,8 @@ function Wait-NoteReplacePanel([IntPtr]$ExpectedRoot, [long]$ExpectedActivation,
 function Set-NoteReplaceOpenAction([IntPtr]$ExpectedRoot, [bool]$UseJump) {
     $query = "note open $script:noteReplaceExpectedTitle"
     $actionId = 'note:open:jump-qa-note-001'
-    $activationBefore = [long](Read-JumpModeObservation).activation_count
-    $baseline = Read-JumpModeObservation
+    $baseline = Read-NoteReplaceRootObservation $ExpectedRoot
+    $activationBefore = [long]$baseline.activation_count
     if ([string]$baseline.query -cne $query) {
         $rootPaint = Get-NoteReplaceRootPaint $baseline
         $queryResponse = $null
@@ -4322,58 +4659,6 @@ function Invoke-NoteReplaceNativeWorkflow($StartupObservation) {
         source_disk_sha256 = $sourceDiskBefore
         unrelated_note_disk_sha256 = $otherDiskBefore
     }
-    if (!$script:noteReplaceJumpEnabled) {
-        $null = Invoke-NoteReplaceControlClick 'note-replace-disabled-open-find' 'find_toggle' $root $panelIdentity
-        $findOpened = Wait-JumpModeObservation {
-            param($state)
-            $state.root_focused -and $state.note_replace.root_owner_allowed -and
-                (Get-NoteReplaceCurrentPanel $state $panelIdentity) -and
-                $state.note_replace.find_open -and $state.note_replace.controls.find_query -and
-                $state.note_replace.controls.find_query.enabled
-        }.GetNewClosure() $CaptureTimeoutSeconds 'Jump-disabled Note Replace Find query response'
-        $null = Invoke-NoteReplaceControlClick 'note-replace-disabled-focus-query' 'find_query' $root $panelIdentity
-        $focused = Wait-JumpModeObservation {
-            param($state)
-            (Get-NoteReplaceCurrentPanel $state $panelIdentity) -and
-                $state.note_replace.controls.find_query -and $state.note_replace.controls.find_query.focused
-        }.GetNewClosure() $CaptureTimeoutSeconds 'Jump-disabled current Find TextEntry focus'
-        Send-NoteReplaceUnicodeText 'note-replace-disabled-search-literal' 'literal Ω $1\path' $root $panelIdentity 'find_query'
-        $searched = Wait-JumpModeObservation {
-            param($state)
-            $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
-            $null -ne $paint -and $paint.find_open -and $paint.match_count -eq 2 -and
-                $paint.source_only_match -and [long]$state.activation_count -eq $activationBaseline
-        }.GetNewClosure() $CaptureTimeoutSeconds 'Jump-disabled literal Find result and source-only visibility'
-        $null = Invoke-NoteReplaceControlClick 'note-replace-disabled-close-find' 'find_close' $root $panelIdentity
-        $closed = Wait-JumpModeObservation {
-            param($state)
-            $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
-            $null -ne $paint -and !$paint.find_open -and !$paint.dirty -and
-                [long]$state.activation_count -eq $activationBaseline
-        }.GetNewClosure() $CaptureTimeoutSeconds 'Jump-disabled Find closes without changing the note'
-        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceSourcePath).Hash.ToLowerInvariant() -cne $sourceDiskBefore -or
-            (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceOtherPath).Hash.ToLowerInvariant() -cne $otherDiskBefore) {
-            throw 'Jump-disabled Find-only leg changed a generated note file'
-        }
-        Write-Event 'note_replace_jump_disabled_focus_passed' @{
-            panel_identity = $panelIdentity
-            find_match_count = [int]$searched.note_replace.match_count
-            source_only_match = [bool]$searched.note_replace.source_only_match
-            find_closed = !$closed.note_replace.find_open
-            disk_unchanged = $true
-            activation_count = [long]$closed.activation_count
-        }
-        return [ordered]@{
-            fixture_scenario = $script:noteReplaceFixtureScenario
-            jump_mode_enabled = $false
-            panel_identity = $panelIdentity
-            find_match_count = [int]$searched.note_replace.match_count
-            source_only_match = [bool]$searched.note_replace.source_only_match
-            disk_unchanged = $true
-            activation_count = [long]$closed.activation_count
-        }
-    }
-
     $marker = ' pre-replacement unsaved Ω'
     $script:noteReplaceExpectedPreReplace = $script:noteReplaceSourceBefore + $marker
     $script:noteReplaceExpectedPreReplaceSha256 = Get-NoteReplaceTextSha256 $script:noteReplaceExpectedPreReplace
@@ -4397,11 +4682,6 @@ function Invoke-NoteReplaceNativeWorkflow($StartupObservation) {
         (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceOtherPath).Hash.ToLowerInvariant() -cne $otherDiskBefore) {
         throw 'pre-replacement unsaved marker changed a generated note file on disk'
     }
-    $script:noteReplaceExpectedSourceAfterAll = $script:noteReplaceExpectedPreReplace.Replace(
-        'literal Ω $1\path', [string]$script:noteReplaceExpectedReplacement, [StringComparison]::Ordinal
-    )
-    $script:noteReplaceExpectedAfterReplaceSha256 = Get-NoteReplaceTextSha256 $script:noteReplaceExpectedSourceAfterAll
-    $expectedAfterReplaceSha256 = [string]$script:noteReplaceExpectedAfterReplaceSha256
     Write-Event 'note_replace_unsaved_marker_added' @{
         panel_identity = $panelIdentity
         content_revision = [long]$preReplace.note_replace.content_revision
@@ -4448,18 +4728,118 @@ function Invoke-NoteReplaceNativeWorkflow($StartupObservation) {
         param($state)
         $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
         $null -ne $paint -and $paint.match_count -eq 2 -and $paint.controls.replace_all -and
-            $paint.controls.replace_all.enabled -and [long]$state.activation_count -eq $activationBaseline
+            $paint.controls.replace_all.enabled -and $paint.controls.replace_one -and
+            $paint.controls.replace_one.enabled -and [long]$state.activation_count -eq $activationBaseline
     }.GetNewClosure() $CaptureTimeoutSeconds 'enabled current Replace All Response for the two source matches'
-    $preReplaceRevision = [long]$readyToReplace.note_replace.content_revision
-    $null = Invoke-NoteReplaceControlClick 'note-replace-all-original-matches' 'replace_all' $root $panelIdentity
+    $oldLiteral = 'literal Ω $1\path'
+    $selectedRange = @($readyToReplace.note_replace.selected_match_byte_range)
+    if ($selectedRange.Count -ne 2) { throw 'NoteReplace current query has no exact selected original UTF-8 byte range' }
+    $startByte = [int]$selectedRange[0]
+    $endByte = [int]$selectedRange[1]
+    $startChar = Get-NoteReplaceCharacterIndexFromUtf8ByteOffset $script:noteReplaceExpectedPreReplace $startByte
+    $endChar = Get-NoteReplaceCharacterIndexFromUtf8ByteOffset $script:noteReplaceExpectedPreReplace $endByte
+    if ($endChar -lt $startChar -or
+        $script:noteReplaceExpectedPreReplace.Substring($startChar, $endChar - $startChar) -cne $oldLiteral) {
+        throw 'NoteReplace selected original range does not identify the exact literal fixture text'
+    }
+    $script:noteReplaceExpectedAfterCurrent = $script:noteReplaceExpectedPreReplace.Substring(0, $startChar) +
+        [string]$script:noteReplaceExpectedReplacement +
+        $script:noteReplaceExpectedPreReplace.Substring($endChar)
+    $expectedAfterCurrentSha256 = Get-NoteReplaceTextSha256 $script:noteReplaceExpectedAfterCurrent
+    if (!$script:noteReplaceExpectedAfterCurrent.Contains($oldLiteral, [StringComparison]::Ordinal)) {
+        throw 'NoteReplace Current fixture did not leave the second original literal match intact'
+    }
+    $script:noteReplaceExpectedSourceAfterAll = $script:noteReplaceExpectedAfterCurrent.Replace(
+        $oldLiteral, [string]$script:noteReplaceExpectedReplacement, [StringComparison]::Ordinal
+    )
+    $script:noteReplaceExpectedAfterReplaceSha256 = Get-NoteReplaceTextSha256 $script:noteReplaceExpectedSourceAfterAll
+    $expectedAfterReplaceSha256 = [string]$script:noteReplaceExpectedAfterReplaceSha256
+
+    $preCurrentRevision = [long]$readyToReplace.note_replace.content_revision
+    $null = Invoke-NoteReplaceControlClick 'note-replace-current-original-match' 'replace_one' $root $panelIdentity
+    $currentReplaced = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.dirty -and $paint.content_revision -gt $preCurrentRevision -and
+            $paint.match_count -eq 1 -and
+            [string]$paint.content_sha256 -ceq $expectedAfterCurrentSha256 -and
+            [long]$state.activation_count -eq $activationBaseline
+    }.GetNewClosure() $CaptureTimeoutSeconds 'Replace Current changes only the selected original literal match'
+    Write-Event 'note_replace_current_completed' @{
+        panel_identity = $panelIdentity
+        match_count_before = [int]$readyToReplace.note_replace.match_count
+        match_count_after = [int]$currentReplaced.note_replace.match_count
+        content_revision_before = [long]$readyToReplace.note_replace.content_revision
+        content_revision_after = [long]$currentReplaced.note_replace.content_revision
+        expected_unsaved_sha256 = $expectedAfterCurrentSha256
+        disk_unchanged = $true
+    }
+    $afterReplaceDisk = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceSourcePath).Hash.ToLowerInvariant()
+    if ($afterReplaceDisk -cne $sourceDiskBefore -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceOtherPath).Hash.ToLowerInvariant() -cne $otherDiskBefore) {
+        throw 'Note Replace Current wrote to disk before normal Save or changed the unrelated generated note'
+    }
+
+    $null = Invoke-NoteReplaceControlClick 'note-replace-close-find-before-current-undo' 'find_close' $root $panelIdentity
+    $editorForCurrentUndo = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and !$paint.find_open -and $paint.controls.note_editor -and
+            $paint.controls.note_editor.enabled
+    }.GetNewClosure() $CaptureTimeoutSeconds 'editor response after closing Find for Replace Current Undo'
+    $null = Invoke-NoteReplaceControlClick 'note-replace-focus-editor-before-current-undo' 'note_editor' $root $panelIdentity
+    $editorForCurrentUndo = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.controls.note_editor -and $paint.controls.note_editor.focused
+    }.GetNewClosure() $CaptureTimeoutSeconds 'actual note editor focus before Replace Current Undo'
+    $currentRevision = [long]$editorForCurrentUndo.note_replace.content_revision
+    Invoke-NoteReplaceKeyBatch 'note-replace-current-editor-undo' ([uint16[]]@(0x11, 0x5A)) ([string[]]@('Ctrl', 'Z')) $root $panelIdentity 'note_editor'
+    $currentUndone = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.dirty -and $paint.content_revision -gt $currentRevision -and
+            $paint.match_count -eq 2 -and [string]$paint.content_sha256 -ceq $expectedPreReplaceSha256
+    }.GetNewClosure() $CaptureTimeoutSeconds 'one editor-owned Undo restores the pre-Current unsaved source'
+    $currentUndoRevision = [long]$currentUndone.note_replace.content_revision
+    Invoke-NoteReplaceKeyBatch 'note-replace-current-editor-redo' ([uint16[]]@(0x11, 0x59)) ([string[]]@('Ctrl', 'Y')) $root $panelIdentity 'note_editor'
+    $currentRedone = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.dirty -and $paint.content_revision -gt $currentUndoRevision -and
+            $paint.match_count -eq 1 -and [string]$paint.content_sha256 -ceq $expectedAfterCurrentSha256
+    }.GetNewClosure() $CaptureTimeoutSeconds 'one editor-owned Redo restores the pre-All unsaved source'
+
+    $null = Invoke-NoteReplaceControlClick 'note-replace-reopen-find-before-all' 'find_toggle' $root $panelIdentity
+    $findReopened = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.find_open -and $paint.controls.find_query -and
+            $paint.controls.find_query.enabled
+    }.GetNewClosure() $CaptureTimeoutSeconds 'Find strip reopens with the remaining original match'
+    if (!$findReopened.note_replace.controls.replacement_input -or
+        !$findReopened.note_replace.controls.replace_all) {
+        $null = Invoke-NoteReplaceControlClick 'note-replace-reopen-expander-before-all' 'replace_expander' $root $panelIdentity
+    }
+    $readyForAll = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.find_open -and $paint.match_count -eq 1 -and
+            $paint.controls.replace_all -and $paint.controls.replace_all.enabled
+    }.GetNewClosure() $CaptureTimeoutSeconds 'Replace All response for the one remaining original literal match'
+    if ([string]$readyForAll.note_replace.content_sha256 -cne $expectedAfterCurrentSha256) {
+        throw 'NoteReplace source changed between Replace Current and Replace All'
+    }
+    $preAllRevision = [long]$readyForAll.note_replace.content_revision
+    $null = Invoke-NoteReplaceControlClick 'note-replace-all-remaining-original-match' 'replace_all' $root $panelIdentity
     $replaced = Wait-JumpModeObservation {
         param($state)
         $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
-        $null -ne $paint -and $paint.dirty -and $paint.content_revision -gt $preReplaceRevision -and
+        $null -ne $paint -and $paint.dirty -and $paint.content_revision -gt $preAllRevision -and
             $paint.match_count -eq 0 -and
             [string]$paint.content_sha256 -ceq $expectedAfterReplaceSha256 -and
             [long]$state.activation_count -eq $activationBaseline
-    }.GetNewClosure() $CaptureTimeoutSeconds 'Replace All mutates the current unsaved note exactly once'
+    }.GetNewClosure() $CaptureTimeoutSeconds 'Replace All changes the one remaining original literal match'
     $afterReplaceDisk = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceSourcePath).Hash.ToLowerInvariant()
     if ($afterReplaceDisk -cne $sourceDiskBefore -or
         (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceOtherPath).Hash.ToLowerInvariant() -cne $otherDiskBefore) {
@@ -4479,6 +4859,13 @@ function Invoke-NoteReplaceNativeWorkflow($StartupObservation) {
         $null -ne $paint -and $paint.find_open -and $paint.match_count -eq 2 -and
             $paint.dirty -and [long]$state.activation_count -eq $activationBaseline
     }.GetNewClosure() $CaptureTimeoutSeconds 'literal replacement query finds both inserted occurrences in Markdown source'
+    $null = Invoke-NoteReplaceControlClick 'note-replace-switch-to-split' 'split' $root $panelIdentity
+    $split = Wait-JumpModeObservation {
+        param($state)
+        $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
+        $null -ne $paint -and $paint.view_mode -ceq 'split' -and $paint.match_count -eq 2 -and
+            $paint.dirty -and [long]$state.activation_count -eq $activationBaseline
+    }.GetNewClosure() $CaptureTimeoutSeconds 'Split view preserves the current unsaved replacement source and Find matches'
     $null = Invoke-NoteReplaceControlClick 'note-replace-switch-to-preview-for-source-only-reveal' 'render' $root $panelIdentity
     $sourceOnly = Wait-JumpModeObservation {
         param($state)
@@ -4495,6 +4882,7 @@ function Invoke-NoteReplaceNativeWorkflow($StartupObservation) {
             $null -ne $paint.selected_match_byte_range -and [long]$state.activation_count -eq $activationBaseline
     }.GetNewClosure() $CaptureTimeoutSeconds 'source-only Reveal selects an exact replacement occurrence in Edit'
     $null = Invoke-NoteReplaceControlClick 'note-replace-close-find-before-editor-undo' 'find_close' $root $panelIdentity
+    $null = Invoke-NoteReplaceControlClick 'note-replace-focus-editor-before-all-undo' 'note_editor' $root $panelIdentity
     $editorReady = Wait-JumpModeObservation {
         param($state)
         $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
@@ -4507,10 +4895,10 @@ function Invoke-NoteReplaceNativeWorkflow($StartupObservation) {
         param($state)
         $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
         $null -ne $paint -and $paint.dirty -and $paint.content_revision -gt $replacedRevision -and
-            $paint.match_count -eq 0 -and
-            [string]$paint.content_sha256 -ceq $expectedPreReplaceSha256 -and
+            $paint.match_count -eq 1 -and
+            [string]$paint.content_sha256 -ceq $expectedAfterCurrentSha256 -and
             [long]$state.activation_count -eq $activationBaseline
-    }.GetNewClosure() $CaptureTimeoutSeconds 'one editor-owned Undo restores the exact pre-replacement unsaved source'
+    }.GetNewClosure() $CaptureTimeoutSeconds 'one editor-owned Undo restores the exact pre-All unsaved source'
     $undoRevision = [long]$undone.note_replace.content_revision
     Invoke-NoteReplaceKeyBatch 'note-replace-editor-redo' ([uint16[]]@(0x11, 0x59)) ([string[]]@('Ctrl', 'Y')) $root $panelIdentity 'note_editor'
     $redone = Wait-JumpModeObservation {
@@ -4567,7 +4955,7 @@ function Invoke-NoteReplaceNativeWorkflow($StartupObservation) {
         (Get-FileHash -Algorithm SHA256 -LiteralPath $script:noteReplaceOtherPath).Hash.ToLowerInvariant() -cne $otherDiskBefore) {
         throw 'post-save unsaved edit changed one of the generated note files before discard'
     }
-    Invoke-NoteReplaceKeyBatch 'note-replace-close-dirty-note-with-production-escape' ([uint16[]]@(0x1B)) ([string[]]@('Escape')) $root $panelIdentity 'note_editor'
+    Invoke-NoteReplaceKeyBatch 'note-replace-close-dirty-note-with-production-escape' ([uint16[]]@(0x1B)) ([string[]]@('Escape')) $root $panelIdentity 'note_editor' -AllowOwnerChangeAfter
     $discardPrompt = Wait-JumpModeObservation {
         param($state)
         $paint = Get-NoteReplaceCurrentPanel $state $panelIdentity
@@ -4590,14 +4978,18 @@ function Invoke-NoteReplaceNativeWorkflow($StartupObservation) {
     }
     Write-Event 'note_replace_native_workflow_passed' @{
         fixture_scenario = $script:noteReplaceFixtureScenario
-        jump_mode_enabled = $true
+        jump_mode_enabled = [bool]$script:noteReplaceJumpEnabled
         panel_identity = $panelIdentity
         activation_count = [long]$discarded.activation_count
         original_match_count = [int]$matches.note_replace.match_count
+        current_match_count_after_replace = [int]$currentReplaced.note_replace.match_count
+        current_undo_restored_source = ([string]$currentUndone.note_replace.content_sha256 -ceq $expectedPreReplaceSha256)
+        current_redo_restored_source = ([string]$currentRedone.note_replace.content_sha256 -ceq $expectedAfterCurrentSha256)
         replaced_match_count = [int]$sourceOnly.note_replace.match_count
         source_only_match = [bool]$sourceOnly.note_replace.source_only_match
-        undo_restored_saved_baseline = !$undone.note_replace.dirty
-        redo_restored_replacement = [bool]$redone.note_replace.dirty
+        split_view_preserved_source = [string]$split.note_replace.content_sha256 -ceq $expectedAfterReplaceSha256
+        undo_restored_pre_all_unsaved_source = ([string]$undone.note_replace.content_sha256 -ceq $expectedAfterCurrentSha256)
+        redo_restored_replacement = ([string]$redone.note_replace.content_sha256 -ceq $expectedAfterReplaceSha256)
         saved_source_sha256 = $script:noteReplaceSavedSha256
         unrelated_note_sha256 = $otherAfterDiscard
         discard_prompt_observed = [bool]$discardPrompt.note_replace.discard_prompt
@@ -4605,14 +4997,18 @@ function Invoke-NoteReplaceNativeWorkflow($StartupObservation) {
     }
     return [ordered]@{
         fixture_scenario = $script:noteReplaceFixtureScenario
-        jump_mode_enabled = $true
+        jump_mode_enabled = [bool]$script:noteReplaceJumpEnabled
         panel_identity = $panelIdentity
         activation_count = [long]$discarded.activation_count
         original_match_count = [int]$matches.note_replace.match_count
+        current_match_count_after_replace = [int]$currentReplaced.note_replace.match_count
+        current_undo_restored_source = ([string]$currentUndone.note_replace.content_sha256 -ceq $expectedPreReplaceSha256)
+        current_redo_restored_source = ([string]$currentRedone.note_replace.content_sha256 -ceq $expectedAfterCurrentSha256)
         replaced_match_count = [int]$sourceOnly.note_replace.match_count
         source_only_match = [bool]$sourceOnly.note_replace.source_only_match
-        undo_restored_saved_baseline = !$undone.note_replace.dirty
-        redo_restored_replacement = [bool]$redone.note_replace.dirty
+        split_view_preserved_source = [string]$split.note_replace.content_sha256 -ceq $expectedAfterReplaceSha256
+        undo_restored_pre_all_unsaved_source = ([string]$undone.note_replace.content_sha256 -ceq $expectedAfterCurrentSha256)
+        redo_restored_replacement = ([string]$redone.note_replace.content_sha256 -ceq $expectedAfterReplaceSha256)
         saved_source_sha256 = $script:noteReplaceSavedSha256
         unrelated_note_sha256 = $otherAfterDiscard
         discard_prompt_observed = [bool]$discardPrompt.note_replace.discard_prompt
@@ -5212,7 +5608,11 @@ function Invoke-PrebuiltNativeScenario {
         }
         cleanup = $null
     })
-    $startupObservation = Wait-SettingsSearchStartupReadiness
+    $startupObservation = if ($Scenario -eq 'NoteReplace') {
+        Wait-NoteReplaceStartupReadiness
+    } else {
+        Wait-SettingsSearchStartupReadiness
+    }
     if (!(Test-RetainedProcessIdentity)) { throw 'retained app PID/birth identity changed after Settings Search startup readiness' }
     $process.Refresh()
     if ($process.HasExited) {
@@ -5235,10 +5635,18 @@ function Invoke-PrebuiltNativeScenario {
         hwnd = $readyHwnd
         logic_frame_id = $startupObservation.logic_frame_id
         ui_pass_id = $startupObservation.ui_pass_id
-        query_response_id = [string](@($startupObservation.targets | Where-Object {
-            $_.surface -ceq 'launcher_results' -and $_.is_query_input -and $_.kind -ceq 'text_entry'
-        })[0].target_id)
-        query_response = 'current ROOT launcher query TextEntry observed; no foreground activation or input was sent'
+        query_response_id = if ($Scenario -eq 'NoteReplace') {
+            [string]$startupObservation.note_replace_root.query.response_id
+        } else {
+            [string](@($startupObservation.targets | Where-Object {
+                $_.surface -ceq 'launcher_results' -and $_.is_query_input -and $_.kind -ceq 'text_entry'
+            })[0].target_id)
+        }
+        query_response = if ($Scenario -eq 'NoteReplace') {
+            'current enabled, fully visible ROOT NoteReplace query Response observed; no foreground activation or input was sent'
+        } else {
+            'current ROOT launcher query TextEntry observed; no foreground activation or input was sent'
+        }
     }
     Write-Event 'owned_app_window_metadata' @{ os_version = [Environment]::OSVersion.VersionString; architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString(); session_id = $processSessionId; window = $appWindowMetadata }
     if (!(Test-Path -LiteralPath $prebuiltSettingsPath -PathType Leaf)) { throw 'isolated settings.json disappeared before Settings Search input' }
@@ -5277,10 +5685,7 @@ function Invoke-PrebuiltNativeScenario {
         Write-Summary 'BLOCKED' 'The validated prebuilt app is waiting for exact current ROOT query and Note Replace response observations. No note body or replacement text is included in the QA observation.'
         $noteReplaceResult = Invoke-NoteReplaceNativeWorkflow $startupObservation
         $script:scenarioStatus = 'PASS'
-        $script:scenarioReason = 'The generated current Markdown note was opened through the actual note command; literal Replace All, source-only Reveal, same-owner Undo/Redo, normal Save, and subsequent discard preserved the second generated note.'
-        if (!$script:noteReplaceJumpEnabled) {
-            $script:scenarioReason = 'The Jump-disabled profile accepted normal current query/editor input and opened the exact generated note without a Jump Mode hint session; this was the short focus-only leg.'
-        }
+        $script:scenarioReason = 'The generated current Markdown note was opened through its normal UI route; literal Replace Current and Replace All, same-owner Undo/Redo across Edit/Split/Preview, source-only Reveal, normal Save, and subsequent discard preserved the unrelated generated note.'
         $script:runStatus = 'PASS'
         $script:phase = 'note_replace_complete'
         Update-Scenarios
@@ -6207,6 +6612,11 @@ function Invoke-Phase1Orchestration {
     Update-Scenarios
 }
 
+if ($FixtureInputSelfTest) {
+    Invoke-FixtureInputSelfTest
+    return
+}
+
 try {
     if ($Screen -ne 'All' -and $Scenario -ne 'Phase1Enabled') { throw 'Dashboard and Grid filters are available only for the enabled Phase 1 scenario' }
     if (Test-Path -LiteralPath $evidenceRoot) { throw "refusing to reuse evidence path $evidenceRoot" }
@@ -6663,15 +7073,16 @@ try {
         Write-Summary $runStatus 'The run did not meet its current acceptance criteria.'
     }
 } finally {
-    if ($Scenario -eq 'TargetRepair') {
-        $null = Complete-TargetRepairPendingInputCleanup
+    if ($Scenario -in @('TargetRepair', 'NoteReplace')) {
+        $fixtureInputScenario = if ($Scenario -eq 'NoteReplace') { 'NoteReplace' } else { 'TargetRepair' }
+        $null = Complete-FixtureInputCleanup $fixtureInputScenario
         if ($script:cleanupIssues.Count -gt 0 -or
-            $script:targetRepairPendingInputs.Count -ne 0 -or
-            $script:targetRepairAcceptedKeyDowns -ne $script:targetRepairAcceptedKeyUps -or
-            $script:targetRepairAcceptedMouseDowns -ne $script:targetRepairAcceptedMouseUps) {
+            $script:fixtureInputPendingInputs.Count -ne 0 -or
+            $script:fixtureInputAcceptedKeyDowns -ne $script:fixtureInputAcceptedKeyUps -or
+            $script:fixtureInputAcceptedMouseDowns -ne $script:fixtureInputAcceptedMouseUps) {
             $runStatus = 'FAIL'
             $scenarioStatus = 'FAIL'
-            $scenarioReason = 'TargetRepair ended with an accepted native input Down without a verified matching Up.'
+            $scenarioReason = "$fixtureInputScenario ended with an accepted native input Down without a verified matching Up."
             Update-Scenarios
         }
     }

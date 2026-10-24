@@ -992,6 +992,7 @@ pub(super) struct NoteReplaceControlsPaint {
     pub(super) find_toggle: Option<NoteReplaceControlPaint>,
     pub(super) edit: Option<NoteReplaceControlPaint>,
     pub(super) render: Option<NoteReplaceControlPaint>,
+    pub(super) split: Option<NoteReplaceControlPaint>,
     pub(super) find_query: Option<NoteReplaceControlPaint>,
     pub(super) find_close: Option<NoteReplaceControlPaint>,
     pub(super) replace_expander: Option<NoteReplaceControlPaint>,
@@ -1036,6 +1037,7 @@ enum NoteReplaceControl {
     FindToggle,
     Edit,
     Render,
+    Split,
     FindQuery,
     FindClose,
     ReplaceExpander,
@@ -2318,6 +2320,7 @@ impl NotePanel {
             NoteReplaceControl::FindToggle => paint.controls.find_toggle = Some(control_paint),
             NoteReplaceControl::Edit => paint.controls.edit = Some(control_paint),
             NoteReplaceControl::Render => paint.controls.render = Some(control_paint),
+            NoteReplaceControl::Split => paint.controls.split = Some(control_paint),
             NoteReplaceControl::FindQuery => paint.controls.find_query = Some(control_paint),
             NoteReplaceControl::FindClose => paint.controls.find_close = Some(control_paint),
             NoteReplaceControl::ReplaceExpander => {
@@ -3683,11 +3686,13 @@ impl NotePanel {
                     }
                 }
             }
-            if app.note_settings.can_use_split()
-                && !matches!(self.view_mode, NoteViewMode::Split)
-                && ui.button("Split").clicked()
-            {
-                self.set_view_mode_with_context(ui.ctx(), NoteViewMode::Split);
+            if app.note_settings.can_use_split() && !matches!(self.view_mode, NoteViewMode::Split) {
+                let split = ui.button("Split");
+                #[cfg(feature = "qa-framebuffer-capture")]
+                self.record_note_replace_control(NoteReplaceControl::Split, &split);
+                if split.clicked() {
+                    self.set_view_mode_with_context(ui.ctx(), NoteViewMode::Split);
+                }
             }
             if ui.button(self.details_toggle_label()).clicked() {
                 self.set_show_metadata(app, !self.show_metadata);
