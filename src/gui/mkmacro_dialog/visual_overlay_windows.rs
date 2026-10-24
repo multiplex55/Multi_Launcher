@@ -1418,12 +1418,11 @@ impl NativeOverlayRenderer {
                         && i64::from(point.x) < bounds.right()
                         && i64::from(point.y) >= i64::from(bounds.y)
                         && i64::from(point.y) < bounds.bottom()
+                        && expected_hit.replace(shield.hwnd).is_some()
                     {
-                        if expected_hit.replace(shield.hwnd).is_some() {
-                            return Err(platform(
-                                "fixture point is covered by multiple retained shield HWNDs",
-                            ));
-                        }
+                        return Err(platform(
+                            "fixture point is covered by multiple retained shield HWNDs",
+                        ));
                     }
                 }
                 let expected_hit = expected_hit.ok_or_else(|| {

@@ -807,7 +807,7 @@ impl Receiver {
             && thread_id != 0
             && self
                 .root_identity
-                .map_or(true, |root| root.thread_id == thread_id)
+                .is_none_or(|root| root.thread_id == thread_id)
             && current_parent(hwnd).is_ok_and(|actual_parent| actual_parent == parent)
             && unsafe { GetDlgCtrlID(hwnd) } == control_id
             && unsafe { GetPropW(hwnd, RECEIVER_IDENTITY_PROPERTY).0 as usize } == token
@@ -838,7 +838,7 @@ impl Receiver {
             && root_thread_id != 0
             && self
                 .root_identity
-                .map_or(true, |root| root.thread_id == root_thread_id)
+                .is_none_or(|root| root.thread_id == root_thread_id)
             && current_process_birth().is_ok_and(|birth| birth == self.process_birth)
             && unsafe { GetWindowLongPtrW(self.hwnd, GWLP_USERDATA) }
                 == self.state.as_ref() as *const ReceiverState as isize;
