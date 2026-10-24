@@ -47,6 +47,13 @@ pub struct NativeFileIdentity {
 }
 
 impl NativeFileIdentity {
+    pub(crate) const fn from_parts(volume_serial_number: u64, file_id: [u8; 16]) -> Self {
+        Self {
+            volume_serial_number,
+            file_id,
+        }
+    }
+
     pub fn volume_serial_number(self) -> u64 {
         self.volume_serial_number
     }
@@ -3356,6 +3363,344 @@ pub(crate) fn scan_duplicate_discovery_root_with_progress(
         );
         result.into_duplicate_discovery()
     }
+}
+
+/// Exact path evidence for one content read. The root is the canonical root
+/// admitted during discovery; identity, size, and modification time are the
+/// observations captured from the candidate during that scan.
+#[derive(Clone)]
+pub(crate) struct DuplicateDiscoveryContentRequest {
+    pub(crate) root: DuplicateDiscoveryRootIdentity,
+    pub(crate) generation: RenameScanGeneration,
+    pub(crate) path: PathBuf,
+    pub(crate) identity: NativeFileIdentity,
+    pub(crate) length: u64,
+    pub(crate) modified: SystemTime,
+}
+
+/// A short-lived, no-follow DFF read lease. Its sharing mode permits ordinary
+/// readers, writers, and deleters; every read is bracketed by identity,
+/// metadata, ancestor, and displayed-path revalidation.
+pub(crate) struct DuplicateDiscoveryContentFile {
+    file: std::fs::File,
+    request: DuplicateDiscoveryContentRequest,
+    #[cfg(windows)]
+    root_proof: RootProof,
+    #[cfg(windows)]
+    parent_chain: Vec<DirectoryProof>,
+}
+
+impl DuplicateDiscoveryContentFile {
+    pub(crate) fn revalidate(&self, cancellation: &ScanCancellation) -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            revalidate_duplicate_discovery_content_file(self, cancellation)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = cancellation;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "duplicate-content reads require validated Windows file identity",
+            ))
+        }
+    }
+}
+
+impl std::io::Read for DuplicateDiscoveryContentFile {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(&mut self.file, buffer)
+    }
+}
+
+pub(crate) fn open_duplicate_discovery_content_file(
+    request: DuplicateDiscoveryContentRequest,
+    cancellation: &ScanCancellation,
+) -> std::io::Result<DuplicateDiscoveryContentFile> {
+    #[cfg(windows)]
+    {
+        open_duplicate_discovery_content_file_windows(request, cancellation)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (request, cancellation);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "duplicate-content reads require validated Windows file identity",
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn open_duplicate_discovery_content_file_windows(
+    request: DuplicateDiscoveryContentRequest,
+    cancellation: &ScanCancellation,
+) -> std::io::Result<DuplicateDiscoveryContentFile> {
+    if cancellation.is_cancelled() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "duplicate-content read was cancelled before opening",
+        ));
+    }
+    if request.path == request.root.canonical_root
+        || !batch_rename::path_is_within_windows_ordinal(
+            &request.root.canonical_root,
+            &request.path,
+        )
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "candidate path is not a file below its admitted duplicate-scan root",
+        ));
+    }
+    let explicit_root =
+        ExplicitDirectoryRoot::new(request.root.canonical_root.clone()).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid duplicate-scan root: {error:?}"),
+            )
+        })?;
+    let mut scan_request = RenameScanRequest::new(explicit_root, true, request.generation);
+    scan_request.exclude_cloud_placeholders = true;
+    let admission = NativeRenameScanBackend
+        .admit_root(&scan_request)
+        .map_err(duplicate_content_backend_error)?;
+    if admission.proof.identity != request.root.identity
+        || batch_rename::compare_paths_windows_ordinal(
+            &admission.proof.canonical_path,
+            &request.root.canonical_root,
+        ) != std::cmp::Ordering::Equal
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "duplicate-scan root identity or canonical path changed",
+        ));
+    }
+
+    let relative = request
+        .path
+        .strip_prefix(&request.root.canonical_root)
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "candidate path does not use the admitted root prefix",
+            )
+        })?;
+    let components = relative.components().collect::<Vec<_>>();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "candidate path contains an invalid root-relative component",
+        ));
+    }
+
+    let mut directories = admission.directories;
+    let mut parent_chain = admission.proof.chain.clone();
+    for component in &components[..components.len() - 1] {
+        if cancellation.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "duplicate-content path validation was cancelled",
+            ));
+        }
+        let parent = directories.last().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "admitted duplicate-content root chain is empty",
+            )
+        })?;
+        let child = NativeRenameScanBackend
+            .open_child(
+                parent,
+                &parent_chain,
+                &admission.proof,
+                component.as_os_str(),
+                None,
+            )
+            .map_err(duplicate_content_backend_error)?;
+        if child.kind != SnapshotEntryKind::Directory || child.reparse_point {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "candidate parent is not a verified plain directory",
+            ));
+        }
+        let child_proof = DirectoryProof {
+            lookup_path: child.lookup_path.clone(),
+            canonical_path: child.canonical_path.clone(),
+            identity: child.identity,
+        };
+        let directory = NativeRenameScanBackend
+            .acquire_child_directory_for_enumeration(
+                parent,
+                &parent_chain,
+                &admission.proof,
+                &child,
+            )
+            .map_err(duplicate_content_backend_error)?;
+        drop(child);
+        parent_chain.push(child_proof);
+        directories.push(Arc::new(directory));
+    }
+
+    let parent = directories.last().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "candidate file has no verified parent directory",
+        )
+    })?;
+    if request.path.parent().is_none_or(|actual_parent| {
+        batch_rename::compare_paths_windows_ordinal(actual_parent, &parent.canonical_path)
+            != std::cmp::Ordering::Equal
+    }) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "candidate file no longer has its scanned parent directory",
+        ));
+    }
+
+    let opened = open_native_duplicate_content_leaf(&request.path)?;
+    validate_duplicate_content_opened(&opened, &request, &admission.proof, &parent.canonical_path)?;
+    NativeRenameScanBackend
+        .reopen_chain(
+            &parent_chain,
+            &admission.proof,
+            DirectoryOpenAccess::Metadata,
+        )
+        .map_err(duplicate_content_backend_error)?;
+    drop(directories);
+
+    Ok(DuplicateDiscoveryContentFile {
+        file: opened.handle,
+        request,
+        root_proof: admission.proof,
+        parent_chain,
+    })
+}
+
+#[cfg(windows)]
+fn revalidate_duplicate_discovery_content_file(
+    content: &DuplicateDiscoveryContentFile,
+    cancellation: &ScanCancellation,
+) -> std::io::Result<()> {
+    if cancellation.is_cancelled() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "duplicate-content read was cancelled during revalidation",
+        ));
+    }
+    validate_duplicate_content_handle(&content.file, &content.request, &content.root_proof)?;
+    let parent_directories = NativeRenameScanBackend
+        .reopen_chain(
+            &content.parent_chain,
+            &content.root_proof,
+            DirectoryOpenAccess::Metadata,
+        )
+        .map_err(duplicate_content_backend_error)?;
+    let parent = parent_directories.last().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "duplicate-content parent chain could not be reopened",
+        )
+    })?;
+    let opened = open_native_duplicate_content_leaf(&content.request.path)?;
+    validate_duplicate_content_opened(
+        &opened,
+        &content.request,
+        &content.root_proof,
+        &parent.canonical_path,
+    )?;
+    NativeRenameScanBackend
+        .reopen_chain(
+            &content.parent_chain,
+            &content.root_proof,
+            DirectoryOpenAccess::Metadata,
+        )
+        .map_err(duplicate_content_backend_error)?;
+    drop(opened);
+    drop(parent_directories);
+    validate_duplicate_content_handle(&content.file, &content.request, &content.root_proof)
+}
+
+#[cfg(windows)]
+fn validate_duplicate_content_opened(
+    opened: &OpenedObject<std::fs::File>,
+    request: &DuplicateDiscoveryContentRequest,
+    root: &RootProof,
+    parent_path: &Path,
+) -> std::io::Result<()> {
+    if opened.kind != SnapshotEntryKind::File
+        || opened.reparse_point
+        || opened.cloud_placeholder
+        || opened.identity != request.identity
+        || opened.length != Some(request.length)
+        || opened.modified != Some(request.modified)
+        || batch_rename::compare_paths_windows_ordinal(&opened.canonical_path, &request.path)
+            != std::cmp::Ordering::Equal
+        || !batch_rename::path_is_within_windows_ordinal(
+            &root.canonical_path,
+            &opened.canonical_path,
+        )
+        || opened.canonical_path.parent().is_none_or(|actual_parent| {
+            batch_rename::compare_paths_windows_ordinal(actual_parent, parent_path)
+                != std::cmp::Ordering::Equal
+        })
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "duplicate candidate identity, type, path, size, or modification time changed",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_duplicate_content_handle(
+    file: &std::fs::File,
+    request: &DuplicateDiscoveryContentRequest,
+    root: &RootProof,
+) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    let metadata = file.metadata()?;
+    let attributes = metadata.file_attributes();
+    if !metadata.is_file()
+        || attributes
+            & (windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                | FILE_ATTRIBUTE_OFFLINE_BITS
+                | FILE_ATTRIBUTE_RECALL_ON_OPEN_BITS
+                | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS_BITS)
+            != 0
+        || metadata.len() != request.length
+        || metadata.modified().ok() != Some(request.modified)
+        || native_file_identity(file)? != request.identity
+        || batch_rename::compare_paths_windows_ordinal(&final_path_for_handle(file)?, &request.path)
+            != std::cmp::Ordering::Equal
+        || !batch_rename::path_is_within_windows_ordinal(&root.canonical_path, &request.path)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "duplicate candidate changed during its content read",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn duplicate_content_backend_error(error: BackendFailure) -> std::io::Error {
+    let kind = match error.kind {
+        BackendFailureKind::Cancelled => std::io::ErrorKind::Interrupted,
+        BackendFailureKind::UnsupportedIdentity => std::io::ErrorKind::Unsupported,
+        BackendFailureKind::ResourceLimit => std::io::ErrorKind::OutOfMemory,
+        BackendFailureKind::InvalidRoot | BackendFailureKind::PathEscapedRoot => {
+            std::io::ErrorKind::InvalidData
+        }
+        _ => std::io::ErrorKind::Other,
+    };
+    std::io::Error::new(kind, error.message)
 }
 
 /// Admit one DFF root without enumerating it. Controllers use this short-lived
@@ -8395,6 +8740,81 @@ fn hash_reader(
         ));
     }
     Ok(hasher.finalize().into())
+}
+
+#[cfg(windows)]
+fn open_native_duplicate_content_leaf(path: &Path) -> std::io::Result<OpenedObject<std::fs::File>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_OPEN_NO_RECALL, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::core::PCWSTR;
+
+    dff_cloud_attribute_preflight(true, || query_native_path_attributes(path))
+        .map_err(|error| native_contextual_io_error("DFF content cloud preflight", error))?;
+    let mut wide_path = extended_local_path(path)?;
+    wide_path.push(0);
+    // Unlike directory proof handles, the content lease permits ordinary
+    // writers and deleters. It pins only the opened object, while the caller
+    // independently revalidates that the displayed path still names it.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            FILE_READ_DATA.0 | FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_OPEN_NO_RECALL,
+            HANDLE::default(),
+        )
+    }
+    .map_err(|error| {
+        native_contextual_io_error("CreateFileW(DFF content read)", windows_error_to_io(error))
+    })?;
+    let file = unsafe { std::fs::File::from_raw_handle(handle.0 as RawHandle) };
+    let metadata = file
+        .metadata()
+        .map_err(|error| native_contextual_io_error("File::metadata(DFF content read)", error))?;
+    let attributes = metadata.file_attributes();
+    let reparse_point = attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
+    let cloud_placeholder = has_cloud_placeholder_attributes(attributes);
+    if cloud_placeholder {
+        return Err(native_contextual_io_error(
+            "DFF content cloud recheck",
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "cloud-placeholder object became ineligible during content open",
+            ),
+        ));
+    }
+    let is_directory = attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
+    let kind = if reparse_point {
+        SnapshotEntryKind::Other
+    } else if is_directory {
+        SnapshotEntryKind::Directory
+    } else if metadata.is_file() {
+        SnapshotEntryKind::File
+    } else {
+        SnapshotEntryKind::Other
+    };
+    Ok(OpenedObject {
+        lookup_path: path.to_path_buf(),
+        canonical_path: final_path_for_handle(&file)
+            .map_err(|error| native_contextual_io_error("GetFinalPathNameW(DFF content)", error))?,
+        identity: native_file_identity(&file)
+            .map_err(|error| native_contextual_io_error("FILE_ID_INFO(DFF content)", error))?,
+        kind,
+        reparse_point,
+        length: (!is_directory).then_some(metadata.len()),
+        modified: metadata.modified().ok(),
+        cloud_placeholder,
+        handle: file,
+    })
 }
 
 #[cfg(windows)]

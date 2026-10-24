@@ -2,8 +2,8 @@ use super::discovery::{
     DiscoveryJob, DiscoveryLimits, MAX_ROOT_SELECTION_PATH_BYTES, NativeDiscoveryJob,
 };
 use super::model::{
-    DiscoveryDiagnostic, DiscoveryProgress, DiscoverySnapshot, DiscoveryStatus, RootScan,
-    RootScanStatus, ScanCounts,
+    ContentProgress, DiscoveryDiagnostic, DiscoveryProgress, DiscoverySnapshot, DiscoveryStage,
+    DiscoveryStatus, DuplicateTotals, RootScan, RootScanStatus, ScanCounts,
 };
 use crate::file_operations::ScanCancellation;
 use crate::thread_reaper::{self, ReapPermit};
@@ -286,6 +286,9 @@ impl DuplicateFinderSession {
                 progress: None,
                 roots: Vec::new(),
                 size_groups: Vec::new(),
+                verified_duplicate_groups: Vec::new(),
+                identity_unverified_matches: Vec::new(),
+                duplicate_totals: DuplicateTotals::default(),
                 diagnostics: Vec::new(),
                 diagnostics_truncated: false,
                 counts: ScanCounts::default(),
@@ -512,6 +515,9 @@ fn failed_snapshot(generation: u64, message: String) -> DiscoverySnapshot {
         progress: None,
         roots: Vec::new(),
         size_groups: Vec::new(),
+        verified_duplicate_groups: Vec::new(),
+        identity_unverified_matches: Vec::new(),
+        duplicate_totals: DuplicateTotals::default(),
         diagnostics: vec![DiscoveryDiagnostic {
             root_index: None,
             path: None,
@@ -561,6 +567,7 @@ fn terminal_snapshot_from_current(
         status,
         progress: Some(DiscoveryProgress {
             generation,
+            stage: DiscoveryStage::Traversing,
             roots_total: roots.len(),
             roots_preflighted: roots
                 .iter()
@@ -569,9 +576,13 @@ fn terminal_snapshot_from_current(
             roots_completed: 0,
             current_root: None,
             counts,
+            content: Some(ContentProgress::default()),
         }),
         roots,
         size_groups: Vec::new(),
+        verified_duplicate_groups: Vec::new(),
+        identity_unverified_matches: Vec::new(),
+        duplicate_totals: DuplicateTotals::default(),
         diagnostics: Vec::new(),
         diagnostics_truncated: false,
         counts,

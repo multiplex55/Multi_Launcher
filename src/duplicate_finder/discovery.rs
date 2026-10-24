@@ -1,7 +1,7 @@
 use super::model::{
-    DiscoveryDiagnostic, DiscoveryProgress, DiscoverySnapshot, DiscoveryStatus, FileAlias,
-    IdentityUnverifiedPath, KnownFile, KnownFileIdentity, RootScan, RootScanStatus, ScanCounts,
-    SizeGroup,
+    DiscoveryDiagnostic, DiscoveryProgress, DiscoverySnapshot, DiscoveryStage, DiscoveryStatus,
+    FileAlias, IdentityUnverifiedPath, KnownFile, KnownFileIdentity, RootScan, RootScanStatus,
+    ScanCounts, SizeGroup,
 };
 use crate::batch_rename::{self, ExplicitDirectoryRoot, RootError, SnapshotEntryKind};
 use crate::file_operations::{
@@ -109,6 +109,8 @@ impl DiscoveryAccumulator {
                 .push(IdentityUnverifiedPath {
                     root_index,
                     size_bytes,
+                    observed_identity: identity,
+                    modified,
                     path,
                 });
             return None;
@@ -668,6 +670,7 @@ impl DiscoveryJob for NativeDiscoveryJob {
         };
         snapshot.progress = Some(DiscoveryProgress {
             generation,
+            stage: DiscoveryStage::Traversing,
             roots_total: snapshot.roots.len(),
             roots_preflighted: snapshot
                 .roots
@@ -677,7 +680,20 @@ impl DiscoveryJob for NativeDiscoveryJob {
             roots_completed,
             current_root: None,
             counts,
+            content: None,
         });
+        if cancellation.is_cancelled() {
+            snapshot.status = DiscoveryStatus::Cancelled;
+            return snapshot;
+        }
+        if snapshot.status != DiscoveryStatus::Cancelled {
+            super::content::verify_discovered_content(
+                &mut snapshot,
+                limits,
+                cancellation,
+                progress,
+            );
+        }
         snapshot
     }
 }
@@ -922,11 +938,13 @@ fn publish_progress(
 ) {
     progress(DiscoveryProgress {
         generation,
+        stage: DiscoveryStage::Traversing,
         roots_total,
         roots_preflighted,
         roots_completed,
         current_root,
         counts,
+        content: None,
     });
 }
 

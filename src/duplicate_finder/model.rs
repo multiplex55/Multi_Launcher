@@ -13,6 +13,23 @@ pub(crate) enum DiscoveryStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DiscoveryStage {
+    Traversing,
+    Hashing,
+    Comparing,
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ContentProgress {
+    pub(crate) files_completed: usize,
+    pub(crate) files_total: usize,
+    pub(crate) bytes_processed: u64,
+    /// `None` while the number of exact comparison passes is data-dependent.
+    pub(crate) bytes_total: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RootScanStatus {
     Pending,
     Scanning,
@@ -52,11 +69,13 @@ pub(crate) struct RootScan {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DiscoveryProgress {
     pub(crate) generation: u64,
+    pub(crate) stage: DiscoveryStage,
     pub(crate) roots_total: usize,
     pub(crate) roots_preflighted: usize,
     pub(crate) roots_completed: usize,
     pub(crate) current_root: Option<PathBuf>,
     pub(crate) counts: ScanCounts,
+    pub(crate) content: Option<ContentProgress>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +117,10 @@ pub(crate) struct KnownFile {
 pub(crate) struct IdentityUnverifiedPath {
     pub(crate) root_index: usize,
     pub(crate) size_bytes: u64,
+    /// The observed native value (normally all zero). It is retained only to
+    /// detect a changed observation and is never used to merge these paths.
+    pub(crate) observed_identity: crate::file_operations::NativeFileIdentity,
+    pub(crate) modified: Option<SystemTime>,
     pub(crate) path: PathBuf,
 }
 
@@ -112,6 +135,43 @@ pub(crate) struct SizeGroup {
     pub(crate) unverified_paths: Vec<IdentityUnverifiedPath>,
 }
 
+/// One known identity and the discovery alias that passed content verification.
+/// The alias index points into the immutable `KnownFile::aliases` list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VerifiedKnownFile {
+    pub(crate) known_file_index: usize,
+    pub(crate) alias_index: usize,
+}
+
+/// A content-equal group whose members have distinct, validated native file
+/// identities. Member indexes refer to `DiscoverySnapshot::size_groups` so
+/// the snapshot does not duplicate path metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VerifiedDuplicateGroup {
+    pub(crate) size_group_index: usize,
+    pub(crate) sha256: [u8; 32],
+    pub(crate) known_files: Vec<VerifiedKnownFile>,
+    pub(crate) logical_duplicate_bytes: u64,
+}
+
+/// Content-equal observations where at least one path lacks a reliable file
+/// identity. These are deliberately separate from verified duplicate totals.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IdentityUnverifiedMatch {
+    pub(crate) size_group_index: usize,
+    pub(crate) sha256: [u8; 32],
+    pub(crate) known_files: Vec<VerifiedKnownFile>,
+    pub(crate) unverified_path_indices: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DuplicateTotals {
+    pub(crate) verified_groups: usize,
+    pub(crate) verified_files: usize,
+    pub(crate) logical_duplicate_bytes: u64,
+    pub(crate) identity_unverified_matches: usize,
+}
+
 #[derive(Debug)]
 pub(crate) struct DiscoverySnapshot {
     pub(crate) generation: u64,
@@ -119,6 +179,9 @@ pub(crate) struct DiscoverySnapshot {
     pub(crate) progress: Option<DiscoveryProgress>,
     pub(crate) roots: Vec<RootScan>,
     pub(crate) size_groups: Vec<SizeGroup>,
+    pub(crate) verified_duplicate_groups: Vec<VerifiedDuplicateGroup>,
+    pub(crate) identity_unverified_matches: Vec<IdentityUnverifiedMatch>,
+    pub(crate) duplicate_totals: DuplicateTotals,
     pub(crate) diagnostics: Vec<DiscoveryDiagnostic>,
     pub(crate) diagnostics_truncated: bool,
     pub(crate) counts: ScanCounts,
@@ -132,6 +195,9 @@ impl DiscoverySnapshot {
             progress: None,
             roots: Vec::new(),
             size_groups: Vec::new(),
+            verified_duplicate_groups: Vec::new(),
+            identity_unverified_matches: Vec::new(),
+            duplicate_totals: DuplicateTotals::default(),
             diagnostics: Vec::new(),
             diagnostics_truncated: false,
             counts: ScanCounts::default(),
@@ -144,11 +210,13 @@ impl DiscoverySnapshot {
             status: DiscoveryStatus::Scanning,
             progress: Some(DiscoveryProgress {
                 generation,
+                stage: DiscoveryStage::Traversing,
                 roots_total: roots.len(),
                 roots_preflighted: 0,
                 roots_completed: 0,
                 current_root: None,
                 counts: ScanCounts::default(),
+                content: None,
             }),
             roots: roots
                 .into_iter()
@@ -161,6 +229,9 @@ impl DiscoverySnapshot {
                 })
                 .collect(),
             size_groups: Vec::new(),
+            verified_duplicate_groups: Vec::new(),
+            identity_unverified_matches: Vec::new(),
+            duplicate_totals: DuplicateTotals::default(),
             diagnostics: Vec::new(),
             diagnostics_truncated: false,
             counts: ScanCounts::default(),

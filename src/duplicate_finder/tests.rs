@@ -1,7 +1,7 @@
 use super::discovery::{DiscoveryJob, DiscoveryLimits};
 use super::model::{
-    DiscoveryDiagnostic, DiscoveryProgress, DiscoverySnapshot, DiscoveryStatus, RootScan,
-    RootScanStatus, ScanCounts,
+    ContentProgress, DiscoveryDiagnostic, DiscoveryProgress, DiscoverySnapshot, DiscoveryStage,
+    DiscoveryStatus, DuplicateTotals, RootScan, RootScanStatus, ScanCounts,
 };
 use super::session::{DuplicateFinderSession, DuplicateFinderSessionError};
 use crate::file_operations::ScanCancellation;
@@ -82,11 +82,13 @@ fn completed_snapshot(generation: u64, roots: Vec<PathBuf>) -> DiscoverySnapshot
         status: DiscoveryStatus::Complete,
         progress: Some(DiscoveryProgress {
             generation,
+            stage: DiscoveryStage::Complete,
             roots_total: roots.len(),
             roots_preflighted: roots.len(),
             roots_completed: roots.len(),
             current_root: None,
             counts,
+            content: Some(ContentProgress::default()),
         }),
         roots: roots
             .into_iter()
@@ -99,6 +101,9 @@ fn completed_snapshot(generation: u64, roots: Vec<PathBuf>) -> DiscoverySnapshot
             })
             .collect(),
         size_groups: Vec::new(),
+        verified_duplicate_groups: Vec::new(),
+        identity_unverified_matches: Vec::new(),
+        duplicate_totals: DuplicateTotals::default(),
         diagnostics: Vec::<DiscoveryDiagnostic>::new(),
         diagnostics_truncated: false,
         counts,
