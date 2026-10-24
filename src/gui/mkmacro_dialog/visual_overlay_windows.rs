@@ -31,19 +31,22 @@ use windows::{
             WindowsAndMessaging::{
                 CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
                 DestroyWindow, DispatchMessageW, GWL_EXSTYLE, GWLP_USERDATA, GetCursorPos,
-                GetWindowLongPtrW, GetWindowRect, HTTRANSPARENT, HWND_TOPMOST, IsWindow,
-                IsWindowVisible, LWA_ALPHA, LWA_COLORKEY, MA_NOACTIVATE, MSG, PM_REMOVE,
-                PeekMessageW, RegisterClassW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE,
-                SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
-                ShowWindow, TranslateMessage, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_ERASEBKGND,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCREATE,
-                WM_NCHITTEST, WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+                GetWindowLongPtrW, GetWindowRect, HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOPMOST,
+                IsWindow, IsWindowVisible, LWA_ALPHA, LWA_COLORKEY, MA_NOACTIVATE, MSG, PM_REMOVE,
+                PeekMessageW, RegisterClassW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
+                SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetLayeredWindowAttributes,
+                SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_CAPTURECHANGED,
+                WM_DISPLAYCHANGE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+                WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WNDCLASSW, WS_EX_LAYERED,
+                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
             },
         },
     },
     core::PCWSTR,
 };
+
+#[cfg(feature = "dev-smoke-binaries")]
+use windows::Win32::UI::WindowsAndMessaging::WindowFromPoint;
 
 // COLORREF is 0x00bbggrr. Magenta is reserved exclusively for transparency.
 const TRANSPARENT_KEY: COLORREF = COLORREF(0x00ff00ff);
@@ -1381,6 +1384,76 @@ impl NativeOverlayRenderer {
         }
         Ok(())
     }
+
+    #[cfg(feature = "dev-smoke-binaries")]
+    fn fixture_rectangle_hit_target(
+        &self,
+        operation_id: Option<OperationId>,
+        point: MkPoint,
+    ) -> Result<Option<isize>, VisualOverlayError> {
+        match operation_id {
+            Some(expected)
+                if !self.closing
+                    && self.operation_id == Some(expected)
+                    && matches!(
+                        self.visual.as_ref(),
+                        Some(OverlayVisual::RectanglePicker { .. })
+                    )
+                    && self
+                        .input_shields
+                        .iter()
+                        .all(|window| window.state.operation_id == expected) =>
+            {
+                let physical = displays()?;
+                if physical.is_empty() {
+                    return Err(platform(
+                        "fixture rectangle proof has no active physical monitors",
+                    ));
+                }
+                self.verify_shield_coverage(&physical, "fixture_read_only_input_guard")?;
+                let mut expected_hit = None;
+                for shield in &self.input_shields {
+                    let bounds = shield.state.bounds;
+                    if i64::from(point.x) >= i64::from(bounds.x)
+                        && i64::from(point.x) < bounds.right()
+                        && i64::from(point.y) >= i64::from(bounds.y)
+                        && i64::from(point.y) < bounds.bottom()
+                    {
+                        if expected_hit.replace(shield.hwnd).is_some() {
+                            return Err(platform(
+                                "fixture point is covered by multiple retained shield HWNDs",
+                            ));
+                        }
+                    }
+                }
+                let expected_hit = expected_hit.ok_or_else(|| {
+                    platform("fixture point is outside the current rectangle shields")
+                })?;
+                let actual_hit = unsafe {
+                    WindowFromPoint(POINT {
+                        x: point.x,
+                        y: point.y,
+                    })
+                };
+                if actual_hit != expected_hit || !unsafe { IsWindow(actual_hit) }.as_bool() {
+                    return Err(platform(format!(
+                        "fixture hit owner changed: expected current shield {expected_hit:?}, got {actual_hit:?}"
+                    )));
+                }
+                Ok(Some(expected_hit.0 as isize))
+            }
+            None if self.operation_id.is_none()
+                && self.visual.is_none()
+                && !self.closing
+                && self.input_shields.is_empty() =>
+            {
+                Ok(None)
+            }
+            _ => Err(platform(
+                "fixture renderer no longer owns the requested rectangle operation",
+            )),
+        }
+    }
 }
 
 impl OverlayRenderer for NativeOverlayRenderer {
@@ -1933,6 +2006,15 @@ impl OverlayRenderer for NativeOverlayRenderer {
     }
     fn close_after_release(&mut self) {
         self.destroy_windows();
+    }
+
+    #[cfg(feature = "dev-smoke-binaries")]
+    fn fixture_rectangle_hit_target(
+        &self,
+        operation_id: Option<OperationId>,
+        point: MkPoint,
+    ) -> Result<Option<isize>, VisualOverlayError> {
+        NativeOverlayRenderer::fixture_rectangle_hit_target(self, operation_id, point)
     }
 }
 fn destroy_overlay_window(window: OverlayWindow) {
@@ -2560,9 +2642,11 @@ pub(super) fn run_passive_overlay_smoke_test() -> Result<(), VisualOverlayError>
     Ok(())
 }
 
+#[cfg(feature = "dev-smoke-binaries")]
 #[path = "visual_overlay_rectangle_smoke.rs"]
 mod rectangle_input_smoke;
 
+#[cfg(feature = "dev-smoke-binaries")]
 pub(super) fn run_rectangle_input_isolation_smoke_test() -> Result<(), VisualOverlayError> {
     rectangle_input_smoke::run()
 }
@@ -2586,63 +2670,207 @@ pub(super) fn run_rectangle_shield_probe() -> Result<(), VisualOverlayError> {
         },
     };
     let mut renderer = NativeOverlayRenderer::default();
-    renderer.show(1, &visual, false)?;
-    for (monitor, window) in renderer.input_shields.iter().enumerate() {
-        eprintln!(
-            "shield-probe: monitor={} expected={:?} probe={:?}",
-            monitor + 1,
-            window.state.bounds,
-            probe_shield(window.hwnd)
+    let mut handles = Vec::new();
+    let mut phase = "native_startup";
+    let outcome = (|| {
+        renderer.show(1, &visual, false)?;
+        handles.extend(
+            renderer
+                .input_shields
+                .iter()
+                .chain(&renderer.windows)
+                .chain(&renderer.passive_edges)
+                .chain(&renderer.passive_badges)
+                .chain(renderer.tooltip.iter())
+                .map(|window| window.hwnd),
         );
-    }
-    // Deliberately uncover exactly one column on this owned window. Neither
-    // startup nor topology repair may accept this as full monitor coverage.
-    let window = renderer
-        .input_shields
-        .first()
-        .ok_or_else(|| platform("Probe missing first shield"))?;
-    let (width, height) = win32_dimensions(window.state.bounds, "probe shield")?;
-    if width <= 1 {
-        return Err(platform("Probe monitor is too narrow"));
-    }
-    unsafe {
-        SetWindowPos(
-            window.hwnd,
-            HWND_TOPMOST,
-            window.state.bounds.x,
-            window.state.bounds.y,
-            width - 1,
-            height,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW,
-        )
-    }
-    .map_err(|error| platform(format!("Probe shield fault placement: {error}")))?;
-    match renderer.verify_shield_coverage(&bounds, "owned_probe_fault") {
-        Err(error) if error.message.contains("position/size mismatch") => {
-            eprintln!("shield-probe: strict rejection: {error}")
+        handles.sort_by_key(|hwnd| hwnd.0 as usize);
+        handles.dedup();
+        for (monitor, window) in renderer.input_shields.iter().enumerate() {
+            eprintln!(
+                "shield-probe: monitor={} hwnd={:?} expected={:?} probe={:?}",
+                monitor + 1,
+                window.hwnd,
+                window.state.bounds,
+                probe_shield(window.hwnd)
+            );
         }
-        Err(error) => return Err(error),
-        Ok(()) => return Err(platform("Probe incorrectly accepted one uncovered column")),
+        renderer.verify_shield_coverage(&bounds, "fixture_probe_initial")?;
+
+        // Deliberately introduce a one-column geometry fault. The strict
+        // production gate must identify exactly RectMismatch; this fixture
+        // restores only its own HWND and never runs production topology repair.
+        phase = "fixture_geometry_fault";
+        let shield = renderer
+            .input_shields
+            .first()
+            .ok_or_else(|| platform("Probe missing first shield"))?;
+        let hwnd = shield.hwnd;
+        let expected = shield.state.bounds;
+        let (width, height) = win32_dimensions(expected, "probe shield")?;
+        if width <= 1 {
+            return Err(platform("Probe monitor is too narrow"));
+        }
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                expected.x,
+                expected.y,
+                width - 1,
+                height,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
+        }
+        .map_err(|error| platform(format!("Probe shield fault placement: {error}")))?;
+        let fault_probe = probe_shield(hwnd);
+        let fault_reasons = fault_probe.failures(expected);
+        if fault_reasons.as_slice() != [ShieldFailure::RectMismatch] {
+            return Err(platform(format!(
+                "fixture geometry fault did not produce only RectMismatch: actual={:?}, reasons={fault_reasons:?}",
+                fault_probe.actual
+            )));
+        }
+        match renderer.verify_shield_coverage(&bounds, "fixture_expected_rect_mismatch") {
+            Err(error) if error.message.contains("position/size mismatch") => {
+                eprintln!(
+                    "shield-probe: expected strict rejection reasons={fault_reasons:?}; {error}"
+                );
+            }
+            Err(error) => return Err(error),
+            Ok(()) => {
+                return Err(platform(
+                    "production shield gate accepted fixture RectMismatch",
+                ));
+            }
+        }
+
+        phase = "fixture_geometry_restore";
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                HWND::default(),
+                expected.x,
+                expected.y,
+                width,
+                height,
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
+            )
+        }
+        .map_err(|error| platform(format!("fixture-owned geometry restore failed: {error}")))?;
+        let restored = probe_shield(hwnd);
+        if restored.actual != Some(expected) || !restored.failures(expected).is_empty() {
+            return Err(platform(format!(
+                "fixture geometry restore was not exact: expected={expected:?}, actual={:?}, reasons={:?}",
+                restored.actual,
+                restored.failures(expected)
+            )));
+        }
+        renderer.verify_shield_coverage(&bounds, "fixture_geometry_restored")?;
+        eprintln!(
+            "shield-probe: fixture-only geometry restoration verified unchanged bounds={expected:?}"
+        );
+
+        // Exercise only the existing bounded TOPMOST recovery at unchanged
+        // geometry. The strict initial probe must report no other defect, and
+        // the recovery closure is counted so this cannot silently retry.
+        phase = "topmost_only_fault";
+        let (width, height) = win32_dimensions(expected, "topmost-only probe")?;
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+            )
+        }
+        .map_err(|error| platform(format!("fixture TOPMOST demotion failed: {error}")))?;
+        let initial = probe_shield(hwnd);
+        let initial_reasons = initial.failures(expected);
+        if initial.actual != Some(expected)
+            || initial_reasons.as_slice() != [ShieldFailure::TopmostMissing]
+        {
+            return Err(platform(format!(
+                "TOPMOST-only fault was not isolated: actual={:?}, reasons={initial_reasons:?}",
+                initial.actual
+            )));
+        }
+        eprintln!(
+            "shield-probe: TOPMOST recovery precondition hwnd={hwnd:?} bounds={expected:?} reasons={initial_reasons:?}"
+        );
+        phase = "bounded_topmost_recovery";
+        let mut reassertions = 0usize;
+        let recovered = probe_shield_with_bounded_topmost_reassert(
+            expected,
+            (width, height),
+            || probe_shield(hwnd),
+            |bounds, dimensions| {
+                reassertions += 1;
+                reassert_input_shield_topmost(hwnd, bounds, dimensions)
+            },
+        )
+        .map_err(|failure| {
+            platform(format!(
+                "bounded TOPMOST recovery failed: initial={:?}, reasons={:?}, attempted={}",
+                failure.initial_probe, failure.reasons, failure.reassertion_attempted
+            ))
+        })?;
+        if reassertions != 1
+            || recovered.actual != Some(expected)
+            || !recovered.failures(expected).is_empty()
+        {
+            return Err(platform(format!(
+                "bounded TOPMOST recovery evidence invalid: reassertions={reassertions}, actual={:?}, reasons={:?}",
+                recovered.actual,
+                recovered.failures(expected)
+            )));
+        }
+        renderer.verify_shield_coverage(&bounds, "fixture_topmost_recovered")?;
+        eprintln!(
+            "shield-probe: bounded recovery verified unchanged bounds={expected:?} reassertions={reassertions}"
+        );
+        Ok(())
+    })();
+
+    if handles.is_empty() {
+        handles.extend(
+            renderer
+                .input_shields
+                .iter()
+                .chain(&renderer.windows)
+                .chain(&renderer.passive_edges)
+                .chain(&renderer.passive_badges)
+                .chain(renderer.tooltip.iter())
+                .map(|window| window.hwnd),
+        );
+        handles.sort_by_key(|hwnd| hwnd.0 as usize);
+        handles.dedup();
     }
-    renderer.refresh_shield_coverage()?;
-    eprintln!(
-        "shield-probe: topology repair acknowledged; retained shields={}",
-        renderer.input_shields.len()
-    );
-    let handles: Vec<_> = renderer
-        .input_shields
-        .iter()
-        .chain(&renderer.windows)
-        .chain(renderer.tooltip.iter())
-        .map(|window| window.hwnd)
-        .collect();
     renderer.close();
-    if handles
+    drop(renderer);
+    let survivors: Vec<_> = handles
         .iter()
-        .any(|hwnd| unsafe { IsWindow(*hwnd) }.as_bool())
-    {
-        return Err(platform("Probe cleanup left an owned HWND alive"));
+        .copied()
+        .filter(|hwnd| unsafe { IsWindow(*hwnd) }.as_bool())
+        .collect();
+    eprintln!(
+        "shield-probe: status={} phase={} owned_hwnds={:?} destroyed={} surviving_hwnds={survivors:?}",
+        if outcome.is_ok() {
+            "complete"
+        } else {
+            "failed"
+        },
+        phase,
+        handles,
+        survivors.is_empty()
+    );
+    if !survivors.is_empty() {
+        return Err(platform(format!(
+            "Probe cleanup left owned HWNDs alive: {survivors:?}"
+        )));
     }
-    eprintln!("shield-probe: startup/repair acknowledged; all owned HWNDs destroyed");
-    Ok(())
+    outcome
 }

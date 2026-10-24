@@ -902,11 +902,11 @@ pub fn run_passive_overlay_smoke_test() -> Result<(), VisualOverlayError> {
 }
 
 /// Owned Win32 receiver fixture; SendInput proves injected routing, not hardware input.
-#[cfg(windows)]
+#[cfg(all(windows, feature = "dev-smoke-binaries"))]
 pub fn run_rectangle_input_isolation_smoke_test() -> Result<(), VisualOverlayError> {
     native::run_rectangle_input_isolation_smoke_test()
 }
-#[cfg(not(windows))]
+#[cfg(not(all(windows, feature = "dev-smoke-binaries")))]
 pub fn run_rectangle_input_isolation_smoke_test() -> Result<(), VisualOverlayError> {
     Err(VisualOverlayError::unsupported())
 }
@@ -1109,6 +1109,17 @@ pub trait OverlayRenderer: Send {
     fn close_after_release(&mut self) {
         self.close();
     }
+    /// Fixture-only read-only check for the exact native rectangle shield
+    /// which currently owns a point. It deliberately does not poll, repair,
+    /// create, or focus windows.
+    #[cfg(feature = "dev-smoke-binaries")]
+    fn fixture_rectangle_hit_target(
+        &self,
+        _operation_id: Option<OperationId>,
+        _point: MkPoint,
+    ) -> Result<Option<isize>, VisualOverlayError> {
+        Err(VisualOverlayError::unsupported())
+    }
 }
 
 pub trait OverlayClock: Send {
@@ -1176,6 +1187,35 @@ impl VisualOverlayController {
             .as_ref()
             .map(|(id, _, _)| *id)
             .or(self.operation_id)
+    }
+    /// Read-only native ownership evidence used by the opt-in rectangle
+    /// isolation fixture. The active operation must still be the same
+    /// rectangle picker; an idle proof is accepted only after its renderer
+    /// has retired all rectangle shields.
+    #[cfg(feature = "dev-smoke-binaries")]
+    pub(crate) fn fixture_rectangle_hit_target(
+        &self,
+        operation_id: Option<OperationId>,
+        point: MkPoint,
+    ) -> Result<Option<isize>, VisualOverlayError> {
+        match (operation_id, &self.state) {
+            (
+                Some(expected),
+                VisualOverlayState::PickingRectangle {
+                    operation_id: current,
+                    ..
+                },
+            ) if expected == *current && self.operation_id == Some(expected) => {}
+            (None, VisualOverlayState::Idle) if self.operation_id.is_none() => {}
+            _ => {
+                return Err(VisualOverlayError {
+                    kind: OverlayErrorKind::Platform,
+                    message: "fixture rectangle operation identity is not current".into(),
+                });
+            }
+        }
+        self.renderer
+            .fixture_rectangle_hit_target(operation_id, point)
     }
     fn allocate(&mut self) -> OperationId {
         let id = self.next_id;
