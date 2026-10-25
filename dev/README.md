@@ -16,9 +16,11 @@ must be prepared separately; this task's paired warm no-op measurements found
 For opt-in benchmark probes and bounded Job Object execution, see the
 [performance harness](perf_harness/README.md).
 
-Use `run_owned_process.ps1` for bounded test executables and native probes.
-Requires Windows, PowerShell 7, and access to process inventory and Application
-events (elevation may be needed). Use a fresh evidence directory for each run.
+Use `run_owned_process.ps1` for bounded native executables. Requires Windows
+and PowerShell 7. The runner creates the process suspended, verifies assignment
+to a kill-on-close Job Object, and only then resumes it; it does not scan or kill
+processes by name. It does not query Application event providers. Use a
+fresh evidence directory for each run.
 
 ```powershell
 & .\dev\run_owned_process.ps1 `
@@ -29,25 +31,25 @@ events (elevation may be needed). Use a fresh evidence directory for each run.
 
 The native OCR regression requires an installed English OCR pack and a working
 user-profile recognizer. Compile with a separately contained `cargo test --lib
---no-run` first. Launch the compiled test binary directly when its exact PID
-must be recorded; 200 ms descendant sampling can miss short-lived test children
-of a runner such as Nextest.
+--no-run` first. The runner records process identities from its verified Job
+Object, including short-lived descendants while they remain active.
 
-`Start-Process` joins the argument array into a Windows command line. Include
-literal double quotes around arguments containing spaces or expressions that
-need quoting, for example `@('nextest', 'run', '--lib', '-E', '"test(/^ocr::job::tests::/)"')`.
-This script does not reinterpret arguments through another shell.
+`-ArgumentList` accepts raw native arguments and keeps spaces, embedded quotes,
+and filter punctuation in their original argument. The legacy `-Arguments`
+parameter remains pre-encoded for existing callers such as `dev/test_perf`; do
+not pass raw strings to that compatibility parameter when they require quoting.
 
 Windows start hidden by default. Use `-WindowStyle Normal` only for explicitly
-requested interactive verification. Timeout, an owned crash reporter, or an
-inventory failure triggers cleanup of the launched process tree and verified
-recorded identities. A reporter whose target identity cannot be verified is
-logged as uncertain and left alone. No processes are killed by name.
+requested interactive verification. Timeout or an ownership-monitor failure
+triggers cleanup of the verified Job Object and recorded identities. No
+processes are killed by name.
 
-Evidence includes stdout/stderr, PID/creation/parent records, relevant Application
-Error/WER events, termination/errors, post-cleanup identity checks, and
-`result.json`. Event reporting may be delayed or unavailable; an empty event log
-does not disprove a native crash. Unknown/alive cleanup states produce failure.
+Evidence includes stdout/stderr, PID/creation records, execution/cleanup errors,
+post-cleanup identity checks, and `result.json`. For compatibility,
+`windows-events.json` remains an empty JSON array; `EventCollectionStatus` is
+`NotCollected` with an explanatory `EventCollectionReason`. This means events
+were not queried, not that no crash occurred. Optional event providers cannot
+delay process-result publication. Unknown/alive cleanup states produce failure.
 Exit 0 means successful execution and verified recorded-process cleanup; exit 1
 means failure, with the executable's actual exit code preserved in `result.json`.
 Log-storage failures are reported but cannot guarantee durable evidence.

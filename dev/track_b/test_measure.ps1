@@ -27,7 +27,9 @@ param(
     [int]$ExitCode,
     [string]$TimingPath,
     [string]$Value,
-    [string]$TargetFlag
+    [string]$TargetFlag,
+    [string]$QuotedValue,
+    [string]$FilterValue
 )
 if ($Mode -eq 'update-timing') {
     [IO.File]::WriteAllText($TimingPath, 'updated by this invocation')
@@ -37,9 +39,12 @@ $result = [ordered]@{
     EnvironmentValue = [Environment]::GetEnvironmentVariable($EnvName, 'Process')
     Value = $Value
     TargetFlag = $TargetFlag
+    QuotedValue = $QuotedValue
+    FilterValue = $FilterValue
 }
 [Console]::Out.WriteLine((ConvertTo-Json -InputObject $result -Compress))
 [Console]::Error.WriteLine('fixture stderr line')
+if ($Mode -eq 'sleep') { Start-Sleep -Seconds 30 }
 exit $ExitCode
 '@ | Set-Content -LiteralPath $fixturePath -Encoding utf8NoBOM
 [IO.File]::WriteAllText($timingPath, 'old timing report')
@@ -50,12 +55,15 @@ $initialLocation = (Get-Location).Path
 [Environment]::SetEnvironmentVariable($environmentName, 'parent value', 'Process')
 
 function Invoke-TestMeasurement {
-    param([string]$Scenario, [string]$Mode, [int]$ChildExitCode, [switch]$UnsetTargetOverride)
+    param([string]$Scenario, [string]$Mode, [int]$ChildExitCode, [int]$Timeout = 10, [switch]$UnsetTargetOverride)
+    $quotedValue = 'embedded "quote" stays inside one argument'
+    $filterValue = "module::filter[2], punctuation + && text"
     $arguments = @(
         '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $fixturePath,
         '-EnvName', $environmentName, '-Mode', $Mode, '-ExitCode', [string]$ChildExitCode,
         '-TimingPath', $timingPath, '-Value', 'one argument with spaces',
-        '-TargetFlag', '--target value with spaces'
+        '-TargetFlag', '--target value with spaces', '-QuotedValue', $quotedValue,
+        '-FilterValue', $filterValue
     )
     $overrides = @{ $environmentName = 'child value' }
     $targetDirectory = Join-Path $workingDirectory 'target cache'
@@ -81,7 +89,10 @@ function Invoke-TestMeasurement {
         -EnvironmentOverrides $overrides `
         -FixtureMetadata @{ kind = 'controlled-self-test'; scenario = $Scenario } `
         -FixturePaths @($fixturePath) `
-        -CargoTimingsPath $timingPath
+        -CargoTimingsPath $timingPath `
+        -Stage 'test' `
+        -TimeoutSeconds $Timeout `
+        -CleanupTimeoutSeconds 3
     return [pscustomobject]@{ Record = $measurement; Arguments = $arguments }
 }
 
@@ -102,11 +113,18 @@ try {
         [Environment]::SetEnvironmentVariable('CARGO_TARGET_DIR', $originalCargoTargetDirectory, 'Process')
     }
     $failed = Invoke-TestMeasurement -Scenario 'native exit 7' -Mode 'failure' -ChildExitCode 7
+    $timedOut = Invoke-TestMeasurement -Scenario 'native timeout' -Mode 'sleep' -ChildExitCode 0 -Timeout 1
     $updatedTiming = Invoke-TestMeasurement -Scenario 'updated timing report' -Mode 'update-timing' -ChildExitCode 0
 
     foreach ($run in @($firstNoOp, $secondNoOp)) {
         $record = $run.Record
         if (!$record.Succeeded -or $record.ExitCode -ne 0) { throw 'The zero-exit fixture was not reported as successful.' }
+        if ($record.Stage -ne 'test' -or !$record.DeadlineUtc -or !$record.CleanupVerified -or !$record.OutputDrainVerified) {
+            throw 'The measurement omitted its bounded execution stage, deadline, cleanup, or output-drain receipt.'
+        }
+        if (@($record.PostCleanup | Where-Object { $_.State -in @('Alive', 'Unknown') }).Count -gt 0) {
+            throw 'A successful measurement retained an owned process identity.'
+        }
         if ($record.ArgumentList.Count -ne $run.Arguments.Count) { throw 'The recorded argument count changed.' }
         for ($index = 0; $index -lt $run.Arguments.Count; $index++) {
             Assert-Equal -Actual $record.ArgumentList[$index] -Expected $run.Arguments[$index] -Label "Argument $index"
@@ -117,6 +135,8 @@ try {
         Assert-Equal -Actual $childOutput.EnvironmentValue -Expected 'child value' -Label 'Child environment override'
         Assert-Equal -Actual $childOutput.Value -Expected 'one argument with spaces' -Label 'Argument containing spaces'
         Assert-Equal -Actual $childOutput.TargetFlag -Expected '--target value with spaces' -Label 'Target flag containing spaces'
+        Assert-Equal -Actual $childOutput.QuotedValue -Expected 'embedded "quote" stays inside one argument' -Label 'Argument containing an embedded quote'
+        Assert-Equal -Actual $childOutput.FilterValue -Expected 'module::filter[2], punctuation + && text' -Label 'Filter punctuation argument'
         if ($record.SourceSha -notmatch '^[0-9a-f]{40}$' -or $record.DirtyFiles -isnot [array]) { throw 'Source provenance was not recorded.' }
         if ($record.Fixtures.Count -ne 1 -or $record.Fixtures[0].Sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Fixture hash metadata was not recorded.' }
         if ($null -ne $record.CargoTimings.SnapshotPath -and (Test-Path -LiteralPath $record.CargoTimings.SnapshotPath)) {
@@ -130,6 +150,16 @@ try {
         throw 'Repeated runs reused output paths.'
     }
     if ($failed.Record.Succeeded -or $failed.Record.ExitCode -ne 7) { throw 'Native exit 7 was not propagated as a failed measurement.' }
+    if ($failed.Record.ExecutionReason -ne 'failed exit' -or !$failed.Record.CleanupVerified -or !$failed.Record.OutputDrainVerified) {
+        throw 'The exit-7 measurement did not preserve its failure reason and cleanup receipt.'
+    }
+    if ($timedOut.Record.Succeeded -or !$timedOut.Record.TimedOut -or $timedOut.Record.ExecutionReason -ne 'timeout' -or
+        !$timedOut.Record.CleanupVerified -or !$timedOut.Record.OutputDrainVerified) {
+        throw 'The timed-out measurement was not reported as a bounded, cleaned-up failure.'
+    }
+    if (@($timedOut.Record.PostCleanup | Where-Object { $_.State -in @('Alive', 'Unknown') }).Count -gt 0) {
+        throw 'The timed-out measurement retained an owned process identity.'
+    }
     Assert-Equal -Actual $unsetTargetOverride.Record.TargetDirectory `
         -Expected (Join-Path $workingDirectory 'target') -Label 'Unset CARGO_TARGET_DIR resolution'
     Assert-Equal -Actual $unsetTargetOverride.Record.TargetDirectorySource `
@@ -146,7 +176,7 @@ try {
     [pscustomobject]@{
         Result = 'PASS'
         EvidenceDirectory = $evidenceRoot
-        Cases = @('exit 0', 'exit 7', 'paths and arguments with spaces', 'environment and location restoration', 'unique repeated no-op paths', 'stale timing suppression', 'updated timing snapshot')
+        Cases = @('exit 0', 'exit 7', 'timeout and cleanup receipt', 'paths and arguments with spaces, quotes, and filter punctuation', 'environment and location restoration', 'unique repeated no-op paths', 'stale timing suppression', 'updated timing snapshot')
     }
 }
 finally {

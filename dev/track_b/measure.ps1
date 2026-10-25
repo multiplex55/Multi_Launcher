@@ -4,7 +4,9 @@
 Runs one native executable and writes a unique Track B measurement record.
 
 .DESCRIPTION
-Arguments are passed as a .NET ArgumentList; no command string is evaluated.
+Arguments are passed as a .NET ArgumentList through the checked owned-process
+runner; no command string is evaluated. The run has a finite stage deadline and
+records cleanup, identity and output-capture outcomes with the measurement.
 The script returns a record object and never exits the calling PowerShell host.
 Callers must inspect .Succeeded / .ExitCode. Environment overrides and the
 PowerShell location are restored before the result is returned.
@@ -39,10 +41,14 @@ param(
     [ValidateSet('unknown', 'yes', 'no')][string]$CompilationObserved = 'unknown',
     [ValidateSet('unknown', 'yes', 'no')][string]$BinaryLinkObserved = 'unknown',
     [ValidateSet('unknown', 'fresh', 'not-fresh')][string]$CargoFreshness = 'unknown',
-    [string]$WorkEvidenceNote
+    [string]$WorkEvidenceNote,
+    [ValidateSet('unspecified', 'compile', 'test', 'native', 'provenance')][string]$Stage = 'unspecified',
+    [ValidateRange(1, 86400)][int]$TimeoutSeconds = 1800,
+    [ValidateRange(1, 60)][int]$CleanupTimeoutSeconds = 5
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\workflows\owned_process.ps1')
 
 function Test-PathWithinDirectory {
     param([string]$Candidate, [string]$Directory)
@@ -66,38 +72,36 @@ function Resolve-NativeExecutable {
 }
 
 function Invoke-TextProcess {
-    param([string]$ExecutablePath, [string[]]$Arguments)
-    $startInfo = [Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $ExecutablePath
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    foreach ($argument in $Arguments) {
-        if ($null -eq $argument) { throw 'Native argument arrays cannot contain null values.' }
-        $startInfo.ArgumentList.Add([string]$argument)
-    }
-
-    $process = [Diagnostics.Process]::new()
+    param(
+        [string]$ExecutablePath,
+        [string[]]$Arguments,
+        [string]$WorkingDirectory = (Get-Location).Path,
+        [ValidateRange(1, 120)][int]$TimeoutSeconds = 15
+    )
+    $helperDirectory = Join-Path ([IO.Path]::GetTempPath()) ('measure-provenance-' + [guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($helperDirectory) | Out-Null
+    $stdoutPath = Join-Path $helperDirectory 'stdout.log'
+    $stderrPath = Join-Path $helperDirectory 'stderr.log'
     try {
-        $process.StartInfo = $startInfo
-        if (!$process.Start()) { throw "Could not start executable: $ExecutablePath" }
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
-        $stdout = $stdoutTask.GetAwaiter().GetResult()
-        $stderr = $stderrTask.GetAwaiter().GetResult()
-        return [pscustomobject]@{ ExitCode = $process.ExitCode; Stdout = $stdout; Stderr = $stderr }
+        $result = Invoke-CheckedOwnedProcess -Executable $ExecutablePath -ArgumentList @($Arguments) `
+            -WorkingDirectory $WorkingDirectory -Stage 'provenance' -TimeoutSeconds $TimeoutSeconds `
+            -CleanupTimeoutSeconds 3 -StdoutPath $stdoutPath -StderrPath $stderrPath
+        $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { [IO.File]::ReadAllText($stdoutPath) } else { '' }
+        $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { [IO.File]::ReadAllText($stderrPath) } else { '' }
+        if (!$result.Succeeded) {
+            throw "Provenance command failed or could not be verified ($($result.Reason), exit $($result.ExitCode)): $ExecutablePath"
+        }
+        return [pscustomobject]@{ ExitCode = $result.ExitCode; Stdout = $stdout; Stderr = $stderr }
     }
     finally {
-        $process.Dispose()
+        try { [IO.Directory]::Delete($helperDirectory, $true) } catch { }
     }
 }
 
 function Invoke-GitText {
     param([string]$GitPath, [string]$Repository, [string[]]$GitArguments)
     $arguments = @('-C', $Repository) + $GitArguments
-    $result = Invoke-TextProcess -ExecutablePath $GitPath -Arguments $arguments
+    $result = Invoke-TextProcess -ExecutablePath $GitPath -Arguments $arguments -WorkingDirectory $Repository
     if ($result.ExitCode -ne 0) { throw "git $($GitArguments -join ' ') failed: $($result.Stderr.Trim())" }
     return $result.Stdout.TrimEnd("`r", "`n")
 }
@@ -281,34 +285,19 @@ foreach ($name in $environmentNames) {
     $environmentBefore[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
 
-$processStartInfo = [Diagnostics.ProcessStartInfo]::new()
-$processStartInfo.FileName = $resolvedExecutable
-$processStartInfo.WorkingDirectory = $workingPath
-$processStartInfo.UseShellExecute = $false
-$processStartInfo.CreateNoWindow = $true
-$processStartInfo.RedirectStandardOutput = $true
-$processStartInfo.RedirectStandardError = $true
-foreach ($argument in $ArgumentList) {
-    if ($null -eq $argument) { throw 'Native argument arrays cannot contain null values.' }
-    $processStartInfo.ArgumentList.Add([string]$argument)
-}
-
-$process = [Diagnostics.Process]::new()
-$stdoutStream = $null
-$stderrStream = $null
+$ownedRun = $null
 $locationPushed = $false
 $processStarted = $false
 $executionCompleted = $false
 $nativeExitCode = $null
 $runnerError = $null
 $restorationErrors = [System.Collections.Generic.List[string]]::new()
+$recordingErrors = [System.Collections.Generic.List[string]]::new()
 $watch = $null
 $startedUtc = $null
 $endedUtc = $null
 
 try {
-    $stdoutStream = [IO.File]::Open($stdoutPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
-    $stderrStream = [IO.File]::Open($stderrPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
     Push-Location -LiteralPath $workingPath
     $locationPushed = $true
     foreach ($name in $environmentNames) {
@@ -321,41 +310,25 @@ try {
         }
     }
 
-    $process.StartInfo = $processStartInfo
     $startedUtc = [DateTimeOffset]::UtcNow
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    if (!$process.Start()) { throw "Could not start native executable: $resolvedExecutable" }
-    $processStarted = $true
-    $stdoutCopy = $process.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
-    $stderrCopy = $process.StandardError.BaseStream.CopyToAsync($stderrStream)
-    $process.WaitForExit()
-    $nativeExitCode = $process.ExitCode
-    [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdoutCopy, $stderrCopy))
-    $executionCompleted = $true
+    $ownedRun = Invoke-CheckedOwnedProcess -Executable $resolvedExecutable -ArgumentList @($ArgumentList) `
+        -WorkingDirectory $workingPath -Stage $Stage -TimeoutSeconds $TimeoutSeconds `
+        -CleanupTimeoutSeconds $CleanupTimeoutSeconds -StdoutPath $stdoutPath -StderrPath $stderrPath
+    $processStarted = $ownedRun.ProcessStarted
+    $executionCompleted = $ownedRun.ProcessExited -and $ownedRun.CleanupVerified -and $ownedRun.OutputDrainVerified
+    $nativeExitCode = $ownedRun.ExitCode
+    foreach ($errorText in $ownedRun.RecordingErrors) { $recordingErrors.Add([string]$errorText) }
+    foreach ($errorText in $ownedRun.CleanupErrors) { $recordingErrors.Add([string]$errorText) }
+    if ($ownedRun.Reason -notin @('completed', 'failed exit')) { $runnerError = [string]$ownedRun.Reason }
 }
 catch {
     $runnerError = '{0}: {1}' -f $_.Exception.GetType().FullName, $_.Exception.Message
-    if ($processStarted) {
-        try {
-            if (!$process.HasExited) {
-                $process.Kill($true)
-                $process.WaitForExit()
-            }
-            if ($null -eq $nativeExitCode -and $process.HasExited) { $nativeExitCode = $process.ExitCode }
-        }
-        catch { $restorationErrors.Add(('Process cleanup: {0}' -f $_.Exception.Message)) }
-    }
 }
 finally {
     if ($watch) {
         $watch.Stop()
         $endedUtc = [DateTimeOffset]::UtcNow
-    }
-    foreach ($stream in @($stdoutStream, $stderrStream)) {
-        if ($null -ne $stream) {
-            try { $stream.Dispose() }
-            catch { $restorationErrors.Add(('Output stream close: {0}' -f $_.Exception.Message)) }
-        }
     }
     foreach ($name in $environmentNames) {
         try { [Environment]::SetEnvironmentVariable($name, $environmentBefore[$name], 'Process') }
@@ -365,7 +338,6 @@ finally {
         try { Pop-Location }
         catch { $restorationErrors.Add(('Location restore: {0}' -f $_.Exception.Message)) }
     }
-    $process.Dispose()
 }
 
 $timingDisposition = if (!$timingPath) { 'not-configured' } else { 'not-created' }
@@ -402,13 +374,19 @@ if ($timingPath) {
 }
 
 $wallSeconds = if ($watch) { [Math]::Round($watch.Elapsed.TotalSeconds, 6) } else { $null }
-$succeeded = $processStarted -and $executionCompleted -and $null -eq $runnerError -and $nativeExitCode -eq 0 -and $restorationErrors.Count -eq 0
+$succeeded = $processStarted -and $executionCompleted -and $null -eq $runnerError -and $null -ne $ownedRun -and
+    $ownedRun.Succeeded -and $nativeExitCode -eq 0 -and $restorationErrors.Count -eq 0 -and $recordingErrors.Count -eq 0
 $targetDirectoryIsExplicit = ![string]::IsNullOrWhiteSpace($TargetDirectory)
 $record = [pscustomobject][ordered]@{
     ScenarioId = $ScenarioId
     StartedUtc = if ($startedUtc) { $startedUtc.ToString('o') } else { $null }
     EndedUtc = if ($endedUtc) { $endedUtc.ToString('o') } else { $null }
     WallSeconds = $wallSeconds
+    Stage = $Stage
+    DeadlineUtc = if ($ownedRun) { $ownedRun.DeadlineUtc } else { $null }
+    TimeoutSeconds = $TimeoutSeconds
+    TimeoutReason = if ($ownedRun) { $ownedRun.TimeoutReason } else { $null }
+    TimedOut = if ($ownedRun) { $ownedRun.TimedOut } else { $false }
     TimingMeaning = 'Native process wall time; includes process startup and exit wait.'
     LinkerDuration = 'NOT_MEASURED_BY_PROCESS_WALL_TIME'
     ExecutableInput = $Executable
@@ -424,6 +402,14 @@ $record = [pscustomobject][ordered]@{
     ExecutionCompleted = $executionCompleted
     Succeeded = $succeeded
     RunnerError = $runnerError
+    ExecutionReason = if ($ownedRun) { $ownedRun.Reason } else { $runnerError }
+    CleanupVerified = if ($ownedRun) { $ownedRun.CleanupVerified } else { $false }
+    CleanupErrors = if ($ownedRun) { @($ownedRun.CleanupErrors) } else { @() }
+    OutputDrainVerified = if ($ownedRun) { $ownedRun.OutputDrainVerified } else { $false }
+    OwnedProcesses = if ($ownedRun) { @($ownedRun.OwnedProcesses) } else { @() }
+    PostCleanup = if ($ownedRun) { @($ownedRun.PostCleanup) } else { @() }
+    OutputBytes = if ($ownedRun) { [pscustomobject]@{ StdoutRead = $ownedRun.StdoutBytesRead; StdoutRecorded = $ownedRun.StdoutBytesRecorded; StderrRead = $ownedRun.StderrBytesRead; StderrRecorded = $ownedRun.StderrBytesRecorded } } else { $null }
+    RecordingErrors = @($recordingErrors)
     RestorationErrors = @($restorationErrors)
     SourceRoot = $gitRootPath
     SourceSha = $sourceSha
@@ -457,6 +443,14 @@ $record = [pscustomobject][ordered]@{
     }
 }
 
-$json = ConvertTo-Json -InputObject $record -Depth 16
-[IO.File]::WriteAllText($manifestPath, $json + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+try {
+    $json = ConvertTo-Json -InputObject $record -Depth 16 -ErrorAction Stop
+    [IO.File]::WriteAllText($manifestPath, $json + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+}
+catch {
+    $recordingErrors.Add(('Measurement manifest: {0}' -f $_.Exception.Message))
+    $record.Succeeded = $false
+    $record.RecordingErrors = @($recordingErrors)
+    if ($record.ExecutionReason -eq 'completed') { $record.ExecutionReason = 'measurement recording failure' }
+}
 return $record
