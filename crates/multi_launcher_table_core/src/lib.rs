@@ -2663,8 +2663,10 @@ mod tests {
 
     #[test]
     fn table_parse_empty_and_unsupported_encodings_are_explicit() {
-        let mut options = TableParseOptions::default();
-        options.has_header = true;
+        let options = TableParseOptions {
+            has_header: true,
+            ..TableParseOptions::default()
+        };
         let empty = TableDocument::parse("", options).unwrap();
         assert_eq!(empty.column_count(), 0);
         assert!(empty.rows().is_empty());

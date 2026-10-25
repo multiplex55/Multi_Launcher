@@ -139,6 +139,15 @@ default members include both packages, so normal workspace test discovery keeps
 these cases alongside application tests; an explicit `-p multi_launcher`
 selection intentionally includes only the application package's tests.
 
+The two application-session cases remain in the `multi_launcher` library test
+target: `table_utility_session::tests::table_session_latest_source_wins_across_close_and_reopen`
+and `table_utility_session::tests::table_session_stale_parse_cannot_accept_an_inline_edit`.
+Select just those cases with:
+
+```powershell
+cargo nextest run -p multi_launcher --lib -E 'test(/^table_utility_session::tests::table_session_latest_source_wins_across_close_and_reopen$/) | test(/^table_utility_session::tests::table_session_stale_parse_cannot_accept_an_inline_edit$/)'
+```
+
 Each selected run writes `results.json` with terminal pass/fail/timeout counts,
 ignored and filtered cases, unexecuted or started-only cases, per-case durations,
 and the slowest cases. Incomplete output records observed timeout events while
