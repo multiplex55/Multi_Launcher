@@ -90,6 +90,8 @@ impl IsolatedAppWorkspace {
             ctx,
             &profile_root,
             settings,
+            None,
+            None,
         ));
         self.app_construction
             .push((profile.to_owned(), construction_started.elapsed()));

@@ -12811,6 +12811,21 @@ mod tests {
         results: Vec<Action>,
         root: &std::path::Path,
     ) -> LauncherApp {
+        root_list_app_at_with_initialization(ctx, results, root, RootListAppInitialization::Normal)
+    }
+
+    #[derive(Clone, Copy)]
+    enum RootListAppInitialization {
+        Normal,
+        IsolatedOracle,
+    }
+
+    fn root_list_app_at_with_initialization(
+        ctx: &egui::Context,
+        results: Vec<Action>,
+        root: &std::path::Path,
+        initialization: RootListAppInitialization,
+    ) -> LauncherApp {
         let mut settings = Settings::default();
         settings.hotkey = None;
         settings.quit_hotkey = None;
@@ -12822,22 +12837,35 @@ mod tests {
         settings.show_error_toasts = false;
         settings.dashboard.enabled = false;
         settings.pinned_panels.clear();
-        let mut app = LauncherApp::new(
-            ctx,
-            Arc::new(Vec::new()),
-            0,
-            PluginManager::new_inert_for_test(),
-            root.join("actions.json").to_string_lossy().into_owned(),
-            root.join("settings.json").to_string_lossy().into_owned(),
-            settings,
-            None,
-            None,
-            Some(std::collections::HashSet::new()),
-            Some(HashMap::new()),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
-        );
+        let mut app = match initialization {
+            RootListAppInitialization::Normal => LauncherApp::new(
+                ctx,
+                Arc::new(Vec::new()),
+                0,
+                PluginManager::new_inert_for_test(),
+                root.join("actions.json").to_string_lossy().into_owned(),
+                root.join("settings.json").to_string_lossy().into_owned(),
+                settings,
+                None,
+                None,
+                Some(std::collections::HashSet::new()),
+                Some(HashMap::new()),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+            ),
+            RootListAppInitialization::IsolatedOracle => {
+                let app = LauncherApp::new_isolated_for_test_at(
+                    ctx,
+                    root,
+                    settings,
+                    Some(std::collections::HashSet::new()),
+                    Some(HashMap::new()),
+                );
+                assert!(app.isolated_services_are_dormant_for_test());
+                app
+            }
+        };
         // The first root frame otherwise starts the production dashboard's
         // all-sources refresh even though the dashboard is disabled. This
         // isolated observer fixture intentionally keeps that worker dormant.
@@ -14665,8 +14693,36 @@ mod tests {
         actions: &[Action],
         cold: bool,
     ) -> TrackCRootListState {
+        track_c_prepare_root_list_state_with_initialization(
+            root,
+            actions,
+            cold,
+            RootListAppInitialization::Normal,
+        )
+    }
+
+    fn track_c_prepare_root_list_oracle_state(
+        root: &std::path::Path,
+        actions: &[Action],
+        cold: bool,
+    ) -> TrackCRootListState {
+        track_c_prepare_root_list_state_with_initialization(
+            root,
+            actions,
+            cold,
+            RootListAppInitialization::IsolatedOracle,
+        )
+    }
+
+    fn track_c_prepare_root_list_state_with_initialization(
+        root: &std::path::Path,
+        actions: &[Action],
+        cold: bool,
+        initialization: RootListAppInitialization,
+    ) -> TrackCRootListState {
         let ctx = egui::Context::default();
-        let mut app = root_list_app_at(&ctx, actions.to_vec(), root);
+        let mut app =
+            root_list_app_at_with_initialization(&ctx, actions.to_vec(), root, initialization);
         app.visible_flag.store(true, Ordering::SeqCst);
         app.last_visible = true;
         for frame in 0..9 {
@@ -16164,8 +16220,40 @@ mod tests {
         columns: usize,
         cold: bool,
     ) -> TrackCRootGridState {
+        track_c_prepare_root_grid_state_with_initialization(
+            root,
+            actions,
+            columns,
+            cold,
+            RootListAppInitialization::Normal,
+        )
+    }
+
+    fn track_c_prepare_root_grid_oracle_state(
+        root: &std::path::Path,
+        actions: &[Action],
+        columns: usize,
+        cold: bool,
+    ) -> TrackCRootGridState {
+        track_c_prepare_root_grid_state_with_initialization(
+            root,
+            actions,
+            columns,
+            cold,
+            RootListAppInitialization::IsolatedOracle,
+        )
+    }
+
+    fn track_c_prepare_root_grid_state_with_initialization(
+        root: &std::path::Path,
+        actions: &[Action],
+        columns: usize,
+        cold: bool,
+        initialization: RootListAppInitialization,
+    ) -> TrackCRootGridState {
         let ctx = egui::Context::default();
-        let mut app = root_list_app_at(&ctx, actions.to_vec(), root);
+        let mut app =
+            root_list_app_at_with_initialization(&ctx, actions.to_vec(), root, initialization);
         app.visible_flag.store(true, Ordering::SeqCst);
         app.last_visible = true;
         app.query_results_layout.enabled = true;
@@ -16476,7 +16564,7 @@ mod tests {
         let fixture = action_fixture(100);
         for cold in [true, false] {
             let mut state =
-                track_c_prepare_root_list_state(workspace.root(), &fixture.values, cold);
+                track_c_prepare_root_list_oracle_state(workspace.root(), &fixture.values, cold);
             let frame = state.frame_index;
             state.frame_index += 1;
             run_root_list_frame(&state.ctx, &mut state.app, frame, 960.0, 640.0, Vec::new())
@@ -17400,7 +17488,7 @@ mod tests {
         let fixture = action_fixture(100);
         for columns in [1, 2, 3, 5, 6] {
             for cold in [true, false] {
-                let mut state = track_c_prepare_root_grid_state(
+                let mut state = track_c_prepare_root_grid_oracle_state(
                     workspace.root(),
                     &fixture.values,
                     columns,
@@ -19091,9 +19179,33 @@ mod tests {
         root: &std::path::Path,
         actions: &[Action],
     ) -> TrackCRootQueryState {
+        track_c_prepare_root_query_state_with_initialization(
+            root,
+            actions,
+            RootListAppInitialization::Normal,
+        )
+    }
+
+    fn track_c_prepare_root_query_oracle_state(
+        root: &std::path::Path,
+        actions: &[Action],
+    ) -> TrackCRootQueryState {
+        track_c_prepare_root_query_state_with_initialization(
+            root,
+            actions,
+            RootListAppInitialization::IsolatedOracle,
+        )
+    }
+
+    fn track_c_prepare_root_query_state_with_initialization(
+        root: &std::path::Path,
+        actions: &[Action],
+        initialization: RootListAppInitialization,
+    ) -> TrackCRootQueryState {
         const QUERY_SUFFIX: &str = "00009";
         let ctx = egui::Context::default();
-        let mut app = root_list_app_at(&ctx, actions.to_vec(), root);
+        let mut app =
+            root_list_app_at_with_initialization(&ctx, actions.to_vec(), root, initialization);
         // `default_folders()` supplies path entries when the isolated workspace
         // has no folders file. Clear those constructor defaults so this owner
         // exercises only the synthetic action catalog and no host paths.
@@ -19479,7 +19591,7 @@ mod tests {
 
         let workspace = TrackCWorkspace::new();
         let fixture = action_fixture(100);
-        let mut state = track_c_prepare_root_query_state(workspace.root(), &fixture.values);
+        let mut state = track_c_prepare_root_query_oracle_state(workspace.root(), &fixture.values);
         let _output = track_c_run_root_query_owner(&mut state);
         let _ = track_c_validate_root_query_frame(&state, &_output);
         drop(state);
@@ -20360,6 +20472,24 @@ mod tests {
         progress_enabled: bool,
         eager_layout_mode: TrackC2GEagerLayoutMode,
     ) -> TrackC2GState {
+        track_c2g_prepare_state_with_progress_and_initialization(
+            root,
+            count,
+            case,
+            progress_enabled,
+            eager_layout_mode,
+            RootListAppInitialization::Normal,
+        )
+    }
+
+    fn track_c2g_prepare_state_with_progress_and_initialization(
+        root: &std::path::Path,
+        count: usize,
+        case: TrackC2GCase,
+        progress_enabled: bool,
+        eager_layout_mode: TrackC2GEagerLayoutMode,
+        initialization: RootListAppInitialization,
+    ) -> TrackC2GState {
         use crate::performance::track_c_workloads::action_fixture;
 
         let preparation_started = Instant::now();
@@ -20388,7 +20518,8 @@ mod tests {
             Some(preparation_started.elapsed()),
         );
         let ctx = egui::Context::default();
-        let mut app = root_list_app_at(&ctx, catalog.clone(), root);
+        let mut app =
+            root_list_app_at_with_initialization(&ctx, catalog.clone(), root, initialization);
         app.folder_aliases.clear();
         app.folder_aliases_lc.clear();
         app.bookmark_aliases.clear();
@@ -21515,6 +21646,7 @@ mod tests {
             root,
             false,
             TrackC2GEagerLayoutMode::FreshPerFrame,
+            RootListAppInitialization::Normal,
         )
     }
 
@@ -21530,6 +21662,7 @@ mod tests {
             root,
             progress_enabled,
             TrackC2GEagerLayoutMode::ReuseEquivalentInputs,
+            RootListAppInitialization::IsolatedOracle,
         )
     }
 
@@ -21539,6 +21672,7 @@ mod tests {
         root: &std::path::Path,
         progress_enabled: bool,
         eager_layout_mode: TrackC2GEagerLayoutMode,
+        initialization: RootListAppInitialization,
     ) -> serde_json::Value {
         track_c2g_progress(
             progress_enabled,
@@ -21551,12 +21685,13 @@ mod tests {
             None,
             None,
         );
-        let mut state = track_c2g_prepare_state_with_progress(
+        let mut state = track_c2g_prepare_state_with_progress_and_initialization(
             root,
             count,
             case,
             progress_enabled,
             eager_layout_mode,
+            initialization,
         );
         let sample = track_c2g_run_sequence(&mut state);
         let fixture_signature = state.fixture_signature;

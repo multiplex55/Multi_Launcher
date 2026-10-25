@@ -2949,6 +2949,8 @@ impl LauncherApp {
         ctx: &egui::Context,
         root: impl AsRef<Path>,
         mut settings: Settings,
+        enabled_plugins: Option<HashSet<String>>,
+        enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     ) -> Self {
         let root = root.as_ref();
         settings.paste_sequence.next_hotkey = None;
@@ -2965,8 +2967,8 @@ impl LauncherApp {
             settings,
             None,
             None,
-            None,
-            None,
+            enabled_plugins,
+            enabled_capabilities,
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),

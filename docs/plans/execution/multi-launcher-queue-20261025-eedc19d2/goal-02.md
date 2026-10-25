@@ -132,3 +132,127 @@ External evidence root:
 a read-only review of the source correction and found no remaining source
 findings. No full suite, early Clippy run, or Goal 01 acceptance campaign was
 run. The parent owns the final Goal Clippy decision and Git checkpoint.
+
+## M2-A — isolate repeated GUI oracle setup
+
+### Implementation
+
+The four selected GUI oracle paths now construct their app through M1-A's
+shared `LauncherApp::new_isolated_for_test_at` / `IsolatedTest` initializer.
+That entry point accepts optional enabled-plugin and capability snapshots and
+forwards them to the shared initializer. The oracle path passes
+`Some(HashSet::new())` and `Some(HashMap::new())` during construction, retaining
+the previous explicit-empty-provider semantics rather than replacing them
+with `None` or mutating enabled state after initialization. The existing
+shortcut settings, disabled toast/dashboard settings, synthetic results, and
+independent eager geometry expectations remain in the shared root-list fixture
+builder.
+
+Initialization selection is explicit at the four oracle call sites. Existing
+general root-list setup, benchmark setup, and the C2G FreshPerFrame validator
+continue to use the normal constructor. This avoids changing unrelated GUI
+tests or benchmark protocol. M2-B watcher-resource migration was not included.
+
+### Coverage and invariants
+
+The selected roster stayed exactly the same four tests. It retains list cold
+and warm geometry; grid cold and warm geometry at columns 1, 2, 3, 5, and 6;
+the 100-action root-query geometry/focus assertion; and all C2G cases at 100
+actions plus viewport controls at 1,000 and 10,000 actions. C2G retains all
+nine input steps and ticks 9–13 and 32–35, with query, geometry, focus,
+navigation, selection, and paint assertions. The existing cache invalidation
+and corruption tests were not weakened or altered. The C2G eager-input cache
+continues to use its existing `ReuseEquivalentInputs` path in this oracle;
+no mutable GUI or geometry state is carried between unrelated scenarios.
+
+### Bounded comparable evidence
+
+One unchanged-source baseline and one candidate run used default features,
+Cargo `fast-dev`, Nextest defaults and concurrency, the exact four-test
+filter, and `--success-output immediate`. Both runs used the checked
+`dev/track_b/measure.ps1` owner with unknown cache/work classification and
+passed cleanup and output-drain verification. Neither selected run added Cargo
+build selectors or overrides. The baseline reused prepared M1-B metadata only
+after checking the bound source and binary; candidate preparation was a
+separate 161.393600-second checked compile stage. Metadata-only inventories
+were separate, bounded provenance stages.
+
+The unchanged-source baseline on HEAD
+`064fcbc72841a0e087f75c2b7df2dd61d877ffc5` passed 4/4 in 18.305994 seconds
+(2026-10-25 19:32:00.6846841–19:32:18.9906930 UTC). The candidate passed 4/4
+in 16.683376 seconds (2026-10-25 19:39:53.4923353–19:40:10.1757274 UTC), a
+single-pair 1.622618-second / 8.863862% reduction in aggregate selected-run
+wall time. Nextest per-case observations were:
+
+| Oracle | Baseline | Candidate |
+| --- | ---: | ---: |
+| Root query | 0.864 s | 0.542 s |
+| Root list | 1.692 s | 1.132 s |
+| Root grid | 7.809 s | 5.402 s |
+| C2G query sequences | 17.526 s | 15.900 s |
+
+The candidate also retains the same six C2G fixture signatures as baseline.
+Its `prepare_complete` telemetry is not an initializer-only measure and was
+mixed: for the six recorded scenarios it ranged from 0.359883 to 2.480445
+seconds, while baseline ranged from 0.346709 to 2.367275 seconds. That phase
+ends before app teardown. The source change removes production dashboard and
+hotfolder runtime ownership from these oracle apps; those owners otherwise
+start and join/reap workers. The aggregate selected-run reduction is measured,
+but attributing that reduction to a particular startup or teardown subphase
+is an inference; no isolated constructor/drop timing was collected. No claim
+is made that the `prepare_complete` phase itself became faster. This is one
+comparable timing pair, not a general benchmark claim.
+
+### Commands and evidence
+
+Preparation used the successful M1-B command shape with the same package,
+library target, Cargo profile, and verified MSVC VCTIP policy:
+
+```text
+cargo nextest list --list-type binaries-only --message-format json --manifest-path G:\Repos\rust\Multi_Launcher\Cargo.toml -p multi_launcher --lib --cargo-profile fast-dev
+```
+
+Prepared metadata SHA256 was
+`f4985b1447d3a0920b59c50724c04d8d2201b7521b56c381ea52216aae187a2e`.
+Both metadata snapshots name
+`target/fast-dev/deps/multi_launcher-b96e8e61417c6153.exe`; the executable was
+SHA256 `569e86a61bb90e8ee56b2b71c107c788d1447bfd1def4491c0794b53411dfb7a`
+for baseline and `a7a5a65e052e4b28163862bd44adfc6ec26a95d51036901e6a0bd27b61d43a3d`
+for candidate. Candidate source fingerprint SHA256 was
+`6887bc47ab75a3deada7e4fd15fb017ec107366fa170daf56157a0b7986f4e44`; its
+three owned source hashes are recorded in the candidate preparation receipt.
+The baseline source fingerprint was
+`328a8425d1a9b47cc84b97dc89525a1fedd500be246fd10715ecc1eea93b063d`.
+
+For each inventory and selected run, the prepared metadata path replaced
+`<metadata>` below. The inventory had a 300-second deadline; the selected run
+had a 600-second deadline. No package, target, feature, profile, or concurrency
+selector was added to these metadata-only commands.
+
+```text
+cargo nextest list --binaries-metadata <metadata> --message-format json -E 'test(=gui::render::tests::track_c2g_oracle_query_sequences_match_usable_cpu_frames) | test(=gui::render::tests::track_c_oracle_root_grid_frame_matches_frozen_eager_geometry) | test(=gui::render::tests::track_c_oracle_root_list_frame_matches_frozen_eager_geometry) | test(=gui::render::tests::track_c_oracle_root_query_reaches_current_usable_cpu_frame)'
+cargo nextest run --binaries-metadata <metadata> -E 'test(=gui::render::tests::track_c2g_oracle_query_sequences_match_usable_cpu_frames) | test(=gui::render::tests::track_c_oracle_root_grid_frame_matches_frozen_eager_geometry) | test(=gui::render::tests::track_c_oracle_root_list_frame_matches_frozen_eager_geometry) | test(=gui::render::tests::track_c_oracle_root_query_reaches_current_usable_cpu_frame)' --success-output immediate
+```
+
+The baseline inventory first preserved two metadata-inventory CLI failures:
+Nextest rejected the unsupported `--format` option, then rejected Cargo build
+selectors combined with `--binaries-metadata`. Neither launched tests. The
+corrected metadata-only inventory succeeded and selected exactly the four
+identities above. Candidate metadata-only inventory also succeeded and
+selected those same four identities from 6,344 listed library cases.
+
+External evidence root:
+`C:\Users\Jay\.codex\visualizations\2026\10\25\01a17319-6f7d-7052-b54e-1bb4a92c5fd0\multi-launcher-queue-20261025-eedc19d2\g02-m2a\`
+
+- Baseline inventory failures and successful inventory: `baseline-four-oracle\g02-m2a-baseline-four-oracle-inventory_20261025T193048307Z_88dac7ce84384967956088c843d7ab88\measurement.json`, `baseline-four-oracle\g02-m2a-baseline-four-oracle-inventory-corrected_20261025T193119035Z_23c0f0f8dfbd4b719031dde8dd949916\measurement.json`, and `baseline-four-oracle\g02-m2a-baseline-four-oracle-inventory-metadata-only_20261025T193138600Z_465a18600a704fb2a59c3716daae2e22\measurement.json`.
+- Baseline run and retained passing telemetry: `baseline-four-oracle\g02-m2a-baseline-four-oracle_20261025T193200332Z_42cd9d2b3bdb451a9b2f6c8cf6e63a2a\measurement.json` and `stderr.bin`.
+- Candidate compile metadata and binary provenance: `candidate-four-oracle\g02-m2a-candidate-compile-prep_20261025T193613519Z_93426c93c64e4196876c54c97ad630a2\measurement.json` and `stdout.bin`.
+- Candidate metadata-only inventory: `candidate-four-oracle\g02-m2a-candidate-inventory-metadata-only_20261025T193929722Z_00e39fc9290e433f8a8c2a384078ddb7\measurement.json` and `stdout.bin`.
+- Candidate run and retained passing telemetry: `candidate-four-oracle\g02-m2a-candidate-four-oracle_20261025T193953146Z_e68661776c2e4de1a6e5f49def9d5c34\measurement.json` and `stderr.bin`.
+
+`cargo fmt --all` and `git diff --check` passed; incidental formatting churn
+from the workspace-wide formatter was narrowly reverted. The checked candidate
+preparation compiled the library tests, and the exact selected candidate run
+passed 4/4. No full suite, early Clippy run, repeated timing campaign, or M2-B
+resource migration was run. Parent retains Git, final review, and checkpoint
+ownership.
