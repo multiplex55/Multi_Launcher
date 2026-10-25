@@ -10920,6 +10920,7 @@ mod tests {
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc,
         },
         thread,
         time::{Duration, Instant},
@@ -47259,64 +47260,138 @@ mod tests {
         set_execute_action_hook(None);
     }
 
-    fn wait_for_repaint(wakes: &AtomicUsize) {
-        for _ in 0..100 {
-            if wakes.load(Ordering::SeqCst) != 0 {
-                return;
+    fn create_macro_launcher_test_app<'a>(
+        fixture: &'a mut crate::gui::test_fixtures::IsolatedAppWorkspace,
+        ctx: &egui::Context,
+        profile: &str,
+    ) -> &'a mut LauncherApp {
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        let app = fixture
+            .create_app(ctx, profile, settings)
+            .expect("isolated macro launcher app constructs");
+        assert!(app.isolated_services_are_dormant_for_test());
+        app
+    }
+
+    struct CancelAndJoinOnDrop<T> {
+        control: Arc<RunControl>,
+        worker: Option<thread::JoinHandle<T>>,
+    }
+
+    impl<T> CancelAndJoinOnDrop<T> {
+        fn new(control: Arc<RunControl>, worker: thread::JoinHandle<T>) -> Self {
+            Self {
+                control,
+                worker: Some(worker),
             }
-            thread::sleep(Duration::from_millis(2));
         }
-        panic!("worker submission did not wake egui");
+
+        fn join(mut self) -> thread::Result<T> {
+            self.worker
+                .take()
+                .expect("worker handle is available until join")
+                .join()
+        }
+    }
+
+    impl<T> Drop for CancelAndJoinOnDrop<T> {
+        fn drop(&mut self) {
+            if let Some(worker) = self.worker.take() {
+                self.control.stop();
+                let _ = worker.join();
+            }
+        }
+    }
+
+    fn wait_for_completion<T>(
+        receiver: &mpsc::Receiver<T>,
+        event: &'static str,
+        timeout: Duration,
+    ) -> Result<T, String> {
+        receiver.recv_timeout(timeout).map_err(|error| match error {
+            mpsc::RecvTimeoutError::Timeout => {
+                format!("{event} did not arrive within {timeout:?}")
+            }
+            mpsc::RecvTimeoutError::Disconnected => {
+                format!("{event} sender disconnected before completion")
+            }
+        })
     }
 
     #[test]
     fn macro_launcher_poll_consumes_one_request_and_mutates_query_on_gui_dispatch() {
         let ctx = egui::Context::default();
         let broker = Arc::new(LauncherCommandBroker::default());
-        let mut app = new_app(&ctx);
-        app.command_cache = two_results();
-        app.query = "before polling".into();
+        let mut fixture = crate::gui::test_fixtures::IsolatedAppWorkspace::new();
+        {
+            let app = create_macro_launcher_test_app(&mut fixture, &ctx, "macro-launcher-poll");
+            app.command_cache = two_results();
+            app.query = "before polling".into();
 
-        // Consume repaint requests made while constructing the app. An immediate
-        // egui repaint intentionally remains outstanding for another frame, so
-        // one frame is not sufficient to put the context back to sleep. If a
-        // repaint is already pending, another `request_repaint` is coalesced and
-        // does not invoke the integration callback.
-        for _ in 0..8 {
-            ctx.run_ui(egui::RawInput::default(), |_| {})
-                .drop_without_applying_deltas();
-            if !ctx.has_requested_repaint() {
-                break;
+            // Consume repaint requests made while constructing the app. An immediate
+            // egui repaint intentionally remains outstanding for another frame, so
+            // one frame is not sufficient to put the context back to sleep. If a
+            // repaint is already pending, another `request_repaint` is coalesced and
+            // does not invoke the integration callback.
+            for _ in 0..8 {
+                ctx.run_ui(egui::RawInput::default(), |_| {})
+                    .drop_without_applying_deltas();
+                if !ctx.has_requested_repaint() {
+                    break;
+                }
             }
+            assert!(!ctx.has_requested_repaint());
+            let wakes = Arc::new(AtomicUsize::new(0));
+            let callback_wakes = Arc::clone(&wakes);
+            let (repaint_tx, repaint_rx) = mpsc::sync_channel(1);
+            ctx.set_request_repaint_callback(move |_| {
+                callback_wakes.fetch_add(1, Ordering::SeqCst);
+                let _ = repaint_tx.try_send(());
+            });
+
+            // The empty poll installs the wakeup callback but changes no GUI state.
+            app.poll_macro_launcher_commands_from(&ctx, &broker);
+            assert_eq!(app.query, "before polling");
+
+            let control = Arc::new(RunControl::default());
+            let submit_control = Arc::clone(&control);
+            let submit_broker = Arc::clone(&broker);
+            let submitter = CancelAndJoinOnDrop::new(
+                Arc::clone(&control),
+                thread::spawn(move || submit_broker.submit_query("", &submit_control)),
+            );
+            if let Err(error) = wait_for_completion(
+                &repaint_rx,
+                "egui repaint callback for macro launcher request",
+                Duration::from_millis(200),
+            ) {
+                control.stop();
+                let worker_result = submitter
+                    .join()
+                    .expect("macro launcher worker joins after cancellation");
+                panic!("{error}; worker returned {worker_result:?}");
+            }
+            assert!(wakes.load(Ordering::SeqCst) > 0);
+            assert_eq!(app.query, "before polling");
+
+            app.poll_macro_launcher_commands_from(&ctx, &broker);
+            assert_eq!(app.query, "");
+            assert!(broker.take_pending().is_none());
+            assert_eq!(
+                submitter.join().unwrap().unwrap(),
+                LauncherCommandResponse::PresentedForSelection { result_count: 2 }
+            );
+
+            // A second poll cannot respond to, or otherwise process, the request again.
+            app.poll_macro_launcher_commands_from(&ctx, &broker);
+            assert_eq!(app.query, "");
         }
-        assert!(!ctx.has_requested_repaint());
-        let wakes = Arc::new(AtomicUsize::new(0));
-        let callback_wakes = Arc::clone(&wakes);
-        ctx.set_request_repaint_callback(move |_| {
-            callback_wakes.fetch_add(1, Ordering::SeqCst);
-        });
-
-        // The empty poll installs the wakeup callback but changes no GUI state.
-        app.poll_macro_launcher_commands_from(&ctx, &broker);
-        assert_eq!(app.query, "before polling");
-
-        let submit_broker = Arc::clone(&broker);
-        let submitter =
-            thread::spawn(move || submit_broker.submit_query("", &RunControl::default()));
-        wait_for_repaint(&wakes);
-        assert_eq!(app.query, "before polling");
-
-        app.poll_macro_launcher_commands_from(&ctx, &broker);
-        assert_eq!(app.query, "");
-        assert!(broker.take_pending().is_none());
-        assert_eq!(
-            submitter.join().unwrap().unwrap(),
-            LauncherCommandResponse::PresentedForSelection { result_count: 2 }
-        );
-
-        // A second poll cannot respond to, or otherwise process, the request again.
-        app.poll_macro_launcher_commands_from(&ctx, &broker);
-        assert_eq!(app.query, "");
+        let teardown = fixture.finish().expect("isolated fixture cleanup succeeds");
+        assert!(teardown.cwd_restored);
+        assert!(teardown.root_removed);
+        eprintln!("isolated app fixture teardown: {teardown:?}");
     }
 
     #[test]
@@ -47335,25 +47410,90 @@ mod tests {
     #[test]
     fn disconnected_macro_launcher_waiter_does_not_panic_gui_dispatch() {
         let ctx = egui::Context::default();
+        let mut fixture = crate::gui::test_fixtures::IsolatedAppWorkspace::new();
         let broker = Arc::new(LauncherCommandBroker::default());
         let control = Arc::new(RunControl::default());
+        let (repaint_tx, repaint_rx) = mpsc::sync_channel(1);
+        broker.set_repaint(Arc::new(move || {
+            let _ = repaint_tx.try_send(());
+        }));
         let submit_broker = Arc::clone(&broker);
         let submit_control = Arc::clone(&control);
-        let submitter =
-            thread::spawn(move || submit_broker.submit_query("missing", &submit_control));
-        let pending = loop {
-            if let Some(pending) = broker.take_pending() {
-                break pending;
-            }
-            thread::yield_now();
+        let submitter = CancelAndJoinOnDrop::new(
+            Arc::clone(&control),
+            thread::spawn(move || submit_broker.submit_query("missing", &submit_control)),
+        );
+        let notification = wait_for_completion(
+            &repaint_rx,
+            "broker repaint publication for cancelled macro launcher request",
+            Duration::from_millis(200),
+        );
+        let pending = if notification.is_ok() {
+            broker.take_pending()
+        } else {
+            None
         };
         control.stop();
-        assert!(submitter.join().unwrap().is_err());
+        let submission = submitter
+            .join()
+            .expect("macro launcher worker joins after cancellation");
+        assert!(submission.is_err());
+        let pending = match notification {
+            Ok(()) => pending.expect("repaint follows pending request publication"),
+            Err(error) => panic!("{error}; worker returned {submission:?}"),
+        };
 
-        let mut app = new_app(&ctx);
-        let response = app.handle_macro_launcher_command(&pending.request);
-        assert_eq!(response, LauncherCommandResponse::NoResults);
-        assert!(!pending.respond(response));
+        {
+            let app =
+                create_macro_launcher_test_app(&mut fixture, &ctx, "macro-launcher-disconnected");
+            let response = app.handle_macro_launcher_command(&pending.request);
+            assert_eq!(response, LauncherCommandResponse::NoResults);
+            assert!(!pending.respond(response));
+        }
+        let teardown = fixture.finish().expect("isolated fixture cleanup succeeds");
+        assert!(teardown.cwd_restored);
+        assert!(teardown.root_removed);
+        eprintln!("isolated app fixture teardown: {teardown:?}");
+    }
+
+    #[test]
+    fn completion_wait_handles_prearrival_timeout_and_disconnection() {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        ready_tx.send("published before wait").unwrap();
+        assert_eq!(
+            wait_for_completion(
+                &ready_rx,
+                "pre-arrived repaint publication",
+                Duration::from_millis(10),
+            )
+            .unwrap(),
+            "published before wait"
+        );
+
+        let (timeout_tx, timeout_rx) = mpsc::channel::<()>();
+        let timeout_error = wait_for_completion(
+            &timeout_rx,
+            "missing repaint publication",
+            Duration::from_millis(10),
+        )
+        .unwrap_err();
+        assert_eq!(
+            timeout_error,
+            "missing repaint publication did not arrive within 10ms"
+        );
+        drop(timeout_tx);
+
+        let (disconnected_tx, disconnected_rx) = mpsc::channel::<()>();
+        drop(disconnected_tx);
+        assert_eq!(
+            wait_for_completion(
+                &disconnected_rx,
+                "repaint publication",
+                Duration::from_millis(10),
+            )
+            .unwrap_err(),
+            "repaint publication sender disconnected before completion"
+        );
     }
 
     #[test]
