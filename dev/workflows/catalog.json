@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 1,
+  "package": "multi_launcher",
+  "features": {
+    "defaultFeatures": true,
+    "explicit": []
+  },
+  "modes": [
+    {
+      "name": "quick-check",
+      "cargoPreset": "quick-check",
+      "kind": "build",
+      "compilerProfile": "workspace default",
+      "runnerProfile": null,
+      "budgets": { "preparationSeconds": 1800, "executionSeconds": 1800 }
+    },
+    {
+      "name": "full-debug",
+      "cargoPreset": "full-debug",
+      "kind": "build",
+      "compilerProfile": "dev",
+      "runnerProfile": null,
+      "budgets": { "preparationSeconds": 1800, "executionSeconds": 1800 }
+    },
+    {
+      "name": "fast-dev-build",
+      "cargoPreset": "fast-dev-build",
+      "kind": "build",
+      "compilerProfile": "fast-dev",
+      "runnerProfile": null,
+      "budgets": { "preparationSeconds": 1800, "executionSeconds": 1800 }
+    },
+    {
+      "name": "fast-dev-tests",
+      "cargoPreset": "fast-dev-tests",
+      "kind": "tests",
+      "compilerProfile": "fast-dev",
+      "runnerProfile": null,
+      "budgets": { "preparationSeconds": 1800, "inventorySeconds": 600, "executionSeconds": 600 }
+    },
+    {
+      "name": "iteration",
+      "cargoPreset": "iteration",
+      "kind": "build",
+      "compilerProfile": "iteration",
+      "runnerProfile": null,
+      "budgets": { "preparationSeconds": 1800, "executionSeconds": 1800 }
+    },
+    {
+      "name": "production",
+      "cargoPreset": "production",
+      "kind": "build",
+      "compilerProfile": "release",
+      "runnerProfile": null,
+      "budgets": { "preparationSeconds": 1800, "executionSeconds": 1800 }
+    }
+  ],
+  "selections": [
+    {
+      "name": "tables",
+      "package": "multi_launcher",
+      "targetKind": "lib",
+      "targetName": "multi_launcher",
+      "nextestKind": "lib",
+      "exactCase": "table_utility::tests::table_parse_csv_quotes_escaped_quotes_and_embedded_newlines_preserve_strings",
+      "source": "src/table_utility.rs",
+      "features": { "defaultFeatures": true, "explicit": [] },
+      "platformNotes": "Windows test selection; case is host-independent Rust library coverage.",
+      "resourceNotes": "Small deterministic parser fixture; no desktop application launch.",
+      "nativeMetadata": { "available": false, "status": "selection metadata only; native mapping belongs to M3-A" },
+      "budgets": { "preparationSeconds": 1800, "inventorySeconds": 600, "executionSeconds": 600 }
+    },
+    {
+      "name": "notes",
+      "package": "multi_launcher",
+      "targetKind": "lib",
+      "targetName": "multi_launcher",
+      "nextestKind": "lib",
+      "exactCase": "plugins::note::tests::extract_entity_refs_parses_link_note_urls_like_action_links",
+      "source": "src/plugins/note.rs",
+      "features": { "defaultFeatures": true, "explicit": [] },
+      "platformNotes": "Windows test selection; case is pure plugin parsing coverage.",
+      "resourceNotes": "In-memory note URL parsing; no external note store is required.",
+      "nativeMetadata": { "available": false, "status": "selection metadata only; native mapping belongs to M3-A" },
+      "budgets": { "preparationSeconds": 1800, "inventorySeconds": 600, "executionSeconds": 600 }
+    },
+    {
+      "name": "paste",
+      "package": "multi_launcher",
+      "targetKind": "lib",
+      "targetName": "multi_launcher",
+      "nextestKind": "lib",
+      "exactCase": "paste_sequence::tests::clipboard_reference_uses_exact_utf8_sha256_and_redacted_debug",
+      "source": "src/paste_sequence.rs",
+      "features": { "defaultFeatures": true, "explicit": [] },
+      "platformNotes": "Windows test selection; case validates a pure clipboard-reference value.",
+      "resourceNotes": "Uses deterministic UTF-8 input and hashing; no clipboard access.",
+      "nativeMetadata": { "available": false, "status": "selection metadata only; native mapping belongs to M3-A" },
+      "budgets": { "preparationSeconds": 1800, "inventorySeconds": 600, "executionSeconds": 600 }
+    },
+    {
+      "name": "query-focus",
+      "package": "multi_launcher",
+      "targetKind": "lib",
+      "targetName": "multi_launcher",
+      "nextestKind": "lib",
+      "exactCase": "gui::tests::launcher_query_is_not_refocused_while_file_search_remains_open",
+      "source": "src/gui/mod.rs",
+      "features": { "defaultFeatures": true, "explicit": [] },
+      "platformNotes": "Windows test selection; state-level GUI logic only, without creating a desktop window.",
+      "resourceNotes": "No native UI or user profile is opened by the selected test body.",
+      "nativeMetadata": { "available": false, "status": "selection metadata only; native mapping belongs to M3-A" },
+      "budgets": { "preparationSeconds": 1800, "inventorySeconds": 600, "executionSeconds": 600 }
+    },
+    {
+      "name": "settings",
+      "package": "multi_launcher",
+      "targetKind": "lib",
+      "targetName": "multi_launcher",
+      "nextestKind": "lib",
+      "exactCase": "settings::model::tests::query_results_layout_defaults_are_backward_compatible",
+      "source": "src/settings/model.rs",
+      "features": { "defaultFeatures": true, "explicit": [] },
+      "platformNotes": "Windows test selection; pure settings-model compatibility coverage.",
+      "resourceNotes": "In-memory default-model assertion; no application instance is created.",
+      "nativeMetadata": { "available": false, "status": "selection metadata only; native mapping belongs to M3-A" },
+      "budgets": { "preparationSeconds": 1800, "inventorySeconds": 600, "executionSeconds": 600 }
+    },
+    {
+      "name": "integration-query",
+      "package": "multi_launcher",
+      "targetKind": "integration",
+      "targetName": "pure",
+      "nextestKind": "test",
+      "exactCase": "query_autocomplete::default_query_autocomplete_enabled",
+      "source": "tests/pure_cases/query_autocomplete.rs",
+      "targetDefinition": "tests/suites/pure.rs",
+      "features": { "defaultFeatures": true, "explicit": [] },
+      "platformNotes": "Windows pure integration-test target; no native application launch.",
+      "resourceNotes": "The test asserts default query-autocomplete configuration without OS interaction.",
+      "nativeMetadata": { "available": false, "status": "selection metadata only; native mapping belongs to M3-A" },
+      "budgets": { "preparationSeconds": 1800, "inventorySeconds": 600, "executionSeconds": 600 }
+    }
+  ]
+}

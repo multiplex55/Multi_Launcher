@@ -87,6 +87,50 @@ profile selectors; use Cargo directly for those advanced workflows. Nextest
 runner profiles remain available through `-CargoArguments @('-P', 'default')`;
 `--cargo-profile` is blocked because it changes the compiler profile.
 
+## Bounded workflow facade
+
+`workflows/run.ps1` resolves a fixed catalog request and routes each native
+command through `track_b/measure.ps1` and the checked owned-process runner. Its
+build modes are `quick-check`, `full-debug`, `fast-dev-build`, `iteration`, and
+`production`; `fast-dev-tests` is the selected-test mode. The production mode
+uses the existing release profile. All modes keep Cargo's default features and
+the facade does not expand a selection to the whole suite.
+
+```powershell
+& .\dev\workflows\run.ps1 -Action Preview -Mode quick-check
+& .\dev\workflows\run.ps1 -Action Discover -Mode fast-dev-tests -TargetKind lib
+& .\dev\workflows\run.ps1 -Action Discover -Mode fast-dev-tests -TargetKind integration
+& .\dev\workflows\run.ps1 -Action Preview -Mode fast-dev-tests -SelectionName tables `
+    -DiscoveryReceipt '<discovery.json path from the Discover result>'
+& .\dev\workflows\run.ps1 -Action Run -Mode fast-dev-tests -SelectionName tables
+```
+
+Build previews print the resolved executable and native argument array without
+launching it. Test previews require a successful discovery receipt whose
+catalog, source fingerprint, Cargo/Nextest tools, metadata file, target, and
+exact case still match; missing or stale receipts require another Discover.
+Discover prepares only the requested library or `pure` integration target,
+then inventories its catalog cases without running them. Run prepares the same
+target, validates that the exact catalog case matches one runnable test, and
+executes only that case. Target preparation has an 1800-second deadline;
+inventory and selected test execution each have a 600-second deadline. Every
+phase publishes its arguments, exit/timeout, output-drain, owned-process and
+cleanup evidence under an external evidence directory.
+
+The test catalog is `workflows/catalog.json`. Each entry records its package,
+Cargo target, exact case, source, default-feature set, host/resource notes, and
+native-selection metadata. Native mappings remain unavailable until their
+separate milestone. `fast-dev-tests` uses `--cargo-profile fast-dev` for
+compilation; an optional `-RunnerProfile` maps separately to Nextest `-P`.
+Forward test-binary options as a string array with `-TestArguments`, for
+example `-TestArguments @('--nocapture')`; the facade
+places those arguments after the native `--` separator.
+
+Run the focused facade fixtures with `& .\dev\workflows\test_run.ps1`. They
+cover catalog/source agreement, fixed and legacy argument arrays, preview and
+execution resolution, stale/empty discovery, and bounded failure propagation
+without compiling the application.
+
 For a quick library check, run `cargo check --lib`. To deliberately build all
 package binaries, use `cargo build --release` directly; the release preset
 selects only `multi_launcher`.

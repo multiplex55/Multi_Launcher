@@ -1,0 +1,53 @@
+#requires -Version 7.0
+<#
+.SYNOPSIS
+Resolves and runs one fixed developer workflow or previews it without execution.
+
+.DESCRIPTION
+Test previews require a successful matching discovery receipt. Discover builds
+only the requested Cargo target, inventories catalog cases, and writes a receipt.
+Run prepares target metadata, validates one exact case, and executes only that
+case. Every native child runs through the checked measurement owner.
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('Preview', 'Discover', 'Run')]
+    [string]$Action,
+
+    [Parameter(Mandatory = $true)]
+    [string]$Mode,
+
+    [string]$SelectionName,
+
+    [ValidateSet('lib', 'integration')]
+    [string]$TargetKind,
+
+    [string]$DiscoveryReceipt,
+
+    [string]$RunnerProfile,
+
+    [string[]]$TestArguments = @(),
+
+    [string]$EvidenceDirectory
+)
+
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'engine.ps1')
+
+try {
+    $request = New-WorkflowRequestFromCli -Action $Action -Mode $Mode -SelectionName $SelectionName `
+        -TargetKind $TargetKind -DiscoveryReceipt $DiscoveryReceipt -RunnerProfile $RunnerProfile `
+        -TestArguments @($TestArguments)
+    $result = Invoke-WorkflowAction -Request $request -EvidenceDirectory $EvidenceDirectory
+}
+catch {
+    $result = [pscustomobject][ordered]@{
+        Status = 'INVALID_REQUEST'
+        ExitCode = 2
+        Error = '{0}: {1}' -f $_.Exception.GetType().FullName, $_.Exception.Message
+    }
+}
+
+$result | ConvertTo-Json -Depth 20
+exit ([int]$result.ExitCode)

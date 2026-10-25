@@ -8,8 +8,9 @@ Forward additional Cargo/Nextest options with the explicit -CargoArguments
 string array. Conflicting manifest, package, target, workspace, and Cargo compiler-profile selectors are rejected. Use Cargo directly for other targets or profiles.
 
 .PARAMETER Preset
-One of release, debug, lib-test, or integration-test. Build presets select
-multi_launcher; test presets select the library or one integration-test target.
+One of the legacy release, debug, lib-test, or integration-test presets, or a
+fixed workflow build/test phase. Build presets select multi_launcher; test
+presets select the library or one integration-test target.
 
 .PARAMETER TestTarget
 Cargo integration-test target name. Required only for integration-test and
@@ -36,10 +37,25 @@ starting Cargo.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('release', 'debug', 'lib-test', 'integration-test')]
+    [ValidateSet('release', 'debug', 'lib-test', 'integration-test', 'quick-check', 'full-debug', 'fast-dev-build', 'fast-dev-tests', 'iteration', 'production')]
     [string]$Preset,
 
     [string]$TestTarget,
+
+    [ValidateSet('prepare', 'inventory', 'run')]
+    [string]$WorkflowPhase,
+
+    [ValidateSet('lib', 'integration')]
+    [string]$TargetKind,
+
+    [string]$FilterExpression,
+
+    [string]$BinariesMetadataPath,
+
+    [ValidatePattern('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')]
+    [string]$RunnerProfile,
+
+    [string[]]$TestArguments = @(),
 
     [string[]]$CargoArguments = @(),
 
@@ -57,7 +73,7 @@ function Assert-NoConflictingCargoArguments {
         '--bench', '--benches', '--lib', '--all-targets', '--all',
         '--target', '--target-dir', '--cargo-profile', '--release'
     )
-    $buildPreset = $SelectedPreset -in @('release', 'debug')
+    $buildPreset = $SelectedPreset -in @('release', 'debug', 'quick-check', 'full-debug', 'fast-dev-build', 'iteration', 'production')
     $shortSelectors = @('-p')
     if ($buildPreset) {
         $longSelectors += '--profile'
@@ -96,12 +112,55 @@ if ($Preset -eq 'integration-test') {
     if ([string]::IsNullOrWhiteSpace($TestTarget) -or $TestTarget -notmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]*$') {
         throw 'Integration-test preset requires a Cargo test target name in -TestTarget.'
     }
-} elseif (![string]::IsNullOrWhiteSpace($TestTarget)) {
+} elseif ($Preset -eq 'fast-dev-tests') {
+    if ([string]::IsNullOrWhiteSpace($WorkflowPhase)) {
+        throw 'The fast-dev-tests preset requires -WorkflowPhase prepare, inventory, or run.'
+    }
+    if ([string]::IsNullOrWhiteSpace($TargetKind)) {
+        throw 'The fast-dev-tests preset requires -TargetKind lib or integration.'
+    }
+    if ($TargetKind -eq 'integration' -and ($TestTarget -notmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]*$')) {
+        throw 'The integration target workflow requires a Cargo test target name.'
+    }
+    if ($TargetKind -eq 'lib' -and ![string]::IsNullOrWhiteSpace($TestTarget)) {
+        throw '-TestTarget is valid only for integration target workflows.'
+    }
+    if ($WorkflowPhase -eq 'prepare' -and (! [string]::IsNullOrWhiteSpace($FilterExpression) -or ! [string]::IsNullOrWhiteSpace($BinariesMetadataPath) -or $TestArguments.Count -gt 0)) {
+        throw 'The prepare phase does not accept a filter, binaries metadata, or test arguments.'
+    }
+    if ($WorkflowPhase -eq 'inventory' -and ([string]::IsNullOrWhiteSpace($BinariesMetadataPath) -or $TestArguments.Count -gt 0)) {
+        throw 'The inventory phase requires -BinariesMetadataPath and does not accept test arguments.'
+    }
+    if ($WorkflowPhase -eq 'run' -and [string]::IsNullOrWhiteSpace($BinariesMetadataPath)) {
+        throw 'The run phase requires -BinariesMetadataPath.'
+    }
+    if ($WorkflowPhase -eq 'run' -and [string]::IsNullOrWhiteSpace($FilterExpression)) {
+        throw 'The run phase requires an exact-selection -FilterExpression.'
+    }
+    if ($WorkflowPhase -ne 'run' -and ![string]::IsNullOrWhiteSpace($RunnerProfile)) {
+        throw '-RunnerProfile is valid only for the run phase.'
+    }
+    if ($null -eq $TestArguments) { $TestArguments = @() }
+    foreach ($argument in $TestArguments) {
+        if ($null -eq $argument) { throw 'TestArguments cannot contain null elements.' }
+    }
+} elseif (![string]::IsNullOrWhiteSpace($TestTarget) -or ![string]::IsNullOrWhiteSpace($WorkflowPhase) -or
+    ![string]::IsNullOrWhiteSpace($TargetKind) -or ![string]::IsNullOrWhiteSpace($FilterExpression) -or
+    ![string]::IsNullOrWhiteSpace($BinariesMetadataPath) -or ![string]::IsNullOrWhiteSpace($RunnerProfile) -or
+    $TestArguments.Count -gt 0) {
     throw '-TestTarget is valid only with the integration-test preset.'
 }
 
 if ($null -eq $CargoArguments) { $CargoArguments = @() }
-Assert-NoConflictingCargoArguments -Values $CargoArguments -SelectedPreset $Preset
+if ($Preset -eq 'fast-dev-tests') {
+    if (@($CargoArguments).Count -gt 0) { throw 'fast-dev-tests uses fixed workflow arguments; pass only test-binary options through -TestArguments.' }
+} else {
+    if (@($TestArguments).Count -gt 0) { throw '-TestArguments is valid only with the fast-dev-tests preset.' }
+    if (![string]::IsNullOrWhiteSpace($WorkflowPhase) -or ![string]::IsNullOrWhiteSpace($TargetKind) -or
+        ![string]::IsNullOrWhiteSpace($FilterExpression) -or ![string]::IsNullOrWhiteSpace($BinariesMetadataPath) -or
+        ![string]::IsNullOrWhiteSpace($RunnerProfile)) { throw 'Workflow phase arguments are valid only with fast-dev-tests.' }
+    Assert-NoConflictingCargoArguments -Values $CargoArguments -SelectedPreset $Preset
+}
 
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..') -ErrorAction Stop).ProviderPath
 $manifestPath = (Resolve-Path -LiteralPath (Join-Path $repositoryRoot 'Cargo.toml') -ErrorAction Stop).ProviderPath
@@ -112,10 +171,44 @@ $cargoPath = [IO.Path]::GetFullPath($(if ($cargoApplication.Source) { $cargoAppl
 $selectedArguments = switch ($Preset) {
     'release' { @('build', '--release', '--bin', 'multi_launcher') }
     'debug' { @('build', '--bin', 'multi_launcher') }
+    'quick-check' { @('check', '--lib') }
+    'full-debug' { @('build', '--bin', 'multi_launcher') }
+    'fast-dev-build' { @('build', '--profile', 'fast-dev', '--bin', 'multi_launcher') }
+    'iteration' { @('build', '--profile', 'iteration', '--bin', 'multi_launcher') }
+    'production' { @('build', '--release', '--bin', 'multi_launcher') }
     'lib-test' { @('nextest', 'run', '--lib') }
     'integration-test' { @('nextest', 'run', '--test', $TestTarget) }
+    'fast-dev-tests' {
+        $targetArguments = if ($TargetKind -eq 'lib') { @('-p', 'multi_launcher', '--lib') } else { @('-p', 'multi_launcher', '--test', $TestTarget) }
+        switch ($WorkflowPhase) {
+            'prepare' { @('nextest', 'list', '--list-type', 'binaries-only', '--message-format', 'json', '--cargo-profile', 'fast-dev') + $targetArguments }
+            'inventory' {
+                $inventoryArguments = @('nextest', 'list', '--message-format', 'json', '--binaries-metadata', [IO.Path]::GetFullPath($BinariesMetadataPath))
+                if (![string]::IsNullOrWhiteSpace($FilterExpression)) { $inventoryArguments += @('-E', $FilterExpression) }
+                $inventoryArguments
+            }
+            'run' {
+                $runArguments = @('nextest', 'run', '--binaries-metadata', [IO.Path]::GetFullPath($BinariesMetadataPath), '--message-format', 'human', '-E', $FilterExpression)
+                if (![string]::IsNullOrWhiteSpace($RunnerProfile)) { $runArguments += @('-P', $RunnerProfile) }
+                if ($TestArguments.Count -gt 0) { $runArguments += @('--') + @($TestArguments) }
+                $runArguments
+            }
+        }
+    }
 }
-$argumentList = @($selectedArguments) + @('--manifest-path', $manifestPath) + @($CargoArguments)
+$argumentList = @($selectedArguments)
+if ($Preset -eq 'fast-dev-tests' -and $WorkflowPhase -eq 'run') {
+    # Cargo's manifest selector belongs to Cargo, before Nextest's `--` boundary.
+    $separatorIndex = [Array]::IndexOf([string[]]$argumentList, '--')
+    if ($separatorIndex -ge 0) {
+        $argumentList = @($argumentList[0..($separatorIndex - 1)]) + @('--manifest-path', $manifestPath) + @($argumentList[($separatorIndex)..($argumentList.Count - 1)])
+    }
+    else { $argumentList += @('--manifest-path', $manifestPath) }
+}
+else {
+    $argumentList += @('--manifest-path', $manifestPath)
+}
+if ($Preset -ne 'fast-dev-tests') { $argumentList += @($CargoArguments) }
 
 if ($PrintCommand) {
     [pscustomobject]@{

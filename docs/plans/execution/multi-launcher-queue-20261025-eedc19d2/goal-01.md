@@ -39,3 +39,34 @@ review when Reviewer dispatch is unavailable. It applies to the full queue;
 all functional, safety, verification, and Git requirements remain binding.
 M1-A correction 2 used the parent as sole source writer and an independent
 configured Reviewer. Original Goal/Kickstart inputs remain unchanged.
+
+## M1-B — explicit build modes and test selections
+
+M1-A commit: f86397762a210c20109628de55aabe80e0bb8af3 (pushed).
+Added a declarative six-selection catalog and a single resolver for Preview,
+Discover and Run. Existing Cargo presets remain compatible. The facade selects
+explicit targets, separates compiler and runner profiles, validates nonempty
+exact identities, rejects stale discovery, and uses the shared bounded owner.
+Selections: tables, notes, paste, query-focus, settings and integration-query.
+
+Verification: focused facade fixtures passed (10.522 seconds), including an
+actual Discover-writer to validator to public-Preview round trip; legacy
+performance parser fixtures passed. Final attempt-5 library and pure-target
+discovery passed, both matching fingerprint
+77633d885a587fcbb5293b54e5f3617c84795361a80336641e27c3077b8dabea.
+Both public previews passed without executing a test. The exact table case ran:
+1 passed, 6338 skipped, no failures. All final phases verified cleanup and drain.
+Detailed receipts remain in external g01-m1b/verification/attempt-5.
+
+Configured Reviewer dispatch was unavailable. The parent performed a separate
+structured review under the user's override; this was not independent review.
+Corrected optional CLI forwarding, receipt-property casing at the serialization
+boundary, and quick-check target metadata. Focused regression coverage passes;
+parent review accepts M1-B with no remaining blocking findings.
+
+Earlier cold preparations exited Cargo successfully but failed owned-descendant
+retirement checks. Original failures remain retained; the late descendant's
+image is unknown. The bounded warm diagnostic and final cached preparations
+passed. No owner/grace change, cold-build fix, or speedup is claimed. Native
+mapping, result summaries/replay, and comparisons belong to later checkpoints.
+Final Goal Clippy remains deferred until all Goal edits and validation finish.
