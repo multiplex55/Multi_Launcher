@@ -16,12 +16,12 @@ Only these corrections and their focused evidence are in scope.
 | Stage | State | Evidence / commit / push |
 | --- | --- | --- |
 | M0-A | complete | Baseline above; no pre-existing modifications. |
-| M1-A | complete | `afde8db4`; rustls 0.23.40 → 0.23.45, required webpki 0.103.13 → 0.103.16 only. Locked reverse graph: reqwest 0.12.28, hyper-rustls 0.27.9, tokio-rustls 0.26.4. Manifest features unchanged. Push: connection failed. Compile deferred to integration. |
+| M1-A | complete | `afde8db4`; rustls 0.23.40 → 0.23.45, required webpki 0.103.13 → 0.103.16 only. Locked reverse graph: reqwest 0.12.28, hyper-rustls 0.27.9, tokio-rustls 0.26.4. Manifest features unchanged. Push: connection failed. Final first-party compile passed. |
 | M2-A | partial / verified related fix | `8daffbae`; zero-height results viewport corrected and focused geometry/scroll/resize regression passes; reported creep remains unreproduced. Unchanged response-flow gate timeout remains. Push: connection failed. |
 | M3-A | verified tail fix / native gap | `a20daa94`; redundant Windows 10 ms hidden-frame sleep removed; identical owned static/live/paused dispatch probes improve maxima to <1 ms. Four control/lifetime tests pass; pointer drag, visual compositing and separate slow fixture polling remain unverified. Push: connection failed. |
-| M4-A | verified | Active cadence 34 ms (~29.4 Hz); generated idle poll stays 100 ms; native 200/750 ms waits unchanged. Deterministic old/new completions 10/29 with 1 ms processing. Seven focused tests pass after one test-boundary correction. |
-| M4-B | pending | One existing guarded Glow/native WinRT acceptance pass where supported; record environmental gaps truthfully. |
-| M5-A | pending | Changed-file formatting, one first-party compile, focused tests and optional end-only Clippy, independent final diff review, clean committed handoff. |
+| M4-A | verified | `eaec6934`; active cadence 34 ms (~29.4 Hz); generated idle poll stays 100 ms; native 200/750 ms waits unchanged. Deterministic old/new completions 10/29 with 1 ms processing. Seven focused tests pass after one test-boundary correction. Push: connection failed. |
+| M4-B | environmental GAP | Final owned WinRT test failed at Graphics Capture support check (0x8007000E), before first frame. Glow owned-pixel sampling already unavailable in both M3 runs; no repeated attempt to force it. |
+| M5-A | verification complete with gaps | Final independent cumulative review has no remaining substantive findings. First-party compile and end-only Clippy pass. Original creep/flow-timeout and native evidence gaps remain explicit. |
 
 ## Native environment probe
 
@@ -163,3 +163,49 @@ Exact M4 command:
 `cargo nextest run --locked -p multi_launcher --lib -E 'test(frame_cadence_) or test(worker_signal_) or test(latest_frame_slot) or test(fake_live_session) or test(pinboard_live_presenter)' --no-capture`
 Changed-file rustfmt and `git diff --check` passed. No stale ten-per-second test
 name remains. Final compile/lint and native-source attempt follow this checkpoint.
+
+## Final native attempt and integration
+
+`cargo nextest run --locked -p multi_launcher --lib --run-ignored ignored-only -E 'test(native_live_pin_owned_window_smoke)' -j 1 --no-capture`
+ran once after M4: 0 passed / 1 failed / 6,336 skipped, 1.188 s tests.
+Failure: Windows Graphics Capture support check returned
+`0x8007000E` (not enough memory resources) before any initial frame. This is a
+failed native test / environmental resource GAP, not a pass or measured native
+FPS result. Existing owned source fixture Drop cleanup ran; subsequent
+`Get-Process powershell,pin_opacity_smoke` showed neither process remaining.
+The first process-inventory attempt via CIM was denied; the non-CIM process
+inventory succeeded. No foreign input/capture or ownership bypass was used.
+
+Final cumulative independent review confirmed the simulator horizon correction
+resolves its only finding; no remaining substantive code findings. Evidence
+gaps remain for original creep, actual pointer drag and OS capture FPS.
+
+`cargo check --locked -p multi_launcher --bin multi_launcher` passed in 2m20s.
+Log: `target/remediation-check.log`. Existing vendored warnings were left alone.
+End-only first-party Clippy (including dev smoke source) passed in 1m03s:
+`cargo clippy --locked -p multi_launcher --lib --bin multi_launcher --features dev-smoke-binaries --no-deps -- -D warnings`
+Log: `target/remediation-clippy.log`. No first-party lint remediation or
+unrelated warning cleanup was needed. Existing vendored warnings are separate.
+
+## Final handoff boundary
+
+Implementation commits: M1 `afde8db4`, M2 `8daffbae`, M3 `a20daa94`, M4
+`eaec6934`, following M0 baseline `abc8ced6`. Every in-chat initial/checkpoint
+push attempt returned a github.com:443 connection error; no retry loop or
+history rewrite was used. The cached upstream ref is at M1; server state is
+unverified (see baseline note). A final evidence-only checkpoint records these
+receipts; its SHA and push outcome are reported in the chat handoff.
+
+No full suite, release build, new settings, external-window capture/input, or
+unrelated fixes were performed. Rust formatting/diff checks pass for changed
+files; workspace-wide format-check probes had reported existing differences
+in `src/bin/radial_acceptance/native.rs` and `src/paste_sequence/playback.rs`,
+which were left untouched. The final source diff matches the reviewed paths.
+
+Remaining limitations: original vertical creep was never reproduced; an
+unchanged required response-flow test times out at its first-read gate; actual
+pointer dragging and native compositor/live-source FPS cannot be qualified
+from the available session. The measured results-access defect, Windows
+dispatch tail, patched TLS resolution and active scheduling cap are corrected
+and verified at their stated layers. Do not describe this as a complete native
+acceptance pass or as proof that the user's original creep trigger is fixed.
