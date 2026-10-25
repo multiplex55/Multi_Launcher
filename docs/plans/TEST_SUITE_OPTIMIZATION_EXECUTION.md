@@ -26,7 +26,7 @@ No application behavior or default profile changes are authorized.
 | M3-B | skipped | No small measured extraction/deduplication justified; avoid broad GUI test-owner restructuring |
 | M4-A | complete | Measured replacement-observer teardown race fixed with existing completion seam; 20 exact repeats and mixed group passed |
 | M4-B | skipped | No measured arbitrary sleep justified a substitution; no wait campaign |
-| M5-A | pending | Matched scorecard, coverage parity; at most one final full execution |
+| M5-A | complete | Matched scorecard; final full execution 185.644s, all original cases retained, three baseline failures remain |
 | M5-B | pending | Independent review; scoped format and one first-party Clippy; commit and push |
 
 One source writer per checkpoint; planning and final review are read-only.
@@ -265,3 +265,83 @@ Final matched library no-op samples at `15d9e12c` are 2.140753, 2.159011 and
 Preparation 2.203940s is excluded. These small warm command differences include
 startup/freshness work and do not measure compiler or linker time separately.
 Evidence: `final-lib-build-containment`, `build-samples/candidate-lib-*`.
+
+## M5-A final quantitative scorecard
+
+Same Windows host/toolchain, default features, `fast-dev`, Nextest default
+profile and default parallelism; no Cargo job/test-thread overrides. All
+execution comparisons exclude compilation. Baseline application/test source
+is M0-A `916bd05d`; final full-run source is clean `c12b92da576bf489efbba6171811467040b4b3a4`.
+The oracle candidate was measured after M2-A, dialog after M2-B, grouped builds
+at the M3-A source, and final library no-ops at `15d9e12c`. Each is the same
+retained implementation as the final full-run source; later edits only affect
+other test owners, grouping, tooling or documentation. Receipts record exact
+source fingerprints, including any then-uncommitted implementation.
+
+| Matched workload | Baseline | Candidate | Improvement | Samples per side |
+|---|---:|---:|---:|---|
+| Library warm no-op build | 2.376990s | 2.140753s | 9.94% | 3; median |
+| Two-file/five-case warm no-op build | 2.346657s | 2.100373s | 10.50% | 3; median |
+| Two-file/five-case controlled edit build | 8.444534s | 6.361472s | **24.67%** | 3; median |
+| Standalone C2G oracle | 42.664474s | 17.839346s | **58.19%** | 1 |
+| Typed dialog in matched two-case group | 4.552922s | 2.497186s | **45.15%** | 1 |
+| Full Nextest execution | 249.316s | 185.644s | **25.54%** | 1 |
+
+Warm selected edited-build 20% and full execution 25% aspirations were met
+for these particular workloads. Warm no-op changes did not meet 20%.
+Single execution samples carry ordinary scheduler/load noise; there is no
+statistical significance claim or extrapolation to arbitrary builds. Historical
+263.841s is unused context. Both full runs completed, with failures rather than
+timeout censoring. The final run includes two additional proof tests, so the
+original workload is preserved rather than reduced to improve the score.
+
+### Full-run results and parity
+
+| Full result | Baseline | Final |
+|---|---:|---:|
+| Inventory / test binaries | 7019 / 71 | 7021 / 70 |
+| Executed | 6971 | 6973 |
+| Passed | 6966 | 6970 |
+| Failed | 5 | 3 |
+| Timed out (native reporter) | 0 | 0 |
+| Skipped / ignored | 48 | 48 |
+| Nextest exit | 100 | 100 |
+
+Final failures, all present in the baseline:
+
+- `file_operations::tests::direct_scan_keeps_child_directory_blocker_when_listing_is_denied`
+- `gui::radial_editor::action_editor::tests::live_ranked_editor_search_scrolls_and_assigns_rows_beyond_fifty`
+- `gui::universal_action_catalog::tests::acceptance_fixture_queries_reach_real_ranked_actions_and_authoring_rows`
+
+No newly failing case was observed. The unchanged CSV workflow passed this time;
+that does not establish its baseline failure is resolved. The explicitly repaired
+observer test passed in the full run as well as its targeted repeat/contention
+checks. Final oracle passed in 25.653253s under full-suite load (baseline
+74.883421s); typed dialog passed in 5.294577s (baseline full 9.307s). These are
+descriptive full-load values, separate from the standalone/matched selections.
+
+Final inventory matches the verified M3-A inventory name/ignored-state exactly:
+zero differences, zero duplicate terminal names, every one of 6973 runnable
+cases completed, all parsed terminal identities resolved. Original coverage is
+retained via the five documented target-name mappings plus two new C2G proofs;
+no original case, assertion, recipe, 10k step or ignored state was removed.
+JSON generic failures leave total per-case timeout classification null; the
+actual native summary and terminal status lines establish zero timeouts here.
+
+Exactly one baseline and one final unfiltered full execution were used. Final
+command was `profile.ps1 -Mode FullRun -TargetKind Workspace -CargoProfile
+fast-dev -TimeoutSeconds 900`: prebuild/list from unfiltered `--workspace`, then
+`cargo nextest run --manifest-path <repo>/Cargo.toml --binaries-metadata
+<prebuilt-metadata> --no-fail-fast --message-format libtest-json-plus
+--message-format-version 0.1`. No selection filter or hidden exclusion.
+Final prebuild Cargo report: 1.05s; profiling phase wall 14.114969s.
+Execution phase wall 198.638836s includes containment/cleanup and is not
+substituted for Nextest's 185.644s execution measurement. No bound was reached;
+all recorded owned identities were absent after cleanup. The root-generated
+`clipboard_modifiers.json` was preserved externally as `final-generated-clipboard_modifiers.json`.
+
+Evidence beneath external `Multi_Launcher/test-perf`:
+`FullRun_20261025T123017966Z_a2e3b5c369854e279b2bd41ecb570705/receipt.json`,
+its validated `summary.json`, raw phase logs and owned cleanup records;
+`final-full.log`; `final-parity-and-scorecard.json`. No raw/private logs are
+committed. `summarize.ps1 -ReceiptPath <receipt>` produced valid schema-1 JSON.
