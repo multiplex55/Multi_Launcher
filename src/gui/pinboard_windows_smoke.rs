@@ -5,18 +5,19 @@
 //! windows, not for an external/OS capture source.
 
 use super::*;
-use crate::pinboard::live::PinLiveCaptureSession;
+use crate::pinboard::live::{PinLiveCaptureSession, PinLiveStatus};
 use crate::pinboard::source::{PinSourceBinding, PinSourceCrop, PinSourceWindowIdentity};
 use crate::pinboard::{Pin, PinSnapshot};
 use image::RgbaImage;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::mpsc::SyncSender;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use windows::Win32::Foundation::{BOOL, COLORREF, FILETIME, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Foundation::{BOOL, COLORREF, FILETIME, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{ClientToScreen, GetDC, GetPixel, ReleaseDC};
 use windows::Win32::System::SystemInformation::GetTickCount64;
@@ -29,7 +30,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
     GetWindowThreadProcessId, IsWindow, IsWindowVisible, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetForegroundWindow, WindowFromPoint,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SMTO_ABORTIFHUNG, SendMessageTimeoutW,
+    SetForegroundWindow, WM_NULL, WindowFromPoint,
 };
 
 const ROOT_COLOR: [u8; 4] = [24, 52, 88, 255];
@@ -42,6 +44,10 @@ const FRAME_REPAINT: Duration = Duration::from_millis(40);
 const PHASE_TIMEOUT: Duration = Duration::from_secs(12);
 const RUN_TIMEOUT: Duration = Duration::from_secs(90);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
+const DISPATCH_PROBE_SAMPLES: usize = 32;
+const DISPATCH_PROBE_INTERVAL: Duration = Duration::from_millis(10);
+const DISPATCH_PROBE_TIMEOUT_MS: u32 = 100;
+const GENERATED_FRAME_PRODUCER_INTERVAL: Duration = Duration::from_millis(33);
 
 #[derive(Clone)]
 struct SmokeLog(Arc<Mutex<File>>);
@@ -89,6 +95,15 @@ impl PinSavePicker for FixedSavePicker {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
     AwaitInitialWindows,
+    RequestLatencyRootHide,
+    AwaitLatencyRootHidden,
+    ProbeStaticDispatch,
+    StartLiveDispatchProbe,
+    ProbeLiveDispatch,
+    PauseLiveDispatch,
+    ProbePausedDispatch,
+    RequestLatencyRootRestore,
+    AwaitLatencyRootRestore,
     SampleInitial,
     RequestStaticFifty,
     AwaitStaticFifty,
@@ -169,6 +184,252 @@ struct ZOrderScan {
     obstruction: Option<usize>,
 }
 
+struct NativeDispatchProbe {
+    pin_id: PinId,
+    label: &'static str,
+    binding: NativeWindowBinding,
+    thread_id: u32,
+    hidden_logic_passes_at_start: usize,
+    result_rx: Receiver<Result<NativeDispatchStats, String>>,
+    cancelled: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+struct NativeDispatchStats {
+    latencies_us: Vec<u64>,
+    timed_out: usize,
+    wall_time: Duration,
+}
+
+impl NativeDispatchStats {
+    fn percentile_us(&self, percentile: usize) -> Option<u64> {
+        let mut sorted = self.latencies_us.clone();
+        sorted.sort_unstable();
+        let index = sorted
+            .len()
+            .checked_mul(percentile)?
+            .div_ceil(100)
+            .saturating_sub(1);
+        sorted.get(index).copied()
+    }
+
+    fn median_us(&self) -> Option<u64> {
+        let mut sorted = self.latencies_us.clone();
+        sorted.sort_unstable();
+        let middle = sorted.len() / 2;
+        match sorted.len() {
+            0 => None,
+            len if len % 2 == 0 => Some(
+                sorted[middle - 1] / 2
+                    + sorted[middle] / 2
+                    + (sorted[middle - 1] % 2 + sorted[middle] % 2) / 2,
+            ),
+            _ => sorted.get(middle).copied(),
+        }
+    }
+
+    fn receipt_fields(&self) -> Result<String, String> {
+        if self.latencies_us.len() != DISPATCH_PROBE_SAMPLES {
+            return Err(format!(
+                "GAP: WM_NULL proxy collected {} of {DISPATCH_PROBE_SAMPLES} samples",
+                self.latencies_us.len()
+            ));
+        }
+        let minimum = self
+            .latencies_us
+            .iter()
+            .copied()
+            .min()
+            .ok_or_else(|| "GAP: WM_NULL proxy collected no samples".to_owned())?;
+        let median = self
+            .median_us()
+            .ok_or_else(|| "GAP: WM_NULL proxy median is unavailable".to_owned())?;
+        let p95 = self
+            .percentile_us(95)
+            .ok_or_else(|| "GAP: WM_NULL proxy p95 is unavailable".to_owned())?;
+        let maximum = self
+            .latencies_us
+            .iter()
+            .copied()
+            .max()
+            .ok_or_else(|| "GAP: WM_NULL proxy maximum is unavailable".to_owned())?;
+        Ok(format!(
+            "samples={} min_us={minimum} median_us={median} p95_us={p95} max_us={maximum} timeouts={} wall_ms={}",
+            self.latencies_us.len(),
+            self.timed_out,
+            self.wall_time.as_millis()
+        ))
+    }
+}
+
+impl NativeDispatchProbe {
+    fn start(
+        pin_id: PinId,
+        label: &'static str,
+        binding: NativeWindowBinding,
+        expected_thread_id: u32,
+        hidden_logic_passes_at_start: usize,
+    ) -> Result<Self, String> {
+        let hwnd_value = binding.hwnd;
+        let expected_process_id = binding.process_id;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_for_worker = Arc::clone(&cancelled);
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name(format!("pin-wm-null-{label}"))
+            .spawn(move || {
+                let hwnd = HWND(hwnd_value as *mut _);
+                let started = Instant::now();
+                let result = (|| {
+                    let mut latencies_us = Vec::with_capacity(DISPATCH_PROBE_SAMPLES);
+                    let mut timed_out = 0;
+                    for sample in 0..DISPATCH_PROBE_SAMPLES {
+                        if cancelled_for_worker.load(Ordering::Acquire) {
+                            return Err("GAP: WM_NULL proxy was cancelled".to_owned());
+                        }
+                        if !unsafe { IsWindow(hwnd) }.as_bool()
+                            || !unsafe { IsWindowVisible(hwnd) }.as_bool()
+                        {
+                            return Err("GAP: exact owned pin HWND became unavailable during WM_NULL proxy".to_owned());
+                        }
+                        let mut actual_process_id = 0;
+                        let actual_thread_id = unsafe {
+                            GetWindowThreadProcessId(hwnd, Some(&mut actual_process_id))
+                        };
+                        if actual_process_id != expected_process_id
+                            || actual_thread_id != expected_thread_id
+                        {
+                            return Err(format!(
+                                "GAP: WM_NULL proxy target identity changed pid={actual_process_id} tid={actual_thread_id}"
+                            ));
+                        }
+                        let mut message_result = 0_usize;
+                        let send_started = Instant::now();
+                        let delivered = unsafe {
+                            SendMessageTimeoutW(
+                                hwnd,
+                                WM_NULL,
+                                WPARAM(0),
+                                LPARAM(0),
+                                SMTO_ABORTIFHUNG,
+                                DISPATCH_PROBE_TIMEOUT_MS,
+                                Some(&mut message_result),
+                            )
+                        }
+                        .0 != 0;
+                        let elapsed_us = send_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                        if !delivered {
+                            timed_out += 1;
+                        }
+                        latencies_us.push(elapsed_us);
+                        if sample + 1 < DISPATCH_PROBE_SAMPLES {
+                            thread::sleep(DISPATCH_PROBE_INTERVAL);
+                        }
+                    }
+                    Ok(NativeDispatchStats {
+                        latencies_us,
+                        timed_out,
+                        wall_time: started.elapsed(),
+                    })
+                })();
+                let _ = result_tx.send(result);
+            })
+            .map_err(|error| format!("GAP: could not start WM_NULL proxy worker: {error}"))?;
+        Ok(Self {
+            pin_id,
+            label,
+            binding,
+            thread_id: expected_thread_id,
+            hidden_logic_passes_at_start,
+            result_rx,
+            cancelled,
+            worker: Some(worker),
+        })
+    }
+
+    fn try_finish(&mut self) -> Option<Result<NativeDispatchStats, String>> {
+        let result = match self.result_rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => {
+                Err("FAIL: WM_NULL proxy worker exited without a result".to_owned())
+            }
+        };
+        if self
+            .worker
+            .take()
+            .is_some_and(|worker| worker.join().is_err())
+        {
+            return Some(Err("FAIL: WM_NULL proxy worker panicked".to_owned()));
+        }
+        Some(result)
+    }
+
+    fn cancel_and_join(&mut self) -> Result<(), String> {
+        self.cancelled.store(true, Ordering::Release);
+        if self
+            .worker
+            .take()
+            .is_some_and(|worker| worker.join().is_err())
+        {
+            Err("FAIL: WM_NULL proxy worker panicked during cleanup".to_owned())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct GeneratedFrameProducer {
+    stop_tx: SyncSender<()>,
+    worker: Option<thread::JoinHandle<GeneratedFrameProducerStats>>,
+}
+
+struct GeneratedFrameProducerStats {
+    accepted: usize,
+    full: usize,
+}
+
+impl GeneratedFrameProducer {
+    fn start(sender: SyncSender<RgbaImage>, frame: RgbaImage) -> Result<Self, String> {
+        let (stop_tx, stop_rx) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("pin-generated-30hz-producer".to_owned())
+            .spawn(move || {
+                let mut stats = GeneratedFrameProducerStats {
+                    accepted: 0,
+                    full: 0,
+                };
+                loop {
+                    match stop_rx.try_recv() {
+                        Ok(()) | Err(TryRecvError::Disconnected) => break,
+                        Err(TryRecvError::Empty) => {}
+                    }
+                    match sender.try_send(frame.clone()) {
+                        Ok(()) => stats.accepted += 1,
+                        Err(TrySendError::Full(_)) => stats.full += 1,
+                        Err(TrySendError::Disconnected(_)) => break,
+                    }
+                    thread::sleep(GENERATED_FRAME_PRODUCER_INTERVAL);
+                }
+                stats
+            })
+            .map_err(|error| format!("FAIL: could not start generated live producer: {error}"))?;
+        Ok(Self {
+            stop_tx,
+            worker: Some(worker),
+        })
+    }
+
+    fn stop_and_join(&mut self) -> Result<GeneratedFrameProducerStats, String> {
+        let _ = self.stop_tx.try_send(());
+        self.worker
+            .take()
+            .ok_or_else(|| "FAIL: generated live producer was already joined".to_owned())?
+            .join()
+            .map_err(|_| "FAIL: generated live producer panicked".to_owned())
+    }
+}
+
 unsafe extern "system" fn inspect_z_order(hwnd: HWND, parameter: LPARAM) -> BOOL {
     let scan = unsafe { &mut *(parameter.0 as *mut ZOrderScan) };
     if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
@@ -233,6 +494,7 @@ struct SmokeApp {
     started: Instant,
     stage_started: Instant,
     stage: Stage,
+    hidden_root_logic_passes: usize,
     fatal: Option<String>,
     root_hwnd: Option<HWND>,
     canvas_rect: Option<egui::Rect>,
@@ -242,6 +504,8 @@ struct SmokeApp {
     window_positions_configured: bool,
     copy_request_id: Option<u64>,
     save_request_id: Option<u64>,
+    native_dispatch_probe: Option<NativeDispatchProbe>,
+    generated_frame_producer: Option<GeneratedFrameProducer>,
     shutdown_succeeded: bool,
     shutdown_attempted: bool,
     closed_normally: bool,
@@ -310,6 +574,7 @@ impl SmokeApp {
             started: Instant::now(),
             stage_started: Instant::now(),
             stage: Stage::AwaitInitialWindows,
+            hidden_root_logic_passes: 0,
             fatal: None,
             root_hwnd: None,
             canvas_rect: None,
@@ -319,6 +584,8 @@ impl SmokeApp {
             window_positions_configured: false,
             copy_request_id: None,
             save_request_id: None,
+            native_dispatch_probe: None,
+            generated_frame_producer: None,
             shutdown_succeeded: false,
             shutdown_attempted: false,
             closed_normally: false,
@@ -383,6 +650,7 @@ impl SmokeApp {
             let message = message.into();
             self.log.line(format!("result={kind} reason={message}"));
             self.fatal = Some(format!("{kind}: {message}"));
+            self.stop_dispatch_workers();
             self.set_stage(Stage::ClosePins);
         }
     }
@@ -436,6 +704,119 @@ impl SmokeApp {
             Stage::AwaitInitialWindows => {
                 let readiness = self.presentation_ready(100, 100);
                 if self.observe_readiness("initial presentation", readiness) {
+                    self.log.line(format!(
+                        "phase=initial-pins-ready elapsed_from_fixture_creation_ms={} source=generated-static-plus-synthetic-live",
+                        self.started.elapsed().as_millis()
+                    ));
+                    self.set_stage(Stage::RequestLatencyRootHide);
+                }
+            }
+            Stage::RequestLatencyRootHide => {
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::Visible(false),
+                );
+                self.set_stage(Stage::AwaitLatencyRootHidden);
+            }
+            Stage::AwaitLatencyRootHidden => {
+                let readiness = self.hidden_root_dispatch_targets_ready();
+                if self.observe_readiness("hidden-root WM_NULL targets", readiness) {
+                    match self.start_native_dispatch_probe(self.first, "static") {
+                        Ok(()) => self.set_stage(Stage::ProbeStaticDispatch),
+                        Err(error) => self.dispatch_probe_error(error),
+                    }
+                }
+            }
+            Stage::ProbeStaticDispatch => match self.poll_native_dispatch_probe() {
+                None => {}
+                Some(Ok((probe, stats))) => match self.record_native_dispatch_probe(probe, stats) {
+                    Ok(()) => self.set_stage(Stage::StartLiveDispatchProbe),
+                    Err(error) => self.dispatch_probe_error(error),
+                },
+                Some(Err(error)) => self.dispatch_probe_error(error),
+            },
+            Stage::StartLiveDispatchProbe => {
+                let live_status = self.board.get(self.second).and_then(Pin::live_status);
+                if live_status != Some(PinLiveStatus::Live) {
+                    self.gap(format!(
+                        "generated live pin was not active before the live WM_NULL proxy: {live_status:?}"
+                    ));
+                } else {
+                    match GeneratedFrameProducer::start(
+                        self.live_frame_sender.clone(),
+                        self.second_pixels.clone(),
+                    ) {
+                        Ok(producer) => {
+                            self.generated_frame_producer = Some(producer);
+                            match self
+                                .start_native_dispatch_probe(self.second, "live-generated-30hz")
+                            {
+                                Ok(()) => self.set_stage(Stage::ProbeLiveDispatch),
+                                Err(error) => self.dispatch_probe_error(error),
+                            }
+                        }
+                        Err(error) => self.dispatch_probe_error(error),
+                    }
+                }
+            }
+            Stage::ProbeLiveDispatch => match self.poll_native_dispatch_probe() {
+                None => {}
+                Some(Ok((probe, stats))) => match self.record_native_dispatch_probe(probe, stats) {
+                    Ok(()) => match self.stop_generated_frame_producer() {
+                        Ok(()) => self.set_stage(Stage::PauseLiveDispatch),
+                        Err(error) => self.dispatch_probe_error(error),
+                    },
+                    Err(error) => self.dispatch_probe_error(error),
+                },
+                Some(Err(error)) => self.dispatch_probe_error(error),
+            },
+            Stage::PauseLiveDispatch => {
+                if !self.board.pause_live(self.second) {
+                    self.defect("generated live pin refused the bounded pause control");
+                } else if self.board.get(self.second).and_then(Pin::live_status)
+                    != Some(PinLiveStatus::Paused)
+                {
+                    self.defect("generated live pin did not report Paused after pause control");
+                } else {
+                    match self.start_native_dispatch_probe(self.second, "paused-live") {
+                        Ok(()) => self.set_stage(Stage::ProbePausedDispatch),
+                        Err(error) => self.dispatch_probe_error(error),
+                    }
+                }
+            }
+            Stage::ProbePausedDispatch => match self.poll_native_dispatch_probe() {
+                None => {}
+                Some(Ok((probe, stats))) => match self.record_native_dispatch_probe(probe, stats) {
+                    Ok(()) => {
+                        if !self.board.resume_live(self.second) {
+                            self.defect("generated live pin refused resume after paused proxy");
+                        } else if self.board.get(self.second).and_then(Pin::live_status)
+                            != Some(PinLiveStatus::Live)
+                        {
+                            self.defect("generated live pin did not return to Live after proxy");
+                        } else {
+                            self.set_stage(Stage::RequestLatencyRootRestore);
+                        }
+                    }
+                    Err(error) => self.dispatch_probe_error(error),
+                },
+                Some(Err(error)) => self.dispatch_probe_error(error),
+            },
+            Stage::RequestLatencyRootRestore => {
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::Visible(true),
+                );
+                self.set_stage(Stage::AwaitLatencyRootRestore);
+            }
+            Stage::AwaitLatencyRootRestore => {
+                let readiness = self.presentation_ready(100, 100);
+                if self.observe_readiness("restored-root WM_NULL measurement", readiness) {
+                    self.log.line(format!(
+                        "phase=latency-root-restored elapsed_from_fixture_creation_ms={} root_hwnd=0x{:x}",
+                        self.started.elapsed().as_millis(),
+                        self.root_hwnd.map_or(0, |hwnd| hwnd.0 as usize)
+                    ));
                     self.set_stage(Stage::SampleInitial);
                 }
             }
@@ -920,6 +1301,206 @@ impl SmokeApp {
             egui::ViewportId::ROOT
         ));
         Ok(())
+    }
+
+    fn hidden_root_dispatch_targets_ready(&self) -> Result<(), String> {
+        let root = self
+            .root_hwnd
+            .ok_or_else(|| "GAP: root HWND is unavailable before WM_NULL proxy".to_owned())?;
+        if unsafe { IsWindowVisible(root) }.as_bool() {
+            return Err("GAP: fixture root remains visible before hidden-root proxy".into());
+        }
+        for (pin_id, opacity) in [(self.first, 100), (self.second, 100)] {
+            let (_, binding, ..) = self.current_pin(pin_id, opacity)?;
+            let hwnd = HWND(binding.hwnd as *mut _);
+            if !unsafe { IsWindow(hwnd) }.as_bool() || !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+                return Err(format!(
+                    "GAP: owned pin {} is not visible while root is hidden",
+                    pin_id.get()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn start_native_dispatch_probe(
+        &mut self,
+        pin_id: PinId,
+        label: &'static str,
+    ) -> Result<(), String> {
+        if self.native_dispatch_probe.is_some() {
+            return Err("FAIL: a native dispatch proxy is already running".into());
+        }
+        let root = self
+            .root_hwnd
+            .ok_or_else(|| "GAP: exact root HWND is unavailable for WM_NULL proxy".to_owned())?;
+        if unsafe { IsWindowVisible(root) }.as_bool() {
+            return Err("GAP: root became visible before hidden-root WM_NULL proxy".into());
+        }
+        let (_, binding, ..) = self.current_pin(pin_id, 100)?;
+        let hwnd = HWND(binding.hwnd as *mut _);
+        if !unsafe { IsWindow(hwnd) }.as_bool() || !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            return Err(format!(
+                "GAP: exact owned pin {} is not visible for WM_NULL proxy",
+                pin_id.get()
+            ));
+        }
+        let mut root_process_id = 0;
+        let root_thread_id = unsafe { GetWindowThreadProcessId(root, Some(&mut root_process_id)) };
+        let mut target_process_id = 0;
+        let target_thread_id =
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut target_process_id)) };
+        if root_process_id != self.process_id
+            || target_process_id != binding.process_id
+            || target_process_id != self.process_id
+            || root_thread_id == 0
+            || target_thread_id == 0
+            || target_thread_id != root_thread_id
+        {
+            return Err(format!(
+                "GAP: native dispatch proxy does not share the validated root UI thread root_pid={root_process_id} root_tid={root_thread_id} pin_pid={target_process_id} pin_tid={target_thread_id}"
+            ));
+        }
+        self.native_dispatch_probe = Some(NativeDispatchProbe::start(
+            pin_id,
+            label,
+            binding.clone(),
+            target_thread_id,
+            self.hidden_root_logic_passes,
+        )?);
+        self.log.line(format!(
+            "phase=native-dispatch-proxy-start class={label} pin_id={} source=generated hwnd=0x{:x} title={:?} pid={} tid={} root_hwnd=0x{:x} root_visible=false message=WM_NULL timeout_ms={DISPATCH_PROBE_TIMEOUT_MS} samples={DISPATCH_PROBE_SAMPLES} cadence_ms={} evidence=dispatch-latency-proxy-not-pointer-drag",
+            pin_id.get(),
+            binding.hwnd,
+            binding.title,
+            binding.process_id,
+            target_thread_id,
+            root.0 as usize,
+            DISPATCH_PROBE_INTERVAL.as_millis()
+        ));
+        Ok(())
+    }
+
+    fn poll_native_dispatch_probe(
+        &mut self,
+    ) -> Option<Result<(NativeDispatchProbe, NativeDispatchStats), String>> {
+        let Some(mut probe) = self.native_dispatch_probe.take() else {
+            return Some(Err("FAIL: dispatch-probe stage has no active worker".into()));
+        };
+        match probe.try_finish() {
+            None => {
+                self.native_dispatch_probe = Some(probe);
+                None
+            }
+            Some(Ok(stats)) => Some(Ok((probe, stats))),
+            Some(Err(error)) => Some(Err(error)),
+        }
+    }
+
+    fn record_native_dispatch_probe(
+        &mut self,
+        probe: NativeDispatchProbe,
+        stats: NativeDispatchStats,
+    ) -> Result<(), String> {
+        let (_, binding, ..) = self.current_pin(probe.pin_id, 100)?;
+        if binding != probe.binding {
+            return Err(format!(
+                "FAIL: pin {} native binding changed during {} WM_NULL proxy",
+                probe.pin_id.get(),
+                probe.label
+            ));
+        }
+        let hwnd = HWND(binding.hwnd as *mut _);
+        if !unsafe { IsWindow(hwnd) }.as_bool() || !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            return Err(format!(
+                "GAP: pin {} was unavailable after {} WM_NULL proxy",
+                probe.pin_id.get(),
+                probe.label
+            ));
+        }
+        if probe.label == "static" {
+            if self
+                .board
+                .get(probe.pin_id)
+                .and_then(Pin::live_status)
+                .is_some()
+            {
+                return Err("FAIL: static WM_NULL proxy target became a live pin".into());
+            }
+        } else {
+            let expected_status = if probe.label == "paused-live" {
+                PinLiveStatus::Paused
+            } else {
+                PinLiveStatus::Live
+            };
+            if self.board.get(probe.pin_id).and_then(Pin::live_status)
+                != Some(expected_status.clone())
+            {
+                return Err(format!(
+                    "GAP: {} WM_NULL proxy pin changed live state during measurement",
+                    probe.label
+                ));
+            }
+        }
+        let summary = stats.receipt_fields()?;
+        let root_logic_passes = self
+            .hidden_root_logic_passes
+            .saturating_sub(probe.hidden_logic_passes_at_start);
+        self.log.line(format!(
+            "phase=native-dispatch-proxy class={} pin_id={} source=generated hwnd=0x{:x} title={:?} pid={} tid={} root_visible=false message=WM_NULL root_logic_passes={} {} evidence=dispatch-latency-proxy-not-pointer-drag",
+            probe.label,
+            probe.pin_id.get(),
+            probe.binding.hwnd,
+            probe.binding.title,
+            probe.binding.process_id,
+            probe.thread_id,
+            root_logic_passes,
+            summary
+        ));
+        Ok(())
+    }
+
+    fn stop_generated_frame_producer(&mut self) -> Result<(), String> {
+        let mut producer = self
+            .generated_frame_producer
+            .take()
+            .ok_or_else(|| "FAIL: generated live producer is not running".to_owned())?;
+        let stats = producer.stop_and_join()?;
+        self.log.line(format!(
+            "phase=generated-live-producer class=live-generated-30hz result=joined accepted={} full={} interval_ms={} source=synthetic-not-os-capture",
+            stats.accepted,
+            stats.full,
+            GENERATED_FRAME_PRODUCER_INTERVAL.as_millis()
+        ));
+        Ok(())
+    }
+
+    fn stop_dispatch_workers(&mut self) {
+        if let Some(mut probe) = self.native_dispatch_probe.take()
+            && let Err(error) = probe.cancel_and_join()
+        {
+            self.log
+                .line(format!("cleanup=wm-null-proxy error={error}"));
+        }
+        if let Some(mut producer) = self.generated_frame_producer.take() {
+            match producer.stop_and_join() {
+                Ok(stats) => self.log.line(format!(
+                    "cleanup=generated-live-producer joined accepted={} full={}",
+                    stats.accepted, stats.full
+                )),
+                Err(error) => self
+                    .log
+                    .line(format!("cleanup=generated-live-producer error={error}")),
+            }
+        }
+    }
+
+    fn dispatch_probe_error(&mut self, error: String) {
+        if error.starts_with("FAIL: ") {
+            self.defect(error.trim_start_matches("FAIL: ").to_owned());
+        } else {
+            self.gap(error.trim_start_matches("GAP: ").to_owned());
+        }
     }
 
     fn presentation_ready(&self, first_opacity: u8, second_opacity: u8) -> Result<(), String> {
@@ -2109,6 +2690,9 @@ impl eframe::App for SmokeApp {
             if crate::window_manager::get_hwnd(frame) != Some(root) {
                 self.gap("the eframe root HWND changed during the smoke run");
             }
+            if !unsafe { IsWindowVisible(root) }.as_bool() {
+                self.hidden_root_logic_passes = self.hidden_root_logic_passes.saturating_add(1);
+            }
             self.presenter
                 .set_root_native_identity((root.0 as usize, self.process_birth));
             self.presenter.poll(ctx, &mut self.board);
@@ -2155,6 +2739,7 @@ impl eframe::App for SmokeApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.stop_dispatch_workers();
         if self.stage != Stage::Finish {
             self.log
                 .line("result=GAP root_closed_before_bounded_phases_finished");

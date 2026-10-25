@@ -20,13 +20,18 @@ pub fn is_invisible_or_minimized(window: &Window) -> bool {
 /// On Mac, a minimized window uses up all CPU:
 /// <https://github.com/emilk/egui/issues/325>
 ///
-/// On Windows, an invisible window also uses up all CPU:
-/// <https://github.com/emilk/egui/issues/7776>
+/// On Windows, the event loop throttles hidden viewport repaints in `run.rs`.
+/// Sleeping here would block the shared event thread and delay visible child
+/// viewports while the hidden root is being repainted.
 pub fn sleep_if_invisible_or_minimized(window: Option<&Window>) {
+    #[cfg(not(target_os = "windows"))]
     if window.is_some_and(is_invisible_or_minimized) {
         profiling::scope!("minimized_sleep");
         std::thread::sleep(core::time::Duration::from_millis(10));
     }
+
+    #[cfg(target_os = "windows")]
+    let _ = window;
 }
 
 /// Create an egui context, restoring it from storage if possible.

@@ -17,8 +17,8 @@ Only these corrections and their focused evidence are in scope.
 | --- | --- | --- |
 | M0-A | complete | Baseline above; no pre-existing modifications. |
 | M1-A | complete | `afde8db4`; rustls 0.23.40 → 0.23.45, required webpki 0.103.13 → 0.103.16 only. Locked reverse graph: reqwest 0.12.28, hyper-rustls 0.27.9, tokio-rustls 0.26.4. Manifest features unchanged. Push: connection failed. Compile deferred to integration. |
-| M2-A | partial / verified related fix | Zero-height results viewport corrected and focused geometry/scroll/resize regression passes; reported creep remains unreproduced. Unchanged response-flow gate timeout remains. |
-| M3-A | pending | Measure static/live/paused native paths; fix only confirmed bottleneck while retaining exact window ownership and lifetime guards. |
+| M2-A | partial / verified related fix | `8daffbae`; zero-height results viewport corrected and focused geometry/scroll/resize regression passes; reported creep remains unreproduced. Unchanged response-flow gate timeout remains. Push: connection failed. |
+| M3-A | verified tail fix / native gap | Redundant Windows 10 ms hidden-frame sleep removed; identical owned static/live/paused dispatch probes improve maxima to <1 ms. Four control/lifetime tests pass; pointer drag, visual compositing and separate slow fixture polling remain unverified. |
 | M4-A | pending | Bounded ~34 ms active capture cadence, deterministic production cadence tests plus distinct generated prepare/display evidence; preserve budgets/coalescing/idle/cancel. |
 | M4-B | pending | One existing guarded Glow/native WinRT acceptance pass where supported; record environmental gaps truthfully. |
 | M5-A | pending | Changed-file formatting, one first-party compile, focused tests and optional end-only Clippy, independent final diff review, clean committed handoff. |
@@ -78,3 +78,54 @@ outer scrolling while footer and geometry remain stable. Changed-file rustfmt
 and `git diff --check` passed. The earlier group had 2 passed / 2 failed
 (new zero-height regression plus unchanged first-read timeout); serial group
 rerun stopped after 1 passed / first-read timeout. No more group retries.
+
+Independent read-only reviewer inspected `abc8ced6..8daffbae`: no substantive
+code findings. Confirmed minimal dependencies and finite nested-scroll ownership;
+agreed M2 remains partial because creep is unreproduced and the unchanged flow
+test timeout is unresolved. No extra builds/tests were requested by review.
+
+## M3 native dispatch baseline (current source, before production change)
+
+Instrumented existing Glow fixture, exact owned child HWND/PID/thread checks;
+32 worker-thread WM_NULL sends per class at 10 ms spacing, 100 ms timeout.
+These are dispatch proxies, **not pointer-drag measurements**.
+
+| Class | min / median / p95 / max (µs) | Timeouts | Probe duration |
+| --- | --- | --- | --- |
+| Static | 30 / 95 / 166 / 11,492 | 0 | 347 ms |
+| Active generated 30 Hz live | 42 / 96 / 217 / 11,679 | 0 | 346 ms |
+| Paused live | 44 / 80 / 194 / 11,047 | 0 | 352 ms |
+
+Each probe observed one hidden-root logic pass. Generated producer accepted 66
+frames with zero full-channel drops, then joined. Roughly 11 ms maxima are
+consistent with the explicit Windows 10 ms shared-event-thread sleep after
+hidden viewport work; typical latency was already low. Existing owned-pixel
+sampling subsequently returned environmental GAP; fixture shut down cleanly.
+No pointer drag or OS capture throughput is claimed.
+
+Post-change same probe (Windows hidden-frame sleep removed; non-Windows keeps
+its sleep; existing 100 ms hidden repaint scheduling retained):
+
+| Class | min / median / p95 / max (µs) | Timeouts | Probe duration |
+| --- | --- | --- | --- |
+| Static | 40 / 101 / 233 / 957 | 0 | 338 ms |
+| Active generated live | 35 / 103 / 683 / 689 | 0 | 335 ms |
+| Paused live | 44 / 80 / 107 / 852 | 0 | 341 ms |
+
+Hidden-root logic passes stayed one per class. Fixture-create-to-ready was
+9.099 s before and 9.202 s after (no readiness improvement). Maxima dropped from
+11.0–11.7 ms to 0.69–0.96 ms; median/p95 were mixed, so only removal of the
+10 ms tail is demonstrated. Both runs closed/joined safely after the same owned
+pixel-sampling GAP. Root stage polling was roughly 1.8 s apart; that separate
+delay and pointer dragging remain unverified. Independent read-only M3 review
+found no substantive defects and confirmed scheduler, identity and cleanup
+ownership.
+
+Targeted M3 Nextest command:
+`cargo nextest run --locked -p multi_launcher --lib -E 'test(pin_controls_use_exact_child_commands_and_reject_invalid_owners) or test(pinboard_live_presenter_reuses_texture_and_charges_retained_uploads) or test(retained_child_callbacks_keep_textures_and_zoom_independent_of_root_scale) or test(native_hide_ack_and_bounded_worker_preserve_close_and_finish_lifetimes)'`
+passed: 4 passed, 6,332 skipped, 0.207 s tests / 6m29s build. Changed-file
+rustfmt and diff checks passed. No vendor-wide suite or extra native retries.
+
+Owned native logs (ignored build artifacts):
+- Before: `target/pin-opacity-smoke/000000000000000018e1a31bedc15838/pin-opacity-smoke.log`
+- After: `target/pin-opacity-smoke/000000000000000018e1a35aa8d09bd4/pin-opacity-smoke.log`
