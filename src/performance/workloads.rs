@@ -193,7 +193,7 @@ impl IsolatedWorkspace {
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(io::Error::new(io::ErrorKind::Other, errors.join("; ")))
+            Err(io::Error::other(errors.join("; ")))
         }
     }
 }

@@ -924,11 +924,23 @@ enum LauncherInitPolicy {
     Production,
     #[cfg(test)]
     IsolatedTest,
+    #[cfg(test)]
+    IsolatedWatcherTest,
 }
 
 impl LauncherInitPolicy {
     fn starts_production_services(self) -> bool {
         matches!(self, Self::Production)
+    }
+
+    fn registers_gui_file_watchers(self) -> bool {
+        match self {
+            Self::Production => true,
+            #[cfg(test)]
+            Self::IsolatedTest => false,
+            #[cfg(test)]
+            Self::IsolatedWatcherTest => true,
+        }
     }
 }
 
@@ -969,6 +981,8 @@ pub struct LauncherApp {
     pub error: Option<String>,
     error_time: Option<Instant>,
     pub plugins: PluginManager,
+    #[cfg(test)]
+    init_policy: LauncherInitPolicy,
     /// Main-thread orchestration for Screen Draw. Native session resources are
     /// intentionally owned outside `LauncherApp` by the later worker layer.
     pub screen_draw_controller: crate::screen_draw::ScreenDrawController,
@@ -2948,19 +2962,63 @@ impl LauncherApp {
     pub(crate) fn new_isolated_for_test_at(
         ctx: &egui::Context,
         root: impl AsRef<Path>,
-        mut settings: Settings,
+        settings: Settings,
         enabled_plugins: Option<HashSet<String>>,
         enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     ) -> Self {
-        let root = root.as_ref();
+        Self::new_isolated_for_test_at_with_policy(
+            ctx,
+            root.as_ref(),
+            Arc::new(Vec::new()),
+            settings,
+            enabled_plugins,
+            enabled_capabilities,
+            LauncherInitPolicy::IsolatedTest,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_real_watch_test_at(
+        ctx: &egui::Context,
+        root: impl AsRef<Path>,
+        actions: Vec<Action>,
+    ) -> Self {
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        let enabled_plugins = Some(HashSet::new());
+        let enabled_capabilities = Some(std::collections::HashMap::new());
+        Self::new_isolated_for_test_at_with_policy(
+            ctx,
+            root.as_ref(),
+            Arc::new(actions),
+            settings,
+            enabled_plugins,
+            enabled_capabilities,
+            LauncherInitPolicy::IsolatedWatcherTest,
+        )
+    }
+
+    #[cfg(test)]
+    fn new_isolated_for_test_at_with_policy(
+        ctx: &egui::Context,
+        root: &Path,
+        actions: Arc<Vec<Action>>,
+        mut settings: Settings,
+        enabled_plugins: Option<HashSet<String>>,
+        enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
+        init_policy: LauncherInitPolicy,
+    ) -> Self {
+        let custom_len = actions.len();
         settings.paste_sequence.next_hotkey = None;
         settings.paste_sequence.cancel_hotkey = None;
         settings.dashboard.config_path =
             Some(root.join("dashboard.json").to_string_lossy().into_owned());
         Self::new_with_policy(
             ctx,
-            Arc::new(Vec::new()),
-            0,
+            actions,
+            custom_len,
             PluginManager::new_inert_for_test_at(root),
             root.join("actions.json").to_string_lossy().into_owned(),
             root.join("settings.json").to_string_lossy().into_owned(),
@@ -2972,7 +3030,7 @@ impl LauncherApp {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
-            LauncherInitPolicy::IsolatedTest,
+            init_policy,
         )
     }
 
@@ -3082,7 +3140,7 @@ impl LauncherApp {
             None
         };
 
-        if init_policy.starts_production_services() {
+        if init_policy.registers_gui_file_watchers() {
             #[cfg(not(test))]
             match watch_file(
                 Path::new(&actions_path),
@@ -3232,75 +3290,77 @@ impl LauncherApp {
                 }
             }
 
-            let notes_dir = crate::plugins::note::notes_dir();
-            let _ = std::fs::create_dir_all(&notes_dir);
+            if init_policy.starts_production_services() {
+                let notes_dir = crate::plugins::note::notes_dir();
+                let _ = std::fs::create_dir_all(&notes_dir);
 
-            #[cfg(not(test))]
-            for (path, event) in [
-                (
-                    Path::new(crate::plugins::clipboard::CLIPBOARD_FILE),
-                    WatchEvent::Clipboard,
-                ),
-                (
-                    Path::new(crate::plugins::snippets::SNIPPETS_FILE),
-                    WatchEvent::Snippets,
-                ),
-                (
-                    Path::new(crate::plugins::todo::TODO_FILE),
-                    WatchEvent::Todos,
-                ),
-                (
-                    Path::new(crate::plugins::fav::FAV_FILE),
-                    WatchEvent::Favorites,
-                ),
-                (notes_dir.as_path(), WatchEvent::Notes),
-                (
-                    Path::new(crate::mouse_gestures::db::GESTURES_FILE),
-                    WatchEvent::Gestures,
-                ),
-                (
-                    Path::new(crate::mouse_gestures::usage::GESTURES_USAGE_FILE),
-                    WatchEvent::Gestures,
-                ),
-            ] {
-                match watch_file(path, tx.clone(), event, ctx.clone()) {
-                    Ok(w) => watchers.push(w),
-                    Err(e) => tracing::error!("watch error: {:?}", e),
+                #[cfg(not(test))]
+                for (path, event) in [
+                    (
+                        Path::new(crate::plugins::clipboard::CLIPBOARD_FILE),
+                        WatchEvent::Clipboard,
+                    ),
+                    (
+                        Path::new(crate::plugins::snippets::SNIPPETS_FILE),
+                        WatchEvent::Snippets,
+                    ),
+                    (
+                        Path::new(crate::plugins::todo::TODO_FILE),
+                        WatchEvent::Todos,
+                    ),
+                    (
+                        Path::new(crate::plugins::fav::FAV_FILE),
+                        WatchEvent::Favorites,
+                    ),
+                    (notes_dir.as_path(), WatchEvent::Notes),
+                    (
+                        Path::new(crate::mouse_gestures::db::GESTURES_FILE),
+                        WatchEvent::Gestures,
+                    ),
+                    (
+                        Path::new(crate::mouse_gestures::usage::GESTURES_USAGE_FILE),
+                        WatchEvent::Gestures,
+                    ),
+                ] {
+                    match watch_file(path, tx.clone(), event, ctx.clone()) {
+                        Ok(w) => watchers.push(w),
+                        Err(e) => tracing::error!("watch error: {:?}", e),
+                    }
                 }
-            }
 
-            #[cfg(test)]
-            for (path, event) in [
-                (
-                    Path::new(crate::plugins::clipboard::CLIPBOARD_FILE),
-                    WatchEvent::Clipboard,
-                ),
-                (
-                    Path::new(crate::plugins::snippets::SNIPPETS_FILE),
-                    WatchEvent::Snippets,
-                ),
-                (
-                    Path::new(crate::plugins::todo::TODO_FILE),
-                    WatchEvent::Todos,
-                ),
-                (
-                    Path::new(crate::plugins::fav::FAV_FILE),
-                    WatchEvent::Favorites,
-                ),
-                (notes_dir.as_path(), WatchEvent::Notes),
-                (
-                    Path::new(crate::mouse_gestures::db::GESTURES_FILE),
-                    WatchEvent::Gestures,
-                ),
-                (
-                    Path::new(crate::mouse_gestures::usage::GESTURES_USAGE_FILE),
-                    WatchEvent::Gestures,
-                ),
-            ] {
-                if path.exists()
-                    && let Ok(w) = watch_file(path, tx.clone(), event, ctx.clone())
-                {
-                    watchers.push(w);
+                #[cfg(test)]
+                for (path, event) in [
+                    (
+                        Path::new(crate::plugins::clipboard::CLIPBOARD_FILE),
+                        WatchEvent::Clipboard,
+                    ),
+                    (
+                        Path::new(crate::plugins::snippets::SNIPPETS_FILE),
+                        WatchEvent::Snippets,
+                    ),
+                    (
+                        Path::new(crate::plugins::todo::TODO_FILE),
+                        WatchEvent::Todos,
+                    ),
+                    (
+                        Path::new(crate::plugins::fav::FAV_FILE),
+                        WatchEvent::Favorites,
+                    ),
+                    (notes_dir.as_path(), WatchEvent::Notes),
+                    (
+                        Path::new(crate::mouse_gestures::db::GESTURES_FILE),
+                        WatchEvent::Gestures,
+                    ),
+                    (
+                        Path::new(crate::mouse_gestures::usage::GESTURES_USAGE_FILE),
+                        WatchEvent::Gestures,
+                    ),
+                ] {
+                    if path.exists()
+                        && let Ok(w) = watch_file(path, tx.clone(), event, ctx.clone())
+                    {
+                        watchers.push(w);
+                    }
                 }
             }
         }
@@ -3371,7 +3431,9 @@ impl LauncherApp {
                 let ctx = ctx.clone();
                 move || ctx.request_repaint()
             }),
-            LauncherInitPolicy::IsolatedTest => DashboardRuntime::dormant(),
+            LauncherInitPolicy::IsolatedTest | LauncherInitPolicy::IsolatedWatcherTest => {
+                DashboardRuntime::dormant()
+            }
         };
         #[cfg(not(test))]
         let dashboard_runtime = DashboardRuntime::start({
@@ -3409,7 +3471,7 @@ impl LauncherApp {
                 data_root,
                 hotfolder_action_adapter.clone(),
             ),
-            LauncherInitPolicy::IsolatedTest => {
+            LauncherInitPolicy::IsolatedTest | LauncherInitPolicy::IsolatedWatcherTest => {
                 hotfolder_runtime::HotFolderRuntimeDriver::dormant(data_root)
             }
         };
@@ -3438,6 +3500,8 @@ impl LauncherApp {
             error: None,
             error_time: None,
             plugins,
+            #[cfg(test)]
+            init_policy,
             screen_draw_controller: {
                 let mut controller = crate::screen_draw::ScreenDrawController::default();
                 let mut screen_draw_settings: crate::screen_draw::ScreenDrawSettings = settings
@@ -3861,13 +3925,26 @@ impl LauncherApp {
 
     #[cfg(test)]
     pub(crate) fn isolated_services_are_dormant_for_test(&self) -> bool {
-        self.plugins.is_inert_for_test()
+        self.isolated_non_watcher_services_are_dormant_for_test() && self.watchers.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn isolated_non_watcher_services_are_dormant_for_test(&self) -> bool {
+        self.init_policy != LauncherInitPolicy::Production
+            && self.plugins.is_inert_for_test()
             && !self.plugins.window_catalog_has_worker_for_test()
-            && self.watchers.is_empty()
             && self.clipboard_modify_watcher.is_none()
             && !self.dashboard.has_watcher_for_test()
             && !self.dashboard_runtime.has_worker_for_test()
             && !self.hotfolder_runtime.has_workers_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn real_watch_test_services_are_dormant_for_test(&self) -> bool {
+        self.init_policy == LauncherInitPolicy::IsolatedWatcherTest
+            && !self.init_policy.starts_production_services()
+            && self.watchers.len() == 3
+            && self.isolated_non_watcher_services_are_dormant_for_test()
     }
 
     /// Transfer the foreground snapshot captured immediately before initial ROOT creation.
@@ -5753,7 +5830,6 @@ mod tests {
                 .create_app(&context, "activation", Settings::default())
                 .expect("isolated app fixture constructs");
             assert!(app.isolated_services_are_dormant_for_test());
-            let mut app = app;
             app.query = "start".into();
             app.clear_query_after_run = false;
             app.hide_after_run = false;
@@ -5779,7 +5855,6 @@ mod tests {
                 .create_app(&context, "empty-query", Settings::default())
                 .expect("isolated app fixture constructs");
             assert!(app.isolated_services_are_dormant_for_test());
-            let app = app;
             app.dashboard_enabled = true;
             app.dashboard_show_when_empty = true;
             app.query.clear();

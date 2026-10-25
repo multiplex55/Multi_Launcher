@@ -409,5 +409,25 @@ The existing helper supports the same target boundary via `lib-test` or
 targets. A bare case filter can still compile unrelated executables. Integration
 targets may retain normal binary prerequisites. Use unrestricted `cargo nextest
 run` deliberately for broad coverage, and `cargo build --features
-dev-smoke-binaries --bin coordinate_tool_smoke` when that auxiliary binary is relevant. No targets or
-logical cases were removed to provide these recipes.
+dev-smoke-binaries --bin coordinate_tool_smoke` when that auxiliary binary is
+relevant. The five original recipes above remain unchanged. Separately, M2-B
+migrated the three watcher cases from the obsolete `watchers` integration
+target into the library and added one unwind guard case; no watcher behavior
+was dropped.
+
+The real Actions, Folders and Bookmarks file-watcher cases live under
+`gui::watch::tests` in the library target. They save files through the existing
+production save functions and wait up to three seconds for the app-owned OS
+watcher event. Their fixture drops the app, waits up to five seconds for the
+captured callback closures to release, then restores process paths and removes
+the temporary root. The release receipt covers callback closures; it does not
+claim that Windows `notify` backend threads have joined.
+
+Each case uses its own temporary files, so this roster has no demonstrated
+shared exclusive resource and needs no Nextest group. Keep default concurrency;
+the fixture's existing process-local workspace lock protects its CWD and
+environment changes.
+
+~~~powershell
+cargo nextest run --lib -E 'test(=gui::watch::tests::actions_watcher_sends_event) | test(=gui::watch::tests::folders_watcher_sends_event) | test(=gui::watch::tests::bookmarks_watcher_sends_event) | test(=gui::watch::tests::real_watcher_fixture_unwind_releases_callbacks_before_workspace_cleanup)' --success-output immediate
+~~~

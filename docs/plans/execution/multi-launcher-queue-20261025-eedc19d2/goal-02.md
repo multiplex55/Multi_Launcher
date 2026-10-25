@@ -256,3 +256,173 @@ preparation compiled the library tests, and the exact selected candidate run
 passed 4/4. No full suite, early Clippy run, repeated timing campaign, or M2-B
 resource migration was run. Parent retains Git, final review, and checkpoint
 ownership.
+
+## Accepted M1-B record — bounded macro broker waits
+
+M1-B replaced the two selected broker tests' polling and unbounded yielding
+with finite completion notifications; it also added a focused helper case for
+prearrival, timeout and sender-disconnection behavior. Production broker
+cancellation, debounce behavior and OS watcher delivery were unchanged. The
+candidate inventory selected exactly these three library identities, and all
+three passed:
+
+- `gui::render::tests::macro_launcher_poll_consumes_one_request_and_mutates_query_on_gui_dispatch`
+- `gui::render::tests::disconnected_macro_launcher_waiter_does_not_panic_gui_dispatch`
+- `gui::render::tests::completion_wait_handles_prearrival_timeout_and_disconnection`
+
+Candidate run evidence is `g02-m1b-candidate/g02-m1b-candidate-three-case-run_20261025T191846781Z_98764f545d084cd8954c4e6ff5d56322/measurement.json` under the external queue evidence root. The run passed 3/3 in 0.363 seconds of Nextest time and 1.102606 seconds of outer process wall time. The removed polling interval was below useful timing resolution, and fixture construction dominated the candidate's observed time; this is coverage and responsiveness evidence, not a speedup claim. The complete preparation, inventory, run and retained failures are recorded in external `g02-m1b-execution-record.md`.
+
+The configured Reviewer could not be dispatched once because the agent thread
+limit had been reached. Under the user's explicit fallback, the parent made a
+structured review and accepted the checkpoint. That review is not described as
+independent.
+
+## M2-B — real GUI watcher lifetime and resource policy
+
+The M1-A section above records the earlier checkpoint, when the Actions watcher
+case still lived in `tests/watchers.rs`. M2-B moved the three real file-delivery
+cases into the owning library module, deleted that integration target and its
+now-unused `tests/common/mod.rs` helper, and kept their event path unchanged:
+the existing save function writes a file, the shared production `watch_file`
+callback observes it, and the app queue receives the expected event within the
+existing three-second deadline.
+
+`LauncherInitPolicy::IsolatedWatcherTest` is private and `cfg(test)`. It enables
+only the existing Actions, Folders and Bookmarks GUI watcher registrations.
+The same constructor uses `PluginManager::new_inert_for_test_at`, explicit
+workspace paths, empty enabled-plugin/capability snapshots, and disables the
+test-owned launcher and Paste Sequences shortcuts before construction. Macro
+search configuration, mouse gesture synchronization, dashboard/configuration
+watchers, Hot Folder startup, window-catalog workers and the remaining
+production services stay behind the production-only policy. The fixture proves
+that policy directly; it does not reset or assume that process-global
+macro/gesture `OnceCell` state was empty before a test process started. The
+existing isolated-test assertion remains strict and still requires an empty
+watcher list.
+
+The migrated identities and the new unwind guard case are:
+
+| Prior integration identity | Final library identity | Proof |
+| --- | --- | --- |
+| `multi_launcher::watchers / actions_watcher_sends_event` | `gui::watch::tests::actions_watcher_sends_event` | Real action-file save produces the Actions event. |
+| `multi_launcher::watchers / folders_watcher_sends_event` | `gui::watch::tests::folders_watcher_sends_event` | Real folders-file save produces the Folders event. |
+| `multi_launcher::watchers / bookmarks_watcher_sends_event` | `gui::watch::tests::bookmarks_watcher_sends_event` | Real bookmarks-file save produces the Bookmarks event. |
+| — | `gui::watch::tests::real_watcher_fixture_unwind_releases_callbacks_before_workspace_cleanup` | A caught panic while the app is live still releases callbacks before restoring process state and removing the root. |
+
+`HandlerOwnedWorkspace` owns the CWD/environment/root before the app is
+constructed. The release probe starts before watcher registration. Cleanup
+drops the app first, waits at most five seconds for the captured callback
+closures, checks the exact nonzero Actions/Folders/Bookmarks attempts,
+registrations and releases with no overflow, then drops the workspace and
+asserts restored CWD/environment and root removal. The fixture's unwind guard
+retains the whole workspace if release is incomplete. The Windows `notify`
+backend uses detached threads: these receipts establish callback-closure
+release, not backend-thread joins or process retirement.
+
+The default-feature library preparation used Cargo profile `fast-dev` and the
+checked `dev/track_b/measure.ps1` driver with unknown cache classification,
+an 1,800-second deadline and verified MSVC VCTIP policy. It succeeded in
+184.136024 seconds. Prepared metadata SHA256 was
+`f4985b1447d3a0920b59c50724c04d8d2201b7521b56c381ea52216aae187a2e`. The
+metadata-only inventory selected exactly the four non-ignored identities above
+from the library target in 0.915965 seconds. It used Nextest's default profile
+and did not pass Cargo manifest, package, target or profile selectors alongside
+`--binaries-metadata`.
+
+The bounded preparation, inventory and run used these argument shapes (the
+measurement driver supplied the 1,800/300/600-second deadlines and owned
+process verification):
+
+```text
+cargo nextest list --list-type binaries-only --message-format json --manifest-path G:\Repos\rust\Multi_Launcher\Cargo.toml -p multi_launcher --lib --cargo-profile fast-dev
+cargo nextest list --binaries-metadata <metadata> --message-format json -E 'test(=gui::watch::tests::actions_watcher_sends_event) | test(=gui::watch::tests::folders_watcher_sends_event) | test(=gui::watch::tests::bookmarks_watcher_sends_event) | test(=gui::watch::tests::real_watcher_fixture_unwind_releases_callbacks_before_workspace_cleanup)'
+cargo nextest run --binaries-metadata <metadata> --no-tests=fail -E 'test(=gui::watch::tests::actions_watcher_sends_event) | test(=gui::watch::tests::folders_watcher_sends_event) | test(=gui::watch::tests::bookmarks_watcher_sends_event) | test(=gui::watch::tests::real_watcher_fixture_unwind_releases_callbacks_before_workspace_cleanup)' --success-output immediate
+```
+
+The selected command used ordinary Nextest concurrency and
+`--success-output immediate`; it passed 4/4 (6,344 skipped) in 0.390 seconds
+of Nextest time and 1.146422 seconds of measured process wall time. Each test
+reported `attempted=[GuiActions, GuiBookmarks, GuiFolders]`, the same three
+registered and released, `complete=true`, and `overflowed=false`. The caught
+intentional panic appears in the retained stderr output, followed by a passing
+test and a complete release receipt. Owned-process cleanup and output-drain
+verification passed. These are descriptive costs for the moved tests and new
+unwind proof, not an equivalent before/after timing comparison or a speedup
+claim.
+
+Exact M2-B receipts are under the external queue evidence root in `g02-m2b/`:
+
+- Preparation: `g02-m2b-candidate-compile-prep_20261025T195235380Z_bb37b1bd23c54b7bafda7bffa56ec9e5/measurement.json` and `stdout.bin`.
+- Inventory: `g02-m2b-candidate-inventory_20261025T195610007Z_09d16a90bfe44c00933af746893d40e3/measurement.json` and `stdout.bin`; the exact roster is also in `candidate-inventory-summary.json`.
+- Selected run and callback telemetry: `g02-m2b-candidate-four-case-run_20261025T195612717Z_7485f910e8f842daa7a2a127330f7fa2/measurement.json` and `stderr.bin`; `candidate-summary.json` records metadata, profile, identity and source-hash details.
+
+The four source hashes captured during preparation and the selected run were
+`src/gui/mod.rs=e53171424414d0a36e22bb8ec8a62d3ea359a91c37a1942b97bdaeb35080d242`,
+`src/gui/watch.rs=28d2dae0bbecd0b535627322cd5b9e1158adc389e10f3829da76a273e2e3392c`,
+`src/performance/track_c_watcher_lifecycle.rs=84c59ff472f5fea980df1ebc1c72aa97b25c978bb0d83f353761d11fa3987660`,
+and `src/performance/track_c_workloads.rs=e1b76147d1960c723913f9076278d0c81be5cc6b8d12e5b392687b4c201c7a87`.
+After the selected run, the sole source correction changed the equivalent root
+absence assertion's syntax; the final `src/gui/watch.rs` hash is
+`70099d69f26a1b76486f1683ed9e66cd4980a0c89bf6e36dc2fc80500d17b33b`. The
+other three hashes remain unchanged. The measured predicate already passed;
+there was no repeat selected run for this syntax-only correction.
+
+No catalog selector names these watcher cases, so `dev/workflows/catalog.json`
+is unchanged. The selected tests use unique temporary files and do not compete
+for a shared exclusive native resource. Ordinary Nextest concurrency is
+retained; no `.config/nextest.toml` or fabricated resource group was added. The
+existing process-local workspace lock protects CWD/environment mutation but is
+not presented as a cross-process resource lock. The M2-B candidate binary had
+6,348 default-discovered library cases after migration, with the selected four
+run and 6,344 skipped. No full suite, native personal-input test or broad GUI
+watcher suite was run.
+
+After the passing selected run, one assertion was rewritten from boolean
+`assert_eq!(... , false)` to equivalent `assert!(!...)` style. This does not
+change the tested predicate; the measured run proved the root was absent after
+cleanup. No repeat selected run was made for that syntax-only edit. The parent
+will lint the final source tree before freezing it.
+
+## Final Goal 02 roster and evidence status
+
+The unique accepted behavioral roster is 16 cases: M1-A's ten cases, with its
+old integration watcher case superseded by M2-B's three moved delivery cases
+and unwind case; M1-B's three broker cases; and M2-A's four CPU oracles, which
+overlap the original M1-A roster. The accepted M2-A run remains the only
+selected timing pair supporting a speed claim: 4/4, 18.305994 to 16.683376
+seconds, a one-pair 1.622618-second / 8.863862% aggregate reduction. Its
+preparation telemetry was mixed, and no isolated startup/drop attribution was
+measured. M1-B and M2-B observations above make no speedup claim. Prior
+checkpoint runs and the current four-case run are not repeated to produce a
+new union timing.
+
+The configured M2-B Reviewer follow-up failed once at the agent-thread limit.
+The authorized fallback is a structured parent review, not an independent
+review. The parent's source/evidence verification passed for all three measured
+phases and 28 unique owned process identities, with zero live or unknown
+identities and cleanup/output draining verified; its receipt is
+`g02-m2b/parent-review-verification.json`. That review also identified the
+README recipe-count placement ambiguity, which was corrected before this
+record was finalized. The parent's final source/evidence/documentation review
+found no remaining correctness findings. Final staged-tree lint is still
+pending:
+
+```text
+cargo clippy -p multi_launcher --profile fast-dev --lib --tests --no-deps
+```
+
+`--tests` statically checks the `cfg(test)` unit-fixture code; it does not run
+tests. The parent will record the final lint result under external
+`g02-m2b/final-clippy/` and close Goal 02 with its next-goal handoff in external `QUEUE_STATE.md`.
+The parent retains Git staging, commit and push ownership. No final lint result
+or commit SHA is claimed here before that freeze.
+
+The first final-lint attempt ran against staged tree
+`9ee487f7d9b11ad0349d8b0ff69d571f65cc250a` and returned exit code 0 in
+143.282268 seconds, but was not accepted as the final lint because it reported
+three Goal 02 warnings: an unnecessary `mut` and redundant local binding in
+`src/gui/mod.rs`, plus `io_other_error` in `src/performance/workloads.rs`.
+Those three equivalent forms were corrected without changing behavior. No
+tests or Clippy rerun was performed by this source writer; the final Clippy
+rerun remains the parent's gate. The retained first-attempt stderr is under
+`g02-m2b/final-clippy/g02-final-clippy_20261025T200026800Z_5c7cbdf315dc479e8b57ca96c98edff1/stderr.bin`.
