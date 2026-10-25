@@ -397,9 +397,13 @@ cargo nextest run --test history
 cargo nextest run --test domain -E 'test(indexer_)'
 cargo nextest run --test plugin_queries -E 'test(/^help_plugin::search_returns_help_action$/)'
 cargo nextest run --test multi_manager_plugin
+cargo nextest run --test pure -E 'test(hotkey_events::)'
+cargo nextest run --test pure -E 'test(quit_hotkey::)'
 ~~~
 
-The current Windows roster selects respectively 8, 5, 4, 1 and 8 cases.
+The current Windows roster selects respectively 8, 5, 4, 1, 8, 4 and 1 cases.
+The final two recipes select the moved hotkey and quit cases under the `pure`
+target; together with its existing five cases, that target now contains ten.
 These are explicit selections, not a whole-application acceptance suite. Add
 `--cargo-profile fast-dev` when its reduced-symbol tradeoff suits the work.
 The existing helper supports the same target boundary via `lib-test` or

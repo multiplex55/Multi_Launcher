@@ -6,9 +6,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-#[path = "support/mock_ctx.rs"]
-mod mock_ctx;
-use mock_ctx::MockCtx;
+use super::mock_ctx::MockCtx;
 
 #[test]
 fn launcher_and_quit_hotkeys_toggle_flags() {

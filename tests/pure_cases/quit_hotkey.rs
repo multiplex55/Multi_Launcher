@@ -7,9 +7,7 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
-#[path = "support/mock_ctx.rs"]
-mod mock_ctx;
-use mock_ctx::MockCtx;
+use super::mock_ctx::MockCtx;
 
 fn run_quit_loop(
     trigger: &HotkeyTrigger,

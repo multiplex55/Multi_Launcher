@@ -69,3 +69,52 @@ The app executable and lib-test executable under target were overwritten by the 
 The successful large-owner measurement used the preserved external wrapper run-large-ownerbodyedit.ps1; its SHA-256 is 37b4e43fcf2fb7c17a6e11ff8fdddea21b0cb48f1d437567fba2cd8485d9ffc2. Its successful receipt records driver PID 36184 (creation 2026-10-25T20:37:25.8857583Z), root Cargo PID 25744 (creation 2026-10-25T20:37:30.5186237Z), unified exec session 3910, and verified restoration.
 
 Review found a future-wrapper safety improvement: the preserved wrapper’s source write occurs before its measurement try/finally, leaving intervening diff/hash/evidence writes outside that restoration guard. This successful run did reach the restoration finally and verified the original bytes. The immutable used wrapper was retained, and a separate parse-checked, unexecuted future-safe copy was saved at run-large-owner-baseline-future-safe.ps1 (SHA-256 b294147792bb917d9978f42c209e2467ba189c4c3246b807c453532c36f48679). That copy starts an outer try/finally before the first source write and restores the original bytes on any later error. No additional build or test was run for this wrapper review.
+
+## M1-B checkpoint: consolidate the mock hotkey test batch
+
+**Status:** M1-B is complete and accepted after a separate structured parent review; configured Reviewer dispatch was unavailable. The existing five pure cases and five mock hotkey/quit cases now share the `pure` integration-test target. This is a test-target ownership change only; production code, dependencies, features, Cargo manifest entries, and test behavior are unchanged. It does not complete Goal 03.
+
+### Migration and target ownership
+
+Moved `tests/hotkey_events.rs` and `tests/quit_hotkey.rs` to `tests/pure_cases/` and included them from `tests/suites/pure.rs`. The suite owns one private `MockCtx` module, and both moved modules import it through `super::mock_ctx`; the support implementation and its other users are unchanged. All four hotkey cases, the quit-loop case, and their assertions remain present and nonignored. The existing five pure cases are also included in the baseline and candidate selections.
+
+The target map in `dev/README.md` now uses `--test pure` filters for `hotkey_events::` and `quit_hotkey::`. A metadata-only `cargo metadata --locked --no-deps --format-version 1` inventory reports 65 test targets in the package, keeps `pure` at `tests/suites/pure.rs`, and has no separate `hotkey_events` or `quit_hotkey` test target. The selected-group inventory therefore changes from three binaries to one. No claim is made that old executable files were physically deleted from `target`.
+
+The moved case identities are:
+
+| Old target / case | New `pure` case |
+| --- | --- |
+| `hotkey_events` / `launcher_and_quit_hotkeys_toggle_flags` | `hotkey_events::launcher_and_quit_hotkeys_toggle_flags` |
+| `hotkey_events` / `zero_key_events_toggle_visibility` | `hotkey_events::zero_key_events_toggle_visibility` |
+| `hotkey_events` / `shift_capslock_does_not_trigger` | `hotkey_events::shift_capslock_does_not_trigger` |
+| `hotkey_events` / `win_modifier_triggers` | `hotkey_events::win_modifier_triggers` |
+| `quit_hotkey` / `quit_hotkey_exits_main_loop` | `quit_hotkey::quit_hotkey_exits_main_loop` |
+
+The source-backed compatibility review remains applicable: hotkey events are supplied directly to local trigger state, visibility uses its queue-only mock path, and the quit worker is signalled and joined before assertions. These tests do not start native hooks or use input injection, foreground-window ownership, shared files, or process-global mutable fixtures. The normal Nextest concurrency and default profile were retained.
+
+### Controlled selected-group comparison
+
+Both sides used the accepted M1-A HEAD on Windows x86_64-pc-windows-msvc, Rust/Cargo 1.99.1, the `fast-dev` Cargo profile, default features, and the ordinary Nextest profile/concurrency. To compare the same work, both selected groups contained the five existing pure cases plus the same five hotkey/quit cases. The controlled source edit added the same assertion diagnostic messages to one trigger assertion and one quit-worker assertion; the original source bytes were restored afterward.
+
+| Scenario | Selected targets / prepared binaries | Edited compile outputs whose hashes changed | Compile process wall | Inventory process wall | Ten-case run process wall |
+| --- | --- | --- | ---: | ---: | ---: |
+| Baseline | `pure`, `hotkey_events`, `quit_hotkey` / 3 | 2 (`hotkey_events`, `quit_hotkey`) | 11.829834 s | 1.310770 s | 0.786528 s |
+| Candidate | `pure` / 1 | 1 (`pure`) | 11.921350 s | 1.104362 s | 0.799487 s |
+
+The inventories on both sides selected exactly ten nonignored cases, once each. The baseline run reported `10 tests run: 10 passed, 0 skipped` across three binaries; the candidate reported the same result across one binary. Whole-command run wall differs by 0.012959 s (about 1.6%); Nextest's own test-summary duration was 0.048 s baseline and 0.049 s candidate. This is no material execution regression for this single bounded pair. The compile process wall was 0.091516 s higher on the candidate, so the measurement shows no elapsed compile-time speedup. The evidenced compile-work change is the selected binary/output reduction from three/two edited executables to one/one. These are native process wall measurements, not linker durations.
+
+The original-target preparation selected three test targets and took 170.385264 s; the candidate exact-source preparation selected only `pure` and took 13.134966 s. These preparations have different target sets and are outside the controlled edited-source interval, so their durations are recorded but are not compared as a performance result. The candidate preparation bound the one `pure` executable (SHA-256 `cc6c6e3806e5815ea7393e845abf5154e1f4903cb9452e866fe6b0625762aa1a`, 9,414,656 bytes) to hashes for the suite, all four `pure_cases` modules, and `tests/support/mock_ctx.rs`. The controlled candidate compile then changed the `pure` executable to SHA-256 `0c22ec7259188d32db72567a3624c37b3904476dae999f74174048715da68ea2` for the two diagnostic messages. The source files were restored exactly; that output remains fixture-built and must not be treated as an executable bound to the restored source. A later measurement that needs an exact-source candidate artifact must prepare one first.
+
+The immutable controlled receipts, raw Nextest metadata/output, binary hashes, diffs, and source-restoration records are under:
+
+`C:\Users\Jay\.codex\visualizations\2026\10\25\01a17319-6f7d-7052-b54e-1bb4a92c5fd0\multi-launcher-queue-20261025-eedc19d2\g03-m1b`
+
+The main result records are `baseline-controlled-roster-retry1/baseline-controlled-result.json`, `candidate-controlled-roster-retry1/candidate-controlled-result.json`, `candidate-preparation/candidate-prepared-input-binding.json`, and `target-discovery-checked/candidate-target-discovery-summary.json`. The checked metadata-only discovery receipt took 0.098255 s and invoked no build or test.
+
+### Restoration and driver history
+
+The controlled baseline restored the original top-level files byte-for-byte: `tests/hotkey_events.rs` returned to 3,518 bytes / SHA-256 `8e1c17b328a25054f068d0a83cc529edc2132de92bac88052f907ebc986fafe3`, and `tests/quit_hotkey.rs` to 2,001 bytes / SHA-256 `1ca47aa5fbbc3a58e0ee7d83a67ef1f261ebe22992df7ce26c9697d5d9e6d530`. After the permanent move, the candidate fixture backups were 3,477 bytes / SHA-256 `ee83c02a58508e17739bda9ba10791b8adf955d7940022bf9a2402582fa42573` and 1,960 bytes / SHA-256 `ca41cadb34156cf30d696cb62e4041d5f200dcb01a1106dd4952bf3716bcb437`; both were restored to those exact bytes. The candidate wrapper also verified that the entire permanent migration working-tree status matched its pre-fixture snapshot.
+
+The first baseline controlled-driver attempt (unified exec session 85192) failed before a measured command started: a PowerShell byte-array collection conversion caused its restoration path to write truncated source bytes. The failed driver and receipt are retained unchanged. The parent recovered the two files from the filtered committed blobs only after verifying each recovered hash and length, with no Git reset, checkout, or history operation. The corrected baseline driver then completed compile, inventory, and run successfully. One candidate-preparation preflight receipt also records an initial incorrect Stage classification (`provenance` instead of `compile`); it has `ProcessStarted: false` and was corrected before the successful one-target preparation. Neither failed wrapper attempt is included in the controlled timing comparison.
+
+No full suite, native input test, Clippy run, cache reset, or follow-up benchmark repeat was performed. The scoped results meet the M1-B selected-target, exact-case, restoration, target-reduction, and execution-parity criteria; later Goal 03 checkpoints remain outside this report.
