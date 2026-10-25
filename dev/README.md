@@ -1,5 +1,18 @@
 # Owned Windows process runs
 
+For target-first interactive Nextest runs, bounded profiling and
+machine-readable receipts, see the [test performance workflow](test_perf/README.md).
+
+```powershell
+& .\dev\test_perf\run.ps1 -TargetKind Integration -Target query_autocomplete -CargoProfile fast-dev
+```
+
+Select a Cargo target before filtering cases: a case filter alone may still
+compile unrelated test targets. The helper prints build/selection/execution
+phases and preserves Nextest's native progress and exit status. Profile caches
+must be prepared separately; this task's paired warm no-op measurements found
+`dev` and `fast-dev` effectively tied, so defaults remain unchanged.
+
 For opt-in benchmark probes and bounded Job Object execution, see the
 [performance harness](perf_harness/README.md).
 
