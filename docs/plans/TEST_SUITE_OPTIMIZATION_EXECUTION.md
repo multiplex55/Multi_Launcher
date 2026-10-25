@@ -27,7 +27,7 @@ No application behavior or default profile changes are authorized.
 | M4-A | complete | Measured replacement-observer teardown race fixed with existing completion seam; 20 exact repeats and mixed group passed |
 | M4-B | skipped | No measured arbitrary sleep justified a substitution; no wait campaign |
 | M5-A | complete | Matched scorecard; final full execution 185.644s, all original cases retained, three baseline failures remain |
-| M5-B | pending | Independent review; scoped format and one first-party Clippy; commit and push |
+| M5-B | complete | Independent review and repairs; scoped format passes; final Clippy passes after one lint correction; handoff committed/pushed |
 
 One source writer per checkpoint; planning and final review are read-only.
 Each coherent retained checkpoint is committed and receives one normal push attempt.
@@ -345,3 +345,78 @@ Evidence beneath external `Multi_Launcher/test-perf`:
 its validated `summary.json`, raw phase logs and owned cleanup records;
 `final-full.log`; `final-parity-and-scorecard.json`. No raw/private logs are
 committed. `summarize.ps1 -ReceiptPath <receipt>` produced valid schema-1 JSON.
+
+## M5-B final checks and handoff
+
+Independent review covered cumulative source/test/tooling/grouping changes,
+then confirmed the two tool repairs and scorecard without new findings.
+`cargo fmt -p multi_launcher --check` exited 1 solely on existing differences
+in untouched `src/bin/radial_acceptance/native.rs:2338` and
+`src/paste_sequence/playback.rs:647,1000,1443,1456,2220`. Those files are absent
+from the task diff. The scoped command below passed (exit 0), including both
+unchanged moved test bodies:
+
+```powershell
+rustfmt --check --edition 2024 --config skip_children=true src/gui/actions.rs src/gui/render.rs src/mouse_gestures/service.rs tests/pure_cases/query_autocomplete.rs tests/pure_cases/mkmacro_compiler.rs tests/suites/pure.rs
+```
+
+The single final `cargo clippy -p multi_launcher --all-targets --profile fast-dev
+-- -D warnings` exposed one task-introduced `needless_borrow` at
+`src/gui/render.rs:20681`. Removed that redundant reference and made one bounded
+causal remediation rerun of the same command. This coercion-only test-helper
+correction is the sole Rust difference after the measured full run; no recipe,
+expected value, assertion or control flow changed. Scoped formatting and diff
+checks passed afterward. Both Clippy attempts retain external raw evidence
+(`final-clippy`, `final-clippy-repaired`), with 900-second owned bounds.
+Original Clippy exit was 101; repaired Clippy **passed, exit 0**, Cargo report
+2m14s. Vendored `image` warnings remain dependency warnings and were not edited.
+Both attempts finished before the bound; all their recorded owned identities
+were absent after cleanup. The package-wide formatting limitation remains
+explicit; no unrelated formatting changes were made. Final cumulative diff
+and Git status were inspected before committing the handoff.
+
+Exact retained paths:
+
+- `Cargo.toml`: declare the opt-in grouped test target; profiles unchanged.
+- `dev/README.md`: everyday target-first workflow entry point.
+- `dev/test_perf/README.md`, `common.ps1`, `profile.ps1`, `run.ps1`,
+  `summarize.ps1`, `test_profile.ps1`: profiling workflow, receipts and fixtures.
+- `src/gui/render.rs`: test-only independent oracle reuse and two proof tests.
+- `src/gui/actions.rs`: the one isolated 17-dialog test fixture.
+- `src/mouse_gestures/service.rs`: one test's bounded completion handshakes.
+- `tests/query_autocomplete.rs` → `tests/pure_cases/query_autocomplete.rs` and
+  `tests/mkmacro_compiler.rs` → `tests/pure_cases/mkmacro_compiler.rs`: unchanged bodies.
+- `tests/suites/pure.rs`: private module inclusions for those five cases.
+- `docs/plans/TEST_SUITE_OPTIMIZATION_EXECUTION.md`: this execution ledger.
+
+No production behavior, shipped configuration, default/release profile,
+Nextest parallelism, timeout or ignore policy changed. Optional M3-B and M4-B
+were skipped on evidence; no failed grouping experiment was retained.
+
+Checkpoint commits through the measured scorecard (each normal push succeeded):
+
+| Checkpoint | Commit |
+|---|---|
+| M0-A own baseline | `916bd05d` |
+| M0-B harness | `7325caee` |
+| M0-C baseline results | `aba7818a` |
+| M1-A/B workflows and profile choice | `45cb44ab` |
+| M2-A oracle | `e88050bd` |
+| M2-B dialog fixture | `a31648b5` |
+| M4-A observer fixture | `087c4253` |
+| M3-A grouping | `15d9e12c` |
+| M5-B review repairs | `c12b92da` |
+| M5-A scorecard | `26e934c0` |
+
+The final M5-B handoff/lint-correction commit follows these and is identified
+by the final branch HEAD. No pre-existing dirty work existed or was discarded;
+test-generated root configuration was moved intact to evidence. The source
+diff contains only the paths above. Remaining limitations are the three
+baseline failures, the intermittent baseline CSV failure, unrelated package
+formatting differences and small-sample timing noise. No manual test campaign
+or further optimization work is required by this goal.
+
+Everyday command: `& .\dev\test_perf\run.ps1 -TargetKind Integration -Target
+pure -CargoProfile fast-dev`. For a receipt: `& .\dev\test_perf\profile.ps1
+-Mode SelectedRun -TargetKind Integration -Target pure -CargoProfile fast-dev
+-TimeoutSeconds 60`, followed by `& .\dev\test_perf\summarize.ps1`.

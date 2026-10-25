@@ -20678,7 +20678,7 @@ mod tests {
         } else {
             assert_root_list_cache_matches_eager(
                 &app.root_list_geometry,
-                &eager,
+                eager,
                 outer,
                 "C2-G actual query frame against the frozen eager list oracle",
             );
