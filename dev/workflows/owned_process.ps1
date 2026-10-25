@@ -701,6 +701,19 @@ function Test-CheckedOwnedIdentityAbsent {
     catch { return 'Unknown' }
 }
 
+function Test-VerifiedMsvcCargoCommand {
+    param(
+        [Parameter(Mandatory)][string]$Stage,
+        [Parameter(Mandatory)][string]$Executable,
+        [AllowEmptyCollection()][string[]]$ArgumentList = @()
+    )
+    if ($Stage -cne 'compile' -or [IO.Path]::GetFileName($Executable) -ine 'cargo.exe' -or $ArgumentList.Count -eq 0) {
+        return $false
+    }
+    if ([string]$ArgumentList[0] -in @('build', 'check', 'clippy')) { return $true }
+    return $ArgumentList.Count -ge 2 -and [string]$ArgumentList[0] -ceq 'nextest' -and [string]$ArgumentList[1] -ceq 'list'
+}
+
 function Invoke-CheckedOwnedProcess {
     [CmdletBinding()]
     param(
@@ -764,7 +777,11 @@ function Invoke-CheckedOwnedProcess {
         $resolvedExecutable = [IO.Path]::GetFullPath($Executable)
         $resolvedWorkingDirectory = [IO.Path]::GetFullPath($WorkingDirectory)
         if ($AuxiliaryProcessPolicy -eq 'verified-msvc-vctip') {
-            if ($Stage -ne 'compile' -or (!$TestOwnedProcessImageInspector -and [IO.Path]::GetFileName($resolvedExecutable) -ine 'cargo.exe')) {
+            $policyArguments = if ($null -ne $PreEncodedArguments) { @() } else { @($ArgumentList) }
+            $testImageInspectorSupplied = $null -ne $TestOwnedProcessImageInspector
+            $allowedCompilerCommand = Test-VerifiedMsvcCargoCommand -Stage $Stage -Executable $resolvedExecutable -ArgumentList $policyArguments
+            if ($null -ne $PreEncodedArguments -or $Stage -cne 'compile' -or
+                (!$testImageInspectorSupplied -and !$allowedCompilerCommand)) {
                 throw 'Verified MSVC helper retirement is limited to an explicit Cargo compile invocation.'
             }
             if ($VerifiedMsvcVctipImages.Count -eq 0) { throw 'Verified MSVC helper retirement requires a successful trusted-image preflight.' }
@@ -801,12 +818,6 @@ function Invoke-CheckedOwnedProcess {
                     SignerCertificateSha256 = [string]$descriptor.SignerCertificateSha256
                     SignerOrganization = [string]$descriptor.SignerOrganization
                     VerificationSource = [string]$descriptor.VerificationSource
-                }
-            }
-            if (!$TestOwnedProcessImageInspector) {
-                $firstCargoArgument = if ($PreEncodedArguments) { [string]$PreEncodedArguments[0] } elseif ($ArgumentList.Count -gt 0) { [string]$ArgumentList[0] } else { '' }
-                if ($firstCargoArgument -notin @('build', 'check', 'nextest')) {
-                    throw 'The trusted MSVC helper policy was supplied for a non-compiler Cargo command.'
                 }
             }
             $auxiliaryDisposition = 'eligible-image-preflight-verified'

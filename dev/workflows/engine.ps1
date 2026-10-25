@@ -5,6 +5,7 @@ $script:WorkflowRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\.
 $script:WorkflowCatalogPath = Join-Path $PSScriptRoot 'catalog.json'
 $script:WorkflowCargoPath = Join-Path $script:WorkflowRoot 'dev\track_b\cargo.ps1'
 $script:WorkflowMeasurePath = Join-Path $script:WorkflowRoot 'dev\track_b\measure.ps1'
+$script:WorkflowJumpHarnessPath = Join-Path $script:WorkflowRoot 'dev\jump_mode\run.ps1'
 $script:WorkflowCommonPath = Join-Path $script:WorkflowRoot 'dev\test_perf\common.ps1'
 . $script:WorkflowCommonPath
 . (Join-Path $PSScriptRoot 'results.ps1')
@@ -36,6 +37,7 @@ function Get-WorkflowSourceFingerprint {
         'dev/track_b/cargo.ps1', 'dev/track_b/measure.ps1', 'dev/track_b/comparison.ps1', 'dev/track_b/compare_measurements.ps1',
         'dev/workflows/owned_process.ps1', 'dev/workflows/engine.ps1',
         'dev/workflows/run.ps1', 'dev/workflows/results.ps1', 'dev/workflows/verify_msvc_auxiliary.ps1', 'dev/workflows/catalog.json',
+        'dev/jump_mode/run.ps1',
         'dev/test_perf/common.ps1'
     )) {
         $path = Join-Path $script:WorkflowRoot $relativePath
@@ -67,6 +69,134 @@ function Get-WorkflowNextestIdentity {
     return [pscustomobject][ordered]@{
         Path = $resolvedPath
         Sha256 = (Get-FileHash -LiteralPath $resolvedPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    }
+}
+
+function Get-WorkflowPowerShellPath {
+    $application = Get-Command -Name 'pwsh.exe' -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    if ($null -eq $application) { throw 'pwsh.exe was not found as a native application on PATH.' }
+    $path = if ($application.Source) { $application.Source } else { $application.Path }
+    return [IO.Path]::GetFullPath($path)
+}
+
+function Get-WorkflowSmokeSelection {
+    param([Parameter(Mandatory)][string]$SmokeSelectionName)
+    $catalog = Get-WorkflowCatalog
+    if ($null -eq $catalog.smokeSelections -or @($catalog.smokeSelections).Count -eq 0) {
+        throw 'Workflow catalog has no smoke selections.'
+    }
+    $selection = @($catalog.smokeSelections | Where-Object { [string]$_.name -ceq $SmokeSelectionName })
+    if ($selection.Count -ne 1) { throw "Unknown or ambiguous workflow smoke selection: $SmokeSelectionName" }
+    return Assert-WorkflowSmokeSelectionContract -Selection $selection[0]
+}
+
+function Assert-WorkflowSmokeSelectionContract {
+    param([Parameter(Mandatory)]$Selection)
+    $featureNames = @($selection.features.explicit | ForEach-Object { [string]$_ }) -join ','
+    $expectedCaptureCount = if ([string]$selection.kind -ceq 'native') { 3 } else { 0 }
+    $budgets = $selection.budgets
+    $expectedPostBuildSeconds = if ([string]$selection.kind -ceq 'native') { 300 } else { 0 }
+    $expectedHarnessArguments = @()
+    if ([string]$selection.kind -ceq 'fixture-only') { $expectedHarnessArguments += '-FixturesOnly' }
+    $expectedHarnessArguments += @('-Scenario', 'Phase2', '-Surface', 'Settings', '-CaptureTimeoutSeconds', '45',
+        '-GracefulCloseSeconds', '6')
+    if ([string]$selection.kind -ceq 'native') {
+        $expectedHarnessArguments += @('-PostBuildTimeoutSeconds', '300', '-PostBuildShutdownReserveSeconds', '30')
+    }
+    $expectedHarnessArguments += @('-OverallTimeoutSeconds', '3600')
+    $configuredHarnessArguments = @($selection.harnessArguments | ForEach-Object { [string]$_ })
+    if ([string]$selection.scenario -cne 'Phase2' -or [string]$selection.surface -cne 'Settings' -or
+        [string]$selection.kind -notin @('fixture-only', 'native') -or
+        $featureNames -cne 'dev-smoke-binaries,qa-framebuffer-capture' -or
+        [bool]$selection.features.defaultFeatures -ne $true -or
+        [int]$selection.captureCount -ne $expectedCaptureCount -or
+        [int]$budgets.overallSeconds -ne 3600 -or [int]$budgets.provenanceSeconds -ne 60 -or
+        [int]$budgets.testPreparationSeconds -ne 1800 -or [int]$budgets.fixtureTestsSeconds -ne 600 -or
+        [int]$budgets.fixtureCommandSeconds -ne 120 -or [int]$budgets.appBuildSeconds -ne 1800 -or
+        [int]$budgets.postBuildNativeSeconds -ne $expectedPostBuildSeconds -or
+        [int]$budgets.captureTimeoutSeconds -ne 45 -or [int]$budgets.gracefulCloseSeconds -ne 6 -or
+        [int]$budgets.nativeShutdownReserveSeconds -ne 30 -or
+        (($configuredHarnessArguments -join "`n") -cne ($expectedHarnessArguments -join "`n"))) {
+        throw "Workflow smoke selection '$($selection.name)' does not match the supported Phase 2 Settings contract."
+    }
+    return $Selection
+}
+
+function New-WorkflowSmokeCommand {
+    param([Parameter(Mandatory)]$Selection, [Parameter(Mandatory)][string]$ReceiptPath)
+    $Selection = Assert-WorkflowSmokeSelectionContract -Selection $Selection
+    if (!(Test-Path -LiteralPath $script:WorkflowJumpHarnessPath -PathType Leaf)) {
+        throw 'The existing Jump Mode smoke harness is missing.'
+    }
+    $arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', [IO.Path]::GetFullPath($script:WorkflowJumpHarnessPath))
+    if ([string]$Selection.kind -ceq 'fixture-only') { $arguments += '-FixturesOnly' }
+    $arguments += @('-Scenario', [string]$Selection.scenario, '-Surface', [string]$Selection.surface,
+        '-CaptureTimeoutSeconds', [string]$Selection.budgets.captureTimeoutSeconds,
+        '-GracefulCloseSeconds', [string]$Selection.budgets.gracefulCloseSeconds)
+    if ([string]$Selection.kind -ceq 'native') {
+        $arguments += @('-PostBuildTimeoutSeconds', [string]$Selection.budgets.postBuildNativeSeconds,
+            '-PostBuildShutdownReserveSeconds', [string]$Selection.budgets.nativeShutdownReserveSeconds)
+    }
+    $arguments += @('-OverallTimeoutSeconds', [string]$Selection.budgets.overallSeconds, '-WorkflowReceiptPath', [IO.Path]::GetFullPath($ReceiptPath))
+    return [pscustomobject][ordered]@{
+        Executable = Get-WorkflowPowerShellPath
+        ArgumentList = $arguments
+        WorkingDirectory = $script:WorkflowRoot
+        Started = $false
+    }
+}
+
+function New-WorkflowSmokeRequest {
+    param(
+        [Parameter(Mandatory)][ValidateSet('Preview', 'Run')][string]$Action,
+        [Parameter(Mandatory)][string]$SmokeSelectionName
+    )
+    $selection = Get-WorkflowSmokeSelection -SmokeSelectionName $SmokeSelectionName
+    $catalog = Get-WorkflowCatalog
+    $previewReceiptPath = Join-Path ([IO.Path]::GetTempPath()) 'MultiLauncher\workflow-evidence-preview\jump-run.json'
+    $command = New-WorkflowSmokeCommand -Selection $selection -ReceiptPath $previewReceiptPath
+    return [pscustomobject][ordered]@{
+        SchemaVersion = 1
+        Action = $Action
+        WorkflowKind = 'jump-smoke'
+        Mode = 'phase2-settings-smoke'
+        ModeKind = 'smoke'
+        Package = [string]$catalog.package
+        TargetKind = 'binary'
+        TargetName = 'multi_launcher'
+        Features = [pscustomobject][ordered]@{
+            DefaultFeatures = [bool]$selection.features.defaultFeatures
+            Explicit = @($selection.features.explicit)
+        }
+        CompilerProfile = 'fast-dev'
+        RunnerProfile = 'default'
+        WorkKind = 'unknown'
+        CacheState = 'unknown'
+        BaselineSha = $null
+        ControlledChangeId = $null
+        ControlledChangePaths = @()
+        BudgetSeconds = $selection.budgets
+        SelectionName = [string]$selection.name
+        SmokeSelectionName = [string]$selection.name
+        SmokeSelection = $selection
+        Scenario = [string]$selection.scenario
+        Surface = [string]$selection.surface
+        EvidenceKind = [string]$selection.evidenceKind
+        CaptureCount = [int]$selection.captureCount
+        NativePrerequisites = @($selection.nativePrerequisites)
+        CatalogSha256 = Get-WorkflowCatalogSha256
+        SourceFingerprintSha256 = Get-WorkflowSourceFingerprint
+        CargoExecutable = $null
+        NextestTool = $null
+        Phases = @([pscustomobject][ordered]@{
+            Name = 'jump-smoke'
+            Stage = 'native'
+            TimeoutSeconds = [int]$selection.budgets.overallSeconds
+            Command = $command
+        })
+        Status = 'RESOLVED'
+        ResolutionError = $null
+        JumpReceiptPath = $null
     }
 }
 
@@ -317,6 +447,7 @@ function New-WorkflowRequestFromCli {
         [Parameter(Mandatory)][ValidateSet('Preview', 'Discover', 'Run', 'Replay')][string]$Action,
         [string]$Mode,
         [string]$SelectionName,
+        [string]$SmokeSelectionName,
         [string]$TargetKind,
         [string]$DiscoveryReceipt,
         [string]$ReplayReceipt,
@@ -329,6 +460,14 @@ function New-WorkflowRequestFromCli {
         [string[]]$TestArguments = @()
     )
 
+    if (![string]::IsNullOrWhiteSpace($SmokeSelectionName)) {
+        if ($Action -notin @('Preview', 'Run') -or $Mode -or $SelectionName -or $TargetKind -or $DiscoveryReceipt -or $ReplayReceipt -or
+            $RunnerProfile -or $WorkKind -ne 'unknown' -or $CacheState -ne 'unknown' -or $BaselineSha -or $ControlledChangeId -or
+            $ControlledChangePaths.Count -gt 0 -or $TestArguments.Count -gt 0) {
+            throw 'Smoke selections accept only -Action Preview or Run and -SmokeSelectionName.'
+        }
+        return New-WorkflowSmokeRequest -Action $Action -SmokeSelectionName $SmokeSelectionName
+    }
     if ($Action -eq 'Replay') {
         if ([string]::IsNullOrWhiteSpace($ReplayReceipt)) { throw 'Replay requires -ReplayReceipt pointing to an original failed workflow receipt.' }
         if ($SelectionName -or $TargetKind -or $DiscoveryReceipt -or $RunnerProfile -or $WorkKind -ne 'unknown' -or $CacheState -ne 'unknown' -or $BaselineSha -or
@@ -640,6 +779,318 @@ function Write-WorkflowJson {
     Set-Content -LiteralPath $Path -Value $json -Encoding utf8 -ErrorAction Stop
 }
 
+function Test-WorkflowSmokeMeasurementContract {
+    param([Parameter(Mandatory)]$Summary, [Parameter(Mandatory)]$Measurement)
+    $name = [string]$Summary.name
+    $executable = [IO.Path]::GetFullPath([string]$Measurement.Executable)
+    $arguments = @($Measurement.ArgumentList | ForEach-Object { [string]$_ })
+    $cargo = [IO.Path]::GetFileName($executable) -ieq 'cargo.exe'
+    $manifest = Join-Path $script:WorkflowRoot 'Cargo.toml'
+    $features = 'dev-smoke-binaries,qa-framebuffer-capture'
+    switch ($name) {
+        'cargo-metadata' {
+            $expected = @('metadata', '--no-deps', '--format-version', '1', '--manifest-path', $manifest)
+            return $cargo -and [string]$Measurement.Stage -ceq 'provenance' -and
+                (($arguments -join "`n") -ceq ($expected -join "`n")) -and
+                [string]$Measurement.AuxiliaryProcessPolicy -ceq 'none'
+        }
+        'fixture-binary-prepare' {
+            $expected = @('nextest', 'list', '--list-type', 'binaries-only', '--message-format', 'json', '--cargo-profile', 'fast-dev',
+                '--features', $features, '--bin', 'jump_mode_fixture', '--manifest-path', $manifest)
+            return $cargo -and [string]$Measurement.Stage -ceq 'compile' -and
+                (($arguments -join "`n") -ceq ($expected -join "`n")) -and
+                [string]$Measurement.AuxiliaryProcessPolicy -ceq 'verified-msvc-vctip'
+        }
+        'fixture-generator-build' {
+            $expected = @('build', '--manifest-path', $manifest, '--profile', 'fast-dev', '--features', $features, '--bin', 'jump_mode_fixture')
+            return $cargo -and [string]$Measurement.Stage -ceq 'compile' -and
+                (($arguments -join "`n") -ceq ($expected -join "`n")) -and
+                [string]$Measurement.AuxiliaryProcessPolicy -ceq 'verified-msvc-vctip'
+        }
+        'fixture-tests' {
+            $binaryDirectory = [IO.Path]::GetDirectoryName($executable)
+            return !$cargo -and [string]$Measurement.Stage -ceq 'test' -and
+                [IO.Path]::GetFileName($executable) -match '^jump_mode_fixture-[A-Za-z0-9_-]+\.exe$' -and
+                [IO.Path]::GetFileName($binaryDirectory) -ieq 'deps' -and
+                (($arguments -join "`n") -ceq '--test-threads=1') -and
+                [string]$Measurement.AuxiliaryProcessPolicy -ceq 'none'
+        }
+        { $_ -in @('fixture-generate', 'fixture-verify') } {
+            $operation = if ($name -ceq 'fixture-generate') { 'generate' } else { 'verify' }
+            $fixtureProfile = if ($arguments.Count -ge 2) { [IO.Path]::GetFullPath($arguments[1]) } else { '' }
+            $harnessEvidenceRoot = Join-Path $script:WorkflowRoot 'dev\jump_mode\evidence'
+            return !$cargo -and [IO.Path]::GetFileName($executable) -ieq 'jump_mode_fixture.exe' -and
+                [string]$Measurement.Stage -ceq 'test' -and $arguments.Count -eq 3 -and $arguments[0] -ceq $operation -and
+                $arguments[2] -ceq 'phase2-settings' -and [IO.Path]::GetFileName($fixtureProfile) -ceq 'profile' -and
+                (Test-WorkflowPathWithin -Candidate $fixtureProfile -Directory $harnessEvidenceRoot) -and
+                [string]$Measurement.AuxiliaryProcessPolicy -ceq 'none'
+        }
+        'app-build' {
+            $expected = @('build', '--manifest-path', $manifest, '--profile', 'fast-dev', '--features', $features, '--bin', 'multi_launcher')
+            return $cargo -and [string]$Measurement.Stage -ceq 'compile' -and
+                (($arguments -join "`n") -ceq ($expected -join "`n")) -and
+                [string]$Measurement.AuxiliaryProcessPolicy -ceq 'verified-msvc-vctip'
+        }
+        default { return $false }
+    }
+}
+
+function Test-WorkflowSmokeReceipt {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Request)
+
+    $receipt = [pscustomobject][ordered]@{
+        Valid = $false
+        Classification = 'RECEIPT_MISMATCH'
+        Error = $null
+        Link = $null
+        Manifest = $null
+        Scenarios = @()
+        Lifecycle = $null
+        EvidenceRoot = $null
+    }
+    try {
+        $fullReceiptPath = [IO.Path]::GetFullPath($Path)
+        if (!(Test-Path -LiteralPath $fullReceiptPath -PathType Leaf)) { throw 'Jump Mode did not write the requested workflow link receipt.' }
+        $link = Get-Content -LiteralPath $fullReceiptPath -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+        if ($link.schema_version -ne 1 -or [string]$link.selection_name -cne [string]$Request.SmokeSelectionName -or
+            [string]$link.selection_kind -cne [string]$Request.SmokeSelection.kind -or
+            [string]$link.scenario -cne [string]$Request.Scenario -or [string]$link.surface -cne [string]$Request.Surface) {
+            throw 'Jump Mode link receipt does not match the selected smoke scenario, surface, and evidence kind.'
+        }
+        $runId = [string]$link.run_id
+        if ([string]::IsNullOrWhiteSpace($runId) -or $runId -notmatch '^jump_m13_phase2_settings_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}$') {
+            throw 'Jump Mode link receipt has an invalid unique Phase 2 Settings run id.'
+        }
+        $evidenceRoot = [IO.Path]::GetFullPath([string]$link.evidence_root)
+        $allowedEvidenceRoot = Join-Path $script:WorkflowRoot 'dev\jump_mode\evidence'
+        if (!(Test-WorkflowPathWithin -Candidate $evidenceRoot -Directory $allowedEvidenceRoot) -or
+            [IO.Path]::GetFileName($evidenceRoot) -cne $runId -or
+            [IO.Path]::GetDirectoryName($evidenceRoot).TrimEnd('\') -ine [IO.Path]::GetFullPath($allowedEvidenceRoot).TrimEnd('\')) {
+            throw 'Jump Mode link receipt does not point to its own unique run directory under the harness evidence root.'
+        }
+        $manifestPath = [IO.Path]::GetFullPath([string]$link.manifest_path)
+        $scenariosPath = [IO.Path]::GetFullPath([string]$link.scenarios_path)
+        $lifecyclePath = [IO.Path]::GetFullPath([string]$link.lifecycle_path)
+        foreach ($candidate in @($manifestPath, $scenariosPath, $lifecyclePath)) {
+            if (!(Test-WorkflowPathWithin -Candidate $candidate -Directory $evidenceRoot) -or
+                !(Test-Path -LiteralPath $candidate -PathType Leaf)) {
+                throw 'A linked Jump Mode manifest, scenario, or lifecycle receipt is missing or outside its run directory.'
+            }
+        }
+        if ($manifestPath -ine (Join-Path $evidenceRoot 'manifest.json') -or
+            $scenariosPath -ine (Join-Path $evidenceRoot 'scenarios.json') -or
+            $lifecyclePath -ine (Join-Path $evidenceRoot 'process_lifecycle.json')) {
+            throw 'Jump Mode link paths do not identify the canonical run receipts.'
+        }
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+        $scenarios = @(Get-Content -LiteralPath $scenariosPath -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop)
+        $lifecycle = Get-Content -LiteralPath $lifecyclePath -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+        if ([string]$manifest.run_id -cne $runId -or [string]$manifest.repository_root -ine $script:WorkflowRoot -or $scenarios.Count -ne 2 -or
+            [string]$scenarios[0].scenario_id -cne 'm13-fixture-validation' -or [string]$scenarios[1].scenario_id -cne 'm13-phase2-settings') {
+            throw 'Linked Jump Mode receipts do not agree on the run id, repository, or expected Phase 2 Settings scenarios.'
+        }
+        $fixtureStatus = [string]$scenarios[0].status
+        $scenarioStatus = [string]$scenarios[1].status
+        $receipt.Manifest = $manifest
+        $receipt.Scenarios = $scenarios
+        $receipt.Lifecycle = $lifecycle
+        $receipt.Link = $link
+        $receipt.EvidenceRoot = $evidenceRoot
+        $receipt.Valid = $true
+
+        $measurements = @($link.command_measurements)
+        $measurementNames = @($measurements | ForEach-Object { [string]$_.name })
+        $expectedMeasurementNames = @('cargo-metadata', 'fixture-binary-prepare', 'fixture-generator-build', 'fixture-tests', 'fixture-generate', 'fixture-verify')
+        $mustHaveAllMeasurements = [string]$manifest.status -ceq 'PASS' -or [string]$manifest.status -ceq 'NOT_RUN_ENVIRONMENT'
+        $nativeEnvironmentNotRun = [string]$link.selection_kind -ceq 'native' -and
+            [string]$manifest.status -ceq 'NOT_RUN_ENVIRONMENT'
+        if ([string]$link.selection_kind -ceq 'native' -and !$nativeEnvironmentNotRun) { $expectedMeasurementNames += 'app-build' }
+        $expectedCount = if ($mustHaveAllMeasurements) { $expectedMeasurementNames.Count } else { $null }
+        $measurementPrefixValid = $measurementNames.Count -le $expectedMeasurementNames.Count
+        for ($index = 0; $index -lt $measurementNames.Count -and $measurementPrefixValid; $index++) {
+            if ($measurementNames[$index] -cne $expectedMeasurementNames[$index]) { $measurementPrefixValid = $false }
+        }
+        if (!$measurementPrefixValid -or
+            ($mustHaveAllMeasurements -and $measurementNames.Count -ne [int]$expectedCount) -or
+            ($measurementNames.Count -eq 0 -and [string]$manifest.status -ceq 'PASS')) {
+            $receipt.Classification = 'RECEIPT_MISMATCH'
+            $receipt.Error = 'Linked Jump Mode measurements do not match the ordered commands required by this run outcome.'
+            return $receipt
+        }
+        $measurementPaths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $measurementRoot = Join-Path ([IO.Path]::GetDirectoryName($fullReceiptPath)) 'jump-measurements'
+        $measurementCleanupUncertain = $false
+        foreach ($measurementSummary in $measurements) {
+            if ([string]::IsNullOrWhiteSpace([string]$measurementSummary.measurement_path)) {
+                $receipt.Classification = 'RECEIPT_MISMATCH'
+                $receipt.Error = 'A linked checked-command measurement path is empty.'
+                return $receipt
+            }
+            $measurementPath = [IO.Path]::GetFullPath([string]$measurementSummary.measurement_path)
+            if (!(Test-WorkflowPathWithin -Candidate $measurementPath -Directory $measurementRoot) -or
+                [IO.Path]::GetFileName($measurementPath) -cne 'measurement.json') {
+                $receipt.Classification = 'RECEIPT_MISMATCH'
+                $receipt.Error = 'A linked checked-command measurement is outside the workflow-owned measurement directory.'
+                return $receipt
+            }
+            if (!$measurementPaths.Add($measurementPath) -or !(Test-Path -LiteralPath $measurementPath -PathType Leaf) -or
+                [string]$measurementSummary.status -notin @('PASS', 'FAIL') -or
+                ($mustHaveAllMeasurements -and [string]$measurementSummary.status -cne 'PASS')) {
+                $receipt.Classification = 'RECEIPT_MISMATCH'
+                $receipt.Error = 'A nested checked-command measurement is missing, duplicated, or has an inconsistent status.'
+                return $receipt
+            }
+            $measurement = Get-Content -LiteralPath $measurementPath -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+            if ([string]$measurement.SourceSha -notmatch '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' -or
+                [string]$measurementSummary.source_sha -cne [string]$measurement.SourceSha -or
+                [string]$manifest.source_head -cne [string]$measurement.SourceSha) {
+                $receipt.Classification = 'RECEIPT_MISMATCH'
+                $receipt.Error = 'A linked checked-command measurement does not match the run source HEAD.'
+                return $receipt
+            }
+            if (([string]$measurementSummary.status -ceq 'PASS') -ne [bool]$measurement.Succeeded) {
+                $receipt.Classification = 'RECEIPT_MISMATCH'
+                $receipt.Error = 'A linked checked-command measurement status does not agree with its owner receipt.'
+                return $receipt
+            }
+            if (!$measurement.CleanupVerified -or !$measurement.OutputDrainVerified -or @($measurement.CleanupErrors).Count -gt 0 -or
+                @($measurement.RecordingErrors).Count -gt 0) { $measurementCleanupUncertain = $true }
+            $expectedStage = switch ([string]$measurementSummary.name) {
+                'cargo-metadata' { 'provenance' }
+                { $_ -in @('fixture-binary-prepare', 'fixture-generator-build', 'app-build') } { 'compile' }
+                default { 'test' }
+            }
+            if ([string]$measurement.Stage -cne $expectedStage -or
+                (($measurement.ArgumentList -join "`n") -cne (@($measurementSummary.arguments) -join "`n")) -or
+                [string]$measurementSummary.stage -cne $expectedStage -or
+                ![bool](Test-WorkflowSmokeMeasurementContract -Summary $measurementSummary -Measurement $measurement)) {
+                $receipt.Classification = 'RECEIPT_MISMATCH'
+                $receipt.Error = 'A nested command measurement does not match its approved target, arguments, stage, or compiler policy.'
+                return $receipt
+            }
+        }
+
+        $cleanupUncertain = $false
+        if ($measurementCleanupUncertain) { $cleanupUncertain = $true }
+        if ([string]$link.selection_kind -ceq 'native' -and $manifest.executable -and $manifest.executable.pid) {
+            $cleanupUncertain = !$lifecycle.owned_tree_verified -or !$lifecycle.process_output_drain_verified -or
+                [string]$lifecycle.post_cleanup_state -cne 'owned_tree_gone' -or @($lifecycle.cleanup_issues).Count -gt 0 -or $cleanupUncertain
+        }
+        if ($cleanupUncertain) {
+            $receipt.Classification = 'CLEANUP_UNCERTAINTY'
+            $receipt.Error = 'Native run lacks verified owned-process cleanup, process-log drain, or a clean lifecycle receipt.'
+            return $receipt
+        }
+
+        if ([string]$link.selection_kind -ceq 'fixture-only') {
+            if ([string]$manifest.status -ceq 'PASS' -and $fixtureStatus -ceq 'PASS' -and $scenarioStatus -ceq 'BLOCKED' -and
+                [string]$manifest.phase -ceq 'complete' -and [int]$manifest.capture.count -eq 0 -and
+                [string]$lifecycle.post_cleanup_state -ceq 'not_started' -and [string]$link.native_status -ceq 'NOT_RUN') {
+                $receipt.Classification = 'FIXTURE_PASS'
+                return $receipt
+            }
+            $receipt.Classification = 'SCENARIO_CAPTURE_FAILURE'
+            $receipt.Error = 'Fixture-only receipt does not prove typed fixture success with native execution explicitly not run.'
+            return $receipt
+        }
+
+        if ([string]$manifest.status -ceq 'NOT_RUN_ENVIRONMENT' -and $fixtureStatus -ceq 'PASS' -and
+            $scenarioStatus -ceq 'NOT_RUN_ENVIRONMENT' -and [int]$link.capture_count -eq 0 -and
+            [string]$link.native_status -ceq 'NOT_RUN_ENVIRONMENT') {
+            $receipt.Classification = 'ENVIRONMENT_NATIVE_NOT_RUN'
+            return $receipt
+        }
+
+        if ([string]$manifest.status -ceq 'PASS' -and $fixtureStatus -ceq 'PASS' -and $scenarioStatus -ceq 'PASS' -and
+            [string]$manifest.phase -ceq 'phase2_complete' -and [string]$link.native_status -ceq 'PASS') {
+            if ([int]$manifest.post_build_native_timeout_seconds -ne [int]$Request.BudgetSeconds.postBuildNativeSeconds -or
+                [int]$manifest.post_build_native_shutdown_reserve_seconds -ne [int]$Request.BudgetSeconds.nativeShutdownReserveSeconds -or
+                [bool]$manifest.post_build_native_deadline_reached -or [bool]$link.post_build_native_deadline_reached -or
+                [int]$link.capture_count -ne [int]$Request.CaptureCount -or [int]$manifest.capture.count -ne [int]$Request.CaptureCount -or
+                @($manifest.capture.captures).Count -ne [int]$Request.CaptureCount -or
+                @($scenarios[1].captures).Count -ne [int]$Request.CaptureCount -or
+                !$manifest.post_build_native_started_at_utc -or !$manifest.post_build_native_deadline_utc -or
+                !$manifest.post_build_native_finished_at_utc) {
+                $receipt.Classification = 'RECEIPT_MISMATCH'
+                $receipt.Error = 'Native receipt does not record the exact capture count and 300-second post-build deadline.'
+                return $receipt
+            }
+            $nativeStarted = [DateTimeOffset]::Parse([string]$manifest.post_build_native_started_at_utc).UtcDateTime
+            $nativeDeadline = [DateTimeOffset]::Parse([string]$manifest.post_build_native_deadline_utc).UtcDateTime
+            $nativeFinished = [DateTimeOffset]::Parse([string]$manifest.post_build_native_finished_at_utc).UtcDateTime
+            if ($nativeDeadline -le $nativeStarted -or
+                [Math]::Abs(($nativeDeadline - $nativeStarted).TotalSeconds - [int]$Request.BudgetSeconds.postBuildNativeSeconds) -gt 1 -or
+                $nativeFinished -gt $nativeDeadline) {
+                $receipt.Classification = 'SCENARIO_CAPTURE_FAILURE'
+                $receipt.Error = 'Native interactions and shutdown did not finish within the declared post-build deadline.'
+                return $receipt
+            }
+            $expectedCaptureIndex = 1
+            foreach ($capture in @($manifest.capture.captures)) {
+                if ([string]$capture.status -cne 'PASS' -or [int]$capture.capture_index -ne $expectedCaptureIndex -or
+                    [int]$capture.capture_count -ne [int]$Request.CaptureCount -or
+                    [string]$capture.fixture_manifest_sha256 -cne [string]$manifest.fixture_manifest_sha256 -or
+                    [int]$capture.process_pid -ne [int]$manifest.executable.pid -or
+                    [string]$capture.executable_sha256 -cne [string]$manifest.executable.sha256) {
+                    $receipt.Classification = 'RECEIPT_MISMATCH'
+                    $receipt.Error = 'Native capture records have a mismatched index, count, fixture, executable, or client binding.'
+                    return $receipt
+                }
+                $screenshotPath = [IO.Path]::GetFullPath((Join-Path $evidenceRoot ([string]$capture.screenshot).Replace('/', '\')))
+                $captureReceiptPath = [IO.Path]::GetFullPath((Join-Path $evidenceRoot ([string]$capture.receipt).Replace('/', '\')))
+                if (!(Test-WorkflowPathWithin -Candidate $screenshotPath -Directory $evidenceRoot) -or
+                    !(Test-WorkflowPathWithin -Candidate $captureReceiptPath -Directory $evidenceRoot) -or
+                    !(Test-Path -LiteralPath $screenshotPath -PathType Leaf) -or
+                    !(Test-Path -LiteralPath $captureReceiptPath -PathType Leaf)) {
+                    $receipt.Classification = 'RECEIPT_MISMATCH'
+                    $receipt.Error = 'A native screenshot or capture receipt is missing or escapes the linked run directory.'
+                    return $receipt
+                }
+                $imageHash = (Get-FileHash -LiteralPath $screenshotPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                if ($imageHash -cne [string]$capture.screenshot_sha256) {
+                    $receipt.Classification = 'RECEIPT_MISMATCH'
+                    $receipt.Error = 'A linked native screenshot hash does not match the Phase 2 scenario receipt.'
+                    return $receipt
+                }
+                $nativeCapture = Get-Content -LiteralPath $captureReceiptPath -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+                if ([string]$nativeCapture.status -cne 'saved' -or [string]$nativeCapture.trigger -cne 'f11' -or
+                    [string]$nativeCapture.run_id -cne $runId -or [string]$nativeCapture.request_id -cne 'phase2-settings-native' -or
+                    [string]$nativeCapture.target -cne 'ROOT' -or [int]$nativeCapture.capture_index -ne $expectedCaptureIndex -or
+                    [int]$nativeCapture.capture_count -ne [int]$Request.CaptureCount -or
+                    [string]$nativeCapture.saved.png_sha256 -cne $imageHash -or
+                    [int]$nativeCapture.process.pid -ne [int]$manifest.executable.pid -or
+                    [string]$nativeCapture.executable.sha256 -cne [string]$manifest.executable.sha256 -or
+                    [string]$nativeCapture.fixture_manifest_sha256 -cne [string]$manifest.fixture_manifest_sha256 -or
+                    [string]$nativeCapture.build_receipt_identity -cne [string]$manifest.build_receipt_identity -or
+                    [int64]$capture.logic_frame_id -le 0 -or [int64]$capture.ui_pass_id -le 0 -or
+                    [int64]$nativeCapture.captured.logic_frame_id -ne [int64]$capture.logic_frame_id -or
+                    [int64]$nativeCapture.captured.ui_pass_id -ne [int64]$capture.ui_pass_id) {
+                    $receipt.Classification = 'RECEIPT_MISMATCH'
+                    $receipt.Error = 'A native ROOT/F11 receipt does not bind to its screenshot, frame, pass, or capture index.'
+                    return $receipt
+                }
+                $expectedCaptureIndex++
+            }
+            $receipt.Classification = 'ACTUAL_NATIVE_PASS'
+            return $receipt
+        }
+
+        if ([string]$manifest.phase -in @('fixture_preparation', 'fixture_tests', 'fixture_generation', 'app_build')) {
+            $receipt.Classification = 'BUILD_FAILURE'
+        }
+        elseif ($cleanupUncertain -or [string]$lifecycle.post_cleanup_state -in @('cleanup_uncertain', 'root_still_alive', 'owned_tree_still_alive')) {
+            $receipt.Classification = 'CLEANUP_UNCERTAINTY'
+        }
+        else { $receipt.Classification = 'SCENARIO_CAPTURE_FAILURE' }
+        $receipt.Error = [string]$manifest.failure
+        return $receipt
+    }
+    catch {
+        $receipt.Error = $_.Exception.Message
+        return $receipt
+    }
+}
+
 function Export-WorkflowRunRecording {
     param(
         [Parameter(Mandatory)]$Request,
@@ -725,6 +1176,9 @@ function Invoke-WorkflowAction {
         SelectedIdentity = $Request.SelectedIdentity
         Results = $null
         ResultsPath = $null
+        Classification = $null
+        Smoke = $null
+        SmokeReceiptPath = $null
         RecordingError = $null
         Recording = $null
         RecordingContext = $null
@@ -738,7 +1192,54 @@ function Invoke-WorkflowAction {
     $firstFailure = $null
 
     try {
-        if ($Request.Action -eq 'Run' -and $Request.ModeKind -eq 'build') {
+        if ($Request.WorkflowKind -ceq 'jump-smoke' -and $Request.Action -eq 'Run') {
+            $linkPath = Join-Path $runDirectory 'jump-run.json'
+            $Request.JumpReceiptPath = $linkPath
+            $phase = $Request.Phases[0]
+            $phase.Command = New-WorkflowSmokeCommand -Selection $Request.SmokeSelection -ReceiptPath $linkPath
+            $measurement = Invoke-WorkflowCommand -Request $Request -EvidenceDirectory $runDirectory -Name 'jump-smoke-run' `
+                -Stage 'native' -TimeoutSeconds ([int]$Request.BudgetSeconds.overallSeconds) -Command $phase.Command -ProcessInvoker $ProcessInvoker
+            $phases.Add((Get-WorkflowPhaseSummary -Name 'jump-smoke-run' -Command $phase.Command -Measurement $measurement))
+            $result.SmokeReceiptPath = $linkPath
+            $linkedReceipt = Test-WorkflowSmokeReceipt -Path $linkPath -Request $Request
+            $classification = [string]$linkedReceipt.Classification
+            if (!$measurement.CleanupVerified -or !$measurement.OutputDrainVerified -or @($measurement.CleanupErrors).Count -gt 0 -or
+                @($measurement.RecordingErrors).Count -gt 0) {
+                $classification = 'CLEANUP_UNCERTAINTY'
+            }
+            $result.Classification = $classification
+            $result.Smoke = [pscustomobject][ordered]@{
+                SelectionName = [string]$Request.SmokeSelectionName
+                EvidenceKind = [string]$Request.EvidenceKind
+                Classification = $classification
+                NativeStatus = if ($linkedReceipt.Link) { [string]$linkedReceipt.Link.native_status } else { 'UNKNOWN' }
+                CaptureCount = if ($linkedReceipt.Link) { [int]$linkedReceipt.Link.capture_count } else { $null }
+                LinkReceiptPath = if ($linkedReceipt.Valid) { $linkPath } else { $null }
+                HarnessEvidenceRoot = if ($linkedReceipt.Valid) { [string]$linkedReceipt.EvidenceRoot } else { $null }
+                ManifestPath = if ($linkedReceipt.Link) { [string]$linkedReceipt.Link.manifest_path } else { $null }
+                ScenariosPath = if ($linkedReceipt.Link) { [string]$linkedReceipt.Link.scenarios_path } else { $null }
+                LifecyclePath = if ($linkedReceipt.Link) { [string]$linkedReceipt.Link.lifecycle_path } else { $null }
+                Error = if ($linkedReceipt.Error) { [string]$linkedReceipt.Error } else { $null }
+            }
+            if ($measurement.Succeeded -and $linkedReceipt.Valid -and $classification -in @('FIXTURE_PASS', 'ACTUAL_NATIVE_PASS')) {
+                $result.Status = 'PASS'
+                $result.ExitCode = 0
+            }
+            elseif ($measurement.Succeeded -and $linkedReceipt.Valid -and $classification -ceq 'ENVIRONMENT_NATIVE_NOT_RUN') {
+                $result.Status = 'NOT_RUN_ENVIRONMENT'
+                $result.ExitCode = 3
+                $result.Error = 'Fixture validation completed, but Windows reported no interactive session; native Settings acceptance remains not run.'
+            }
+            else {
+                $result.Status = 'FAIL'
+                $result.ExitCode = Get-WorkflowFailureExitCode $measurement
+                if ($result.ExitCode -eq 0) { $result.ExitCode = 1 }
+                $result.Error = if ($linkedReceipt.Error) { [string]$linkedReceipt.Error } else {
+                    "Jump Mode smoke did not produce a valid matching receipt ($($measurement.ExecutionReason), exit $($measurement.ExitCode))."
+                }
+            }
+        }
+        elseif ($Request.Action -eq 'Run' -and $Request.ModeKind -eq 'build') {
             $phase = $Request.Phases[0]
             $measurement = Invoke-WorkflowCommand -Request $Request -EvidenceDirectory $runDirectory -Name $phase.Name -Stage $phase.Stage `
                 -TimeoutSeconds $phase.TimeoutSeconds -Command $phase.Command -ProcessInvoker $ProcessInvoker

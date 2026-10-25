@@ -67,7 +67,7 @@
       "features": { "defaultFeatures": true, "explicit": [] },
       "platformNotes": "Windows test selection; case is host-independent Rust library coverage.",
       "resourceNotes": "Small deterministic parser fixture; no desktop application launch.",
-      "nativeMetadata": { "available": false, "status": "selection metadata only; native mapping belongs to M3-A" },
+      "nativeMetadata": { "available": false, "status": "Pure test selection; no native UI workflow is mapped." },
       "budgets": { "preparationSeconds": 1800, "inventorySeconds": 600, "executionSeconds": 600 }
     },
     {
@@ -81,7 +81,7 @@
       "features": { "defaultFeatures": true, "explicit": [] },
       "platformNotes": "Windows test selection; case is pure plugin parsing coverage.",
       "resourceNotes": "In-memory note URL parsing; no external note store is required.",
-      "nativeMetadata": { "available": false, "status": "selection metadata only; native mapping belongs to M3-A" },
+      "nativeMetadata": { "available": false, "status": "Pure test selection; no native UI workflow is mapped." },
       "budgets": { "preparationSeconds": 1800, "inventorySeconds": 600, "executionSeconds": 600 }
     },
     {
@@ -95,7 +95,7 @@
       "features": { "defaultFeatures": true, "explicit": [] },
       "platformNotes": "Windows test selection; case validates a pure clipboard-reference value.",
       "resourceNotes": "Uses deterministic UTF-8 input and hashing; no clipboard access.",
-      "nativeMetadata": { "available": false, "status": "selection metadata only; native mapping belongs to M3-A" },
+      "nativeMetadata": { "available": false, "status": "Pure test selection; no native UI workflow is mapped." },
       "budgets": { "preparationSeconds": 1800, "inventorySeconds": 600, "executionSeconds": 600 }
     },
     {
@@ -109,7 +109,7 @@
       "features": { "defaultFeatures": true, "explicit": [] },
       "platformNotes": "Windows test selection; state-level GUI logic only, without creating a desktop window.",
       "resourceNotes": "No native UI or user profile is opened by the selected test body.",
-      "nativeMetadata": { "available": false, "status": "selection metadata only; native mapping belongs to M3-A" },
+      "nativeMetadata": { "available": false, "status": "State-level test selection; no native UI workflow is mapped." },
       "budgets": { "preparationSeconds": 1800, "inventorySeconds": 600, "executionSeconds": 600 }
     },
     {
@@ -123,7 +123,7 @@
       "features": { "defaultFeatures": true, "explicit": [] },
       "platformNotes": "Windows test selection; pure settings-model compatibility coverage.",
       "resourceNotes": "In-memory default-model assertion; no application instance is created.",
-      "nativeMetadata": { "available": false, "status": "selection metadata only; native mapping belongs to M3-A" },
+      "nativeMetadata": { "available": false, "status": "Pure settings-model test; the native Settings smoke is a separate selection." },
       "budgets": { "preparationSeconds": 1800, "inventorySeconds": 600, "executionSeconds": 600 }
     },
     {
@@ -138,8 +138,58 @@
       "features": { "defaultFeatures": true, "explicit": [] },
       "platformNotes": "Windows pure integration-test target; no native application launch.",
       "resourceNotes": "The test asserts default query-autocomplete configuration without OS interaction.",
-      "nativeMetadata": { "available": false, "status": "selection metadata only; native mapping belongs to M3-A" },
+      "nativeMetadata": { "available": false, "status": "Pure integration-test selection; no native UI workflow is mapped." },
       "budgets": { "preparationSeconds": 1800, "inventorySeconds": 600, "executionSeconds": 600 }
+    }
+  ],
+  "smokeSelections": [
+    {
+      "name": "phase2-settings-fixture",
+      "kind": "fixture-only",
+      "scenario": "Phase2",
+      "surface": "Settings",
+      "features": { "defaultFeatures": true, "explicit": ["dev-smoke-binaries", "qa-framebuffer-capture"] },
+      "evidenceKind": "typed-fixture",
+      "captureCount": 0,
+      "nativePrerequisites": [],
+      "harnessArguments": ["-FixturesOnly", "-Scenario", "Phase2", "-Surface", "Settings", "-CaptureTimeoutSeconds", "45", "-GracefulCloseSeconds", "6", "-OverallTimeoutSeconds", "3600"],
+      "budgets": {
+        "overallSeconds": 3600,
+        "provenanceSeconds": 60,
+        "testPreparationSeconds": 1800,
+        "fixtureTestsSeconds": 600,
+        "fixtureCommandSeconds": 120,
+        "appBuildSeconds": 1800,
+        "postBuildNativeSeconds": 0,
+        "captureTimeoutSeconds": 45,
+        "gracefulCloseSeconds": 6,
+        "nativeShutdownReserveSeconds": 30
+      },
+      "nativeMetadata": { "available": false, "status": "Fixture-only selection; no application launch or native acceptance is claimed." }
+    },
+    {
+      "name": "phase2-settings-native",
+      "kind": "native",
+      "scenario": "Phase2",
+      "surface": "Settings",
+      "features": { "defaultFeatures": true, "explicit": ["dev-smoke-binaries", "qa-framebuffer-capture"] },
+      "evidenceKind": "native-root-framebuffer",
+      "captureCount": 3,
+      "nativePrerequisites": ["Windows interactive user session", "owned foreground window", "native input", "framebuffer capture", "owned process inventory and cleanup"],
+      "harnessArguments": ["-Scenario", "Phase2", "-Surface", "Settings", "-CaptureTimeoutSeconds", "45", "-GracefulCloseSeconds", "6", "-PostBuildTimeoutSeconds", "300", "-PostBuildShutdownReserveSeconds", "30", "-OverallTimeoutSeconds", "3600"],
+      "budgets": {
+        "overallSeconds": 3600,
+        "provenanceSeconds": 60,
+        "testPreparationSeconds": 1800,
+        "fixtureTestsSeconds": 600,
+        "fixtureCommandSeconds": 120,
+        "appBuildSeconds": 1800,
+        "postBuildNativeSeconds": 300,
+        "captureTimeoutSeconds": 45,
+        "gracefulCloseSeconds": 6,
+        "nativeShutdownReserveSeconds": 30
+      },
+      "nativeMetadata": { "available": true, "status": "Mapped to the existing Phase 2 Settings harness; readiness and acceptance are determined by each run." }
     }
   ]
 }

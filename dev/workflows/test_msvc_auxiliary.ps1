@@ -9,6 +9,22 @@ $evidenceRoot = [IO.Path]::GetFullPath($EvidenceDirectory)
 
 $pwshCommand = Get-Command pwsh.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
 $pwshPath = if ($pwshCommand.Source) { $pwshCommand.Source } else { $pwshCommand.Path }
+$cargoPath = 'C:\toolchain\cargo.exe'
+$compilerPolicyCases = @(
+    @{ Stage = 'compile'; Executable = $cargoPath; Arguments = @('build', '--bin', 'multi_launcher'); Expected = $true; Label = 'Cargo build' },
+    @{ Stage = 'compile'; Executable = $cargoPath; Arguments = @('check', '--lib'); Expected = $true; Label = 'Cargo check' },
+    @{ Stage = 'compile'; Executable = $cargoPath; Arguments = @('clippy', '--lib'); Expected = $true; Label = 'Cargo clippy' },
+    @{ Stage = 'compile'; Executable = $cargoPath; Arguments = @('nextest', 'list', '--list-type', 'binaries-only'); Expected = $true; Label = 'Cargo Nextest list' },
+    @{ Stage = 'compile'; Executable = $cargoPath; Arguments = @('test', '--no-run', '--bin', 'jump_mode_fixture'); Expected = $false; Label = 'Cargo test preparation' },
+    @{ Stage = 'compile'; Executable = $cargoPath; Arguments = @('run', '--bin', 'jump_mode_fixture'); Expected = $false; Label = 'Cargo run' },
+    @{ Stage = 'test'; Executable = $cargoPath; Arguments = @('clippy', '--lib'); Expected = $false; Label = 'Non-compile Cargo clippy' },
+    @{ Stage = 'compile'; Executable = $pwshPath; Arguments = @('clippy', '--lib'); Expected = $false; Label = 'Non-Cargo compiler command' }
+)
+foreach ($case in $compilerPolicyCases) {
+    $actual = Test-VerifiedMsvcCargoCommand -Stage $case.Stage -Executable $case.Executable -ArgumentList $case.Arguments
+    if ([bool]$actual -ne [bool]$case.Expected) { throw "Verified MSVC compiler policy routing mismatch for $($case.Label)." }
+}
+
 $fixturePath = Join-Path $evidenceRoot 'owned compiler fixture.ps1'
 $results = [System.Collections.Generic.List[object]]::new()
 $script:fakeJobMemberPid = $null

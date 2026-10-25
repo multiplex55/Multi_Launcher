@@ -554,11 +554,8 @@ try {
     }
 
     if ($AuxiliaryProcessPolicy -eq 'verified-msvc-vctip') {
-        $firstArgument = if ($ArgumentList.Count -gt 0) { [string]$ArgumentList[0] } else { '' }
-        $secondArgument = if ($ArgumentList.Count -gt 1) { [string]$ArgumentList[1] } else { '' }
-        if ($Stage -ne 'compile' -or [IO.Path]::GetFileName($resolvedExecutable) -ine 'cargo.exe' -or
-            !(($firstArgument -in @('build', 'check')) -or ($firstArgument -ceq 'nextest' -and $secondArgument -ceq 'list'))) {
-            throw 'MSVC helper preflight is restricted to an explicit Cargo build/check or Nextest list preparation command.'
+        if (!(Test-VerifiedMsvcCargoCommand -Stage $Stage -Executable $resolvedExecutable -ArgumentList @($ArgumentList))) {
+            throw 'MSVC helper preflight is restricted to explicit Cargo build/check/clippy or Nextest list preparation commands.'
         }
         $preflightResult = Invoke-VerifiedMsvcVctipPreflight -RunDirectory $runDirectory
         $auxiliaryPreflight = $preflightResult.Receipt

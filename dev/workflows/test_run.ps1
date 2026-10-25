@@ -149,6 +149,38 @@ $cliRunRequest = New-WorkflowRequestFromCli -Action Run -Mode fast-dev-tests -Se
 Assert-WorkflowEqual $cliRunRequest.Status 'RESOLVED' 'CLI run without optional target kind'
 Assert-WorkflowEqual $cliRunRequest.TargetKind 'lib' 'CLI selection resolves target kind'
 
+$fixtureSmokeRequest = New-WorkflowRequestFromCli -Action Preview -SmokeSelectionName phase2-settings-fixture
+Assert-WorkflowEqual $fixtureSmokeRequest.WorkflowKind 'jump-smoke' 'Settings fixture workflow kind'
+Assert-WorkflowEqual $fixtureSmokeRequest.CaptureCount 0 'Settings fixture selection capture count'
+Assert-WorkflowSequence @($fixtureSmokeRequest.Phases[0].Command.ArgumentList) @(
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-File', [IO.Path]::GetFullPath($script:WorkflowJumpHarnessPath),
+    '-FixturesOnly', '-Scenario', 'Phase2', '-Surface', 'Settings', '-CaptureTimeoutSeconds', '45',
+    '-GracefulCloseSeconds', '6', '-OverallTimeoutSeconds', '3600', '-WorkflowReceiptPath',
+    (Join-Path ([IO.Path]::GetTempPath()) 'MultiLauncher\workflow-evidence-preview\jump-run.json')
+) 'Settings fixture command'
+$nativeSmokeRequest = New-WorkflowRequestFromCli -Action Preview -SmokeSelectionName phase2-settings-native
+Assert-WorkflowEqual $nativeSmokeRequest.CaptureCount 3 'Settings native selection capture count'
+Assert-WorkflowEqual $nativeSmokeRequest.BudgetSeconds.postBuildNativeSeconds 300 'Settings native hard deadline'
+Assert-WorkflowSequence @($nativeSmokeRequest.NativePrerequisites) @(
+    'Windows interactive user session', 'owned foreground window', 'native input', 'framebuffer capture', 'owned process inventory and cleanup'
+) 'Settings native prerequisites'
+if (@($nativeSmokeRequest.Phases[0].Command.ArgumentList) -contains '-ExecutionPolicy' -or
+    @($nativeSmokeRequest.Phases[0].Command.ArgumentList) -contains 'Bypass') {
+    throw 'Settings smoke command added an unsupported PowerShell execution-policy bypass.'
+}
+$smokePreviewChildCalls = 0
+$smokePreviewResult = Invoke-WorkflowAction -Request $fixtureSmokeRequest -ProcessInvoker { $smokePreviewChildCalls++; throw 'Preview unexpectedly launched a child.' }
+Assert-WorkflowEqual $smokePreviewResult.Status 'PREVIEW' 'Settings workflow preview'
+Assert-WorkflowEqual $smokePreviewChildCalls 0 'Settings workflow preview has no child process'
+Assert-WorkflowThrows {
+    New-WorkflowRequestFromCli -Action Run -Mode fast-dev-tests -SmokeSelectionName phase2-settings-native
+} 'Mixed workflow and smoke arguments rejection'
+$tamperedSmokeSelection = ConvertFrom-Json -InputObject (ConvertTo-Json -InputObject (Get-WorkflowSmokeSelection -SmokeSelectionName phase2-settings-native) -Depth 10) -AsHashtable
+$tamperedSmokeSelection.harnessArguments[1] = 'Phase1'
+Assert-WorkflowThrows {
+    New-WorkflowSmokeCommand -Selection $tamperedSmokeSelection -ReceiptPath (Join-Path ([IO.Path]::GetTempPath()) 'jump-run.json')
+} 'Tampered Settings harness argument rejection before child launch'
+
 $cargoWrapper = Join-Path $script:WorkflowRoot 'dev\track_b\cargo.ps1'
 Assert-WorkflowThrows { & $cargoWrapper -Preset quick-check -CargoArguments @('--all-targets') -PrintCommand } 'Long selector conflict'
 Assert-WorkflowThrows { & $cargoWrapper -Preset full-debug -CargoArguments @('--package=other') -PrintCommand } 'Equals selector conflict'
@@ -206,7 +238,179 @@ finally {
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('Multi Launcher\workflow self test-' + [guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($testRoot) | Out-Null
+$syntheticJumpEvidenceRoots = [System.Collections.Generic.List[string]]::new()
 try {
+    $makeSyntheticJumpRun = {
+        param($Spec, [string]$SelectionName, [string]$Outcome)
+        $receiptIndex = [Array]::IndexOf([string[]]$Spec.Command.ArgumentList, '-WorkflowReceiptPath')
+        if ($receiptIndex -lt 0 -or $receiptIndex + 1 -ge $Spec.Command.ArgumentList.Count) { throw 'Smoke command did not pass its generated receipt path.' }
+        $linkPath = [IO.Path]::GetFullPath([string]$Spec.Command.ArgumentList[$receiptIndex + 1])
+        $runId = 'jump_m13_phase2_settings_{0}_{1}' -f [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'), [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $harnessRoot = Join-Path $script:WorkflowRoot "dev\jump_mode\evidence\$runId"
+        [IO.Directory]::CreateDirectory($harnessRoot) | Out-Null
+        $syntheticJumpEvidenceRoots.Add($harnessRoot)
+        $measureRoot = Join-Path ([IO.Path]::GetDirectoryName($linkPath)) 'jump-measurements'
+        $cargo = Get-WorkflowCargoPath
+        $manifest = Join-Path $script:WorkflowRoot 'Cargo.toml'
+        $sourceSha = 'd' * 40
+        $fixtureProfile = Join-Path $harnessRoot 'profile'
+        $definitions = @(
+            @{ Name = 'cargo-metadata'; Stage = 'provenance'; Executable = $cargo; Arguments = @('metadata', '--no-deps', '--format-version', '1', '--manifest-path', $manifest); Policy = 'none' },
+            @{ Name = 'fixture-binary-prepare'; Stage = 'compile'; Executable = $cargo; Arguments = @('nextest', 'list', '--list-type', 'binaries-only', '--message-format', 'json', '--cargo-profile', 'fast-dev', '--features', 'dev-smoke-binaries,qa-framebuffer-capture', '--bin', 'jump_mode_fixture', '--manifest-path', $manifest); Policy = 'verified-msvc-vctip' },
+            @{ Name = 'fixture-generator-build'; Stage = 'compile'; Executable = $cargo; Arguments = @('build', '--manifest-path', $manifest, '--profile', 'fast-dev', '--features', 'dev-smoke-binaries,qa-framebuffer-capture', '--bin', 'jump_mode_fixture'); Policy = 'verified-msvc-vctip' },
+            @{ Name = 'fixture-tests'; Stage = 'test'; Executable = (Join-Path $script:WorkflowRoot 'target\fast-dev\deps\jump_mode_fixture-abc123.exe'); Arguments = @('--test-threads=1'); Policy = 'none' },
+            @{ Name = 'fixture-generate'; Stage = 'test'; Executable = (Join-Path $script:WorkflowRoot 'target\fast-dev\jump_mode_fixture.exe'); Arguments = @('generate', $fixtureProfile, 'phase2-settings'); Policy = 'none' },
+            @{ Name = 'fixture-verify'; Stage = 'test'; Executable = (Join-Path $script:WorkflowRoot 'target\fast-dev\jump_mode_fixture.exe'); Arguments = @('verify', $fixtureProfile, 'phase2-settings'); Policy = 'none' }
+        )
+        if ($SelectionName -ceq 'phase2-settings-native' -and $Outcome -cne 'environment') {
+            $definitions += @{ Name = 'app-build'; Stage = 'compile'; Executable = $cargo; Arguments = @('build', '--manifest-path', $manifest, '--profile', 'fast-dev', '--features', 'dev-smoke-binaries,qa-framebuffer-capture', '--bin', 'multi_launcher'); Policy = 'verified-msvc-vctip' }
+        }
+        $summaries = [System.Collections.Generic.List[object]]::new()
+        foreach ($definition in $definitions) {
+            $phaseDirectory = Join-Path $measureRoot ([string]$definition.Name)
+            [IO.Directory]::CreateDirectory($phaseDirectory) | Out-Null
+            $measurementPath = Join-Path $phaseDirectory 'measurement.json'
+            $rawMeasurement = [ordered]@{
+                Succeeded = $true
+                CleanupVerified = $true
+                OutputDrainVerified = $true
+                CleanupErrors = @()
+                RecordingErrors = @()
+                SourceSha = $sourceSha
+                Stage = $definition.Stage
+                Executable = $definition.Executable
+                ArgumentList = @($definition.Arguments)
+                AuxiliaryProcessPolicy = $definition.Policy
+            }
+            [IO.File]::WriteAllText($measurementPath, (ConvertTo-Json -InputObject $rawMeasurement -Depth 8), [Text.UTF8Encoding]::new($false))
+            $summaries.Add([ordered]@{
+                name = $definition.Name
+                stage = $definition.Stage
+                source_sha = $sourceSha
+                executable = $definition.Executable
+                arguments = @($definition.Arguments)
+                status = 'PASS'
+                cleanup_verified = $true
+                output_drain_verified = $true
+                measurement_path = $measurementPath
+            })
+        }
+        $fixtureOnly = $SelectionName -ceq 'phase2-settings-fixture'
+        $nativeEnvironmentNotRun = $Outcome -ceq 'environment'
+        $cleanupUncertain = $Outcome -ceq 'cleanup-uncertain'
+        $manifestStatus = if ($nativeEnvironmentNotRun) { 'NOT_RUN_ENVIRONMENT' } else { 'PASS' }
+        $scenarioStatus = if ($fixtureOnly) { 'BLOCKED' } elseif ($nativeEnvironmentNotRun) { 'NOT_RUN_ENVIRONMENT' } else { 'PASS' }
+        $captureCount = if ($fixtureOnly -or $nativeEnvironmentNotRun) { 0 } else { 3 }
+        $manifest = [ordered]@{
+            run_id = $runId
+            repository_root = $script:WorkflowRoot
+            source_head = $sourceSha
+            status = $manifestStatus
+            phase = if ($fixtureOnly -or $nativeEnvironmentNotRun) { 'complete' } else { 'phase2_complete' }
+            capture = @{ count = $captureCount; captures = @() }
+            executable = if ($captureCount -gt 0) { @{ pid = 424242; sha256 = ('a' * 64) } } else { $null }
+            fixture_manifest_sha256 = ('b' * 64)
+            build_receipt_identity = 'synthetic measurement-linked app build'
+            command_measurements = @($summaries.ToArray())
+            post_build_native_timeout_seconds = 300
+            post_build_native_shutdown_reserve_seconds = 30
+            post_build_native_started_at_utc = $null
+            post_build_native_deadline_utc = $null
+            post_build_native_finished_at_utc = $null
+            post_build_native_deadline_reached = $false
+        }
+        if (!$fixtureOnly -and !$nativeEnvironmentNotRun) {
+            $started = [DateTime]::UtcNow
+            $manifest.post_build_native_started_at_utc = $started.ToString('O')
+            $manifest.post_build_native_deadline_utc = $started.AddSeconds(300).ToString('O')
+            $manifest.post_build_native_finished_at_utc = $started.AddSeconds(2).ToString('O')
+        }
+        $scenarios = @(
+            @{ scenario_id = 'm13-fixture-validation'; status = 'PASS' },
+            @{ scenario_id = 'm13-phase2-settings'; status = $scenarioStatus; captures = @() }
+        )
+        $lifecycle = @{
+            post_cleanup_state = if ($cleanupUncertain) { 'cleanup_uncertain' } elseif ($captureCount -gt 0) { 'owned_tree_gone' } else { 'not_started' }
+            owned_tree_verified = ($captureCount -gt 0 -and !$cleanupUncertain)
+            process_output_drain_verified = ($captureCount -gt 0 -and !$cleanupUncertain)
+            cleanup_issues = if ($cleanupUncertain) { @('synthetic cleanup uncertainty') } else { @() }
+        }
+        $manifestPath = Join-Path $harnessRoot 'manifest.json'
+        $scenariosPath = Join-Path $harnessRoot 'scenarios.json'
+        $lifecyclePath = Join-Path $harnessRoot 'process_lifecycle.json'
+        [IO.File]::WriteAllText($manifestPath, (ConvertTo-Json -InputObject $manifest -Depth 24), [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($scenariosPath, (ConvertTo-Json -InputObject $scenarios -Depth 12), [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($lifecyclePath, (ConvertTo-Json -InputObject $lifecycle -Depth 12), [Text.UTF8Encoding]::new($false))
+        $link = [ordered]@{
+            schema_version = 1
+            selection_name = $SelectionName
+            selection_kind = if ($fixtureOnly) { 'fixture-only' } else { 'native' }
+            scenario = 'Phase2'
+            surface = 'Settings'
+            run_id = $runId
+            evidence_root = $harnessRoot
+            manifest_path = $manifestPath
+            scenarios_path = $scenariosPath
+            lifecycle_path = $lifecyclePath
+            status = $manifestStatus
+            fixture_status = 'PASS'
+            scenario_status = $scenarioStatus
+            native_status = if ($fixtureOnly) { 'NOT_RUN' } elseif ($nativeEnvironmentNotRun) { 'NOT_RUN_ENVIRONMENT' } elseif ($cleanupUncertain) { 'PASS' } else { 'PASS' }
+            capture_count = $captureCount
+            post_build_native_timeout_seconds = if ($fixtureOnly) { 0 } else { 300 }
+            post_build_native_deadline_reached = $false
+            command_measurements = @($summaries.ToArray())
+        }
+        [IO.File]::WriteAllText($linkPath, (ConvertTo-Json -InputObject $link -Depth 24), [Text.UTF8Encoding]::new($false))
+        return [pscustomobject]@{ LinkPath = $linkPath; RunId = $runId }
+    }.GetNewClosure()
+
+    $fixtureSmokeRun = New-WorkflowRequestFromCli -Action Run -SmokeSelectionName phase2-settings-fixture
+    Assert-WorkflowEqual $fixtureSmokeRun.CacheState 'unknown' 'Smoke request does not infer a cache state'
+    Assert-WorkflowEqual $fixtureSmokeRun.WorkKind 'unknown' 'Smoke request does not infer a work kind'
+    $fixtureSmokeCalls = [System.Collections.Generic.List[string]]::new()
+    $fixtureSmokeInvoker = {
+        param($spec)
+        $fixtureSmokeCalls.Add([string]$spec.Name)
+        Assert-WorkflowEqual $spec.Name 'jump-smoke-run' 'Settings fixture child name'
+        Assert-WorkflowEqual $spec.Stage 'native' 'Settings fixture outer process stage'
+        Assert-WorkflowEqual $spec.TimeoutSeconds 3600 'Settings fixture outer budget'
+        $null = & $makeSyntheticJumpRun $spec 'phase2-settings-fixture' 'fixture'
+        return & $measurementFactory $spec ''
+    }.GetNewClosure()
+    $fixtureSmokeResult = Invoke-WorkflowAction -Request $fixtureSmokeRun -EvidenceDirectory $testRoot -ProcessInvoker $fixtureSmokeInvoker
+    Assert-WorkflowEqual $fixtureSmokeResult.Status 'PASS' 'Synthetic Settings fixture run classification'
+    Assert-WorkflowEqual $fixtureSmokeResult.Classification 'FIXTURE_PASS' 'Synthetic Settings fixture is not native acceptance'
+    Assert-WorkflowEqual $fixtureSmokeResult.Smoke.NativeStatus 'NOT_RUN' 'Fixture-only result records native execution as not run'
+    Assert-WorkflowSequence @($fixtureSmokeCalls) @('jump-smoke-run') 'Settings fixture executes one checked harness command'
+    $tamperedSmokeLink = Get-Content -LiteralPath $fixtureSmokeResult.SmokeReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+    $tamperedSmokeLink.run_id = 'jump_m13_phase2_settings_wrong'
+    [IO.File]::WriteAllText($fixtureSmokeResult.SmokeReceiptPath, (ConvertTo-Json -InputObject $tamperedSmokeLink -Depth 24), [Text.UTF8Encoding]::new($false))
+    $tamperedSmokeReceipt = Test-WorkflowSmokeReceipt -Path $fixtureSmokeResult.SmokeReceiptPath -Request $fixtureSmokeRun
+    Assert-WorkflowEqual $tamperedSmokeReceipt.Valid $false 'Mismatched harness run id is rejected'
+
+    $environmentSmokeRun = New-WorkflowRequestFromCli -Action Run -SmokeSelectionName phase2-settings-native
+    $environmentSmokeInvoker = {
+        param($spec)
+        $null = & $makeSyntheticJumpRun $spec 'phase2-settings-native' 'environment'
+        return & $measurementFactory $spec ''
+    }.GetNewClosure()
+    $environmentSmokeResult = Invoke-WorkflowAction -Request $environmentSmokeRun -EvidenceDirectory $testRoot -ProcessInvoker $environmentSmokeInvoker
+    Assert-WorkflowEqual $environmentSmokeResult.Status 'NOT_RUN_ENVIRONMENT' 'Native Settings environment block status'
+    Assert-WorkflowEqual $environmentSmokeResult.Classification 'ENVIRONMENT_NATIVE_NOT_RUN' 'Environment block is not a native pass'
+    $environmentSmokeLink = Get-Content -LiteralPath $environmentSmokeResult.SmokeReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+    Assert-WorkflowEqual @($environmentSmokeLink.command_measurements).Count 6 'Environment-blocked native smoke stops before app build'
+    Assert-WorkflowEqual $environmentSmokeLink.command_measurements[-1].name 'fixture-verify' 'Environment-blocked native measurement prefix'
+
+    $cleanupSmokeInvoker = {
+        param($spec)
+        $null = & $makeSyntheticJumpRun $spec 'phase2-settings-native' 'cleanup-uncertain'
+        return & $measurementFactory $spec ''
+    }.GetNewClosure()
+    $cleanupSmokeResult = Invoke-WorkflowAction -Request $environmentSmokeRun -EvidenceDirectory $testRoot -ProcessInvoker $cleanupSmokeInvoker
+    Assert-WorkflowEqual $cleanupSmokeResult.Status 'FAIL' 'Native cleanup uncertainty fails smoke run'
+    Assert-WorkflowEqual $cleanupSmokeResult.Classification 'CLEANUP_UNCERTAINTY' 'Native cleanup uncertainty classification'
+
     $quickRunRequest = New-WorkflowRequest -Action Run -Mode quick-check
     $expectedQuickCommand = $quickRunRequest.Phases[0].Command.ArgumentList
     foreach ($quickCase in @(

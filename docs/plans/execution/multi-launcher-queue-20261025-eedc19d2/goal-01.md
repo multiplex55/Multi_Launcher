@@ -206,3 +206,101 @@ The attached report-only census covered 15 files, 21 entries and 99,322 bytes
 without truncation or deletion. See `comparison-command.json` beside the
 comparison receipt for the exact comparison invocation and quota.
 Review corrections verified the environment snapshot includes inherited `CARGO_BUILD_RUSTFLAGS`, target-specific Rust flags and linker selection, recording only hashes. Difference details now compare each sample with the first valid sample and identify sample index/path. Same-commit controlled source comparisons use actual between-sample file-map changes, so unchanged pre-existing dirty files do not invalidate a declared edit; an undeclared changed path still rejects the group. Focused regression checks passed under the checked owner.
+
+#### M3-A execution record (2026-10-25)
+
+Added two catalog-validated Phase 2 Settings smoke selections to the workflow
+facade. The fixture-only selection measures metadata, Nextest binaries-only
+preparation, an explicit fixture-generator build, the directly selected test
+executable, and fixture generation/verification. The native selection adds the
+same measured setup and app build, then delegates the existing owned HWND,
+native input, ROOT/F11 capture, and shutdown lifecycle to the Jump Mode runner.
+The post-build native lifecycle has a hard 300-second deadline with a
+270-second interaction window and a 30-second shutdown reserve. At most three
+captures are requested. The checked auxiliary-process exception remains limited
+to the verified signed MSVC VCTIP helper, with final owner identity, byte-drain,
+and cleanup checks intact.
+
+The corrected fixture-only public run passed at
+`g01-m3a/fixture-only-run-corrected/workflow_20261025T174727743Z_2d9e299d70924a638aa97faca85b5654`.
+All six nested command measurements passed; the directly executed fixture test
+binary reported 9 passed and 0 failed, generated-profile verification passed,
+the harness manifest was PASS/complete with zero captures, and the outer owner
+verified cleanup and output drain. Run ID:
+`jump_m13_phase2_settings_20261025T174729Z_8bb1db7f`. An earlier public attempt
+failed before launching a child because the new smoke request omitted explicit
+`unknown` work/cache labels; that receipt is retained under
+`g01-m3a/fixture-only-run`. The defaults and focused facade assertion are
+corrected.
+
+The one authorized native run used the public facade and completed its measured
+setup and app build, but failed the existing Settings scenario while waiting
+for the active hint map after the first collapse action. It captured one
+receipt-bound ROOT/F11 frame, then the 45-second hint-map wait expired. No
+second native attempt was made. The run is honestly classified
+`SCENARIO_CAPTURE_FAILURE`; the app process tree was verified gone, its 452-byte
+stderr stream was drained, and the 300-second deadline was not reached. Evidence
+is under
+`g01-m3a/native-run/workflow_20261025T175345893Z_4410919c03dc4b77b88cfcea51e8db0d`,
+with harness run ID `jump_m13_phase2_settings_20261025T175347Z_b6853bf2` and
+screenshot `dev/jump_mode/evidence/jump_m13_phase2_settings_20261025T175347Z_b6853bf2/screenshots/15_settings_hints.png`.
+Native Settings acceptance is not claimed.
+
+Post-run corrections make environment-unavailable native receipts require the
+six pre-app command measurements (rather than an app-build that is correctly
+skipped), and source HEAD now comes from the checked Cargo metadata measurement
+instead of an unbounded raw Git command in the selected workflow. The linked
+receipt validates that each measured command and the manifest share the same
+source SHA. Focused `dev/workflows/test_run.ps1`, PowerShell parser, and catalog
+JSON checks passed after these corrections. The independent reviewer is still
+attributing the observed native hint-map timeout; M3-A is not marked complete
+here. Final Goal Clippy remains deferred to the parent after source and review
+freeze.
+
+#### M3-A native binding correction 2 (2026-10-25)
+
+The second Settings native attempt preserved a physical ROOT/F11 capture at
+`g01-m3a/native-run-corrected/workflow_20261025T180644008Z_e05ac3f73473436485fe126da4005bfd`:
+`capture/receipt-001.json` reports `status: saved`, and
+`capture/framebuffer-001.png` is 1800×1000 with the Settings surface visible.
+The workflow’s accepted `capture_count` is 0 because binding failed before the
+image was copied into accepted screenshots. Count the physical image anyway.
+The process (PID 40216) exited 0, its owned tree was absent after cleanup, and
+all 452 stderr bytes were drained and persisted; the 300-second deadline was
+not reached. The initial pre-readiness anchor had HWND `0xE00D3A`, outer bounds
+16×16, and client bounds 0×0. This makes two physical Settings captures across
+the first two failed native attempts, with native acceptance still unproven.
+
+Correction 2 now retains the Settings anchor only after the fresh production
+ROOT observation and existing owned-foreground check, requires a verified
+owned HWND with positive outer/client dimensions, and preserves exact HWND and
+client-size checks for all three captures. Binding failures include expected
+and current window metadata plus ROOT PNG dimensions. The focused public
+fixture-only run passed all six measured commands and helper regressions at
+`g01-m3a/corrected-anchor-fixture-pass/workflow_20261025T181244644Z_f423fc2d7f9c4fe282e1b3edb008f7b3`;
+the event verifies 0×0 startup rejection, ready-anchor acceptance, and strict
+binding while preserving FinalSmoke post-resize behavior. The configured
+Reviewer accepted this correction after the fixture receipt. One final
+same-surface native attempt is authorized; no Clippy or FINAL_01 is claimed.
+
+#### M3-A final Settings native acceptance (2026-10-25)
+
+After the correction2 fixture PASS and independent review acceptance, the single
+authorized final Settings invocation completed through the public workflow
+facade with `Status=PASS`, `Classification=ACTUAL_NATIVE_PASS`, and exit code 0.
+Its run receipt is
+`g01-m3a/native-run-final-correction2/workflow_20261025T181503616Z_f63876ce14334878bf6919f9b7275286/workflow.json`;
+the linked Jump Mode run is
+`dev/jump_mode/evidence/jump_m13_phase2_settings_20261025T181505Z_75dd2989`.
+The harness reports three saved ROOT/F11 captures (`15_settings_hints.png`,
+`16_dialog_hints.png`, `17_dialog_selected.png`), Settings scenario PASS, and
+all measured setup/build/test/generate/verify stages PASS. The native app was
+PID 336; it exited 0, its owned tree was verified gone without forced cleanup,
+all 452 stderr bytes were drained and persisted, and there were no cleanup
+issues. Post-build native timing was 18:15:18.3051261Z through 18:15:35.053751Z,
+within its 300-second deadline of 18:20:18.3051261Z (30-second shutdown reserve
+included). Across the three preserved native invocations there are five
+physical ROOT/F11 PNG captures: one in the first failed run, one retained but
+not promoted in the second binding failure, and three accepted in this final
+pass. M3-A native acceptance is now established; no Clippy, FINAL_01, commit,
+or push was performed by the implementation owner.

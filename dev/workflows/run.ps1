@@ -21,6 +21,8 @@ param(
 
     [string]$SelectionName,
 
+    [string]$SmokeSelectionName,
+
     [ValidateSet('lib', 'integration')]
     [string]$TargetKind,
 
@@ -51,7 +53,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'engine.ps1')
 
 try {
-    $request = New-WorkflowRequestFromCli -Action $Action -Mode $Mode -SelectionName $SelectionName `
+    $request = New-WorkflowRequestFromCli -Action $Action -Mode $Mode -SelectionName $SelectionName -SmokeSelectionName $SmokeSelectionName `
         -TargetKind $TargetKind -DiscoveryReceipt $DiscoveryReceipt -ReplayReceipt $ReplayReceipt -RunnerProfile $RunnerProfile `
         -WorkKind $WorkKind -CacheState $CacheState -BaselineSha $BaselineSha `
         -ControlledChangeId $ControlledChangeId -ControlledChangePaths @($ControlledChangePaths) `

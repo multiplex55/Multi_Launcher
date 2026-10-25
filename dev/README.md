@@ -148,10 +148,10 @@ source inputs changed since the original failure; catalog, tool, archive, or
 identity mismatches are rejected. The original failure receipt and archive are
 left unchanged.
 
-The test catalog is `workflows/catalog.json`. Each entry records its package,
-Cargo target, exact case, source, default-feature set, host/resource notes, and
-native-selection metadata. Native mappings remain unavailable until their
-separate milestone. `fast-dev-tests` uses `--cargo-profile fast-dev` for
+The test catalog is `workflows/catalog.json`. Each test entry records its
+package, Cargo target, exact case, source, default-feature set, host/resource
+notes, and native-selection metadata. Those pure-test entries remain separate
+from the Phase 2 smoke selections below. `fast-dev-tests` uses `--cargo-profile fast-dev` for
 compilation; an optional `-RunnerProfile` maps separately to Nextest `-P`.
 Forward test-binary options as a string array with `-TestArguments`, for
 example `-TestArguments @('--exact', 'table_utility::tests::table_parse_csv_quotes_escaped_quotes_and_embedded_newlines_preserve_strings')`;
@@ -167,6 +167,32 @@ result reduction, duplicate/ambiguous identities, retry counts, slow-case
 ordering, exact replay filters, catalog/source agreement, argument arrays,
 preview and execution resolution, stale/empty discovery, replay provenance,
 and bounded failure propagation without compiling the application.
+
+The same catalog also declares two checked Phase 2 Settings smoke selections.
+Preview or run the typed-fixture-only selection with
+`-SmokeSelectionName phase2-settings-fixture`, or select the native workflow
+with `-SmokeSelectionName phase2-settings-native`:
+
+```powershell
+& .\dev\workflows\run.ps1 -Action Preview -SmokeSelectionName phase2-settings-fixture
+& .\dev\workflows\run.ps1 -Action Run -SmokeSelectionName phase2-settings-fixture `
+    -EvidenceDirectory (Join-Path $env:TEMP ('multi-launcher-settings-fixture-' + [guid]::NewGuid().ToString('N')))
+& .\dev\workflows\run.ps1 -Action Run -SmokeSelectionName phase2-settings-native `
+    -EvidenceDirectory (Join-Path $env:TEMP ('multi-launcher-settings-native-' + [guid]::NewGuid().ToString('N')))
+```
+
+Both selections use the fixed existing Phase 2 Settings scenario and explicit
+Cargo features. The facade measures metadata, fixture-test preparation and
+execution, fixture generation/verification, and (for the native selection) the
+application build through the existing checked command owner. The native run
+allows at most three ROOT/F11 captures and gives post-build interaction,
+process shutdown, tree verification, and output draining one 300-second
+deadline with a 30-second shutdown reserve. It reports native acceptance only
+when linked capture evidence and owned-process cleanup are verified. An
+unavailable interactive desktop is recorded as `NOT_RUN_ENVIRONMENT`, never as
+a native pass. The fixture profile disables Paste Sequences' Next and Cancel
+shortcuts before application construction. These smoke requests do not widen
+the existing pure-test selections or change production settings.
 
 Native capture and exact-failure replay were verified in a bounded isolated
 Rust library fixture (this does not substitute for application or GUI tests).
