@@ -81,33 +81,63 @@ function New-WorkflowFixtureRunOutput {
     $suiteTerminal = [ordered]@{ type = 'suite'; event = $suiteEvent; nextest = @{ run_id = $fixtureRunId } }
     return (@($suite, $started, $terminal, $suiteTerminal) | ForEach-Object { ConvertTo-Json -InputObject $_ -Compress -Depth 5 }) -join "`n"
 }
+
+function New-WorkflowFixtureBinaryMetadata {
+    param([Parameter(Mandatory)][string[]]$PackageNames)
+    $binaries = foreach ($packageName in $PackageNames) {
+        [ordered]@{ 'binary-id' = '{0}::lib' -f $packageName }
+    }
+    return ConvertTo-Json -InputObject ([ordered]@{ 'rust-binaries' = @($binaries) }) -Compress -Depth 4
+}
+
+function New-WorkflowFixtureInventoryOutput {
+    param([Parameter(Mandatory)]$Selection)
+    $binaryId = '{0}::lib' -f [string]$Selection.package
+    $testName = [string]$Selection.exactCase
+    return ConvertTo-Json -Compress -Depth 8 -InputObject ([ordered]@{
+        'rust-suites' = [ordered]@{
+            $binaryId = [ordered]@{
+                'binary-id' = $binaryId
+                'package-name' = [string]$Selection.package
+                'binary-name' = [string]$Selection.targetName
+                kind = [string]$Selection.nextestKind
+                testcases = [ordered]@{ $testName = [ordered]@{ ignored = $false; 'filter-match' = [ordered]@{ status = 'matches' } } }
+            }
+        }
+    })
+}
+
 $fixturePassRunOutput = New-WorkflowFixtureRunOutput -TestStatus PASS
 $fixtureFailRunOutput = New-WorkflowFixtureRunOutput -TestStatus FAIL
 
 $catalog = Get-WorkflowCatalog
+$libraryPackageNames = @($catalog.selections | Where-Object { $_.targetKind -ceq 'lib' } |
+    ForEach-Object { [string]$_.package } | Select-Object -Unique)
 $expectedCases = @(
-    'tables|lib|table_utility::tests::table_parse_csv_quotes_escaped_quotes_and_embedded_newlines_preserve_strings|src/table_utility.rs',
-    'notes|lib|plugins::note::tests::extract_entity_refs_parses_link_note_urls_like_action_links|src/plugins/note.rs',
-    'paste|lib|paste_sequence::tests::clipboard_reference_uses_exact_utf8_sha256_and_redacted_debug|src/paste_sequence.rs',
-    'query-focus|lib|gui::tests::launcher_query_is_not_refocused_while_file_search_remains_open|src/gui/mod.rs',
-    'settings|lib|settings::model::tests::query_results_layout_defaults_are_backward_compatible|src/settings/model.rs',
-    'integration-query|integration|query_autocomplete::default_query_autocomplete_enabled|tests/pure_cases/query_autocomplete.rs'
+    'tables|multi_launcher_table_core|multi_launcher_table_core|lib|tests::table_parse_csv_quotes_escaped_quotes_and_embedded_newlines_preserve_strings|crates/multi_launcher_table_core/src/lib.rs',
+    'notes|multi_launcher|multi_launcher|lib|plugins::note::tests::extract_entity_refs_parses_link_note_urls_like_action_links|src/plugins/note.rs',
+    'paste|multi_launcher|multi_launcher|lib|paste_sequence::tests::clipboard_reference_uses_exact_utf8_sha256_and_redacted_debug|src/paste_sequence.rs',
+    'query-focus|multi_launcher|multi_launcher|lib|gui::tests::launcher_query_is_not_refocused_while_file_search_remains_open|src/gui/mod.rs',
+    'settings|multi_launcher|multi_launcher|lib|settings::model::tests::query_results_layout_defaults_are_backward_compatible|src/settings/model.rs',
+    'integration-query|multi_launcher|pure|integration|query_autocomplete::default_query_autocomplete_enabled|tests/pure_cases/query_autocomplete.rs'
 )
 Assert-WorkflowEqual $catalog.selections.Count 6 'Catalog selection count'
 foreach ($entry in $expectedCases) {
     $parts = $entry.Split('|')
     $selection = @($catalog.selections | Where-Object { $_.name -ceq $parts[0] })
     Assert-WorkflowEqual $selection.Count 1 "Catalog entry $($parts[0])"
-    Assert-WorkflowEqual $selection[0].targetKind $parts[1] "$($parts[0]) target kind"
-    Assert-WorkflowEqual $selection[0].exactCase $parts[2] "$($parts[0]) exact case"
-    Assert-WorkflowEqual $selection[0].source $parts[3] "$($parts[0]) source"
+    Assert-WorkflowEqual $selection[0].package $parts[1] "$($parts[0]) package"
+    Assert-WorkflowEqual $selection[0].targetName $parts[2] "$($parts[0]) target name"
+    Assert-WorkflowEqual $selection[0].targetKind $parts[3] "$($parts[0]) target kind"
+    Assert-WorkflowEqual $selection[0].exactCase $parts[4] "$($parts[0]) exact case"
+    Assert-WorkflowEqual $selection[0].source $parts[5] "$($parts[0]) source"
     Assert-WorkflowEqual $selection[0].features.defaultFeatures $true "$($parts[0]) default features"
     Assert-WorkflowEqual $selection[0].features.explicit.Count 0 "$($parts[0]) explicit feature set"
-    $functionName = ($parts[2] -split '::')[-1]
-    $sourcePath = Join-Path $script:WorkflowRoot $parts[3]
+    $functionName = ($parts[4] -split '::')[-1]
+    $sourcePath = Join-Path $script:WorkflowRoot $parts[5]
     $sourcePattern = '(?m)^\s*(?:async\s+)?fn\s+' + [regex]::Escape($functionName) + '\s*\('
     if (!(Select-String -LiteralPath $sourcePath -Pattern $sourcePattern -Quiet -ErrorAction Stop)) {
-        throw "Catalog selection '$($parts[0])' is not backed by source function '$functionName' in '$($parts[3])'."
+        throw "Catalog selection '$($parts[0])' is not backed by source function '$functionName' in '$($parts[5])'."
     }
 }
 
@@ -186,7 +216,7 @@ Assert-WorkflowThrows { & $cargoWrapper -Preset quick-check -CargoArguments @('-
 Assert-WorkflowThrows { & $cargoWrapper -Preset full-debug -CargoArguments @('--package=other') -PrintCommand } 'Equals selector conflict'
 Assert-WorkflowThrows { & $cargoWrapper -Preset full-debug -CargoArguments @('-pother') -PrintCommand } 'Short selector conflict'
 
-$exactCase = 'table_utility::tests::table_parse_csv_quotes_escaped_quotes_and_embedded_newlines_preserve_strings'
+$exactCase = 'tests::table_parse_csv_quotes_escaped_quotes_and_embedded_newlines_preserve_strings'
 $runArguments = @('--exact', $exactCase)
 $runRequest = New-WorkflowRequest -Action Run -Mode fast-dev-tests -SelectionName tables -RunnerProfile 'ci-fast' -TestArguments $runArguments
 $opaqueArguments = @('quoted "argument" with spaces', 'filter!:punctuation')
@@ -196,7 +226,29 @@ $toolReceiptRoundTrip = ConvertFrom-Json -InputObject (ConvertTo-Json -InputObje
 Assert-WorkflowEqual (@($toolReceiptRoundTrip.Keys) -join '|') 'path|sha256' 'Lowercase tool receipt schema'
 Assert-WorkflowEqual $runRequest.CompilerProfile 'fast-dev' 'Compiler profile stays distinct'
 Assert-WorkflowEqual $runRequest.RunnerProfile 'ci-fast' 'Nextest runner profile'
+Assert-WorkflowEqual $runRequest.Package 'multi_launcher_table_core' 'Table selection package ownership'
+Assert-WorkflowEqual $runRequest.TargetName 'multi_launcher_table_core' 'Table selection target ownership'
 Assert-WorkflowEqual $runRequest.PrepareCommand.ArgumentList[7] 'fast-dev' 'Cargo Nextest compiler profile flag'
+Assert-WorkflowEqual $runRequest.PrepareCommand.ArgumentList[[Array]::IndexOf([string[]]$runRequest.PrepareCommand.ArgumentList, '-p') + 1] 'multi_launcher_table_core' 'Table preparation package selector'
+if ($runRequest.InventoryCommand.ArgumentList -ccontains '-p' -or $runRequest.RunCommand.ArgumentList -ccontains '-p') {
+    throw 'Inventory and execution phases must use prepared binary metadata without package selectors.'
+}
+$notesRequest = New-WorkflowRequest -Action Run -Mode fast-dev-tests -SelectionName notes
+Assert-WorkflowEqual $notesRequest.Package 'multi_launcher' 'Notes selection remains in the root package'
+Assert-WorkflowEqual $notesRequest.PrepareCommand.ArgumentList[[Array]::IndexOf([string[]]$notesRequest.PrepareCommand.ArgumentList, '-p') + 1] 'multi_launcher' 'Notes prepare retains root package selection'
+$combinedPrepare = (& $cargoWrapper -Preset fast-dev-tests -WorkflowPhase prepare -TargetKind lib `
+    -Packages @('multi_launcher', 'multi_launcher_table_core') -PrintCommand) | ConvertFrom-Json
+Assert-WorkflowSequence @($combinedPrepare.ArgumentList) @(
+    'nextest', 'list', '--list-type', 'binaries-only', '--message-format', 'json', '--cargo-profile', 'fast-dev',
+    '-p', 'multi_launcher', '-p', 'multi_launcher_table_core', '--lib', '--manifest-path', $manifestPath
+) 'Combined library preparation package selectors'
+Assert-WorkflowThrows {
+    & $cargoWrapper -Preset fast-dev-tests -WorkflowPhase prepare -TargetKind lib -Packages @('unowned_package') -PrintCommand
+} 'Unknown fast-dev-tests package rejection'
+Assert-WorkflowThrows {
+    & $cargoWrapper -Preset fast-dev-tests -WorkflowPhase inventory -TargetKind lib -Packages @('multi_launcher_table_core') `
+        -BinariesMetadataPath (Join-Path ([IO.Path]::GetTempPath()) 'unused-metadata.json') -PrintCommand
+} 'Package selector rejected outside test preparation'
 Assert-WorkflowEqual $runRequest.RunCommand.ArgumentList[$runRequest.RunCommand.ArgumentList.Count - $runArguments.Count - 1] '--' 'Test-binary separator'
 $forwardedStart = $runRequest.RunCommand.ArgumentList.Count - $runArguments.Count
 $forwardedArguments = @($runRequest.RunCommand.ArgumentList[$forwardedStart..($runRequest.RunCommand.ArgumentList.Count - 1)])
@@ -240,6 +292,27 @@ $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('Multi Launcher\workflow self 
 [IO.Directory]::CreateDirectory($testRoot) | Out-Null
 $syntheticJumpEvidenceRoots = [System.Collections.Generic.List[string]]::new()
 try {
+    $fingerprintRoot = Join-Path $testRoot 'fingerprint-fixture'
+    foreach ($directory in @('src', 'tests', 'crates/multi_launcher_table_core/src')) {
+        [IO.Directory]::CreateDirectory((Join-Path $fingerprintRoot $directory)) | Out-Null
+    }
+    Set-Content -LiteralPath (Join-Path $fingerprintRoot 'src/main.rs') -Value 'fn main() {}' -NoNewline
+    Set-Content -LiteralPath (Join-Path $fingerprintRoot 'tests/sample.rs') -Value '#[test] fn sample() {}' -NoNewline
+    $coreFixtureSource = Join-Path $fingerprintRoot 'crates/multi_launcher_table_core/src/lib.rs'
+    $coreFixtureManifest = Join-Path $fingerprintRoot 'crates/multi_launcher_table_core/Cargo.toml'
+    Set-Content -LiteralPath $coreFixtureSource -Value 'pub const VALUE: u8 = 1;' -NoNewline
+    Set-Content -LiteralPath (Join-Path $fingerprintRoot 'Cargo.toml') -Value '[package]' -NoNewline
+    Set-Content -LiteralPath $coreFixtureManifest -Value '[package]' -NoNewline
+    $fingerprintBaseline = Get-WorkflowSourceFingerprint -RepositoryRoot $fingerprintRoot
+    Set-Content -LiteralPath $coreFixtureSource -Value 'pub const VALUE: u8 = 2;' -NoNewline
+    $fingerprintAfterCoreSourceEdit = Get-WorkflowSourceFingerprint -RepositoryRoot $fingerprintRoot
+    if ($fingerprintAfterCoreSourceEdit -ceq $fingerprintBaseline) { throw 'Core source edits must invalidate workflow provenance.' }
+    Set-Content -LiteralPath $coreFixtureSource -Value 'pub const VALUE: u8 = 1;' -NoNewline
+    Assert-WorkflowEqual (Get-WorkflowSourceFingerprint -RepositoryRoot $fingerprintRoot) $fingerprintBaseline 'Core source fingerprint restoration'
+    Set-Content -LiteralPath $coreFixtureManifest -Value '[package] version = "changed"' -NoNewline
+    $fingerprintAfterCoreManifestEdit = Get-WorkflowSourceFingerprint -RepositoryRoot $fingerprintRoot
+    if ($fingerprintAfterCoreManifestEdit -ceq $fingerprintBaseline) { throw 'Core manifest edits must invalidate workflow provenance.' }
+
     $makeSyntheticJumpRun = {
         param($Spec, [string]$SelectionName, [string]$Outcome)
         $receiptIndex = [Array]::IndexOf([string[]]$Spec.Command.ArgumentList, '-WorkflowReceiptPath')
@@ -463,7 +536,7 @@ try {
     }
 
     $metadataPath = Join-Path $testRoot 'binaries metadata.json'
-    Set-Content -LiteralPath $metadataPath -Value '{"rust-binaries":[{"binary-id":"multi_launcher::lib"}]}' -Encoding utf8
+    Set-Content -LiteralPath $metadataPath -Value (New-WorkflowFixtureBinaryMetadata -PackageNames $libraryPackageNames) -Encoding utf8
     $metadataHash = (Get-FileHash -LiteralPath $metadataPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $discoveryRequest = New-WorkflowRequest -Action Discover -Mode fast-dev-tests -TargetKind lib
     $discoveryCalls = [System.Collections.Generic.List[string]]::new()
@@ -472,24 +545,11 @@ try {
         $discoveryCalls.Add([string]$spec.Name)
         $stdout = ''
         if ($spec.Name -eq 'nextest-version') { $stdout = 'cargo-nextest 0.9.135' }
-        elseif ($spec.Name -eq 'target-prepare') { $stdout = '{"rust-binaries":[{"binary-id":"multi_launcher::lib"}]}' }
+        elseif ($spec.Name -eq 'target-prepare') { $stdout = New-WorkflowFixtureBinaryMetadata -PackageNames @($spec.Request.Packages) }
         elseif ($spec.Name.StartsWith('inventory-', [StringComparison]::Ordinal)) {
             $selectionName = $spec.Name.Substring('inventory-'.Length)
             $selection = @($spec.Request.Selections | Where-Object { [string]$_.name -ceq $selectionName })[0]
-            $testName = [string]$selection.exactCase
-            $stdout = ConvertTo-Json -Compress -Depth 8 -InputObject ([ordered]@{
-                'rust-suites' = [ordered]@{
-                    'multi_launcher::lib' = [ordered]@{
-                        'binary-id' = 'multi_launcher::lib'
-                        'package-name' = 'multi_launcher'
-                        'binary-name' = 'multi_launcher'
-                        kind = 'lib'
-                        testcases = [ordered]@{
-                            $testName = [ordered]@{ ignored = $false; 'filter-match' = [ordered]@{ status = 'matches' } }
-                        }
-                    }
-                }
-            })
+            $stdout = New-WorkflowFixtureInventoryOutput -Selection $selection
         }
         elseif ($spec.Name -eq 'selected-run') { $stdout = $fixturePassRunOutput }
         elseif ($spec.Name -eq 'record-store-list') { $stdout = $fixtureRunId }
@@ -506,6 +566,21 @@ try {
     Assert-WorkflowEqual $discoveryResult.Status 'PASS' 'Mocked Discover action'
     Assert-WorkflowEqual $discoveryResult.Discovery.selections.Count 5 'Actual Discover writer selection count'
     Assert-WorkflowEqual $discoveryCalls.Count 7 'Mocked Discover stage count'
+    Assert-WorkflowEqual $discoveryRequest.Package $null 'Mixed library discovery has no invented singular package'
+    Assert-WorkflowEqual $discoveryRequest.TargetName $null 'Mixed library discovery has no invented singular target'
+    $expectedLibraryPackages = @('multi_launcher', 'multi_launcher_table_core')
+    Assert-WorkflowEqual @($discoveryRequest.Packages).Count $expectedLibraryPackages.Count 'Mixed library package count'
+    Assert-WorkflowSequence @($discoveryRequest.Packages | Sort-Object -CaseSensitive) $expectedLibraryPackages 'Mixed library discovery package set'
+    $preparedPackages = [System.Collections.Generic.List[string]]::new()
+    for ($argumentIndex = 0; $argumentIndex -lt $discoveryRequest.PrepareCommand.ArgumentList.Count - 1; $argumentIndex++) {
+        if ([string]$discoveryRequest.PrepareCommand.ArgumentList[$argumentIndex] -ceq '-p') {
+            $preparedPackages.Add([string]$discoveryRequest.PrepareCommand.ArgumentList[$argumentIndex + 1])
+        }
+    }
+    Assert-WorkflowEqual $preparedPackages.Count $expectedLibraryPackages.Count 'Mixed discovery prepared package count'
+    Assert-WorkflowSequence @($preparedPackages | Sort-Object -CaseSensitive) $expectedLibraryPackages 'Mixed discovery prepares the exact catalog packages'
+    Assert-WorkflowSequence @($discoveryResult.Discovery.packages | Sort-Object -CaseSensitive) $expectedLibraryPackages 'Mixed discovery receipt package set'
+    Assert-WorkflowSequence @($discoveryResult.Discovery.packages) @($discoveryRequest.Packages) 'Mixed discovery receipt retains prepared package identities'
     $receiptPath = [string]$discoveryResult.DiscoveryReceiptPath
     Assert-WorkflowEqual (Test-Path -LiteralPath $receiptPath -PathType Leaf) $true 'Actual Discover receipt persisted'
     $validReceipt = Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
@@ -516,7 +591,7 @@ try {
 
     $selection = $runRequest.Selection
     $identity = [ordered]@{
-        binaryId = 'multi_launcher::lib'
+        binaryId = 'multi_launcher_table_core::lib'
         packageName = [string]$selection.package
         binaryName = [string]$selection.targetName
         kind = [string]$selection.nextestKind
@@ -558,6 +633,35 @@ try {
     $stalePath = Join-Path $testRoot 'stale.json'
     Set-Content -LiteralPath $stalePath -Value (ConvertTo-Json -InputObject $staleReceipt -Depth 8) -Encoding utf8
     Assert-WorkflowEqual (Test-WorkflowDiscoveryReceipt -Path $stalePath -Request $runRequest).Status 'STALE_DISCOVERY' 'Stale receipt rejection'
+    foreach ($identityChange in @(
+        @{ Name = 'package'; Property = 'PackageName'; Value = 'multi_launcher' },
+        @{ Name = 'target'; Property = 'BinaryName'; Value = 'multi_launcher' },
+        @{ Name = 'case'; Property = 'TestName'; Value = 'tests::different_case' }
+    )) {
+        $changedIdentityReceipt = ConvertFrom-Json -InputObject (ConvertTo-Json -InputObject $validReceipt -Depth 8) -AsHashtable
+        $selectionReceipt = $changedIdentityReceipt['selections'][0]
+        $identityContainerCount = @($selectionReceipt.Keys | Where-Object { [string]$_ -ceq 'SelectedIdentity' }).Count
+        Assert-WorkflowEqual $identityContainerCount 1 'Changed-identity fixture uses the serialized SelectedIdentity key'
+        $selectedIdentity = $selectionReceipt['SelectedIdentity']
+        $identityKeyCount = @($selectedIdentity.Keys | Where-Object { [string]$_ -ceq $identityChange.Property }).Count
+        Assert-WorkflowEqual $identityKeyCount 1 "Changed-identity fixture has exact $($identityChange.Property) key"
+        $originalIdentityKeyCount = $selectedIdentity.Count
+        $selectedIdentity[$identityChange.Property] = $identityChange.Value
+        $serializedChangedIdentityReceipt = ConvertTo-Json -InputObject $changedIdentityReceipt -Depth 8
+        $changedIdentityPath = Join-Path $testRoot ("changed-identity-{0}.json" -f $identityChange.Name)
+        Set-Content -LiteralPath $changedIdentityPath -Value $serializedChangedIdentityReceipt -Encoding utf8
+        $persistedChangedIdentityReceipt = Get-Content -LiteralPath $changedIdentityPath -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+        $persistedSelectedIdentity = $persistedChangedIdentityReceipt['selections'][0]['SelectedIdentity']
+        Assert-WorkflowEqual $persistedSelectedIdentity.Count $originalIdentityKeyCount "Changed $($identityChange.Name) identity fixture does not add a duplicate key"
+        Assert-WorkflowEqual @($persistedSelectedIdentity.Keys | Where-Object { [string]$_ -ceq $identityChange.Property }).Count 1 "Serialized changed $($identityChange.Name) identity retains one exact key"
+        Assert-WorkflowEqual $persistedSelectedIdentity[$identityChange.Property] $identityChange.Value "Serialized changed $($identityChange.Name) identity value"
+        Assert-WorkflowEqual (Test-WorkflowDiscoveryReceipt -Path $changedIdentityPath -Request $runRequest).Status 'STALE_DISCOVERY' "Changed $($identityChange.Name) identity rejection"
+    }
+    $changedFingerprintReceipt = ConvertFrom-Json -InputObject (ConvertTo-Json -InputObject $validReceipt -Depth 8) -AsHashtable
+    $changedFingerprintReceipt.sourceFingerprintSha256 = ('a' * 64)
+    $changedFingerprintPath = Join-Path $testRoot 'changed-source-discovery.json'
+    Set-Content -LiteralPath $changedFingerprintPath -Value (ConvertTo-Json -InputObject $changedFingerprintReceipt -Depth 8) -Encoding utf8
+    Assert-WorkflowEqual (Test-WorkflowDiscoveryReceipt -Path $changedFingerprintPath -Request $runRequest).Status 'STALE_DISCOVERY' 'Source-fingerprint change rejection'
     $zeroReceipt = ConvertFrom-Json -InputObject (ConvertTo-Json -InputObject $validReceipt -Depth 8) -AsHashtable
     $zeroReceipt.selections = @([ordered]@{ name = 'tables'; status = 'PASS'; selectedCaseCount = 0; selectedIdentity = $identity })
     $zeroPath = Join-Path $testRoot 'zero.json'
@@ -570,20 +674,9 @@ try {
         $calls.Add([string]$spec.Name)
         $stdout = ''
         if ($spec.Name -eq 'nextest-version') { $stdout = 'cargo-nextest 0.9.135' }
-        elseif ($spec.Name -eq 'target-prepare') { $stdout = '{"rust-binaries":[{"binary-id":"multi_launcher::lib"}]}' }
+        elseif ($spec.Name -eq 'target-prepare') { $stdout = New-WorkflowFixtureBinaryMetadata -PackageNames @($spec.Request.Packages) }
         elseif ($spec.Name -eq 'selected-inventory') {
-            $name = [string]$spec.Request.Selection.exactCase
-            $stdout = ConvertTo-Json -Compress -Depth 8 -InputObject ([ordered]@{
-                'rust-suites' = [ordered]@{
-                    'multi_launcher::lib' = [ordered]@{
-                        'binary-id' = 'multi_launcher::lib'
-                        'package-name' = 'multi_launcher'
-                        'binary-name' = 'multi_launcher'
-                        kind = 'lib'
-                        testcases = [ordered]@{ $name = [ordered]@{ ignored = $false; 'filter-match' = [ordered]@{ status = 'matches' } } }
-                    }
-                }
-            })
+            $stdout = New-WorkflowFixtureInventoryOutput -Selection $spec.Request.Selection
         }
         elseif ($spec.Name -eq 'selected-run') { $stdout = $fixturePassRunOutput }
         elseif ($spec.Name -eq 'record-store-list') { $stdout = "recorded run $fixtureRunId" }
@@ -617,15 +710,9 @@ try {
     $throwingInvoker = {
         param($spec)
         if ($spec.Name -eq 'nextest-version') { return & $measurementFactory $spec 'cargo-nextest 0.9.135' }
-        if ($spec.Name -eq 'target-prepare') { return & $measurementFactory $spec '{"rust-binaries":[{"binary-id":"multi_launcher::lib"}]}' }
+        if ($spec.Name -eq 'target-prepare') { return & $measurementFactory $spec (New-WorkflowFixtureBinaryMetadata -PackageNames @($spec.Request.Packages)) }
         if ($spec.Name -eq 'selected-inventory') {
-            $name = [string]$spec.Request.Selection.exactCase
-            $stdout = ConvertTo-Json -Compress -Depth 8 -InputObject ([ordered]@{
-                'rust-suites' = [ordered]@{ 'multi_launcher::lib' = [ordered]@{
-                    'binary-id' = 'multi_launcher::lib'; 'package-name' = 'multi_launcher'; 'binary-name' = 'multi_launcher'; kind = 'lib'
-                    testcases = [ordered]@{ $name = [ordered]@{ ignored = $false; 'filter-match' = [ordered]@{ status = 'matches' } } }
-                } }
-            })
+            $stdout = New-WorkflowFixtureInventoryOutput -Selection $spec.Request.Selection
             return & $measurementFactory $spec $stdout
         }
         if ($spec.Name -eq 'selected-run') { throw 'injected selected-run invocation failure' }
@@ -652,16 +739,10 @@ try {
             return & $measurementFactory $spec 'exported'
         }
         if ($spec.Name -eq 'selected-inventory') {
-            $name = [string]$spec.Request.Selection.exactCase
-            $stdout = ConvertTo-Json -Compress -Depth 8 -InputObject ([ordered]@{
-                'rust-suites' = [ordered]@{ 'multi_launcher::lib' = [ordered]@{
-                    'binary-id' = 'multi_launcher::lib'; 'package-name' = 'multi_launcher'; 'binary-name' = 'multi_launcher'; kind = 'lib'
-                    testcases = [ordered]@{ $name = [ordered]@{ ignored = $false; 'filter-match' = [ordered]@{ status = 'matches' } } }
-                } }
-            })
+            $stdout = New-WorkflowFixtureInventoryOutput -Selection $spec.Request.Selection
             return & $measurementFactory $spec $stdout
         }
-        $stdout = if ($spec.Name -eq 'nextest-version') { 'cargo-nextest 0.9.135' } elseif ($spec.Name -eq 'target-prepare') { '{"rust-binaries":[{"binary-id":"multi_launcher::lib"}]}' } else { throw "Unexpected mock phase $($spec.Name)" }
+        $stdout = if ($spec.Name -eq 'nextest-version') { 'cargo-nextest 0.9.135' } elseif ($spec.Name -eq 'target-prepare') { New-WorkflowFixtureBinaryMetadata -PackageNames @($spec.Request.Packages) } else { throw "Unexpected mock phase $($spec.Name)" }
         return & $measurementFactory $spec $stdout
     }.GetNewClosure()
     $failedRequest = New-WorkflowRequest -Action Run -Mode fast-dev-tests -SelectionName tables -RunnerProfile 'ci-fast' -TestArguments $runArguments
@@ -680,7 +761,7 @@ try {
     Assert-WorkflowEqual $replayRequest.ReplaySource.SourceChanged $false 'Unchanged source replay disclosure'
     $replayFilterIndex = [Array]::IndexOf([string[]]$replayRequest.RunCommand.ArgumentList, '-E')
     $replayFilter = [string]$replayRequest.RunCommand.ArgumentList[$replayFilterIndex + 1]
-    if (!$replayFilter.Contains('binary_id(') -or !$replayFilter.Contains('table_utility::tests::table_parse_csv_quotes_escaped_quotes_and_embedded_newlines_preserve_strings')) {
+    if (!$replayFilter.Contains('binary_id(') -or !$replayFilter.Contains($exactCase)) {
         throw "Replay filter did not retain exact failed binary/case identity: $replayFilter"
     }
     Assert-WorkflowEqual (Get-FileHash -LiteralPath $failedRun.ReceiptPath -Algorithm SHA256).Hash $firstFailureHash 'Original failure receipt remains immutable'
@@ -701,15 +782,9 @@ try {
         $replayCalls.Add([string]$spec.Name)
         $stdout = ''
         if ($spec.Name -eq 'nextest-version') { $stdout = 'cargo-nextest 0.9.135' }
-        elseif ($spec.Name -eq 'target-prepare') { $stdout = '{"rust-binaries":[{"binary-id":"multi_launcher::lib"}]}' }
+        elseif ($spec.Name -eq 'target-prepare') { $stdout = New-WorkflowFixtureBinaryMetadata -PackageNames @($spec.Request.Packages) }
         elseif ($spec.Name -eq 'selected-inventory') {
-            $name = [string]$spec.Request.Selection.exactCase
-            $stdout = ConvertTo-Json -Compress -Depth 8 -InputObject ([ordered]@{
-                'rust-suites' = [ordered]@{ 'multi_launcher::lib' = [ordered]@{
-                    'binary-id' = 'multi_launcher::lib'; 'package-name' = 'multi_launcher'; 'binary-name' = 'multi_launcher'; kind = 'lib'
-                    testcases = [ordered]@{ $name = [ordered]@{ ignored = $false; 'filter-match' = [ordered]@{ status = 'matches' } } }
-                } }
-            })
+            $stdout = New-WorkflowFixtureInventoryOutput -Selection $spec.Request.Selection
         }
         elseif ($spec.Name -eq 'selected-run') {
             $replayIndex = [Array]::IndexOf([string[]]$spec.Command.ArgumentList, '-R')
@@ -727,7 +802,7 @@ try {
             $replayRuntimePaths.Add($runtimePath)
             $filterIndex = [Array]::IndexOf([string[]]$spec.Command.ArgumentList, '-E')
             $filter = [string]$spec.Command.ArgumentList[$filterIndex + 1]
-            if (!$filter.Contains('binary_id(') -or !$filter.Contains('table_utility::tests::table_parse_csv_quotes_escaped_quotes_and_embedded_newlines_preserve_strings')) { throw 'Replay did not pass the exact failed binary/case filter.' }
+            if (!$filter.Contains('binary_id(') -or !$filter.Contains($exactCase)) { throw 'Replay did not pass the exact failed binary/case filter.' }
             $stdout = $fixturePassRunOutput
         }
         elseif ($spec.Name -eq 'record-store-list') { $stdout = "recorded run $fixtureRunId" }

@@ -24,9 +24,11 @@ function Get-WorkflowCatalogSha256 {
 }
 
 function Get-WorkflowSourceFingerprint {
+    param([string]$RepositoryRoot = $script:WorkflowRoot)
+    $RepositoryRoot = [IO.Path]::GetFullPath($RepositoryRoot)
     $files = [System.Collections.Generic.List[string]]::new()
-    foreach ($directory in @('src', 'tests')) {
-        $directoryPath = Join-Path $script:WorkflowRoot $directory
+    foreach ($directory in @('src', 'tests', 'crates/multi_launcher_table_core/src')) {
+        $directoryPath = Join-Path $RepositoryRoot $directory
         if (!(Test-Path -LiteralPath $directoryPath -PathType Container)) { throw "Workflow source directory is missing: $directory" }
         foreach ($file in Get-ChildItem -LiteralPath $directoryPath -Filter '*.rs' -File -Recurse -ErrorAction Stop) {
             $files.Add($file.FullName)
@@ -38,15 +40,16 @@ function Get-WorkflowSourceFingerprint {
         'dev/workflows/owned_process.ps1', 'dev/workflows/engine.ps1',
         'dev/workflows/run.ps1', 'dev/workflows/results.ps1', 'dev/workflows/verify_msvc_auxiliary.ps1', 'dev/workflows/catalog.json',
         'dev/jump_mode/run.ps1',
-        'dev/test_perf/common.ps1'
+        'dev/test_perf/common.ps1',
+        'crates/multi_launcher_table_core/Cargo.toml'
     )) {
-        $path = Join-Path $script:WorkflowRoot $relativePath
+        $path = Join-Path $RepositoryRoot $relativePath
         if (Test-Path -LiteralPath $path -PathType Leaf) { $files.Add($path) }
     }
 
     $entries = [System.Collections.Generic.List[string]]::new()
     foreach ($path in @($files | Sort-Object -Unique)) {
-        $relativePath = [IO.Path]::GetRelativePath($script:WorkflowRoot, $path).Replace('\', '/')
+        $relativePath = [IO.Path]::GetRelativePath($RepositoryRoot, $path).Replace('\', '/')
         $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
         $entries.Add("$relativePath=$hash")
     }
@@ -210,6 +213,7 @@ function Get-WorkflowCommand {
         [string]$BinariesMetadataPath,
         [string]$RunnerProfile,
         [string]$ReplayRecordingPath,
+        [string[]]$Packages,
         [string[]]$TestArguments = @()
     )
 
@@ -221,6 +225,7 @@ function Get-WorkflowCommand {
     if ($BinariesMetadataPath) { $wrapperArguments.BinariesMetadataPath = $BinariesMetadataPath }
     if ($RunnerProfile) { $wrapperArguments.RunnerProfile = $RunnerProfile }
     if ($ReplayRecordingPath) { $wrapperArguments.ReplayRecordingPath = $ReplayRecordingPath }
+    if ($Packages.Count -gt 0) { $wrapperArguments.Packages = @($Packages) }
     if ($TestArguments.Count -gt 0) { $wrapperArguments.TestArguments = @($TestArguments) }
 
     $json = & $script:WorkflowCargoPath @wrapperArguments
@@ -269,12 +274,14 @@ function New-WorkflowPhaseTemplate {
         [string]$FilterExpression,
         [string]$RunnerProfile,
         [string]$ReplayRecordingPath,
+        [string[]]$Packages,
         [string[]]$TestArguments = @()
     )
     $testTarget = if ($Selection.targetKind -eq 'integration') { [string]$Selection.targetName } else { $null }
+    if ($Phase -eq 'prepare' -and $Packages.Count -eq 0) { $Packages = @([string]$Selection.package) }
     return Get-WorkflowCommand -Preset $Preset -WorkflowPhase $Phase -TargetKind ([string]$Selection.targetKind) `
         -TestTarget $testTarget -FilterExpression $FilterExpression -BinariesMetadataPath $BinariesMetadataPath `
-        -RunnerProfile $RunnerProfile -ReplayRecordingPath $ReplayRecordingPath -TestArguments $TestArguments
+        -RunnerProfile $RunnerProfile -ReplayRecordingPath $ReplayRecordingPath -Packages $Packages -TestArguments $TestArguments
 }
 
 function New-WorkflowRequest {
@@ -317,6 +324,7 @@ function New-WorkflowRequest {
         Mode = [string]$modeRecord.name
         ModeKind = [string]$modeRecord.kind
         Package = [string]$catalog.package
+        Packages = @()
         TargetKind = $null
         TargetName = $null
         Features = [pscustomobject][ordered]@{ DefaultFeatures = [bool]$catalog.features.defaultFeatures; Explicit = @($catalog.features.explicit) }
@@ -359,11 +367,15 @@ function New-WorkflowRequest {
         $selections = @(Get-WorkflowSelection -TargetKind $TargetKind)
         if ($selections.Count -eq 0) { throw "The catalog has no selections for target kind '$TargetKind'." }
         $request.TargetKind = $TargetKind
-        $request.TargetName = if ($TargetKind -eq 'lib') { 'multi_launcher' } else { 'pure' }
+        $packageNames = @($selections | ForEach-Object { [string]$_.package } | Select-Object -Unique)
+        $targetNames = @($selections | ForEach-Object { [string]$_.targetName } | Select-Object -Unique)
+        $request.Packages = $packageNames
+        $request.Package = if ($packageNames.Count -eq 1) { $packageNames[0] } else { $null }
+        $request.TargetName = if ($targetNames.Count -eq 1) { $targetNames[0] } else { $null }
         $request.CargoExecutable = Get-WorkflowCargoPath
         $request.NextestTool = Get-WorkflowNextestIdentity
         $request | Add-Member -NotePropertyName Selections -NotePropertyValue @($selections) -Force
-        $request | Add-Member -NotePropertyName PrepareCommand -NotePropertyValue (New-WorkflowPhaseTemplate -Preset $modeRecord.cargoPreset -Phase 'prepare' -Selection $selections[0]) -Force
+        $request | Add-Member -NotePropertyName PrepareCommand -NotePropertyValue (New-WorkflowPhaseTemplate -Preset $modeRecord.cargoPreset -Phase 'prepare' -Selection $selections[0] -Packages $packageNames) -Force
         $placeholder = Join-Path ([IO.Path]::GetTempPath()) 'multi-launcher-binaries-metadata-pending.json'
         $inventories = foreach ($selection in $selections) {
             $filter = Get-WorkflowFilterExpression -ExactCase ([string]$selection.exactCase)
@@ -405,6 +417,8 @@ function New-WorkflowRequest {
     if ($selection.Count -ne 1) { throw "Selection '$SelectionName' did not resolve to exactly one catalog entry." }
     $selection = $selection[0]
     $request.TargetKind = [string]$selection.targetKind
+    $request.Package = [string]$selection.package
+    $request.Packages = @([string]$selection.package)
     $request.TargetName = [string]$selection.targetName
     $request.SelectionName = [string]$selection.name
     $request.ExactCase = [string]$selection.exactCase
@@ -703,9 +717,10 @@ function Invoke-WorkflowCommand {
             ComparisonSelection = @{
                 Mode = [string]$Request.Mode
                 ModeKind = [string]$Request.ModeKind
-                Package = [string]$Request.Package
+                Package = $Request.Package
+                Packages = @($Request.Packages)
                 TargetKind = [string]$Request.TargetKind
-                TargetName = [string]$Request.TargetName
+                TargetName = $Request.TargetName
                 Features = [pscustomobject]@{ DefaultFeatures = [bool]$Request.Features.DefaultFeatures; Explicit = @($Request.Features.Explicit) }
                 CompilerProfile = [string]$Request.CompilerProfile
                 RunnerProfile = [string]$Request.RunnerProfile
@@ -1330,8 +1345,9 @@ function Invoke-WorkflowAction {
                     schemaVersion = 1
                     status = $discoveryStatus
                     targetKind = [string]$Request.TargetKind
-                    targetName = [string]$Request.TargetName
-                    package = [string]$Request.Package
+                    targetName = $Request.TargetName
+                    package = $Request.Package
+                    packages = @($Request.Packages)
                     mode = [string]$Request.Mode
                     compilerProfile = [string]$Request.CompilerProfile
                     runnerProfile = [string]$Request.RunnerProfile

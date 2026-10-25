@@ -3100,7 +3100,6 @@ dependencies = [
  "bytes",
  "chrono",
  "criterion",
- "csv",
  "dirs-next",
  "eframe",
  "egui-toast",
@@ -3119,6 +3118,7 @@ dependencies = [
  "libloading",
  "lipsum",
  "log",
+ "multi_launcher_table_core",
  "notify",
  "once_cell",
  "open",
@@ -3158,6 +3158,14 @@ dependencies = [
  "walkdir",
  "windows 0.58.0",
  "winit",
+]
+
+[[package]]
+name = "multi_launcher_table_core"
+version = "0.1.0"
+dependencies = [
+ "csv",
+ "serde_json",
 ]
 
 [[package]]

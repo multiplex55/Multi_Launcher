@@ -120,13 +120,24 @@ Build previews print the resolved executable and native argument array without
 launching it. Test previews require a successful discovery receipt whose
 catalog, source fingerprint, Cargo/Nextest tools, metadata file, target, and
 exact case still match; missing or stale receipts require another Discover.
-Discover prepares only the requested library or `pure` integration target,
-then inventories its catalog cases without running them. Run prepares the same
-target, validates that the exact catalog case matches one runnable test, and
-executes only that case. Target preparation has an 1800-second deadline;
+Discover prepares the catalog-owned packages for the requested target kind,
+then inventories its cases without running them. The library selection set
+currently prepares `multi_launcher` and `multi_launcher_table_core` together;
+the `pure` integration target remains in `multi_launcher`. Run prepares only
+the package and target for its selected case, validates that the exact case
+matches one runnable test, and executes only that case. Target preparation has
+an 1800-second deadline;
 inventory and selected test execution each have a 600-second deadline. Every
 phase publishes its arguments, exit/timeout, output-drain, owned-process and
 cleanup evidence under an external evidence directory.
+
+The pure table engine is owned by `crates/multi_launcher_table_core`; the
+`multi_launcher::table_utility` module re-exports its public API for existing
+application consumers. Its 23 unit cases can be selected directly with
+`cargo nextest run -p multi_launcher_table_core --lib`. The root workspace's
+default members include both packages, so normal workspace test discovery keeps
+these cases alongside application tests; an explicit `-p multi_launcher`
+selection intentionally includes only the application package's tests.
 
 Each selected run writes `results.json` with terminal pass/fail/timeout counts,
 ignored and filtered cases, unexecuted or started-only cases, per-case durations,
@@ -154,7 +165,7 @@ notes, and native-selection metadata. Those pure-test entries remain separate
 from the Phase 2 smoke selections below. `fast-dev-tests` uses `--cargo-profile fast-dev` for
 compilation; an optional `-RunnerProfile` maps separately to Nextest `-P`.
 Forward test-binary options as a string array with `-TestArguments`, for
-example `-TestArguments @('--exact', 'table_utility::tests::table_parse_csv_quotes_escaped_quotes_and_embedded_newlines_preserve_strings')`;
+example `-TestArguments @('--exact', 'tests::table_parse_csv_quotes_escaped_quotes_and_embedded_newlines_preserve_strings')`;
 the facade places those arguments after the native `--` separator. Structured
 workflow results require captured test output, so `--nocapture` and
 `--no-capture` are rejected before launch. Use capture-preserving filters such

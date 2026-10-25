@@ -58,12 +58,12 @@
   "selections": [
     {
       "name": "tables",
-      "package": "multi_launcher",
+      "package": "multi_launcher_table_core",
       "targetKind": "lib",
-      "targetName": "multi_launcher",
+      "targetName": "multi_launcher_table_core",
       "nextestKind": "lib",
-      "exactCase": "table_utility::tests::table_parse_csv_quotes_escaped_quotes_and_embedded_newlines_preserve_strings",
-      "source": "src/table_utility.rs",
+      "exactCase": "tests::table_parse_csv_quotes_escaped_quotes_and_embedded_newlines_preserve_strings",
+      "source": "crates/multi_launcher_table_core/src/lib.rs",
       "features": { "defaultFeatures": true, "explicit": [] },
       "platformNotes": "Windows test selection; case is host-independent Rust library coverage.",
       "resourceNotes": "Small deterministic parser fixture; no desktop application launch.",

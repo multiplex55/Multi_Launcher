@@ -118,3 +118,62 @@ The controlled baseline restored the original top-level files byte-for-byte: `te
 The first baseline controlled-driver attempt (unified exec session 85192) failed before a measured command started: a PowerShell byte-array collection conversion caused its restoration path to write truncated source bytes. The failed driver and receipt are retained unchanged. The parent recovered the two files from the filtered committed blobs only after verifying each recovered hash and length, with no Git reset, checkout, or history operation. The corrected baseline driver then completed compile, inventory, and run successfully. One candidate-preparation preflight receipt also records an initial incorrect Stage classification (`provenance` instead of `compile`); it has `ProcessStarted: false` and was corrected before the successful one-target preparation. Neither failed wrapper attempt is included in the controlled timing comparison.
 
 No full suite, native input test, Clippy run, cache reset, or follow-up benchmark repeat was performed. The scoped results meet the M1-B selected-target, exact-case, restoration, target-reduction, and execution-parity criteria; later Goal 03 checkpoints remain outside this report.
+
+## M2-A checkpoint: extract the pure table core
+
+**Status: COMPLETE / ACCEPTED.** The explicit user fixture-only renewal superseded the earlier exhausted allowance. The first renewed focused contract run passed; all original mandatory M2-A criteria now have scoped evidence. A separate structured parent review accepted the checkpoint under the existing configured-Reviewer dispatch fallback; this is not independent review. Goal 03 remains incomplete until M2-B's app-edit comparison and final Clippy gate.
+
+### Ownership change
+
+Moved the one pure table implementation and its existing 23 inline tests into the internal `crates/multi_launcher_table_core` package. The package has only `csv` and `serde_json` dependencies and is `publish = false`. The root package now depends on it by path and no longer declares a direct `csv` dependency. `src/table_utility.rs` remains the public application module and re-exports the core API; application callers retain the same types and functions. The root workspace and default members contain exactly `multi_launcher` and `multi_launcher_table_core`; no session, dialog, plugin, or UI ownership moved.
+
+The `tables` catalog selection now names the core lib target, its moved exact test, and `crates/multi_launcher_table_core/src/lib.rs`. Fast-dev test preparation accepts only the fixed root/core package set, while inventory and execution remain metadata-driven. Mixed library discovery prepares both packages and records both identities without claiming one package for the aggregate. Source fingerprints include the core implementation and manifest. Existing selection names and per-selection receipts are retained. The README records the facade, package command, workspace defaults, and target-preparation/inventory deadlines.
+
+Cargo metadata reports both packages as workspace members and default members. Original-source preparation produced the root and core library test binaries. `cargo tree --locked -p multi_launcher_table_core -e normal` contains no `eframe`, `egui`, `windows`, or `winapi` packages. The 23 core cases remain nonignored and cover parsing, CSV policy/export, limits, projection, cancellation, and source-bound selections.
+
+### Compile and behavior evidence
+
+The controlled compile used the same one-line assertion-diagnostic fixture as M1-A's `table_parse_bom_unicode_and_whitespace_are_exact` case. Core preparation was outside the interval. The original prepared core lib-test executable was bound by identity, path, source, manifests, lockfile, SHA-256, and byte length before the guarded edit; the source was restored in an outer `finally` and verified byte-exact afterward.
+
+| Item | Result |
+| --- | --- |
+| M1-A root lib-test compile baseline | 68.480312 s; original test executable SHA-256 `b97f6cc9…ab4e4` |
+| M2-A core lib-test diagnostic compile | 7.176044 s; 1,420,800-byte output SHA-256 `0c5dff1d279f3a0fd963cec2c972c286388d0245a382861ba0bddd3255bfab14` |
+| Core original-source prepared executable | 1,420,800 bytes; SHA-256 `6c3b5768977cd102848d9e7527dffe26cfe793d0b32b948b7c968865fee61d09` |
+| Restored core source | 111,718 bytes; SHA-256 `ec670d9272091e5ffe9f126bb53b34f130003867c4945f08095667ed4b369419` |
+| M2-A core inventory and run | Exactly 23 nonignored cases; 23 passed, 0 skipped, from the same diagnostic-built executable after source restoration |
+
+This is about an 89.5% lower compile wall for the independent core lib-test target than the M1-A root lib-test baseline. The target intentionally changed to the extracted package; this is not an app-build speed claim and does not bind the edited executable to restored source.
+
+The root lib-test target was prepared once (229.213874 s) and its prepared metadata selected exactly the two existing `table_utility_session` cases: `table_session_latest_source_wins_across_close_and_reopen` and `table_session_stale_parse_cannot_accept_an_inline_edit`. Both passed; 6,323 other root lib cases were filtered. The first run command stopped before test execution because Nextest's experimental JSON output mode requires `NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1`; that failed receipt is preserved and the same two cases then passed with the required scoped override.
+
+The actual `tables` workflow `Run` passed its one exact parser case and published its Nextest recording. Its receipt identifies the `multi_launcher_table_core` package and binary, with kind `lib`. The actual library `Discover` passed all five catalog library selections: `tables` resolves to the core binary, while `notes`, `paste`, `query-focus`, and `settings` resolve to the root binary. Its combined prepared metadata contains exactly the core and root lib binaries. Discovery's aggregate package and target fields are null, with the package list carrying both identities. This intentionally does not execute the unrelated selected cases.
+
+### Historical workflow-contract blocker and authorized resolution
+
+The four focused contract invocations and receipts are retained under `g03-m2a/workflow-contracts` in the external evidence directory below. The first two failures were repaired within the existing owner: explicit null/count handling for an absent fast-dev target selector, then a case-sensitive selector assertion so Cargo `-p` is not confused with Nextest `-P`. The third failure was an unnecessary root-first ordering assumption in the new test; with parent approval, only that assertion was adjusted to compare the exact sorted two-package set while preserving duplicate/cardinality and per-selection identity checks. Production catalog order remains core-first. The single adjusted run still failed:
+
+| Attempt | Owner PID / creation time | Outcome |
+| --- | --- | --- |
+| `g03-m2a-workflow-contracts_20261025T213124715Z_0b286d4664db47c1b8c0b0523bee28dc` | 27460 / 21:31:24.9736592Z | `cargo.ps1:176` precondition rejected an invocation because an absent package list was counted as one element; corrected with the scoped null/count guard. |
+| `g03-m2a-workflow-contracts_20261025T213201595Z_d8ebef9a0f0146af862cae64725a5f11` | 27000 / 21:32:01.8234859Z | `test_run.ps1:234` treated Nextest `-P` as Cargo `-p`; corrected to a case-sensitive selector check. |
+| `g03-m2a-workflow-contracts_20261025T213306604Z_d8aee00db09247da97a5a9b8e6111ea2` | 36104 / 21:33:06.8372751Z | New assertion expected root-first ordering; parent approved the exact sorted-set assertion adjustment, with production ordering unchanged. |
+| `g03-m2a-workflow-contracts-adjusted_20261025T213616974Z_7e5b1491013540819752abef68fc79a8` | 20832 / 21:36:17.2124391Z | `test_run.ps1:642` failed with `Cannot index into a null array.` |
+
+Read-only diagnosis confirmed that `ConvertFrom-Json -AsHashtable` creates case-sensitive ordered hashtables. The receipt writes `SelectedIdentity` with `PackageName`, `BinaryName`, and `TestName`, while the failing fixture uses the lowercase member `selectedIdentity` and lowercase property labels (`packageName`, `binaryName`, `testName`). The exact minimal future fixture correction is to index the actual case-sensitive `SelectedIdentity` key and mutate those exact PascalCase identity keys; preserve each stale-identity rejection. The parent exhausted this contract boundary after the two repairs and one scope adjustment. At that historical stop, no further contract edits or reruns were authorized and the self-test had not passed. The explicit user renewal and successful resolution below supersede that stop.
+
+Configured independent Reviewer dispatch failed once at the agent thread limit; no retry or replacement was launched. The authorized parent fallback performed the separate structured acceptance review after the configured Implementer completed the renewed correction. Only the fixture changed during renewal; the other ten preserved task files matched their prior hashes, so successful core, root-session, graph, and actual-workflow evidence remains valid without repetition.
+
+The fixture indexes the serialized `SelectedIdentity` container and exact `PackageName`, `BinaryName`, and `TestName` keys. It verifies each key already exists, mutates its intended stale value, writes the altered receipt, reads it back, checks unchanged key cardinality and exact persisted value, and retains each `STALE_DISCOVERY` rejection assertion. This prevents a false pass from adding differently cased duplicate keys.
+
+The one renewed checked invocation of `dev/workflows/test_run.ps1` passed with exit 0 in 19.122982 seconds, under the authorized 600-second execution / five-second cleanup deadlines. Receipt: `fixture-renewal/g03-m2a-workflow-contracts-fixture-renewal_20261025T223312415Z_4dbe885984464227bd336513e509df72/measurement.json`. Stdout was 91 bytes and stderr zero; actual file lengths, bytes read, and bytes recorded matched. Cleanup and output drain were verified, with no timeout or runner/recording/restoration error. The parent independently queried all 15 recorded PID-plus-creation identities with a bounded CIM query: all were absent. No second correction or rerun was needed. All earlier failures and receipts remain preserved. No passing benchmarks/tests, core preparation, or native campaign was repeated.
+
+### M2-A evidence and source bindings
+
+The external evidence root is:
+
+`C:\Users\Jay\.codex\visualizations\2026\10\25\01a17319-6f7d-7052-b54e-1bb4a92c5fd0\multi-launcher-queue-20261025-eedc19d2\g03-m2a`
+
+Key evidence paths beneath it are `metadata/g03-m2a-workspace-metadata_20261025T213348302Z_0bfb4fcdc3e042999dee23b5d7095790/measurement.json`, `graph/g03-m2a-core-locked-graph_20261025T213732223Z_cf415880d0c44ab7996b364081e4d3ee/measurement.json`, `core-preparation/g03-m2a-core-original-preparation_20261025T213400728Z_312e4f7441f24c17b5c39b072b97022d/measurement.json`, `root-session/g03-m2a-root-session-preparation_20261025T213750113Z_cf7de0f663f14975bd9da40e5ce45c4b/measurement.json`, `core-selected-unittesteditcompile.driver-result.json`, `core-diagnostic-tests/`, `root-session/`, `workflow-tables-run/`, and `workflow-library-discover/`. All command receipts retain owned process identities, cleanup and output-drain results.
+
+Principal source hashes at the end of this checkpoint are: `crates/multi_launcher_table_core/src/lib.rs` `ec670d9272091e5ffe9f126bb53b34f130003867c4945f08095667ed4b369419`; `crates/multi_launcher_table_core/Cargo.toml` `be8c5d3f6e3c75551aca9dc4485f20293237dcad2f9c9c99f256147f1fd94319`; `src/table_utility.rs` facade `b1524ebb2ee16daa1444742bb9a77572cbf664fc7f34e755107421e25183ed7b`; root `Cargo.toml` `9c8bd78bc59ceea6662a274400e420af5ed00a67332bbed14a81f59c4472f32f`; `Cargo.lock` `3eef4cc515234d5316e623855cbf4906d3f0da208890dc6cf1b4de451ad68320`; `dev/workflows/catalog.json` `7927081d2c662f8721809e04980bcc57b257ea49ad3b18a7b9c3d88f610128e5`; `dev/workflows/engine.ps1` `2324eaad8bfd5d5a0fff97ebd2909079773ca296c2727201c353c05be2ffe4d4`; `dev/workflows/test_run.ps1` `57398f9544aa91049df971059b12600190ad00ed2088b36d845918f15ae53343`; and `dev/track_b/cargo.ps1` `cdb278bf8f58a8e9642872dc6e33d1f2b7345823390722c3e1ae09af678f418a`.

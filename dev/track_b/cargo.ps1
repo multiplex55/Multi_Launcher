@@ -16,6 +16,11 @@ presets select the library or one integration-test target.
 Cargo integration-test target name. Required only for integration-test and
 rejected for the other presets.
 
+.PARAMETER Packages
+Catalog-owned Cargo packages to prepare for a fast-dev-tests target.
+If omitted, the root package remains the default; inventory and run phases use
+the prepared binary metadata and do not accept package selectors.
+
 .PARAMETER CargoArguments
 Additional options passed as individual native process arguments. Pass one
 string array, for example @('-E', 'test(history_prepare_)').
@@ -53,6 +58,8 @@ param(
     [string]$BinariesMetadataPath,
 
     [string]$ReplayRecordingPath,
+
+    [string[]]$Packages,
 
     [ValidatePattern('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')]
     [string]$RunnerProfile,
@@ -127,6 +134,25 @@ if ($Preset -eq 'integration-test') {
     if ($TargetKind -eq 'lib' -and ![string]::IsNullOrWhiteSpace($TestTarget)) {
         throw '-TestTarget is valid only for integration target workflows.'
     }
+    if ($null -eq $Packages) { $Packages = @() }
+    foreach ($package in $Packages) {
+        if ([string]::IsNullOrWhiteSpace($package) -or $package -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]*$') {
+            throw 'Packages must contain valid Cargo package names.'
+        }
+        if ($package -cnotin @('multi_launcher', 'multi_launcher_table_core')) {
+            throw "Package '$package' is not owned by the fast-dev-tests catalog workflow."
+        }
+    }
+    if (@($Packages | Select-Object -Unique).Count -ne $Packages.Count) {
+        throw 'Packages cannot contain duplicate names.'
+    }
+    if ($WorkflowPhase -ne 'prepare' -and $Packages.Count -gt 0) {
+        throw '-Packages is valid only for the fast-dev-tests prepare phase.'
+    }
+    if ($TargetKind -eq 'integration' -and $Packages.Count -gt 0 -and
+        ($Packages.Count -ne 1 -or $Packages[0] -cne 'multi_launcher')) {
+        throw 'Integration test preparation is fixed to the multi_launcher package.'
+    }
     if ($WorkflowPhase -eq 'prepare' -and (! [string]::IsNullOrWhiteSpace($FilterExpression) -or ! [string]::IsNullOrWhiteSpace($BinariesMetadataPath) -or $TestArguments.Count -gt 0)) {
         throw 'The prepare phase does not accept a filter, binaries metadata, or test arguments.'
     }
@@ -149,7 +175,7 @@ if ($Preset -eq 'integration-test') {
 } elseif (![string]::IsNullOrWhiteSpace($TestTarget) -or ![string]::IsNullOrWhiteSpace($WorkflowPhase) -or
     ![string]::IsNullOrWhiteSpace($TargetKind) -or ![string]::IsNullOrWhiteSpace($FilterExpression) -or
     ![string]::IsNullOrWhiteSpace($BinariesMetadataPath) -or ![string]::IsNullOrWhiteSpace($RunnerProfile) -or
-    $TestArguments.Count -gt 0) {
+    $TestArguments.Count -gt 0 -or ($null -ne $Packages -and $Packages.Count -gt 0)) {
     throw '-TestTarget is valid only with the integration-test preset.'
 }
 
@@ -181,7 +207,17 @@ $selectedArguments = switch ($Preset) {
     'lib-test' { @('nextest', 'run', '--lib') }
     'integration-test' { @('nextest', 'run', '--test', $TestTarget) }
     'fast-dev-tests' {
-        $targetArguments = if ($TargetKind -eq 'lib') { @('-p', 'multi_launcher', '--lib') } else { @('-p', 'multi_launcher', '--test', $TestTarget) }
+        $targetArguments = @()
+        if ($WorkflowPhase -eq 'prepare') {
+            $preparePackages = if ($Packages.Count -gt 0) { @($Packages) } else { @('multi_launcher') }
+            foreach ($package in $preparePackages) { $targetArguments += @('-p', [string]$package) }
+            if ($TargetKind -eq 'lib') { $targetArguments += '--lib' }
+            else { $targetArguments += @('--test', $TestTarget) }
+        }
+        else {
+            if ($TargetKind -eq 'lib') { $targetArguments = @('--lib') }
+            else { $targetArguments = @('--test', $TestTarget) }
+        }
         switch ($WorkflowPhase) {
             'prepare' { @('nextest', 'list', '--list-type', 'binaries-only', '--message-format', 'json', '--cargo-profile', 'fast-dev') + $targetArguments }
             'inventory' {
