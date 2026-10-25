@@ -247,6 +247,11 @@ impl Dashboard {
         .ok();
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_watcher_for_test(&self) -> bool {
+        self.watcher.is_some()
+    }
+
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,

@@ -5,15 +5,17 @@ use multi_launcher::plugin::PluginManager;
 use multi_launcher::plugins::bookmarks::{BOOKMARKS_FILE, BookmarkEntry, save_bookmarks};
 use multi_launcher::plugins::folders::{FOLDERS_FILE, FolderEntry, save_folders};
 use multi_launcher::settings::Settings;
-use once_cell::sync::Lazy;
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;
-use tempfile::tempdir;
 
-static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+mod common;
+use common::ScopedWorkspace;
 
 fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
     let custom_len = actions.len();
+    let mut settings = Settings::default();
+    settings.paste_sequence.next_hotkey = None;
+    settings.paste_sequence.cancel_hotkey = None;
     LauncherApp::new(
         ctx,
         Arc::new(actions),
@@ -21,7 +23,7 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
         PluginManager::new(),
         "actions.json".into(),
         "settings.json".into(),
-        Settings::default(),
+        settings,
         None,
         None,
         None,
@@ -34,9 +36,7 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
 
 #[test]
 fn actions_watcher_sends_event() {
-    let _lock = TEST_MUTEX.lock().unwrap();
-    let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
+    let _workspace = ScopedWorkspace::new();
 
     let acts = vec![Action {
         label: "one".into(),
@@ -60,9 +60,7 @@ fn actions_watcher_sends_event() {
 
 #[test]
 fn folders_watcher_sends_event() {
-    let _lock = TEST_MUTEX.lock().unwrap();
-    let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
+    let _workspace = ScopedWorkspace::new();
 
     save_actions("actions.json", &[]).unwrap();
     save_folders(FOLDERS_FILE, &[]).unwrap();
@@ -88,9 +86,7 @@ fn folders_watcher_sends_event() {
 
 #[test]
 fn bookmarks_watcher_sends_event() {
-    let _lock = TEST_MUTEX.lock().unwrap();
-    let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
+    let _workspace = ScopedWorkspace::new();
 
     save_actions("actions.json", &[]).unwrap();
     save_folders(FOLDERS_FILE, &[]).unwrap();

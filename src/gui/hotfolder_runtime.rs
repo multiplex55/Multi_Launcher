@@ -177,6 +177,26 @@ pub(crate) struct HotFolderRuntimeDriver {
 }
 
 impl HotFolderRuntimeDriver {
+    /// Construct the app-owned driver state without starting its worker.
+    /// Requests fail through the same disconnected-channel path used when a
+    /// live driver has shut down, while reads retain a valid empty snapshot.
+    #[cfg(test)]
+    pub(crate) fn dormant(data_root: AppDataRoot) -> Self {
+        let repair_store = crate::hotfolder::HotFolderRulesStore::new(&data_root);
+        let (sender, receiver) = mpsc::sync_channel(DRIVER_QUEUE_CAPACITY);
+        drop(receiver);
+        Self {
+            sender,
+            snapshot: Arc::new(RwLock::new(HotFolderDriverSnapshot::default())),
+            next_request_id: AtomicU64::new(1),
+            execution_control: HotFolderExecutionControl::initially_blocked(),
+            shutdown_requested: Arc::new(AtomicBool::new(true)),
+            worker: None,
+            reaper: None,
+            repair_store,
+        }
+    }
+
     pub(crate) fn new(
         data_root: AppDataRoot,
         adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter>,
@@ -217,6 +237,11 @@ impl HotFolderRuntimeDriver {
 
     pub(crate) fn repair_store_handle(&self) -> crate::hotfolder::HotFolderRulesStore {
         self.repair_store.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_workers_for_test(&self) -> bool {
+        self.worker.is_some() || self.reaper.is_some()
     }
 
     pub(crate) fn snapshot(&self) -> HotFolderDriverSnapshot {

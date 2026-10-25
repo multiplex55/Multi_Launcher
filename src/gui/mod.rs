@@ -89,6 +89,8 @@ mod state;
 mod table_utility_dialog;
 mod tempfile_alias_dialog;
 mod tempfile_dialog;
+#[cfg(test)]
+pub(crate) mod test_fixtures;
 pub mod theme;
 mod theme_settings_dialog;
 mod timer_dialog;
@@ -914,6 +916,19 @@ impl PasteSequenceDocumentRevisionNotifier {
         {
             let _ = main_wake.send(());
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LauncherInitPolicy {
+    Production,
+    #[cfg(test)]
+    IsolatedTest,
+}
+
+impl LauncherInitPolicy {
+    fn starts_production_services(self) -> bool {
+        matches!(self, Self::Production)
     }
 }
 
@@ -2910,11 +2925,80 @@ impl LauncherApp {
         restore_flag: Arc<AtomicBool>,
         help_flag: Arc<AtomicBool>,
     ) -> Self {
+        Self::new_with_policy(
+            ctx,
+            actions,
+            custom_len,
+            plugins,
+            actions_path,
+            settings_path,
+            settings,
+            plugin_dirs,
+            index_paths,
+            enabled_plugins,
+            enabled_capabilities,
+            visible_flag,
+            restore_flag,
+            help_flag,
+            LauncherInitPolicy::Production,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_isolated_for_test_at(
+        ctx: &egui::Context,
+        root: impl AsRef<Path>,
+        mut settings: Settings,
+    ) -> Self {
+        let root = root.as_ref();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        settings.dashboard.config_path =
+            Some(root.join("dashboard.json").to_string_lossy().into_owned());
+        Self::new_with_policy(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test_at(root),
+            root.join("actions.json").to_string_lossy().into_owned(),
+            root.join("settings.json").to_string_lossy().into_owned(),
+            settings,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            LauncherInitPolicy::IsolatedTest,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_policy(
+        ctx: &egui::Context,
+        actions: Arc<Vec<Action>>,
+        custom_len: usize,
+        plugins: PluginManager,
+        actions_path: String,
+        settings_path: String,
+        settings: Settings,
+        plugin_dirs: Option<Vec<String>>,
+        index_paths: Option<Vec<String>>,
+        enabled_plugins: Option<HashSet<String>>,
+        enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
+        visible_flag: Arc<AtomicBool>,
+        restore_flag: Arc<AtomicBool>,
+        help_flag: Arc<AtomicBool>,
+        init_policy: LauncherInitPolicy,
+    ) -> Self {
         // egui snapshots context plugins when a UI run begins, so install the
         // font-revision owner before the first eframe pass can begin.
         crate::gui::font_revision::register(ctx);
         crate::gui::theme::initialize_runtime(ctx, &settings.theme);
-        crate::plugins::macros::configure_search_runtime(&settings, &actions_path);
+        if init_policy.starts_production_services() {
+            crate::plugins::macros::configure_search_runtime(&settings, &actions_path);
+        }
         let desired_index_config = crate::indexer::coordinator::IndexConfig::new(
             index_paths.unwrap_or_default(),
             settings.max_indexed_items,
@@ -2959,7 +3043,9 @@ impl LauncherApp {
             dashboard_registry.clone(),
             Some(dashboard_event_cb),
         );
-        dashboard.attach_watcher();
+        if init_policy.starts_production_services() {
+            dashboard.attach_watcher();
+        }
         dashboard_timer.finish("startup.dashboard_construction");
         let watcher_timer = crate::performance::Timer::start();
 
@@ -2977,7 +3063,7 @@ impl LauncherApp {
         let (clipboard_modify_runtime, loaded_clipboard_modify) =
             ClipboardModifyRuntime::new(Path::new(&settings_path), clipboard_modify_catalog);
         let clipboard_modify_config_diagnostic = loaded_clipboard_modify.state.startup_diagnostic();
-        let clipboard_modify_watcher =
+        let clipboard_modify_watcher = if init_policy.starts_production_services() {
             crate::clipboard_modify::watch::ClipboardModifyWatcher::start(
                 clipboard_modify_runtime.store.clone(),
                 Duration::from_millis(150),
@@ -2989,19 +3075,50 @@ impl LauncherApp {
             .map_err(
                 |error| tracing::warn!(%error, "failed to watch Clipboard Modify configuration"),
             )
-            .ok();
+            .ok()
+        } else {
+            None
+        };
 
-        #[cfg(not(test))]
-        match watch_file(
-            Path::new(&actions_path),
-            tx.clone(),
-            WatchEvent::Actions,
-            ctx.clone(),
-        ) {
-            Ok(w) => watchers.push(w),
-            Err(e) => {
-                tracing::error!("watch error: {:?}", e);
-                if enable_toasts && show_error_toasts {
+        if init_policy.starts_production_services() {
+            #[cfg(not(test))]
+            match watch_file(
+                Path::new(&actions_path),
+                tx.clone(),
+                WatchEvent::Actions,
+                ctx.clone(),
+            ) {
+                Ok(w) => watchers.push(w),
+                Err(e) => {
+                    tracing::error!("watch error: {:?}", e);
+                    if enable_toasts && show_error_toasts {
+                        push_toast(
+                            &mut toasts,
+                            Toast {
+                                text: format!("Failed to watch {}", actions_path).into(),
+                                kind: ToastKind::Error,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(toast_duration as f64),
+
+                                style: Default::default(),
+                            },
+                        );
+                    }
+                }
+            }
+
+            #[cfg(test)]
+            {
+                if Path::new(&actions_path).exists() {
+                    if let Ok(w) = watch_file(
+                        Path::new(&actions_path),
+                        tx.clone(),
+                        WatchEvent::Actions,
+                        ctx.clone(),
+                    ) {
+                        watchers.push(w);
+                    }
+                } else if enable_toasts && show_error_toasts {
                     push_toast(
                         &mut toasts,
                         Toast {
@@ -3015,44 +3132,41 @@ impl LauncherApp {
                     );
                 }
             }
-        }
 
-        #[cfg(test)]
-        {
-            if Path::new(&actions_path).exists() {
-                if let Ok(w) = watch_file(
-                    Path::new(&actions_path),
-                    tx.clone(),
-                    WatchEvent::Actions,
-                    ctx.clone(),
-                ) {
-                    watchers.push(w);
+            #[cfg(not(test))]
+            match watch_file(
+                Path::new(crate::plugins::folders::FOLDERS_FILE),
+                tx.clone(),
+                WatchEvent::Folders,
+                ctx.clone(),
+            ) {
+                Ok(w) => watchers.push(w),
+                Err(e) => {
+                    tracing::error!("watch error: {:?}", e);
+                    if enable_toasts && show_error_toasts {
+                        push_toast(
+                            &mut toasts,
+                            Toast {
+                                text: "Failed to watch folders.json".into(),
+                                kind: ToastKind::Error,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(toast_duration as f64),
+
+                                style: Default::default(),
+                            },
+                        );
+                    }
                 }
-            } else if enable_toasts && show_error_toasts {
-                push_toast(
-                    &mut toasts,
-                    Toast {
-                        text: format!("Failed to watch {}", actions_path).into(),
-                        kind: ToastKind::Error,
-                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
-
-                        style: Default::default(),
-                    },
-                );
             }
-        }
 
-        #[cfg(not(test))]
-        match watch_file(
-            Path::new(crate::plugins::folders::FOLDERS_FILE),
-            tx.clone(),
-            WatchEvent::Folders,
-            ctx.clone(),
-        ) {
-            Ok(w) => watchers.push(w),
-            Err(e) => {
-                tracing::error!("watch error: {:?}", e);
-                if enable_toasts && show_error_toasts {
+            #[cfg(test)]
+            {
+                let path = Path::new(crate::plugins::folders::FOLDERS_FILE);
+                if path.exists() {
+                    if let Ok(w) = watch_file(path, tx.clone(), WatchEvent::Folders, ctx.clone()) {
+                        watchers.push(w);
+                    }
+                } else if enable_toasts && show_error_toasts {
                     push_toast(
                         &mut toasts,
                         Toast {
@@ -3066,40 +3180,42 @@ impl LauncherApp {
                     );
                 }
             }
-        }
 
-        #[cfg(test)]
-        {
-            let path = Path::new(crate::plugins::folders::FOLDERS_FILE);
-            if path.exists() {
-                if let Ok(w) = watch_file(path, tx.clone(), WatchEvent::Folders, ctx.clone()) {
-                    watchers.push(w);
+            #[cfg(not(test))]
+            match watch_file(
+                Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE),
+                tx.clone(),
+                WatchEvent::Bookmarks,
+                ctx.clone(),
+            ) {
+                Ok(w) => watchers.push(w),
+                Err(e) => {
+                    tracing::error!("watch error: {:?}", e);
+                    if enable_toasts && show_error_toasts {
+                        push_toast(
+                            &mut toasts,
+                            Toast {
+                                text: "Failed to watch bookmarks.json".into(),
+                                kind: ToastKind::Error,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(toast_duration as f64),
+
+                                style: Default::default(),
+                            },
+                        );
+                    }
                 }
-            } else if enable_toasts && show_error_toasts {
-                push_toast(
-                    &mut toasts,
-                    Toast {
-                        text: "Failed to watch folders.json".into(),
-                        kind: ToastKind::Error,
-                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
-
-                        style: Default::default(),
-                    },
-                );
             }
-        }
 
-        #[cfg(not(test))]
-        match watch_file(
-            Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE),
-            tx.clone(),
-            WatchEvent::Bookmarks,
-            ctx.clone(),
-        ) {
-            Ok(w) => watchers.push(w),
-            Err(e) => {
-                tracing::error!("watch error: {:?}", e);
-                if enable_toasts && show_error_toasts {
+            #[cfg(test)]
+            {
+                let path = Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE);
+                if path.exists() {
+                    if let Ok(w) = watch_file(path, tx.clone(), WatchEvent::Bookmarks, ctx.clone())
+                    {
+                        watchers.push(w);
+                    }
+                } else if enable_toasts && show_error_toasts {
                     push_toast(
                         &mut toasts,
                         Toast {
@@ -3113,98 +3229,77 @@ impl LauncherApp {
                     );
                 }
             }
-        }
 
-        #[cfg(test)]
-        {
-            let path = Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE);
-            if path.exists() {
-                if let Ok(w) = watch_file(path, tx.clone(), WatchEvent::Bookmarks, ctx.clone()) {
+            let notes_dir = crate::plugins::note::notes_dir();
+            let _ = std::fs::create_dir_all(&notes_dir);
+
+            #[cfg(not(test))]
+            for (path, event) in [
+                (
+                    Path::new(crate::plugins::clipboard::CLIPBOARD_FILE),
+                    WatchEvent::Clipboard,
+                ),
+                (
+                    Path::new(crate::plugins::snippets::SNIPPETS_FILE),
+                    WatchEvent::Snippets,
+                ),
+                (
+                    Path::new(crate::plugins::todo::TODO_FILE),
+                    WatchEvent::Todos,
+                ),
+                (
+                    Path::new(crate::plugins::fav::FAV_FILE),
+                    WatchEvent::Favorites,
+                ),
+                (notes_dir.as_path(), WatchEvent::Notes),
+                (
+                    Path::new(crate::mouse_gestures::db::GESTURES_FILE),
+                    WatchEvent::Gestures,
+                ),
+                (
+                    Path::new(crate::mouse_gestures::usage::GESTURES_USAGE_FILE),
+                    WatchEvent::Gestures,
+                ),
+            ] {
+                match watch_file(path, tx.clone(), event, ctx.clone()) {
+                    Ok(w) => watchers.push(w),
+                    Err(e) => tracing::error!("watch error: {:?}", e),
+                }
+            }
+
+            #[cfg(test)]
+            for (path, event) in [
+                (
+                    Path::new(crate::plugins::clipboard::CLIPBOARD_FILE),
+                    WatchEvent::Clipboard,
+                ),
+                (
+                    Path::new(crate::plugins::snippets::SNIPPETS_FILE),
+                    WatchEvent::Snippets,
+                ),
+                (
+                    Path::new(crate::plugins::todo::TODO_FILE),
+                    WatchEvent::Todos,
+                ),
+                (
+                    Path::new(crate::plugins::fav::FAV_FILE),
+                    WatchEvent::Favorites,
+                ),
+                (notes_dir.as_path(), WatchEvent::Notes),
+                (
+                    Path::new(crate::mouse_gestures::db::GESTURES_FILE),
+                    WatchEvent::Gestures,
+                ),
+                (
+                    Path::new(crate::mouse_gestures::usage::GESTURES_USAGE_FILE),
+                    WatchEvent::Gestures,
+                ),
+            ] {
+                if path.exists()
+                    && let Ok(w) = watch_file(path, tx.clone(), event, ctx.clone())
+                {
                     watchers.push(w);
                 }
-            } else if enable_toasts && show_error_toasts {
-                push_toast(
-                    &mut toasts,
-                    Toast {
-                        text: "Failed to watch bookmarks.json".into(),
-                        kind: ToastKind::Error,
-                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
-
-                        style: Default::default(),
-                    },
-                );
-            }
-        }
-
-        let notes_dir = crate::plugins::note::notes_dir();
-        let _ = std::fs::create_dir_all(&notes_dir);
-
-        #[cfg(not(test))]
-        for (path, event) in [
-            (
-                Path::new(crate::plugins::clipboard::CLIPBOARD_FILE),
-                WatchEvent::Clipboard,
-            ),
-            (
-                Path::new(crate::plugins::snippets::SNIPPETS_FILE),
-                WatchEvent::Snippets,
-            ),
-            (
-                Path::new(crate::plugins::todo::TODO_FILE),
-                WatchEvent::Todos,
-            ),
-            (
-                Path::new(crate::plugins::fav::FAV_FILE),
-                WatchEvent::Favorites,
-            ),
-            (notes_dir.as_path(), WatchEvent::Notes),
-            (
-                Path::new(crate::mouse_gestures::db::GESTURES_FILE),
-                WatchEvent::Gestures,
-            ),
-            (
-                Path::new(crate::mouse_gestures::usage::GESTURES_USAGE_FILE),
-                WatchEvent::Gestures,
-            ),
-        ] {
-            match watch_file(path, tx.clone(), event, ctx.clone()) {
-                Ok(w) => watchers.push(w),
-                Err(e) => tracing::error!("watch error: {:?}", e),
-            }
-        }
-
-        #[cfg(test)]
-        for (path, event) in [
-            (
-                Path::new(crate::plugins::clipboard::CLIPBOARD_FILE),
-                WatchEvent::Clipboard,
-            ),
-            (
-                Path::new(crate::plugins::snippets::SNIPPETS_FILE),
-                WatchEvent::Snippets,
-            ),
-            (
-                Path::new(crate::plugins::todo::TODO_FILE),
-                WatchEvent::Todos,
-            ),
-            (
-                Path::new(crate::plugins::fav::FAV_FILE),
-                WatchEvent::Favorites,
-            ),
-            (notes_dir.as_path(), WatchEvent::Notes),
-            (
-                Path::new(crate::mouse_gestures::db::GESTURES_FILE),
-                WatchEvent::Gestures,
-            ),
-            (
-                Path::new(crate::mouse_gestures::usage::GESTURES_USAGE_FILE),
-                WatchEvent::Gestures,
-            ),
-        ] {
-            if path.exists()
-                && let Ok(w) = watch_file(path, tx.clone(), event, ctx.clone())
-            {
-                watchers.push(w);
             }
         }
 
@@ -3268,6 +3363,15 @@ impl LauncherApp {
         #[cfg(not(test))]
         let plugin_editor = PluginEditor::new(&settings);
         let actions_by_id = ActionIdLookup::new(Arc::clone(&actions));
+        #[cfg(test)]
+        let dashboard_runtime = match init_policy {
+            LauncherInitPolicy::Production => DashboardRuntime::start({
+                let ctx = ctx.clone();
+                move || ctx.request_repaint()
+            }),
+            LauncherInitPolicy::IsolatedTest => DashboardRuntime::dormant(),
+        };
+        #[cfg(not(test))]
         let dashboard_runtime = DashboardRuntime::start({
             let ctx = ctx.clone();
             move || ctx.request_repaint()
@@ -3297,6 +3401,17 @@ impl LauncherApp {
                 ctx.clone(),
                 Arc::clone(&plugins.internal_services().mkmacro_store),
             );
+        #[cfg(test)]
+        let hotfolder_runtime = match init_policy {
+            LauncherInitPolicy::Production => hotfolder_runtime::HotFolderRuntimeDriver::new(
+                data_root,
+                hotfolder_action_adapter.clone(),
+            ),
+            LauncherInitPolicy::IsolatedTest => {
+                hotfolder_runtime::HotFolderRuntimeDriver::dormant(data_root)
+            }
+        };
+        #[cfg(not(test))]
         let hotfolder_runtime = hotfolder_runtime::HotFolderRuntimeDriver::new(
             data_root,
             hotfolder_action_adapter.clone(),
@@ -3722,13 +3837,16 @@ impl LauncherApp {
             }));
         app.plugins
             .set_search_repaint_callback(Arc::new(move || repaint_context.request_repaint()));
-        crate::plugins::mouse_gestures::sync_enabled_plugins(app.enabled_plugins.as_ref());
+        if init_policy.starts_production_services() {
+            crate::plugins::mouse_gestures::sync_enabled_plugins(app.enabled_plugins.as_ref());
+        }
         app.plugins
             .sync_enabled_plugins(app.enabled_plugins.as_ref());
         let hotfolder_enabled = app.plugin_enabled("hotfolder");
         app.hotfolder_action_adapter.set_active(hotfolder_enabled);
         app.hotfolder_action_pump.set_active(hotfolder_enabled);
-        if hotfolder_enabled
+        if init_policy.starts_production_services()
+            && hotfolder_enabled
             && let Err(error) = app
                 .hotfolder_runtime
                 .start(app.hotfolder_capability_inputs())
@@ -3737,6 +3855,17 @@ impl LauncherApp {
         }
         app.recompute_query_results_layout();
         app
+    }
+
+    #[cfg(test)]
+    pub(crate) fn isolated_services_are_dormant_for_test(&self) -> bool {
+        self.plugins.is_inert_for_test()
+            && !self.plugins.window_catalog_has_worker_for_test()
+            && self.watchers.is_empty()
+            && self.clipboard_modify_watcher.is_none()
+            && !self.dashboard.has_watcher_for_test()
+            && !self.dashboard_runtime.has_worker_for_test()
+            && !self.hotfolder_runtime.has_workers_for_test()
     }
 
     /// Transfer the foreground snapshot captured immediately before initial ROOT creation.
@@ -5603,6 +5732,213 @@ mod tests {
     };
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    fn assert_fixture_finished(fixture: super::test_fixtures::FixtureTeardown) {
+        assert!(fixture.cwd_restored, "fixture must restore the process CWD");
+        assert!(
+            fixture.root_removed,
+            "fixture must remove its isolated root"
+        );
+        eprintln!("isolated app fixture teardown: {fixture:?}");
+    }
+
+    #[test]
+    fn activation_applies_query_override_first() {
+        let mut fixture = super::test_fixtures::IsolatedAppWorkspace::new();
+        let context = egui::Context::default();
+        {
+            let app = fixture
+                .create_app(&context, "activation", Settings::default())
+                .expect("isolated app fixture constructs");
+            assert!(app.isolated_services_are_dormant_for_test());
+            let mut app = app;
+            app.query = "start".into();
+            app.clear_query_after_run = false;
+            app.hide_after_run = false;
+            let action = Action {
+                label: "Query".into(),
+                desc: "".into(),
+                action: "query:after".into(),
+                args: None,
+            };
+            app.activate_action(action, Some("override".into()), ActivationSource::Dashboard);
+            assert_eq!(app.query, "after");
+            assert!(app.move_cursor_end_flag());
+        }
+        assert_fixture_finished(fixture.finish().expect("fixture cleanup succeeds"));
+    }
+
+    #[test]
+    fn should_show_dashboard_when_empty_query() {
+        let mut fixture = super::test_fixtures::IsolatedAppWorkspace::new();
+        let context = egui::Context::default();
+        {
+            let app = fixture
+                .create_app(&context, "empty-query", Settings::default())
+                .expect("isolated app fixture constructs");
+            assert!(app.isolated_services_are_dormant_for_test());
+            let app = app;
+            app.dashboard_enabled = true;
+            app.dashboard_show_when_empty = true;
+            app.query.clear();
+            let trimmed = app.query.trim().to_string();
+            assert!(app.should_show_dashboard(&trimmed));
+        }
+        assert_fixture_finished(fixture.finish().expect("fixture cleanup succeeds"));
+    }
+
+    #[test]
+    fn isolated_profiles_load_persisted_settings_without_cross_contamination() {
+        let mut fixture = super::test_fixtures::IsolatedAppWorkspace::new();
+        let context = egui::Context::default();
+        let profile_a = fixture.profile_root("profile-a");
+        let profile_b = fixture.profile_root("profile-b");
+        std::fs::create_dir_all(&profile_a).expect("create first profile root");
+        std::fs::create_dir_all(&profile_b).expect("create second profile root");
+
+        let mut settings_a = Settings::default();
+        settings_a.dashboard.enabled = false;
+        settings_a.enable_toasts = false;
+        let mut settings_b = Settings::default();
+        settings_b.dashboard.enabled = true;
+        settings_b.enable_toasts = true;
+        settings_a
+            .save(&profile_a.join("settings.json").to_string_lossy())
+            .expect("persist first profile settings");
+        settings_b
+            .save(&profile_b.join("settings.json").to_string_lossy())
+            .expect("persist second profile settings");
+        let mut dashboard_a = crate::dashboard::config::DashboardConfig::default();
+        dashboard_a.grid.rows = 2;
+        dashboard_a
+            .save(profile_a.join("dashboard.json"))
+            .expect("persist first profile dashboard");
+        let mut dashboard_b = crate::dashboard::config::DashboardConfig::default();
+        dashboard_b.grid.rows = 5;
+        dashboard_b
+            .save(profile_b.join("dashboard.json"))
+            .expect("persist second profile dashboard");
+
+        let note_a_path;
+        {
+            let app = fixture
+                .create_app_from_saved_profile(&context, "profile-a")
+                .expect("first profile loads from its explicit root");
+            assert!(!app.dashboard_enabled);
+            assert!(!app.enable_toasts);
+            assert_eq!(app.dashboard.config.grid.rows, 2);
+            assert!(app.isolated_services_are_dormant_for_test());
+            assert_eq!(crate::plugins::note::notes_dir(), profile_a.join("notes"));
+            assert!(
+                crate::plugins::note::load_notes()
+                    .expect("load first profile notes")
+                    .is_empty()
+            );
+            append_note("Profile A", "profile-a-note").expect("save a first-profile note");
+            let notes = crate::plugins::note::load_notes().expect("reload first profile notes");
+            assert_eq!(notes.len(), 1);
+            assert!(notes[0].content.contains("profile-a-note"));
+            note_a_path = notes[0].path.clone();
+        }
+        fixture.drop_app();
+
+        {
+            let app = fixture
+                .create_app_from_saved_profile(&context, "profile-b")
+                .expect("second profile loads from its explicit root");
+            assert!(app.dashboard_enabled);
+            assert!(app.enable_toasts);
+            assert_eq!(app.dashboard.config.grid.rows, 5);
+            assert!(app.isolated_services_are_dormant_for_test());
+            assert_eq!(crate::plugins::note::notes_dir(), profile_b.join("notes"));
+            let notes = crate::plugins::note::load_notes().expect("load second profile notes");
+            assert!(notes.is_empty(), "profile B must not load profile A data");
+            append_note("Profile B", "profile-b-note").expect("save a second-profile note");
+        }
+        fixture.drop_app();
+
+        assert_ne!(profile_a, profile_b);
+        let notes_b = crate::plugins::note::load_notes().expect("reload second profile notes");
+        assert_eq!(notes_b.len(), 1);
+        assert!(notes_b[0].content.contains("profile-b-note"));
+        assert!(note_a_path.starts_with(profile_a.join("notes")));
+        assert!(notes_b[0].path.starts_with(profile_b.join("notes")));
+        assert!(
+            std::fs::read_to_string(&note_a_path)
+                .expect("read persisted first profile note")
+                .contains("profile-a-note")
+        );
+        assert!(
+            std::fs::read_to_string(&notes_b[0].path)
+                .expect("read persisted second profile note")
+                .contains("profile-b-note")
+        );
+        assert!(
+            !Settings::load(&profile_a.join("settings.json").to_string_lossy())
+                .expect("reload first profile")
+                .dashboard
+                .enabled
+        );
+        assert!(
+            Settings::load(&profile_b.join("settings.json").to_string_lossy())
+                .expect("reload second profile")
+                .dashboard
+                .enabled
+        );
+        assert_fixture_finished(fixture.finish().expect("fixture cleanup succeeds"));
+    }
+
+    #[test]
+    fn isolated_fixture_drop_restores_process_state_during_unwind() {
+        let mut original_cwd = None;
+        let mut original_notes_directory = None;
+        let mut original_template_directory = None;
+        let mut isolated_root = None;
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut fixture = super::test_fixtures::IsolatedAppWorkspace::new();
+            original_cwd = Some(fixture.original_cwd().to_path_buf());
+            original_notes_directory = fixture.original_notes_directory();
+            original_template_directory = fixture.original_template_directory();
+            isolated_root = Some(fixture.profile_root("unwind-profile"));
+            fixture
+                .create_app(
+                    &egui::Context::default(),
+                    "unwind-profile",
+                    Settings::default(),
+                )
+                .expect("isolated app fixture constructs");
+            std::panic::resume_unwind(Box::new("intentional isolated fixture unwind"));
+        }));
+
+        assert!(unwind.is_err(), "the test exercised its unwind path");
+        assert_eq!(
+            std::env::current_dir().expect("read restored CWD"),
+            original_cwd.expect("fixture recorded original CWD")
+        );
+        assert_eq!(
+            std::env::var_os("ML_NOTES_DIR"),
+            original_notes_directory,
+            "panic fallback restores the notes directory override"
+        );
+        assert_eq!(
+            std::env::var_os("ML_NOTE_TEMPLATES_DIR"),
+            original_template_directory,
+            "panic fallback restores the template directory override"
+        );
+        assert!(
+            !isolated_root
+                .expect("fixture recorded isolated root")
+                .try_exists()
+                .expect("verify unwind cleanup"),
+            "panic fallback removes the isolated workspace"
+        );
+        let fixture = super::test_fixtures::IsolatedAppWorkspace::new();
+        assert_fixture_finished(
+            fixture
+                .finish()
+                .expect("fixture lock remains reusable after unwind"),
+        );
+    }
 
     #[test]
     fn panel_display_labels_are_friendly_and_serde_names_stay_stable() {

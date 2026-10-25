@@ -11181,6 +11181,9 @@ mod tests {
     }
 
     fn new_app_with_settings(ctx: &egui::Context, settings: Settings) -> LauncherApp {
+        let mut settings = settings;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
@@ -11201,6 +11204,7 @@ mod tests {
 
     #[test]
     fn launcher_initialization_restores_macro_property_preferences() {
+        let mut fixture = crate::gui::test_fixtures::IsolatedAppWorkspace::new();
         let context = egui::Context::default();
         let mut settings = Settings::default();
         settings.mkmacro_properties.expand_all();
@@ -11208,15 +11212,24 @@ mod tests {
         settings.mkmacro_properties.recording_open = false;
         let expected = settings.mkmacro_properties.clone();
 
-        let mut app = new_app_with_settings(&context, settings);
+        {
+            let app = fixture
+                .create_app(&context, "macro-preferences", settings)
+                .expect("isolated app fixture constructs");
+            assert!(app.isolated_services_are_dormant_for_test());
 
-        assert_eq!(app.mkmacro_dialog.mkmacro_properties_preferences, expected);
-        assert_eq!(
-            app.mkmacro_dialog
-                .take_macro_properties_preferences_for_persist(),
-            None,
-            "loading preferences does not schedule a redundant settings write"
-        );
+            assert_eq!(app.mkmacro_dialog.mkmacro_properties_preferences, expected);
+            assert_eq!(
+                app.mkmacro_dialog
+                    .take_macro_properties_preferences_for_persist(),
+                None,
+                "loading preferences does not schedule a redundant settings write"
+            );
+        }
+        let teardown = fixture.finish().expect("fixture cleanup succeeds");
+        assert!(teardown.cwd_restored);
+        assert!(teardown.root_removed);
+        eprintln!("isolated app fixture teardown: {teardown:?}");
     }
 
     #[test]

@@ -635,7 +635,10 @@ impl PluginManager {
 
     #[cfg(test)]
     fn from_inert_test_store(store: Arc<crate::mkmacro::MkMacroStore>) -> Self {
-        let mut manager = Self::from_macro_store(store);
+        let search_updates = Arc::new(PluginSearchUpdates::default());
+        let window_catalog = WindowCatalog::from_snapshot(Vec::new());
+        let mut manager =
+            Self::from_macro_store_with_catalog(store, search_updates, window_catalog);
         manager.inert_for_test = true;
         manager
     }
@@ -643,6 +646,11 @@ impl PluginManager {
     #[cfg(test)]
     pub(crate) fn is_inert_for_test(&self) -> bool {
         self.inert_for_test
+    }
+
+    #[cfg(test)]
+    pub(crate) fn window_catalog_has_worker_for_test(&self) -> bool {
+        self.services.window_catalog.has_worker_for_test()
     }
 
     /// Register a real built-in provider in an inert test manager while
@@ -655,6 +663,14 @@ impl PluginManager {
     fn from_macro_store(store: Arc<crate::mkmacro::MkMacroStore>) -> Self {
         let search_updates = Arc::new(PluginSearchUpdates::default());
         let window_catalog = WindowCatalog::production(Arc::clone(&search_updates));
+        Self::from_macro_store_with_catalog(store, search_updates, window_catalog)
+    }
+
+    fn from_macro_store_with_catalog(
+        store: Arc<crate::mkmacro::MkMacroStore>,
+        search_updates: Arc<PluginSearchUpdates>,
+        window_catalog: Arc<WindowCatalog>,
+    ) -> Self {
         Self {
             plugins: Vec::new(),
             runtime_enablement: None,
