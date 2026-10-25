@@ -30,6 +30,18 @@ param(
 
     [string]$RunnerProfile,
 
+    [ValidateSet('unknown', 'no-op', 'edited-source', 'preparation', 'cold')]
+    [string]$WorkKind = 'unknown',
+
+    [ValidateSet('unknown', 'warmed', 'clean', 'branch-switched', 'new-profile')]
+    [string]$CacheState = 'unknown',
+
+    [string]$BaselineSha,
+
+    [string]$ControlledChangeId,
+
+    [string[]]$ControlledChangePaths = @(),
+
     [string[]]$TestArguments = @(),
 
     [string]$EvidenceDirectory
@@ -41,6 +53,8 @@ $ErrorActionPreference = 'Stop'
 try {
     $request = New-WorkflowRequestFromCli -Action $Action -Mode $Mode -SelectionName $SelectionName `
         -TargetKind $TargetKind -DiscoveryReceipt $DiscoveryReceipt -ReplayReceipt $ReplayReceipt -RunnerProfile $RunnerProfile `
+        -WorkKind $WorkKind -CacheState $CacheState -BaselineSha $BaselineSha `
+        -ControlledChangeId $ControlledChangeId -ControlledChangePaths @($ControlledChangePaths) `
         -TestArguments @($TestArguments)
     $result = Invoke-WorkflowAction -Request $request -EvidenceDirectory $EvidenceDirectory
 }

@@ -173,3 +173,36 @@ the code after the reliability correction; M2-A changes await parent commit and
 push. Review evidence is retained at
 `g01-m2a/vctip-lifecycle-revision/parent-review.md`. M2-B and M3-A have not
 started; final Goal Clippy remains deferred.
+
+#### M2-B execution record (2026-10-25)
+
+The measurement path now captures sanitized source, host, tool, selection,
+target-directory, allowlisted environment and Cargo configuration provenance.
+The workflow dispatches `quick-check` through the build owner and records the
+actual `cargo check --lib` invocation. Comparisons classify incompatible,
+missing, stale, failed, noisy and incomplete records without treating unknown
+cache/work labels as evidence of an optimization. Evidence retention is a
+bounded, report-only census; it does not delete evidence.
+
+Focused PowerShell checks passed for the comparison helper, measurement
+compatibility and workflow dispatch. The checked-owner receipts are under
+`g01-m2b/verification` in the queue evidence directory. The first actual pair
+is retained at
+`g01-m2b/actual-pair-20261025-7f2c3a/comparison.json`; it remains classified
+incomplete because the Rustc `--version --verbose` probe was passed as one
+nested argument and selection fingerprint ordering was unstable. Neither
+sample was retrospectively repaired or used for a claim. The probe now passes
+the two arguments separately and selection fingerprints are canonicalized.
+
+The corrected representative pair is retained at
+`g01-m2b/actual-pair-correction1-20261025-a49d31/comparison.json`. Both samples
+used the same public `quick-check` request and exact `cargo check --lib`
+command, with no source edits between them. Both completed with the same
+source and comparison fingerprints and complete provenance. Their wall times
+were 0.895 and 0.867 seconds; work and cache remained unknown, so the result is
+compatible but makes no improvement claim. Cargo timing-artifact freshness was
+not configured, and these whole-command timings are not linker measurements.
+The attached report-only census covered 15 files, 21 entries and 99,322 bytes
+without truncation or deletion. See `comparison-command.json` beside the
+comparison receipt for the exact comparison invocation and quota.
+Review corrections verified the environment snapshot includes inherited `CARGO_BUILD_RUSTFLAGS`, target-specific Rust flags and linker selection, recording only hashes. Difference details now compare each sample with the first valid sample and identify sample index/path. Same-commit controlled source comparisons use actual between-sample file-map changes, so unchanged pre-existing dirty files do not invalidate a declared edit; an undeclared changed path still rejects the group. Focused regression checks passed under the checked owner.

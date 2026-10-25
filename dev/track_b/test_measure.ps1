@@ -138,6 +138,17 @@ try {
         Assert-Equal -Actual $childOutput.QuotedValue -Expected 'embedded "quote" stays inside one argument' -Label 'Argument containing an embedded quote'
         Assert-Equal -Actual $childOutput.FilterValue -Expected 'module::filter[2], punctuation + && text' -Label 'Filter punctuation argument'
         if ($record.SourceSha -notmatch '^[0-9a-f]{40}$' -or $record.DirtyFiles -isnot [array]) { throw 'Source provenance was not recorded.' }
+        if ($record.ComparisonContext.SchemaVersion -ne 1 -or $record.ComparisonContext.Scenario.WorkKind -ne 'unknown' -or
+            $record.ComparisonContext.Scenario.CacheState -ne 'warmed') { throw 'Versioned comparison context or explicit work/cache classification is missing.' }
+        if ($record.ComparisonContext.Tools.InvokedExecutable.Sha256 -notmatch '^[0-9a-f]{64}$' -or
+            $record.ComparisonContext.Tools.Cargo.Status -ne 'not-applicable' -or
+            $record.ComparisonContext.Tools.InvokedExecutable.VersionProbe -ne 'not-run for generic executable') {
+            throw 'Generic measurement incorrectly ran or omitted its executable identity.'
+        }
+        $targetEnvironment = @($record.ComparisonContext.Environment.Values | Where-Object Name -ceq 'CARGO_TARGET_DIR')
+        if ($targetEnvironment.Count -ne 1 -or $targetEnvironment[0].State -ne 'absent') {
+            throw 'Environment provenance did not preserve the explicit absent target-dir state.'
+        }
         if ($record.Fixtures.Count -ne 1 -or $record.Fixtures[0].Sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Fixture hash metadata was not recorded.' }
         if ($null -ne $record.CargoTimings.SnapshotPath -and (Test-Path -LiteralPath $record.CargoTimings.SnapshotPath)) {
             throw 'An unchanged stale timing report was copied.'

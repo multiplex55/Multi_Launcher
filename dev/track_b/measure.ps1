@@ -42,6 +42,10 @@ param(
     [ValidateSet('unknown', 'yes', 'no')][string]$BinaryLinkObserved = 'unknown',
     [ValidateSet('unknown', 'fresh', 'not-fresh')][string]$CargoFreshness = 'unknown',
     [string]$WorkEvidenceNote,
+    [ValidateSet('unknown', 'no-op', 'edited-source', 'preparation', 'cold')][string]$WorkKind = 'unknown',
+    [string]$ControlledChangeId,
+    [string[]]$ControlledChangePaths = @(),
+    [hashtable]$ComparisonSelection = @{},
     [ValidateSet('unspecified', 'compile', 'test', 'native', 'provenance')][string]$Stage = 'unspecified',
     [ValidateRange(1, 86400)][int]$TimeoutSeconds = 1800,
     [ValidateRange(1, 60)][int]$CleanupTimeoutSeconds = 5,
@@ -50,6 +54,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\workflows\owned_process.ps1')
+. (Join-Path $PSScriptRoot 'comparison.ps1')
 
 function Test-PathWithinDirectory {
     param([string]$Candidate, [string]$Directory)
@@ -131,6 +136,29 @@ function Resolve-InputPath {
 function Get-FileSha256 {
     param([string]$Path)
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+}
+
+function Resolve-RustcForComparison {
+    $configured = [Environment]::GetEnvironmentVariable('RUSTC', 'Process')
+    if (![string]::IsNullOrWhiteSpace($configured)) {
+        $candidate = $configured.Trim()
+        if ($candidate.Length -ge 2 -and $candidate[0] -eq '"' -and $candidate[$candidate.Length - 1] -eq '"') {
+            $candidate = $candidate.Substring(1, $candidate.Length - 2)
+        }
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return [IO.Path]::GetFullPath($candidate) }
+        try {
+            $command = Get-Command -Name $candidate -CommandType Application -ErrorAction Stop | Select-Object -First 1
+            if ($command) { return [IO.Path]::GetFullPath($(if ($command.Source) { $command.Source } else { $command.Path })) }
+        }
+        catch { return $null }
+        return $null
+    }
+    try {
+        $command = Get-Command -Name 'rustc.exe' -CommandType Application -ErrorAction Stop | Select-Object -First 1
+        if ($command) { return [IO.Path]::GetFullPath($(if ($command.Source) { $command.Source } else { $command.Path })) }
+    }
+    catch { return $null }
+    return $null
 }
 
 function Get-InstalledMsvcVctipCandidates {
@@ -284,6 +312,11 @@ if ([string]::IsNullOrWhiteSpace($ScenarioId)) { throw 'ScenarioId must not be e
 if ($null -eq $ArgumentList) { $ArgumentList = @() }
 if ($null -eq $EnvironmentOverrides) { $EnvironmentOverrides = @{} }
 if ($null -eq $FixtureMetadata) { $FixtureMetadata = @{} }
+if ($null -eq $ComparisonSelection) { $ComparisonSelection = @{} }
+if ($null -eq $ControlledChangePaths) { $ControlledChangePaths = @() }
+if ($WorkKind -eq 'edited-source' -and ([string]::IsNullOrWhiteSpace($ControlledChangeId) -or $ControlledChangePaths.Count -eq 0)) {
+    throw 'Edited-source measurements require a controlled change ID and at least one explicit changed path.'
+}
 
 $resolvedExecutable = Resolve-NativeExecutable -Name $Executable
 $workingPath = (Resolve-Path -LiteralPath $WorkingDirectory -ErrorAction Stop).ProviderPath
@@ -456,6 +489,7 @@ foreach ($name in $environmentNames) {
 }
 
 $ownedRun = $null
+$comparisonContext = $null
 $locationPushed = $false
 $processStarted = $false
 $executionCompleted = $false
@@ -491,6 +525,31 @@ try {
         }
         else {
             [Environment]::SetEnvironmentVariable($name, [string]$value, 'Process')
+        }
+    }
+
+    try {
+        $isCargoCompile = $Stage -eq 'compile' -and [IO.Path]::GetFileName($resolvedExecutable) -ieq 'cargo.exe'
+        $cargoPath = if ($isCargoCompile) { $resolvedExecutable } else { $null }
+        $rustcPath = if ($isCargoCompile) { Resolve-RustcForComparison } else { $null }
+        $comparisonContext = New-TrackBComparisonContext -SourceRoot $gitRootPath -WorkingDirectory $workingPath `
+            -SourceSha $sourceSha -BaselineSha $BaselineSha -GitPath $gitPath -InvokedExecutablePath $resolvedExecutable -CargoPath $cargoPath -RustcPath $rustcPath `
+            -ArgumentList @($ArgumentList) -TargetDirectory $effectiveTargetDirectory -TargetDirectorySource $targetDirectorySource `
+            -Profile $Profile -WorkKind $WorkKind -CacheState $CacheState -ControlledChangeId $ControlledChangeId `
+            -ControlledChangePaths @($ControlledChangePaths) -FingerprintFlags @($FingerprintFlags) -TargetFlags @($TargetFlags) `
+            -Selection $ComparisonSelection -EnvironmentOverrides $EnvironmentOverrides `
+            -ProcessProbe { param($path, $arguments, $timeout) Invoke-TextProcess -ExecutablePath $path -Arguments @($arguments) `
+                -WorkingDirectory $workingPath -TimeoutSeconds $timeout }
+    }
+    catch {
+        $comparisonContext = [pscustomobject][ordered]@{
+            SchemaVersion = 1
+            ProvenanceStatus = 'incomplete'
+            CompatibilityCompleteness = $false
+            CompatibilityFingerprintSha256 = $null
+            Source = [pscustomobject][ordered]@{ Commit = $sourceSha; ChangedFiles = @(); Status = 'incomplete'; Sha256 = $null }
+            Scenario = [pscustomobject][ordered]@{ WorkKind = $WorkKind; CacheState = $CacheState; ControlledChangeId = $ControlledChangeId; ControlledChangePaths = @($ControlledChangePaths) }
+            Unknowns = @(('Comparison provenance collection failed: {0}' -f $_.Exception.Message))
         }
     }
 
@@ -685,6 +744,10 @@ $record = [pscustomobject][ordered]@{
     BinaryLinkObserved = $BinaryLinkObserved
     CargoFreshness = $CargoFreshness
     WorkEvidenceNote = $WorkEvidenceNote
+    WorkKind = $WorkKind
+    ControlledChangeId = $ControlledChangeId
+    ControlledChangePaths = @($ControlledChangePaths)
+    ComparisonContext = $comparisonContext
     CargoTimings = [pscustomobject][ordered]@{
         ReportPath = $timingPath
         Disposition = $timingDisposition

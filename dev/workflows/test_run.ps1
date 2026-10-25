@@ -207,6 +207,31 @@ finally {
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('Multi Launcher\workflow self test-' + [guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($testRoot) | Out-Null
 try {
+    $quickRunRequest = New-WorkflowRequest -Action Run -Mode quick-check
+    $expectedQuickCommand = $quickRunRequest.Phases[0].Command.ArgumentList
+    foreach ($quickCase in @(
+        @{ Name = 'success'; ExitCode = 0; Succeeded = $true; TimedOut = $false; ExpectedStatus = 'PASS'; ExpectedExit = 0 },
+        @{ Name = 'nonzero'; ExitCode = 7; Succeeded = $false; TimedOut = $false; ExpectedStatus = 'FAIL'; ExpectedExit = 7 },
+        @{ Name = 'timeout'; ExitCode = 0; Succeeded = $false; TimedOut = $true; ExpectedStatus = 'FAIL'; ExpectedExit = 124 }
+    )) {
+        $quickCalls = [System.Collections.Generic.List[string]]::new()
+        $quickInvoker = {
+            param($spec)
+            $quickCalls.Add([string]$spec.Name)
+            Assert-WorkflowEqual $spec.Name 'build' 'Quick-check phase name'
+            Assert-WorkflowEqual $spec.Stage 'compile' 'Quick-check stage'
+            Assert-WorkflowEqual $spec.TimeoutSeconds 1800 'Quick-check build deadline'
+            Assert-WorkflowSequence @($spec.Command.ArgumentList) $expectedQuickCommand 'Quick-check exact Cargo command'
+            return & $measurementFactory $spec '' $quickCase.ExitCode $quickCase.Succeeded $quickCase.TimedOut $true $true
+        }.GetNewClosure()
+        $quickResult = Invoke-WorkflowAction -Request $quickRunRequest -EvidenceDirectory $testRoot -ProcessInvoker $quickInvoker
+        Assert-WorkflowSequence @($quickCalls) @('build') "Quick-check $($quickCase.Name) executes only its build"
+        Assert-WorkflowEqual $quickResult.Status $quickCase.ExpectedStatus "Quick-check $($quickCase.Name) status"
+        Assert-WorkflowEqual $quickResult.ExitCode $quickCase.ExpectedExit "Quick-check $($quickCase.Name) exit propagation"
+        Assert-WorkflowEqual $quickResult.Request.TargetKind 'lib' "Quick-check $($quickCase.Name) retains library target"
+        Assert-WorkflowEqual $quickResult.Request.ModeKind 'build' "Quick-check $($quickCase.Name) retains build mode"
+    }
+
     $archiveSource = Join-Path $testRoot 'short-source.zip'
     Set-Content -LiteralPath $archiveSource -Value 'portable fixture archive bytes' -NoNewline
     $longArchiveRoot = Join-Path ([IO.Path]::GetTempPath()) ('wfl-' + [guid]::NewGuid().ToString('N').Substring(0, 12))

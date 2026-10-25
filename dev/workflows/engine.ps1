@@ -33,7 +33,7 @@ function Get-WorkflowSourceFingerprint {
     }
     foreach ($relativePath in @(
         'Cargo.toml', 'Cargo.lock', 'build.rs', '.cargo/config.toml',
-        'dev/track_b/cargo.ps1', 'dev/track_b/measure.ps1',
+        'dev/track_b/cargo.ps1', 'dev/track_b/measure.ps1', 'dev/track_b/comparison.ps1', 'dev/track_b/compare_measurements.ps1',
         'dev/workflows/owned_process.ps1', 'dev/workflows/engine.ps1',
         'dev/workflows/run.ps1', 'dev/workflows/results.ps1', 'dev/workflows/verify_msvc_auxiliary.ps1', 'dev/workflows/catalog.json',
         'dev/test_perf/common.ps1'
@@ -155,6 +155,11 @@ function New-WorkflowRequest {
         [ValidateSet('lib', 'integration')][string]$TargetKind,
         [string]$DiscoveryReceipt,
         [string]$RunnerProfile,
+        [ValidateSet('unknown', 'no-op', 'edited-source', 'preparation', 'cold')][string]$WorkKind = 'unknown',
+        [ValidateSet('unknown', 'warmed', 'clean', 'branch-switched', 'new-profile')][string]$CacheState = 'unknown',
+        [string]$BaselineSha,
+        [string]$ControlledChangeId,
+        [string[]]$ControlledChangePaths = @(),
         [string[]]$TestArguments = @()
     )
 
@@ -180,6 +185,7 @@ function New-WorkflowRequest {
         SchemaVersion = 1
         Action = $Action
         Mode = [string]$modeRecord.name
+        ModeKind = [string]$modeRecord.kind
         Package = [string]$catalog.package
         TargetKind = $null
         TargetName = $null
@@ -195,11 +201,23 @@ function New-WorkflowRequest {
         DiscoveryReceipt = $null
         CatalogSha256 = Get-WorkflowCatalogSha256
         SourceFingerprintSha256 = Get-WorkflowSourceFingerprint
+        WorkKind = $WorkKind
+        CacheState = $CacheState
+        BaselineSha = $BaselineSha
+        ControlledChangeId = $ControlledChangeId
+        ControlledChangePaths = @($ControlledChangePaths)
         CargoExecutable = $null
         NextestTool = $null
         Phases = @()
         Status = 'RESOLVED'
         ResolutionError = $null
+    }
+
+    if ($WorkKind -eq 'edited-source' -and ([string]::IsNullOrWhiteSpace($ControlledChangeId) -or $ControlledChangePaths.Count -eq 0)) {
+        throw 'Edited-source workflows require -ControlledChangeId and at least one -ControlledChangePaths entry.'
+    }
+    if ($ControlledChangePaths -contains '' -or @($ControlledChangePaths | Where-Object { [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) {
+        throw 'Controlled change paths cannot be empty.'
     }
 
     if ($Action -eq 'Discover' -and $modeRecord.kind -ne 'tests') { throw 'Discover requires the fast-dev-tests mode.' }
@@ -303,12 +321,18 @@ function New-WorkflowRequestFromCli {
         [string]$DiscoveryReceipt,
         [string]$ReplayReceipt,
         [string]$RunnerProfile,
+        [ValidateSet('unknown', 'no-op', 'edited-source', 'preparation', 'cold')][string]$WorkKind = 'unknown',
+        [ValidateSet('unknown', 'warmed', 'clean', 'branch-switched', 'new-profile')][string]$CacheState = 'unknown',
+        [string]$BaselineSha,
+        [string]$ControlledChangeId,
+        [string[]]$ControlledChangePaths = @(),
         [string[]]$TestArguments = @()
     )
 
     if ($Action -eq 'Replay') {
         if ([string]::IsNullOrWhiteSpace($ReplayReceipt)) { throw 'Replay requires -ReplayReceipt pointing to an original failed workflow receipt.' }
-        if ($SelectionName -or $TargetKind -or $DiscoveryReceipt -or $RunnerProfile -or $TestArguments.Count -gt 0) {
+        if ($SelectionName -or $TargetKind -or $DiscoveryReceipt -or $RunnerProfile -or $WorkKind -ne 'unknown' -or $CacheState -ne 'unknown' -or $BaselineSha -or
+            $ControlledChangeId -or $ControlledChangePaths.Count -gt 0 -or $TestArguments.Count -gt 0) {
             throw 'Replay takes its mode, selection, runner profile, and test arguments from the original receipt; only -ReplayReceipt is accepted.'
         }
         return New-WorkflowReplayRequest -Path $ReplayReceipt
@@ -320,6 +344,11 @@ function New-WorkflowRequestFromCli {
     if (![string]::IsNullOrWhiteSpace($TargetKind)) { $requestArguments.TargetKind = $TargetKind }
     if (![string]::IsNullOrWhiteSpace($DiscoveryReceipt)) { $requestArguments.DiscoveryReceipt = $DiscoveryReceipt }
     if (![string]::IsNullOrWhiteSpace($RunnerProfile)) { $requestArguments.RunnerProfile = $RunnerProfile }
+    if ($WorkKind -ne 'unknown') { $requestArguments.WorkKind = $WorkKind }
+    if ($CacheState -ne 'unknown') { $requestArguments.CacheState = $CacheState }
+    if (![string]::IsNullOrWhiteSpace($BaselineSha)) { $requestArguments.BaselineSha = $BaselineSha }
+    if (![string]::IsNullOrWhiteSpace($ControlledChangeId)) { $requestArguments.ControlledChangeId = $ControlledChangeId }
+    if ($ControlledChangePaths.Count -gt 0) { $requestArguments.ControlledChangePaths = @($ControlledChangePaths) }
     if ($PSBoundParameters.ContainsKey('TestArguments')) { $requestArguments.TestArguments = @($TestArguments) }
     return New-WorkflowRequest @requestArguments
 }
@@ -527,6 +556,23 @@ function Invoke-WorkflowCommand {
             WorkingDirectory = [string]$Command.WorkingDirectory
             SourceRoot = $script:WorkflowRoot
             Profile = [string]$Request.CompilerProfile
+            WorkKind = [string]$Request.WorkKind
+            CacheState = [string]$Request.CacheState
+            BaselineSha = [string]$Request.BaselineSha
+            ControlledChangeId = [string]$Request.ControlledChangeId
+            ControlledChangePaths = @($Request.ControlledChangePaths)
+            ComparisonSelection = @{
+                Mode = [string]$Request.Mode
+                ModeKind = [string]$Request.ModeKind
+                Package = [string]$Request.Package
+                TargetKind = [string]$Request.TargetKind
+                TargetName = [string]$Request.TargetName
+                Features = [pscustomobject]@{ DefaultFeatures = [bool]$Request.Features.DefaultFeatures; Explicit = @($Request.Features.Explicit) }
+                CompilerProfile = [string]$Request.CompilerProfile
+                RunnerProfile = [string]$Request.RunnerProfile
+                SelectionName = [string]$Request.SelectionName
+                ExactCase = [string]$Request.ExactCase
+            }
             Stage = $Stage
             TimeoutSeconds = $TimeoutSeconds
             CleanupTimeoutSeconds = 5
@@ -692,7 +738,7 @@ function Invoke-WorkflowAction {
     $firstFailure = $null
 
     try {
-        if ($Request.Action -eq 'Run' -and $Request.TargetKind -ne 'lib' -and $Request.TargetKind -ne 'integration') {
+        if ($Request.Action -eq 'Run' -and $Request.ModeKind -eq 'build') {
             $phase = $Request.Phases[0]
             $measurement = Invoke-WorkflowCommand -Request $Request -EvidenceDirectory $runDirectory -Name $phase.Name -Stage $phase.Stage `
                 -TimeoutSeconds $phase.TimeoutSeconds -Command $phase.Command -ProcessInvoker $ProcessInvoker

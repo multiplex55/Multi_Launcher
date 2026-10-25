@@ -195,6 +195,63 @@ For a quick library check, run `cargo check --lib`. To deliberately build all
 package binaries, use `cargo build --release` directly; the release preset
 selects only `multi_launcher`.
 
+## Build measurement and comparison
+
+For repeatable build observations, run the fixed workflow with explicit work
+and cache labels. Leave either label `unknown` unless its state was actually
+established; the report does not turn an unknown or warm-cache timing into an
+optimization claim.
+
+```powershell
+$evidence = Join-Path $env:TEMP ('multi-launcher-quick-check-pair-' + [guid]::NewGuid().ToString('N'))
+[IO.Directory]::CreateDirectory($evidence) | Out-Null
+$first = Join-Path $evidence 'sample-1'
+$second = Join-Path $evidence 'sample-2'
+& .\dev\workflows\run.ps1 -Action Run -Mode quick-check `
+    -WorkKind unknown -CacheState unknown -EvidenceDirectory $first
+& .\dev\workflows\run.ps1 -Action Run -Mode quick-check `
+    -WorkKind unknown -CacheState unknown -EvidenceDirectory $second
+$measurements = foreach ($sample in @($first, $second)) {
+    $workflow = Get-Content -Raw (Get-ChildItem $sample -Filter workflow.json -Recurse -File |
+        Select-Object -First 1 -ExpandProperty FullName) | ConvertFrom-Json
+    $workflow.Phases[0].MeasurementPath
+}
+& .\dev\track_b\compare_measurements.ps1 -MeasurementPath $measurements `
+    -OwnedEvidenceRoot $evidence -MaximumEvidenceFiles 5000 `
+    -MaximumEvidenceEntries 10000 -MaximumEvidenceBytes 5368709120 `
+    -OutputPath (Join-Path $evidence 'comparison.json')
+```
+
+Quick-check executes `cargo check --lib` with a compile deadline of 1,800
+seconds. Each measurement records whole-command wall time, source identity,
+host and tool identity, selected target/features/profile, effective target
+directory, allowlisted environment state and hashes, and Cargo configuration
+file labels and hashes. The environment allowlist includes inherited
+`CARGO_BUILD_RUSTFLAGS` and target-specific `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`
+and `CARGO_TARGET_<TRIPLE>_LINKER` settings. Cargo and Rustc version probes run
+through the checked owner only for an explicit Cargo compile command. Generic
+measured executables are never invoked with guessed version arguments. Raw environment values and
+configuration file contents are not retained; an explicit environment override
+outside the allowlist makes provenance incomplete. The comparison details
+show sanitized before/after values, including environment names/states/hashes
+and configuration file labels/hashes.
+
+The comparison helper rejects missing, malformed, legacy, failed, timed-out or
+incomplete-provenance samples. It keeps Cargo timing-artifact freshness separate
+from wall time, and never infers linker duration from process time. Evidence
+retention is an explicit report-only census bounded by file count, directory
+entry count and total bytes; it reports truncation or excess without deleting
+or rewriting evidence. Comparison output must be a new path and all input
+measurements must be inside the explicitly selected evidence root when a
+retention report is requested.
+
+The M2-B representative pair used the same quick-check request and unchanged
+source, with work/cache labels left unknown. Its measured wall times were
+0.895 and 0.867 seconds; the cache cause was not established. The comparison
+was compatible but explicitly made no improvement claim; these timings are
+workflow evidence, not a speedup result. The retained comparison receipt
+records the full provenance and report-only census.
+
 ## Opt-in reduced-symbol development profile
 
 `fast-dev` is accepted as an opt-in for repeated launcher builds and selected
