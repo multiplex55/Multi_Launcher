@@ -1918,7 +1918,7 @@ mod tests {
                 Arc::clone(&new_retired),
             )
             .unwrap();
-        let new_guard = ClickObservationGuard {
+        let mut new_guard = ClickObservationGuard {
             service: Arc::clone(&service),
             token: Some(new_token),
             retired: new_retired,
@@ -1930,8 +1930,9 @@ mod tests {
         );
         drop(service_lock);
 
+        let completion_timeout = Duration::from_secs(2);
         release_done_rx
-            .recv()
+            .recv_timeout(completion_timeout)
             .expect("the deferred old-token release should complete");
         let point = PhysicalPoint::new(-1400, 275);
         assert!(!handle.emit_physical_button_down(ClickButton::Middle, point, false, false));
@@ -1940,7 +1941,13 @@ mod tests {
         assert_eq!(event.generation, 44);
         assert!(new_event_rx.try_recv().is_err());
 
-        drop(new_guard);
+        // The old release can signal before it drops the service mutex, so
+        // releasing the replacement can also defer cleanup to its own worker.
+        let (replacement_done_tx, replacement_done_rx) = mpsc::channel();
+        new_guard.release_with_completion(Some(replacement_done_tx));
+        replacement_done_rx
+            .recv_timeout(completion_timeout)
+            .expect("the replacement-token release should complete");
         assert_eq!(handle.uninstall_count(), 1);
     }
 

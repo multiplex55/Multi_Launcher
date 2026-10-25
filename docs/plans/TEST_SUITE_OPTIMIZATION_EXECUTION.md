@@ -24,7 +24,8 @@ No application behavior or default profile changes are authorized.
 | M2-B | complete | One retained measured dialog fixture improvement; Quick Notes already caches geometry and was left unchanged |
 | M3-A | pending | One reversible pure-target grouping A/B; map full roster; retain only measured benefit |
 | M3-B | pending | Optional one test-only compile hotspot; skip without evidence |
-| M4-A/B | pending | Only observed isolation/wait costs; at most three wait substitutions |
+| M4-A | complete | Measured replacement-observer teardown race fixed with existing completion seam; 20 exact repeats and mixed group passed |
+| M4-B | skipped | No measured arbitrary sleep justified a substitution; no wait campaign |
 | M5-A | pending | Matched scorecard, coverage parity; at most one final full execution |
 | M5-B | pending | Independent review; scoped format and one first-party Clippy; commit and push |
 
@@ -173,3 +174,25 @@ Quick Notes geometry was inspected as a second candidate: it already computes
 eager geometry once per independent cold/warm fixture. Its 12 fixtures and seven
 settling frames have meaningful lifecycle coverage; no speculative reduction was
 retained. No other additional slow-test optimizations were manufactured.
+
+## M4-A deterministic teardown
+
+Only `src/mouse_gestures/service.rs`'s existing replacement-observer test changed.
+It now bounds the old completion receive and explicitly releases/awaits the
+replacement token using the existing completion method before asserting exactly
+one uninstall. Both local handshakes use two-second bounds; no sleeps, retries,
+production changes, global timeouts or parallelism changes were introduced.
+Stale-token rejection, actual replacement click/position/generation and duplicate
+event assertions remain. Completion proves token cleanup/uninstall, not a thread join.
+
+The original failure was observed at M0-A source, line 1944 (0 vs 1 uninstall).
+After the fix, `cargo nextest run --lib --cargo-profile fast-dev --offline -E
+'test(=mouse_gestures::service::tests::deferred_click_release_cannot_remove_a_replacement_observer)'
+--stress-count 20 --no-fail-fast` passed all 20 iterations (0.823s runner total).
+One normal-parallelism group with the adjacent passive-lease and guard-drop
+cases passed all three (0.047s total). Both owned invocations completed with
+recorded cleanup; evidence: `m4a-build.log`, `m4a-repeat`, `m4a-mixed`.
+The failed baseline duration is not counted as a speed improvement.
+
+There is no measured unnecessary wall-clock sleep in these selected owners.
+Quick Notes' settling frames test lifecycle behavior; no M4-B edits were made.
