@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 
 const MIB: usize = 1024 * 1024;
 const FRAME_POOL_BUFFERS: usize = 2;
-const FRAME_INTERVAL: Duration = Duration::from_millis(100);
+const FRAME_INTERVAL: Duration = Duration::from_millis(34);
+#[cfg(all(windows, feature = "dev-smoke-binaries"))]
+const GENERATED_SMOKE_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_GPU_BYTES: usize = 256 * MIB;
 
@@ -689,7 +691,7 @@ impl PinLiveCaptureSession {
                         }
                         continue;
                     }
-                    let image = match frames_rx.recv_timeout(FRAME_INTERVAL) {
+                    let image = match frames_rx.recv_timeout(GENERATED_SMOKE_IDLE_POLL_INTERVAL) {
                         Ok(image) => image,
                         Err(mpsc::RecvTimeoutError::Timeout) => continue,
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -865,10 +867,10 @@ struct FrameCadence {
 }
 
 impl FrameCadence {
-    fn wait_remaining(&self, now: Duration) -> Option<Duration> {
+    fn wait_remaining(&self, now: Duration, interval: Duration) -> Option<Duration> {
         let last = self.last_completed?;
         let elapsed = now.saturating_sub(last);
-        (elapsed < FRAME_INTERVAL).then(|| FRAME_INTERVAL - elapsed)
+        (elapsed < interval).then(|| interval - elapsed)
     }
 
     fn record_completed(&mut self, now: Duration) {
@@ -1402,7 +1404,9 @@ mod native {
                 continue;
             }
             if first_reservation.is_none() {
-                while let Some(remaining) = cadence.wait_remaining(clock_origin.elapsed()) {
+                while let Some(remaining) =
+                    cadence.wait_remaining(clock_origin.elapsed(), FRAME_INTERVAL)
+                {
                     let throttled = signal.wait_for_frame_or_control(remaining);
                     if throttled.cancelled {
                         break 'capture;
@@ -2067,21 +2071,69 @@ mod tests {
     }
 
     #[test]
-    fn frame_cadence_caps_completed_frames_to_ten_per_second() {
+    fn frame_cadence_caps_completed_frames_near_thirty_per_second() {
+        const PREVIOUS_INTERVAL: Duration = Duration::from_millis(100);
+
         let mut cadence = FrameCadence::default();
-        assert_eq!(cadence.wait_remaining(Duration::ZERO), None);
+        assert_eq!(cadence.wait_remaining(Duration::ZERO, FRAME_INTERVAL), None);
         cadence.record_completed(Duration::ZERO);
         assert_eq!(
-            cadence.wait_remaining(Duration::from_millis(99)),
+            cadence.wait_remaining(Duration::from_millis(33), FRAME_INTERVAL),
             Some(Duration::from_millis(1))
         );
-        assert_eq!(cadence.wait_remaining(Duration::from_millis(100)), None);
-        cadence.record_completed(Duration::from_millis(100));
+        assert_eq!(cadence.wait_remaining(FRAME_INTERVAL, FRAME_INTERVAL), None);
+        cadence.record_completed(FRAME_INTERVAL);
         assert_eq!(
-            cadence.wait_remaining(Duration::from_millis(199)),
+            cadence.wait_remaining(FRAME_INTERVAL + Duration::from_millis(33), FRAME_INTERVAL),
             Some(Duration::from_millis(1))
         );
-        assert_eq!(cadence.wait_remaining(Duration::from_millis(250)), None);
+        assert_eq!(
+            cadence.wait_remaining(FRAME_INTERVAL * 2, FRAME_INTERVAL),
+            None
+        );
+
+        let simulated_completions = |interval| {
+            let measurement_window = Duration::from_secs(1);
+            let mut cadence = FrameCadence::default();
+            let source_period = Duration::from_nanos(1_000_000_000 / 30);
+            let processing_cost = Duration::from_millis(1);
+            let mut now = Duration::ZERO;
+            let mut next_source = Duration::ZERO;
+            let mut completed = 0;
+
+            while now < measurement_window {
+                if next_source > now {
+                    now = next_source;
+                }
+                next_source += source_period;
+
+                while let Some(remaining) = cadence.wait_remaining(now, interval) {
+                    let deadline = now + remaining;
+                    if next_source <= deadline {
+                        now = next_source;
+                        next_source += source_period;
+                    } else {
+                        now = deadline;
+                    }
+                }
+
+                now += processing_cost;
+                if now >= measurement_window {
+                    break;
+                }
+                cadence.record_completed(now);
+                completed += 1;
+            }
+            completed
+        };
+
+        let previous_rate = simulated_completions(PREVIOUS_INTERVAL);
+        let bounded_rate = simulated_completions(FRAME_INTERVAL);
+        assert_eq!(previous_rate, 10, "the former 100 ms cap yields 10 Hz");
+        assert_eq!(
+            bounded_rate, 29,
+            "a 30 Hz source yields about 29 completed frames/s after 1 ms processing"
+        );
     }
 
     #[test]

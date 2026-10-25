@@ -6125,6 +6125,143 @@ mod tests {
     }
 
     #[test]
+    fn pinboard_live_presenter_delivers_controlled_generated_frames_above_ten_hz() {
+        let mut board = Pinboard::with_limits(PinboardLimits::new(2, 256, 64)).unwrap();
+        let (pin_id, generation, frames) = add_live_pin(&mut board, 1);
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let fake_native = Arc::new(FakePinNativeApi::default());
+        let native_api: Arc<dyn PinNativeApi> = fake_native.clone();
+        let mut presenter = PinWindowPresenter::with_native_api(native_api);
+        let repaint_ids = Arc::new(Mutex::new(Vec::new()));
+        let repaint_ids_callback = Arc::clone(&repaint_ids);
+        ctx.set_request_repaint_callback(move |info| {
+            repaint_ids_callback.lock().unwrap().push(info.viewport_id);
+        });
+        let callbacks = pin_callbacks(&ctx, &mut presenter, &board);
+        let runtime = presenter.registry.lock().unwrap().pins[&pin_id].clone();
+        fake_native.add_window(&runtime, 0x501, true, ScreenRect::new(0, 0, 2, 2));
+        let preparation = runtime.image_source.live_preparation().unwrap().clone();
+        assert!(preparation.wait_for_sequence(1));
+        let callback = callbacks[&pin_id].clone();
+        let initial_output = ctx.run_ui(child_input(runtime.viewport_id, 1.0), |ui| callback(ui));
+        let texture_id = runtime.state.lock().unwrap().texture.as_ref().unwrap().id();
+        assert_eq!(runtime.state.lock().unwrap().texture_sequence, Some(1));
+        drop(delta_image(&initial_output, texture_id));
+        initial_output.drop_without_applying_deltas();
+        repaint_ids.lock().unwrap().clear();
+
+        const GENERATED_FRAME_COUNT: u64 = 30;
+        let source_period = Duration::from_micros(33_333);
+        let started = Instant::now();
+        let mut source_frames_sent = 0_u64;
+        let mut published = 0_u64;
+        let mut prepared = 0_u64;
+        let mut texture_deltas = 0_u64;
+        let mut source_to_publish = Duration::ZERO;
+        let mut source_to_prepare = Duration::ZERO;
+        let mut source_to_texture = Duration::ZERO;
+
+        for index in 0..GENERATED_FRAME_COUNT {
+            let due = started + source_period * index as u32;
+            if let Some(remaining) = due.checked_duration_since(Instant::now()) {
+                thread::sleep(remaining);
+            }
+
+            let sequence = index + 2;
+            let color = Rgba([sequence as u8, 71, 113, 255]);
+            let frame_started = Instant::now();
+            source_frames_sent += 1;
+            publish_fake_live_frame(&frames, generation, sequence, color);
+            source_to_publish += frame_started.elapsed();
+            assert_eq!(
+                board.get(pin_id).unwrap().live_frame().unwrap().sequence,
+                sequence,
+                "the source worker should publish each paced generated sequence"
+            );
+            published += 1;
+
+            assert!(preparation.wait_for_sequence(sequence));
+            assert_eq!(preparation.frame().unwrap().sequence, sequence);
+            source_to_prepare += frame_started.elapsed();
+            prepared += 1;
+
+            let output = ctx.run_ui(child_input(runtime.viewport_id, 1.0), |ui| callback(ui));
+            assert_eq!(
+                runtime.state.lock().unwrap().texture.as_ref().unwrap().id(),
+                texture_id,
+                "live frames should update the existing child texture"
+            );
+            assert_eq!(
+                runtime.state.lock().unwrap().texture_sequence,
+                Some(sequence)
+            );
+            let delta = delta_image(&output, texture_id);
+            assert_eq!(
+                delta.pixels[0],
+                egui::Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3])
+            );
+            drop(delta);
+            output.drop_without_applying_deltas();
+            source_to_texture += frame_started.elapsed();
+            texture_deltas += 1;
+
+            assert!(preparation.retained_upload_count() <= MAX_RETIRED_LIVE_UPLOADS);
+            assert!(
+                board.image_bytes() <= 64,
+                "generated display preparation must stay within the pin image budget"
+            );
+        }
+
+        let elapsed = started.elapsed();
+        let delivered_per_second = texture_deltas as f64 / elapsed.as_secs_f64();
+        let repaint_requests = repaint_ids.lock().unwrap().clone();
+        assert_eq!(source_frames_sent, GENERATED_FRAME_COUNT);
+        assert_eq!(published, GENERATED_FRAME_COUNT);
+        assert_eq!(prepared, GENERATED_FRAME_COUNT);
+        assert_eq!(texture_deltas, GENERATED_FRAME_COUNT);
+        assert!(delivered_per_second > 10.0);
+        assert!(
+            !repaint_requests.is_empty()
+                && repaint_requests
+                    .iter()
+                    .all(|viewport_id| *viewport_id == runtime.viewport_id),
+            "live display wakes should target only the child pin viewport"
+        );
+        eprintln!(
+            "generated fake pipeline (not OS capture): source={source_frames_sent}, published={published}, prepared={prepared}, child_texture_deltas={texture_deltas}, elapsed_ms={}, delivered_fps={delivered_per_second:.2}, avg_source_to_publish_ms={:.3}, avg_source_to_prepare_ms={:.3}, avg_source_to_texture_ms={:.3}, child_repaint_requests={}, retained_uploads={}, image_bytes={}",
+            elapsed.as_secs_f64() * 1_000.0,
+            source_to_publish.as_secs_f64() * 1_000.0 / GENERATED_FRAME_COUNT as f64,
+            source_to_prepare.as_secs_f64() * 1_000.0 / GENERATED_FRAME_COUNT as f64,
+            source_to_texture.as_secs_f64() * 1_000.0 / GENERATED_FRAME_COUNT as f64,
+            repaint_requests.len(),
+            preparation.retained_upload_count(),
+            board.image_bytes(),
+        );
+
+        let last_sequence = GENERATED_FRAME_COUNT + 1;
+        let unchanged_output = ctx.run_ui(child_input(runtime.viewport_id, 1.0), |ui| callback(ui));
+        assert_eq!(
+            runtime.state.lock().unwrap().texture_sequence,
+            Some(last_sequence)
+        );
+        assert!(
+            unchanged_output
+                .textures_delta
+                .set
+                .iter()
+                .all(|(updated_id, _)| *updated_id != texture_id),
+            "an unchanged source sequence should not upload the texture again"
+        );
+        unchanged_output.drop_without_applying_deltas();
+
+        presenter.close(pin_id, &mut board);
+        assert!(preparation.cancel_and_join().is_ok());
+        assert!(preparation.is_cancelled());
+        presenter.shutdown().unwrap();
+    }
+
+    #[test]
     fn pinboard_presenter_capture_feedback_re_registers_until_dismissed() {
         let ctx = egui::Context::default();
         ctx.set_embed_viewports(false);

@@ -18,8 +18,8 @@ Only these corrections and their focused evidence are in scope.
 | M0-A | complete | Baseline above; no pre-existing modifications. |
 | M1-A | complete | `afde8db4`; rustls 0.23.40 → 0.23.45, required webpki 0.103.13 → 0.103.16 only. Locked reverse graph: reqwest 0.12.28, hyper-rustls 0.27.9, tokio-rustls 0.26.4. Manifest features unchanged. Push: connection failed. Compile deferred to integration. |
 | M2-A | partial / verified related fix | `8daffbae`; zero-height results viewport corrected and focused geometry/scroll/resize regression passes; reported creep remains unreproduced. Unchanged response-flow gate timeout remains. Push: connection failed. |
-| M3-A | verified tail fix / native gap | Redundant Windows 10 ms hidden-frame sleep removed; identical owned static/live/paused dispatch probes improve maxima to <1 ms. Four control/lifetime tests pass; pointer drag, visual compositing and separate slow fixture polling remain unverified. |
-| M4-A | pending | Bounded ~34 ms active capture cadence, deterministic production cadence tests plus distinct generated prepare/display evidence; preserve budgets/coalescing/idle/cancel. |
+| M3-A | verified tail fix / native gap | `a20daa94`; redundant Windows 10 ms hidden-frame sleep removed; identical owned static/live/paused dispatch probes improve maxima to <1 ms. Four control/lifetime tests pass; pointer drag, visual compositing and separate slow fixture polling remain unverified. Push: connection failed. |
+| M4-A | verified | Active cadence 34 ms (~29.4 Hz); generated idle poll stays 100 ms; native 200/750 ms waits unchanged. Deterministic old/new completions 10/29 with 1 ms processing. Seven focused tests pass after one test-boundary correction. |
 | M4-B | pending | One existing guarded Glow/native WinRT acceptance pass where supported; record environmental gaps truthfully. |
 | M5-A | pending | Changed-file formatting, one first-party compile, focused tests and optional end-only Clippy, independent final diff review, clean committed handoff. |
 
@@ -129,3 +129,37 @@ rustfmt and diff checks passed. No vendor-wide suite or extra native retries.
 Owned native logs (ignored build artifacts):
 - Before: `target/pin-opacity-smoke/000000000000000018e1a31bedc15838/pin-opacity-smoke.log`
 - After: `target/pin-opacity-smoke/000000000000000018e1a35aa8d09bd4/pin-opacity-smoke.log`
+
+## M4 generated baseline
+
+Before changing production's 100 ms FrameCadence, a controlled 30 Hz fake source
+delivered all 30 source-signaled / published / prepared / child texture-delta
+sequences in 971.848 ms (30.87 counted frames/s). Average source→publish was
+0.191 ms, source→prepared 0.214 ms, source→texture 1.912 ms. There were 30
+child-only repaint requests, zero retained uploads at measurement end, and
+32 budgeted image bytes. Texture identity was retained, unchanged sequences
+caused no upload, and retained/image budget bounds were asserted throughout.
+This source bypasses native FrameCadence: it proves small-frame preparation and
+texture capacity, not OS capture throughput or a before-fix 30 FPS native pin.
+
+Post-change initial focused group measured generated throughput at 31.00 FPS
+and passed presenter reuse plus fake pause/resume, but the new virtual cadence
+simulator counted an out-of-window 1.011 s completion. Parent and independent
+review both identified this test boundary defect. The completion-time horizon
+check was corrected, preserving expected old/new counts of 10/29; one focused
+group rerun passed. Review found no other production ownership/budget
+or integration defects.
+
+Final M4 run: 7 passed, 6,330 skipped, 1.342 s tests / 1m44s build.
+Generated stages each delivered 30 sequences in 967.830 ms (31.00 counted
+frames/s): average source→publish 0.200 ms, source→prepared 0.216 ms,
+source→texture 2.007 ms. Thirty child-only repaint requests, zero retained
+uploads at receipt, and 32/64 budgeted image bytes. This is essentially the
+same generated capacity as before; the production improvement is removal of
+the 100 ms native-capture scheduling ceiling. Actual OS-source FPS remains
+unmeasured. Existing lease, fake pause/resume and upload-retention tests pass.
+
+Exact M4 command:
+`cargo nextest run --locked -p multi_launcher --lib -E 'test(frame_cadence_) or test(worker_signal_) or test(latest_frame_slot) or test(fake_live_session) or test(pinboard_live_presenter)' --no-capture`
+Changed-file rustfmt and `git diff --check` passed. No stale ten-per-second test
+name remains. Final compile/lint and native-source attempt follow this checkpoint.
