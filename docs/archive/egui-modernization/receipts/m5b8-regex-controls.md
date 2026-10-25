@@ -1,9 +1,0 @@
-# M5-B8 Regex Tester surrounding controls
-
-Parent: 80cc7213. Only src/gui/regex_tester_dialog.rs changes. Existing shared heading/help/status and native button emphasis refine engine/pattern/flags and copy feedback. The information selector retains its original parent, salt and width; a provisional extra horizontal parent was removed during review before testing. Full diagnostics and explicit clipboard commands remain with their existing owners. CoreLayout allocation, immediate viewport/class callbacks, evaluation/session/debounce, editor/highlighting/Unicode/oversized guards, source/cursor/navigation and persistence are unchanged.
-
-Scoped formatting, diff check and source review passed. Windows locked/offline fast-dev regex-chrome-001 passed all eight existing contracts (native exit 0) in 63.8914 seconds, with source hashes unchanged during the run. Coverage includes scaled core allocation/source bounds, F3 and Tab ownership, complete same-frame Unicode paste, idle/truncation, embedded focus/close, implicit clipboard isolation and full-text glyph guard. Raw input, source hashes, process receipt, result and logs remain in target/egui-modernization/m5b8/regex-chrome-001/nextest. Review accepted with no remaining substantive finding; the process is terminal. No new tests or matrix. The installed stable formatter succeeded directly after a rustup shim attempted an unavailable update; no toolchain change was made. No benchmark or dependency changes.
-
-Computer Use is prohibited. Existing ROOT/QR framebuffer capture does not target the native Regex immediate viewport; native visual/control clipping/input remains unobserved. The existing scaled-layout test covers allocated core regions and source bounds, not every individual native control. No new capture/bootstrap framework is introduced. Continue safe implementation with these explicit qualification gaps.
-
-Next: M5-C1 App Editor, Add/Edit App and legacy command Macros. Checkpoints remain local.
