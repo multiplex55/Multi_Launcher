@@ -239,3 +239,29 @@ No optional M3-B change was made: the monolithic library-test preparation is
 expensive (327s for M2-A), but a small proven duplication/monomorphization fix
 was not identified. Large GUI test-module restructuring and compiler tuning
 would exceed this bounded follow-on.
+
+## M5-B review remediation
+
+The independent reviewer found two tooling defects: the native helper returned
+zero after a failed target prebuild, and the JSON parser attributed interleaved
+case completions to the most recent suite announcement. Both are repaired.
+Terminal case identities now resolve against the actual inventory; ambiguous
+or unknown protocol identities remain explicitly unresolved. Pure fixtures
+cover interleaving, ambiguity, unknown identity and started announcements.
+Ignored counts come from inventory. Generic failed events cannot reliably
+distinguish per-case timeouts on this reporter version, so that total stays
+nullable; explicit timeout-event counts and raw output remain available.
+
+All PowerShell scripts parse; `test_profile.ps1 -ParserOnly` passes. Bounded
+native helper checks returned **101** for a deliberately nonexistent target,
+**0** for all five `pure` cases, and **4** for an unmatched exact filter without
+starting execution. The containing check exited 0; all recorded owned
+identities are absent afterward (`m5-helper-check`). The same reviewer
+confirmed both repairs and found no new substantive issue in the narrow
+follow-up. No production code changed.
+
+Final matched library no-op samples at `15d9e12c` are 2.140753, 2.159011 and
+2.101898 seconds (median **2.140753s**, 9.94% below baseline 2.376990s).
+Preparation 2.203940s is excluded. These small warm command differences include
+startup/freshness work and do not measure compiler or linker time separately.
+Evidence: `final-lib-build-containment`, `build-samples/candidate-lib-*`.

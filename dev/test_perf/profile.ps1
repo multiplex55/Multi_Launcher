@@ -120,7 +120,8 @@ function Invoke-ProfilePhase {
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string[]]$Arguments,
         [ValidateSet('human', 'json', 'inventory')][string]$OutputMode = 'human',
-        [hashtable]$EnvironmentOverrides = @{}
+        [hashtable]$EnvironmentOverrides = @{},
+        [AllowEmptyCollection()][object[]]$InventoryCases = @()
     )
 
     Write-Host "Phase: $Name"
@@ -130,7 +131,7 @@ function Invoke-ProfilePhase {
     $phase = Invoke-TestPerfProcess -ExecutablePath $cargo.Path -Arguments $Arguments -WorkingDirectory $repoRoot `
         -TimeoutSeconds $TimeoutSeconds -OwnedRunnerPath (Join-Path $repoRoot 'dev\run_owned_process.ps1') `
         -StdoutPath $stdoutPath -StderrPath $stderrPath -OutputMode $OutputMode `
-        -EnvironmentOverrides $EnvironmentOverrides
+        -EnvironmentOverrides $EnvironmentOverrides -InventoryCases $InventoryCases
     return [pscustomobject][ordered]@{
         Name = $Name
         Category = if ($Name -match '(?i)build|metadata') { 'Prebuild' } elseif ($Name -match '(?i)inventory') { 'Inventory' } elseif ($Name -match '(?i)execution') { 'Execution' } else { 'Other' }
@@ -246,7 +247,8 @@ try {
         $environment = @{}
         $outputMode = if ($format -eq 'libtest-json-plus') { 'json' } else { 'human' }
         if ($format -eq 'libtest-json-plus') { $environment['NEXTEST_EXPERIMENTAL_LIBTEST_JSON'] = '1' }
-        $runPhase = Invoke-ProfilePhase -Name 'test-execution' -Arguments @($runArguments) -OutputMode $outputMode -EnvironmentOverrides $environment
+        $runPhase = Invoke-ProfilePhase -Name 'test-execution' -Arguments @($runArguments) -OutputMode $outputMode `
+            -EnvironmentOverrides $environment -InventoryCases $testInventory
         $phases.Add($runPhase)
     }
 }
@@ -270,8 +272,16 @@ $executionPhase = $phases | Where-Object Name -eq 'test-execution' | Select-Obje
 $resultsCollected = $null -ne $executionPhase -and $MessageFormat -eq 'libtest-json-plus' -and $parserErrors.Count -eq 0
 $passed = @($executionPhase.PerCaseResults | Where-Object Status -eq 'PASS').Count
 $failed = @($executionPhase.PerCaseResults | Where-Object Status -eq 'FAIL').Count
-$timedOutCases = @($executionPhase.PerCaseResults | Where-Object Status -eq 'TIMEOUT').Count
-$ignored = @($executionPhase.PerCaseResults | Where-Object Status -eq 'IGNORED').Count
+$explicitTimeoutEvents = if ($resultsCollected) { @($executionPhase.PerCaseResults | Where-Object Status -eq 'TIMEOUT').Count } else { $null }
+$ignored = if ($inventoryCollected) { @($testInventory | Where-Object Ignored).Count } else { $null }
+$timeoutCountCompleteness = if (!$resultsCollected) {
+    'unknown: structured execution results were not collected'
+} elseif ($executionPhase.TimedOut) {
+    'unknown: the outer execution deadline may have left cases without terminal events'
+} elseif ($executionPhase.Status -ne 'PASS' -or $failed -gt 0) {
+    'unknown: generic failed events or a non-success phase do not distinguish timeout from other failure'
+} else { 'complete for the successful structured run' }
+$timedOutCases = if ($timeoutCountCompleteness -eq 'complete for the successful structured run') { $explicitTimeoutEvents } else { $null }
 $notIgnoredInventory = Get-TestPerfSelectedCaseCount -Cases $testInventory
 $notIgnoredInventory = [int]$notIgnoredInventory
 if ($Mode -eq 'Inventory' -and $notIgnoredInventory -eq 0 -and !$phaseFailure) { $exitCode = 4 }
@@ -332,7 +342,7 @@ $receipt = [pscustomobject][ordered]@{
     BinariesMetadataPath = $binariesMetadataPath
     BinariesMetadataSha256 = if ($binariesMetadataPath -and (Test-Path -LiteralPath $binariesMetadataPath)) { (Get-FileHash -LiteralPath $binariesMetadataPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
     Inventory = [pscustomobject]@{
-        Source = if ($testInventory.Count -gt 0) { 'nextest list JSON' } elseif ($inventoryError) { 'unavailable' } else { 'not collected or empty' }
+        Source = if ($inventoryCollected) { 'nextest list JSON' } elseif ($inventoryError) { 'unavailable' } else { 'not collected' }
         TotalCases = if ($inventoryCollected) { $testInventory.Count } else { $null }
         IgnoredCases = if ($inventoryCollected) { @($testInventory | Where-Object Ignored).Count } else { $null }
         SelectedCases = if ($inventoryCollected) { $notIgnoredInventory } else { $null }
@@ -342,8 +352,10 @@ $receipt = [pscustomobject][ordered]@{
     Results = [pscustomobject]@{
         Passed = if ($resultsCollected) { $passed } else { $null }
         Failed = if ($resultsCollected) { $failed } else { $null }
-        TimedOut = if ($resultsCollected) { $timedOutCases } else { $null }
-        Ignored = if ($inventoryCollected) { @($testInventory | Where-Object Ignored).Count } else { $null }
+        TimedOut = $timedOutCases
+        ExplicitTimeoutEvents = if ($resultsCollected) { $explicitTimeoutEvents } else { $null }
+        TimeoutCountCompleteness = $timeoutCountCompleteness
+        Ignored = $ignored
         PerCase = @($executionPhase.PerCaseResults)
     }
     Phases = @($phases)
@@ -353,5 +365,10 @@ $receipt = [pscustomobject][ordered]@{
 $receiptPath = Join-Path $runDirectory 'receipt.json'
 $receipt | ConvertTo-Json -Depth 14 | Set-Content -LiteralPath $receiptPath -Encoding utf8
 Write-Host "Receipt: $receiptPath"
-Write-Host ("Status: {0}; build phases: {1}; passed: {2}; failed: {3}; timeout: {4}; ignored: {5}" -f $receipt.Status, $phases.Count, $passed, $failed, $timedOutCases, $ignored)
+$passedLabel = if ($resultsCollected) { [string]$passed } else { 'unknown' }
+$failedLabel = if ($resultsCollected) { [string]$failed } else { 'unknown' }
+$timeoutLabel = if ($null -ne $timedOutCases) { [string]$timedOutCases } elseif ($null -ne $explicitTimeoutEvents) { "unknown (explicit events: $explicitTimeoutEvents)" } else { 'unknown' }
+$ignoredLabel = if ($inventoryCollected) { [string]$ignored } else { 'unknown' }
+Write-Host ("Status: {0}; phases: {1}; passed: {2}; failed: {3}; per-case timeout: {4}; ignored: {5}" -f `
+    $receipt.Status, $phases.Count, $passedLabel, $failedLabel, $timeoutLabel, $ignoredLabel)
 exit $exitCode

@@ -49,6 +49,7 @@ try {
     & $cargoPath @buildArguments 1> $metadataPath
     $buildExitCode = [int]$LASTEXITCODE
     if ($buildExitCode -ne 0) {
+        $runExitCode = $buildExitCode
         Write-Warning "Selected target build/metadata phase failed with exit code $buildExitCode."
     }
     else {
@@ -61,7 +62,7 @@ try {
         if ($Filter) {
             Write-Host 'Selection phase: verify that the exact case filter matches runnable cases.'
             $selectionPath = Join-Path $runDirectory 'selected-tests.json'
-        $selectionArguments = @('nextest', 'list', '--message-format', 'json', '--manifest-path', $manifestPath, '--binaries-metadata', $metadataPath, '-E', $Filter)
+            $selectionArguments = @('nextest', 'list', '--message-format', 'json', '--manifest-path', $manifestPath, '--binaries-metadata', $metadataPath, '-E', $Filter)
             & $cargoPath @selectionArguments 1> $selectionPath
             $selectionExitCode = [int]$LASTEXITCODE
             if ($selectionExitCode -ne 0) {
@@ -83,7 +84,7 @@ try {
 
         if ($shouldRun) {
             Write-Host 'Execution phase: Nextest native progress follows.'
-    $runArguments = @('nextest', 'run', '--manifest-path', $manifestPath, '--binaries-metadata', $metadataPath, '--message-format', 'human')
+            $runArguments = @('nextest', 'run', '--manifest-path', $manifestPath, '--binaries-metadata', $metadataPath, '--message-format', 'human')
             if ($Filter) { $runArguments += @('-E', $Filter) }
             & $cargoPath @runArguments
             $runExitCode = [int]$LASTEXITCODE

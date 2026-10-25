@@ -1,6 +1,6 @@
 #requires -Version 7.0
 [CmdletBinding()]
-param()
+param([switch]$ParserOnly)
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -8,6 +8,63 @@ $ErrorActionPreference = 'Stop'
 function Assert-Equal {
     param([object]$Actual, [object]$Expected, [string]$Label)
     if ($Actual -ne $Expected) { throw "$Label expected '$Expected', got '$Actual'." }
+}
+
+function Invoke-ParserIdentityFixtures {
+    $inventoryCases = @(
+        [pscustomobject]@{ BinaryId = 'multi_launcher'; PackageName = 'multi_launcher'; BinaryName = 'multi_launcher'; Kind = 'lib'; TestName = 'xml_toolkit_session::tests::done' },
+        [pscustomobject]@{ BinaryId = 'multi_launcher::bookmarks_plugin'; PackageName = 'multi_launcher'; BinaryName = 'bookmarks_plugin'; Kind = 'test'; TestName = 'alias_roundtrip' },
+        [pscustomobject]@{ BinaryId = 'multi_launcher::clipboard_modifiers'; PackageName = 'multi_launcher'; BinaryName = 'clipboard_modifiers'; Kind = 'test'; TestName = 'adjustment' }
+    )
+    $identityMap = New-TestPerfInventoryIdentityMap -Cases $inventoryCases
+    $rows = [System.Collections.Generic.List[object]]::new()
+    $errors = [System.Collections.Generic.List[string]]::new()
+    $fixtureMessages = @(
+        @{ type = 'suite'; event = 'started'; nextest = @{ crate = 'multi_launcher'; test_binary = 'bookmarks_plugin'; kind = 'test' } },
+        @{ type = 'test'; event = 'started'; name = 'multi_launcher::bookmarks_plugin$alias_roundtrip' },
+        @{ type = 'suite'; event = 'started'; nextest = @{ crate = 'multi_launcher'; test_binary = 'multi_launcher'; kind = 'lib' } },
+        @{ type = 'test'; event = 'ok'; name = 'multi_launcher::bookmarks_plugin$alias_roundtrip'; exec_time = 0.01 },
+        @{ type = 'test'; event = 'started'; name = 'multi_launcher::multi_launcher$xml_toolkit_session::tests::done' },
+        @{ type = 'suite'; event = 'started'; nextest = @{ crate = 'multi_launcher'; test_binary = 'clipboard_modifiers'; kind = 'test' } },
+        @{ type = 'test'; event = 'ok'; name = 'multi_launcher::multi_launcher$xml_toolkit_session::tests::done'; exec_time = 0.02 },
+        @{ type = 'test'; event = 'ok'; name = 'multi_launcher::clipboard_modifiers$adjustment'; exec_time = 0.03 }
+    )
+    foreach ($message in $fixtureMessages) {
+        Receive-TestPerfProcessLine -Line ($message | ConvertTo-Json -Compress -Depth 5) -OutputMode json `
+            -CaseRows $rows -ParseErrors $errors -IdentityMap $identityMap
+    }
+    Assert-Equal $errors.Count 0 'Interleaved parser fixture errors'
+    Assert-Equal $rows.Count 3 'Started announcements are not counted as completed cases'
+    Assert-Equal $rows[0].BinaryName 'bookmarks_plugin' 'Interleaved bookmarks target attribution'
+    Assert-Equal $rows[0].Kind 'test' 'Interleaved bookmarks kind attribution'
+    Assert-Equal $rows[1].BinaryName 'multi_launcher' 'Interleaved library target attribution'
+    Assert-Equal $rows[1].Kind 'lib' 'Interleaved library kind attribution'
+    Assert-Equal $rows[2].BinaryName 'clipboard_modifiers' 'Interleaved clipboard target attribution'
+    Assert-Equal $rows[2].IdentityStatus 'resolved' 'Interleaved identity status'
+
+    $ambiguousCases = @(
+        [pscustomobject]@{ BinaryId = 'multi_launcher::same::lib'; PackageName = 'multi_launcher'; BinaryName = 'same'; Kind = 'lib'; TestName = 'duplicate' },
+        [pscustomobject]@{ BinaryId = 'multi_launcher::same::test'; PackageName = 'multi_launcher'; BinaryName = 'same'; Kind = 'test'; TestName = 'duplicate' }
+    )
+    $ambiguousMap = New-TestPerfInventoryIdentityMap -Cases $ambiguousCases
+    $ambiguousLine = @{ type = 'test'; event = 'ok'; name = 'multi_launcher::same$duplicate' } | ConvertTo-Json -Compress
+    $ambiguous = Convert-TestPerfJsonMessage -Line $ambiguousLine -IdentityMap $ambiguousMap
+    Assert-Equal $ambiguous.IdentityStatus 'ambiguous' 'Ambiguous identity status'
+    Assert-Equal $ambiguous.BinaryId $null 'Ambiguous binary id remains unknown'
+    Assert-Equal $ambiguous.TargetName $null 'Ambiguous target remains unknown'
+    Assert-Equal $ambiguous.Kind $null 'Ambiguous kind remains unknown'
+    Assert-Equal $ambiguous.IdentityCandidates.Count 2 'Ambiguous candidates are retained'
+
+    $unknownLine = @{ type = 'test'; event = 'ok'; name = 'multi_launcher::missing$case' } | ConvertTo-Json -Compress
+    $unknown = Convert-TestPerfJsonMessage -Line $unknownLine -IdentityMap $identityMap
+    Assert-Equal $unknown.IdentityStatus 'unknown' 'Unmatched identity status'
+    Assert-Equal $unknown.BinaryId $null 'Unmatched binary id remains unknown'
+}
+
+Invoke-ParserIdentityFixtures
+if ($ParserOnly) {
+    Write-Host 'Pure parser identity fixtures passed.'
+    return
 }
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('Multi Launcher\test perf self test-' + [guid]::NewGuid().ToString('N'))
@@ -38,9 +95,10 @@ if ($Case -eq 'timeout') {
 }
 $event = if ($Case -eq 'failure') { 'failed' } else { 'ok' }
 $status = if ($Case -eq 'failure') { 'fail' } else { 'pass' }
+$eventName = 'multi_launcher::multi_launcher$' + $Value
 $suite = [ordered]@{ type = 'suite'; event = 'started'; nextest = @{ crate = 'multi_launcher'; test_binary = 'multi_launcher::multi_launcher$gui'; kind = 'lib' } }
-$started = [ordered]@{ type = 'test'; event = 'started'; name = $Value; nextest = @{ status = 'running' } }
-$finished = [ordered]@{ type = 'test'; event = $event; name = $Value; exec_time = 0.015; nextest = @{ status = $status; time = @{ exec_time = 0.015 } } }
+$started = [ordered]@{ type = 'test'; event = 'started'; name = $eventName; nextest = @{ status = 'running' } }
+$finished = [ordered]@{ type = 'test'; event = $event; name = $eventName; exec_time = 0.015; nextest = @{ status = $status; time = @{ exec_time = 0.015 } } }
 foreach ($message in @($suite, $started, $finished)) { [Console]::WriteLine(($message | ConvertTo-Json -Compress -Depth 5)) }
 if ($Case -eq 'failure') { exit 7 }
 exit 0
@@ -50,7 +108,7 @@ $fixtureSource | Set-Content -LiteralPath $fixture -Encoding utf8
 
 $inventoryPath = Join-Path $testRoot 'inventory.json'
 @'
-{"test-count":3,"rust-suites":{"multi_launcher::lib":{"binary-id":"multi_launcher::lib","testcases":{"gui::tests::passes":{"ignored":false,"filter-match":{"status":"matches"}},"gui::tests::ignored":{"ignored":true,"filter-match":{"status":"matches"}},"gui::tests::filtered":{"ignored":false,"filter-match":{"status":"not-matches"}}}}}}
+{"test-count":3,"rust-suites":{"multi_launcher::lib":{"package-name":"multi_launcher","binary-id":"multi_launcher::lib","binary-name":"multi_launcher","kind":"lib","testcases":{"gui::tests::passes":{"ignored":false,"filter-match":{"status":"matches"}},"gui::tests::ignored":{"ignored":true,"filter-match":{"status":"matches"}},"gui::tests::filtered":{"ignored":false,"filter-match":{"status":"not-matches"}}}}}}
 '@ | Set-Content -LiteralPath $inventoryPath -Encoding utf8
 $inventory = @(Convert-TestPerfInventory -Path $inventoryPath)
 Assert-Equal $inventory.Count 3 'Inventory case count'
@@ -59,15 +117,18 @@ Assert-Equal (Get-TestPerfSelectedCaseCount -Cases $inventory) 1 'Runnable filte
 Assert-Equal (Get-TestPerfSelectedCaseCount -Cases @([pscustomobject]@{Ignored=$false;FilterStatus='not-matches'})) 0 'No-match inventory count'
 
 $quotedValue = 'spaces and "quotes" stay one argument'
+$quotedIdentity = @([pscustomobject]@{ BinaryId = 'multi_launcher'; PackageName = 'multi_launcher'; BinaryName = 'multi_launcher'; Kind = 'lib'; TestName = $quotedValue })
 $success = Invoke-TestPerfProcess -ExecutablePath $pwshPath -Arguments @('-NoProfile', '-File', $fixture, '-Case', 'success', '-Value', $quotedValue) `
     -WorkingDirectory $testRoot -TimeoutSeconds 60 -OwnedRunnerPath $ownedRunnerPath -StdoutPath (Join-Path $testRoot 'success.out') `
-    -StderrPath (Join-Path $testRoot 'success.err') -OutputMode json
+    -StderrPath (Join-Path $testRoot 'success.err') -OutputMode json -InventoryCases $quotedIdentity
 Assert-Equal $success.Status 'PASS' 'Synthetic success status'
-Assert-Equal $success.PerCaseResults[0].TestName $quotedValue 'Native argument quoting'
+Assert-Equal $success.PerCaseResults[0].TestName ('multi_launcher::multi_launcher$' + $quotedValue) 'Native argument quoting'
 Assert-Equal $success.PerCaseResults[0].DurationSeconds 0.015 'Per-case duration'
-Assert-Equal $success.PerCaseResults[0].BinaryId 'multi_launcher::multi_launcher$gui' 'Suite binary metadata'
-Assert-Equal $success.PerCaseResults[0].Crate 'multi_launcher' 'Suite crate metadata'
+Assert-Equal $success.PerCaseResults[0].BinaryId 'multi_launcher' 'Inventory binary metadata'
+Assert-Equal $success.PerCaseResults[0].PackageName 'multi_launcher' 'Inventory package metadata'
+Assert-Equal $success.PerCaseResults[0].BinaryName 'multi_launcher' 'Inventory target metadata'
 Assert-Equal $success.PerCaseResults[0].Kind 'lib' 'Suite kind metadata'
+Assert-Equal $success.PerCaseResults[0].IdentityStatus 'resolved' 'Inventory identity resolution'
 Assert-Equal $success.PerCaseResults.Count 1 'Started events are not counted as completed cases'
 
 $failure = Invoke-TestPerfProcess -ExecutablePath $pwshPath -Arguments @('-NoProfile', '-File', $fixture, '-Case', 'failure', '-Value', 'synthetic::failure') `

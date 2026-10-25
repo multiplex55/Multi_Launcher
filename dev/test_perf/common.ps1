@@ -18,7 +18,7 @@ function Get-TestPerfField {
 function Convert-TestPerfJsonMessage {
     param(
         [Parameter(Mandatory)][string]$Line,
-        [AllowNull()][System.Collections.IDictionary]$SuiteMetadata
+        [AllowNull()][object]$IdentityMap
     )
 
     $message = ConvertFrom-Json -InputObject $Line -AsHashtable -ErrorAction Stop
@@ -48,29 +48,70 @@ function Convert-TestPerfJsonMessage {
         else { $duration = $null }
     }
 
-    $binaryId = [string](Get-TestPerfField $nextest 'test_binary')
-    if ([string]::IsNullOrWhiteSpace($binaryId)) { $binaryId = [string](Get-TestPerfField $nextest 'binary') }
-    if ([string]::IsNullOrWhiteSpace($binaryId) -and $SuiteMetadata) {
-        $binaryId = [string](Get-TestPerfField $SuiteMetadata 'test_binary')
-        if ([string]::IsNullOrWhiteSpace($binaryId)) { $binaryId = [string](Get-TestPerfField $SuiteMetadata 'binary') }
+    $testName = [string](Get-TestPerfField $message 'name')
+    $identityStatus = 'unknown'
+    $identity = $null
+    $identityCandidates = @()
+    if ($IdentityMap -and $IdentityMap.ContainsKey($testName)) {
+        $identityCandidates = @($IdentityMap[$testName])
+        if ($identityCandidates.Count -eq 1) {
+            $identity = $identityCandidates[0]
+            $identityStatus = 'resolved'
+        }
+        elseif ($identityCandidates.Count -gt 1) { $identityStatus = 'ambiguous' }
     }
-    $crate = [string](Get-TestPerfField $nextest 'crate')
-    $kind = [string](Get-TestPerfField $nextest 'kind')
-    if ($SuiteMetadata) {
-        if ([string]::IsNullOrWhiteSpace($crate)) { $crate = [string](Get-TestPerfField $SuiteMetadata 'crate') }
-        if ([string]::IsNullOrWhiteSpace($kind)) { $kind = [string](Get-TestPerfField $SuiteMetadata 'kind') }
-    }
+    $binaryId = if ($identityStatus -eq 'resolved') { [string]$identity.BinaryId } else { $null }
+    $packageName = if ($identityStatus -eq 'resolved') { [string]$identity.PackageName } else { $null }
+    $binaryName = if ($identityStatus -eq 'resolved') { [string]$identity.BinaryName } else { $null }
+    $kind = if ($identityStatus -eq 'resolved') { [string]$identity.Kind } else { $null }
+    $candidateIds = @($identityCandidates | ForEach-Object { [string]$_.BinaryId } | Where-Object { $_ } | Sort-Object -Unique)
 
     return [pscustomobject][ordered]@{
         Type = $type
         Event = $event
-        TestName = [string](Get-TestPerfField $message 'name')
+        TestName = $testName
         BinaryId = $binaryId
-        Crate = $crate
+        PackageName = $packageName
+        BinaryName = $binaryName
+        TargetName = $binaryName
+        Crate = $packageName
         Kind = $kind
+        IdentityStatus = $identityStatus
+        IdentityCandidates = $candidateIds
         Status = $status
         DurationSeconds = $duration
     }
+}
+
+function New-TestPerfInventoryIdentityMap {
+    param([AllowEmptyCollection()][object[]]$Cases = @())
+
+    $identityMap = [System.Collections.Hashtable]::new([StringComparer]::Ordinal)
+    foreach ($case in $Cases) {
+        $packageName = [string]$case.PackageName
+        $binaryName = [string]$case.BinaryName
+        $testName = [string]$case.TestName
+        if ([string]::IsNullOrWhiteSpace($packageName) -or
+            [string]::IsNullOrWhiteSpace($binaryName) -or
+            [string]::IsNullOrWhiteSpace([string]$case.Kind) -or
+            [string]::IsNullOrWhiteSpace($testName)) { continue }
+
+        # Rust crate and target identifiers use underscores where Cargo package/target
+        # names may use hyphens. The reporter's event name is crate::binary$test.
+        $crateName = $packageName.Replace('-', '_')
+        $rustBinaryName = $binaryName.Replace('-', '_')
+        $eventName = '{0}::{1}${2}' -f $crateName, $rustBinaryName, $testName
+        if (!$identityMap.ContainsKey($eventName)) {
+            $identityMap[$eventName] = [System.Collections.Generic.List[object]]::new()
+        }
+        $identityMap[$eventName].Add([pscustomobject][ordered]@{
+            BinaryId = [string]$case.BinaryId
+            PackageName = $packageName
+            BinaryName = $binaryName
+            Kind = [string]$case.Kind
+        })
+    }
+    return $identityMap
 }
 
 function Convert-TestPerfInventory {
@@ -87,6 +128,9 @@ function Convert-TestPerfInventory {
         $suite = $suiteEntry.Value
         $binaryId = [string](Get-TestPerfField $suite 'binary-id')
         if ([string]::IsNullOrWhiteSpace($binaryId)) { $binaryId = [string]$suiteEntry.Key }
+        $packageName = [string](Get-TestPerfField $suite 'package-name')
+        $binaryName = [string](Get-TestPerfField $suite 'binary-name')
+        $kind = [string](Get-TestPerfField $suite 'kind')
         $testcases = Get-TestPerfField $suite 'testcases'
         if ($null -eq $testcases) { continue }
         foreach ($testEntry in $testcases.GetEnumerator()) {
@@ -95,6 +139,9 @@ function Convert-TestPerfInventory {
             $filterStatus = [string](Get-TestPerfField $filter 'status')
             $cases.Add([pscustomobject][ordered]@{
                 BinaryId = $binaryId
+                PackageName = if ($packageName) { $packageName } else { $null }
+                BinaryName = if ($binaryName) { $binaryName } else { $null }
+                Kind = if ($kind) { $kind } else { $null }
                 TestName = [string]$testEntry.Key
                 Ignored = [bool](Get-TestPerfField $case 'ignored')
                 FilterStatus = if ($filterStatus) { $filterStatus } else { $null }
@@ -191,7 +238,8 @@ function Invoke-TestPerfProcess {
         [Parameter(Mandatory)][string]$StdoutPath,
         [Parameter(Mandatory)][string]$StderrPath,
         [ValidateSet('human', 'json', 'inventory')][string]$OutputMode = 'human',
-        [hashtable]$EnvironmentOverrides = @{}
+        [hashtable]$EnvironmentOverrides = @{},
+        [AllowEmptyCollection()][object[]]$InventoryCases = @()
     )
 
     if (!(Test-Path -LiteralPath $OwnedRunnerPath -PathType Leaf)) { throw "Owned process runner was not found: $OwnedRunnerPath" }
@@ -236,7 +284,7 @@ foreach ($name in $request.EnvironmentOverrides.Keys) {
     $process = [Diagnostics.Process]::new()
     $caseRows = [System.Collections.Generic.List[object]]::new()
     $parseErrors = [System.Collections.Generic.List[string]]::new()
-    $suiteMetadata = [ordered]@{}
+    $identityMap = New-TestPerfInventoryIdentityMap -Cases $InventoryCases
     $startedUtc = [DateTimeOffset]::UtcNow
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $started = $false
@@ -304,7 +352,7 @@ foreach ($name in $request.EnvironmentOverrides.Keys) {
 
     if (Test-Path -LiteralPath $StdoutPath -PathType Leaf) {
         foreach ($line in [IO.File]::ReadLines($StdoutPath)) {
-            if ($OutputMode -eq 'json') { Receive-TestPerfProcessLine -Line $line -OutputMode $OutputMode -CaseRows $caseRows -ParseErrors $parseErrors -SuiteMetadata $suiteMetadata }
+            if ($OutputMode -eq 'json') { Receive-TestPerfProcessLine -Line $line -OutputMode $OutputMode -CaseRows $caseRows -ParseErrors $parseErrors -IdentityMap $identityMap }
             elseif ($OutputMode -ne 'inventory' -and $line.Length -gt 0) { Write-Host $line }
         }
     }
@@ -339,7 +387,7 @@ function Receive-TestPerfProcessLine {
         [Parameter(Mandatory)][string]$OutputMode,
         [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$CaseRows,
         [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$ParseErrors,
-        [Parameter(Mandatory)][System.Collections.IDictionary]$SuiteMetadata
+        [AllowNull()][object]$IdentityMap
     )
 
     if ($OutputMode -eq 'json') {
@@ -348,20 +396,18 @@ function Receive-TestPerfProcessLine {
             $type = [string](Get-TestPerfField $rawMessage 'type')
             if ($type -eq 'suite') {
                 $suite = Get-TestPerfField $rawMessage 'nextest'
-                if ($suite) {
-                    foreach ($key in $suite.Keys) { $SuiteMetadata[$key] = $suite[$key] }
-                }
                 $event = [string](Get-TestPerfField $rawMessage 'event')
-                Write-Host ("[nextest] suite {0} {1}" -f $event, [string](Get-TestPerfField $SuiteMetadata 'test_binary'))
+                Write-Host ("[nextest] suite {0} {1}" -f $event, [string](Get-TestPerfField $suite 'test_binary'))
             }
             elseif ($type -eq 'test') {
-                $message = Convert-TestPerfJsonMessage -Line $Line -SuiteMetadata $SuiteMetadata
+                $message = Convert-TestPerfJsonMessage -Line $Line -IdentityMap $IdentityMap
                 if ($message.Event -ne 'started') {
                     $CaseRows.Add($message)
                     $duration = if ($null -eq $message.DurationSeconds) { '' } else { ' {0:N3}s' -f $message.DurationSeconds }
-                    Write-Host ("[case] {0} {1}{2}" -f $message.Status, $message.TestName, $duration)
+                    $target = if ($message.BinaryName) { "[$($message.BinaryName)]" } else { '[target unknown]' }
+                    Write-Host ("[case] {0} {1} {2}{3}" -f $message.Status, $target, $message.TestName, $duration)
                 }
-                else { Write-Host ("[case] RUN {0}" -f $message.TestName) }
+                else { Write-Host ("[nextest] test event={0}: {1}" -f $message.Event, $message.TestName) }
             }
         }
         catch {

@@ -21,6 +21,13 @@ its owned-process identities and post-cleanup states. The helper does not
 delete or modify Cargo caches. A cold or newly selected profile uses its own
 Cargo cache; allow for that first population before comparing warm runs.
 
+Per-case target attribution matches each protocol event's
+`crate::binary$test` name against the selected Nextest inventory. It does not
+infer a case's target from whichever suite event happened most recently, since
+parallel suites can interleave. Unmatched identities are marked `unknown`; if
+more than one inventory target matches, target and kind remain null and the row
+is marked `ambiguous` with its candidate binary IDs.
+
 Use `-CacheState preparation`, `warm-noop`, or `warm-edit` to label known cache
 conditions; the default is `unknown`. Phase wall times include containment
 inventory/cleanup overhead and are not pure compiler or linker durations.
@@ -81,6 +88,14 @@ The default run reporter is Nextest's experimental `libtest-json-plus` version
 Per-case events are stored as structured rows and raw JSONL. The message format
 is experimental, so receipts also retain the raw output and parser errors.
 Use `-MessageFormat human` when the installed Nextest lacks that reporter.
+Started events are shown as protocol announcements and are not counted as
+completed cases. Ignored counts come from the selected inventory. With the
+human reporter, machine-derived result counts are null/unknown. The installed
+JSON reporter's generic failed events do not distinguish a test timeout from
+another failure: `ExplicitTimeoutEvents` counts only explicit timeout statuses,
+while total per-case `TimedOut` is null when generic failures, a non-success
+execution phase, or an outer deadline makes the total indeterminate. The phase
+receipt still records an outer process timeout separately.
 
 The receipt workflow writes native stdout/stderr to its external run directory
 and replays it after the owned-process invocation finishes. For ordinary
