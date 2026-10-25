@@ -840,7 +840,39 @@ pub(super) mod tests {
         ];
 
         for (raw, panel) in cases {
-            let mut app = new_app(&ctx);
+            let temp_root = tempdir().unwrap();
+            let mut settings = Settings::default();
+            settings.hotkey = None;
+            settings.quit_hotkey = None;
+            settings.help_hotkey = None;
+            settings.paste_sequence.next_hotkey = None;
+            settings.paste_sequence.cancel_hotkey = None;
+            // This test dispatches commands directly and does not need plugin
+            // providers or the process-global macro runtime.
+            let mut app = LauncherApp::new(
+                &ctx,
+                Arc::new(Vec::new()),
+                0,
+                PluginManager::new_inert_for_test_at(temp_root.path()),
+                temp_root
+                    .path()
+                    .join("actions.json")
+                    .to_string_lossy()
+                    .into_owned(),
+                temp_root
+                    .path()
+                    .join("settings.json")
+                    .to_string_lossy()
+                    .into_owned(),
+                settings,
+                None,
+                None,
+                None,
+                None,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+            );
             app.query = "keep me".into();
             app.clear_query_after_run = true;
             app.hide_after_run = true;

@@ -21,7 +21,7 @@ No application behavior or default profile changes are authorized.
 | M0-C | complete | Current-source inventory and full run, standalone oracle, three warm no-op/edit samples; hashes restored |
 | M1-A/B | complete | Native progress helper and exact selections passed; matched no-op profiles effectively tied |
 | M2-A | complete | Independent last-layout cache; original recipes and all row/state assertions retained; exact and mixed proofs passed |
-| M2-B | pending | At most five measured additional candidates; retain only justified improvements |
+| M2-B | complete | One retained measured dialog fixture improvement; Quick Notes already caches geometry and was left unchanged |
 | M3-A | pending | One reversible pure-target grouping A/B; map full roster; retain only measured benefit |
 | M3-B | pending | Optional one test-only compile hotspot; skip without evidence |
 | M4-A/B | pending | Only observed isolation/wait costs; at most three wait substitutions |
@@ -126,7 +126,7 @@ visible/overscan/popup/provider/selection/scroll and state/receipt assertions.
 An explicit mode preserves fresh validation for the ignored benchmark, including
 its sequence timing boundaries; ordinary oracle runs reuse equivalent inputs.
 
-- Standalone: 42.6644737s before / 17.8393512s after (one sample each), **58.19%**
+- Standalone: 42.6644737s before / 17.8393458s after (one sample each), **58.19%**
   lower per-test wall time. Same host/default features/fast-dev/default Nextest
   parallelism, with compilation excluded and owned execution bounded at 180s.
 - Mixed group: 4 passed, no failures/timeouts; oracle 17.979s. Other exact cases:
@@ -151,3 +151,25 @@ its sequence timing boundaries; ordinary oracle runs reuse equivalent inputs.
 - Evidence: `m2a-build*.log`, corresponding SelectedBuild receipts,
   `m2a-oracle.log` / SelectedRun receipt, `m2a-mixed-proofs`, and
   `m2a-phase-summary.json` under the external evidence root.
+
+## M2-B measured fixture
+
+`src/gui/actions.rs` changes only `typed_simple_dialogs_preserve_interactive_lifecycle`:
+each of its 17 independent apps now has a temporary root, inert plugin manager,
+isolated actions/settings paths and disabled launcher/help/Paste Sequence
+shortcuts before construction. These commands dispatch directly to dialog hosts;
+plugin search and a global macro runtime are unrelated fixture work. The shared
+`new_app` helper, all 17 command/panel pairs, Dashboard activation and every
+query/restore/visibility/history assertion remain unchanged.
+
+Matched two-case selection (typed-dialog case plus history pin-roundtrip),
+fast-dev/default features/default parallelism, one sample per side:
+typed dialog **4.5529221 → 2.4971859s**, 45.15% lower. Both cases passed; history
+was 0.031055 / 0.0325031s. Compilation was separate (candidate preparation 77s,
+not a scored build improvement). Scoped rustfmt/diff checks passed; owned
+cleanup completed. Evidence: `m2b-build.log`, `m2b-selected.log` and their receipts.
+
+Quick Notes geometry was inspected as a second candidate: it already computes
+eager geometry once per independent cold/warm fixture. Its 12 fixtures and seven
+settling frames have meaningful lifecycle coverage; no speculative reduction was
+retained. No other additional slow-test optimizations were manufactured.
