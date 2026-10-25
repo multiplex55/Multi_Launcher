@@ -10916,7 +10916,7 @@ mod tests {
     };
     use eframe::egui;
     use std::{
-        cell::Cell,
+        cell::{Cell, Ref, RefCell},
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -20169,9 +20169,101 @@ mod tests {
         signature.finish()
     }
 
+    #[derive(Clone, Debug, PartialEq)]
+    struct TrackC2GEagerLayoutKey {
+        actions: Vec<Action>,
+        aliases: HashMap<String, Option<String>>,
+        show_full_paths: bool,
+        width_bits: u32,
+        style: egui::Style,
+        scale_bits: u32,
+    }
+
+    impl TrackC2GEagerLayoutKey {
+        fn matches_inputs(
+            &self,
+            actions: &[Action],
+            aliases: &HashMap<String, Option<String>>,
+            show_full_paths: bool,
+            width: f32,
+            style: &egui::Style,
+            scale: f32,
+        ) -> bool {
+            self.actions == actions
+                && self.aliases == *aliases
+                && self.show_full_paths == show_full_paths
+                && self.width_bits == width.to_bits()
+                && self.style == *style
+                && self.scale_bits == scale.to_bits()
+        }
+    }
+
+    struct TrackC2GEagerLayoutCacheEntry {
+        key: TrackC2GEagerLayoutKey,
+        outer: egui::Rect,
+        layout: EagerRootListLayout,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TrackC2GEagerLayoutMode {
+        FreshPerFrame,
+        ReuseEquivalentInputs,
+    }
+
+    fn track_c2g_eager_layout<'a>(
+        cache: &'a RefCell<Option<TrackC2GEagerLayoutCacheEntry>>,
+        actions: &[Action],
+        aliases: &HashMap<String, Option<String>>,
+        show_full_paths: bool,
+        width: f32,
+        style: &egui::Style,
+        scale: f32,
+    ) -> (Ref<'a, TrackC2GEagerLayoutCacheEntry>, bool) {
+        let cache_hit = {
+            let cache = cache.borrow();
+            cache.as_ref().is_some_and(|entry| {
+                entry
+                    .key
+                    .matches_inputs(actions, aliases, show_full_paths, width, style, scale)
+            })
+        };
+        if !cache_hit {
+            let oracle_ctx = egui::Context::default();
+            let (outer, layout) = track_c_eager_root_list_layout(
+                &oracle_ctx,
+                actions,
+                aliases,
+                show_full_paths,
+                width,
+                style,
+                scale,
+            );
+            *cache.borrow_mut() = Some(TrackC2GEagerLayoutCacheEntry {
+                key: TrackC2GEagerLayoutKey {
+                    actions: actions.to_vec(),
+                    aliases: aliases.clone(),
+                    show_full_paths,
+                    width_bits: width.to_bits(),
+                    style: style.clone(),
+                    scale_bits: scale.to_bits(),
+                },
+                outer,
+                layout,
+            });
+        }
+        let entry = Ref::map(cache.borrow(), |cache| {
+            cache
+                .as_ref()
+                .expect("Track C2G eager layout cache is populated")
+        });
+        (entry, !cache_hit)
+    }
+
     struct TrackC2GState {
         app: LauncherApp,
         ctx: egui::Context,
+        // `None` preserves eager reconstruction on every validation frame.
+        eager_layout_cache: Option<RefCell<Option<TrackC2GEagerLayoutCacheEntry>>>,
         catalog: Vec<Action>,
         provider_action: Option<Arc<Mutex<Action>>>,
         provider_calls: Arc<AtomicUsize>,
@@ -20238,7 +20330,13 @@ mod tests {
         count: usize,
         case: TrackC2GCase,
     ) -> TrackC2GState {
-        track_c2g_prepare_state_with_progress(root, count, case, false)
+        track_c2g_prepare_state_with_progress(
+            root,
+            count,
+            case,
+            false,
+            TrackC2GEagerLayoutMode::FreshPerFrame,
+        )
     }
 
     fn track_c2g_prepare_state_with_progress(
@@ -20246,6 +20344,7 @@ mod tests {
         count: usize,
         case: TrackC2GCase,
         progress_enabled: bool,
+        eager_layout_mode: TrackC2GEagerLayoutMode,
     ) -> TrackC2GState {
         use crate::performance::track_c_workloads::action_fixture;
 
@@ -20445,6 +20544,9 @@ mod tests {
         TrackC2GState {
             app,
             ctx,
+            eager_layout_cache: (eager_layout_mode
+                == TrackC2GEagerLayoutMode::ReuseEquivalentInputs)
+                .then(|| RefCell::new(None)),
             catalog,
             provider_action,
             provider_calls,
@@ -20526,16 +20628,37 @@ mod tests {
             .expect("the current root frame records its actual row width");
         assert!(available_width.is_finite() && available_width > 0.0);
         let style = state.ctx.style_of(state.ctx.theme()).as_ref().clone();
-        let oracle_ctx = egui::Context::default();
-        let (outer, eager) = track_c_eager_root_list_layout(
-            &oracle_ctx,
-            expected_actions,
-            &app.folder_aliases,
-            false,
-            available_width,
-            &style,
-            app.list_scale,
-        );
+        let fresh_layout;
+        let cached_snapshot;
+        let (outer, eager) = if let Some(cache) = &state.eager_layout_cache {
+            let (snapshot, _) = track_c2g_eager_layout(
+                cache,
+                expected_actions,
+                &app.folder_aliases,
+                false,
+                available_width,
+                &style,
+                app.list_scale,
+            );
+            cached_snapshot = snapshot;
+            (cached_snapshot.outer, &cached_snapshot.layout)
+        } else {
+            // The frozen oracle intentionally uses default egui fonts/DPI and
+            // explicit style/scale inputs; mutable production-context state is
+            // never used as the expected geometry.
+            let oracle_ctx = egui::Context::default();
+            let (outer, layout) = track_c_eager_root_list_layout(
+                &oracle_ctx,
+                expected_actions,
+                &app.folder_aliases,
+                false,
+                available_width,
+                &style,
+                app.list_scale,
+            );
+            fresh_layout = layout;
+            (outer, &fresh_layout)
+        };
         if expected_actions.is_empty() {
             let cache = &app.root_list_geometry;
             assert!(eager.rows.is_empty());
@@ -21372,7 +21495,13 @@ mod tests {
         count: usize,
         root: &std::path::Path,
     ) -> serde_json::Value {
-        track_c2g_run_record_with_progress(case, count, root, false)
+        track_c2g_run_record_with_mode(
+            case,
+            count,
+            root,
+            false,
+            TrackC2GEagerLayoutMode::FreshPerFrame,
+        )
     }
 
     fn track_c2g_run_record_with_progress(
@@ -21380,6 +21509,22 @@ mod tests {
         count: usize,
         root: &std::path::Path,
         progress_enabled: bool,
+    ) -> serde_json::Value {
+        track_c2g_run_record_with_mode(
+            case,
+            count,
+            root,
+            progress_enabled,
+            TrackC2GEagerLayoutMode::ReuseEquivalentInputs,
+        )
+    }
+
+    fn track_c2g_run_record_with_mode(
+        case: TrackC2GCase,
+        count: usize,
+        root: &std::path::Path,
+        progress_enabled: bool,
+        eager_layout_mode: TrackC2GEagerLayoutMode,
     ) -> serde_json::Value {
         track_c2g_progress(
             progress_enabled,
@@ -21392,7 +21537,13 @@ mod tests {
             None,
             None,
         );
-        let mut state = track_c2g_prepare_state_with_progress(root, count, case, progress_enabled);
+        let mut state = track_c2g_prepare_state_with_progress(
+            root,
+            count,
+            case,
+            progress_enabled,
+            eager_layout_mode,
+        );
         let sample = track_c2g_run_sequence(&mut state);
         let fixture_signature = state.fixture_signature;
         track_c2g_progress(
@@ -21476,6 +21627,154 @@ mod tests {
             assert_eq!(sample["intents"].as_array().unwrap().len(), 0);
             assert_viewport_recipe(&sample);
         }
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c2g_eager_layout_cache_invalidates_changed_inputs() {
+        let cache = RefCell::new(None);
+        let mut actions = vec![
+            Action {
+                label: "Alpha".into(),
+                desc: "A deliberately long description whose wrapped text contributes to the eager row geometry. ".repeat(3),
+                action: "app:alpha".into(),
+                args: None,
+            },
+            Action {
+                label: "Beta".into(),
+                desc: "Second result".into(),
+                action: "app:beta".into(),
+                args: None,
+            },
+        ];
+        let aliases = HashMap::new();
+        let mut style = egui::Style::default();
+
+        let (snapshot, rebuilt) =
+            track_c2g_eager_layout(&cache, &actions, &aliases, false, 140.0, &style, 1.0);
+        assert!(rebuilt);
+        assert_eq!(snapshot.layout.rows.len(), actions.len());
+        drop(snapshot);
+
+        let equivalent_actions = actions.clone();
+        let (snapshot, rebuilt) = track_c2g_eager_layout(
+            &cache,
+            &equivalent_actions,
+            &aliases,
+            false,
+            140.0,
+            &style,
+            1.0,
+        );
+        assert!(!rebuilt, "equal action contents reuse the last layout");
+        drop(snapshot);
+
+        let (snapshot, rebuilt) =
+            track_c2g_eager_layout(&cache, &actions, &aliases, false, 160.0, &style, 1.0);
+        assert!(rebuilt, "width changes invalidate the eager layout");
+        assert_eq!(snapshot.outer.width(), 160.0);
+        drop(snapshot);
+
+        let (snapshot, rebuilt) =
+            track_c2g_eager_layout(&cache, &actions, &aliases, false, 160.0, &style, 1.25);
+        assert!(rebuilt, "scale changes invalidate the eager layout");
+        drop(snapshot);
+
+        actions[0].desc.push_str(" changed action content");
+        let (snapshot, rebuilt) =
+            track_c2g_eager_layout(&cache, &actions, &aliases, false, 160.0, &style, 1.25);
+        assert!(rebuilt, "action text changes invalidate the eager layout");
+        let previous_gap = snapshot.layout.rows[1].top() - snapshot.layout.rows[0].bottom();
+        drop(snapshot);
+
+        style.spacing.item_spacing.y += 12.0;
+        let (snapshot, rebuilt) =
+            track_c2g_eager_layout(&cache, &actions, &aliases, false, 160.0, &style, 1.25);
+        assert!(rebuilt, "style changes invalidate the eager layout");
+        let styled_gap = snapshot.layout.rows[1].top() - snapshot.layout.rows[0].bottom();
+        assert!(styled_gap > previous_gap);
+        let long_description_height = snapshot.layout.rows[0].height();
+        drop(snapshot);
+
+        let aliases = HashMap::from([("app:alpha".to_owned(), Some("Friendly".to_owned()))]);
+        let (snapshot, rebuilt) =
+            track_c2g_eager_layout(&cache, &actions, &aliases, false, 160.0, &style, 1.25);
+        assert!(rebuilt, "alias changes invalidate the eager layout");
+        let aliased_height = snapshot.layout.rows[0].height();
+        assert!(aliased_height < long_description_height);
+        drop(snapshot);
+
+        let (snapshot, rebuilt) =
+            track_c2g_eager_layout(&cache, &actions, &aliases, true, 160.0, &style, 1.25);
+        assert!(rebuilt, "path-display changes invalidate the eager layout");
+        assert!(snapshot.layout.rows[0].height() > aliased_height);
+    }
+
+    #[test]
+    fn track_c2g_validator_rejects_offscreen_geometry_popup_and_painted_row_corruption() {
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+
+        let workspace = TrackCWorkspace::new();
+        let mut state = track_c2g_prepare_state_with_progress(
+            workspace.root(),
+            100,
+            TrackC2GCase::ViewportControls,
+            false,
+            TrackC2GEagerLayoutMode::ReuseEquivalentInputs,
+        );
+        let expected_query = state.app.query.clone();
+        let expected_selected = state.app.selected;
+        let validate = |state: &TrackC2GState| {
+            let expected_actions =
+                track_c2g_expected_state_for_query(state, &expected_query, false);
+            track_c2g_validate_frame(
+                state,
+                &expected_query,
+                &expected_actions,
+                false,
+                expected_selected,
+            );
+        };
+
+        let expected_actions = track_c2g_expected_state_for_query(&state, &expected_query, false);
+        assert_eq!(expected_actions.len(), 100);
+        validate(&state);
+
+        let last_index = expected_actions.len() - 1;
+        assert!(
+            !state
+                .app
+                .test_root_rendered_rows
+                .iter()
+                .any(|(index, _)| *index == last_index),
+            "the last fixture row is outside the painted viewport"
+        );
+        let original_top = state.app.root_list_geometry.row_tops[last_index];
+        state.app.root_list_geometry.row_tops[last_index] += 8.0;
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| validate(&state))).is_err()
+        );
+        state.app.root_list_geometry.row_tops[last_index] = original_top;
+
+        let popup_owner_id = egui::Id::new("track-c2g-root-popup-owner-for-paint");
+        state
+            .ctx
+            .data_mut(|data| data.insert_temp(popup_owner_id, Some(last_index)));
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| validate(&state))).is_err()
+        );
+        state
+            .ctx
+            .data_mut(|data| data.insert_temp(popup_owner_id, None::<usize>));
+
+        let (_, rect) = &mut state.app.test_root_rendered_row_rects[0];
+        rect.min.x += 8.0;
+        rect.max.x += 8.0;
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| validate(&state))).is_err()
+        );
+
+        drop(state);
         drop(workspace);
     }
 

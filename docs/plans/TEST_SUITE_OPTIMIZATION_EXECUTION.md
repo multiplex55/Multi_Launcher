@@ -20,7 +20,7 @@ No application behavior or default profile changes are authorized.
 | M0-B | complete | Bounded owned profiling and structured receipts; synthetic success/failure/timeout and real exact smoke passed |
 | M0-C | complete | Current-source inventory and full run, standalone oracle, three warm no-op/edit samples; hashes restored |
 | M1-A/B | complete | Native progress helper and exact selections passed; matched no-op profiles effectively tied |
-| M2-A | pending | Independent C2G oracle optimization; retain all recipes and 10k rows; exact and negative verification |
+| M2-A | complete | Independent last-layout cache; original recipes and all row/state assertions retained; exact and mixed proofs passed |
 | M2-B | pending | At most five measured additional candidates; retain only justified improvements |
 | M3-A | pending | One reversible pure-target grouping A/B; map full roster; retain only measured benefit |
 | M3-B | pending | Optional one test-only compile hotspot; skip without evidence |
@@ -115,3 +115,39 @@ it was moved intact to external evidence, not staged. No pre-existing work exist
 - Profiling phase wall includes CIM/event/cleanup overhead; pure test durations
   are from Nextest. Interactive runs avoid this optional profiling overhead.
 - M0-B commit `7325caee`: pushed successfully.
+
+## M2-A independent oracle
+
+Only `src/gui/render.rs` test helpers changed. One state-local immutable eager
+snapshot is keyed by complete actions, aliases, style, path-display, width and
+scale. Each miss uses a fresh default-font/default-DPI egui context, independent
+of production geometry. Every frame retains action equality, every row geometry,
+visible/overscan/popup/provider/selection/scroll and state/receipt assertions.
+An explicit mode preserves fresh validation for the ignored benchmark, including
+its sequence timing boundaries; ordinary oracle runs reuse equivalent inputs.
+
+- Standalone: 42.6644737s before / 17.8393512s after (one sample each), **58.19%**
+  lower per-test wall time. Same host/default features/fast-dev/default Nextest
+  parallelism, with compilation excluded and owned execution bounded at 180s.
+- Mixed group: 4 passed, no failures/timeouts; oracle 17.979s. Other exact cases:
+  `root_list_geometry_matches_eager_selectable_label_layout`,
+  `track_c2g_eager_layout_cache_invalidates_changed_inputs`, and
+  `track_c2g_validator_rejects_offscreen_geometry_popup_and_painted_row_corruption`.
+- Invalidation proof covers equal-content reuse and width/scale/content/style/
+  alias/path-display changes. Negative fixture catches deliberately corrupt
+  offscreen geometry, omitted popup owner and painted rectangle. Its caught
+  panic diagnostics are expected evidence, not test failures.
+- Original four 100-action recipes, 1k/10k viewport cases, nine viewport steps,
+  ticks, action cardinalities and independent full-row comparisons are unchanged.
+  Two additional proof tests account for the library roster increase 6337→6339.
+- Existing progress markers in the mixed run report the 10k case: preparation
+  2.530s, rendered frames 4.080s, validation 6.072s. Timings nested inside those
+  phases are not additive. The baseline JSON reporter omitted successful stdout,
+  so current-baseline subphase attribution, separate hash/serialization and
+  teardown costs are unavailable; no historical subphase is substituted.
+- Scoped rustfmt and diff checks passed. First prebuild caught a tuple-field
+  mistake in the new negative fixture; the corrected prebuild passed. Both
+  receipts are retained. No failed build duration is counted as an improvement.
+- Evidence: `m2a-build*.log`, corresponding SelectedBuild receipts,
+  `m2a-oracle.log` / SelectedRun receipt, `m2a-mixed-proofs`, and
+  `m2a-phase-summary.json` under the external evidence root.
