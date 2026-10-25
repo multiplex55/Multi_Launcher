@@ -70,3 +70,106 @@ image is unknown. The bounded warm diagnostic and final cached preparations
 passed. No owner/grace change, cold-build fix, or speedup is claimed. Native
 mapping, result summaries/replay, and comparisons belong to later checkpoints.
 Final Goal Clippy remains deferred until all Goal edits and validation finish.
+
+## M2-A — historical interim status (superseded by the final update below)
+
+Last accepted checkpoint: M1-B b63dc7353260aed791b3f15b747515319823aeeb,
+normal push succeeded. M2-A changes remain uncommitted and unstaged.
+Implemented structured selected-run reduction, distinct binary/case identities,
+retry-aware slow cases, immutable original-receipt replay with exact failure
+filter and native recording reference, fresh target validation and changed-source
+disclosure. Native recording/export/replay interoperability remains unverified.
+
+Focused synthetic evidence (external g01-m2a): reducer and facade passed under
+the checked owner. Final review-correction1 facade passed in 14.141 seconds;
+review-correction2 reducer passed in 0.786 seconds. Verified drain and cleanup.
+The parent reviewed the diff after configured Reviewer dispatch returned
+agent thread limit reached; this was parent review, not independent review.
+Resolved guaranteed recording-state cleanup on exceptions, realistic suite
+started/ok/failed lifecycle, and unknown timeout totals for partial or generic
+failures. Original failures and all attempts remain retained.
+
+Mandatory acceptance blocker: native-attempt5 target preparation produced the
+fixture binary and Cargo exit 0, but the checked owner returned failure:
+owned descendants survived the root process. The 60-second command ended in
+6.01189 seconds; all 17 recorded identities were Absent after cleanup, and
+drain/cleanup verified. No original test execution, recorded run, export or
+replay followed. Short disposable workspace/state cleanup also verified.
+No owner/grace changes or further native retries were made.
+
+Resume at G01/M2-A native capture/replay acceptance boundary. First resolve or
+attribute the owned-descendant retirement failure within an explicitly bounded
+correction, preserving the original receipt and fail-closed semantics; then
+obtain actual isolated failing-run and exact replay evidence and review before
+any M2-A commit. Do not recreate branch/M0-A or repeat completed verification
+without an affected-path reason. Current native evidence:
+g01-m2a/native-attempt5/native-fixture-summary.json and its referenced measurement.
+M2-B and M3-A remain pending because checkpoint acceptance is ordered. Goals
+02-17 remain Not started under the strict cumulative handoff. No FINAL_01 is
+claimed. Final Goal Clippy has not run because Goal 01 is incomplete.
+
+## M2-A owned-survivor attribution — one diagnostic adjustment
+
+Previous goal turn was progress. Current read-only reconciliation preserved
+HEAD/upstream b63dc7353260aed791b3f15b747515319823aeeb and all partial files.
+One bounded cold-preparation diagnostic reproduced the failure without changing
+owner code, grace, command semantics, or acceptance policy. Creation-verified
+Job snapshots identified VCTIP.EXE as the sole surviving member at root exit
+and about 5.02 seconds later. Cargo exited 0; owner correctly rejected the run.
+All recorded identities were Absent after cleanup; output drain and generated
+temp-directory cleanup verified. No test execution or replay was attempted.
+Evidence: g01-m2a/owner-attribution-once/diagnostic.json, including fixture and
+owner hashes, exact argv, snapshots and cleanup. Instrumentation was local to
+the diagnostic script; no repository source was edited.
+
+The locally installed Microsoft MSVC 14.44 vctip.exe FileDescription identifies
+a VC compiler/tools experience-improvement uploader. This contextualizes the
+observed basename; the diagnostic did not retain full image path/signature.
+Read-only installed-tool inspection found no verified child-scoped compiler
+switch preventing this launch. VsDevCmd.bat VSCMD_SKIP_SENDTELEMETRY controls a
+separate PowerShell telemetry path, so it was not applied as an unproven fix.
+No registry/global preferences, linker choice, environment settings or owner
+failure criteria were changed; no name-based exception or cleanup was added.
+
+Same mandatory boundary remains blocked, now attributed rather than unknown.
+Smallest next requirement: establish a supported invocation-scoped toolchain
+control, or explicitly scope a safe compiler-helper lifecycle contract with
+identity verification and negative coverage; never silently exempt the process
+by basename or count cleanup-after-failure as acceptance. Existing native proof
+and ordered queue handoff remain incomplete. This was the one evidence-backed
+attribution adjustment, not permission for further unbounded retries.
+
+## M2-A final evidence update — 2026-10-25
+
+This update supersedes the interim blocked status and the attribution note above;
+those entries remain as history of the preserved failures and diagnosis. The
+verified MSVC helper lifecycle boundary and replay environment-restoration
+boundary were corrected without changing the five-second owner grace or strict
+default policy. Existing owner fixtures passed, and the focused structured-
+result regression now prevents `Complete` and replay acceptance when recording,
+cleanup or environment-restoration errors are present even if test output parses
+completely.
+
+Native capture/replay passed in the disposable library fixture at
+`g01-m2a/vctip-lifecycle-revision/native-capture-replay-3b`. The exact original
+case failed with exit 100 and a complete one-case structured result; the
+12,016-byte Nextest recording (run ID
+`e3fe9c18-fb77-4517-9296-e7204e6e2c3e`, SHA-256
+`c9ba7cd1493443181c0daa24b9a8832d6312cd864ebaba588017812f4d243cd5`) was
+replayed after a controlled source fix. Replay selected the same binary and
+case with the same options and passed with exit 0 while disclosing changed
+source. Original receipt/result/output/archive hashes remained identical;
+private replay state and all 270 recorded identity observations were verified
+clean. The generated workspace was removed; its supplemental receipt is
+`supplemental-fixture-workspace-cleanup.json` in the same evidence directory.
+This is bounded fixture proof, not application-suite or GUI acceptance.
+
+The final targeted result-fixture command was run through
+`dev/track_b/measure.ps1` with a 120-second test deadline and five-second
+cleanup deadline; it exited 0 in 1.89 seconds with cleanup and output drain
+verified. Focused owner, environment and auxiliary-lifecycle test receipts from
+the earlier M2-A attempts are retained. The parent structured review accepted
+the code after the reliability correction; M2-A changes await parent commit and
+push. Review evidence is retained at
+`g01-m2a/vctip-lifecycle-revision/parent-review.md`. M2-B and M3-A have not
+started; final Goal Clippy remains deferred.

@@ -7,6 +7,7 @@ $script:WorkflowCargoPath = Join-Path $script:WorkflowRoot 'dev\track_b\cargo.ps
 $script:WorkflowMeasurePath = Join-Path $script:WorkflowRoot 'dev\track_b\measure.ps1'
 $script:WorkflowCommonPath = Join-Path $script:WorkflowRoot 'dev\test_perf\common.ps1'
 . $script:WorkflowCommonPath
+. (Join-Path $PSScriptRoot 'results.ps1')
 
 function Get-WorkflowCatalog {
     $catalog = Get-Content -LiteralPath $script:WorkflowCatalogPath -Raw -ErrorAction Stop |
@@ -34,7 +35,7 @@ function Get-WorkflowSourceFingerprint {
         'Cargo.toml', 'Cargo.lock', 'build.rs', '.cargo/config.toml',
         'dev/track_b/cargo.ps1', 'dev/track_b/measure.ps1',
         'dev/workflows/owned_process.ps1', 'dev/workflows/engine.ps1',
-        'dev/workflows/run.ps1', 'dev/workflows/catalog.json',
+        'dev/workflows/run.ps1', 'dev/workflows/results.ps1', 'dev/workflows/verify_msvc_auxiliary.ps1', 'dev/workflows/catalog.json',
         'dev/test_perf/common.ps1'
     )) {
         $path = Join-Path $script:WorkflowRoot $relativePath
@@ -78,6 +79,7 @@ function Get-WorkflowCommand {
         [string]$FilterExpression,
         [string]$BinariesMetadataPath,
         [string]$RunnerProfile,
+        [string]$ReplayRecordingPath,
         [string[]]$TestArguments = @()
     )
 
@@ -88,6 +90,7 @@ function Get-WorkflowCommand {
     if ($FilterExpression) { $wrapperArguments.FilterExpression = $FilterExpression }
     if ($BinariesMetadataPath) { $wrapperArguments.BinariesMetadataPath = $BinariesMetadataPath }
     if ($RunnerProfile) { $wrapperArguments.RunnerProfile = $RunnerProfile }
+    if ($ReplayRecordingPath) { $wrapperArguments.ReplayRecordingPath = $ReplayRecordingPath }
     if ($TestArguments.Count -gt 0) { $wrapperArguments.TestArguments = @($TestArguments) }
 
     $json = & $script:WorkflowCargoPath @wrapperArguments
@@ -135,17 +138,18 @@ function New-WorkflowPhaseTemplate {
         [string]$BinariesMetadataPath,
         [string]$FilterExpression,
         [string]$RunnerProfile,
+        [string]$ReplayRecordingPath,
         [string[]]$TestArguments = @()
     )
     $testTarget = if ($Selection.targetKind -eq 'integration') { [string]$Selection.targetName } else { $null }
     return Get-WorkflowCommand -Preset $Preset -WorkflowPhase $Phase -TargetKind ([string]$Selection.targetKind) `
         -TestTarget $testTarget -FilterExpression $FilterExpression -BinariesMetadataPath $BinariesMetadataPath `
-        -RunnerProfile $RunnerProfile -TestArguments $TestArguments
+        -RunnerProfile $RunnerProfile -ReplayRecordingPath $ReplayRecordingPath -TestArguments $TestArguments
 }
 
 function New-WorkflowRequest {
     param(
-        [Parameter(Mandatory)][ValidateSet('Preview', 'Discover', 'Run')][string]$Action,
+        [Parameter(Mandatory)][ValidateSet('Preview', 'Discover', 'Run', 'Replay')][string]$Action,
         [Parameter(Mandatory)][string]$Mode,
         [string]$SelectionName,
         [ValidateSet('lib', 'integration')][string]$TargetKind,
@@ -160,6 +164,15 @@ function New-WorkflowRequest {
     $modeRecord = $modeRecord[0]
     if ($null -eq $TestArguments) { $TestArguments = @() }
     foreach ($argument in $TestArguments) { if ($null -eq $argument) { throw 'TestArguments cannot contain null elements.' } }
+    if ($modeRecord.kind -eq 'tests' -and $Action -in @('Preview', 'Run', 'Replay')) {
+        $captureDisablingArgument = @($TestArguments | Where-Object {
+            [string]::Equals([string]$_, '--nocapture', [StringComparison]::OrdinalIgnoreCase) -or
+            [string]::Equals([string]$_, '--no-capture', [StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($captureDisablingArgument.Count -gt 0) {
+            throw 'Structured test workflows require captured test output; --nocapture and --no-capture are unsupported.'
+        }
+    }
     if ($RunnerProfile -and $modeRecord.kind -ne 'tests') { throw '-RunnerProfile is valid only for fast-dev-tests.' }
     if ($RunnerProfile -and $RunnerProfile -notmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]*$') { throw 'Runner profile name is malformed.' }
 
@@ -239,7 +252,7 @@ function New-WorkflowRequest {
     if ($modeRecord.name -cne 'fast-dev-tests') { throw "Unsupported test mode: $Mode" }
     if ($Action -eq 'Discover') { throw 'Internal discovery resolution was not completed.' }
     if (!$SelectionName -or $TargetKind) { throw 'Preview and Run for test mode require exactly one -SelectionName.' }
-    if ($TestArguments.Count -gt 0 -and $Action -ne 'Run' -and $Action -ne 'Preview') { throw 'Test arguments are valid only for test Preview or Run.' }
+    if ($TestArguments.Count -gt 0 -and $Action -notin @('Run', 'Replay', 'Preview')) { throw 'Test arguments are valid only for test Preview, Run, or Replay.' }
     $selection = @(Get-WorkflowSelection -SelectionName $SelectionName)
     if ($selection.Count -ne 1) { throw "Selection '$SelectionName' did not resolve to exactly one catalog entry." }
     $selection = $selection[0]
@@ -252,6 +265,7 @@ function New-WorkflowRequest {
     $request.NextestTool = Get-WorkflowNextestIdentity
     $request | Add-Member -NotePropertyName Selection -NotePropertyValue $selection -Force
     $request | Add-Member -NotePropertyName TestArguments -NotePropertyValue @($TestArguments) -Force
+    $request | Add-Member -NotePropertyName ReplayRecordingPath -NotePropertyValue $null -Force
     $placeholder = Join-Path ([IO.Path]::GetTempPath()) 'multi-launcher-binaries-metadata-pending.json'
     $request | Add-Member -NotePropertyName PrepareCommand -NotePropertyValue (New-WorkflowPhaseTemplate -Preset $modeRecord.cargoPreset -Phase 'prepare' -Selection $selection) -Force
     $request | Add-Member -NotePropertyName InventoryCommand -NotePropertyValue (New-WorkflowPhaseTemplate -Preset $modeRecord.cargoPreset -Phase 'inventory' -Selection $selection `
@@ -282,15 +296,25 @@ function New-WorkflowRequest {
 
 function New-WorkflowRequestFromCli {
     param(
-        [Parameter(Mandatory)][ValidateSet('Preview', 'Discover', 'Run')][string]$Action,
-        [Parameter(Mandatory)][string]$Mode,
+        [Parameter(Mandatory)][ValidateSet('Preview', 'Discover', 'Run', 'Replay')][string]$Action,
+        [string]$Mode,
         [string]$SelectionName,
         [string]$TargetKind,
         [string]$DiscoveryReceipt,
+        [string]$ReplayReceipt,
         [string]$RunnerProfile,
         [string[]]$TestArguments = @()
     )
 
+    if ($Action -eq 'Replay') {
+        if ([string]::IsNullOrWhiteSpace($ReplayReceipt)) { throw 'Replay requires -ReplayReceipt pointing to an original failed workflow receipt.' }
+        if ($SelectionName -or $TargetKind -or $DiscoveryReceipt -or $RunnerProfile -or $TestArguments.Count -gt 0) {
+            throw 'Replay takes its mode, selection, runner profile, and test arguments from the original receipt; only -ReplayReceipt is accepted.'
+        }
+        return New-WorkflowReplayRequest -Path $ReplayReceipt
+    }
+    if ([string]::IsNullOrWhiteSpace($Mode)) { throw '-Mode is required except for Replay, which reads it from -ReplayReceipt.' }
+    if ($ReplayReceipt) { throw '-ReplayReceipt is valid only with -Action Replay.' }
     $requestArguments = @{ Action = $Action; Mode = $Mode }
     if (![string]::IsNullOrWhiteSpace($SelectionName)) { $requestArguments.SelectionName = $SelectionName }
     if (![string]::IsNullOrWhiteSpace($TargetKind)) { $requestArguments.TargetKind = $TargetKind }
@@ -318,10 +342,56 @@ function Set-WorkflowRequestMetadataPath {
     $Request.InventoryCommand = New-WorkflowPhaseTemplate -Preset ([string]$mode.cargoPreset) -Phase 'inventory' -Selection $selection `
         -BinariesMetadataPath $metadataPath -FilterExpression $filter
     $Request.RunCommand = New-WorkflowPhaseTemplate -Preset ([string]$mode.cargoPreset) -Phase 'run' -Selection $selection `
-        -BinariesMetadataPath $metadataPath -FilterExpression $filter -RunnerProfile $runnerProfile -TestArguments @($Request.TestArguments)
+        -BinariesMetadataPath $metadataPath -FilterExpression $filter -RunnerProfile $runnerProfile `
+        -ReplayRecordingPath ([string]$Request.ReplayRecordingPath) -TestArguments @($Request.TestArguments)
     $Request.BinariesMetadataPath = $metadataPath
     $Request.Phases[2].Command = $Request.InventoryCommand
     $Request.Phases[3].Command = $Request.RunCommand
+}
+
+function New-WorkflowReplayRequest {
+    param([Parameter(Mandatory)][string]$Path)
+    $fullReceiptPath = [IO.Path]::GetFullPath($Path)
+    $validated = Test-WorkflowReplayReceipt -Path $fullReceiptPath
+    $original = $validated.Receipt
+    $request = New-WorkflowRequest -Action Replay -Mode ([string]$original.Request.Mode) `
+        -SelectionName ([string]$original.Request.SelectionName) -RunnerProfile ([string]$original.Request.RunnerProfile) `
+        -TestArguments @($original.Request.TestArguments)
+    if ($request.Status -ne 'RESOLVED') { throw "Original replay request could not be resolved: $($request.ResolutionError)" }
+    if ($request.Package -cne [string]$original.Request.Package -or $request.TargetKind -cne [string]$original.Request.TargetKind -or
+        $request.TargetName -cne [string]$original.Request.TargetName -or $request.CompilerProfile -cne [string]$original.Request.CompilerProfile -or
+        $request.RunnerProfile -cne [string]$original.Request.RunnerProfile -or $request.Features.DefaultFeatures -ne [bool]$original.Request.Features.DefaultFeatures -or
+        (@($request.Features.Explicit) -join "`n") -cne (@($original.Request.Features.Explicit) -join "`n") -or
+        (@($request.TestArguments) -join "`n") -cne (@($original.Request.TestArguments) -join "`n")) {
+        throw 'Original request targets, features, profiles, or forwarded test arguments no longer match the current resolver.'
+    }
+    $request.FilterExpression = '(' + (Get-WorkflowFilterExpression -ExactCase ([string]$request.ExactCase)) + ') & (' +
+        (Get-WorkflowReplayFilterExpression -Failures $validated.Failures) + ')'
+    $request.ReplayRecordingPath = $validated.ArchivePath
+    $request | Add-Member -NotePropertyName ReplaySource -NotePropertyValue ([pscustomobject][ordered]@{
+        ReceiptPath = $fullReceiptPath
+        ReceiptSha256 = (Get-FileHash -LiteralPath $fullReceiptPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+        RecordingPath = $validated.ArchivePath
+        RecordingSha256 = $validated.ArchiveSha256
+        FailedIdentities = @($validated.Failures)
+        SourceChanged = [bool]$validated.SourceChanged
+        OriginalSourceFingerprintSha256 = $validated.OriginalSourceFingerprintSha256
+        CurrentSourceFingerprintSha256 = $validated.CurrentSourceFingerprintSha256
+    }) -Force
+    $placeholder = Join-Path ([IO.Path]::GetTempPath()) 'multi-launcher-binaries-metadata-pending.json'
+    $mode = Get-WorkflowCatalog | ForEach-Object { @($_.modes | Where-Object { $_.name -ceq $request.Mode })[0] }
+    $runnerProfile = if ($request.RunnerProfile -cne 'default') { [string]$request.RunnerProfile } else { $null }
+    $request.PrepareCommand = New-WorkflowPhaseTemplate -Preset ([string]$mode.cargoPreset) -Phase 'prepare' -Selection $request.Selection
+    $request.InventoryCommand = New-WorkflowPhaseTemplate -Preset ([string]$mode.cargoPreset) -Phase 'inventory' -Selection $request.Selection `
+        -BinariesMetadataPath $placeholder -FilterExpression (Get-WorkflowFilterExpression -ExactCase $request.ExactCase)
+    $request.RunCommand = New-WorkflowPhaseTemplate -Preset ([string]$mode.cargoPreset) -Phase 'run' -Selection $request.Selection `
+        -BinariesMetadataPath $placeholder -FilterExpression $request.FilterExpression -RunnerProfile $runnerProfile `
+        -ReplayRecordingPath $request.ReplayRecordingPath -TestArguments @($request.TestArguments)
+    $request.Phases[1].Command = $request.PrepareCommand
+    $request.Phases[2].Command = $request.InventoryCommand
+    $request.Phases[3].Command = $request.RunCommand
+    $request | Add-Member -NotePropertyName ReplayReceipt -NotePropertyValue $fullReceiptPath -Force
+    return $request
 }
 
 function Test-WorkflowDiscoveryReceipt {
@@ -399,6 +469,7 @@ function Get-WorkflowPhaseSummary {
         WorkingDirectory = [string]$Command.WorkingDirectory
         DeadlineUtc = $Measurement.DeadlineUtc
         TimeoutSeconds = $Measurement.TimeoutSeconds
+        WallSeconds = $Measurement.WallSeconds
         TimedOut = [bool]$Measurement.TimedOut
         ExitCode = $Measurement.ExitCode
         Succeeded = [bool]$Measurement.Succeeded
@@ -411,6 +482,13 @@ function Get-WorkflowPhaseSummary {
         OwnedProcesses = @($Measurement.OwnedProcesses)
         PostCleanup = @($Measurement.PostCleanup)
         RecordingErrors = @($Measurement.RecordingErrors)
+        AuxiliaryProcessPolicy = [string]$Measurement.AuxiliaryProcessPolicy
+        AuxiliaryPreflight = $Measurement.AuxiliaryPreflight
+        AuxiliaryProcessClassifications = @($Measurement.AuxiliaryProcessClassifications)
+        ForcedJobRetirementAttempted = [bool]$Measurement.ForcedJobRetirementAttempted
+        AuxiliaryDisposition = [string]$Measurement.AuxiliaryDisposition
+        AuxiliaryLeaseCleanupVerified = [bool]$Measurement.AuxiliaryLeaseCleanupVerified
+        AuxiliaryLeaseCleanupErrors = @($Measurement.AuxiliaryLeaseCleanupErrors)
         EvidenceDirectory = [string]$Measurement.EvidenceDirectory
         MeasurementPath = [string]$Measurement.ManifestPath
         StdoutPath = [string]$Measurement.StdoutPath
@@ -426,9 +504,21 @@ function Invoke-WorkflowCommand {
         [Parameter(Mandatory)][string]$Stage,
         [Parameter(Mandatory)][int]$TimeoutSeconds,
         [Parameter(Mandatory)]$Command,
+        [hashtable]$EnvironmentOverrides = @{},
         [scriptblock]$ProcessInvoker
     )
     if ($null -eq $ProcessInvoker) {
+        $auxiliaryPolicy = 'none'
+        if ($Stage -eq 'compile') {
+            $catalogMode = @((Get-WorkflowCatalog).modes | Where-Object { [string]$_.name -ceq [string]$Request.Mode })
+            $isFixedBuildPhase = $Request.Action -eq 'Run' -and $catalogMode.Count -eq 1 -and
+                [string]$catalogMode[0].kind -ceq 'build' -and $Name -ceq 'build' -and
+                $Request.Phases.Count -eq 1 -and [object]::ReferenceEquals($Command, $Request.Phases[0].Command)
+            $isFixedTargetPrepare = $Request.Action -in @('Discover', 'Run', 'Replay') -and
+                [string]$Request.Mode -ceq 'fast-dev-tests' -and $Name -ceq 'target-prepare' -and
+                [object]::ReferenceEquals($Command, $Request.PrepareCommand)
+            if ($isFixedBuildPhase -or $isFixedTargetPrepare) { $auxiliaryPolicy = 'verified-msvc-vctip' }
+        }
         $measureArguments = @{
             Executable = [string]$Command.Executable
             ArgumentList = @($Command.ArgumentList)
@@ -440,6 +530,8 @@ function Invoke-WorkflowCommand {
             Stage = $Stage
             TimeoutSeconds = $TimeoutSeconds
             CleanupTimeoutSeconds = 5
+            EnvironmentOverrides = $EnvironmentOverrides
+            AuxiliaryProcessPolicy = $auxiliaryPolicy
         }
         $measurement = & $script:WorkflowMeasurePath @measureArguments
     }
@@ -451,6 +543,7 @@ function Invoke-WorkflowCommand {
             TimeoutSeconds = $TimeoutSeconds
             Command = $Command
             EvidenceDirectory = $EvidenceDirectory
+            EnvironmentOverrides = $EnvironmentOverrides
         }
     }
     if ($null -eq $measurement) { throw "Process owner returned no result for phase '$Name'." }
@@ -501,6 +594,61 @@ function Write-WorkflowJson {
     Set-Content -LiteralPath $Path -Value $json -Encoding utf8 -ErrorAction Stop
 }
 
+function Export-WorkflowRunRecording {
+    param(
+        [Parameter(Mandatory)]$Request,
+        [Parameter(Mandatory)][string]$RunDirectory,
+        [Parameter(Mandatory)]$RunMeasurement,
+        [Parameter(Mandatory)]$RecordingContext,
+        [Parameter(Mandatory)][System.Collections.Generic.List[object]]$Phases,
+        [scriptblock]$ProcessInvoker
+    )
+    $recording = [pscustomobject][ordered]@{
+        Status = 'FAIL'
+        RunId = $null
+        ArchivePath = $null
+        ArchiveSha256 = $null
+        ArchiveByteLength = $null
+        NativeStaging = $null
+        PublicationVerified = $false
+        Error = $null
+        ConfigPath = [string]$RecordingContext.ConfigPath
+        ConfigSha256 = [string]$RecordingContext.ConfigSha256
+    }
+    $listCommand = New-WorkflowNextestStoreCommand -CargoExecutable $Request.CargoExecutable -Operation list
+    try {
+        $listMeasurement = Invoke-WorkflowCommand -Request $Request -EvidenceDirectory $RunDirectory -Name 'record-store-list' -Stage 'provenance' `
+            -TimeoutSeconds 20 -Command $listCommand -EnvironmentOverrides $RecordingContext.EnvironmentOverrides -ProcessInvoker $ProcessInvoker
+        $Phases.Add((Get-WorkflowPhaseSummary -Name 'record-store-list' -Command $listCommand -Measurement $listMeasurement))
+        if (!$listMeasurement.Succeeded) { throw "Nextest recording store listing failed ($($listMeasurement.ExecutionReason), exit $($listMeasurement.ExitCode))." }
+        $runId = Get-WorkflowRecordedRunId -RunStdoutPath ([string]$RunMeasurement.StdoutPath) `
+            -RunStderrPath ([string]$RunMeasurement.StderrPath) -StoreListPath ([string]$listMeasurement.StdoutPath)
+        $archivePath = Join-Path $RunDirectory 'nextest-recording.zip'
+        $stagingArchivePath = Join-Path ([string]$RecordingContext.StateDirectory) 'recording-export.zip'
+        $exportCommand = New-WorkflowNextestStoreCommand -CargoExecutable $Request.CargoExecutable -Operation export -RunId $runId -ArchivePath $stagingArchivePath
+        $exportMeasurement = Invoke-WorkflowCommand -Request $Request -EvidenceDirectory $RunDirectory -Name 'record-store-export' -Stage 'provenance' `
+            -TimeoutSeconds 30 -Command $exportCommand -EnvironmentOverrides $RecordingContext.EnvironmentOverrides -ProcessInvoker $ProcessInvoker
+        $Phases.Add((Get-WorkflowPhaseSummary -Name 'record-store-export' -Command $exportCommand -Measurement $exportMeasurement))
+        if (!$exportMeasurement.Succeeded) { throw "Nextest portable recording export failed ($($exportMeasurement.ExecutionReason), exit $($exportMeasurement.ExitCode))." }
+        $copy = Copy-WorkflowArchive -SourcePath $stagingArchivePath -DestinationPath $archivePath
+        $recording.RunId = $runId
+        $recording.ArchivePath = $copy.Destination.Path
+        $recording.ArchiveSha256 = $copy.Destination.Sha256
+        $recording.ArchiveByteLength = $copy.Destination.ByteLength
+        $recording.NativeStaging = [pscustomobject][ordered]@{
+            PathScope = 'private Nextest state'
+            FileName = [IO.Path]::GetFileName($stagingArchivePath)
+            Sha256 = $copy.Source.Sha256
+            ByteLength = $copy.Source.ByteLength
+            CleanupVerified = $false
+        }
+        $recording.PublicationVerified = [bool]$copy.ContentMatches
+        $recording.Status = 'PASS'
+    }
+    catch { $recording.Error = $_.Exception.Message }
+    return $recording
+}
+
 function Invoke-WorkflowAction {
     param(
         [Parameter(Mandatory)]$Request,
@@ -527,7 +675,18 @@ function Invoke-WorkflowAction {
         Phases = @()
         Error = $null
         DiscoveryReceiptPath = $null
+        Discovery = $null
+        SelectedIdentity = $Request.SelectedIdentity
+        Results = $null
+        ResultsPath = $null
+        RecordingError = $null
+        Recording = $null
+        RecordingContext = $null
+        RecordingStorageCleanupVerified = $null
+        RecordingStorageCleanupError = $null
+        ReplaySource = $Request.ReplaySource
         EvidenceDirectory = $runDirectory
+        ReceiptPath = $null
     }
     $failureSeen = $false
     $firstFailure = $null
@@ -547,7 +706,7 @@ function Invoke-WorkflowAction {
             $result.Status = 'PASS'
             $result.ExitCode = 0
         }
-        elseif ($Request.Action -eq 'Discover' -or ($Request.Action -eq 'Run' -and $Request.Mode -eq 'fast-dev-tests')) {
+        elseif ($Request.Action -eq 'Discover' -or ($Request.Action -in @('Run', 'Replay') -and $Request.Mode -eq 'fast-dev-tests')) {
             $versionCommand = if ($Request.Action -eq 'Discover') { [pscustomobject]@{ Executable = $Request.CargoExecutable; ArgumentList = @('nextest', '--version'); WorkingDirectory = $script:WorkflowRoot } } else { $Request.Phases[0].Command }
             $versionMeasurement = Invoke-WorkflowCommand -Request $Request -EvidenceDirectory $runDirectory -Name 'nextest-version' -Stage 'provenance' `
                 -TimeoutSeconds 20 -Command $versionCommand -ProcessInvoker $ProcessInvoker
@@ -650,7 +809,7 @@ function Invoke-WorkflowAction {
                 $result.Status = $discoveryStatus
                 $result.ExitCode = if ($discoveryStatus -eq 'PASS') { 0 } else { if ($result.ExitCode -eq 0) { 1 } else { $result.ExitCode } }
                 $result.Error = $firstFailure
-                $result | Add-Member -NotePropertyName Discovery -NotePropertyValue $discovery -Force
+                $result.Discovery = $discovery
             }
             else {
                 Set-WorkflowRequestMetadataPath -Request $Request -Path $metadataPath
@@ -666,23 +825,111 @@ function Invoke-WorkflowAction {
                 $identity = Get-WorkflowSelectedIdentity -InventoryPath ([string]$inventoryMeasurement.StdoutPath) -Selection $Request.Selection
                 $Request.SelectedIdentity = $identity
                 $runPhase = $Request.Phases[3]
-                $runMeasurement = Invoke-WorkflowCommand -Request $Request -EvidenceDirectory $runDirectory -Name 'selected-run' -Stage 'test' `
-                    -TimeoutSeconds ([int]$Request.BudgetSeconds.executionSeconds) -Command $Request.RunCommand -ProcessInvoker $ProcessInvoker
-                $runSummary = Get-WorkflowPhaseSummary -Name 'selected-run' -Command $Request.RunCommand -Measurement $runMeasurement
-                $phases.Add($runSummary)
-                if (!$runMeasurement.Succeeded) {
-                    $firstFailure = "Selected test execution failed ($($runMeasurement.ExecutionReason), exit $($runMeasurement.ExitCode))."
-                    $result.ExitCode = Get-WorkflowFailureExitCode $runMeasurement
+                $recordingContext = New-WorkflowRecordingContext -EvidenceDirectory $runDirectory
+                $runFailure = $null
+                try {
+                    $result.RecordingContext = [pscustomobject][ordered]@{
+                        ConfigPath = $recordingContext.ConfigPath
+                        ConfigSha256 = $recordingContext.ConfigSha256
+                        StateDirectory = $recordingContext.StateDirectory
+                        EnvironmentNames = @($recordingContext.EnvironmentOverrides.Keys | Sort-Object)
+                    }
+                    if ($Request.Action -eq 'Replay') {
+                        $replayStaging = Stage-WorkflowReplayArchive -Request $Request -RecordingContext $recordingContext
+                        $result.RecordingContext | Add-Member -NotePropertyName ReplayStaging -NotePropertyValue $replayStaging -Force
+                    }
+                    $result.SelectedIdentity = $identity
+                    $runMeasurement = Invoke-WorkflowCommand -Request $Request -EvidenceDirectory $runDirectory -Name 'selected-run' -Stage 'test' `
+                        -TimeoutSeconds ([int]$Request.BudgetSeconds.executionSeconds) -Command $Request.RunCommand `
+                        -EnvironmentOverrides $recordingContext.EnvironmentOverrides -ProcessInvoker $ProcessInvoker
+                    $runSummary = Get-WorkflowPhaseSummary -Name 'selected-run' -Command $Request.RunCommand -Measurement $runMeasurement
+                    $phases.Add($runSummary)
+                    if (!$runMeasurement.Succeeded) {
+                        $runFailure = "Selected test execution failed ($($runMeasurement.ExecutionReason), exit $($runMeasurement.ExitCode))."
+                        $result.ExitCode = Get-WorkflowFailureExitCode $runMeasurement
+                    }
+                    try {
+                        $structuredResults = Get-WorkflowStructuredResults -StdoutPath ([string]$runMeasurement.StdoutPath) `
+                            -InventoryPath ([string]$inventoryMeasurement.StdoutPath) -SelectedIdentity $identity -Measurement $runMeasurement
+                    }
+                    catch {
+                        $structuredResults = [pscustomobject][ordered]@{
+                            SchemaVersion = 1; Format = 'nextest-libtest-json-plus-0.1'; Selected = 1; Passed = 0; Failed = 0; TimedOut = $null
+                            ObservedTimedOut = 0; TimeoutCountKnown = $false
+                            TimeoutCountReason = 'Structured output could not be reduced; the total timed-out case count is unknown.'
+                            Ignored = 0; Filtered = 0; Skipped = 0; Unexecuted = 1; StartedOnly = 0; Unknown = 1; Complete = $false
+                            SuiteStartedCount = 0; SuiteTerminalCount = 0; SuiteActiveAtEnd = 0; SuiteTerminalStatuses = @(); SuiteComplete = $false
+                            PhaseReliable = $false; PhaseReliabilityErrors = @('Structured result reduction failed.')
+                            NativeExitCode = $runMeasurement.ExitCode; StageTimedOut = [bool]$runMeasurement.TimedOut
+                            CleanupVerified = [bool]$runMeasurement.CleanupVerified; OutputDrainVerified = [bool]$runMeasurement.OutputDrainVerified
+                            ExecutionWallSeconds = $runMeasurement.WallSeconds; TerminalAttemptCount = 0; Cases = @(); SlowCases = @()
+                            ConfirmedFailures = @(); ParseErrors = @($_.Exception.Message)
+                        }
+                    }
+                    $result.Results = $structuredResults
+                    $resultsPath = Join-Path $runDirectory 'results.json'
+                    $result.ResultsPath = $resultsPath
+                    try { Write-WorkflowJson -Path $resultsPath -Value $structuredResults }
+                    catch {
+                        if (!$runFailure) { $runFailure = "Structured results could not be recorded: $($_.Exception.Message)"; $result.ExitCode = 1 }
+                        else { $result.RecordingError = "Structured results could not be recorded: $($_.Exception.Message)" }
+                    }
+
+                    if (!$structuredResults.Complete -and !$runFailure) {
+                        $runFailure = 'Selected test output was partial, malformed, ambiguous, or uncertain; see results.json.'
+                        $result.ExitCode = if ($runMeasurement.ExitCode -ne 0) { Get-WorkflowFailureExitCode $runMeasurement } else { 1 }
+                    }
+                    if ($structuredResults.Failed -gt 0 -or $structuredResults.ObservedTimedOut -gt 0) {
+                        if (!$runFailure) { $runFailure = 'Selected test execution recorded a failing or timed-out test.' }
+                        if ($result.ExitCode -eq 0) { $result.ExitCode = if ($structuredResults.ObservedTimedOut -gt 0) { 124 } else { 1 } }
+                    }
+
+                    $recording = Export-WorkflowRunRecording -Request $Request -RunDirectory $runDirectory -RunMeasurement $runMeasurement `
+                        -RecordingContext $recordingContext -Phases $phases -ProcessInvoker $ProcessInvoker
+                    $result.Recording = $recording
+                    if ($recording.Status -ne 'PASS' -and !$runFailure) {
+                        $runFailure = "Test result recording failed: $($recording.Error)"
+                        $result.ExitCode = 1
+                    }
+
+                    if ($runFailure) {
+                        $firstFailure = $runFailure
+                        throw $firstFailure
+                    }
+                    if ((Get-WorkflowSourceFingerprint) -cne $Request.SourceFingerprintSha256) {
+                        $firstFailure = 'Source inputs changed during selected execution; provenance is uncertain.'
+                        $result.ExitCode = 1
+                        throw $firstFailure
+                    }
+                    $result.Status = 'PASS'
+                    $result.ExitCode = 0
+                }
+                finally {
+                    try { Remove-WorkflowRecordingContext -Context $recordingContext }
+                    catch {
+                        $recordingContext.CleanupVerified = $false
+                        $recordingContext.CleanupError = $_.Exception.Message
+                    }
+                    $result.RecordingStorageCleanupVerified = [bool]$recordingContext.CleanupVerified
+                    $result.RecordingStorageCleanupError = $recordingContext.CleanupError
+                    if ($result.Recording -and $result.Recording.NativeStaging) {
+                        $result.Recording.NativeStaging.CleanupVerified = [bool]$recordingContext.CleanupVerified
+                    }
+                    if ($Request.ReplaySource -and $Request.ReplaySource.RuntimeRecording) {
+                        $Request.ReplaySource.RuntimeRecording.CleanupVerified = [bool]$recordingContext.CleanupVerified
+                        if ($result.RecordingContext.ReplayStaging) {
+                            $result.RecordingContext.ReplayStaging.CleanupVerified = [bool]$recordingContext.CleanupVerified
+                        }
+                    }
+                    if (!$recordingContext.CleanupVerified -and !$runFailure) {
+                        $runFailure = "Private Nextest state cleanup failed: $($recordingContext.CleanupError)"
+                        $result.ExitCode = 1
+                    }
+                }
+                if ($runFailure) {
+                    $firstFailure = $runFailure
                     throw $firstFailure
                 }
-                if ((Get-WorkflowSourceFingerprint) -cne $Request.SourceFingerprintSha256) {
-                    $firstFailure = 'Source inputs changed during selected execution; provenance is uncertain.'
-                    $result.ExitCode = 1
-                    throw $firstFailure
-                }
-                $result.Status = 'PASS'
-                $result.ExitCode = 0
-                $result | Add-Member -NotePropertyName SelectedIdentity -NotePropertyValue $identity -Force
             }
         }
         else { throw "Unsupported workflow action/mode combination: $($Request.Action) / $($Request.Mode)." }
@@ -696,7 +943,7 @@ function Invoke-WorkflowAction {
 
     $result.Phases = @($phases)
     $resultPath = Join-Path $runDirectory 'workflow.json'
-    $result | Add-Member -NotePropertyName ReceiptPath -NotePropertyValue $resultPath -Force
+    $result.ReceiptPath = $resultPath
     try { Write-WorkflowJson -Path $resultPath -Value $result }
     catch {
         if ($result.Status -eq 'PASS') { $result.Status = 'FAIL'; $result.ExitCode = 1 }

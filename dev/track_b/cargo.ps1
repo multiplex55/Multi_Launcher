@@ -52,6 +52,8 @@ param(
 
     [string]$BinariesMetadataPath,
 
+    [string]$ReplayRecordingPath,
+
     [ValidatePattern('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')]
     [string]$RunnerProfile,
 
@@ -188,7 +190,9 @@ $selectedArguments = switch ($Preset) {
                 $inventoryArguments
             }
             'run' {
-                $runArguments = @('nextest', 'run', '--binaries-metadata', [IO.Path]::GetFullPath($BinariesMetadataPath), '--message-format', 'human', '-E', $FilterExpression)
+                $runArguments = @('nextest', 'run', '--binaries-metadata', [IO.Path]::GetFullPath($BinariesMetadataPath))
+                if (![string]::IsNullOrWhiteSpace($ReplayRecordingPath)) { $runArguments += @('-R', [IO.Path]::GetFullPath($ReplayRecordingPath)) }
+                $runArguments += @('--message-format', 'libtest-json-plus', '--message-format-version', '0.1', '-E', $FilterExpression)
                 if (![string]::IsNullOrWhiteSpace($RunnerProfile)) { $runArguments += @('-P', $RunnerProfile) }
                 if ($TestArguments.Count -gt 0) { $runArguments += @('--') + @($TestArguments) }
                 $runArguments

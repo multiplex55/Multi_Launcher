@@ -44,6 +44,16 @@ requested interactive verification. Timeout or an ownership-monitor failure
 triggers cleanup of the verified Job Object and recorded identities. No
 processes are killed by name.
 
+The workflow facade keeps auxiliary-process handling disabled by default. It
+opts into `verified-msvc-vctip` only for its fixed Cargo compiler and target-
+preparation phases after a bounded preflight verifies the installed MSVC
+`vctip.exe` signature and held file identity. The checked owner still requires
+the live PID, creation identity, canonical image and exact Job membership to
+match; all survivors must be verified, and the existing five-second grace and
+final Job-empty, output, recording and cleanup checks still apply. Unknown or
+mixed descendants remain failures. Run
+`& .\dev\workflows\test_msvc_auxiliary.ps1` for its focused lifecycle fixtures.
+
 Evidence includes stdout/stderr, PID/creation records, execution/cleanup errors,
 post-cleanup identity checks, and `result.json`. For compatibility,
 `windows-events.json` remains an empty JSON array; `EventCollectionStatus` is
@@ -103,6 +113,7 @@ the facade does not expand a selection to the whole suite.
 & .\dev\workflows\run.ps1 -Action Preview -Mode fast-dev-tests -SelectionName tables `
     -DiscoveryReceipt '<discovery.json path from the Discover result>'
 & .\dev\workflows\run.ps1 -Action Run -Mode fast-dev-tests -SelectionName tables
+& .\dev\workflows\run.ps1 -Action Replay -ReplayReceipt '<original failed workflow.json path>'
 ```
 
 Build previews print the resolved executable and native argument array without
@@ -117,19 +128,68 @@ inventory and selected test execution each have a 600-second deadline. Every
 phase publishes its arguments, exit/timeout, output-drain, owned-process and
 cleanup evidence under an external evidence directory.
 
+Each selected run writes `results.json` with terminal pass/fail/timeout counts,
+ignored and filtered cases, unexecuted or started-only cases, per-case durations,
+and the slowest cases. Incomplete output records observed timeout events while
+leaving the total timeout count unknown (`TimedOut: null`), rather than claiming
+an incomplete stream had zero timeouts. A generic failed case also leaves that
+total unknown because its failure is not a reliable timeout classification.
+Suite `started` and `ok`/`failed` terminal events are recorded separately from
+case counts; a missing suite terminal makes the results incomplete. Preparation
+time is reported by its own phase receipt and does not contribute to test-case
+duration. Unknown identities or uncertain cleanup also make the results
+incomplete and the workflow fails closed.
+
+Replay accepts only an original failed `Run` receipt. It preserves the recorded
+runner profile and test arguments, prepares the current target again, verifies
+the exact binary-qualified failed case in a fresh inventory, then intersects
+that identity with Nextest's portable recording. The receipt records whether
+source inputs changed since the original failure; catalog, tool, archive, or
+identity mismatches are rejected. The original failure receipt and archive are
+left unchanged.
+
 The test catalog is `workflows/catalog.json`. Each entry records its package,
 Cargo target, exact case, source, default-feature set, host/resource notes, and
 native-selection metadata. Native mappings remain unavailable until their
 separate milestone. `fast-dev-tests` uses `--cargo-profile fast-dev` for
 compilation; an optional `-RunnerProfile` maps separately to Nextest `-P`.
 Forward test-binary options as a string array with `-TestArguments`, for
-example `-TestArguments @('--nocapture')`; the facade
-places those arguments after the native `--` separator.
+example `-TestArguments @('--exact', 'table_utility::tests::table_parse_csv_quotes_escaped_quotes_and_embedded_newlines_preserve_strings')`;
+the facade places those arguments after the native `--` separator. Structured
+workflow results require captured test output, so `--nocapture` and
+`--no-capture` are rejected before launch. Use capture-preserving filters such
+as `--exact` when narrowing a selected test.
 
-Run the focused facade fixtures with `& .\dev\workflows\test_run.ps1`. They
-cover catalog/source agreement, fixed and legacy argument arrays, preview and
-execution resolution, stale/empty discovery, and bounded failure propagation
-without compiling the application.
+Run the focused reducer and facade fixtures with
+`& .\dev\workflows\test_results.ps1` and
+`& .\dev\workflows\test_run.ps1`. These synthetic fixtures cover structured
+result reduction, duplicate/ambiguous identities, retry counts, slow-case
+ordering, exact replay filters, catalog/source agreement, argument arrays,
+preview and execution resolution, stale/empty discovery, replay provenance,
+and bounded failure propagation without compiling the application.
+
+Native capture and exact-failure replay were verified in a bounded isolated
+Rust library fixture (this does not substitute for application or GUI tests).
+The original run failed its one selected case with a complete structured result
+and no parse errors. Its Nextest run ID was
+`e3fe9c18-fb77-4517-9296-e7204e6e2c3e`; replay run ID was
+`c27799e2-7f86-4556-92cc-fe0f23135d77`. Nextest exported a 12,016-byte archive with SHA-256
+`c9ba7cd1493443181c0daa24b9a8832d6312cd864ebaba588017812f4d243cd5`. After the
+fixture source was corrected, replay selected the same binary-qualified case
+with the same test arguments and passed. The replay disclosed the source change,
+used a short private staged copy with the same archive hash, and removed that
+copy after execution. Original receipt, result, stdout, stderr and archive
+hashes remained unchanged. The checked owner and trusted MSVC helper cleanup
+verified all 270 recorded identity observations absent; the generated fixture
+workspace was removed and recorded in
+`supplemental-fixture-workspace-cleanup.json`.
+
+The earlier cold-preparation, capture-format, long-export-path and environment
+restoration failures remain in separate evidence directories as history. The
+focused environment regression is
+`& .\dev\track_b\test_measure_environment.ps1`; it checks absent, empty and
+null-override restoration. Structured workflows continue to reject
+`--nocapture`/`--no-capture` and publish archives through short private staging.
 
 For a quick library check, run `cargo check --lib`. To deliberately build all
 package binaries, use `cargo build --release` directly; the release preset

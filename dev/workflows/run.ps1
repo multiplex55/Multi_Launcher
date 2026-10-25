@@ -7,15 +7,16 @@ Resolves and runs one fixed developer workflow or previews it without execution.
 Test previews require a successful matching discovery receipt. Discover builds
 only the requested Cargo target, inventories catalog cases, and writes a receipt.
 Run prepares target metadata, validates one exact case, and executes only that
-case. Every native child runs through the checked measurement owner.
+case. Replay takes only an original failed workflow receipt and runs the
+confirmed failed binary-qualified case. Every native child runs through the
+checked measurement owner.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Preview', 'Discover', 'Run')]
+    [ValidateSet('Preview', 'Discover', 'Run', 'Replay')]
     [string]$Action,
 
-    [Parameter(Mandatory = $true)]
     [string]$Mode,
 
     [string]$SelectionName,
@@ -24,6 +25,8 @@ param(
     [string]$TargetKind,
 
     [string]$DiscoveryReceipt,
+
+    [string]$ReplayReceipt,
 
     [string]$RunnerProfile,
 
@@ -37,7 +40,7 @@ $ErrorActionPreference = 'Stop'
 
 try {
     $request = New-WorkflowRequestFromCli -Action $Action -Mode $Mode -SelectionName $SelectionName `
-        -TargetKind $TargetKind -DiscoveryReceipt $DiscoveryReceipt -RunnerProfile $RunnerProfile `
+        -TargetKind $TargetKind -DiscoveryReceipt $DiscoveryReceipt -ReplayReceipt $ReplayReceipt -RunnerProfile $RunnerProfile `
         -TestArguments @($TestArguments)
     $result = Invoke-WorkflowAction -Request $request -EvidenceDirectory $EvidenceDirectory
 }

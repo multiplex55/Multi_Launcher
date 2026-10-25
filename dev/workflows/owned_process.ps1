@@ -70,6 +70,40 @@ namespace MultiLauncher.Dev {
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    internal struct ByHandleFileInformation {
+        public uint FileAttributes;
+        public FileTime CreationTime;
+        public FileTime LastAccessTime;
+        public FileTime LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    public sealed class OwnedFileDescriptor {
+        public string CanonicalPath;
+        public string FileId;
+        public uint VolumeSerialNumber;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    public sealed class OwnedProcessImage {
+        public uint ProcessId;
+        public string CreationUtc;
+        public bool InOwnedJob;
+        public bool Running;
+        public string CanonicalPath;
+        public string FileId;
+        public uint VolumeSerialNumber;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     internal struct JobBasicLimitInformation {
         public long PerProcessUserTimeLimit;
         public long PerJobUserTimeLimit;
@@ -215,6 +249,7 @@ namespace MultiLauncher.Dev {
         private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000;
         private const uint FILE_SHARE_READ = 0x00000001;
         private const uint FILE_SHARE_WRITE = 0x00000002;
+        private const uint FILE_READ_ATTRIBUTES = 0x00000080;
         private const uint OPEN_EXISTING = 3;
         private const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
         private const uint WAIT_OBJECT_0 = 0;
@@ -253,6 +288,14 @@ namespace MultiLauncher.Dev {
         private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern IntPtr CreateFileW(string name, uint access, uint share, ref SecurityAttributes attributes, uint creation, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr OpenFileForIdentity(string name, uint access, uint share, IntPtr attributes, uint creation, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetFileInformationByHandle(IntPtr file, out ByHandleFileInformation information);
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern uint GetFinalPathNameByHandleW(IntPtr file, StringBuilder path, uint length, uint flags);
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder imageName, ref uint size);
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
         [DllImport("kernel32.dll", SetLastError = true)]
@@ -465,6 +508,87 @@ namespace MultiLauncher.Dev {
             finally { CloseHandle(process); }
         }
 
+        private static string FinalPath(IntPtr file) {
+            StringBuilder path = new StringBuilder(512);
+            while (true) {
+                uint length = GetFinalPathNameByHandleW(file, path, (uint)path.Capacity, 0);
+                if (length == 0) throw LastError("GetFinalPathNameByHandleW");
+                if (length < path.Capacity) return path.ToString();
+                if (length > 32768) throw new InvalidOperationException("Canonical file path exceeded its bounded capacity.");
+                path.EnsureCapacity((int)length + 1);
+            }
+        }
+
+        private static OwnedFileDescriptor DescribeFile(IntPtr file) {
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(file, out information)) throw LastError("GetFileInformationByHandle");
+            ulong index = ((ulong)information.FileIndexHigh << 32) | information.FileIndexLow;
+            return new OwnedFileDescriptor {
+                CanonicalPath = FinalPath(file),
+                FileId = information.VolumeSerialNumber.ToString("X8") + ":" + index.ToString("X16"),
+                VolumeSerialNumber = information.VolumeSerialNumber,
+                FileIndexHigh = information.FileIndexHigh,
+                FileIndexLow = information.FileIndexLow
+            };
+        }
+
+        public static OwnedFileDescriptor GetOpenFileDescriptor(SafeFileHandle file) {
+            if (file == null || file.IsInvalid || file.IsClosed) throw new InvalidOperationException("The trusted image lease is not open.");
+            bool added = false;
+            try {
+                file.DangerousAddRef(ref added);
+                return DescribeFile(file.DangerousGetHandle());
+            }
+            finally { if (added) file.DangerousRelease(); }
+        }
+
+        public static OwnedProcessImage GetOwnedProcessImage(OwnedChild child, uint processId) {
+            IntPtr process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, false, processId);
+            if (process == IntPtr.Zero) {
+                int error = Marshal.GetLastWin32Error();
+                throw new Win32Exception(error, "OpenProcess(owned image identity) failed");
+            }
+            try {
+                int inJob;
+                if (!IsProcessInJob(process, child.JobHandle, out inJob)) throw LastError("IsProcessInJob(image identity)");
+                if (inJob == 0) throw new InvalidOperationException("Process is not a member of the invocation's owned Job Object.");
+                FileTime creation, exit, kernel, user;
+                if (!GetProcessTimes(process, out creation, out exit, out kernel, out user)) throw LastError("GetProcessTimes(image identity)");
+                long ticks = ((long)creation.High << 32) | creation.Low;
+                uint exitCode;
+                if (!GetExitCodeProcess(process, out exitCode)) throw LastError("GetExitCodeProcess(image identity)");
+                StringBuilder image = new StringBuilder(32768);
+                uint imageLength = (uint)image.Capacity;
+                if (!QueryFullProcessImageNameW(process, 0, image, ref imageLength)) throw LastError("QueryFullProcessImageNameW");
+                IntPtr imageFile = OpenFileForIdentity(image.ToString(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ, IntPtr.Zero, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
+                if (imageFile == IntPtr.Zero || imageFile == new IntPtr(-1)) throw LastError("CreateFileW(process image identity)");
+                try {
+                    OwnedFileDescriptor descriptor = DescribeFile(imageFile);
+                    int stillInJob;
+                    if (!IsProcessInJob(process, child.JobHandle, out stillInJob)) throw LastError("IsProcessInJob(image recheck)");
+                    if (stillInJob == 0) throw new InvalidOperationException("Process left the owned Job Object during image verification.");
+                    FileTime creationAgain, exitAgain, kernelAgain, userAgain;
+                    if (!GetProcessTimes(process, out creationAgain, out exitAgain, out kernelAgain, out userAgain)) throw LastError("GetProcessTimes(image recheck)");
+                    long ticksAgain = ((long)creationAgain.High << 32) | creationAgain.Low;
+                    if (ticksAgain != ticks) throw new InvalidOperationException("Process creation identity changed during image verification.");
+                    if (!GetExitCodeProcess(process, out exitCode)) throw LastError("GetExitCodeProcess(image recheck)");
+                    return new OwnedProcessImage {
+                        ProcessId = processId,
+                        CreationUtc = DateTime.FromFileTimeUtc(ticks).ToString("o"),
+                        InOwnedJob = true,
+                        Running = exitCode == 259,
+                        CanonicalPath = descriptor.CanonicalPath,
+                        FileId = descriptor.FileId,
+                        VolumeSerialNumber = descriptor.VolumeSerialNumber,
+                        FileIndexHigh = descriptor.FileIndexHigh,
+                        FileIndexLow = descriptor.FileIndexLow
+                    };
+                }
+                finally { CloseHandle(imageFile); }
+            }
+            finally { CloseHandle(process); }
+        }
+
         public static string QuoteRawArgument(string value) {
             if (value == null) throw new ArgumentNullException("value");
             if (value.Length > 0 && value.IndexOfAny(new char[] { ' ', '\t', '\n', '\v', '"' }) < 0) return value;
@@ -552,6 +676,15 @@ function Get-CheckedOwnedIdentity {
     catch { throw "Could not verify owned process identity $ProcessId`: $($_.Exception.Message)" }
 }
 
+function Get-CheckedOwnedProcessImage {
+    param(
+        [Parameter(Mandatory)][MultiLauncher.Dev.OwnedChild]$Owner,
+        [Parameter(Mandatory)][uint32]$ProcessId
+    )
+    try { return [MultiLauncher.Dev.OwnedProcessNative]::GetOwnedProcessImage($Owner, $ProcessId) }
+    catch { throw "Could not verify owned process image $ProcessId`: $($_.Exception.Message)" }
+}
+
 function Test-CheckedOwnedIdentityAbsent {
     param([Parameter(Mandatory)][object]$Identity)
     try {
@@ -579,6 +712,9 @@ function Invoke-CheckedOwnedProcess {
         [ValidateRange(1, 60)][int]$CleanupTimeoutSeconds = 5,
         [string]$Stage = 'unspecified',
         [bool]$HiddenWindow = $true,
+        [ValidateSet('none', 'verified-msvc-vctip')][string]$AuxiliaryProcessPolicy = 'none',
+        [AllowEmptyCollection()][object[]]$VerifiedMsvcVctipImages = @(),
+        [scriptblock]$TestOwnedProcessImageInspector,
         [Parameter(Mandatory)][string]$StdoutPath,
         [Parameter(Mandatory)][string]$StderrPath
     )
@@ -609,6 +745,12 @@ function Invoke-CheckedOwnedProcess {
     $rootExitDeadline = $null
     $resolvedExecutable = $null
     $resolvedWorkingDirectory = $null
+    $auxiliaryRetirementPending = $false
+    $forcedJobRetirementAttempted = $false
+    $auxiliaryDisposition = if ($AuxiliaryProcessPolicy -eq 'none') { 'not-enabled' } else { 'not-observed' }
+    $auxiliaryClassifications = [System.Collections.Generic.List[object]]::new()
+    $verifiedImageLeases = [System.Collections.Generic.List[object]]::new()
+    $auxiliaryPreflightSummary = @()
 
     try {
         if ([string]::IsNullOrWhiteSpace($Executable)) { throw 'Executable must not be empty.' }
@@ -621,6 +763,57 @@ function Invoke-CheckedOwnedProcess {
         if (!(Test-Path -LiteralPath $WorkingDirectory -PathType Container)) { throw "Working directory does not exist: $WorkingDirectory" }
         $resolvedExecutable = [IO.Path]::GetFullPath($Executable)
         $resolvedWorkingDirectory = [IO.Path]::GetFullPath($WorkingDirectory)
+        if ($AuxiliaryProcessPolicy -eq 'verified-msvc-vctip') {
+            if ($Stage -ne 'compile' -or (!$TestOwnedProcessImageInspector -and [IO.Path]::GetFileName($resolvedExecutable) -ine 'cargo.exe')) {
+                throw 'Verified MSVC helper retirement is limited to an explicit Cargo compile invocation.'
+            }
+            if ($VerifiedMsvcVctipImages.Count -eq 0) { throw 'Verified MSVC helper retirement requires a successful trusted-image preflight.' }
+            foreach ($image in $VerifiedMsvcVctipImages) {
+                if ($null -eq $image -or $null -eq $image.Lease -or $null -eq $image.Descriptor) {
+                    throw 'A verified MSVC image descriptor or held file lease is missing.'
+                }
+                $descriptor = $image.Descriptor
+                $lease = $image.Lease
+                if (!$lease.CanRead -or $lease.SafeFileHandle.IsClosed -or $lease.SafeFileHandle.IsInvalid) {
+                    throw 'A verified MSVC image lease was closed before the Cargo invocation.'
+                }
+                if ([string]$descriptor.SignatureStatus -cne 'Valid' -or
+                    [string]$descriptor.SignerOrganization -cne 'Microsoft Corporation' -or
+                    [string]$descriptor.SignerThumbprint -notmatch '^[0-9A-Fa-f]{40,64}$' -or
+                    [string]$descriptor.SignerCertificateSha256 -notmatch '^[0-9a-f]{64}$' -or
+                    [string]$descriptor.Sha256 -notmatch '^[0-9a-f]{64}$' -or
+                    [string]::IsNullOrWhiteSpace([string]$descriptor.FileId) -or
+                    [string]::IsNullOrWhiteSpace([string]$descriptor.CanonicalPath)) {
+                    throw 'The MSVC helper trust descriptor is malformed or is not a valid Microsoft-signed image.'
+                }
+                $heldDescriptor = [MultiLauncher.Dev.OwnedProcessNative]::GetOpenFileDescriptor($lease.SafeFileHandle)
+                if ([string]$heldDescriptor.FileId -cne [string]$descriptor.FileId -or
+                    [string]$heldDescriptor.CanonicalPath -ine [string]$descriptor.CanonicalPath) {
+                    throw 'The held MSVC image lease no longer matches its trusted file identity.'
+                }
+                $verifiedImageLeases.Add($image)
+                $auxiliaryPreflightSummary += [pscustomobject][ordered]@{
+                    CanonicalPath = [string]$descriptor.CanonicalPath
+                    FileId = [string]$descriptor.FileId
+                    Sha256 = [string]$descriptor.Sha256
+                    SignatureStatus = [string]$descriptor.SignatureStatus
+                    SignerThumbprint = [string]$descriptor.SignerThumbprint
+                    SignerCertificateSha256 = [string]$descriptor.SignerCertificateSha256
+                    SignerOrganization = [string]$descriptor.SignerOrganization
+                    VerificationSource = [string]$descriptor.VerificationSource
+                }
+            }
+            if (!$TestOwnedProcessImageInspector) {
+                $firstCargoArgument = if ($PreEncodedArguments) { [string]$PreEncodedArguments[0] } elseif ($ArgumentList.Count -gt 0) { [string]$ArgumentList[0] } else { '' }
+                if ($firstCargoArgument -notin @('build', 'check', 'nextest')) {
+                    throw 'The trusted MSVC helper policy was supplied for a non-compiler Cargo command.'
+                }
+            }
+            $auxiliaryDisposition = 'eligible-image-preflight-verified'
+        }
+        elseif ($VerifiedMsvcVctipImages.Count -gt 0 -or $TestOwnedProcessImageInspector) {
+            throw 'Trusted MSVC image descriptors require the explicit verified-msvc-vctip policy.'
+        }
         try {
             $stdoutFile = [IO.File]::Open($StdoutPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read)
             $stderrFile = [IO.File]::Open($StderrPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read)
@@ -697,7 +890,90 @@ function Invoke-CheckedOwnedProcess {
                     if ($activeCount -eq 0) { break }
                     if ($null -eq $rootExitDeadline) { $rootExitDeadline = [Diagnostics.Stopwatch]::StartNew() }
                     if ($rootExitDeadline.Elapsed.TotalSeconds -ge $CleanupTimeoutSeconds) {
-                        $reason = 'owned descendants survived the root process'
+                        if ($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                            $timedOut = $true
+                            $timeoutReason = 'stage deadline elapsed during owned descendant grace'
+                            $reason = 'timeout'
+                        }
+                        elseif ($AuxiliaryProcessPolicy -eq 'verified-msvc-vctip' -and $exitCode -eq 0 -and
+                            $recorderErrors.Count -eq 0 -and $cleanupErrors.Count -eq 0) {
+                            try {
+                                $currentIds = @(Get-CheckedOwnedProcessIds -Owner $owner)
+                                $activeMembers = [System.Collections.Generic.List[object]]::new()
+                                foreach ($memberId in $currentIds) {
+                                    if ([uint32]$memberId -eq [uint32]$owner.ProcessId) { continue }
+                                    $memberIdentity = Get-CheckedOwnedIdentity -Owner $owner -ProcessId $memberId
+                                    if ($null -eq $memberIdentity) { throw "Owned process $memberId could not be positively identified." }
+                                    $identityMap[[string]$memberId] = $memberIdentity
+                                    $memberImage = if ($TestOwnedProcessImageInspector) {
+                                        & $TestOwnedProcessImageInspector $owner $memberId
+                                    } else {
+                                        Get-CheckedOwnedProcessImage -Owner $owner -ProcessId $memberId
+                                    }
+                                    if (!$memberImage.InOwnedJob -or !$memberImage.Running -or
+                                        [uint32]$memberImage.ProcessId -ne [uint32]$memberId -or
+                                        ([datetime]$memberImage.CreationUtc).ToUniversalTime() -ne ([datetime]$memberIdentity.CreationDate).ToUniversalTime()) {
+                                        throw "Owned process $memberId was not a live, exact Job/PID/creation identity."
+                                    }
+                                    $matches = @($verifiedImageLeases | Where-Object {
+                                        [string]$_.Descriptor.FileId -ceq [string]$memberImage.FileId -and
+                                        [string]$_.Descriptor.CanonicalPath -ieq [string]$memberImage.CanonicalPath
+                                    })
+                                    if ($matches.Count -ne 1) {
+                                        throw "Owned process $memberId has an unknown or ambiguous executable image."
+                                    }
+                                    $activeMembers.Add([pscustomobject][ordered]@{
+                                        ProcessId = [int]$memberId
+                                        CreationDate = [string]$memberImage.CreationUtc
+                                        CanonicalPath = [string]$memberImage.CanonicalPath
+                                        FileId = [string]$memberImage.FileId
+                                        Sha256 = [string]$matches[0].Descriptor.Sha256
+                                        SignerThumbprint = [string]$matches[0].Descriptor.SignerThumbprint
+                                        SignerCertificateSha256 = [string]$matches[0].Descriptor.SignerCertificateSha256
+                                        Classification = 'verified-msvc-vctip-auxiliary'
+                                        Disposition = 'pending-owned-job-retirement'
+                                    })
+                                }
+                                if ($activeMembers.Count -eq 0 -or $activeMembers.Count -ne [int]$activeCount) {
+                                    throw 'The active Job membership count did not match the verified auxiliary process identities.'
+                                }
+                                $secondIds = @(Get-CheckedOwnedProcessIds -Owner $owner | Where-Object { [uint32]$_ -ne [uint32]$owner.ProcessId })
+                                $firstKey = (@($activeMembers | ForEach-Object { [string]$_.ProcessId } | Sort-Object) -join ',')
+                                $secondKey = (@($secondIds | ForEach-Object { [string]$_ } | Sort-Object) -join ',')
+                                $secondActiveCount = [MultiLauncher.Dev.OwnedProcessNative]::GetActiveProcessCount($owner)
+                                if ($firstKey -cne $secondKey -or [int]$secondActiveCount -ne $activeMembers.Count -or
+                                    $watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                                    throw 'The Job membership changed or the stage deadline expired during helper classification.'
+                                }
+                                foreach ($member in $activeMembers) {
+                                    $recheckedIdentity = Get-CheckedOwnedIdentity -Owner $owner -ProcessId ([uint32]$member.ProcessId)
+                                    $recheckedImage = if ($TestOwnedProcessImageInspector) {
+                                        & $TestOwnedProcessImageInspector $owner ([uint32]$member.ProcessId)
+                                    } else {
+                                        Get-CheckedOwnedProcessImage -Owner $owner -ProcessId ([uint32]$member.ProcessId)
+                                    }
+                                    if ($null -eq $recheckedIdentity -or !$recheckedImage.InOwnedJob -or !$recheckedImage.Running -or
+                                        [string]$recheckedIdentity.CreationDate -cne [string]$member.CreationDate -or
+                                        [string]$recheckedImage.CreationUtc -cne [string]$member.CreationDate -or
+                                        [string]$recheckedImage.FileId -cne [string]$member.FileId -or
+                                        [string]$recheckedImage.CanonicalPath -ine [string]$member.CanonicalPath) {
+                                        throw "Owned process $($member.ProcessId) changed identity during the final retirement check."
+                                    }
+                                }
+                                foreach ($member in $activeMembers) { $auxiliaryClassifications.Add($member) }
+                                $auxiliaryRetirementPending = $true
+                                $auxiliaryDisposition = 'verified-helpers-pending-forced-job-retirement'
+                                break
+                            }
+                            catch {
+                                $reason = 'auxiliary process classification failure: ' + $_.Exception.Message
+                                $auxiliaryDisposition = 'classification-failed'
+                                break
+                            }
+                        }
+                        else {
+                            $reason = if ($exitCode -ne 0) { 'owned descendants survived a nonzero root exit' } else { 'owned descendants survived the root process' }
+                        }
                         break
                     }
                 }
@@ -752,7 +1028,8 @@ function Invoke-CheckedOwnedProcess {
                 }
                 catch { $cleanupErrors.Add('Owned identity snapshot: ' + $_.Exception.Message) }
 
-                if ($reason -ne 'completed') {
+                if ($reason -ne 'completed' -or $auxiliaryRetirementPending) {
+                    if ($auxiliaryRetirementPending) { $forcedJobRetirementAttempted = $true }
                     try { [MultiLauncher.Dev.OwnedProcessNative]::TerminateJob($owner) }
                     catch { $cleanupErrors.Add('Job Object termination: ' + $_.Exception.Message) }
                 }
@@ -821,6 +1098,9 @@ function Invoke-CheckedOwnedProcess {
             if ($reason -eq 'completed' -and (!$cleanupVerified -or !$outputDrainVerified)) { $reason = 'cleanup or output drain unverified' }
             if ($reason -eq 'completed' -and $recorderErrors.Count -gt 0) { $reason = 'output recording failure' }
             if ($reason -eq 'completed' -and $processExited -and $exitCode -ne 0) { $reason = 'failed exit' }
+            if ($auxiliaryRetirementPending) {
+                foreach ($classification in $auxiliaryClassifications) { $classification.Disposition = if ($cleanupVerified) { 'retired-and-cleanup-verified' } else { 'retirement-attempted-cleanup-unverified' } }
+            }
             try { $owner.Dispose() } catch { $cleanupErrors.Add('Owned process handle disposal: ' + $_.Exception.Message) }
         }
         $watch.Stop()
@@ -828,6 +1108,15 @@ function Invoke-CheckedOwnedProcess {
 
     if ($cleanupErrors.Count -gt 0 -and $reason -eq 'completed') { $reason = 'cleanup incomplete or uncertain' }
     if ($recorderErrors.Count -gt 0 -and $reason -eq 'completed') { $reason = 'output recording failure' }
+    if ($auxiliaryRetirementPending) {
+        $finalAuxiliaryChecksPassed = $reason -eq 'completed' -and $cleanupVerified -and $outputDrainVerified -and
+            $recorderErrors.Count -eq 0 -and $cleanupErrors.Count -eq 0 -and
+            @($postCleanup | Where-Object { $_.State -in @('Alive', 'Unknown') }).Count -eq 0
+        foreach ($classification in $auxiliaryClassifications) {
+            $classification.Disposition = if ($finalAuxiliaryChecksPassed) { 'retired-and-all-final-checks-verified' } else { 'retirement-attempted-but-final-checks-failed' }
+        }
+        $auxiliaryDisposition = if ($finalAuxiliaryChecksPassed) { 'verified-helpers-retired-and-all-final-checks-verified' } else { 'verified-helpers-retired-but-final-checks-failed' }
+    }
     $endedUtc = [DateTimeOffset]::UtcNow
     $succeeded = $reason -eq 'completed' -and $processStarted -and $processExited -and $exitCode -eq 0 -and
         $cleanupVerified -and $outputDrainVerified -and $recorderErrors.Count -eq 0 -and $cleanupErrors.Count -eq 0
@@ -864,5 +1153,10 @@ function Invoke-CheckedOwnedProcess {
         OwnedProcesses = @($identityMap.Values)
         PostCleanup = @($postCleanup)
         RootAlive = if ($rootIdentity) { @($postCleanup | Where-Object { $_.ProcessId -eq $rootIdentity.ProcessId -and $_.State -eq 'Alive' }).Count -gt 0 } else { $false }
+        AuxiliaryProcessPolicy = $AuxiliaryProcessPolicy
+        AuxiliaryPreflight = @($auxiliaryPreflightSummary)
+        AuxiliaryProcessClassifications = @($auxiliaryClassifications)
+        ForcedJobRetirementAttempted = $forcedJobRetirementAttempted
+        AuxiliaryDisposition = $auxiliaryDisposition
     }
 }
