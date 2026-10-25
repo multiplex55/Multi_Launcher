@@ -1100,7 +1100,7 @@ impl DuplicateFinderDialogState {
         let _row_range = egui::ScrollArea::vertical()
             .id_salt("duplicate-finder-results")
             .auto_shrink([false, false])
-            .min_scrolled_height(0.0)
+            .min_scrolled_height(max_height)
             .max_height(max_height)
             .show_rows(ui, RESULT_ROW_HEIGHT, self.rows.len(), |ui, range| {
                 let row_viewport = ui.clip_rect().intersect(ui.available_rect_before_wrap());
@@ -2017,6 +2017,385 @@ mod tests {
         assert_eq!(proof.generation, 4);
         assert_eq!(proof.identity.file_id(), [14; 16]);
         assert_eq!(proof.root.identity.file_id(), [12; 16]);
+    }
+
+    #[test]
+    fn dff_dialog_window_geometry_stays_stable_before_and_after_resizing() {
+        const INSTANCE: u64 = 0xDFF_6001;
+
+        fn actual_window_rect(ctx: &egui::Context) -> egui::Rect {
+            ctx.memory(|memory| memory.area_rect(egui::Id::new(Some(WINDOW_TITLE))))
+                .expect("the actual Duplicate Finder window area is retained")
+        }
+
+        fn frame_at_size(
+            ctx: &egui::Context,
+            dialog: &mut DuplicateFinderDialogState,
+            screen_size: egui::Vec2,
+        ) -> egui::Rect {
+            frame_with_events(ctx, dialog, screen_size, Vec::new())
+        }
+
+        fn frame_with_events(
+            ctx: &egui::Context,
+            dialog: &mut DuplicateFinderDialogState,
+            screen_size: egui::Vec2,
+            events: Vec<egui::Event>,
+        ) -> egui::Rect {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size)),
+                focused: true,
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ctx| {
+                let first_ui_pass = ctx.current_pass_index() == 0;
+                dialog.show_with_jump_mode(
+                    ctx,
+                    None,
+                    Some(INSTANCE),
+                    crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                        kind: crate::gui::jump_mode::ui::NavigationDialogKind::DuplicateFinder,
+                        instance: INSTANCE,
+                    },
+                    true,
+                    true,
+                    first_ui_pass,
+                );
+            });
+            output.drop_without_applying_deltas();
+            actual_window_rect(ctx)
+        }
+
+        fn resize_by(
+            ctx: &egui::Context,
+            dialog: &mut DuplicateFinderDialogState,
+            screen_size: egui::Vec2,
+            delta: egui::Vec2,
+        ) -> egui::Rect {
+            let rect = actual_window_rect(ctx);
+            let start = rect.right_bottom() - egui::vec2(4.0, 4.0);
+            let end = start + delta;
+            frame_with_events(
+                ctx,
+                dialog,
+                screen_size,
+                vec![
+                    egui::Event::PointerMoved(start),
+                    egui::Event::PointerButton {
+                        pos: start,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            frame_with_events(
+                ctx,
+                dialog,
+                screen_size,
+                vec![egui::Event::PointerMoved(end)],
+            );
+            frame_with_events(
+                ctx,
+                dialog,
+                screen_size,
+                vec![egui::Event::PointerButton {
+                    pos: end,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            )
+        }
+
+        fn assert_rects_stay_stable(rects: &[egui::Rect], context: &str) -> egui::Rect {
+            let settled = rects[8];
+            for (frame, rect) in rects.iter().enumerate().skip(8) {
+                assert!(
+                    (rect.height() - settled.height()).abs() <= 0.5
+                        && (rect.top() - settled.top()).abs() <= 0.5
+                        && (rect.bottom() - settled.bottom()).abs() <= 0.5,
+                    "actual window geometry stays stable after convergence: context={context}, frame={frame}, settled={settled:?}, actual={rect:?}",
+                );
+            }
+            settled
+        }
+
+        fn assert_footer_visible(
+            dialog: &DuplicateFinderDialogState,
+            screen_size: egui::Vec2,
+            context: &str,
+        ) {
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size);
+            for key in ["start", "cancel", "close"] {
+                let response = dialog
+                    .responses
+                    .get(key)
+                    .unwrap_or_else(|| panic!("the actual {key} footer response is rendered"));
+                assert!(
+                    screen.contains_rect(response.response_rect),
+                    "the complete {key} footer response remains reachable: context={context}, response={response:?}, screen={screen:?}",
+                );
+            }
+        }
+
+        fn scroll_until_results_visible(
+            ctx: &egui::Context,
+            dialog: &mut DuplicateFinderDialogState,
+            screen_size: egui::Vec2,
+        ) -> egui::Rect {
+            for _ in 0..12 {
+                let results = dialog.responses["results-scroll"];
+                if results.rect.is_positive() {
+                    return actual_window_rect(ctx);
+                }
+                let content = dialog.responses["content-scroll"];
+                assert!(
+                    content.rect.is_positive(),
+                    "the outer content viewport remains available while revealing results: content={content:?}, results={results:?}",
+                );
+                let delta_y = if results.response_rect.bottom() > content.rect.bottom() {
+                    (results.response_rect.bottom() - content.rect.bottom() + 8.0).min(160.0)
+                } else if results.response_rect.top() < content.rect.top() {
+                    -(content.rect.top() - results.response_rect.top() + 8.0).min(160.0)
+                } else {
+                    panic!(
+                        "the results viewport should be visible or scrollable within the outer content area: content={content:?}, results={results:?}",
+                    );
+                };
+                let wheel_position =
+                    egui::pos2(content.rect.left() + 8.0, content.rect.top() + 4.0);
+                frame_with_events(
+                    ctx,
+                    dialog,
+                    screen_size,
+                    vec![
+                        egui::Event::PointerMoved(wheel_position),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, -delta_y),
+                            phase: egui::TouchPhase::Move,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            panic!(
+                "bounded outer-content scrolling reveals the results viewport; content={:?}, results={:?}",
+                dialog.responses.get("content-scroll"),
+                dialog.responses.get("results-scroll"),
+            );
+        }
+
+        fn crowded_snapshot() -> DiscoverySnapshot {
+            let roots = (0..32)
+                .map(|index| PathBuf::from(format!("C:\\fixture\\root-{index:02}")))
+                .collect::<Vec<_>>();
+            let content_size = b"identical generated content".len() as u64;
+            DiscoverySnapshot {
+                generation: 40,
+                status: DiscoveryStatus::Partial,
+                progress: None,
+                roots: roots
+                    .iter()
+                    .map(|path| crate::duplicate_finder::RootScan {
+                        selected_path: path.clone(),
+                        canonical_root: None,
+                        identity: None,
+                        status: RootScanStatus::Complete,
+                        counts: Default::default(),
+                    })
+                    .collect(),
+                size_groups: vec![SizeGroup {
+                    size_bytes: content_size,
+                    known_files: vec![
+                        KnownFile {
+                            identity: KnownFileIdentity {
+                                volume_serial_number: 1,
+                                file_id: [2; 16],
+                            },
+                            size_bytes: content_size,
+                            modified: Some(std::time::SystemTime::UNIX_EPOCH),
+                            aliases: vec![FileAlias {
+                                root_index: 0,
+                                path: roots[0].join("first.bin"),
+                            }],
+                        },
+                        KnownFile {
+                            identity: KnownFileIdentity {
+                                volume_serial_number: 1,
+                                file_id: [3; 16],
+                            },
+                            size_bytes: content_size,
+                            modified: Some(std::time::SystemTime::UNIX_EPOCH),
+                            aliases: vec![FileAlias {
+                                root_index: 0,
+                                path: roots[0].join("second.bin"),
+                            }],
+                        },
+                    ],
+                    unverified_paths: Vec::new(),
+                }],
+                verified_duplicate_groups: vec![VerifiedDuplicateGroup {
+                    size_group_index: 0,
+                    sha256: [7; 32],
+                    known_files: vec![
+                        VerifiedKnownFile {
+                            known_file_index: 0,
+                            alias_index: 0,
+                        },
+                        VerifiedKnownFile {
+                            known_file_index: 1,
+                            alias_index: 0,
+                        },
+                    ],
+                    logical_duplicate_bytes: content_size,
+                }],
+                identity_unverified_matches: Vec::new(),
+                duplicate_totals: DuplicateTotals {
+                    verified_groups: 1,
+                    verified_files: 2,
+                    logical_duplicate_bytes: content_size,
+                    identity_unverified_matches: 0,
+                },
+                diagnostics: (0..64)
+                    .map(|index| DiscoveryDiagnostic {
+                        root_index: Some(index % roots.len()),
+                        path: None,
+                        message: format!("generated diagnostic {index}"),
+                    })
+                    .collect(),
+                diagnostics_truncated: false,
+                counts: Default::default(),
+            }
+        }
+
+        for (snapshot_name, is_crowded) in [("idle", false), ("crowded", true)] {
+            for viewport in [egui::vec2(1180.0, 860.0), egui::vec2(620.0, 420.0)] {
+                let ctx = egui::Context::default();
+                let mut theme_settings = crate::settings::ThemeSettings::default();
+                if is_crowded {
+                    theme_settings.preferences.density = crate::settings::ThemeDensity::Comfortable;
+                    theme_settings.preferences.typography_scale = 1.5;
+                }
+                if is_crowded && viewport.x == 1180.0 {
+                    ctx.set_pixels_per_point(1.25);
+                }
+                crate::gui::theme::initialize_runtime(&ctx, &theme_settings);
+                ctx.all_styles_mut(|style| style.animation_time = 0.0);
+                let mut dialog = DuplicateFinderDialogState::new(&ctx);
+                dialog.open();
+                if is_crowded {
+                    let snapshot = crowded_snapshot();
+                    dialog.selected_roots = snapshot
+                        .roots
+                        .iter()
+                        .map(|root| root.selected_path.clone())
+                        .collect();
+                    dialog.set_snapshot_for_test(snapshot);
+                }
+                frame_at_size(&ctx, &mut dialog, viewport);
+                frame_at_size(&ctx, &mut dialog, viewport);
+                if is_crowded && viewport.x == 1180.0 {
+                    let position = dialog.responses["diagnostics-toggle"].rect.center();
+                    frame_with_events(
+                        &ctx,
+                        &mut dialog,
+                        viewport,
+                        vec![
+                            egui::Event::PointerMoved(position),
+                            egui::Event::PointerButton {
+                                pos: position,
+                                button: egui::PointerButton::Primary,
+                                pressed: true,
+                                modifiers: egui::Modifiers::NONE,
+                            },
+                        ],
+                    );
+                    frame_with_events(
+                        &ctx,
+                        &mut dialog,
+                        viewport,
+                        vec![egui::Event::PointerButton {
+                            pos: position,
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            modifiers: egui::Modifiers::NONE,
+                        }],
+                    );
+                    assert!(
+                        dialog.responses.contains_key("diagnostics-scroll"),
+                        "the actual diagnostics body expanded before its geometry is sampled"
+                    );
+                }
+                let mut rects = Vec::new();
+                for _ in 0..64 {
+                    rects.push(frame_at_size(&ctx, &mut dialog, viewport));
+                }
+                let context = format!(
+                    "{snapshot_name}, viewport={viewport:?}, ppp={}, theme={:?}",
+                    ctx.pixels_per_point(),
+                    theme_settings.preferences,
+                );
+                let settled = assert_rects_stay_stable(&rects, &context);
+                assert_footer_visible(&dialog, viewport, &context);
+                if is_crowded {
+                    assert!(dialog.responses["root-status-scroll"].rect.is_positive());
+                    if viewport.x > 1000.0 {
+                        assert!(dialog.responses["results-scroll"].rect.is_positive());
+                    } else {
+                        let after_scroll =
+                            scroll_until_results_visible(&ctx, &mut dialog, viewport);
+                        assert!(dialog.responses["results-scroll"].rect.is_positive());
+                        assert!(
+                            (after_scroll.height() - settled.height()).abs() <= 0.5
+                                && (after_scroll.top() - settled.top()).abs() <= 0.5,
+                            "scrolling the crowded body does not change the user-visible window geometry: settled={settled:?}, after_scroll={after_scroll:?}",
+                        );
+                        assert_footer_visible(&dialog, viewport, &context);
+                    }
+                    assert!(
+                        dialog.responses["diagnostics-toggle"]
+                            .response_rect
+                            .is_positive()
+                    );
+                }
+                if is_crowded && viewport.x == 1180.0 {
+                    let enlarged = resize_by(&ctx, &mut dialog, viewport, egui::vec2(40.0, 80.0));
+                    assert!(
+                        enlarged.height() >= settled.height() + 70.0,
+                        "a pointer drag on the window's resize grip applies the requested height increase: before={settled:?}, after={enlarged:?}"
+                    );
+                    let after_resize = (0..48)
+                        .map(|_| frame_at_size(&ctx, &mut dialog, viewport))
+                        .collect::<Vec<_>>();
+                    let resized_stable =
+                        assert_rects_stay_stable(&after_resize, "after user resize up");
+                    assert!(
+                        (resized_stable.height() - enlarged.height()).abs() <= 0.5,
+                        "the user-selected size persists after idle frames: resized={enlarged:?}, settled={resized_stable:?}"
+                    );
+                    assert_footer_visible(&dialog, viewport, "after user resize up");
+                    let reduced = resize_by(&ctx, &mut dialog, viewport, egui::vec2(-40.0, -60.0));
+                    assert!(
+                        reduced.height() <= resized_stable.height() - 50.0,
+                        "a pointer drag on the window's resize grip applies the requested height decrease: before={resized_stable:?}, after={reduced:?}"
+                    );
+                    let after_resize_down = (0..48)
+                        .map(|_| frame_at_size(&ctx, &mut dialog, viewport))
+                        .collect::<Vec<_>>();
+                    let resized_down_stable =
+                        assert_rects_stay_stable(&after_resize_down, "after user resize down");
+                    assert!(
+                        (resized_down_stable.height() - reduced.height()).abs() <= 0.5,
+                        "the reduced user-selected size persists after idle frames: resized={reduced:?}, settled={resized_down_stable:?}"
+                    );
+                    assert_footer_visible(&dialog, viewport, "after user resize down");
+                }
+                dialog.shutdown();
+            }
+        }
     }
 
     #[cfg(windows)]
