@@ -22,8 +22,8 @@ No application behavior or default profile changes are authorized.
 | M1-A/B | complete | Native progress helper and exact selections passed; matched no-op profiles effectively tied |
 | M2-A | complete | Independent last-layout cache; original recipes and all row/state assertions retained; exact and mixed proofs passed |
 | M2-B | complete | One retained measured dialog fixture improvement; Quick Notes already caches geometry and was left unchanged |
-| M3-A | pending | One reversible pure-target grouping A/B; map full roster; retain only measured benefit |
-| M3-B | pending | Optional one test-only compile hotspot; skip without evidence |
+| M3-A | complete | One two-file grouping retained; 24.67% controlled-edit build saving, exact roster mapping and six selected tests passed |
+| M3-B | skipped | No small measured extraction/deduplication justified; avoid broad GUI test-owner restructuring |
 | M4-A | complete | Measured replacement-observer teardown race fixed with existing completion seam; 20 exact repeats and mixed group passed |
 | M4-B | skipped | No measured arbitrary sleep justified a substitution; no wait campaign |
 | M5-A | pending | Matched scorecard, coverage parity; at most one final full execution |
@@ -196,3 +196,46 @@ The failed baseline duration is not counted as a speed improvement.
 
 There is no measured unnecessary wall-clock sleep in these selected owners.
 Quick Notes' settling frames test lifecycle behavior; no M4-B edits were made.
+
+## M3-A one target-grouping experiment
+
+The unchanged bodies of `tests/query_autocomplete.rs` (one test) and
+`tests/mkmacro_compiler.rs` (four tests) moved under `tests/pure_cases/`.
+`tests/suites/pure.rs` includes them as private modules; `Cargo.toml` declares
+that single target. Autodiscovery and all existing profiles/features remain.
+Both files are pure in-memory tests: no app, native services, environment,
+temporary fixtures, binary-local global state or subprocess-name assumptions.
+
+| fast-dev selected build | Standalone pair | Grouped `pure` | Change |
+|---|---:|---:|---:|
+| Warm no-op median, 3 samples | 2.346657s | 2.100373s | 10.50% lower |
+| Controlled edit median, 3 samples | 8.444534s | 6.361472s | **24.67% lower** |
+| Controlled edit range | 7.975874–10.333270s | 6.289574–6.383503s | No overlap |
+
+Grouped preparation (7.556874s) and restored-source preparation (7.197831s)
+are excluded. Exact edit bytes/comments match the baseline fixture on both
+files; final original SHA-256s match. This is a two-file edit/link workload,
+not a claim about arbitrary single-file edits or the entire suite's build.
+One experiment only; no alternative group was tried.
+Combined executable size fell from 10,168,320 to 9,052,672 bytes (PDBs excluded).
+
+Full M3 inventories: **7021 cases, 48 ignored**, targets **71→70**; canonical
+name/ignored mapping has zero differences or duplicates. The earlier M0-A full
+roster had 7019 cases: its only additions are the two passing C2G proof tests.
+Mapping: `query_autocomplete/default_query_autocomplete_enabled` becomes
+`pure/query_autocomplete::default_query_autocomplete_enabled`; all four
+`mkmacro_compiler/<name>` cases become `pure/mkmacro_compiler::<name>`.
+The complete five-name mapping and checksum are in `m3-roster-parity.json`.
+
+`cargo nextest run --test pure --test plugin_queries --cargo-profile fast-dev
+--offline -E 'binary(=pure)|test(=help_plugin::search_returns_help_action)'
+--no-fail-fast`: **6 passed**, 135 unselected/ignored cases skipped. Existing
+owned runner records show completed cleanup. Retain the grouping on these
+measurements and parity proofs. Evidence: `m3-before-inventory`,
+`m3-after-inventory`, `m3-mapped-tests`, `m3-grouped-build-containment`,
+`build-samples`, `standalone-target-sizes.json`, and `m3-roster-parity.json`.
+
+No optional M3-B change was made: the monolithic library-test preparation is
+expensive (327s for M2-A), but a small proven duplication/monomorphization fix
+was not identified. Large GUI test-module restructuring and compiler tuning
+would exceed this bounded follow-on.

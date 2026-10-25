@@ -4,7 +4,7 @@ For target-first interactive Nextest runs, bounded profiling and
 machine-readable receipts, see the [test performance workflow](test_perf/README.md).
 
 ```powershell
-& .\dev\test_perf\run.ps1 -TargetKind Integration -Target query_autocomplete -CargoProfile fast-dev
+& .\dev\test_perf\run.ps1 -TargetKind Integration -Target pure -CargoProfile fast-dev
 ```
 
 Select a Cargo target before filtering cases: a case filter alone may still

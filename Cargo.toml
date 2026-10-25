@@ -266,6 +266,10 @@ path = "tests/suites/plugin_queries.rs"
 name = "domain"
 path = "tests/suites/domain.rs"
 
+[[test]]
+name = "pure"
+path = "tests/suites/pure.rs"
+
 # One reduced-symbol candidate shared by iterative launcher builds and Nextest.
 # Inheriting dev keeps its safety checks and other development settings.
 [profile.fast-dev]
