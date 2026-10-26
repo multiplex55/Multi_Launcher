@@ -2773,6 +2773,34 @@ mod tests {
         #[test]
         #[ignore = "requires an interactive Windows desktop with Windows Graphics Capture support"]
         fn native_live_pin_owned_window_smoke() {
+            run_owned_window_smoke(false);
+        }
+
+        #[test]
+        #[ignore = "requires an interactive Windows desktop with Windows Graphics Capture support"]
+        fn activity_baseline_native_live_pin_cancel_and_warm_cycle() {
+            use windows::Win32::System::WinRT::{
+                RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize,
+            };
+            // This repeated-session fixture owns one host apartment lifetime.
+            // Workers still initialize, cancel, release resources and join as
+            // before. It does not prove standalone last-MTA teardown/restart.
+            unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.unwrap();
+            struct HostApartment;
+            impl Drop for HostApartment {
+                fn drop(&mut self) {
+                    // SAFETY: balances this test thread's successful initialize,
+                    // after both owned capture workers and fixtures have retired.
+                    unsafe { RoUninitialize() };
+                }
+            }
+            let _host_apartment = HostApartment;
+            eprintln!("native baseline host: one balanced MTA lifetime across two sessions");
+            run_owned_window_smoke(true);
+            run_owned_window_smoke(true);
+        }
+
+        fn run_owned_window_smoke(active_cancel_baseline: bool) {
             use windows::Win32::Foundation::HWND;
             use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
 
@@ -2926,6 +2954,42 @@ mod tests {
                 Duration::from_secs(5),
             )
             .unwrap_or_else(|error| panic!("resumed source did not publish phase C: {error}"));
+
+            if active_cancel_baseline {
+                assert!(
+                    unsafe { IsWindow(hwnd) }.as_bool(),
+                    "source must still be live at cancel"
+                );
+                let cancel = Instant::now();
+                assert!(board.close(pin_id));
+                let ack_us = cancel.elapsed().as_micros();
+                board.shutdown_live_sessions_and_join().unwrap();
+                let join_us = cancel.elapsed().as_micros();
+                let retained_bytes = board.image_bytes();
+                drop(initial);
+                drop(covered);
+                drop(frozen);
+                drop(resumed);
+                drop(wake_source);
+                assert_eq!(board.image_bytes(), 0);
+                assert_eq!(gpu_budget.used.load(Ordering::Acquire), 0);
+                fixture.finish().unwrap();
+                eprintln!(
+                    "ACTIVITY_BASELINE {}",
+                    serde_json::json!({
+                        "owner":"native_wgc_live_pin", "operation":format!("{:?}",capture),
+                        "source_nonce":nonce,"source_pid":ready.process_id,"source_hwnd":ready.hwnd,
+                        "fixture_bounds":[360,240],"crop":[CROP_SIZE,CROP_SIZE],
+                        "warm_cycle":"paint/move/pause/resume, repeated owned-source session",
+                        "cancel_ack_us":ack_us,"worker_join_us":join_us,
+                        "cpu_lease_bytes_after_join":retained_bytes,
+                        "cpu_bytes_after_external_lease_drop":0,"gpu_bytes_after_join":0,
+                        "ui_frame_latency":"not measured","cleanup":"capture joined, owned source finished",
+                        "initial_png":initial_path,"updated_png":covered_path
+                    })
+                );
+                return;
+            }
 
             fixture.command("CLOSE_SOURCE").unwrap();
             let closed_deadline = Instant::now() + Duration::from_secs(2);

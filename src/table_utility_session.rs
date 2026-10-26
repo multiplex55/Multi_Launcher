@@ -1617,6 +1617,78 @@ mod tests {
         }
     }
 
+    // Baseline probe: method acknowledgment and active-job clearance are not UI
+    // frame latency or worker-thread retirement. No production policy changes.
+    #[test]
+    fn activity_baseline_table_cancel_and_warm_reopen() {
+        let ctx = egui::Context::default();
+        let mut session = TableUtilitySession::new();
+        session.set_has_header(true);
+        session.open(&ctx).unwrap();
+        session.paste_source("value\nwarm".to_owned()).unwrap();
+        let warm = ready_snapshot(&mut session);
+        assert_eq!(warm.document.as_ref().unwrap().rows().len(), 1);
+        session.close();
+        session.open(&ctx).unwrap();
+        assert!(session.snapshot().document.is_some());
+        let source = format!("value\n{}", "abcdefghij0123456789\n".repeat(40_000));
+        let bytes = source.len();
+        session.paste_source(source).unwrap();
+        let operation = session.snapshot().source_revision.value();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let active = session
+                .worker
+                .as_ref()
+                .unwrap()
+                .shared
+                .0
+                .lock()
+                .unwrap()
+                .active_cancellation
+                .is_some();
+            if active {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "actual table job was not observed active"
+            );
+            thread::yield_now();
+        }
+        let cancel = Instant::now();
+        session.close();
+        let ack_us = cancel.elapsed().as_micros();
+        loop {
+            let state = session.worker.as_ref().unwrap().shared.0.lock().unwrap();
+            let idle = state.active_cancellation.is_none() && state.pending.is_none();
+            drop(state);
+            if idle {
+                break;
+            }
+            assert!(Instant::now() < deadline, "table job did not clear");
+            thread::yield_now();
+        }
+        let job_clear_us = cancel.elapsed().as_micros();
+        let retained_document = session.snapshot().document.is_some();
+        assert!(retained_document, "close preserves last-good document");
+        assert_eq!(session.source().len(), bytes);
+        session.shutdown();
+        let joined_us = cancel.elapsed().as_micros();
+        assert!(session.worker.is_none());
+        eprintln!(
+            "ACTIVITY_BASELINE {}",
+            serde_json::json!({
+                "owner":"table", "operation_source_revision":operation,
+                "fixture_rows":40000,"fixture_bytes":bytes,"warm_reopen":true,
+                "cancel_ack_us":ack_us,"job_clear_observed_us":job_clear_us,
+                "worker_join_us":joined_us,"retained_source_bytes":bytes,
+                "last_good_document_retained":retained_document,"ui_frame_latency":"not measured",
+                "deadline_seconds":5,"cleanup":"joined"
+            })
+        );
+    }
+
     #[test]
     fn table_session_latest_source_wins_across_close_and_reopen() {
         let ctx = egui::Context::default();

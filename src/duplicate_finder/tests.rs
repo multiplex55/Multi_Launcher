@@ -151,6 +151,79 @@ fn wait_for_current_complete(session: &DuplicateFinderSession, generation: u64) 
 }
 
 #[test]
+fn activity_baseline_native_file_scan_cancel_and_warm_reopen() {
+    use super::content::FirstReadCheckpointGate;
+    let directory = tempfile::tempdir().unwrap();
+    let payload = vec![42u8; 128 * 1024];
+    for index in 0..8 {
+        std::fs::write(
+            directory.path().join(format!("fixture-{index}.bin")),
+            &payload,
+        )
+        .unwrap();
+    }
+    let gate = Arc::new(FirstReadCheckpointGate::new());
+    // Release on unwind too, so a failed observation cannot strand the reaper.
+    struct Release(Arc<FirstReadCheckpointGate>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    let _release = Release(Arc::clone(&gate));
+    let session = DuplicateFinderSession::with_wake_and_first_read_checkpoint(
+        Arc::new(|| {}),
+        Arc::clone(&gate),
+    );
+    let operation = session
+        .start_scan(vec![directory.path().to_owned()])
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !gate.reached() {
+        assert!(
+            Instant::now() < deadline,
+            "native reader checkpoint not reached"
+        );
+        std::thread::yield_now();
+    }
+    let cancel = Instant::now();
+    assert!(session.cancel().unwrap());
+    let ack_us = cancel.elapsed().as_micros();
+    assert_eq!(session.view().snapshot.status, DiscoveryStatus::Cancelled);
+    assert!(
+        session.is_busy(),
+        "cancel publication is not native read retirement"
+    );
+    gate.release();
+    while session.is_busy() {
+        assert!(Instant::now() < deadline, "native scan did not drain");
+        std::thread::yield_now();
+    }
+    let drained_us = cancel.elapsed().as_micros();
+    session.close();
+    finish_close(&session);
+    let joined_us = cancel.elapsed().as_micros();
+    let warm = session
+        .start_scan(vec![directory.path().to_owned()])
+        .unwrap();
+    wait_for_current_complete(&session, warm);
+    assert_eq!(session.view().snapshot.verified_duplicate_groups.len(), 1);
+    session.close();
+    finish_close(&session);
+    eprintln!(
+        "ACTIVITY_BASELINE {}",
+        serde_json::json!({
+            "owner":"duplicate_native_scan","operation_generation":operation,
+            "fixture_files":8,"fixture_bytes":8*payload.len(),"warm_reopen":true,
+            "cancel_ack_us":ack_us,"job_drain_us":drained_us,"worker_join_observed_us":joined_us,
+            "gate":"first native read; released immediately after cancel",
+            "timing_scope":"controlled checkpoint, not arbitrary native IO worst case",
+            "ui_frame_latency":"not measured","deadline_seconds":10,"cleanup":"post-join reopen confirmed"
+        })
+    );
+}
+
+#[test]
 fn dff_lifecycle_coalesces_pending_scans_and_reopens_only_after_retirement() {
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
