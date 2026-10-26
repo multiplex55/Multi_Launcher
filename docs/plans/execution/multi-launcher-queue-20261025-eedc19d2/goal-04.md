@@ -14,7 +14,7 @@ Goals01-03 are complete and frozen on their own branches; their process/workflow
 
 Execute existing Goal04 checkpoints in order: attributable link/editor baselines; one accepted opt-in link/debug mode; scoped Neovim rust-analyzer configuration; equivalent editor comparison and final guidance. Inspect installed tools and actual configuration before choosing candidates. At most two link candidates, one scoped editor profile and only observed-contention cache comparison. Preserve global settings, trust/security defaults, full-debug and canonical release behavior, resources and production features. Use checked owners with compile1800s, editor300s and post-build smoke120s deadlines; cleanup5s. Controlled source edits require raw-byte backups and an outer restoration guard before the first write. Version/headless output is not interactive editor proof. No full suite is automatic; final appropriate first-party lint occurs after review/corrections and before exact-tree commit.
 
-M1-A baseline evidence is complete and independently accepted. M1-B through M2-B remain pending. The external queue ledger records planner/implementer/reviewer dispatch, actual evidence, failures, finite repairs, checkpoint identities and push outcomes. No measured speed gain or editor acceptance is implied by this baseline.
+M1-A baseline evidence is complete and independently accepted. M1-B recovery has completed its app/root measurements and artifact, icon, source-line, selected-test, and corrected native-window checks; checkpoint review and acceptance remain pending. M2-A remains unaccepted and M2-B remains pending. The external queue ledger records planner/implementer/reviewer dispatch, actual evidence, failures, finite repairs, checkpoint identities and push outcomes. No editor acceptance is implied by this baseline.
 
 ## M1-A — Independently accepted baseline evidence
 
@@ -57,6 +57,121 @@ The exact final repair-2 controller, runner, wire helper, and self-check inputs 
 
 All checked build and editor owners reported captured output, joined output drains, and cleanup. The parent independently audited the final semantic-retry owner receipt: 140 identities were checked after cleanup; 139 were absent, one PID was reused by a different identity, and zero of the recorded identities remained alive. The first-session/build overlap and final retry process identities have separate preserved audits. The earlier semantic timeout's 261 identities were also independently verified absent. The untracked `nvim.log` observed during this milestone was left untouched.
 
-**Disposition:** The configured independent Reviewer accepted M1-A without substantive findings, including the actual same-file semantic response adjudication. Review evidence is `g04-m1a/reviewer-review.md` beneath the queue evidence root. Parent checkpoint commit and actual push identities are recorded externally. M1-B and later checkpoints remain pending at this report boundary. The raw failed retry and strict URI-comparison result remain preserved alongside the parent’s read-only file-identity adjudication. No speed-improvement, diagnostic-latency, isolated linker-time, or unchanged-PDB claim is made.
+**Disposition:** The configured independent Reviewer accepted M1-A without substantive findings, including the actual same-file semantic response adjudication. Review evidence is `g04-m1a/reviewer-review.md` beneath the queue evidence root. Parent checkpoint commit and actual push identities are recorded externally. At the time of M1-A acceptance, M1-B and later checkpoints were pending; see the updated dispositions below. The raw failed retry and strict URI-comparison result remain preserved alongside the parent’s read-only file-identity adjudication. No speed-improvement, diagnostic-latency, isolated linker-time, or unchanged-PDB claim is made.
 
 The initial direct version probes had an ownership-recording gap, and one early checked discovery serializer failed before its receipt was saved. Their available outputs and limitations were retained; a corrected consolidated checked discovery supplied the authoritative seven-probe record (six successful version probes and the nonzero linker-help probe). No earlier gap is relabeled as a checked pass. The parent separately verified all recorded build/discovery, editor/coexistence and semantic-attempt process identities retired, including PID reuse distinctions. No further M1-A semantic repair runs are authorized under that exhausted two-repair boundary; the actual returned definition was accepted from the preserved final response by file and symbol identity.
+
+## M1-B — Verification complete; checkpoint review pending
+
+The initial M1-B app-preview sequence was blocked before candidate Cargo compilation, and its finite preview repair allowance was exhausted. Those historical failures remain recorded below. A later, narrowly authorized recovery continued the same M1-B checkpoint through candidate measurements and post-build checks. The first bounded default-feature native-app smoke did not satisfy its actual-window and normal-close criteria; its failure is preserved below. A focused correction to the new native verification boundary passed once under the ordinary remedy policy. All M1-B verification gates are complete; independent checkpoint review and acceptance remain pending.
+
+### Initial app-preview failures (preserved)
+
+The exact boundary and preserved receipts are recorded in the external
+`g04-m1b/BLOCKED_RESUME.md`. In brief, r05 stopped before `cargo.ps1` because
+StrictMode read optional `ExternalPath` from a normal manifest record where
+that property was absent (exit 1, 1.677078 s, stdout 0/stderr 797 bytes,
+cleanup and output drain verified, five identities). One property-safe
+correction produced r06, which stopped before `cargo.ps1` because
+`support.Cargo` is a path string but the preview assumed `support.Cargo.Sha256`
+(exit 1, 2.092646 s, stdout 0/stderr 791 bytes, cleanup and output drain
+verified, fourteen identities). The preserved inner compile record is
+`NOT_STARTED`: no stdout/stderr artifacts, and inner Exit/Wall/OutputBytes are
+null with raw cleanup/drain false. An earlier r04 outer owner failed after
+5.749684 s with exit 1 while outer cleanup/drain were verified; that does not
+change the inner `NOT_STARTED` result.
+
+The r05 inner result is
+`g04-m1b/app-preview/runs/app-preview-20261026T005324293Z-c31b27fe020e433794be564595f337f1/app-preview-result.json`;
+the r06 inner result is
+`g04-m1b/app-preview/runs/app-preview-20261026T005411686Z-259ea32921e84c3fb72322b96a8613e7/app-preview-result.json`.
+Their owner receipts are
+`g04-m1b/app-preview/outer-owner/r05/g04-m1b-forwarding-app-preview-r05-owner.json`
+and `g04-m1b/app-preview/outer-owner/r06/g04-m1b-forwarding-app-preview-r06-owner.json`.
+At the original stop, the three partial M1-B files were recorded at these
+historical hashes; the authorized recovery later changed their contents, so
+these are not current-file hash claims: `dev/track_b/cargo.ps1`
+`50EEB64CC564D4531138D7C86EC0FE96317AC393C21AA1419D3429A3FA963007`,
+`dev/workflows/test_run.ps1`
+`4992302849112B95FFA7DCA767E9EBC38E2BD467FE554D64E48AFA4732BF0339`, and
+`dev/track_b/linker_mode.ps1`
+`3BAE68E3004A617FF643DF0355F2EBC3B13F92339A2233FEADC6E91BF00D3D4D`.
+The untracked `nvim.log` remains untouched and empty
+(`E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855`).
+No M1-B retry or candidate compilation was run during M2-A's original bounded
+probe phase.
+
+### Recovery continuation (2026-10-26)
+
+Original-source app preparation measured 270.374517 s and original-source
+root-library test-binary preparation measured 250.240402 s; both are excluded
+from the edit comparisons. The exact M1-A app and root-library small-edit
+fixtures were each compiled once, then restored through their outside-job
+guards. The edited app build measured 36.693609 s versus its 41.135731 s M1-A
+baseline (10.7986947% lower whole-command time). The edited root-library
+diagnostic build measured 47.465428 s versus its 54.345498 s baseline
+(12.659871% lower whole-command time). These are single-pair, host-specific
+Cargo command observations; they do not isolate linker time. The original
+source was restored exactly, and the candidate executables and PDBs were bound
+by path, length, hash, and matching PE/PDB identity in the preserved evidence.
+The measured candidate app executable/PDB were 118,012,928 and 366,055,424
+bytes; the root-library test executable/PDB were 172,518,400 and 492,756,992
+bytes. These are artifact sizes, not a measured total Cargo-cache footprint.
+
+The candidate app's icon-resource assertion passed against the bound app
+binary. The focused DbgHelp checks matched each executable's PE CodeView GUID
+and age to its PDB and resolved exactly one requested source line: app fixture
+line 1553 and root-library fixture line 1642. Symbol cleanup and DbgHelp library
+release succeeded for both probes. The exact selected root-library test was
+found as the sole nonignored inventory item and passed once (native duration
+0.864068 s; case duration 0.0243429 s). The shared structured-results
+aggregate remained `Complete=false` because its libtest JSON bookkeeping
+classified 46 ignored/mismatch starts as unrecognized; the parent preserved
+that parser limitation and independently reconciled those records with the
+inventory, the target's started/ok events, all 47 suite terminal events, and
+the one passed/zero failed case. No parser change or rerun was made.
+
+The app comparison's controller-exit-code field was not captured, although its
+checked worker and Cargo both exited 0 and its external restoration guard
+verified exact source and worktree restoration; this gap was preserved without
+repeating the measurement. The root comparison recorded controller exit 0.
+The parent independently verified retirement of the recorded process
+identities for both comparisons and the icon/selected-test runs. The separate
+PDB probes and icon/test receipts are under the external
+`g04-recovery-20261026/m1b-acceptance-r04/` evidence directory; app/root
+comparison details and restoration receipts are retained beside them.
+
+The first bounded native default-feature app smoke (native-r01) failed its
+actual-root-window and graceful-close criteria after 16.763944 s. PowerShell's
+`Process.MainWindowHandle` identified visible auxiliary HWND `0x42513cc` for
+the exact app PID 15448 (creation `2026-10-26T13:05:52.7985016Z`); the handle
+was responsive but its client area was only 16x16. The capture was unavailable
+because the candidate was not the foreground window, and no unrelated desktop
+pixels were collected. `CloseMainWindow()` returned true for that auxiliary
+window, but the app did not exit normally; forced cleanup was used, the process
+exited -1, and the exact PID/creation identity was absent afterward. Raw output
+drains and owned cleanup were verified: app stdout 0/0 bytes, stderr 452/452;
+fixture-generator stdout 2,770/2,770 and stderr 0/0. App startup log output
+continued after the auxiliary window was first observed. The preserved result
+and original helper snapshot are under
+`g04-recovery-20261026/m1b-acceptance-r04/native-r01/`.
+
+The focused correction enumerated top-level windows for the exact app PID and
+selected the actual `Multi Lnchr` launcher root with 900x560 client bounds. It
+recorded each observed window's class, title, and bounds without treating an
+unverified class string as an acceptance filter. The selected root responded
+to WM_NULL; the checker revalidated that HWND and sent normal WM_CLOSE, after
+which the app exited 0 without forced termination. The bounded owner completed
+in 5.796434 s with exit 0, cleanup and output drains verified, and all five
+recorded process identities retired. Generated settings contained both
+Next/Cancel shortcut properties explicitly set to null before app
+construction. The inspected 916x599 capture shows the launcher title, icon,
+search field, and generated notes dashboard, with no Paste Sequence error
+toast. The result and capture are under
+`g04-recovery-20261026/m1b-acceptance-r04/native-r03/`; the initial failed
+native-r01 run and unused r02 revision remain preserved.
+
+All M1-B verification gates are now complete. The single-pair timings above do
+not establish a generally reproducible speedup or isolated linker improvement.
+M1-B awaits checkpoint review and acceptance; no commit or push is claimed in
+this worker report.

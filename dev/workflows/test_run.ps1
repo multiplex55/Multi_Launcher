@@ -1,9 +1,11 @@
 #requires -Version 7.0
 [CmdletBinding()]
-param()
+param([switch]$LinkerModeContractsOnly)
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'engine.ps1')
+. (Join-Path $PSScriptRoot 'owned_process.ps1')
+. (Join-Path $PSScriptRoot '..\track_b\linker_mode.ps1')
 
 function Assert-WorkflowEqual {
     param([object]$Actual, [object]$Expected, [string]$Label)
@@ -25,6 +27,26 @@ function Assert-WorkflowThrows {
     $threw = $false
     try { & $Action | Out-Null } catch { $threw = $true }
     if (!$threw) { throw "$Label was expected to fail closed." }
+}
+
+function Assert-WorkflowThrowsContaining {
+    param([scriptblock]$Action, [string]$ExpectedText, [string]$Label)
+    $message = $null
+    try { & $Action | Out-Null } catch { $message = $_.Exception.Message }
+    if ([string]::IsNullOrWhiteSpace($message)) { throw "$Label was expected to fail closed." }
+    if ($message.IndexOf($ExpectedText, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        throw "$Label did not explain the refusal; expected '$ExpectedText' in '$message'."
+    }
+    if ($message.IndexOf('ordinary Cargo mode', [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        throw "$Label did not direct users to ordinary Cargo mode after refusal: '$message'."
+    }
+}
+
+. (Join-Path $PSScriptRoot 'linker_mode_contracts.ps1')
+if ($LinkerModeContractsOnly) {
+    Invoke-LinkerModeContractTests
+    Write-Host 'Linker mode contract fixtures passed.'
+    return
 }
 
 $measurementFactory = {
@@ -215,6 +237,8 @@ $cargoWrapper = Join-Path $script:WorkflowRoot 'dev\track_b\cargo.ps1'
 Assert-WorkflowThrows { & $cargoWrapper -Preset quick-check -CargoArguments @('--all-targets') -PrintCommand } 'Long selector conflict'
 Assert-WorkflowThrows { & $cargoWrapper -Preset full-debug -CargoArguments @('--package=other') -PrintCommand } 'Equals selector conflict'
 Assert-WorkflowThrows { & $cargoWrapper -Preset full-debug -CargoArguments @('-pother') -PrintCommand } 'Short selector conflict'
+
+Invoke-LinkerModeContractTests
 
 $exactCase = 'tests::table_parse_csv_quotes_escaped_quotes_and_embedded_newlines_preserve_strings'
 $runArguments = @('--exact', $exactCase)

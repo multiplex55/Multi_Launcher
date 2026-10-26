@@ -29,6 +29,10 @@ string array, for example @('-E', 'test(history_prepare_)').
 Print the executable, argument array, and working directory as JSON without
 starting Cargo.
 
+.PARAMETER LinkerMode
+Opt in to the active Rust toolchain's bundled Windows LLD linker for the
+fast-dev-build preset or fast-dev-tests prepare phase only.
+
 .EXAMPLE
 & .\dev\track_b\cargo.ps1 -Preset release -PrintCommand
 
@@ -67,6 +71,9 @@ param(
     [string[]]$TestArguments = @(),
 
     [string[]]$CargoArguments = @(),
+
+    [ValidateSet('bundled-lld')]
+    [string]$LinkerMode,
 
     [switch]$PrintCommand
 )
@@ -190,11 +197,33 @@ if ($Preset -eq 'fast-dev-tests') {
     Assert-NoConflictingCargoArguments -Values $CargoArguments -SelectedPreset $Preset
 }
 
+$useBundledLld = $LinkerMode -ieq 'bundled-lld'
+if ($useBundledLld) {
+    $linkerModeSupported = $Preset -ceq 'fast-dev-build' -or
+        ($Preset -ceq 'fast-dev-tests' -and $WorkflowPhase -ceq 'prepare')
+    if (!$linkerModeSupported) {
+        throw '-LinkerMode bundled-lld is valid only for fast-dev-build or fast-dev-tests -WorkflowPhase prepare.'
+    }
+    if ($Preset -eq 'fast-dev-build' -and @($CargoArguments | Where-Object {
+        $_ -ceq '--config' -or $_.StartsWith('--config=', [StringComparison]::Ordinal)
+    }).Count -gt 0) {
+        throw 'The bundled LLD mode owns Cargo --config arguments; conflicting CargoArguments are not allowed.'
+    }
+}
+
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..') -ErrorAction Stop).ProviderPath
 $manifestPath = (Resolve-Path -LiteralPath (Join-Path $repositoryRoot 'Cargo.toml') -ErrorAction Stop).ProviderPath
 $cargoApplication = Get-Command -Name 'cargo.exe' -CommandType Application -ErrorAction Stop | Select-Object -First 1
 if ($null -eq $cargoApplication) { throw 'cargo.exe was not found as a native application on PATH.' }
 $cargoPath = [IO.Path]::GetFullPath($(if ($cargoApplication.Source) { $cargoApplication.Source } else { $cargoApplication.Path }))
+
+$linkerModeArguments = @()
+if ($useBundledLld) {
+    . (Join-Path $PSScriptRoot 'linker_mode.ps1')
+    Assert-NoConflictingBundledLldConfiguration -RepositoryRoot $repositoryRoot -CargoExecutable $cargoPath
+    $bundledLinkerPath = Resolve-ActiveSysrootBundledLld -RepositoryRoot $repositoryRoot
+    $linkerModeArguments = @(New-BundledLldCargoArguments -Preset $Preset -WorkflowPhase $WorkflowPhase -LinkerPath $bundledLinkerPath)
+}
 
 $selectedArguments = switch ($Preset) {
     'release' { @('build', '--release', '--bin', 'multi_launcher') }
@@ -237,6 +266,20 @@ $selectedArguments = switch ($Preset) {
     }
 }
 $argumentList = @($selectedArguments)
+if ($useBundledLld) {
+    if ($Preset -ceq 'fast-dev-build') {
+        # Keep `build` first so the checked MSVC auxiliary-process classifier can
+        # recognize the explicit Cargo command. Cargo accepts --config here.
+        # Add the fixed application package while preserving the preset selectors.
+        $argumentList = @($selectedArguments[0]) + @($linkerModeArguments) + @('-p', 'multi_launcher') + @($selectedArguments[1..($selectedArguments.Count - 1)])
+    } else {
+        # Nextest is an external Cargo subcommand: Cargo consumes its own
+        # pre-subcommand globals before dispatch. Place its Cargo overrides
+        # after `nextest list`, where Nextest forwards them to its Cargo build.
+        # Insert into the existing selected argv to preserve catalog package/target selectors.
+        $argumentList = @($selectedArguments[0..1]) + @($linkerModeArguments) + @($selectedArguments[2..($selectedArguments.Count - 1)])
+    }
+}
 if ($Preset -eq 'fast-dev-tests' -and $WorkflowPhase -eq 'run') {
     # Cargo's manifest selector belongs to Cargo, before Nextest's `--` boundary.
     $separatorIndex = [Array]::IndexOf([string[]]$argumentList, '--')

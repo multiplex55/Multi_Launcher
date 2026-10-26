@@ -349,6 +349,38 @@ cargo nextest run --lib -E 'test(history_prepare_)'
 
 Timings are process wall time, not isolated linker time.
 
+The bundled Windows linker candidate is an opt-in measured path selected with
+`dev/track_b/cargo.ps1 -Preset fast-dev-build -LinkerMode bundled-lld`; test
+binary preparation accepts the same mode only with `-Preset fast-dev-tests
+-WorkflowPhase prepare`. Omitting `-LinkerMode` preserves the ordinary Cargo
+commands. The candidate is limited to the active native MSVC toolchain and
+refuses competing target, compiler, Rust-flag, and `dev`/`fast-dev` profile
+settings. Its Cargo configuration check recognizes ordinary table settings
+such as `[build].jobs` and `[net].retry`, while rejecting root-level inline or
+dotted target settings and ambiguous `dev`/`fast-dev` profile forms, including
+quoted keys. Escaped key and table spellings are also refused without decoding
+them. The check is deliberately conservative rather than a general TOML parser;
+use ordinary Cargo mode without `-LinkerMode` when one of these configuration
+forms is needed. The bounded M1-B recovery compiled the candidate and passed
+artifact compatibility, app/root small-edit measurement, PDB/source-line,
+icon-resource, selected-root-test, and responsive native-window/normal-close
+checks. The selected-test aggregate parser limitation and initial native
+auxiliary-window failure, followed by the corrected passing native check, are
+recorded in the execution report. One paired app sample measured 36.693609 s
+versus the 41.135731 s baseline; the root-library diagnostic sample measured
+47.465428 s versus 54.345498 s. These are host-specific whole-Cargo-command
+times, not isolated linker durations or a general speedup guarantee. Original-
+source candidate preparation took 270.374517 s for the app and 250.240402 s
+for the root-library test binary; preparation is excluded from the edit
+comparison. The measured app executable/PDB were 118,012,928 and 366,055,424
+bytes; the root-library test executable/PDB were 172,518,400 and 492,756,992
+bytes. These are artifact sizes, not a total cache-footprint measurement.
+Fast-dev remains line-tables-only: use the default `dev` profile
+for full debug information and `--release` for canonical release artifacts.
+Each profile has a separate cache; the pre-existing fast-dev profile results
+and cache caveats above apply. M1-B evidence is complete and awaits checkpoint
+review; no default Cargo behavior changes.
+
 ## Release-like local iteration profile
 
 The `iteration` profile is accepted for opt-in local launcher builds. It writes to
