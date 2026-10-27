@@ -237,7 +237,10 @@ use crate::plugin_editor::PluginEditor;
 use crate::plugins::clipboard_modify::ClipboardModifyPluginSettings;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
 use crate::plugins::snippets::{SNIPPETS_FILE, remove_snippet};
-use crate::settings::{MultiManagerSettings, NoteSettings, QueryResultsLayoutSettings, Settings};
+use crate::settings::{
+    HintAlphabet, JumpModeChord, MultiManagerSettings, NoteSettings, QueryResultsLayoutSettings,
+    Settings,
+};
 use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{TOAST_LOG_FILE, append_toast_log};
 use crate::usage::{self, USAGE_FILE};
@@ -2009,6 +2012,18 @@ impl LauncherApp {
 
     pub(crate) fn jump_mode_session_active(&self) -> bool {
         self.jump_mode_ui.active_session().is_some()
+    }
+
+    pub(crate) fn jump_mode_configuration(&self) -> (JumpModeChord, HintAlphabet) {
+        self.jump_mode_ui.configuration()
+    }
+
+    pub(crate) fn set_jump_mode_configuration(
+        &mut self,
+        chord: JumpModeChord,
+        alphabet: HintAlphabet,
+    ) -> bool {
+        self.jump_mode_ui.set_configuration(chord, alphabet)
     }
 
     pub(crate) fn set_jump_mode_enabled(&mut self, enabled: bool) {
@@ -3785,7 +3800,11 @@ impl LauncherApp {
             list_scale,
             show_launcher_icon: settings.show_launcher_icon,
             show_launcher_title: settings.show_launcher_title,
-            jump_mode_ui: jump_mode::ui::JumpModeUi::new(settings.experimental_jump_mode_enabled),
+            jump_mode_ui: jump_mode::ui::JumpModeUi::new_with_configuration(
+                settings.experimental_jump_mode_enabled,
+                settings.jump_mode_activation_chord,
+                settings.jump_mode_hint_alphabet.clone(),
+            ),
             custom_len,
             history_limit: settings.history_limit,
             clipboard_limit: settings.clipboard_limit,

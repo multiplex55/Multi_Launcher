@@ -106,6 +106,10 @@ impl SettingsEditor {
         app.list_scale = new_settings.list_scale.unwrap_or(1.0).min(5.0);
         app.show_launcher_icon = new_settings.show_launcher_icon;
         app.show_launcher_title = new_settings.show_launcher_title;
+        app.set_jump_mode_configuration(
+            new_settings.jump_mode_activation_chord,
+            new_settings.jump_mode_hint_alphabet.clone(),
+        );
         if app.jump_mode_enabled() != new_settings.experimental_jump_mode_enabled {
             app.set_jump_mode_enabled(new_settings.experimental_jump_mode_enabled);
         }
@@ -223,11 +227,17 @@ mod tests {
     use std::sync::{Arc, atomic::AtomicBool};
 
     #[test]
-    fn jump_mode_runtime_gate_tracks_startup_and_committed_settings() {
+    fn jump_mode_configuration_tracks_startup_and_committed_settings() {
         let directory = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let mut settings = Settings::default();
         settings.experimental_jump_mode_enabled = true;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        settings.jump_mode_activation_chord =
+            crate::settings::JumpModeChord::parse("Ctrl+Shift+F8").unwrap();
+        settings.jump_mode_hint_alphabet =
+            crate::settings::HintAlphabet::parse("ASDFJKLQ").unwrap();
         settings.index_paths = Some(Vec::new());
         settings.plugin_dirs = Some(Vec::new());
         settings.enabled_plugins = Some(std::collections::HashSet::new());
@@ -258,9 +268,49 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         assert!(app.jump_mode_enabled());
+        assert_eq!(
+            app.jump_mode_configuration(),
+            (
+                settings.jump_mode_activation_chord,
+                settings.jump_mode_hint_alphabet.clone(),
+            )
+        );
 
-        settings.experimental_jump_mode_enabled = false;
-        SettingsEditor::apply_saved_settings(&ctx, &mut app, settings, false);
+        let mut draft = settings.clone();
+        draft.jump_mode_activation_chord =
+            crate::settings::JumpModeChord::parse("Alt+F12").unwrap();
+        draft.jump_mode_hint_alphabet = crate::settings::HintAlphabet::parse("ZY").unwrap();
+        app.settings_save_reconciliation_required = true;
+        let mut draft_editor = SettingsEditor::new(&draft);
+        draft_editor.save_settings(&ctx, &mut app);
+        assert_eq!(
+            app.jump_mode_configuration(),
+            (
+                settings.jump_mode_activation_chord,
+                settings.jump_mode_hint_alphabet.clone(),
+            ),
+            "an unresolved/failed save cannot apply draft preferences"
+        );
+        app.settings_save_reconciliation_required = false;
+
+        let mut committed = settings.clone();
+        committed.jump_mode_activation_chord = draft.jump_mode_activation_chord;
+        committed.jump_mode_hint_alphabet = draft.jump_mode_hint_alphabet.clone();
+        SettingsEditor::apply_saved_settings(&ctx, &mut app, committed.clone(), false);
+        assert!(
+            app.jump_mode_enabled(),
+            "a preference-only save keeps Jump enabled"
+        );
+        assert_eq!(
+            app.jump_mode_configuration(),
+            (
+                committed.jump_mode_activation_chord,
+                committed.jump_mode_hint_alphabet.clone(),
+            )
+        );
+
+        committed.experimental_jump_mode_enabled = false;
+        SettingsEditor::apply_saved_settings(&ctx, &mut app, committed, false);
 
         assert!(!app.jump_mode_enabled());
     }

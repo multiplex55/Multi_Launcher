@@ -4,6 +4,7 @@
 //! `Response` for the current call, applies any returned focus directive, and
 //! then drops it normally.
 
+use super::config::{HintAlphabet, JumpModeChord};
 use super::{
     HintMap, HintSession, MatchOutcome, SemanticTargetId, SessionLifecycle, SurfaceId,
     TargetGeneration, TargetId, TargetKind, TargetMetadata,
@@ -2049,6 +2050,8 @@ pub(crate) fn register_and_apply_target(
 #[derive(Default)]
 pub(crate) struct JumpModeUi {
     enabled: bool,
+    activation_chord: JumpModeChord,
+    hint_alphabet: HintAlphabet,
     navigation_epoch: NavigationEpoch,
     navigation_owner: NavigationOwner,
     frame_navigation_owner: NavigationOwner,
@@ -2090,10 +2093,47 @@ struct ObservedNavigationDialog {
 
 impl JumpModeUi {
     pub(crate) fn new(enabled: bool) -> Self {
+        Self::new_with_configuration(enabled, JumpModeChord::default(), HintAlphabet::default())
+    }
+
+    pub(crate) fn new_with_configuration(
+        enabled: bool,
+        activation_chord: JumpModeChord,
+        hint_alphabet: HintAlphabet,
+    ) -> Self {
         Self {
             enabled,
+            activation_chord,
+            hint_alphabet,
             ..Self::default()
         }
+    }
+
+    pub(crate) fn configuration(&self) -> (JumpModeChord, HintAlphabet) {
+        (self.activation_chord, self.hint_alphabet.clone())
+    }
+
+    pub(crate) fn set_configuration(
+        &mut self,
+        activation_chord: JumpModeChord,
+        hint_alphabet: HintAlphabet,
+    ) -> bool {
+        if self.activation_chord == activation_chord && self.hint_alphabet == hint_alphabet {
+            return false;
+        }
+
+        self.activation_chord = activation_chord;
+        self.hint_alphabet = hint_alphabet;
+        self.navigation_epoch = self.navigation_epoch.next();
+        self.invalidated_session_key_fence
+            .extend(self.held_captured_keys.drain());
+        self.cancel_active_session();
+        self.pending_focus_intent = None;
+        self.collector = None;
+        self.pass_registry = None;
+        self.frame_consumed_focus_intent = None;
+        self.last_completed_focus_handoff = None;
+        true
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
@@ -2475,8 +2515,10 @@ impl JumpModeUi {
         if first_ui_pass {
             self.root_input_frame.viewport = viewport;
         }
-        if !navigation_input_allowed {
+        if !navigation_input_allowed || !self.enabled {
             self.capture_invalidated_session_key_events(ctx);
+        }
+        if !navigation_input_allowed {
             self.root_input_frame.owner_blocked = true;
             if !ctx.input(|input| input.focused) && self.active_session.is_some() {
                 self.capture_unfocused_owner_loss_events(ctx);
@@ -3159,12 +3201,15 @@ impl JumpModeUi {
         self.root_input_frame.owner_blocked = true;
     }
 
+    /// Clear transient navigation state without letting a retired session's
+    /// captured keys leak after disablement, owner changes, or hidden frames.
     fn clear(&mut self) {
+        self.invalidated_session_key_fence
+            .extend(self.held_captured_keys.drain());
         self.active_session = None;
         self.last_outcome = None;
         self.root_input_frame = RootInputFrame::default();
         self.held_captured_keys.clear();
-        self.invalidated_session_key_fence.clear();
         self.pending_focus_intent = None;
         self.collector = None;
         self.pass_registry = None;
@@ -3242,7 +3287,7 @@ impl JumpModeUi {
                     continue;
                 }
 
-                let leader = is_leader_key(*key, *modifiers);
+                let leader = self.is_leader_key(*key, *modifiers);
                 if leader && !self.root_input_frame.resolved {
                     self.capture_event(event);
                     self.held_captured_keys.insert(*key);
@@ -3377,7 +3422,11 @@ impl JumpModeUi {
             return true;
         }
 
-        let map = HintMap::assign(self.retained_registry.metadata().cloned()).unwrap_or_default();
+        let map = HintMap::assign_with_alphabet(
+            self.retained_registry.metadata().cloned(),
+            &self.hint_alphabet,
+        )
+        .unwrap_or_default();
         self.last_outcome = Some(if map.is_empty() {
             MatchOutcome::NoTargets
         } else {
@@ -3393,6 +3442,19 @@ impl JumpModeUi {
         if let Some(mut session) = self.active_session.take() {
             self.last_outcome = Some(session.cancel());
         }
+    }
+
+    fn is_leader_key(&self, key: egui::Key, modifiers: egui::Modifiers) -> bool {
+        let chord = self.activation_chord;
+        key == chord.key()
+            && modifiers.ctrl == chord.ctrl()
+            && modifiers.shift == chord.shift()
+            && modifiers.alt == chord.alt()
+            // On Windows (and other non-Mac platforms), egui's `command` is
+            // an alias for Ctrl. Accept that mirror only when the physical
+            // Ctrl bit is also present; a Mac command key is not representable.
+            && (!modifiers.command || modifiers.ctrl)
+            && !modifiers.mac_cmd
     }
 
     fn cancel_for_owner_loss(&mut self) {
@@ -3515,10 +3577,6 @@ impl JumpModeUi {
 
 fn has_shortcut_modifier(modifiers: egui::Modifiers) -> bool {
     modifiers.ctrl || modifiers.alt || modifiers.command || modifiers.mac_cmd
-}
-
-fn is_leader_key(key: egui::Key, modifiers: egui::Modifiers) -> bool {
-    key == egui::Key::Space && modifiers.shift && !has_shortcut_modifier(modifiers)
 }
 
 fn paired_text_indices(events: &[egui::Event]) -> std::collections::HashMap<usize, usize> {
@@ -5073,6 +5131,424 @@ mod tests {
             'Z' => egui::Key::Z,
             _ => panic!("test key must be an ASCII letter"),
         }
+    }
+
+    #[test]
+    fn configured_leader_uses_windows_ctrl_mirror_and_frozen_alphabet() {
+        let ctx = egui::Context::default();
+        let chord = JumpModeChord::parse("Ctrl+Shift+F8").unwrap();
+        let alphabet = HintAlphabet::parse("ZY").unwrap();
+        let mut jump = JumpModeUi::new_with_configuration(true, chord, alphabet);
+        register_root_input_targets(&mut jump, &ctx, 3);
+
+        let mut command_only = egui::Modifiers::NONE;
+        command_only.shift = true;
+        command_only.command = true;
+        let command_events = vec![
+            key_event(egui::Key::F8, true, false, command_only),
+            egui::Event::Text("F8".into()),
+        ];
+        assert_eq!(
+            run_root_input_frame(&mut jump, &ctx, command_events.clone()),
+            command_events,
+            "an unsupported command-only chord remains ordinary input"
+        );
+        assert!(
+            jump.active_session().is_none(),
+            "the platform command key is not substituted for physical Ctrl"
+        );
+        let command_release = vec![key_event(egui::Key::F8, false, false, command_only)];
+        assert_eq!(
+            run_root_input_frame(&mut jump, &ctx, command_release.clone()),
+            command_release,
+            "the unsupported key release remains ordinary input too"
+        );
+
+        let mut windows_ctrl = egui::Modifiers::NONE;
+        windows_ctrl.ctrl = true;
+        windows_ctrl.shift = true;
+        windows_ctrl.command = true;
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(egui::Key::F8, true, false, windows_ctrl),
+                    egui::Event::Text("F8".into()),
+                ],
+            )
+            .is_empty()
+        );
+        let session = jump.active_session().expect("configured chord starts Jump");
+        let assigned: Vec<_> = session
+            .hint_map()
+            .assignments()
+            .iter()
+            .map(|assignment| assignment.hint.as_str().to_owned())
+            .collect();
+        assert_eq!(assigned, ["Z", "YZ", "YY"]);
+
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(egui::Key::F8, true, true, windows_ctrl),
+                    egui::Event::Text("F8".into()),
+                ],
+            )
+            .is_empty()
+        );
+        assert!(
+            jump.active_session().is_some(),
+            "a repeated leader while still held does not toggle"
+        );
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![key_event(egui::Key::F8, false, false, windows_ctrl)],
+            )
+            .is_empty()
+        );
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(egui::Key::F8, true, false, windows_ctrl),
+                    egui::Event::Text("F8".into()),
+                ],
+            )
+            .is_empty()
+        );
+        assert!(
+            jump.active_session().is_none(),
+            "a fresh configured leader press cancels the active session"
+        );
+    }
+
+    #[test]
+    fn committed_configuration_change_retires_prefix_and_fences_held_leader() {
+        let ctx = egui::Context::default();
+        let default_chord = JumpModeChord::default();
+        let default_alphabet = HintAlphabet::default();
+        let mut jump =
+            JumpModeUi::new_with_configuration(true, default_chord, default_alphabet.clone());
+        register_root_input_targets(&mut jump, &ctx, 27);
+
+        let shift = egui::Modifiers::SHIFT;
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(egui::Key::Space, true, false, shift),
+                    egui::Event::Text(" ".into()),
+                ],
+            )
+            .is_empty()
+        );
+        let prefix_character = jump
+            .active_session()
+            .unwrap()
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.hint.as_str().len() > 1)
+            .unwrap()
+            .hint
+            .as_str()
+            .chars()
+            .next()
+            .unwrap();
+        let prefix_key = key_for_letter(prefix_character);
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(prefix_key, true, false, egui::Modifiers::NONE),
+                    egui::Event::Text(prefix_character.to_ascii_lowercase().to_string()),
+                ],
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            jump.active_session().unwrap().prefix(),
+            prefix_character.to_ascii_uppercase().to_string()
+        );
+
+        let epoch_before = jump.navigation_epoch();
+        assert!(!jump.set_configuration(default_chord, default_alphabet));
+        assert_eq!(jump.navigation_epoch(), epoch_before);
+        assert_eq!(
+            jump.active_session().unwrap().prefix(),
+            prefix_character.to_ascii_uppercase().to_string(),
+            "an unchanged committed configuration preserves the active prefix"
+        );
+
+        jump.pass_registry = None;
+        assert!(jump.queue_focus_intent(
+            TargetId::root_result(TargetGeneration(1), 0),
+            egui::ViewportId::ROOT,
+            jump.navigation_epoch(),
+        ));
+        assert!(jump.test_has_focus_intent_or_handoff());
+
+        let new_chord = JumpModeChord::parse("Ctrl+Shift+F8").unwrap();
+        let new_alphabet = HintAlphabet::parse("ZY").unwrap();
+        assert!(jump.set_configuration(new_chord, new_alphabet.clone()));
+        assert_eq!(jump.navigation_epoch(), epoch_before.next());
+        assert!(jump.active_session().is_none());
+        assert!(!jump.test_has_focus_intent_or_handoff());
+        assert!(
+            jump.invalidated_session_key_fence
+                .contains(&egui::Key::Space)
+        );
+        assert!(jump.invalidated_session_key_fence.contains(&prefix_key));
+
+        jump.complete_frame(&ctx, true, false);
+        assert!(
+            jump.invalidated_session_key_fence
+                .contains(&egui::Key::Space)
+        );
+        assert!(jump.invalidated_session_key_fence.contains(&prefix_key));
+
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(prefix_key, true, true, egui::Modifiers::NONE),
+                    egui::Event::Text(prefix_character.to_ascii_lowercase().to_string()),
+                ],
+            )
+            .is_empty()
+        );
+        assert!(
+            jump.active_session().is_none(),
+            "a stale held hint is fenced"
+        );
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![key_event(prefix_key, false, false, egui::Modifiers::NONE)],
+            )
+            .is_empty()
+        );
+        assert!(!jump.invalidated_session_key_fence.contains(&prefix_key));
+
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(egui::Key::Space, true, true, shift),
+                    egui::Event::Text(" ".into()),
+                ],
+            )
+            .is_empty()
+        );
+        assert!(
+            jump.active_session().is_none(),
+            "a stale held leader is fenced"
+        );
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![key_event(egui::Key::Space, false, false, shift)],
+            )
+            .is_empty()
+        );
+        assert!(
+            !jump
+                .invalidated_session_key_fence
+                .contains(&egui::Key::Space)
+        );
+
+        let old_chord_events = vec![
+            key_event(egui::Key::Space, true, false, shift),
+            egui::Event::Text(" ".into()),
+        ];
+        assert_eq!(
+            run_root_input_frame(&mut jump, &ctx, old_chord_events.clone()),
+            old_chord_events,
+            "the old default chord becomes ordinary input after reconfiguration"
+        );
+        let _ = run_root_input_frame(
+            &mut jump,
+            &ctx,
+            vec![key_event(egui::Key::Space, false, false, shift)],
+        );
+
+        register_root_input_targets(&mut jump, &ctx, 27);
+        let mut windows_ctrl = egui::Modifiers::NONE;
+        windows_ctrl.ctrl = true;
+        windows_ctrl.shift = true;
+        windows_ctrl.command = true;
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(egui::Key::F8, true, false, windows_ctrl),
+                    egui::Event::Text("F8".into()),
+                ],
+            )
+            .is_empty()
+        );
+        let session = jump
+            .active_session()
+            .expect("new chord starts a fresh session");
+        assert_eq!(session.hint_map().len(), 27);
+        assert!(session.hint_map().assignments().iter().all(|assignment| {
+            assignment
+                .hint
+                .as_str()
+                .bytes()
+                .all(|symbol| new_alphabet.contains(symbol))
+        }));
+    }
+
+    #[test]
+    fn disabling_after_configuration_change_keeps_release_fence_without_blocking_ordinary_input() {
+        let ctx = egui::Context::default();
+        let mut jump = JumpModeUi::new(true);
+        register_root_input_targets(&mut jump, &ctx, 27);
+
+        let shift = egui::Modifiers::SHIFT;
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(egui::Key::Space, true, false, shift),
+                    egui::Event::Text(" ".into()),
+                ],
+            )
+            .is_empty()
+        );
+        let prefix_character = jump
+            .active_session()
+            .expect("the held leader starts a session")
+            .hint_map()
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.hint.as_str().len() > 1)
+            .expect("27 targets include a multi-character hint")
+            .hint
+            .as_str()
+            .chars()
+            .next()
+            .expect("the multi-character hint has a prefix");
+        let prefix_key = key_for_letter(prefix_character);
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(prefix_key, true, false, egui::Modifiers::NONE),
+                    egui::Event::Text(prefix_character.to_ascii_lowercase().to_string()),
+                ],
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            jump.active_session().unwrap().prefix(),
+            prefix_character.to_ascii_uppercase().to_string()
+        );
+
+        let new_chord = JumpModeChord::parse("Ctrl+Shift+F8").unwrap();
+        let new_alphabet = HintAlphabet::parse("ZY").unwrap();
+        assert!(jump.set_configuration(new_chord, new_alphabet));
+        jump.set_enabled(false);
+        assert!(!jump.is_enabled());
+        assert!(jump.active_session().is_none());
+        assert!(
+            jump.invalidated_session_key_fence
+                .contains(&egui::Key::Space)
+        );
+        assert!(jump.invalidated_session_key_fence.contains(&prefix_key));
+
+        let ordinary_input = vec![
+            key_event(egui::Key::X, true, false, egui::Modifiers::NONE),
+            egui::Event::Text("x".into()),
+        ];
+        assert_eq!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(egui::Key::Space, true, true, shift),
+                    egui::Event::Text(" ".into()),
+                    ordinary_input[0].clone(),
+                    ordinary_input[1].clone(),
+                ],
+            ),
+            ordinary_input,
+            "disabled Jump consumes the stale held leader and its text, not ordinary input"
+        );
+        jump.complete_frame(&ctx, true, true);
+        assert!(
+            jump.invalidated_session_key_fence
+                .contains(&egui::Key::Space)
+        );
+        assert!(jump.invalidated_session_key_fence.contains(&prefix_key));
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(prefix_key, true, true, egui::Modifiers::NONE),
+                    egui::Event::Text(prefix_character.to_ascii_lowercase().to_string()),
+                ],
+            )
+            .is_empty()
+        );
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![key_event(egui::Key::Space, false, false, shift)],
+            )
+            .is_empty()
+        );
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![key_event(prefix_key, false, false, egui::Modifiers::NONE)],
+            )
+            .is_empty()
+        );
+        assert!(
+            jump.invalidated_session_key_fence.is_empty(),
+            "both captured keys leave the fence only after their releases"
+        );
+
+        jump.set_enabled(true);
+        register_root_input_targets(&mut jump, &ctx, 27);
+        let mut configured_modifiers = egui::Modifiers::NONE;
+        configured_modifiers.ctrl = true;
+        configured_modifiers.shift = true;
+        assert!(
+            run_root_input_frame(
+                &mut jump,
+                &ctx,
+                vec![
+                    key_event(egui::Key::F8, true, false, configured_modifiers),
+                    egui::Event::Text("F8".into()),
+                ],
+            )
+            .is_empty()
+        );
+        assert!(
+            jump.active_session().is_some(),
+            "fresh input follows the newly committed configuration after old keys release"
+        );
     }
 
     #[test]

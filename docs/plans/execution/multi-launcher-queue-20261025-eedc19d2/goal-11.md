@@ -26,8 +26,18 @@ Review: authorized labeled parent-review fallback after configured Reviewer unav
 Evidence root: C:\Users\Jay\.codex\visualizations\2026\10\25\01a17319-6f7d-7052-b54e-1bb4a92c5fd0\multi-launcher-queue-20261025-eedc19d2\g11.
 See M1A_PARENT_REVIEW.md, m1a-cumulative-coverage.json, numbered prepare/inventory/run receipts, source bindings and commit/push receipts. Commit identifiers/push results are maintained externally to avoid rewriting this accepted checkpoint.
 
+## M1-B — accepted
+
+The existing JumpModeUi now owns committed chord/alphabet preferences. Loaded settings initialize the real LauncherApp controller; successful committed settings application updates preferences, including preference-only changes. Identical preferences preserve the active session. Configured leaders are recognized before generic shortcut filtering, with Windows command accepted only as a physical-Ctrl mirror. The actual session uses the same rank-based allocator with its frozen alphabet; the old fixed leader predicate is removed.
+
+Real preference changes retire old prefixes, pending focus and navigation authority. One transient cleanup path preserves captured-key release fences through disablement, hidden frames and retired viewports; disabled input drains only fenced keys/paired text, leaving ordinary input available. Existing focus-only resolution, separate Enter execution, owner gates and repeat handling remain intact. No global hooks, second input observer or replacement settings transaction was introduced.
+
+Verification: prepare1 passed144.175654s, exact13ordinarycases produced12PASS/1FAIL2.170393s. The failing new fixture sent a fresh F8 press without releasing the preceding rejected key; egui correctly derived repeat from physical key state. The fixture alone was corrected to release between distinct presses, retain the held-repeat case and strengthen ordinary-input assertions. Production code stayed unchanged. Prepare2 passed93.942977s; only that one case reran and passed0.872135s. The cumulative map verifies13distinctpassingcases, preserving the other12passes and the original failure evidence. Both final hidden/disabled release-fence regressions pass, including 27 rebuilt visible targets before fresh activation. Default input, foreign/native editor, viewport/epoch, settings owner, disabled state and focus-only guards pass. The app fixture clears Paste Sequence next/cancel shortcuts before construction.
+
+Touched-only rustfmt(skip_children), scoped diff review and all required cleanup/output-drain receipts passed, with recorded owned identities Absent. Review is the authorized labeled parent-review fallback, not configured independent Reviewer acceptance. Evidence: M1B_PARENT_REVIEW.md, m1b-cumulative-coverage.json, numbered prepare/inventory/run receipts and16inputbindings in the same external g11 evidence root. No native or final Clippy claim is made at M1-B.
+
 ## Remaining original checkpoints
 
-M1-B pending: apply committed configuration through the existing input owner, preserve release fences and focus-only behavior.
+M1-B accepted; checkpoint commit/push identifiers are recorded in the external ledger.
 M2-A pending: settings/search/directory/help integration, required native default/custom/reset smoke and final affected first-party Clippy.
 Goal11 is not complete.
