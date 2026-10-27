@@ -411,6 +411,7 @@ impl SettingsEditor {
             // MkMacro view preferences are independent of this editor's
             // draft and may have changed while the dialog was open.
             mkmacro_properties: current.mkmacro_properties.clone(),
+            table_utility_resources: current.table_utility_resources,
             radial_submenu_migration: current.radial_submenu_migration.clone(),
         }
     }
@@ -463,6 +464,24 @@ mod tests {
         let saved = editor.to_settings(&initial);
 
         assert_eq!(saved.coordinate_tool, initial.coordinate_tool);
+    }
+
+    #[test]
+    fn settings_editor_save_preserves_current_table_resource_preferences() {
+        let opening = Settings::default();
+        let editor = SettingsEditor::new(&opening);
+        let mut current = opening.clone();
+        current.table_utility_resources = crate::settings::TableUtilityResourcePreferences {
+            ram_limit_mib: 512,
+            temp_limit_gib: 16,
+        };
+
+        let saved = editor.to_settings(&current);
+
+        assert_eq!(
+            saved.table_utility_resources,
+            current.table_utility_resources
+        );
     }
 
     #[test]

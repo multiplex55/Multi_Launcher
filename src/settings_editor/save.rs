@@ -38,6 +38,8 @@ impl SettingsEditor {
         show_success_toast: bool,
     ) {
         crate::gui::theme::publish_committed(ctx, &new_settings.theme);
+        app.table_utility_dialog
+            .update_resource_policy(new_settings.table_utility_resources.to_policy());
         crate::plugins::macros::configure_search_runtime(&new_settings, &app.actions_path);
         if let Err(error) = app
             .coordinate_tool

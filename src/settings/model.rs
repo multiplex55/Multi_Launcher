@@ -690,6 +690,8 @@ pub struct Settings {
     pub help_hotkey: Option<String>,
     #[serde(default)]
     pub paste_sequence: PasteSequencePreferences,
+    #[serde(default)]
+    pub table_utility_resources: TableUtilityResourcePreferences,
     pub index_paths: Option<Vec<String>>,
     pub max_indexed_items: Option<usize>,
     pub plugin_dirs: Option<Vec<String>>,
@@ -823,6 +825,46 @@ pub struct Settings {
     /// and authoring undo cannot erase migration recovery state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radial_submenu_migration: Option<SubmenuPresentationMigrationReceipt>,
+}
+
+/// Validated size caps for the Table Utility's aggregate memory and owned
+/// temporary-file budget. These preferences do not persist runtime paths or
+/// current usage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableUtilityResourcePreferences {
+    pub ram_limit_mib: u64,
+    pub temp_limit_gib: u64,
+}
+
+impl Default for TableUtilityResourcePreferences {
+    fn default() -> Self {
+        Self {
+            ram_limit_mib: 256,
+            temp_limit_gib: 8,
+        }
+    }
+}
+
+impl TableUtilityResourcePreferences {
+    pub fn to_policy(
+        self,
+    ) -> Result<
+        multi_launcher_table_core::TableResourcePolicy,
+        multi_launcher_table_core::TableResourceError,
+    > {
+        let ram_bytes = self.ram_limit_mib.checked_mul(1024 * 1024).ok_or(
+            multi_launcher_table_core::TableResourceError::InvalidPolicy(
+                "RAM limit overflows the supported byte range.",
+            ),
+        )?;
+        let temp_bytes = self.temp_limit_gib.checked_mul(1024 * 1024 * 1024).ok_or(
+            multi_launcher_table_core::TableResourceError::InvalidPolicy(
+                "Temporary storage limit overflows the supported byte range.",
+            ),
+        )?;
+        multi_launcher_table_core::TableResourcePolicy::new(ram_bytes, temp_bytes)
+    }
 }
 
 /// Persistent, local presentation state for the MkMacro property pane.
@@ -1094,6 +1136,7 @@ impl Default for Settings {
             quit_hotkey: None,
             help_hotkey: Some("F1".into()),
             paste_sequence: PasteSequencePreferences::default(),
+            table_utility_resources: TableUtilityResourcePreferences::default(),
             index_paths: None,
             max_indexed_items: None,
             plugin_dirs: None,
@@ -1225,8 +1268,8 @@ impl Settings {
 mod tests {
     use super::{
         CoordinateToolPreferences, MultiManagerSettings, NoteSettings, NoteViewMode,
-        QueryResultsLayoutSettings, Settings, ThemeColor, ThemeDensity, ThemeMode,
-        ThemePreferences, ThemeSettings,
+        QueryResultsLayoutSettings, Settings, TableUtilityResourcePreferences, ThemeColor,
+        ThemeDensity, ThemeMode, ThemePreferences, ThemeSettings,
     };
     use crate::radial::model::RadialFeatureSettings;
 
@@ -1234,6 +1277,10 @@ mod tests {
     fn empty_settings_deserializes_with_note_defaults() {
         let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
         assert_eq!(parsed.note, NoteSettings::default());
+        assert_eq!(
+            parsed.table_utility_resources,
+            TableUtilityResourcePreferences::default()
+        );
         assert_eq!(parsed.coordinate_tool, CoordinateToolPreferences::default());
         assert_eq!(
             parsed.mkmacro_properties,
@@ -1252,6 +1299,67 @@ mod tests {
         assert_eq!(
             parsed.note.effective_default_view_mode(),
             NoteViewMode::Preview
+        );
+    }
+
+    #[test]
+    fn table_resource_preferences_validate_range_and_round_trip() {
+        let defaults = TableUtilityResourcePreferences::default();
+        assert_eq!(defaults.ram_limit_mib, 256);
+        assert_eq!(defaults.temp_limit_gib, 8);
+        assert!(defaults.to_policy().is_ok());
+
+        for preferences in [
+            TableUtilityResourcePreferences {
+                ram_limit_mib: 64,
+                temp_limit_gib: 1,
+            },
+            TableUtilityResourcePreferences {
+                ram_limit_mib: 1024,
+                temp_limit_gib: 64,
+            },
+        ] {
+            assert!(preferences.to_policy().is_ok());
+        }
+        for preferences in [
+            TableUtilityResourcePreferences {
+                ram_limit_mib: 63,
+                temp_limit_gib: 8,
+            },
+            TableUtilityResourcePreferences {
+                ram_limit_mib: 1025,
+                temp_limit_gib: 8,
+            },
+            TableUtilityResourcePreferences {
+                ram_limit_mib: 256,
+                temp_limit_gib: 0,
+            },
+            TableUtilityResourcePreferences {
+                ram_limit_mib: 256,
+                temp_limit_gib: 65,
+            },
+            TableUtilityResourcePreferences {
+                ram_limit_mib: u64::MAX,
+                temp_limit_gib: 8,
+            },
+            TableUtilityResourcePreferences {
+                ram_limit_mib: 256,
+                temp_limit_gib: u64::MAX,
+            },
+        ] {
+            assert!(preferences.to_policy().is_err());
+        }
+
+        let mut settings = Settings::default();
+        settings.table_utility_resources = TableUtilityResourcePreferences {
+            ram_limit_mib: 512,
+            temp_limit_gib: 16,
+        };
+        let serialized = serde_json::to_string(&settings).unwrap();
+        let restored: Settings = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(
+            restored.table_utility_resources,
+            settings.table_utility_resources
         );
     }
 

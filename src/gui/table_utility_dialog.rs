@@ -4,8 +4,8 @@ use crate::clipboard_modify::clipboard::{
 use crate::common::atomic_file;
 use crate::table_utility::{
     DelimiterChoice, EffectiveSortMode, RowWidthPolicy, TableDelimiter, TableDocument,
-    TableJsonShape, TableObjectShapeAvailability, TableSort, TableSortDirection, TableSortMode,
-    TableUtilityProfile, TableWarning,
+    TableJsonShape, TableObjectShapeAvailability, TableResourceError, TableResourcePolicy,
+    TableSort, TableSortDirection, TableSortMode, TableUtilityProfile, TableWarning,
 };
 use crate::table_utility_session::{
     TableExportKind, TableExportOperation, TableExportPayload, TableExportReceipt,
@@ -222,6 +222,21 @@ impl Default for TableUtilityDialogState {
 }
 
 impl TableUtilityDialogState {
+    pub(crate) fn with_resource_policy(
+        policy: Result<TableResourcePolicy, TableResourceError>,
+    ) -> Self {
+        let mut state = Self::default();
+        state.session.set_resource_policy(policy);
+        state
+    }
+
+    pub(crate) fn update_resource_policy(
+        &mut self,
+        policy: Result<TableResourcePolicy, TableResourceError>,
+    ) {
+        self.session.set_resource_policy(policy);
+    }
+
     pub(crate) fn attach_activity_center(&mut self, center: crate::activity::ActivityCenter) {
         self.session.attach_activity_center(center);
     }
@@ -590,9 +605,14 @@ impl TableUtilityDialogState {
 
     fn sync_editors(&mut self, snapshot: &TableSessionSnapshot) {
         if self.source_editor_revision != Some(snapshot.source_display_revision) {
-            self.source_editor.clear();
             if snapshot.source_is_editable() {
+                self.source_editor.clear();
                 self.source_editor.push_str(snapshot.source.as_ref());
+            } else {
+                // Large-source preview mode does not use the inline editor.
+                // Drop its previous capacity so the old editor allocation is
+                // not retained after the source lease has been replaced.
+                self.source_editor = String::new();
             }
             self.source_editor_revision = Some(snapshot.source_display_revision);
         }
@@ -1522,7 +1542,7 @@ impl TableUtilityDialogState {
             && let Some(TableExportPayload::Json(json)) = self
                 .pending_overwrite
                 .as_ref()
-                .map(|pending| &pending.receipt.payload)
+                .map(|pending| pending.receipt.payload.as_ref())
             && let Some(reason) = json.fallback_reason
         {
             ui.weak(format!(
@@ -1576,14 +1596,14 @@ impl TableUtilityDialogState {
             }
             match pending.action {
                 ExportAction::Clipboard => {
-                    let Some(payload) = payload_text(&receipt.payload) else {
+                    let Some(payload) = payload_text(receipt.payload.as_ref()) else {
                         self.status = Some("The requested output was not valid text.".into());
                         return;
                     };
                     match self.clipboard.write_text(payload) {
                         Ok(()) => {
                             self.status = Some("Copied the current table selection.".into());
-                            if let TableExportPayload::Json(json) = receipt.payload
+                            if let TableExportPayload::Json(json) = receipt.payload.as_ref()
                                 && let Some(reason) = json.fallback_reason
                             {
                                 self.status = Some(format!(
@@ -1610,7 +1630,7 @@ impl TableUtilityDialogState {
         if !self.session.export_receipt_is_current(&receipt) {
             return Err("The selected table changed before it could be saved.".into());
         }
-        let TableExportPayload::Json(json) = &receipt.payload else {
+        let TableExportPayload::Json(json) = receipt.payload.as_ref() else {
             return Err("Only JSON output can be saved from this action.".into());
         };
         let snapshot = self.session.snapshot();
@@ -1701,7 +1721,7 @@ impl TableUtilityDialogState {
             self.status = Some("The table changed; the captured JSON export was discarded.".into());
             return;
         }
-        let TableExportPayload::Json(json) = &pending.receipt.payload else {
+        let TableExportPayload::Json(json) = pending.receipt.payload.as_ref() else {
             self.status = Some("The captured output was no longer JSON.".into());
             return;
         };

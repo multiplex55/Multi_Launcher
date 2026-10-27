@@ -7,11 +7,22 @@
 use std::cmp::Ordering;
 use std::fmt;
 use std::io::{self, Write};
+mod file_source;
+mod resource;
+mod stream_scan;
+pub use file_source::{
+    TABLE_FILE_INDEX_STRIDE, TABLE_FILE_MAX_COLUMNS, TABLE_FILE_MAX_FIELD_BYTES,
+    TABLE_FILE_MAX_RECORD_BYTES, TableAcceptedSource, TableFileBackedSource, TableFileParseOptions,
+    TableFileRow, TableFileRowCursor, TableFileRowId, TableFileSourceError, TableSourceDiagnostic,
+    TableSourceId, TableSourceIdentity,
+};
+pub use resource::{
+    TableResourceError, TableResourceLease, TableResourceOwned, TableResourcePolicy,
+    TableResourcePool, TableResourceUsage, TableTempFile, TableTempWorkspace,
+};
 use std::mem::size_of;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
-
-use std::collections::BTreeMap;
 
 pub const TABLE_UTILITY_MAX_INPUT_BYTES: usize = 10 * 1024 * 1024;
 pub const TABLE_UTILITY_MAX_DATA_ROWS: usize = 50_000;
@@ -313,6 +324,7 @@ pub enum TableParseErrorKind {
     AllocationFailed,
     InvalidLimits,
     IdentityExhausted,
+    IoError,
     Cancelled,
 }
 
@@ -373,6 +385,7 @@ impl TableParseError {
             TableParseErrorKind::IdentityExhausted => {
                 "No additional table snapshot identity is available."
             }
+            TableParseErrorKind::IoError => "The table source could not be read.",
             TableParseErrorKind::Cancelled => "The table operation was cancelled.",
         }
     }
@@ -778,7 +791,7 @@ impl PartialOrd for DelimiterEvidence {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LexState {
+pub(crate) enum LexState {
     FieldStart,
     Unquoted,
     Quoted,
@@ -814,14 +827,21 @@ fn decode_utf8(input: &[u8]) -> Result<(&str, usize), TableParseError> {
 }
 
 fn copy_record_fields(record: &csv::StringRecord) -> Result<Vec<String>, TableParseError> {
+    copy_record_fields_with_capacity(record, record.len())
+}
+
+pub(crate) fn copy_record_fields_with_capacity(
+    record: &csv::StringRecord,
+    minimum_capacity: usize,
+) -> Result<Vec<String>, TableParseError> {
     let mut fields = Vec::new();
     fields
-        .try_reserve(record.len())
+        .try_reserve_exact(record.len().max(minimum_capacity))
         .map_err(|_| TableParseError::new(TableParseErrorKind::AllocationFailed, None))?;
     for value in record.iter() {
         let mut field = String::new();
         field
-            .try_reserve(value.len())
+            .try_reserve_exact(value.len())
             .map_err(|_| TableParseError::new(TableParseErrorKind::AllocationFailed, None))?;
         field.push_str(value);
         fields.push(field);
@@ -866,6 +886,27 @@ fn location_for_prefix(
         record,
         field,
     }
+}
+
+pub(crate) fn location_error(
+    kind: TableParseErrorKind,
+    base_offset: usize,
+    relative_offset: usize,
+    line: usize,
+    column: usize,
+    record: usize,
+    field: usize,
+) -> TableParseError {
+    TableParseError::new(
+        kind,
+        Some(TableLocation {
+            byte_offset: base_offset.saturating_add(relative_offset),
+            line,
+            column,
+            record,
+            field,
+        }),
+    )
 }
 
 fn scan_for_delimiter(
@@ -944,398 +985,42 @@ fn scan_records(
     options: TableParseOptions,
     cancellation: Option<&TableCancellationToken>,
 ) -> Result<LexicalScan, TableParseError> {
-    let bytes = input;
     let mut records = Vec::new();
-    let mut index = 0usize;
-    let mut line = 1usize;
-    let mut column = 1usize;
-    let mut record_start = 0usize;
-    let mut record_start_line = 1usize;
-    let mut record_number = 1usize;
-    let mut field_number = 1usize;
-    let mut state = LexState::FieldStart;
-    let mut record_touched = false;
-    let mut next_cancellation_checkpoint = 0usize;
-
-    let mut schema_width = 0usize;
-    let mut push_record = |records: &mut Vec<RecordShape>,
-                           width: usize,
-                           start_offset: usize,
-                           start_line: usize,
-                           record: usize,
-                           end_offset: usize|
-     -> Result<(), TableParseError> {
-        let allowed_records = options
-            .limits
-            .max_data_rows
-            .saturating_add(usize::from(options.has_header));
-        if records.len() >= allowed_records {
-            return Err(TableParseError::new(
-                TableParseErrorKind::TooManyRows,
-                Some(TableLocation {
-                    byte_offset: base_offset.saturating_add(start_offset),
-                    line: start_line,
-                    column: 1,
-                    record,
-                    field: 1,
-                }),
-            ));
-        }
-        if width > options.limits.max_columns {
-            return Err(TableParseError::new(
-                TableParseErrorKind::TooManyColumns,
-                Some(TableLocation {
-                    byte_offset: base_offset.saturating_add(start_offset),
-                    line: start_line,
-                    column: 1,
-                    record,
-                    field: options.limits.max_columns.saturating_add(1),
-                }),
-            ));
-        }
-        let record_meta = RecordShape {
-            width,
-            start: TableLocation {
-                byte_offset: base_offset.saturating_add(start_offset),
-                line: start_line,
-                column: 1,
-                record,
-                field: 1,
-            },
-        };
-        records
-            .try_reserve(1)
-            .map_err(|_| TableParseError::new(TableParseErrorKind::AllocationFailed, None))?;
-        records.push(record_meta);
-
-        let data_rows = records
-            .len()
-            .saturating_sub(usize::from(options.has_header));
-        schema_width = schema_width.max(width);
-        validate_storage(
-            data_rows,
-            schema_width,
-            options.has_header,
-            end_offset,
-            options.limits,
-        )
+    let limits = stream_scan::StreamLimits {
+        max_columns: options.limits.max_columns,
+        evidence_width_limit: options.limits.max_columns,
+        max_records: Some(
+            u64::try_from(options.limits.max_data_rows)
+                .map_err(|_| TableParseError::new(TableParseErrorKind::IdentityExhausted, None))?,
+        ),
+        max_record_bytes: None,
+        max_field_bytes: None,
+        has_header: options.has_header,
+        strict_width: false,
     };
-
-    while index < bytes.len() {
-        scanner_cancellation_checkpoint(index, &mut next_cancellation_checkpoint, cancellation)?;
-        let byte = bytes[index];
-        match state {
-            LexState::FieldStart => {
-                if byte == delimiter.byte() {
-                    record_touched = true;
-                    field_number += 1;
-                    if field_number > options.limits.max_columns {
-                        return Err(location_error(
-                            TableParseErrorKind::TooManyColumns,
-                            base_offset,
-                            index,
-                            line,
-                            column,
-                            record_number,
-                            field_number,
-                        ));
-                    }
-                    index += 1;
-                    column += 1;
-                } else if byte == b'"' {
-                    record_touched = true;
-                    state = LexState::Quoted;
-                    index += 1;
-                    column += 1;
-                } else if byte == b'\n' || byte == b'\r' {
-                    let (next_index, next_line) = consume_record_terminator(
-                        bytes,
-                        index,
-                        base_offset,
-                        line,
-                        column,
-                        record_number,
-                        field_number,
-                    )?;
-                    let blank_line = !record_touched && field_number == 1;
-                    if !blank_line {
-                        push_record(
-                            &mut records,
-                            field_number,
-                            record_start,
-                            record_start_line,
-                            record_number,
-                            base_offset.saturating_add(next_index),
-                        )?;
-                        record_number += 1;
-                    }
-                    index = next_index;
-                    line = next_line;
-                    column = 1;
-                    record_start = index;
-                    record_start_line = line;
-                    field_number = 1;
-                    state = LexState::FieldStart;
-                    record_touched = false;
-                } else {
-                    record_touched = true;
-                    state = LexState::Unquoted;
-                    advance_utf8_byte(bytes, &mut index, &mut column);
-                }
-            }
-            LexState::Unquoted => {
-                if byte == delimiter.byte() {
-                    field_number += 1;
-                    if field_number > options.limits.max_columns {
-                        return Err(location_error(
-                            TableParseErrorKind::TooManyColumns,
-                            base_offset,
-                            index,
-                            line,
-                            column,
-                            record_number,
-                            field_number,
-                        ));
-                    }
-                    index += 1;
-                    column += 1;
-                    state = LexState::FieldStart;
-                } else if byte == b'"' {
-                    return Err(location_error(
-                        TableParseErrorKind::MalformedDelimitedText,
-                        base_offset,
-                        index,
-                        line,
-                        column,
-                        record_number,
-                        field_number,
-                    ));
-                } else if byte == b'\n' || byte == b'\r' {
-                    let (next_index, next_line) = consume_record_terminator(
-                        bytes,
-                        index,
-                        base_offset,
-                        line,
-                        column,
-                        record_number,
-                        field_number,
-                    )?;
-                    push_record(
-                        &mut records,
-                        field_number,
-                        record_start,
-                        record_start_line,
-                        record_number,
-                        base_offset.saturating_add(next_index),
-                    )?;
-                    index = next_index;
-                    line = next_line;
-                    column = 1;
-                    record_start = index;
-                    record_start_line = line;
-                    record_number += 1;
-                    field_number = 1;
-                    state = LexState::FieldStart;
-                    record_touched = false;
-                } else {
-                    advance_utf8_byte(bytes, &mut index, &mut column);
-                }
-            }
-            LexState::Quoted => {
-                if byte == b'"' {
-                    if bytes.get(index + 1) == Some(&b'"') {
-                        index += 2;
-                        column += 2;
-                    } else {
-                        index += 1;
-                        column += 1;
-                        state = LexState::AfterQuote;
-                    }
-                } else if byte == b'\n' || byte == b'\r' {
-                    let (next_index, next_line) = consume_embedded_newline(
-                        bytes,
-                        index,
-                        base_offset,
-                        line,
-                        column,
-                        record_number,
-                        field_number,
-                    )?;
-                    index = next_index;
-                    line = next_line;
-                    column = 1;
-                } else {
-                    advance_utf8_byte(bytes, &mut index, &mut column);
-                }
-            }
-            LexState::AfterQuote => {
-                if byte == delimiter.byte() {
-                    field_number += 1;
-                    if field_number > options.limits.max_columns {
-                        return Err(location_error(
-                            TableParseErrorKind::TooManyColumns,
-                            base_offset,
-                            index,
-                            line,
-                            column,
-                            record_number,
-                            field_number,
-                        ));
-                    }
-                    index += 1;
-                    column += 1;
-                    state = LexState::FieldStart;
-                } else if byte == b'\n' || byte == b'\r' {
-                    let (next_index, next_line) = consume_record_terminator(
-                        bytes,
-                        index,
-                        base_offset,
-                        line,
-                        column,
-                        record_number,
-                        field_number,
-                    )?;
-                    push_record(
-                        &mut records,
-                        field_number,
-                        record_start,
-                        record_start_line,
-                        record_number,
-                        base_offset.saturating_add(next_index),
-                    )?;
-                    index = next_index;
-                    line = next_line;
-                    column = 1;
-                    record_start = index;
-                    record_start_line = line;
-                    record_number += 1;
-                    field_number = 1;
-                    state = LexState::FieldStart;
-                    record_touched = false;
-                } else {
-                    return Err(location_error(
-                        TableParseErrorKind::MalformedDelimitedText,
-                        base_offset,
-                        index,
-                        line,
-                        column,
-                        record_number,
-                        field_number,
-                    ));
-                }
-            }
-        }
-    }
-
-    if state == LexState::Quoted {
-        return Err(location_error(
-            TableParseErrorKind::MalformedDelimitedText,
-            base_offset,
-            bytes.len(),
-            line,
-            column,
-            record_number,
-            field_number,
-        ));
-    }
-    if record_touched || field_number > 1 || state != LexState::FieldStart {
-        push_record(
-            &mut records,
-            field_number,
-            record_start,
-            record_start_line,
-            record_number,
-            base_offset.saturating_add(bytes.len()),
-        )?;
-    }
-
-    let mut width_counts = BTreeMap::<usize, usize>::new();
-    let mut multicolumn_records = 0usize;
-    let mut widest_record = 0usize;
-    for (index, shape) in records.iter().enumerate() {
-        if index % 256 == 0 {
-            check_parse_cancelled(cancellation)?;
-        }
-        widest_record = widest_record.max(shape.width);
-        if shape.width > 1 {
-            multicolumn_records += 1;
-            *width_counts.entry(shape.width).or_default() += 1;
-        }
-    }
-    check_parse_cancelled(cancellation)?;
-    let modal_multicolumn_count = width_counts.values().copied().max().unwrap_or(0);
+    let summary = stream_scan::scan_reader(
+        std::io::Cursor::new(input),
+        u64::try_from(base_offset)
+            .map_err(|_| TableParseError::new(TableParseErrorKind::IdentityExhausted, None))?,
+        delimiter,
+        limits,
+        cancellation,
+        None,
+        |record, _| {
+            records
+                .try_reserve(1)
+                .map_err(|_| TableParseError::new(TableParseErrorKind::AllocationFailed, None))?;
+            records.push(RecordShape {
+                width: record.width,
+                start: record.start,
+            });
+            Ok(true)
+        },
+    )?;
     Ok(LexicalScan {
         records,
-        score: DelimiterEvidence {
-            multicolumn_records,
-            modal_multicolumn_count,
-            widest_record,
-        },
+        score: summary.score,
     })
-}
-
-fn consume_record_terminator(
-    bytes: &[u8],
-    index: usize,
-    base_offset: usize,
-    line: usize,
-    column: usize,
-    record: usize,
-    field: usize,
-) -> Result<(usize, usize), TableParseError> {
-    match bytes[index] {
-        b'\n' => Ok((index + 1, line + 1)),
-        b'\r' if bytes.get(index + 1) == Some(&b'\n') => Ok((index + 2, line + 1)),
-        _ => Err(location_error(
-            TableParseErrorKind::MalformedDelimitedText,
-            base_offset,
-            index,
-            line,
-            column,
-            record,
-            field,
-        )),
-    }
-}
-
-fn consume_embedded_newline(
-    bytes: &[u8],
-    index: usize,
-    base_offset: usize,
-    line: usize,
-    column: usize,
-    record: usize,
-    field: usize,
-) -> Result<(usize, usize), TableParseError> {
-    consume_record_terminator(bytes, index, base_offset, line, column, record, field)
-}
-
-fn advance_utf8_byte(bytes: &[u8], index: &mut usize, column: &mut usize) {
-    if bytes[*index] & 0b1100_0000 != 0b1000_0000 {
-        *column += 1;
-    }
-    *index += 1;
-}
-
-fn location_error(
-    kind: TableParseErrorKind,
-    base_offset: usize,
-    offset: usize,
-    line: usize,
-    column: usize,
-    record: usize,
-    field: usize,
-) -> TableParseError {
-    TableParseError::new(
-        kind,
-        Some(TableLocation {
-            byte_offset: base_offset.saturating_add(offset),
-            line,
-            column,
-            record,
-            field,
-        }),
-    )
 }
 
 fn scanner_cancellation_checkpoint(
@@ -2755,6 +2440,13 @@ mod tests {
             let error = TableDocument::parse(input, options).unwrap_err();
             assert_eq!(error.kind, expected, "unexpected bound for {input:?}");
         }
+
+        let mut options = explicit_options(TableDelimiter::Comma, true);
+        options.limits.max_data_rows = 1;
+        assert!(TableDocument::parse("header\none", options).is_ok());
+
+        let error = TableDocument::parse("header\none\ntwo", options).unwrap_err();
+        assert_eq!(error.kind, TableParseErrorKind::TooManyRows);
     }
 
     #[test]

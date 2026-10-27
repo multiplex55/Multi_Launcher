@@ -3751,7 +3751,9 @@ impl LauncherApp {
             json_utility_dialog: JsonUtilityDialogState::default(),
             regex_tester_dialog,
             xml_toolkit_dialog: XmlToolkitDialogState::default(),
-            table_utility_dialog: TableUtilityDialogState::default(),
+            table_utility_dialog: TableUtilityDialogState::with_resource_policy(
+                settings.table_utility_resources.to_policy(),
+            ),
             image_compare_dialog: ImageCompareDialogState::new(ctx),
             duplicate_finder_dialog: DuplicateFinderDialogState::new(ctx),
             activity_center: activity_center.clone(),
