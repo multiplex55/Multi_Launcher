@@ -1,6 +1,7 @@
 use crate::annotation::raster::{
     self, Color as RasterColor, Point as RasterPoint, Rect as RasterRect,
 };
+use crate::annotation::redaction::{self, RedactionError, RedactionOperation};
 use crate::gui::LauncherApp;
 use eframe::egui::{
     self, Color32, PointerButton, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
@@ -79,6 +80,7 @@ pub enum MarkupLayer {
     Highlight(MarkupRect),
     Marker(MarkupMarker),
     Text(MarkupText),
+    Redaction(RedactionOperation),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -233,7 +235,10 @@ fn marker_text_color(background: Color32) -> Color32 {
     }
 }
 
-pub fn render_markup_layers(base: &RgbaImage, layers: &[MarkupLayer]) -> RgbaImage {
+pub fn render_markup_layers(
+    base: &RgbaImage,
+    layers: &[MarkupLayer],
+) -> Result<RgbaImage, RedactionError> {
     let mut img = base.clone();
     let font = default_font_arc();
     for layer in layers {
@@ -309,9 +314,12 @@ pub fn render_markup_layers(base: &RgbaImage, layers: &[MarkupLayer]) -> RgbaIma
                     );
                 }
             }
+            MarkupLayer::Redaction(operation) => {
+                redaction::apply_redaction(&mut img, *operation)?;
+            }
         }
     }
-    img
+    Ok(img)
 }
 
 /// Editor window for captured screenshots allowing simple cropping and annotation.
@@ -470,7 +478,7 @@ impl ScreenshotEditor {
 
     #[cfg(feature = "qa-framebuffer-capture")]
     pub(crate) fn qa_write_applied_png(&self, path: &Path) -> std::io::Result<(String, u32, u32)> {
-        let image = self.apply_edits();
+        let image = self.apply_edits().map_err(std::io::Error::other)?;
         let dimensions = (image.width(), image.height());
         let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
         let result = (|| {
@@ -491,8 +499,8 @@ impl ScreenshotEditor {
         result
     }
 
-    fn apply_edits(&self) -> RgbaImage {
-        let mut img = render_markup_layers(&self.image, self.history.layers());
+    fn apply_edits(&self) -> Result<RgbaImage, RedactionError> {
+        let mut img = render_markup_layers(&self.image, self.history.layers())?;
         if let Some(rect) = self.crop_rect {
             let x1 = rect.min.x.max(0.0) as u32;
             let y1 = rect.min.y.max(0.0) as u32;
@@ -502,21 +510,21 @@ impl ScreenshotEditor {
             let h = (y2 - y1).max(1);
             img = image::imageops::crop_imm(&img, x1, y1, w, h).to_image();
         }
-        img
+        Ok(img)
     }
 
     fn save_image(&self, path: &PathBuf) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let img = self.apply_edits();
+        let img = self.apply_edits()?;
         img.save(path)?;
         Ok(())
     }
 
     fn copy_to_clipboard(&self) -> anyhow::Result<()> {
         use std::borrow::Cow;
-        let img = self.apply_edits();
+        let img = self.apply_edits()?;
         let (w, h) = img.dimensions();
         let mut cb = arboard::Clipboard::new()?;
         cb.set_image(arboard::ImageData {
@@ -1190,6 +1198,10 @@ impl ScreenshotEditor {
                                 text.color,
                             );
                         }
+                        // M1-A provides the authoritative raster/export operation. The canvas
+                        // preview and redaction controls are integrated in M1-B; do not present
+                        // a rectangle overlay as if it were the applied effect.
+                        MarkupLayer::Redaction(_) => {}
                     }
                 }
                 if let (Some(start), Some(end)) = (self.active_start, self.active_end) {
@@ -1538,6 +1550,16 @@ mod tests {
             .collect()
     }
 
+    fn redaction_bounds(
+        first: Pos2,
+        second: Pos2,
+    ) -> crate::annotation::redaction::RedactionBounds {
+        crate::annotation::redaction::RedactionBounds::from_corners(
+            first.x, first.y, second.x, second.y,
+        )
+        .unwrap()
+    }
+
     fn generated_grid_image(width: u32, height: u32) -> RgbaImage {
         RgbaImage::from_fn(width, height, |x, y| {
             if (x / 8 + y / 8) % 2 == 0 {
@@ -1619,6 +1641,127 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_redaction_layers_compose_current_pixels_and_follow_history() {
+        use crate::annotation::redaction::{RedactionEffect, RedactionOperation};
+
+        let first_base = RgbaImage::from_fn(4, 1, |x, _| {
+            let value = [20, 40, 60, 80][x as usize];
+            image::Rgba([value, value, value, 255])
+        });
+        let second_base = RgbaImage::from_fn(4, 1, |x, _| {
+            let value = [200, 220, 60, 80][x as usize];
+            image::Rgba([value, value, value, 255])
+        });
+        let solid = RedactionOperation::new(
+            redaction_bounds(Pos2::new(0.0, 0.0), Pos2::new(2.0, 1.0)),
+            RedactionEffect::solid_black(),
+        );
+        let blur = RedactionOperation::new(
+            redaction_bounds(Pos2::new(0.0, 0.0), Pos2::new(4.0, 1.0)),
+            RedactionEffect::blur(1).unwrap(),
+        );
+        let mut history = MarkupHistory::default();
+        history.push(MarkupLayer::Redaction(solid));
+        let solid_only = render_markup_layers(&first_base, history.layers()).unwrap();
+        assert_eq!(solid_only.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        assert_eq!(solid_only.get_pixel(1, 0).0, [0, 0, 0, 255]);
+
+        history.push(MarkupLayer::Redaction(blur));
+        let composed = render_markup_layers(&first_base, history.layers()).unwrap();
+        let alternate_composed = render_markup_layers(&second_base, history.layers()).unwrap();
+        assert_eq!(
+            composed, alternate_composed,
+            "a later effect must sample the already-redacted working pixels"
+        );
+        assert_eq!(
+            (0..4)
+                .map(|x| composed.get_pixel(x, 0)[0])
+                .collect::<Vec<_>>(),
+            [0, 20, 47, 73]
+        );
+        assert_eq!(
+            match &history.layers()[1] {
+                MarkupLayer::Redaction(operation) => operation.effect(),
+                other => panic!("expected redaction layer, got {other:?}"),
+            },
+            RedactionEffect::blur(1).unwrap(),
+            "captured history parameters do not track subsequent tool settings"
+        );
+        let later_tool_setting = RedactionEffect::pixelate(4).unwrap();
+        assert_ne!(later_tool_setting, blur.effect());
+
+        assert!(history.undo());
+        assert_eq!(
+            render_markup_layers(&first_base, history.layers()).unwrap(),
+            solid_only
+        );
+        assert!(history.redo());
+        assert_eq!(
+            render_markup_layers(&first_base, history.layers()).unwrap(),
+            composed
+        );
+        assert!(history.undo());
+        history.push(MarkupLayer::Highlight(MarkupRect {
+            rect: Rect::from_min_max(Pos2::new(3.0, 0.0), Pos2::new(4.0, 1.0)),
+            color: Color32::RED,
+            thickness: 1.0,
+        }));
+        let annotated = render_markup_layers(&first_base, history.layers()).unwrap();
+        assert_eq!(annotated.get_pixel(3, 0).0, [255, 0, 0, 255]);
+        assert!(history.redo_stack.is_empty());
+        assert!(history.undo());
+        assert!(history.redo());
+        assert_eq!(
+            render_markup_layers(&first_base, history.layers()).unwrap(),
+            annotated
+        );
+        assert!(history.undo());
+        history.push(MarkupLayer::Text(MarkupText {
+            position: Pos2::new(0.0, 0.0),
+            text: "later ordinary layer".to_owned(),
+            color: Color32::WHITE,
+            size: 8.0,
+        }));
+        assert!(history.redo_stack.is_empty());
+    }
+
+    #[test]
+    fn screenshot_redaction_apply_edits_crops_after_effect_and_saved_png_matches() {
+        use crate::annotation::redaction::{RedactionEffect, RedactionOperation};
+
+        let base = generated_grid_image(8, 6);
+        let mut editor = ScreenshotEditor::new(
+            base.clone(),
+            PathBuf::from("unused-redaction.png"),
+            false,
+            false,
+            MarkupTool::Pen,
+        );
+        editor.push_layer(MarkupLayer::Redaction(RedactionOperation::new(
+            redaction_bounds(Pos2::new(2.2, 1.1), Pos2::new(6.0, 5.0)),
+            RedactionEffect::solid([210, 5, 9]),
+        )));
+        editor.crop_rect = Some(Rect::from_min_max(Pos2::new(1.0, 1.0), Pos2::new(7.0, 5.0)));
+
+        let full = render_markup_layers(&base, editor.history.layers()).unwrap();
+        assert_eq!(full.get_pixel(2, 2).0, [210, 5, 9, 255]);
+        let expected = image::imageops::crop_imm(&full, 1, 1, 6, 4).to_image();
+        let applied = editor.apply_edits().unwrap();
+        assert_eq!(applied, expected);
+        assert_eq!(applied.get_pixel(1, 1).0, [210, 5, 9, 255]);
+
+        let root = tempfile::tempdir().unwrap();
+        let output_path = root.path().join("redacted.png");
+        editor.save_image(&output_path).unwrap();
+        let saved = image::io::Reader::open(output_path)
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(saved, applied);
+    }
+
+    #[test]
     fn screenshot_marker_raster_bounds_center_digits_and_crop_before_saved_export() {
         let base = generated_grid_image(132, 96);
         let font = default_font_arc().expect("the bundled proportional font is available");
@@ -1671,7 +1814,7 @@ mod tests {
         let geometry_10 = marker_geometry(Pos2::ZERO, 10, 24.0, Some(&font));
         assert!(geometry_10.radius > geometry_9.radius);
 
-        let rendered = render_markup_layers(&base, &layers);
+        let rendered = render_markup_layers(&base, &layers).unwrap();
         assert_ne!(rendered.get_pixel(0, 0), base.get_pixel(0, 0));
         let marker_10 = &markers[2];
         assert_eq!(marker_text_color(marker_10.color), Color32::WHITE);
@@ -1725,9 +1868,9 @@ mod tests {
             Pos2::new(0.0, 0.0),
             Pos2::new(100.0, 72.0),
         ));
-        let full = render_markup_layers(&base, editor.history.layers());
+        let full = render_markup_layers(&base, editor.history.layers()).unwrap();
         let expected = image::imageops::crop_imm(&full, 0, 0, 100, 72).to_image();
-        let applied = editor.apply_edits();
+        let applied = editor.apply_edits().unwrap();
         assert_eq!(applied, expected);
 
         let evidence_dir = std::env::var_os("ML_SCREENSHOT_MARKER_EVIDENCE_DIR");
@@ -1988,7 +2131,7 @@ mod tests {
             .unwrap_or_else(|| tempdir.path().to_path_buf());
         std::fs::create_dir_all(&output_dir).unwrap();
         let output_path = output_dir.join("screenshot-marker-ui-crop.png");
-        let expected = editor.apply_edits();
+        let expected = editor.apply_edits().unwrap();
         editor.save_image(&output_path).unwrap();
         let saved = image::io::Reader::open(&output_path)
             .unwrap()
