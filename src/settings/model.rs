@@ -1,5 +1,6 @@
 use crate::coordinate_tool::settings::CoordinateToolPreferences;
 use crate::gui::Panel;
+use crate::gui::jump_mode::config::{HintAlphabet, JumpModeChord};
 use crate::hotkey::Key;
 use crate::hotkey::{Hotkey, parse_hotkey};
 use crate::settings::defaults::*;
@@ -765,6 +766,10 @@ pub struct Settings {
     pub show_launcher_title: bool,
     #[serde(default)]
     pub experimental_jump_mode_enabled: bool,
+    #[serde(default)]
+    pub jump_mode_activation_chord: JumpModeChord,
+    #[serde(default)]
+    pub jump_mode_hint_alphabet: HintAlphabet,
     #[serde(default = "default_timer_refresh")]
     pub timer_refresh: f32,
     #[serde(default)]
@@ -1175,6 +1180,8 @@ impl Default for Settings {
             show_launcher_icon: true,
             show_launcher_title: true,
             experimental_jump_mode_enabled: false,
+            jump_mode_activation_chord: JumpModeChord::default(),
+            jump_mode_hint_alphabet: HintAlphabet::default(),
             timer_refresh: default_timer_refresh(),
             net_refresh: default_net_refresh(),
             net_unit: NetUnit::Auto,
@@ -1942,6 +1949,86 @@ mod tests {
         .expect("missing unrelated settings retain defaults");
         assert!(!old_defaults.show_launcher_icon);
         assert!(!old_defaults.show_launcher_title);
+    }
+
+    #[test]
+    fn jump_preferences_default_round_trip_and_recover_independently() {
+        let legacy: Settings = serde_json::from_value(serde_json::json!({
+            "show_examples": true,
+        }))
+        .expect("legacy settings remain readable");
+        assert_eq!(
+            legacy.jump_mode_activation_chord.canonical_text(),
+            "Shift+Space"
+        );
+        assert_eq!(
+            legacy.jump_mode_hint_alphabet.canonical_text(),
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        );
+
+        let mut custom = Settings::default();
+        custom.jump_mode_activation_chord =
+            crate::gui::jump_mode::config::JumpModeChord::parse(" control + shift + F8 ").unwrap();
+        custom.jump_mode_hint_alphabet =
+            crate::gui::jump_mode::config::HintAlphabet::parse("asDfjklq").unwrap();
+        assert!(!custom.experimental_jump_mode_enabled);
+        let encoded = serde_json::to_value(&custom).unwrap();
+        assert_eq!(encoded["jump_mode_activation_chord"], "Ctrl+Shift+F8");
+        assert_eq!(encoded["jump_mode_hint_alphabet"], "ASDFJKLQ");
+        let restored: Settings = serde_json::from_value(encoded).unwrap();
+        assert!(!restored.experimental_jump_mode_enabled);
+        assert_eq!(
+            restored.jump_mode_activation_chord,
+            custom.jump_mode_activation_chord
+        );
+        assert_eq!(
+            restored.jump_mode_hint_alphabet,
+            custom.jump_mode_hint_alphabet
+        );
+        assert_eq!(restored.show_examples, custom.show_examples);
+
+        let invalid_chord: Settings = serde_json::from_value(serde_json::json!({
+            "jump_mode_activation_chord": "Ctrl++F8",
+            "jump_mode_hint_alphabet": "zY",
+            "show_examples": true,
+        }))
+        .expect("one malformed preference must not reject Settings");
+        assert_eq!(
+            invalid_chord.jump_mode_activation_chord.canonical_text(),
+            "Shift+Space"
+        );
+        assert_eq!(invalid_chord.jump_mode_hint_alphabet.canonical_text(), "ZY");
+        assert!(invalid_chord.show_examples);
+
+        let invalid_alphabet: Settings = serde_json::from_value(serde_json::json!({
+            "jump_mode_activation_chord": "Control+F8",
+            "jump_mode_hint_alphabet": "AAB",
+            "show_examples": false,
+        }))
+        .expect("invalid alphabet must recover independently");
+        assert_eq!(
+            invalid_alphabet.jump_mode_activation_chord.canonical_text(),
+            "Ctrl+F8"
+        );
+        assert_eq!(
+            invalid_alphabet.jump_mode_hint_alphabet.canonical_text(),
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        );
+        assert!(!invalid_alphabet.show_examples);
+
+        let invalid_types: Settings = serde_json::from_value(serde_json::json!({
+            "jump_mode_activation_chord": {"key": "F8"},
+            "jump_mode_hint_alphabet": 27,
+        }))
+        .expect("wrong preference JSON types must recover independently");
+        assert_eq!(
+            invalid_types.jump_mode_activation_chord.canonical_text(),
+            "Shift+Space"
+        );
+        assert_eq!(
+            invalid_types.jump_mode_hint_alphabet.canonical_text(),
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        );
     }
 
     #[test]

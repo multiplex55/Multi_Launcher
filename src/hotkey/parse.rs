@@ -85,7 +85,7 @@ fn parse_key(upper: &str) -> Option<Key> {
         "RIGHT" | "RIGHTARROW" => Some(Key::RightArrow),
         "UP" | "UPARROW" => Some(Key::UpArrow),
         "DOWN" | "DOWNARROW" => Some(Key::DownArrow),
-        _ if upper.starts_with('F') => match upper[1..].parse::<u8>().ok() {
+        _ if upper.len() > 1 && upper.starts_with('F') => match upper[1..].parse::<u8>().ok() {
             Some(1) => Some(Key::F1),
             Some(2) => Some(Key::F2),
             Some(3) => Some(Key::F3),
@@ -180,5 +180,23 @@ mod tests {
     #[test]
     fn rejects_unknown_key() {
         assert!(parse_hotkey("Ctrl+Nope").is_none());
+    }
+
+    #[test]
+    fn bare_f_is_a_letter_while_function_keys_keep_their_range() {
+        let bare_f = parse_hotkey("F").unwrap();
+        assert_eq!(bare_f.key, Key::KeyF);
+
+        let ctrl_f = parse_hotkey("Ctrl+F").unwrap();
+        assert_eq!(ctrl_f.key, Key::KeyF);
+        assert!(ctrl_f.ctrl);
+
+        for (token, expected) in [("F1", Key::F1), ("F12", Key::F12), ("F24", Key::F24)] {
+            assert_eq!(parse_hotkey(token).unwrap().key, expected);
+        }
+
+        for token in ["F0", "F25", "Fjunk"] {
+            assert!(parse_hotkey(token).is_none(), "{token}");
+        }
     }
 }

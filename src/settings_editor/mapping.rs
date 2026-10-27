@@ -348,6 +348,8 @@ impl SettingsEditor {
             show_launcher_icon: self.show_launcher_icon,
             show_launcher_title: self.show_launcher_title,
             experimental_jump_mode_enabled: self.experimental_jump_mode_enabled,
+            jump_mode_activation_chord: current.jump_mode_activation_chord,
+            jump_mode_hint_alphabet: current.jump_mode_hint_alphabet.clone(),
             timer_refresh: self.timer_refresh,
             disable_timer_updates: self.disable_timer_updates,
             preserve_command: self.preserve_command,
@@ -598,6 +600,30 @@ mod tests {
         assert_eq!(
             disabled.plugin_settings.get("fixture-setting"),
             initial.plugin_settings.get("fixture-setting")
+        );
+    }
+
+    #[test]
+    fn jump_preferences_survive_unrelated_settings_editor_save() {
+        let mut initial = Settings::default();
+        initial.jump_mode_activation_chord =
+            crate::gui::jump_mode::config::JumpModeChord::parse("Ctrl+Shift+F8").unwrap();
+        initial.jump_mode_hint_alphabet =
+            crate::gui::jump_mode::config::HintAlphabet::parse("ASDFJKLQ").unwrap();
+
+        let mut editor = SettingsEditor::new(&initial);
+        editor.show_launcher_icon = !initial.show_launcher_icon;
+        let saved = editor.to_settings(&initial);
+
+        assert_eq!(saved.show_launcher_icon, editor.show_launcher_icon);
+        assert_ne!(saved.show_launcher_icon, initial.show_launcher_icon);
+        assert_eq!(
+            saved.jump_mode_activation_chord,
+            initial.jump_mode_activation_chord
+        );
+        assert_eq!(
+            saved.jump_mode_hint_alphabet,
+            initial.jump_mode_hint_alphabet
         );
     }
 

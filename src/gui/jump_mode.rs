@@ -5,6 +5,7 @@
 //! metadata; geometry belongs to a frame-scoped UI registry and is not part of
 //! this identity.
 
+pub(crate) mod config;
 pub(crate) mod paint;
 pub(crate) mod ui;
 
@@ -192,9 +193,9 @@ impl TargetMetadata {
 pub struct Hint(String);
 
 impl Hint {
-    fn new(value: String) -> Self {
+    fn new(value: String, alphabet: &config::HintAlphabet) -> Self {
         debug_assert!(!value.is_empty());
-        debug_assert!(value.bytes().all(|byte| HINT_ALPHABET.contains(&byte)));
+        debug_assert!(value.bytes().all(|byte| alphabet.contains(byte)));
         Self(value)
     }
 
@@ -250,6 +251,14 @@ impl HintMap {
     pub fn assign(
         targets: impl IntoIterator<Item = TargetMetadata>,
     ) -> Result<Self, DuplicateTargetId> {
+        Self::assign_with_alphabet(targets, &config::HintAlphabet::default())
+    }
+
+    /// Assign hints using a frozen, validated symbol order.
+    pub(crate) fn assign_with_alphabet(
+        targets: impl IntoIterator<Item = TargetMetadata>,
+        alphabet: &config::HintAlphabet,
+    ) -> Result<Self, DuplicateTargetId> {
         let mut targets: Vec<_> = targets.into_iter().collect();
         let mut seen = HashSet::with_capacity(targets.len());
         for target in &targets {
@@ -267,7 +276,7 @@ impl HintMap {
                 .then_with(|| left.id.generation.cmp(&right.id.generation))
         });
 
-        let hints = allocate_hints(targets.len());
+        let hints = allocate_hints(targets.len(), alphabet);
         let assignments = targets
             .into_iter()
             .zip(hints)
@@ -507,29 +516,41 @@ impl PopulationChange {
 }
 
 /// Create a compact prefix-free set by repeatedly expanding the shallowest
-/// lexicographically greatest leaf. Choosing the rightmost leaf preserves the
-/// shortest visible codes for earlier targets. For N > 26, expanding a leaf
-/// adds 25 available codes, keeping the number of longer hints minimal at each
-/// depth rather than moving the entire population to a fixed-width encoding.
-fn allocate_hints(count: usize) -> Vec<Hint> {
+/// greatest leaf in the alphabet rank order. Choosing the rightmost leaf
+/// preserves the shortest visible codes for earlier targets. For N above the
+/// alphabet size, expanding a leaf adds alphabet-size-minus-one available codes,
+/// keeping longer hints minimal
+/// at each depth rather than moving the population to fixed-width codes. With
+/// A–Z this retains the previous 25-code expansion and exact default ordering.
+fn allocate_hints(count: usize, alphabet: &config::HintAlphabet) -> Vec<Hint> {
     if count == 0 {
         return Vec::new();
     }
 
-    // The reverse lexical key makes `pop_first` select the rightmost leaf at
-    // the shortest depth while keeping expansion deterministic.
-    let mut leaves: BTreeSet<(usize, Reverse<String>)> = HINT_ALPHABET
+    // Rank paths make expansion and final ordering follow the frozen alphabet
+    // rather than the lexical order of its characters.
+    let mut leaves: BTreeSet<(usize, Reverse<Vec<u8>>)> = alphabet
+        .symbols()
         .iter()
-        .map(|symbol| (1, Reverse(char::from(*symbol).to_string())))
+        .map(|symbol| {
+            (
+                1,
+                Reverse(vec![
+                    alphabet
+                        .rank(*symbol)
+                        .expect("every alphabet symbol has a rank"),
+                ]),
+            )
+        })
         .collect();
 
     while leaves.len() < count {
         let (depth, Reverse(prefix)) = leaves
             .pop_first()
             .expect("a nonempty prefix tree always has a leaf");
-        for symbol in HINT_ALPHABET {
+        for symbol in alphabet.symbols() {
             let mut child = prefix.clone();
-            child.push(char::from(*symbol));
+            child.push(alphabet.rank(*symbol).expect("alphabet rank is present"));
             leaves.insert((depth + 1, Reverse(child)));
         }
     }
@@ -537,7 +558,19 @@ fn allocate_hints(count: usize) -> Vec<Hint> {
     let mut codes: Vec<_> = leaves.into_iter().map(|(_, Reverse(code))| code).collect();
     codes.sort_by(|left, right| left.len().cmp(&right.len()).then_with(|| left.cmp(right)));
     codes.truncate(count);
-    codes.into_iter().map(Hint::new).collect()
+    codes
+        .into_iter()
+        .map(|ranks| {
+            let bytes: Vec<_> = ranks
+                .into_iter()
+                .map(|rank| alphabet.symbols()[usize::from(rank)])
+                .collect();
+            Hint::new(
+                String::from_utf8(bytes).expect("alphabet symbols are ASCII"),
+                alphabet,
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -562,6 +595,26 @@ mod tests {
 
     fn map_for(count: usize) -> HintMap {
         HintMap::assign(targets(count)).expect("unique test target IDs")
+    }
+
+    fn codes_for(count: usize, alphabet: &config::HintAlphabet) -> Vec<String> {
+        HintMap::assign_with_alphabet(targets(count), alphabet)
+            .unwrap()
+            .assignments()
+            .iter()
+            .map(|assignment| assignment.hint.as_str().to_owned())
+            .collect()
+    }
+
+    fn code_digest(codes: &[String]) -> String {
+        use sha2::{Digest, Sha256};
+
+        let digest = Sha256::digest(codes.join("\n").as_bytes());
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join("")
     }
 
     fn hint_lengths(map: &HintMap) -> (usize, f64) {
@@ -649,6 +702,120 @@ mod tests {
         let second_map = HintMap::assign(second.into_values()).unwrap();
 
         assert_eq!(first_map, second_map);
+    }
+
+    #[test]
+    fn default_assignments_match_prechange_golden_maps() {
+        let alphabet = config::HintAlphabet::default();
+        assert_eq!(
+            codes_for(26, &alphabet),
+            "A B C D E F G H I J K L M N O P Q R S T U V W X Y Z"
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            codes_for(27, &alphabet),
+            "A B C D E F G H I J K L M N O P Q R S T U V W X Y ZA ZB"
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            codes_for(52, &alphabet),
+            "A B C D E F G H I J K L M N O P Q R S T U V W X YA YB YC YD YE YF YG YH YI YJ YK YL YM YN YO YP YQ YR YS YT YU YV YW YX YY YZ ZA ZB"
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            code_digest(&codes_for(100, &alphabet)),
+            "bd1047927574a1faddbc70d9791c9db7ac6a4c85d7778d018897ffe297a7e0b2"
+        );
+        assert_eq!(
+            code_digest(&codes_for(1_000, &alphabet)),
+            "18eeda4b3392b4de7e705a091b4604827819d3e31392b964a77842b794983296"
+        );
+    }
+
+    #[test]
+    fn ordered_alphabets_preserve_rank_compactness_and_determinism() {
+        for alphabet_text in ["ZY", "ASDFJKLQ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ"] {
+            let alphabet = config::HintAlphabet::parse(alphabet_text).unwrap();
+            let boundary = alphabet.symbols().len();
+            for count in [0, 1, 2, boundary, boundary + 1, 100, 1_000] {
+                let map = HintMap::assign_with_alphabet(targets(count), &alphabet).unwrap();
+                let reversed =
+                    HintMap::assign_with_alphabet(targets(count).into_iter().rev(), &alphabet)
+                        .unwrap();
+                assert_eq!(map, reversed, "alphabet={alphabet_text}, count={count}");
+                let codes: Vec<_> = map
+                    .assignments()
+                    .iter()
+                    .map(|assignment| assignment.hint.as_str())
+                    .collect();
+                assert_eq!(codes.len(), count);
+                assert_eq!(
+                    codes.iter().copied().collect::<HashSet<_>>().len(),
+                    count,
+                    "alphabet={alphabet_text}, count={count}"
+                );
+                assert!(
+                    codes
+                        .iter()
+                        .all(|code| code.bytes().all(|symbol| alphabet.contains(symbol))),
+                    "alphabet={alphabet_text}, count={count}"
+                );
+                let rank_path = |code: &str| {
+                    code.bytes()
+                        .map(|symbol| alphabet.rank(symbol).unwrap())
+                        .collect::<Vec<_>>()
+                };
+                let ordered: Vec<_> = codes
+                    .iter()
+                    .map(|code| (code.len(), rank_path(code)))
+                    .collect();
+                assert!(ordered.windows(2).all(|pair| pair[0] <= pair[1]));
+                for (index, code) in codes.iter().enumerate() {
+                    assert!(
+                        codes.iter().enumerate().all(|(other_index, other)| {
+                            index == other_index || !other.starts_with(code)
+                        }),
+                        "prefix collision for {code}, alphabet={alphabet_text}, count={count}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn custom_rank_expansion_and_frozen_map_use_only_their_alphabet() {
+        let custom = config::HintAlphabet::parse("ASDFJKLQ").unwrap();
+        assert_eq!(
+            codes_for(9, &custom),
+            ["A", "S", "D", "F", "J", "K", "L", "QA", "QS"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
+
+        let reverse_pair = config::HintAlphabet::parse("ZY").unwrap();
+        assert_eq!(
+            codes_for(3, &reverse_pair),
+            ["Z", "YZ", "YY"].map(str::to_owned)
+        );
+
+        let frozen = HintMap::assign_with_alphabet(targets(27), &custom).unwrap();
+        let session = HintSession::new(frozen.clone());
+        let _later_alphabet = config::HintAlphabet::parse("ZY").unwrap();
+        assert_eq!(session.hint_map(), &frozen);
+        assert!(frozen.assignments().iter().all(|assignment| {
+            assignment
+                .hint
+                .as_str()
+                .bytes()
+                .all(|symbol| custom.contains(symbol))
+        }));
     }
 
     #[test]
