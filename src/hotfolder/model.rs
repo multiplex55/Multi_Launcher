@@ -5,7 +5,12 @@ use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
 pub const HOT_FOLDER_RULES_FILE: &str = "hotfolder_rules.json";
-pub const HOT_FOLDER_RULES_FORMAT_VERSION: u32 = 1;
+pub const LEGACY_HOT_FOLDER_RULES_FORMAT_VERSION: u32 = 1;
+pub const HOT_FOLDER_RULES_FORMAT_VERSION: u32 = 2;
+pub const MAX_CONTENT_LITERAL_BYTES: usize = 4096;
+
+pub const FILE_CONDITIONS_NOT_EVALUATED: &str =
+    "file conditions are not evaluated by this Hot Folder runtime version";
 
 pub const MAX_RULES: usize = 256;
 pub const MAX_QUARANTINED_ROWS: usize = 256;
@@ -122,6 +127,191 @@ pub enum HotFolderEventKind {
     RenamedTo,
 }
 
+/// Inclusive lower and upper bounds in the unit named by the containing
+/// field. At least one bound must be present.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InclusiveU64Range {
+    #[serde(default)]
+    pub min: Option<u64>,
+    #[serde(default)]
+    pub max: Option<u64>,
+}
+
+impl InclusiveU64Range {
+    pub fn validate(self) -> Result<(), &'static str> {
+        match (self.min, self.max) {
+            (None, None) => Err("a file-condition range needs at least one bound"),
+            (Some(min), Some(max)) if min > max => {
+                Err("a file-condition minimum cannot exceed its maximum")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn contains(self, value: u64) -> bool {
+        self.min.is_none_or(|minimum| value >= minimum)
+            && self.max.is_none_or(|maximum| value <= maximum)
+    }
+
+    fn contains_duration(self, value: std::time::Duration) -> bool {
+        self.min
+            .is_none_or(|minimum| value >= std::time::Duration::from_secs(minimum))
+            && self
+                .max
+                .is_none_or(|maximum| value <= std::time::Duration::from_secs(maximum))
+    }
+}
+
+/// A literal condition applied later by the bounded content reader. The
+/// literal is deliberately omitted from Debug output and diagnostics.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "mode",
+    content = "literal",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum LiteralContentCondition {
+    Contains(String),
+    DoesNotContain(String),
+}
+
+impl LiteralContentCondition {
+    fn literal(&self) -> &str {
+        match self {
+            Self::Contains(literal) | Self::DoesNotContain(literal) => literal,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let literal = self.literal();
+        if literal.is_empty() {
+            return Err("content condition literal cannot be empty");
+        }
+        if literal.len() > MAX_CONTENT_LITERAL_BYTES {
+            return Err("content condition literal exceeds the supported UTF-8 byte limit");
+        }
+        if literal.contains('\0') {
+            return Err("content condition literal cannot contain NUL");
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for LiteralContentCondition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mode = match self {
+            Self::Contains(_) => "contains",
+            Self::DoesNotContain(_) => "does_not_contain",
+        };
+        formatter
+            .debug_struct("LiteralContentCondition")
+            .field("mode", &mode)
+            .field("literal", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Optional file conditions. Size is measured in bytes and age bounds are
+/// expressed in seconds; content matching is a separate, bounded streaming
+/// stage.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HotFolderConditions {
+    #[serde(default)]
+    pub size_bytes: Option<InclusiveU64Range>,
+    #[serde(default)]
+    pub modified_age_seconds: Option<InclusiveU64Range>,
+    #[serde(default)]
+    pub content: Option<LiteralContentCondition>,
+}
+
+impl HotFolderConditions {
+    pub fn is_configured(&self) -> bool {
+        self.size_bytes.is_some() || self.modified_age_seconds.is_some() || self.content.is_some()
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if let Some(range) = self.size_bytes {
+            range.validate()?;
+        }
+        if let Some(range) = self.modified_age_seconds {
+            range.validate()?;
+        }
+        if let Some(content) = &self.content {
+            content.validate()?;
+        }
+        Ok(())
+    }
+
+    pub fn evaluate_metadata(
+        &self,
+        metadata: FileMetadata,
+        captured_now: std::time::SystemTime,
+    ) -> MetadataConditionResult {
+        if let Err(reason) = self.validate() {
+            return MetadataConditionResult::InvalidConfiguration { reason };
+        }
+        if self
+            .size_bytes
+            .is_some_and(|range| !range.contains(metadata.size_bytes))
+        {
+            return MetadataConditionResult::NoMatch {
+                reason: "file size is outside the configured range",
+            };
+        }
+        if let Some(range) = self.modified_age_seconds {
+            let Some(modified) = metadata.modified_at else {
+                return MetadataConditionResult::NoMatch {
+                    reason: "file modification time is unavailable",
+                };
+            };
+            let Ok(age) = captured_now.duration_since(modified) else {
+                return MetadataConditionResult::NoMatch {
+                    reason: "file modification time is in the future",
+                };
+            };
+            if !range.contains_duration(age) {
+                return MetadataConditionResult::NoMatch {
+                    reason: "file age is outside the configured range",
+                };
+            }
+        }
+        if self.content.is_some() {
+            return MetadataConditionResult::NotEvaluated {
+                reason: "content condition requires the bounded streaming evaluator",
+            };
+        }
+        MetadataConditionResult::Match
+    }
+}
+
+impl fmt::Debug for HotFolderConditions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HotFolderConditions")
+            .field("size_bytes", &self.size_bytes)
+            .field("modified_age_seconds", &self.modified_age_seconds)
+            .field("content", &self.content.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileMetadata {
+    pub size_bytes: u64,
+    pub modified_at: Option<std::time::SystemTime>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetadataConditionResult {
+    Match,
+    NoMatch { reason: &'static str },
+    NotEvaluated { reason: &'static str },
+    InvalidConfiguration { reason: &'static str },
+}
+
 /// Purely evaluate one already-rooted relative filename against the stored
 /// rule conditions. The caller remains responsible for proving that `path`
 /// was reported beneath the current canonical watched root.
@@ -130,6 +320,9 @@ pub fn evaluate_rule_conditions(
     event: HotFolderEventKind,
     path: &Path,
 ) -> Result<(), &'static str> {
+    if rule.conditions.is_configured() {
+        return Err(FILE_CONDITIONS_NOT_EVALUATED);
+    }
     if path.as_os_str().is_empty()
         || path.is_absolute()
         || path
@@ -392,6 +585,8 @@ pub struct HotFolderRule {
     #[serde(default)]
     pub include_temporary_files: bool,
     #[serde(default)]
+    pub conditions: HotFolderConditions,
+    #[serde(default)]
     pub settle: SettlePolicy,
     pub action: RuleAction,
 }
@@ -405,6 +600,7 @@ impl fmt::Debug for HotFolderRule {
             .field("enabled", &self.enabled)
             .field("trigger", &self.trigger)
             .field("include_subfolders", &self.include_subfolders)
+            .field("conditions", &self.conditions)
             .field("action", &self.action)
             .finish_non_exhaustive()
     }
@@ -425,6 +621,7 @@ impl HotFolderRule {
             filter: FilenameFilter::default(),
             include_subfolders: false,
             include_temporary_files: false,
+            conditions: HotFolderConditions::default(),
             settle: SettlePolicy::default(),
             action,
         }
@@ -437,6 +634,7 @@ impl HotFolderRule {
         validate_name(&self.name)?;
         validate_explicit_directory(&self.watched_root, "watched root")?;
         self.filter.validate()?;
+        self.conditions.validate()?;
         self.settle.validate()?;
         self.action.validate()
     }
@@ -693,6 +891,267 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "0123456789abcdef0123456789abcdef"
+        );
+
+        let rule = valid_rule();
+        let original = ConfigurationFingerprint::of_serializable(&rule).unwrap();
+        let mut with_size_condition = rule.clone();
+        with_size_condition.conditions.size_bytes = Some(InclusiveU64Range {
+            min: Some(0),
+            max: None,
+        });
+        assert_ne!(
+            original,
+            ConfigurationFingerprint::of_serializable(&with_size_condition).unwrap(),
+            "condition edits participate in the existing whole-rule fingerprint"
+        );
+    }
+
+    #[test]
+    fn metadata_conditions_use_inclusive_bounds_and_one_captured_time() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let now = UNIX_EPOCH + Duration::from_secs(10_000);
+        let conditions = HotFolderConditions {
+            size_bytes: Some(InclusiveU64Range {
+                min: Some(10),
+                max: Some(20),
+            }),
+            modified_age_seconds: Some(InclusiveU64Range {
+                min: Some(5),
+                max: Some(10),
+            }),
+            content: None,
+        };
+        assert_eq!(
+            conditions.evaluate_metadata(
+                FileMetadata {
+                    size_bytes: 10,
+                    modified_at: Some(now - Duration::from_secs(5)),
+                },
+                now,
+            ),
+            MetadataConditionResult::Match,
+            "both lower endpoints are inclusive"
+        );
+        assert_eq!(
+            conditions.evaluate_metadata(
+                FileMetadata {
+                    size_bytes: 20,
+                    modified_at: Some(now - Duration::from_secs(10)),
+                },
+                now,
+            ),
+            MetadataConditionResult::Match,
+            "both upper endpoints are inclusive"
+        );
+        assert!(matches!(
+            conditions.evaluate_metadata(
+                FileMetadata {
+                    size_bytes: 9,
+                    modified_at: Some(now - Duration::from_secs(5)),
+                },
+                now,
+            ),
+            MetadataConditionResult::NoMatch { .. }
+        ));
+
+        let age_zero = HotFolderConditions {
+            modified_age_seconds: Some(InclusiveU64Range {
+                min: Some(0),
+                max: None,
+            }),
+            ..HotFolderConditions::default()
+        };
+        for modified_at in [None, Some(now + Duration::from_secs(1))] {
+            assert!(matches!(
+                age_zero.evaluate_metadata(
+                    FileMetadata {
+                        size_bytes: 0,
+                        modified_at,
+                    },
+                    now,
+                ),
+                MetadataConditionResult::NoMatch { .. }
+            ));
+        }
+        assert_eq!(
+            HotFolderConditions::default().evaluate_metadata(
+                FileMetadata {
+                    size_bytes: u64::MAX,
+                    modified_at: None,
+                },
+                now,
+            ),
+            MetadataConditionResult::Match,
+            "disabled predicates do not require optional metadata"
+        );
+    }
+
+    #[test]
+    fn modified_age_bounds_preserve_subsecond_precision() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let now = UNIX_EPOCH + Duration::from_secs(10_000);
+        let maximum_ten_seconds = HotFolderConditions {
+            modified_age_seconds: Some(InclusiveU64Range {
+                min: None,
+                max: Some(10),
+            }),
+            ..HotFolderConditions::default()
+        };
+        assert_eq!(
+            maximum_ten_seconds.evaluate_metadata(
+                FileMetadata {
+                    size_bytes: 0,
+                    modified_at: Some(now - Duration::from_secs(10)),
+                },
+                now,
+            ),
+            MetadataConditionResult::Match,
+            "the configured maximum remains inclusive at the exact second"
+        );
+        assert!(matches!(
+            maximum_ten_seconds.evaluate_metadata(
+                FileMetadata {
+                    size_bytes: 0,
+                    modified_at: Some(now - Duration::from_secs(10) - Duration::from_millis(1)),
+                },
+                now,
+            ),
+            MetadataConditionResult::NoMatch { .. }
+        ));
+
+        let maximum_zero_seconds = HotFolderConditions {
+            modified_age_seconds: Some(InclusiveU64Range {
+                min: None,
+                max: Some(0),
+            }),
+            ..HotFolderConditions::default()
+        };
+        assert!(matches!(
+            maximum_zero_seconds.evaluate_metadata(
+                FileMetadata {
+                    size_bytes: 0,
+                    modified_at: Some(now - Duration::from_millis(1)),
+                },
+                now,
+            ),
+            MetadataConditionResult::NoMatch { .. }
+        ));
+    }
+
+    #[test]
+    fn file_conditions_validate_ranges_bound_utf8_and_defer_content() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        assert!(
+            InclusiveU64Range {
+                min: Some(0),
+                max: Some(0),
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            InclusiveU64Range {
+                min: None,
+                max: None
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            InclusiveU64Range {
+                min: Some(2),
+                max: Some(1),
+            }
+            .validate()
+            .is_err()
+        );
+
+        let exact_utf8_limit = "é".repeat(MAX_CONTENT_LITERAL_BYTES / 2);
+        assert_eq!(exact_utf8_limit.len(), MAX_CONTENT_LITERAL_BYTES);
+        assert!(
+            LiteralContentCondition::Contains(exact_utf8_limit)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            LiteralContentCondition::Contains(String::new())
+                .validate()
+                .is_err()
+        );
+        assert!(
+            LiteralContentCondition::DoesNotContain("bad\0text".into())
+                .validate()
+                .is_err()
+        );
+        assert!(
+            LiteralContentCondition::Contains("é".repeat(MAX_CONTENT_LITERAL_BYTES / 2 + 1))
+                .validate()
+                .is_err()
+        );
+
+        let sentinel = "PRIVATE_CONTENT_SENTINEL";
+        let content = LiteralContentCondition::Contains(sentinel.into());
+        assert!(!format!("{content:?}").contains(sentinel));
+        let serialized = serde_json::to_string(&content).unwrap();
+        assert!(serialized.contains("\"mode\":\"contains\""));
+        assert!(serialized.contains(sentinel));
+
+        let conditions = HotFolderConditions {
+            size_bytes: Some(InclusiveU64Range {
+                min: Some(1),
+                max: Some(5),
+            }),
+            modified_age_seconds: Some(InclusiveU64Range {
+                min: Some(0),
+                max: None,
+            }),
+            content: Some(content),
+        };
+        let now = UNIX_EPOCH + Duration::from_secs(10);
+        assert_eq!(
+            conditions.evaluate_metadata(
+                FileMetadata {
+                    size_bytes: 3,
+                    modified_at: Some(now),
+                },
+                now,
+            ),
+            MetadataConditionResult::NotEvaluated {
+                reason: "content condition requires the bounded streaming evaluator",
+            },
+            "metadata success cannot claim a content match before M1-B"
+        );
+
+        let mut configured = valid_rule();
+        configured.conditions = conditions;
+        assert!(!format!("{configured:?}").contains(sentinel));
+        assert_eq!(
+            evaluate_rule_conditions(
+                &configured,
+                HotFolderEventKind::Created,
+                Path::new("image.png")
+            ),
+            Err(FILE_CONDITIONS_NOT_EVALUATED),
+            "the old filename-only runtime must not accept a partial condition match"
+        );
+    }
+
+    #[test]
+    fn condition_bearing_v2_json_rejects_negative_and_overflow_unsigned_bounds() {
+        let mut value = serde_json::to_value(valid_rule()).unwrap();
+        value["conditions"] = serde_json::json!({
+            "size_bytes": { "min": -1, "max": null },
+            "modified_age_seconds": null,
+            "content": null
+        });
+        assert!(serde_json::from_value::<HotFolderRule>(value).is_err());
+        assert!(
+            serde_json::from_str::<InclusiveU64Range>(r#"{"min":18446744073709551616,"max":null}"#)
+                .is_err()
         );
     }
 }

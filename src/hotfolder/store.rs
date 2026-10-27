@@ -1,6 +1,7 @@
 use super::model::{
-    HOT_FOLDER_RULES_FILE, HOT_FOLDER_RULES_FORMAT_VERSION, HotFolderRule, MAX_DOCUMENT_BYTES,
-    MAX_QUARANTINED_ROWS, MAX_RULES, RuleAction,
+    HOT_FOLDER_RULES_FILE, HOT_FOLDER_RULES_FORMAT_VERSION, HotFolderRule,
+    LEGACY_HOT_FOLDER_RULES_FORMAT_VERSION, MAX_DOCUMENT_BYTES, MAX_QUARANTINED_ROWS, MAX_RULES,
+    RuleAction,
 };
 use crate::{common::atomic_file::save_atomic, platform::app_data::AppDataRoot};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,10 @@ use std::{
 };
 
 const MAX_QUARANTINE_DIAGNOSTIC_CHARS: usize = 512;
+const LEGACY_CONDITION_ROW_DIAGNOSTIC: &str =
+    "file conditions require Hot Folder document version 2";
+const INVALID_CONDITION_ROW_DIAGNOSTIC: &str =
+    "rule file conditions are malformed or outside supported limits";
 
 /// One unrecognized or invalid source row retained for user recovery.
 ///
@@ -806,7 +811,9 @@ fn decode_document(bytes: &[u8]) -> Result<DecodedDocument, DecodeError> {
         .ok_or_else(|| {
             DecodeError::Malformed("Hot Folder rules version is missing or invalid".into())
         })?;
-    if version != u64::from(HOT_FOLDER_RULES_FORMAT_VERSION) {
+    if version != u64::from(HOT_FOLDER_RULES_FORMAT_VERSION)
+        && version != u64::from(LEGACY_HOT_FOLDER_RULES_FORMAT_VERSION)
+    {
         return Err(DecodeError::UnsupportedVersion(version));
     }
     let revision = object
@@ -873,12 +880,31 @@ fn decode_document(bytes: &[u8]) -> Result<DecodedDocument, DecodeError> {
             ));
             continue;
         }
+        let has_conditions = raw.get("conditions").is_some();
+        if version == u64::from(LEGACY_HOT_FOLDER_RULES_FORMAT_VERSION) && has_conditions {
+            quarantined_rows.push(quarantine(raw, LEGACY_CONDITION_ROW_DIAGNOSTIC));
+            continue;
+        }
         match serde_json::from_value::<HotFolderRule>(raw.clone()) {
             Ok(rule) => match rule.validate() {
                 Ok(()) => rules.push(rule),
-                Err(reason) => quarantined_rows.push(quarantine(raw, reason)),
+                Err(reason) => quarantined_rows.push(quarantine(
+                    raw,
+                    if has_conditions {
+                        INVALID_CONDITION_ROW_DIAGNOSTIC
+                    } else {
+                        reason
+                    },
+                )),
             },
-            Err(error) => quarantined_rows.push(quarantine(raw, error.to_string())),
+            Err(error) => quarantined_rows.push(quarantine(
+                raw,
+                if has_conditions {
+                    INVALID_CONDITION_ROW_DIAGNOSTIC.to_owned()
+                } else {
+                    error.to_string()
+                },
+            )),
         }
     }
     if quarantined_rows.len() > MAX_QUARANTINED_ROWS {
@@ -954,7 +980,7 @@ fn path_transaction(path: &Path) -> Arc<Mutex<()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hotfolder::{RuleAction, RuleId};
+    use crate::hotfolder::{MAX_CONTENT_LITERAL_BYTES, RuleAction, RuleId};
 
     fn fixture() -> (tempfile::TempDir, AppDataRoot, HotFolderRulesStore) {
         let directory = tempfile::tempdir().unwrap();
@@ -976,6 +1002,200 @@ mod tests {
                     .join("target/productivity_expansion/app_data/out"),
             },
         )
+    }
+
+    fn legacy_v1_document(rules: Vec<Value>) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "format_version": LEGACY_HOT_FOLDER_RULES_FORMAT_VERSION,
+            "revision": 7,
+            "quarantined_rows": [],
+            "rules": rules,
+        }))
+        .expect("serialize a bounded v1 compatibility fixture")
+    }
+
+    #[test]
+    fn legacy_v1_load_is_read_only_and_intentional_save_upgrades_without_changing_untouched_rules()
+    {
+        let (_directory, _root, store) = fixture();
+        std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+        let mut first = rule("legacy enabled");
+        first.enabled = true;
+        let first_id = first.id.clone();
+        let mut legacy_row = serde_json::to_value(first).unwrap();
+        legacy_row.as_object_mut().unwrap().remove("conditions");
+        let legacy_bytes = legacy_v1_document(vec![legacy_row]);
+        std::fs::write(store.path(), &legacy_bytes).unwrap();
+
+        let loaded = store.load();
+        assert_eq!(loaded.status, HotFolderLoadStatus::Loaded);
+        assert_eq!(loaded.snapshot.revision, 7);
+        assert_eq!(loaded.snapshot.rules.len(), 1);
+        assert!(loaded.snapshot.rules[0].enabled);
+        assert_eq!(loaded.snapshot.rules[0].id, first_id);
+        assert_eq!(loaded.snapshot.rules[0].conditions, Default::default());
+        assert_eq!(
+            std::fs::read(store.path()).unwrap(),
+            legacy_bytes,
+            "loading v1 never rewrites or upgrades the user's file"
+        );
+        assert!(matches!(
+            store.add_rule(loaded.snapshot.revision - 1, rule("stale v1 save")),
+            Err(HotFolderStoreError::StaleRevision { .. })
+        ));
+        assert_eq!(
+            std::fs::read(store.path()).unwrap(),
+            legacy_bytes,
+            "a rejected stale mutation does not upgrade a legacy file"
+        );
+
+        let upgraded = store
+            .add_rule(loaded.snapshot.revision, rule("new v2 rule"))
+            .unwrap();
+        assert_eq!(upgraded.revision, 8);
+        assert_eq!(upgraded.rules.len(), 2);
+        assert_eq!(upgraded.rules[0].id, first_id);
+        assert!(
+            upgraded.rules[0].enabled,
+            "untouched legacy intent is retained"
+        );
+        assert!(
+            !upgraded.rules[1].enabled,
+            "new rules preserve disabled-by-default behavior"
+        );
+        let persisted: Value =
+            serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(
+            persisted["format_version"].as_u64(),
+            Some(u64::from(HOT_FOLDER_RULES_FORMAT_VERSION))
+        );
+        assert_ne!(
+            persisted["format_version"].as_u64(),
+            Some(u64::from(LEGACY_HOT_FOLDER_RULES_FORMAT_VERSION)),
+            "a strict v1 reader's exact-version gate refuses the v2 output"
+        );
+        let reloaded = store.load();
+        assert_eq!(reloaded.snapshot.rules, upgraded.rules);
+        assert_eq!(reloaded.snapshot.revision, upgraded.revision);
+    }
+
+    #[test]
+    fn legacy_condition_rows_and_malformed_v2_literals_are_quarantined_without_diagnostics_leaking()
+    {
+        let (_directory, _root, store) = fixture();
+        std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+        let sentinel = "PRIVATE_CONDITION_LITERAL_SENTINEL";
+        let mut condition_row = serde_json::to_value(rule("legacy conditional row")).unwrap();
+        condition_row["conditions"] = serde_json::json!({
+            "size_bytes": null,
+            "modified_age_seconds": null,
+            "content": { "mode": "contains", "literal": sentinel }
+        });
+        let legacy_bytes = legacy_v1_document(vec![condition_row.clone()]);
+        std::fs::write(store.path(), &legacy_bytes).unwrap();
+
+        let loaded = store.load();
+        assert_eq!(
+            loaded.status,
+            HotFolderLoadStatus::LoadedWithQuarantinedRows
+        );
+        assert!(loaded.snapshot.rules.is_empty());
+        assert_eq!(loaded.snapshot.quarantined_rows.len(), 1);
+        assert_eq!(loaded.snapshot.quarantined_rows[0].raw, condition_row);
+        assert_eq!(
+            loaded.snapshot.quarantined_rows[0].diagnostic,
+            LEGACY_CONDITION_ROW_DIAGNOSTIC
+        );
+        assert!(
+            !loaded.snapshot.quarantined_rows[0]
+                .diagnostic
+                .contains(sentinel)
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), legacy_bytes);
+
+        let upgraded = store
+            .add_rule(loaded.snapshot.revision, rule("replacement"))
+            .unwrap();
+        let persisted: Value =
+            serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(persisted["format_version"].as_u64(), Some(2));
+        assert_eq!(
+            persisted["quarantined_rows"][0]["raw"], condition_row,
+            "intentional v2 save carries the v1 raw row forward unchanged"
+        );
+        assert_eq!(
+            persisted["quarantined_rows"][0]["diagnostic"],
+            LEGACY_CONDITION_ROW_DIAGNOSTIC
+        );
+
+        let mut malformed: Value =
+            serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        let mut invalid_literal = sentinel.to_owned();
+        invalid_literal.push_str(&"x".repeat(MAX_CONTENT_LITERAL_BYTES));
+        malformed["rules"][0]["conditions"]["content"] = serde_json::json!({
+            "mode": "contains",
+            "literal": invalid_literal
+        });
+        let invalid_row = malformed["rules"][0].clone();
+        std::fs::write(store.path(), serde_json::to_vec(&malformed).unwrap()).unwrap();
+        let invalid = store.load();
+        assert_eq!(
+            invalid.status,
+            HotFolderLoadStatus::LoadedWithQuarantinedRows
+        );
+        assert_eq!(invalid.snapshot.quarantined_rows.len(), 2);
+        let malformed_condition = invalid
+            .snapshot
+            .quarantined_rows
+            .iter()
+            .find(|row| row.raw == invalid_row)
+            .expect("malformed v2 condition row is retained verbatim");
+        assert_eq!(
+            malformed_condition.diagnostic,
+            INVALID_CONDITION_ROW_DIAGNOSTIC
+        );
+        assert!(!malformed_condition.diagnostic.contains(sentinel));
+        assert!(!invalid.snapshot.is_write_blocked());
+        assert_eq!(
+            crate::hotfolder::probe_document_bytes(&std::fs::read(store.path()).unwrap()),
+            HotFolderDocumentProbe::Invalid,
+            "recovery probing shares the same conservative quarantine result"
+        );
+        assert_eq!(upgraded.revision, 8);
+
+        let unknown_mode_sentinel = "PRIVATE_UNKNOWN_CONDITION_MODE_SENTINEL";
+        let mut unknown_mode = persisted.clone();
+        unknown_mode["rules"][0]["conditions"]["content"] = serde_json::json!({
+            "mode": unknown_mode_sentinel,
+            "literal": "sensitive malformed-condition payload"
+        });
+        let unknown_mode_row = unknown_mode["rules"][0].clone();
+        std::fs::write(store.path(), serde_json::to_vec(&unknown_mode).unwrap()).unwrap();
+        let unknown_mode_loaded = store.load();
+        assert_eq!(
+            unknown_mode_loaded.status,
+            HotFolderLoadStatus::LoadedWithQuarantinedRows
+        );
+        let unknown_mode_quarantine = unknown_mode_loaded
+            .snapshot
+            .quarantined_rows
+            .iter()
+            .find(|row| row.raw == unknown_mode_row)
+            .expect("the malformed serde row remains available for recovery");
+        assert_eq!(
+            unknown_mode_quarantine.diagnostic,
+            INVALID_CONDITION_ROW_DIAGNOSTIC
+        );
+        assert!(
+            !unknown_mode_quarantine
+                .diagnostic
+                .contains(unknown_mode_sentinel),
+            "serde's unknown-variant detail must not expose attacker-controlled text"
+        );
+        assert_eq!(
+            unknown_mode_quarantine.raw, unknown_mode_row,
+            "privacy-safe diagnostics do not discard the original recovery value"
+        );
     }
 
     #[test]
@@ -1017,6 +1237,30 @@ mod tests {
             })
             .unwrap();
         assert!(!changed_definition.rules[0].enabled);
+
+        let enabled_again = store
+            .replace_rule(changed_definition.revision, {
+                let mut unchanged = changed_definition.rules[0].clone();
+                unchanged.enabled = true;
+                unchanged
+            })
+            .unwrap();
+        assert!(enabled_again.rules[0].enabled);
+        let changed_conditions = store
+            .replace_rule(enabled_again.revision, {
+                let mut changed = enabled_again.rules[0].clone();
+                changed.conditions.size_bytes = Some(super::super::model::InclusiveU64Range {
+                    min: Some(1),
+                    max: None,
+                });
+                changed.enabled = true;
+                changed
+            })
+            .unwrap();
+        assert!(
+            !changed_conditions.rules[0].enabled,
+            "a condition-only definition edit retires prior enablement"
+        );
 
         let original = std::fs::read(store.path()).unwrap();
         let mut value: Value = serde_json::from_slice(&original).unwrap();
