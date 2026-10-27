@@ -1,4 +1,4 @@
-use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
+use crate::file_search::coordinator::{CancellationToken, SearchEventSender, SearchExecutor};
 use crate::file_search::model::{
     ContentFileResult, ContentFileResultBuilder, ContentMatch, ContentMatchMode, ContentMatchRange,
     InaccessiblePathDetail, SearchDiagnostic, SearchEvent, SearchId, SearchKind, SearchProgress,
@@ -29,7 +29,7 @@ impl SearchExecutor for NativeSearchExecutor {
         id: SearchId,
         request: SearchRequest,
         token: CancellationToken,
-        events: mpsc::Sender<SearchEvent>,
+        events: SearchEventSender,
     ) {
         if let Err(error) = search_content_native(id, request, &self.settings, &token, &events) {
             let _ = events.send(SearchEvent::Failed { id, error });
@@ -63,7 +63,7 @@ pub fn search_content_native(
     request: SearchRequest,
     settings: &FileSearchSettings,
     cancellation: &CancellationToken,
-    events: &mpsc::Sender<SearchEvent>,
+    events: &SearchEventSender,
 ) -> Result<(), String> {
     let summary = search_content_native_summary(request, settings, cancellation)?;
     for detail in summary.inaccessible_paths.iter().cloned() {
@@ -93,7 +93,7 @@ pub fn search_content_native(
     Ok(())
 }
 
-fn send_terminal(id: SearchId, summary: &NativeSearchSummary, events: &mpsc::Sender<SearchEvent>) {
+fn send_terminal(id: SearchId, summary: &NativeSearchSummary, events: &SearchEventSender) {
     let status = if summary.cancelled {
         SearchStatus::Cancelled
     } else {

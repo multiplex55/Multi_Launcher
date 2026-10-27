@@ -1,4 +1,4 @@
-use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
+use crate::file_search::coordinator::{CancellationToken, SearchEventSender, SearchExecutor};
 use crate::file_search::matching::filename_highlight_match;
 use crate::file_search::model::{
     FileKind, FilenameRank, FilenameResult, SearchEvent, SearchId, SearchKind, SearchProgress,
@@ -48,7 +48,7 @@ impl SearchExecutor for EverythingSearchExecutor {
         id: SearchId,
         request: SearchRequest,
         token: CancellationToken,
-        events: mpsc::Sender<SearchEvent>,
+        events: SearchEventSender,
     ) {
         match search_with_everything(request, &self.settings, &token, &events, id) {
             Ok(()) => {}
@@ -196,7 +196,7 @@ pub fn search_with_everything(
     request: SearchRequest,
     settings: &FileSearchSettings,
     cancellation: &CancellationToken,
-    event_sender: &mpsc::Sender<SearchEvent>,
+    event_sender: &SearchEventSender,
     search_id: SearchId,
 ) -> Result<(), String> {
     if request.kind != SearchKind::Filename || !matches!(request.scope, SearchScope::Roots { .. }) {
@@ -293,7 +293,7 @@ fn run_everything_command(
     request: &SearchRequest,
     settings: &FileSearchSettings,
     cancellation: &CancellationToken,
-    event_sender: &mpsc::Sender<SearchEvent>,
+    event_sender: &SearchEventSender,
     search_id: SearchId,
     seen: &mut HashSet<String>,
 ) -> Result<usize, String> {
@@ -789,11 +789,12 @@ exit /b 3
         req.scope = SearchScope::Roots {
             roots: vec![temp.path().to_path_buf()],
         };
+        let event_sender: SearchEventSender = mpsc::channel().0.into();
         let err = search_with_everything(
             req,
             &settings,
             &CancellationToken::new(),
-            &mpsc::channel().0,
+            &event_sender,
             SearchId(1),
         )
         .unwrap_err();
@@ -818,8 +819,15 @@ exit /b 3
         req.scope = SearchScope::Roots {
             roots: vec![std::env::current_dir().unwrap()],
         };
-        search_with_everything(req, &settings, &CancellationToken::new(), &tx, SearchId(99))
-            .unwrap();
+        let event_sender: SearchEventSender = tx.into();
+        search_with_everything(
+            req,
+            &settings,
+            &CancellationToken::new(),
+            &event_sender,
+            SearchId(99),
+        )
+        .unwrap();
         assert!(
             rx.try_iter()
                 .any(|event| matches!(event, SearchEvent::Completed { id: SearchId(99) }))

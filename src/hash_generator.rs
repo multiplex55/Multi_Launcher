@@ -478,7 +478,15 @@ impl HashJob {
         request: HashRequest,
         repaint: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, HashError> {
-        Self::start_with_spawn(request, repaint, |worker| {
+        Self::start_with_activity(request, repaint, None)
+    }
+
+    pub fn start_with_activity(
+        request: HashRequest,
+        repaint: Arc<dyn Fn() + Send + Sync>,
+        activity: Option<crate::activity::ActivityTask>,
+    ) -> Result<Self, HashError> {
+        Self::start_with_spawn(request, repaint, activity, |worker| {
             std::thread::Builder::new()
                 .name("hash-generator".into())
                 .spawn(worker)
@@ -489,6 +497,7 @@ impl HashJob {
     fn start_with_spawn(
         request: HashRequest,
         repaint: Arc<dyn Fn() + Send + Sync>,
+        activity: Option<crate::activity::ActivityTask>,
         spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> io::Result<()>,
     ) -> Result<Self, HashError> {
         let request_id = request.request_id;
@@ -501,12 +510,27 @@ impl HashJob {
         }));
         let worker_progress = progress.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
+        if let Some(activity) = activity.as_ref() {
+            let cancel = worker_cancellation.clone();
+            activity.set_cancel_handler(move || cancel.cancel());
+        }
+        let worker_activity = activity.clone();
         let worker = Box::new(move || {
+            if let Some(activity) = worker_activity.as_ref() {
+                activity.mark_running();
+            }
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 hash_request(request, &worker_cancellation, |snapshot| {
                     *worker_progress
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
+                    if let Some(activity) = worker_activity.as_ref() {
+                        activity.set_progress(Some(crate::activity::ActivityProgress::new(
+                            snapshot.bytes_processed,
+                            snapshot.total_bytes,
+                            crate::activity::ActivityProgressUnit::Bytes,
+                        )));
+                    }
                 })
             }))
             .unwrap_or(Err(HashError::WorkerPanicked));
@@ -515,11 +539,37 @@ impl HashJob {
             } else {
                 result
             };
+            if let Some(activity) = worker_activity.as_ref() {
+                let (outcome, diagnostic) = match &result {
+                    Ok(_) => (crate::activity::ActivityOutcome::Completed, None),
+                    Err(HashError::Cancelled) => {
+                        (crate::activity::ActivityOutcome::Cancelled, None)
+                    }
+                    Err(_) => (
+                        crate::activity::ActivityOutcome::Failed,
+                        Some(crate::activity::ActivityDiagnostic::WorkerFailed),
+                    ),
+                };
+                activity.finish(
+                    outcome,
+                    diagnostic,
+                    crate::activity::ActivityRetirement::Unavailable,
+                );
+            }
             if sender.send(HashJobEvent { request_id, result }).is_ok() {
                 repaint();
             }
         });
-        spawn(worker).map_err(HashError::Spawn)?;
+        if let Err(error) = spawn(worker) {
+            if let Some(activity) = activity.as_ref() {
+                activity.finish(
+                    crate::activity::ActivityOutcome::Failed,
+                    Some(crate::activity::ActivityDiagnostic::WorkerUnavailable),
+                    crate::activity::ActivityRetirement::Confirmed,
+                );
+            }
+            return Err(HashError::Spawn(error));
+        }
         Ok(Self {
             request_id,
             receiver: Some(receiver),
@@ -538,7 +588,7 @@ impl HashJob {
     ) -> Result<(Self, Box<dyn FnOnce() + Send>), HashError> {
         let deferred = Arc::new(Mutex::new(None));
         let deferred_slot = deferred.clone();
-        let job = Self::start_with_spawn(request, repaint, move |worker| {
+        let job = Self::start_with_spawn(request, repaint, None, move |worker| {
             *deferred_slot
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker);
@@ -1029,9 +1079,64 @@ mod tests {
     }
 
     #[test]
+    fn hash_worker_publishes_byte_progress_without_gui_poll() {
+        let payload = "x".repeat(HASH_BUFFER_SIZE + 17);
+        let total_bytes = payload.len() as u64;
+        let request = request(HashAlgorithm::Sha256, HashInput::Text(payload), None);
+        let request_id = request.request_id();
+        let center = crate::activity::ActivityCenter::new();
+        let activity = center
+            .start(
+                crate::activity::ActivityOwner::Hash,
+                crate::activity::ActivitySlot::Primary,
+                crate::activity::ActivityIncarnation::new(request_id.get()),
+                crate::activity::ActivityOperation::CalculateHash,
+            )
+            .expect("test operation id remains available");
+        let deferred_worker = Arc::new(Mutex::new(None));
+        let deferred_worker_for_spawn = deferred_worker.clone();
+        let _job =
+            HashJob::start_with_spawn(request, Arc::new(|| {}), Some(activity), move |worker| {
+                *deferred_worker_for_spawn
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker);
+                Ok(())
+            })
+            .unwrap();
+
+        let worker = deferred_worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("deferred worker was captured");
+        worker();
+
+        let row = center
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.key.incarnation().get() == request_id.get())
+            .expect("worker publishes its Activity row before returning");
+        assert_eq!(
+            row.progress,
+            Some(crate::activity::ActivityProgress::new(
+                total_bytes,
+                Some(total_bytes),
+                crate::activity::ActivityProgressUnit::Bytes,
+            ))
+        );
+        assert_eq!(
+            row.lifecycle,
+            crate::activity::ActivityLifecycle::Terminal(
+                crate::activity::ActivityOutcome::Completed
+            )
+        );
+    }
+
+    #[test]
     fn worker_spawn_failure_and_disconnection_have_one_typed_terminal() {
         let rejected_request = request(HashAlgorithm::Sha256, HashInput::Text("x".into()), None);
-        let error = HashJob::start_with_spawn(rejected_request, Arc::new(|| {}), |_| {
+        let error = HashJob::start_with_spawn(rejected_request, Arc::new(|| {}), None, |_| {
             Err(io::Error::other("spawn rejected"))
         })
         .err()
@@ -1039,7 +1144,7 @@ mod tests {
         assert!(matches!(error, HashError::Spawn(_)));
 
         let request = request(HashAlgorithm::Sha256, HashInput::Text("x".into()), None);
-        let mut job = HashJob::start_with_spawn(request, Arc::new(|| {}), |worker| {
+        let mut job = HashJob::start_with_spawn(request, Arc::new(|| {}), None, |worker| {
             drop(worker);
             Ok(())
         })

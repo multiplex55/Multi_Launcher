@@ -2,6 +2,11 @@
 //! workflow. This module owns search inputs, bounded discovery, and immutable
 //! match evidence; it deliberately contains no replacement or write path.
 
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityProgress, ActivityProgressUnit, ActivityRetirement, ActivitySlot,
+    ActivityTask,
+};
 use crate::batch_rename::{self, ExplicitDirectoryRoot, SnapshotEntryKind};
 use crate::file_operations::{
     self, NativeFileIdentity, RenameScanGeneration, RenameScanIssueKind, RenameScanRequest,
@@ -2774,12 +2779,14 @@ struct SearchWorkerJob {
     request: TextSearchRequest,
     cancellation: ScanCancellation,
     reply: mpsc::Sender<TextSearchResult>,
+    activity: Option<ActivityTask>,
 }
 
 #[derive(Clone)]
 struct ActiveSearch {
     generation: SearchGeneration,
     cancellation: ScanCancellation,
+    activity: Option<ActivityTask>,
 }
 
 struct SearchWorkerState {
@@ -2801,6 +2808,7 @@ pub struct SearchCoordinator {
     state: Arc<(Mutex<SearchWorkerState>, Condvar)>,
     runtime: Arc<Mutex<SearchRuntime>>,
     worker: Option<JoinHandle<()>>,
+    activity_center: Option<ActivityCenter>,
 }
 
 impl SearchCoordinator {
@@ -2824,7 +2832,12 @@ impl SearchCoordinator {
             state,
             runtime,
             worker: Some(worker),
+            activity_center: None,
         })
+    }
+
+    pub fn attach_activity_center(&mut self, center: ActivityCenter) {
+        self.activity_center = Some(center);
     }
 
     pub fn submit(&self, request: TextSearchRequest) -> std::io::Result<SearchTicket> {
@@ -2851,16 +2864,39 @@ impl SearchCoordinator {
         }
         if let Some(active) = &state.active {
             active.cancellation.cancel();
+            if let Some(activity) = active.activity.as_ref() {
+                activity.mark_cancelling();
+            }
         }
         if let Some(pending) = state.pending.take() {
             pending.cancellation.cancel();
+            if let Some(activity) = pending.activity {
+                activity.finish(
+                    ActivityOutcome::Cancelled,
+                    None,
+                    ActivityRetirement::Confirmed,
+                );
+            }
         }
         state.latest_generation = Some(generation);
         let cancellation = ScanCancellation::new();
+        let activity = self.activity_center.as_ref().and_then(|center| {
+            center.start(
+                ActivityOwner::SearchReplace,
+                ActivitySlot::Primary,
+                ActivityIncarnation::new(generation.0),
+                ActivityOperation::SearchFilesForReplacement,
+            )
+        });
+        if let Some(activity) = activity.as_ref() {
+            let cancel = cancellation.clone();
+            activity.set_cancel_handler(move || cancel.cancel());
+        }
         state.pending = Some(SearchWorkerJob {
             request,
             cancellation: cancellation.clone(),
             reply,
+            activity,
         });
         if let Ok(mut runtime) = self.runtime.lock() {
             runtime.latest_generation = Some(generation);
@@ -2890,6 +2926,9 @@ impl SearchCoordinator {
                 && active.generation == generation
             {
                 active.cancellation.cancel();
+                if let Some(activity) = active.activity.as_ref() {
+                    activity.mark_cancelling();
+                }
             }
             if state
                 .pending
@@ -2898,6 +2937,13 @@ impl SearchCoordinator {
                 && let Some(pending) = state.pending.take()
             {
                 pending.cancellation.cancel();
+                if let Some(activity) = pending.activity {
+                    activity.finish(
+                        ActivityOutcome::Cancelled,
+                        None,
+                        ActivityRetirement::Confirmed,
+                    );
+                }
             }
         }
         if let Ok(mut runtime) = self.runtime.lock()
@@ -2955,9 +3001,19 @@ impl SearchCoordinator {
             state.shutdown = true;
             if let Some(active) = &state.active {
                 active.cancellation.cancel();
+                if let Some(activity) = active.activity.as_ref() {
+                    activity.mark_cancelling();
+                }
             }
             if let Some(pending) = state.pending.take() {
                 pending.cancellation.cancel();
+                if let Some(activity) = pending.activity {
+                    activity.finish(
+                        ActivityOutcome::Cancelled,
+                        None,
+                        ActivityRetirement::Confirmed,
+                    );
+                }
             }
             wake.notify_all();
         }
@@ -3022,17 +3078,41 @@ fn search_worker_loop(
         state.active = Some(ActiveSearch {
             generation,
             cancellation: job.cancellation.clone(),
+            activity: job.activity.clone(),
         });
         drop(state);
 
+        if let Some(activity) = job.activity.as_ref() {
+            activity.mark_running();
+        }
         let progress_runtime = Arc::clone(&runtime);
         let result = execute_search(job.request, &job.cancellation, |progress| {
+            if let Some(activity) = job.activity.as_ref() {
+                activity.set_progress(Some(ActivityProgress::new(
+                    progress.files_examined as u64,
+                    None,
+                    ActivityProgressUnit::Files,
+                )));
+            }
             if let Ok(mut runtime) = progress_runtime.lock()
                 && runtime.latest_generation == Some(progress.generation)
             {
                 runtime.progress = Some(progress);
             }
         });
+        if let Some(activity) = job.activity.as_ref() {
+            let (outcome, diagnostic) = match result.status {
+                SearchStatus::Cancelled => (ActivityOutcome::Cancelled, None),
+                SearchStatus::Unsupported => (
+                    ActivityOutcome::Failed,
+                    Some(ActivityDiagnostic::NativeOperationUnavailable),
+                ),
+                SearchStatus::Complete | SearchStatus::Partial | SearchStatus::ResourceLimit => {
+                    (ActivityOutcome::Completed, None)
+                }
+            };
+            activity.finish(outcome, diagnostic, ActivityRetirement::Unavailable);
+        }
         let _ = job.reply.send(result);
 
         let (lock, _) = &*worker_state;

@@ -5,6 +5,11 @@ use super::model::{
     ContentProgress, DiscoveryDiagnostic, DiscoveryProgress, DiscoverySnapshot, DiscoveryStage,
     DiscoveryStatus, DuplicateTotals, RootScan, RootScanStatus, ScanCounts,
 };
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityProgress, ActivityProgressUnit, ActivityRetirement, ActivitySlot,
+    ActivityTask,
+};
 use crate::file_operations::ScanCancellation;
 use crate::thread_reaper::{self, ReapPermit};
 use std::path::{Path, PathBuf};
@@ -61,12 +66,15 @@ pub(crate) struct DuplicateFinderSessionView {
 struct ScanRequest {
     generation: u64,
     roots: Vec<PathBuf>,
+    cancellation: ScanCancellation,
+    activity: Option<ActivityTask>,
 }
 
 struct ActiveScan {
     generation: u64,
     cancellation: ScanCancellation,
     restart_blocked: bool,
+    activity: Option<ActivityTask>,
 }
 
 struct SessionState {
@@ -124,6 +132,7 @@ pub(crate) struct DuplicateFinderSession {
     job: Arc<dyn DiscoveryJob>,
     shared: Arc<SessionShared>,
     worker: Mutex<Option<WorkerSlot>>,
+    activity_center: Option<ActivityCenter>,
     #[cfg(test)]
     test_reap_permit_reserver: Option<TestReapPermitReserver>,
 }
@@ -177,9 +186,14 @@ impl DuplicateFinderSession {
                 wake,
             }),
             worker: Mutex::new(None),
+            activity_center: None,
             #[cfg(test)]
             test_reap_permit_reserver: None,
         }
+    }
+
+    pub(crate) fn attach_activity_center(&mut self, center: ActivityCenter) {
+        self.activity_center = Some(center);
     }
 
     /// Explicitly begin a new scan. Root-count and root-path byte limits are
@@ -190,7 +204,7 @@ impl DuplicateFinderSession {
         selected_roots: Vec<PathBuf>,
     ) -> Result<u64, DuplicateFinderSessionError> {
         let invalid_request = root_list_error(&selected_roots, self.limits);
-        let generation = {
+        let (generation, replaced_pending) = {
             let mut state = self.shared.state.lock().unwrap();
             if state.closed {
                 return Err(DuplicateFinderSessionError::Closed);
@@ -209,22 +223,51 @@ impl DuplicateFinderSession {
             state.generation = generation;
             if let Some(active) = state.active.as_ref() {
                 active.cancellation.cancel();
+                if let Some(activity) = active.activity.as_ref() {
+                    activity.mark_cancelling();
+                }
             }
-            state.pending = None;
+            let replaced_pending = state.pending.take();
             let snapshot = if let Some(message) = invalid_request.as_ref() {
                 Arc::new(failed_snapshot(generation, message.clone()))
             } else {
+                let cancellation = ScanCancellation::new();
+                let activity = self.activity_center.as_ref().and_then(|center| {
+                    center.start(
+                        ActivityOwner::DuplicateFinder,
+                        ActivitySlot::Primary,
+                        ActivityIncarnation::new(generation),
+                        ActivityOperation::FindDuplicates,
+                    )
+                });
+                if let Some(activity) = activity.as_ref() {
+                    let cancel = cancellation.clone();
+                    activity.set_cancel_handler(move || cancel.cancel());
+                }
                 state.pending = Some(ScanRequest {
                     generation,
                     roots: selected_roots.clone(),
+                    cancellation,
+                    activity,
                 });
                 Arc::new(DiscoverySnapshot::scanning(generation, selected_roots))
             };
             state.progress = snapshot.progress.clone();
             state.snapshot = snapshot;
             self.shared.changed.notify_one();
-            generation
+            (generation, replaced_pending)
         };
+
+        if let Some(replaced) = replaced_pending {
+            replaced.cancellation.cancel();
+            if let Some(activity) = replaced.activity {
+                activity.finish(
+                    ActivityOutcome::Cancelled,
+                    None,
+                    ActivityRetirement::Confirmed,
+                );
+            }
+        }
 
         if invalid_request.is_some() {
             (self.shared.wake)();
@@ -233,12 +276,20 @@ impl DuplicateFinderSession {
 
         if let Err(error) = self.ensure_worker() {
             let mut state = self.shared.state.lock().unwrap();
+            let mut failed_activity = None;
             if state.generation == generation && !state.closed {
-                state.pending = None;
+                failed_activity = state.pending.take().and_then(|pending| pending.activity);
                 state.snapshot = Arc::new(failed_snapshot(generation, error.to_string()));
                 state.progress = None;
             }
             drop(state);
+            if let Some(activity) = failed_activity {
+                activity.finish(
+                    ActivityOutcome::Failed,
+                    Some(ActivityDiagnostic::WorkerUnavailable),
+                    ActivityRetirement::Confirmed,
+                );
+            }
             (self.shared.wake)();
             return Err(error);
         }
@@ -251,7 +302,7 @@ impl DuplicateFinderSession {
     /// synchronously; a native call already in flight keeps its single worker
     /// slot until the scanner reaches a cancellation checkpoint.
     pub(crate) fn cancel(&self) -> Result<bool, DuplicateFinderSessionError> {
-        let cancelled = {
+        let (cancelled, pending) = {
             let mut state = self.shared.state.lock().unwrap();
             if state.closed {
                 return Err(DuplicateFinderSessionError::Closed);
@@ -263,10 +314,13 @@ impl DuplicateFinderSession {
                 return Err(DuplicateFinderSessionError::GenerationExhausted);
             };
             state.generation = generation;
-            state.pending = None;
+            let pending = state.pending.take();
             if let Some(active) = state.active.as_mut() {
                 active.restart_blocked = true;
                 active.cancellation.cancel();
+                if let Some(activity) = active.activity.as_ref() {
+                    activity.mark_cancelling();
+                }
             }
             let mut snapshot = terminal_snapshot_from_current(
                 &state.snapshot,
@@ -284,8 +338,18 @@ impl DuplicateFinderSession {
                 progress.current_root = None;
             }
             self.shared.changed.notify_one();
-            true
+            (true, pending)
         };
+        if let Some(pending) = pending {
+            pending.cancellation.cancel();
+            if let Some(activity) = pending.activity {
+                activity.finish(
+                    ActivityOutcome::Cancelled,
+                    None,
+                    ActivityRetirement::Confirmed,
+                );
+            }
+        }
         (self.shared.wake)();
         Ok(cancelled)
     }
@@ -295,12 +359,16 @@ impl DuplicateFinderSession {
     pub(crate) fn close(&self) {
         let mut worker_slot = self.worker.lock().unwrap();
         let mut state = self.shared.state.lock().unwrap();
+        let mut pending = None;
         if !state.closed {
             state.closed = true;
             state.generation = state.generation.saturating_add(1);
-            state.pending = None;
+            pending = state.pending.take();
             if let Some(active) = state.active.as_ref() {
                 active.cancellation.cancel();
+                if let Some(activity) = active.activity.as_ref() {
+                    activity.mark_cancelling();
+                }
             }
             state.snapshot = Arc::new(DiscoverySnapshot {
                 generation: state.generation,
@@ -319,6 +387,16 @@ impl DuplicateFinderSession {
             self.shared.changed.notify_all();
         }
         drop(state);
+        if let Some(pending) = pending {
+            pending.cancellation.cancel();
+            if let Some(activity) = pending.activity {
+                activity.finish(
+                    ActivityOutcome::Cancelled,
+                    None,
+                    ActivityRetirement::Confirmed,
+                );
+            }
+        }
         let running_worker = match worker_slot.take() {
             Some(WorkerSlot::Running(worker)) => Some(worker),
             Some(retiring) => {
@@ -447,15 +525,29 @@ impl DuplicateFinderSession {
                     if panicked {
                         let mut state = self.shared.state.lock().unwrap();
                         state.active = None;
-                        if let Some(pending) = state.pending.take()
-                            && !state.closed
-                            && state.generation == pending.generation
-                        {
+                        let pending = state.pending.take();
+                        let failed_activity = pending
+                            .as_ref()
+                            .filter(|pending| {
+                                !state.closed && state.generation == pending.generation
+                            })
+                            .and_then(|pending| pending.activity.clone());
+                        if let Some(pending) = pending.filter(|pending| {
+                            !state.closed && state.generation == pending.generation
+                        }) {
                             state.snapshot = Arc::new(failed_snapshot(
                                 pending.generation,
                                 "the prior duplicate discovery worker panicked before starting the queued scan".into(),
                             ));
                             state.progress = None;
+                        }
+                        drop(state);
+                        if let Some(activity) = failed_activity {
+                            activity.finish(
+                                ActivityOutcome::Failed,
+                                Some(ActivityDiagnostic::WorkerFailed),
+                                ActivityRetirement::Confirmed,
+                            );
                         }
                         return Err(DuplicateFinderSessionError::WorkerPanicked);
                     }
@@ -547,15 +639,29 @@ impl DuplicateFinderSession {
 impl Drop for DuplicateFinderSession {
     fn drop(&mut self) {
         let worker_slot = self.worker.get_mut().unwrap();
-        {
+        let pending = {
             let mut state = self.shared.state.lock().unwrap();
             state.closed = true;
             state.generation = state.generation.saturating_add(1);
-            state.pending = None;
+            let pending = state.pending.take();
             if let Some(active) = state.active.as_ref() {
                 active.cancellation.cancel();
+                if let Some(activity) = active.activity.as_ref() {
+                    activity.mark_cancelling();
+                }
             }
             self.shared.changed.notify_all();
+            pending
+        };
+        if let Some(pending) = pending {
+            pending.cancellation.cancel();
+            if let Some(activity) = pending.activity {
+                activity.finish(
+                    ActivityOutcome::Cancelled,
+                    None,
+                    ActivityRetirement::Confirmed,
+                );
+            }
         }
         if let Some(WorkerSlot::Running(WorkerOwner { join, reap_permit })) = worker_slot.take()
             && let Err(error) = reap_permit.reap(join)
@@ -688,11 +794,12 @@ fn worker_loop(shared: Arc<SessionShared>, job: Arc<dyn DiscoveryJob>, limits: D
                     return;
                 }
                 if let Some(request) = state.pending.take() {
-                    let cancellation = ScanCancellation::new();
+                    let cancellation = request.cancellation.clone();
                     state.active = Some(ActiveScan {
                         generation: request.generation,
                         cancellation: cancellation.clone(),
                         restart_blocked: false,
+                        activity: request.activity.clone(),
                     });
                     break (request, cancellation);
                 }
@@ -701,8 +808,29 @@ fn worker_loop(shared: Arc<SessionShared>, job: Arc<dyn DiscoveryJob>, limits: D
         };
 
         let generation = request.generation;
+        let activity = request.activity.clone();
+        if let Some(activity) = activity.as_ref() {
+            activity.mark_running();
+        }
         let progress_shared = Arc::clone(&shared);
         let mut publish = |progress: DiscoveryProgress| {
+            if let Some(activity) = activity.as_ref() {
+                let progress_value = progress.content.map_or(
+                    ActivityProgress::new(
+                        progress.counts.files_seen as u64,
+                        None,
+                        ActivityProgressUnit::Files,
+                    ),
+                    |content| {
+                        ActivityProgress::new(
+                            content.files_completed as u64,
+                            Some(content.files_total as u64),
+                            ActivityProgressUnit::Files,
+                        )
+                    },
+                );
+                activity.set_progress(Some(progress_value));
+            }
             let should_wake = {
                 let mut state = progress_shared.state.lock().unwrap();
                 if state.closed || state.generation != generation {
@@ -723,6 +851,21 @@ fn worker_loop(shared: Arc<SessionShared>, job: Arc<dyn DiscoveryJob>, limits: D
             &cancellation,
             &mut publish,
         );
+        if let Some(activity) = activity.as_ref() {
+            let (outcome, diagnostic) = match result.status {
+                DiscoveryStatus::Cancelled => (ActivityOutcome::Cancelled, None),
+                DiscoveryStatus::Failed => (
+                    ActivityOutcome::Failed,
+                    Some(ActivityDiagnostic::WorkerFailed),
+                ),
+                DiscoveryStatus::Idle
+                | DiscoveryStatus::Scanning
+                | DiscoveryStatus::Complete
+                | DiscoveryStatus::Partial
+                | DiscoveryStatus::Closed => (ActivityOutcome::Completed, None),
+            };
+            activity.finish(outcome, diagnostic, ActivityRetirement::Unavailable);
+        }
         {
             let mut state = shared.state.lock().unwrap();
             if state

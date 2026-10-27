@@ -222,6 +222,10 @@ impl Default for TableUtilityDialogState {
 }
 
 impl TableUtilityDialogState {
+    pub(crate) fn attach_activity_center(&mut self, center: crate::activity::ActivityCenter) {
+        self.session.attach_activity_center(center);
+    }
+
     pub fn open(&mut self) {
         self.open = true;
         self.pending_overwrite = None;

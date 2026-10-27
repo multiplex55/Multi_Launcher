@@ -4,6 +4,10 @@
 //! reads. Clipboard access remains an explicit presentation action in the GUI
 //! owner.
 
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityRetirement, ActivitySlot, ActivityTask,
+};
 use crate::table_utility::{
     DelimiterChoice, TableCancellationToken, TableDelimiter, TableDocument, TableDocumentId,
     TableExportError, TableJsonExport, TableJsonShape, TableParseError, TableParseOptions,
@@ -233,6 +237,7 @@ enum Work {
 struct Job {
     key: JobKey,
     work: Work,
+    activity: Option<ActivityTask>,
 }
 
 enum WorkResult {
@@ -253,7 +258,28 @@ struct Completion {
 }
 
 impl Job {
+    fn install_cancel_handler(&self) {
+        if let Some(activity) = self.activity.as_ref() {
+            let cancellation = self.cancellation();
+            activity.set_cancel_handler(move || cancellation.cancel());
+        }
+    }
+
+    fn cancel_before_start(self) {
+        if let Some(activity) = self.activity {
+            activity.finish(
+                ActivityOutcome::Cancelled,
+                None,
+                ActivityRetirement::Confirmed,
+            );
+        }
+    }
+
     fn run(self) -> Completion {
+        let cancellation = self.cancellation();
+        if let Some(activity) = self.activity.as_ref() {
+            activity.mark_running();
+        }
         let result = match self.work {
             Work::ReadFile {
                 path,
@@ -321,10 +347,23 @@ impl Job {
                 WorkResult::Exported(result)
             }
         };
-        Completion {
+        let completion = Completion {
             key: self.key,
             result,
+        };
+        if let Some(activity) = self.activity.as_ref() {
+            let outcome = if cancellation.is_cancelled() || completion_cancelled(&completion) {
+                ActivityOutcome::Cancelled
+            } else if work_result_succeeded(&completion.result) {
+                ActivityOutcome::Completed
+            } else {
+                ActivityOutcome::Failed
+            };
+            let diagnostic =
+                (outcome == ActivityOutcome::Failed).then_some(ActivityDiagnostic::WorkerFailed);
+            activity.finish(outcome, diagnostic, ActivityRetirement::Unavailable);
         }
+        completion
     }
 }
 
@@ -404,24 +443,37 @@ impl TableWorker {
     fn submit(&self, job: Job) {
         #[cfg(test)]
         self.test_job_counts.submitted(job.key.kind);
+        job.install_cancel_handler();
         let (lock, wake) = &*self.shared;
-        let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
-        if let Some(active) = state.active_cancellation.as_ref() {
-            active.cancel();
+        let replaced = {
+            let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(active) = state.active_cancellation.as_ref() {
+                active.cancel();
+            }
+            state.completed = None;
+            let replaced = state.pending.replace(job);
+            wake.notify_one();
+            replaced
+        };
+        if let Some(replaced) = replaced {
+            replaced.cancel_before_start();
         }
-        state.completed = None;
-        state.pending = Some(job);
-        wake.notify_one();
     }
 
     fn cancel_pending(&self) {
         let (lock, wake) = &*self.shared;
-        let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
-        if let Some(active) = state.active_cancellation.as_ref() {
-            active.cancel();
+        let pending = {
+            let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(active) = state.active_cancellation.as_ref() {
+                active.cancel();
+            }
+            let pending = state.pending.take();
+            state.completed = None;
+            pending
+        };
+        if let Some(pending) = pending {
+            pending.cancel_before_start();
         }
-        state.pending = None;
-        state.completed = None;
         wake.notify_one();
     }
 
@@ -435,14 +487,18 @@ impl TableWorker {
 
     fn shutdown(&mut self) {
         let (lock, wake) = &*self.shared;
-        {
+        let pending = {
             let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
             state.shutdown = true;
-            state.pending = None;
+            let pending = state.pending.take();
             state.completed = None;
             if let Some(active) = state.active_cancellation.as_ref() {
                 active.cancel();
             }
+            pending
+        };
+        if let Some(pending) = pending {
+            pending.cancel_before_start();
         }
         wake.notify_one();
         if let Some(join) = self.join.take() {
@@ -561,6 +617,7 @@ impl TableSessionSnapshot {
 /// results are separate so failed edits never relabel a prior parse.
 pub struct TableUtilitySession {
     worker: Option<TableWorker>,
+    activity_center: Option<ActivityCenter>,
     lifetime: TableSessionLifetime,
     source_revision: TableSourceRevision,
     view_revision: TableViewRevision,
@@ -603,6 +660,7 @@ impl TableUtilitySession {
     pub fn new() -> Self {
         Self {
             worker: None,
+            activity_center: None,
             lifetime: TableSessionLifetime(0),
             source_revision: TableSourceRevision(0),
             view_revision: TableViewRevision(0),
@@ -634,6 +692,26 @@ impl TableUtilitySession {
             message: None,
             open: false,
         }
+    }
+
+    pub fn attach_activity_center(&mut self, center: ActivityCenter) {
+        self.activity_center = Some(center);
+    }
+
+    fn activity_task(&self, key: JobKey) -> Option<ActivityTask> {
+        let center = self.activity_center.as_ref()?;
+        let (slot, operation) = match key.kind {
+            JobKind::ReadFile => (ActivitySlot::Primary, ActivityOperation::ReadTableFile),
+            JobKind::Parse => (ActivitySlot::Primary, ActivityOperation::ParseTable),
+            JobKind::Project => (ActivitySlot::Secondary, ActivityOperation::ProjectTable),
+            JobKind::Export => (ActivitySlot::Export, ActivityOperation::ExportTable),
+        };
+        center.start(
+            ActivityOwner::Table,
+            slot,
+            ActivityIncarnation::new(key.lifetime.0),
+            operation,
+        )
     }
 
     pub fn open(&mut self, ctx: &egui::Context) -> Result<(), String> {
@@ -859,8 +937,10 @@ impl TableUtilitySession {
             export: None,
         };
         let cancellation = TableCancellationToken::new();
+        let activity = self.activity_task(key);
         worker.submit(Job {
             key,
+            activity,
             work: Work::ReadFile {
                 path,
                 options: self.parse_options,
@@ -1051,8 +1131,10 @@ impl TableUtilitySession {
             export: Some(operation),
         };
         let cancellation = TableCancellationToken::new();
+        let activity = self.activity_task(key);
         let job = Job {
             key,
+            activity,
             work: Work::Export {
                 document,
                 projection,
@@ -1431,8 +1513,10 @@ impl TableUtilitySession {
             export: None,
         };
         let cancellation = TableCancellationToken::new();
+        let activity = self.activity_task(key);
         worker.submit(Job {
             key,
+            activity,
             work: Work::Parse {
                 bytes: Arc::clone(&self.requested_source),
                 options: self.parse_options,
@@ -1459,8 +1543,10 @@ impl TableUtilitySession {
             export: None,
         };
         let cancellation = TableCancellationToken::new();
+        let activity = self.activity_task(key);
         worker.submit(Job {
             key,
+            activity,
             work: Work::Project {
                 document,
                 options: self.view_options.clone(),
@@ -1532,6 +1618,15 @@ fn completion_cancelled(completion: &Completion) -> bool {
         &completion.result,
         WorkResult::Exported(Err(TableExportError::Cancelled))
     )
+}
+
+fn work_result_succeeded(result: &WorkResult) -> bool {
+    match result {
+        WorkResult::FileRead(result) => result.is_ok(),
+        WorkResult::Parsed(result) => result.is_ok(),
+        WorkResult::Projected(result) => result.is_ok(),
+        WorkResult::Exported(result) => result.is_ok(),
+    }
 }
 
 fn source_line_count_is_editable(source: &str) -> bool {

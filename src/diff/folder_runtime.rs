@@ -3,14 +3,19 @@
 //! This type deliberately lives outside `FolderCompareState`: retained views
 //! may be cloned or persisted, while receivers and operation handles may not.
 
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityRetirement, ActivitySlot, ActivityTask,
+};
 use crate::diff::file_ops::OperationHandle;
 use crate::diff::folder_compare::{EntryMetadata, FolderEntry, FolderModel, FolderStatus};
 use crate::diff::folder_scan::{RootIdentity, ScanHandle};
 use crate::diff::text_compare::{CompiledRules, TextComparisonRules, project};
 use crate::diff::text_file::{LoadedContent, load_text_file};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
@@ -31,6 +36,8 @@ pub struct FolderRuntime {
     result_rx: Receiver<RefinementResult>,
     pub completed_comparisons: u64,
     pub active_operation: Option<OperationHandle>,
+    activity_center: Option<ActivityCenter>,
+    refinement_slots: HashMap<PathBuf, (u64, ActivitySlot)>,
     pub left_error: Option<String>,
     pub right_error: Option<String>,
     pub restart_prepared: bool,
@@ -79,6 +86,8 @@ impl Default for FolderRuntime {
             result_rx,
             completed_comparisons: 0,
             active_operation: None,
+            activity_center: None,
+            refinement_slots: HashMap::new(),
             left_error: None,
             right_error: None,
             restart_prepared: false,
@@ -87,6 +96,32 @@ impl Default for FolderRuntime {
 }
 
 impl FolderRuntime {
+    pub fn attach_activity_center(&mut self, center: ActivityCenter) {
+        self.activity_center = Some(center);
+    }
+
+    pub fn spawn_scan(
+        &self,
+        root: PathBuf,
+        generation: u64,
+        rules: crate::diff::folder_scan::ScanRules,
+        slot: ActivitySlot,
+    ) -> ScanHandle {
+        if let Some(activity_center) = self.activity_center.as_ref() {
+            crate::diff::folder_scan::spawn_scan_with_activity(
+                Arc::new(crate::diff::folder_scan::RealFileSystem),
+                root,
+                generation,
+                rules,
+                128,
+                activity_center.clone(),
+                slot,
+            )
+        } else {
+            crate::diff::folder_scan::spawn_scan(root, generation, rules)
+        }
+    }
+
     pub fn next_generation() -> u64 {
         Self::next_generation_after(0)
     }
@@ -154,6 +189,13 @@ impl FolderRuntime {
     pub fn pump(&mut self, model: &mut FolderModel, rules: &TextComparisonRules) {
         while let Ok(result) = self.result_rx.try_recv() {
             self.in_flight.remove(&result.job.relative_path);
+            if self
+                .refinement_slots
+                .get(&result.job.relative_path)
+                .is_some_and(|(generation, _)| *generation == result.job.generation)
+            {
+                self.refinement_slots.remove(&result.job.relative_path);
+            }
             if self.result_is_current(&result.job, model, rules)
                 && let Some(entry) = find_entry_mut(model, &result.job.relative_path)
             {
@@ -174,10 +216,32 @@ impl FolderRuntime {
             let Some(job) = self.make_job(entry, rules) else {
                 continue;
             };
-            self.in_flight.insert(path);
+            let slot = if self
+                .refinement_slots
+                .values()
+                .any(|(_, slot)| *slot == ActivitySlot::Primary)
+            {
+                ActivitySlot::Secondary
+            } else {
+                ActivitySlot::Primary
+            };
+            self.in_flight.insert(path.clone());
+            self.refinement_slots.insert(path, (job.generation, slot));
+            let activity = self.activity_center.as_ref().and_then(|center| {
+                center.start(
+                    ActivityOwner::FolderCompare,
+                    slot,
+                    ActivityIncarnation::new(job.generation),
+                    ActivityOperation::CompareFolders,
+                )
+            });
             let tx = self.result_tx.clone();
             std::thread::spawn(move || {
+                let mut activity = activity.map(FolderRefinementActivity::new);
                 let status = compare_job(&job);
+                if let Some(activity) = activity.take() {
+                    activity.finish(status);
+                }
                 let _ = tx.send(RefinementResult { job, status });
             });
         }
@@ -246,11 +310,48 @@ impl FolderRuntime {
         self.comparison_queue.clear();
         self.queued.clear();
         self.in_flight.clear();
+        self.refinement_slots.clear();
         self.left_visited = 0;
         self.right_visited = 0;
         self.completed_comparisons = 0;
         self.left_error = None;
         self.right_error = None;
+    }
+}
+
+struct FolderRefinementActivity(Option<ActivityTask>);
+
+impl FolderRefinementActivity {
+    fn new(task: ActivityTask) -> Self {
+        task.mark_running();
+        Self(Some(task))
+    }
+
+    fn finish(mut self, status: FolderStatus) {
+        if let Some(task) = self.0.take() {
+            let failed = matches!(status, FolderStatus::Error | FolderStatus::Unreadable);
+            task.finish(
+                if failed {
+                    ActivityOutcome::Failed
+                } else {
+                    ActivityOutcome::Completed
+                },
+                failed.then_some(ActivityDiagnostic::WorkerFailed),
+                ActivityRetirement::Unavailable,
+            );
+        }
+    }
+}
+
+impl Drop for FolderRefinementActivity {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.finish(
+                ActivityOutcome::Failed,
+                Some(ActivityDiagnostic::WorkerFailed),
+                ActivityRetirement::Unavailable,
+            );
+        }
     }
 }
 

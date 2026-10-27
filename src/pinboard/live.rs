@@ -5,6 +5,10 @@
 //! path used by future pin-window callbacks.
 
 use super::{ImageBudgetReservation, PinImageHandle};
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityRetirement, ActivitySlot, ActivityTask,
+};
 use crate::pinboard::PinCaptureGeneration;
 use crate::pinboard::source::{PinSourceBinding, PinSourceCrop};
 use image::RgbaImage;
@@ -468,6 +472,8 @@ pub(crate) struct PinLiveCaptureSession {
     first_frame: Receiver<Result<(), String>>,
     first_frame_reported: bool,
     worker: Option<JoinHandle<()>>,
+    activity: Option<ActivityTask>,
+    join_retained: Arc<AtomicBool>,
 }
 
 impl fmt::Debug for PinLiveCaptureSession {
@@ -486,28 +492,65 @@ impl PinLiveCaptureSession {
         generation: PinCaptureGeneration,
         reservation: ImageBudgetReservation,
         gpu_budget: Arc<SharedGpuBudget>,
+        activity_center: Option<ActivityCenter>,
         worker: LiveWorker,
     ) -> Result<Self, String> {
         let slot = Arc::new(PinLiveFrameSlot::new(generation));
         let signal = Arc::new(WorkerSignal::new());
         let worker_running = Arc::new(AtomicBool::new(true));
         let (first_frame_tx, first_frame) = mpsc::sync_channel(1);
+        let activity = activity_center.and_then(|center| {
+            center.start(
+                ActivityOwner::LivePin,
+                ActivitySlot::LiveCapture,
+                ActivityIncarnation::new(generation.get()),
+                ActivityOperation::CaptureLivePin,
+            )
+        });
+        if let Some(activity) = &activity {
+            let cancel_signal = Arc::downgrade(&signal);
+            let cancel_slot = Arc::downgrade(&slot);
+            activity.set_cancel_handler(move || {
+                if let Some(signal) = cancel_signal.upgrade() {
+                    signal.cancel();
+                }
+                if let Some(slot) = cancel_slot.upgrade() {
+                    slot.cancel(generation);
+                }
+            });
+        }
         let thread_binding = binding;
         let thread_slot = Arc::clone(&slot);
         let thread_signal = Arc::clone(&signal);
         let thread_worker_running = Arc::clone(&worker_running);
+        let thread_activity = activity.clone();
+        let thread_join_retained = Arc::new(AtomicBool::new(true));
+        let worker_join_retained = Arc::clone(&thread_join_retained);
         let join = thread::Builder::new()
             .name(format!("pin-live-{}", generation.get()))
             .spawn(move || {
-                let result = worker(
-                    thread_binding,
-                    generation,
-                    reservation,
-                    gpu_budget,
-                    Arc::clone(&thread_signal),
-                    Arc::clone(&thread_slot),
-                    first_frame_tx.clone(),
-                );
+                if let Some(activity) = &thread_activity {
+                    activity.mark_running();
+                }
+                let mut panic_payload = None;
+                let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    worker(
+                        thread_binding,
+                        generation,
+                        reservation,
+                        gpu_budget,
+                        Arc::clone(&thread_signal),
+                        Arc::clone(&thread_slot),
+                        first_frame_tx.clone(),
+                    )
+                })) {
+                    Ok(result) => result,
+                    Err(payload) => {
+                        panic_payload = Some(payload);
+                        Err("window capture worker terminated unexpectedly".to_owned())
+                    }
+                };
+                let worker_failed = result.is_err();
                 if let Err(error) = result {
                     thread_slot.set_status(generation, PinLiveStatus::Error(error.clone()));
                     let _ = first_frame_tx.try_send(Err(error));
@@ -523,9 +566,42 @@ impl PinLiveCaptureSession {
                         PinLiveStatus::TemporarilyUnavailable("live capture worker stopped".into()),
                     );
                 }
+                if let Some(activity) = &thread_activity {
+                    let status = thread_slot.status();
+                    let outcome = if thread_signal.snapshot().cancelled {
+                        ActivityOutcome::Cancelled
+                    } else if worker_failed
+                        || matches!(status, PinLiveStatus::Error(_))
+                        || !is_terminal_status(&status)
+                    {
+                        ActivityOutcome::Failed
+                    } else {
+                        ActivityOutcome::Completed
+                    };
+                    let diagnostic = (outcome == ActivityOutcome::Failed)
+                        .then_some(ActivityDiagnostic::WorkerFailed);
+                    let retirement = if worker_join_retained.load(Ordering::Acquire) {
+                        ActivityRetirement::Pending
+                    } else {
+                        ActivityRetirement::Unavailable
+                    };
+                    activity.finish(outcome, diagnostic, retirement);
+                }
                 thread_worker_running.store(false, Ordering::Release);
+                if let Some(payload) = panic_payload {
+                    std::panic::resume_unwind(payload);
+                }
             })
-            .map_err(|error| format!("could not start the live capture worker: {error}"))?;
+            .map_err(|error| {
+                if let Some(activity) = &activity {
+                    activity.finish(
+                        ActivityOutcome::Failed,
+                        Some(ActivityDiagnostic::WorkerUnavailable),
+                        ActivityRetirement::Confirmed,
+                    );
+                }
+                format!("could not start the live capture worker: {error}")
+            })?;
         Ok(Self {
             binding,
             source: PinLiveFrameSource {
@@ -537,6 +613,8 @@ impl PinLiveCaptureSession {
             first_frame,
             first_frame_reported: false,
             worker: Some(join),
+            activity,
+            join_retained: thread_join_retained,
         })
     }
 
@@ -633,9 +711,12 @@ impl PinLiveCaptureSession {
         Ok(())
     }
 
-    pub(crate) fn cancel_and_take_worker(&mut self) -> Option<JoinHandle<()>> {
+    pub(crate) fn cancel_and_take_worker(&mut self) -> Option<RetiredLiveWorker> {
         self.cancel();
-        self.worker.take()
+        self.worker.take().map(|worker| RetiredLiveWorker {
+            worker,
+            activity: self.activity.take(),
+        })
     }
 
     /// Creates a real bounded live-session owner for the generated native
@@ -731,7 +812,7 @@ impl PinLiveCaptureSession {
                 Ok(())
             },
         );
-        let session = Self::spawn(binding, generation, reservation, gpu_budget, worker)?;
+        let session = Self::spawn(binding, generation, reservation, gpu_budget, None, worker)?;
         Ok((session, frames_tx))
     }
 }
@@ -741,7 +822,35 @@ impl Drop for PinLiveCaptureSession {
         self.cancel();
         // Closing one child must not block the root UI on native teardown. The
         // worker owns its resources and exits after the cancellation signal.
-        self.worker.take();
+        if self.worker.take().is_some() {
+            self.join_retained.store(false, Ordering::Release);
+            if let Some(activity) = &self.activity {
+                activity.retirement_unavailable();
+            }
+        }
+    }
+}
+
+pub(crate) struct RetiredLiveWorker {
+    worker: JoinHandle<()>,
+    activity: Option<ActivityTask>,
+}
+
+impl RetiredLiveWorker {
+    pub(crate) fn is_finished(&self) -> bool {
+        self.worker.is_finished()
+    }
+
+    pub(crate) fn join(self) -> thread::Result<()> {
+        let result = self.worker.join();
+        if let Some(activity) = self.activity {
+            if result.is_ok() {
+                activity.retirement_confirmed();
+            } else {
+                activity.retirement_unavailable();
+            }
+        }
+        result
     }
 }
 
@@ -753,6 +862,17 @@ pub(crate) trait PinLiveCaptureBackend: Send + Sync {
         reservation: ImageBudgetReservation,
         gpu_budget: Arc<SharedGpuBudget>,
     ) -> Result<PinLiveCaptureSession, String>;
+
+    fn start_with_activity(
+        &self,
+        binding: PinSourceBinding,
+        generation: PinCaptureGeneration,
+        reservation: ImageBudgetReservation,
+        gpu_budget: Arc<SharedGpuBudget>,
+        _activity_center: ActivityCenter,
+    ) -> Result<PinLiveCaptureSession, String> {
+        self.start(binding, generation, reservation, gpu_budget)
+    }
 }
 
 #[derive(Default)]
@@ -771,6 +891,25 @@ impl PinLiveCaptureBackend for NativePinLiveCaptureBackend {
             generation,
             reservation,
             gpu_budget,
+            None,
+            Box::new(run_native_capture),
+        )
+    }
+
+    fn start_with_activity(
+        &self,
+        binding: PinSourceBinding,
+        generation: PinCaptureGeneration,
+        reservation: ImageBudgetReservation,
+        gpu_budget: Arc<SharedGpuBudget>,
+        activity_center: ActivityCenter,
+    ) -> Result<PinLiveCaptureSession, String> {
+        PinLiveCaptureSession::spawn(
+            binding,
+            generation,
+            reservation,
+            gpu_budget,
+            Some(activity_center),
             Box::new(run_native_capture),
         )
     }
@@ -1895,13 +2034,14 @@ pub(crate) mod test_support {
         pub(crate) processed: SyncSender<()>,
     }
 
-    impl PinLiveCaptureBackend for FakePinLiveCaptureBackend {
-        fn start(
+    impl FakePinLiveCaptureBackend {
+        fn start_internal(
             &self,
             binding: PinSourceBinding,
             generation: PinCaptureGeneration,
             reservation: ImageBudgetReservation,
             gpu_budget: Arc<SharedGpuBudget>,
+            activity_center: Option<ActivityCenter>,
         ) -> Result<PinLiveCaptureSession, String> {
             let first_image = self.first_image.clone();
             let content_size = self.first_content_size;
@@ -1912,6 +2052,7 @@ pub(crate) mod test_support {
                 generation,
                 reservation,
                 gpu_budget,
+                activity_center,
                 Box::new(
                     move |binding, generation, reservation, _, signal, slot, first_tx| {
                         let cpu_budget = reservation.shared_budget();
@@ -2011,11 +2152,41 @@ pub(crate) mod test_support {
             )
         }
     }
+
+    impl PinLiveCaptureBackend for FakePinLiveCaptureBackend {
+        fn start(
+            &self,
+            binding: PinSourceBinding,
+            generation: PinCaptureGeneration,
+            reservation: ImageBudgetReservation,
+            gpu_budget: Arc<SharedGpuBudget>,
+        ) -> Result<PinLiveCaptureSession, String> {
+            self.start_internal(binding, generation, reservation, gpu_budget, None)
+        }
+
+        fn start_with_activity(
+            &self,
+            binding: PinSourceBinding,
+            generation: PinCaptureGeneration,
+            reservation: ImageBudgetReservation,
+            gpu_budget: Arc<SharedGpuBudget>,
+            activity_center: ActivityCenter,
+        ) -> Result<PinLiveCaptureSession, String> {
+            self.start_internal(
+                binding,
+                generation,
+                reservation,
+                gpu_budget,
+                Some(activity_center),
+            )
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activity::{ActivityCancelResult, ActivityLifecycle};
     use crate::mkmacro::ScreenRect;
     use crate::pinboard::source::PinSourceWindowIdentity;
     use crate::pinboard::{PinCaptureGeneration, SharedImageBudget};
@@ -2031,6 +2202,58 @@ mod tests {
             captured_bounds: ScreenRect::new(-20, 15, 12, 10),
             crop,
         }
+    }
+
+    #[test]
+    fn live_pin_activity_cancels_exact_session_and_confirms_join() {
+        let center = ActivityCenter::new();
+        let budget = Arc::new(SharedImageBudget {
+            limit: 32,
+            reserved_and_allocated_bytes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let generation = PinCaptureGeneration(std::num::NonZeroU64::new(57).unwrap());
+        let backend = test_support::FakePinLiveCaptureBackend {
+            first_image: RgbaImage::from_pixel(2, 2, image::Rgba([7, 8, 9, 255])),
+            first_content_size: (12, 10),
+            stream: Mutex::new(None),
+            first_frame_gate: None,
+        };
+        let mut session = backend
+            .start_with_activity(
+                binding(PinSourceCrop {
+                    x: 3,
+                    y: 2,
+                    width: 2,
+                    height: 2,
+                }),
+                generation,
+                budget.reserve(16).unwrap(),
+                Arc::new(SharedGpuBudget::default()),
+                center.clone(),
+            )
+            .unwrap();
+        session
+            .wait_first_frame_result(Duration::from_secs(2))
+            .expect("worker reports first frame before its bounded deadline")
+            .unwrap();
+
+        let active = center.snapshot();
+        assert_eq!(active.rows.len(), 1);
+        let key = active.rows[0].key;
+        assert_eq!(active.rows[0].lifecycle, ActivityLifecycle::Running);
+        assert!(active.rows[0].can_cancel);
+        assert_eq!(center.request_cancel(key), ActivityCancelResult::Requested);
+        session.cancel_and_join().unwrap();
+
+        let terminal = center.snapshot();
+        assert_eq!(terminal.rows.len(), 1);
+        assert_eq!(terminal.rows[0].key, key);
+        assert_eq!(
+            terminal.rows[0].lifecycle,
+            ActivityLifecycle::Terminal(ActivityOutcome::Cancelled)
+        );
+        assert_eq!(terminal.rows[0].retirement, ActivityRetirement::Confirmed);
+        assert!(!terminal.rows[0].can_cancel);
     }
 
     #[test]

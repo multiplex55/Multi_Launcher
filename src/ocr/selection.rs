@@ -10,6 +10,12 @@ const PARK_TIMEOUT: Duration = Duration::from_secs(3);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct OcrGeneration(u64);
 
+impl OcrGeneration {
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SelectionOutcome {
     Cancelled,

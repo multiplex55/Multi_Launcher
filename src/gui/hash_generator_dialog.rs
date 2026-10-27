@@ -28,6 +28,7 @@ pub struct HashGeneratorDialogState {
     error: Option<String>,
     clipboard_feedback: Option<String>,
     focus_text: bool,
+    activity_center: Option<crate::activity::ActivityCenter>,
 }
 
 impl Default for HashGeneratorDialogState {
@@ -47,11 +48,16 @@ impl Default for HashGeneratorDialogState {
             error: None,
             clipboard_feedback: None,
             focus_text: false,
+            activity_center: None,
         }
     }
 }
 
 impl HashGeneratorDialogState {
+    pub(crate) fn attach_activity_center(&mut self, center: crate::activity::ActivityCenter) {
+        self.activity_center = Some(center);
+    }
+
     pub fn ensure_open(&mut self) {
         if !self.open {
             self.begin_session(None);
@@ -225,15 +231,20 @@ impl HashGeneratorDialogState {
     }
 
     pub fn calculate(&mut self, repaint: Arc<dyn Fn() + Send + Sync>) -> Result<(), String> {
-        self.calculate_with_start(repaint, HashJob::start)
+        let activity_center = self.activity_center.clone();
+        self.calculate_with_start(repaint, activity_center, |request, repaint, activity| {
+            HashJob::start_with_activity(request, repaint, activity)
+        })
     }
 
     fn calculate_with_start(
         &mut self,
         repaint: Arc<dyn Fn() + Send + Sync>,
+        activity_center: Option<crate::activity::ActivityCenter>,
         start_job: impl FnOnce(
             HashRequest,
             Arc<dyn Fn() + Send + Sync>,
+            Option<crate::activity::ActivityTask>,
         ) -> Result<HashJob, crate::hash_generator::HashError>,
     ) -> Result<(), String> {
         if self.job.is_some() {
@@ -257,7 +268,27 @@ impl HashGeneratorDialogState {
         let request =
             HashRequest::new(self.algorithm, input, None).map_err(|error| error.to_string())?;
         let request_id = request.request_id();
-        let job = start_job(request, repaint).map_err(|error| error.to_string())?;
+        let activity = activity_center.as_ref().and_then(|center| {
+            center.start(
+                crate::activity::ActivityOwner::Hash,
+                crate::activity::ActivitySlot::Primary,
+                crate::activity::ActivityIncarnation::new(request_id.get()),
+                crate::activity::ActivityOperation::CalculateHash,
+            )
+        });
+        let job = match start_job(request, repaint, activity.clone()) {
+            Ok(job) => job,
+            Err(error) => {
+                if let Some(activity) = activity {
+                    activity.finish(
+                        crate::activity::ActivityOutcome::Failed,
+                        Some(crate::activity::ActivityDiagnostic::WorkerUnavailable),
+                        crate::activity::ActivityRetirement::Confirmed,
+                    );
+                }
+                return Err(error.to_string());
+            }
+        };
         self.result = None;
         self.error = None;
         self.clipboard_feedback = None;
@@ -598,7 +629,7 @@ mod tests {
         let worker_slot = Arc::new(Mutex::new(None));
         let worker_slot_for_start = worker_slot.clone();
         dialog
-            .calculate_with_start(Arc::new(|| {}), move |request, repaint| {
+            .calculate_with_start(Arc::new(|| {}), None, move |request, repaint, _activity| {
                 let (job, run_worker) = HashJob::start_deferred_for_test(request, repaint)?;
                 *worker_slot_for_start
                     .lock()

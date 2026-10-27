@@ -201,6 +201,22 @@ impl HotFolderRuntimeDriver {
         data_root: AppDataRoot,
         adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter>,
     ) -> Self {
+        Self::new_with_optional_activity(data_root, adapter, None)
+    }
+
+    pub(crate) fn new_with_activity(
+        data_root: AppDataRoot,
+        adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter>,
+        activity_center: crate::activity::ActivityCenter,
+    ) -> Self {
+        Self::new_with_optional_activity(data_root, adapter, Some(activity_center))
+    }
+
+    fn new_with_optional_activity(
+        data_root: AppDataRoot,
+        adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter>,
+        activity_center: Option<crate::activity::ActivityCenter>,
+    ) -> Self {
         let repair_store = crate::hotfolder::HotFolderRulesStore::new(&data_root);
         let (sender, receiver) = mpsc::sync_channel(DRIVER_QUEUE_CAPACITY);
         let snapshot = Arc::new(RwLock::new(HotFolderDriverSnapshot::default()));
@@ -220,6 +236,7 @@ impl HotFolderRuntimeDriver {
                     worker_control,
                     worker_shutdown,
                     worker_snapshot,
+                    activity_center,
                 )
             })
             .expect("Hot Folder app driver thread must start");
@@ -765,6 +782,7 @@ fn driver_main(
     control: HotFolderExecutionControl,
     shutdown_requested: Arc<AtomicBool>,
     published: Arc<RwLock<HotFolderDriverSnapshot>>,
+    activity_center: Option<crate::activity::ActivityCenter>,
 ) {
     let mut store_loaded = false;
     let mut inputs = HotFolderCapabilityInputs::empty();
@@ -846,6 +864,10 @@ fn driver_main(
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+
+        if let (Some(center), Some(engine)) = (activity_center.as_ref(), engine.as_mut()) {
+            engine.attach_activity_center(center.clone());
         }
 
         if plugin_enabled

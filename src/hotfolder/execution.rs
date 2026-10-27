@@ -16,6 +16,11 @@ use super::runtime::{
     HotFolderReadyCandidate, HotFolderRuntimeError, HotFolderWatchService,
 };
 use super::store::{HotFolderRulesSnapshot, HotFolderRulesStore};
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityProgress, ActivityProgressUnit, ActivityRetirement, ActivitySlot,
+    ActivityTask,
+};
 use crate::batch_rename::{self, transform_filename_with_prefix_suffix};
 use crate::file_operations::{
     NativeFileIdentity, NativeHotFolderAction, NativeHotFolderError, NativeHotFolderFailureKind,
@@ -388,6 +393,7 @@ pub struct HotFolderExecutionEngine {
     clock: Arc<dyn ExecutionClock>,
     external_adapter: Option<Arc<dyn HotFolderExternalActionAdapter>>,
     control: HotFolderExecutionControl,
+    activity_center: Option<ActivityCenter>,
 }
 
 #[derive(Clone, Default)]
@@ -550,6 +556,42 @@ struct ExecutionControlLease {
     cancellation: ScanCancellation,
 }
 
+struct HotFolderActivityCompletion {
+    task: Option<ActivityTask>,
+    cancellation: ScanCancellation,
+}
+
+impl HotFolderActivityCompletion {
+    fn set_progress(&self, progress: Option<ActivityProgress>) {
+        if let Some(task) = &self.task {
+            task.set_progress(progress);
+        }
+    }
+
+    fn finish(mut self, outcome: ActivityOutcome, diagnostic: Option<ActivityDiagnostic>) {
+        if let Some(task) = self.task.take() {
+            task.finish(outcome, diagnostic, ActivityRetirement::Unavailable);
+        }
+    }
+}
+
+impl Drop for HotFolderActivityCompletion {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            let cancelled = self.cancellation.is_cancelled();
+            task.finish(
+                if cancelled {
+                    ActivityOutcome::Cancelled
+                } else {
+                    ActivityOutcome::Failed
+                },
+                (!cancelled).then_some(ActivityDiagnostic::WorkerFailed),
+                ActivityRetirement::Unavailable,
+            );
+        }
+    }
+}
+
 impl Drop for ExecutionControlLease {
     fn drop(&mut self) {
         if let Ok(mut active) = self.control.inner.active.lock()
@@ -692,7 +734,12 @@ impl HotFolderExecutionEngine {
             clock,
             external_adapter: None,
             control,
+            activity_center: None,
         })
+    }
+
+    pub(crate) fn attach_activity_center(&mut self, center: ActivityCenter) {
+        self.activity_center = Some(center);
     }
 
     pub fn pause(&self) {
@@ -1293,6 +1340,27 @@ impl HotFolderExecutionEngine {
             return Ok(Some(disposition));
         }
 
+        let mut activity = self
+            .activity_center
+            .as_ref()
+            .and_then(|center| {
+                center.start(
+                    ActivityOwner::HotFolder,
+                    ActivitySlot::Primary,
+                    ActivityIncarnation::new(control_lease.operation),
+                    ActivityOperation::WatchHotFolder,
+                )
+            })
+            .map(|task| {
+                let cancel_for_handler = cancellation.clone();
+                task.set_cancel_handler(move || cancel_for_handler.cancel());
+                task.mark_running();
+                HotFolderActivityCompletion {
+                    task: Some(task),
+                    cancellation: cancellation.clone(),
+                }
+            });
+
         // The lease transfer verifies B still owns this exact active epoch and
         // enable authorization. No file mutation has happened yet.
         if watcher
@@ -1302,6 +1370,9 @@ impl HotFolderExecutionEngine {
             cancellation.cancel();
             if let Ok(mut state) = self.state.lock() {
                 state.active = None;
+            }
+            if let Some(activity) = activity.take() {
+                activity.finish(ActivityOutcome::Cancelled, None);
             }
             return Ok(Some(HotFolderRunDisposition::StaleCandidate));
         }
@@ -1321,6 +1392,9 @@ impl HotFolderExecutionEngine {
                 state.active = None;
             }
             cancellation.cancel();
+            if let Some(activity) = activity.take() {
+                activity.finish(ActivityOutcome::Cancelled, None);
+            }
             return Ok(Some(HotFolderRunDisposition::StaleCandidate));
         }
 
@@ -1331,6 +1405,10 @@ impl HotFolderExecutionEngine {
                 .map_err(|_| HotFolderExecutionError::InvalidJournal)?;
             if state.shutdown || state.paused || cancellation.is_cancelled() {
                 state.active = None;
+                drop(state);
+                if let Some(activity) = activity.take() {
+                    activity.finish(ActivityOutcome::Cancelled, None);
+                }
                 return Ok(Some(HotFolderRunDisposition::StaleCandidate));
             }
             let rule_key = (
@@ -1413,8 +1491,23 @@ impl HotFolderExecutionEngine {
                 action,
                 destination,
             } => {
-                let mut record_progress =
-                    |progress| self.persist_native_progress(&key, &mut journal_row, progress);
+                let mut record_progress = |progress: NativeHotFolderProgress| {
+                    if let Some(activity) = activity.as_ref() {
+                        let completed = match progress.phase {
+                            NativeHotFolderPhase::Admission => 0,
+                            NativeHotFolderPhase::Staging => 1,
+                            NativeHotFolderPhase::Published => 2,
+                            NativeHotFolderPhase::SourceRemoval => 3,
+                            NativeHotFolderPhase::Complete => 4,
+                        };
+                        activity.set_progress(Some(ActivityProgress::new(
+                            completed,
+                            Some(4),
+                            ActivityProgressUnit::Phases,
+                        )));
+                    }
+                    self.persist_native_progress(&key, &mut journal_row, progress)
+                };
                 let result = self.operation_port.execute(
                     &root,
                     &candidate.path,
@@ -1574,6 +1667,18 @@ impl HotFolderExecutionEngine {
                 .retain(|output| output.expires > self.clock.now());
             durable
         };
+        if let Some(activity) = activity.take() {
+            let outcome = match status {
+                HotFolderTerminalStatus::Success => ActivityOutcome::Completed,
+                HotFolderTerminalStatus::Cancelled => ActivityOutcome::Cancelled,
+                HotFolderTerminalStatus::Failure | HotFolderTerminalStatus::Partial => {
+                    ActivityOutcome::Failed
+                }
+            };
+            let diagnostic =
+                (outcome == ActivityOutcome::Failed).then_some(ActivityDiagnostic::WorkerFailed);
+            activity.finish(outcome, diagnostic);
+        }
         Ok(Some(HotFolderRunDisposition::Executed(Box::new(
             HotFolderExecutionReceipt { durable, ..receipt },
         ))))

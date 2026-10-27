@@ -5504,6 +5504,7 @@ impl LauncherApp {
                         | super::Panel::TableUtilityDialog
                         | super::Panel::ImageCompareDialog
                         | super::Panel::DuplicateFinderDialog
+                        | super::Panel::ActivityDialog
                         | super::Panel::MouseSettingsDialog
                         | super::Panel::MouseGesturesDialog
                         | super::Panel::MouseGestureSettingsDialog
@@ -5587,6 +5588,10 @@ impl LauncherApp {
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::DuplicateFinder,
                 self.duplicate_finder_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::Activity,
+                self.activity_dialog.open,
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::MouseSettings,
@@ -6438,6 +6443,9 @@ impl LauncherApp {
                     if ui.button("Pin List").clicked() && first_ui_pass {
                         self.pin_list_open = true;
                         ctx.request_repaint_of(egui::ViewportId::ROOT);
+                    }
+                    if ui.button("Activity").clicked() && first_ui_pass {
+                        self.focus_panel(crate::gui::Panel::ActivityDialog);
                     }
                     apps_menu_state = (
                         apps_menu.response.hovered(),
@@ -9170,7 +9178,7 @@ impl LauncherApp {
         if first_ui_pass {
             self.submit_ready_search_replace_confirmation();
         }
-        self.diff_dialog.ui(&ctx);
+        self.diff_dialog.ui(&ctx, &self.activity_center);
         let notes_owner =
             self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
         let notes_scope = match notes_owner {
@@ -9454,6 +9462,60 @@ impl LauncherApp {
             owner_transition_pending,
         );
         self.render_hotfolder_manager(&ctx, first_ui_pass);
+        for action in self.activity_dialog.show(
+            &ctx,
+            &self.activity_center,
+            frame_logic.should_be_visible,
+            !self.screenshot_editors.is_empty(),
+            || Some(self.pinboard_capture.pinboard().image_bytes() as u64),
+        ) {
+            let super::activity_dialog::ActivityDialogAction::Navigate(owner) = action;
+            self.force_close_panel(super::Panel::ActivityDialog);
+            let panel = match owner {
+                crate::activity::ActivityOwner::FileSearch => Some(super::Panel::FileSearchDialog),
+                crate::activity::ActivityOwner::Table => Some(super::Panel::TableUtilityDialog),
+                crate::activity::ActivityOwner::DuplicateFinder => {
+                    Some(super::Panel::DuplicateFinderDialog)
+                }
+                crate::activity::ActivityOwner::Hash => Some(super::Panel::HashGeneratorDialog),
+                crate::activity::ActivityOwner::Rename => Some(super::Panel::BatchRenameDialog),
+                crate::activity::ActivityOwner::SearchReplace => {
+                    Some(super::Panel::SearchReplaceDialog)
+                }
+                crate::activity::ActivityOwner::Xml => Some(super::Panel::XmlToolkitDialog),
+                crate::activity::ActivityOwner::Macro => Some(super::Panel::MkMacroDialog),
+                crate::activity::ActivityOwner::FolderCompare => {
+                    self.diff_dialog.open = true;
+                    ctx.request_repaint();
+                    None
+                }
+                crate::activity::ActivityOwner::Screenshot => {
+                    (!self.screenshot_editors.is_empty()).then_some(super::Panel::ScreenshotEditor)
+                }
+                crate::activity::ActivityOwner::HotFolder => {
+                    self.open_hotfolder_manager();
+                    None
+                }
+                crate::activity::ActivityOwner::Indexing => {
+                    self.activity_dialog.close();
+                    self.focus_input();
+                    None
+                }
+                crate::activity::ActivityOwner::Ocr => {
+                    self.activity_dialog.close();
+                    self.focus_input();
+                    None
+                }
+                crate::activity::ActivityOwner::LivePin => {
+                    self.activity_dialog.close();
+                    self.pin_list_open = true;
+                    None
+                }
+            };
+            if let Some(panel) = panel {
+                self.focus_panel(panel);
+            }
+        }
         #[cfg(feature = "qa-framebuffer-capture")]
         if self.qa_framebuffer_needs_qr_observation() {
             let observation = self.qr_dialog.show_with_qa_observation(&ctx);

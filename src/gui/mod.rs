@@ -1,5 +1,6 @@
 mod action_sheet;
 mod actions;
+mod activity_dialog;
 mod add_action_dialog;
 mod add_bookmark_dialog;
 mod alias_dialog;
@@ -751,6 +752,7 @@ pub enum Panel {
     TableUtilityDialog,
     ImageCompareDialog,
     DuplicateFinderDialog,
+    ActivityDialog,
 }
 
 impl Panel {
@@ -798,6 +800,7 @@ impl Panel {
             Self::TableUtilityDialog => "Table Utility",
             Self::ImageCompareDialog => "Image Comparison",
             Self::DuplicateFinderDialog => "Duplicate Finder",
+            Self::ActivityDialog => "Activity",
             Self::QrDialog => "QR Generator",
             Self::ConvertPanel => "Converter",
             Self::VolumeDialog => "Volume",
@@ -862,6 +865,7 @@ struct PanelStates {
     table_utility_dialog: bool,
     image_compare_dialog: bool,
     duplicate_finder_dialog: bool,
+    activity_dialog: bool,
     qr_dialog: bool,
     convert_panel: bool,
     volume_dialog: bool,
@@ -957,6 +961,8 @@ pub struct LauncherApp {
     hotfolder_action_pump: hotfolder_dispatch::LauncherActionCompletionPump,
     pub(crate) hotfolder_runtime: hotfolder_runtime::HotFolderRuntimeDriver,
     pub(crate) hotfolder_dialog: hotfolder_dialog::HotFolderDialog,
+    pub(crate) activity_center: crate::activity::ActivityCenter,
+    pub(crate) activity_dialog: activity_dialog::ActivityDialogState,
     action_cache: Vec<CachedSearchEntry>,
     action_filter_metadata: Vec<ActionFilterMetadata>,
     actions_by_id: ActionIdLookup,
@@ -2205,7 +2211,10 @@ impl LauncherApp {
             let coordinator = journal_path
                 .and_then(crate::file_operations::RenameScanCoordinator::new_with_journal);
             match coordinator {
-                Ok(coordinator) => self.batch_rename_coordinator = Some(coordinator),
+                Ok(mut coordinator) => {
+                    coordinator.attach_activity_center(self.activity_center.clone());
+                    self.batch_rename_coordinator = Some(coordinator);
+                }
                 Err(error) => {
                     self.batch_rename_dialog.fail_to_start_scan(
                         root,
@@ -2273,11 +2282,10 @@ impl LauncherApp {
                 recovery_directory.clone(),
             )
             .map_err(|error| format!("could not initialize replacement recovery: {error}"))?;
-            self.replace_executor_worker = Some(
-                crate::replace_executor::ReplaceExecutorWorker::new(executor).map_err(|error| {
-                    format!("could not start the guarded replace worker: {error}")
-                })?,
-            );
+            let mut worker = crate::replace_executor::ReplaceExecutorWorker::new(executor)
+                .map_err(|error| format!("could not start the guarded replace worker: {error}"))?;
+            worker.attach_activity_center(self.activity_center.clone());
+            self.replace_executor_worker = Some(worker);
         }
         self.search_replace_dialog.start_receipt_load()?;
         Ok(recovery_directory)
@@ -2286,16 +2294,16 @@ impl LauncherApp {
     fn ensure_search_replace_runtime(&mut self) -> Result<(), String> {
         let _ = self.ensure_replace_executor()?;
         if self.replace_search_coordinator.is_none() {
-            self.replace_search_coordinator = Some(
-                crate::search_replace::SearchCoordinator::new()
-                    .map_err(|error| format!("could not start the search worker: {error}"))?,
-            );
+            let mut coordinator = crate::search_replace::SearchCoordinator::new()
+                .map_err(|error| format!("could not start the search worker: {error}"))?;
+            coordinator.attach_activity_center(self.activity_center.clone());
+            self.replace_search_coordinator = Some(coordinator);
         }
         if self.replace_preview_worker.is_none() {
-            self.replace_preview_worker = Some(
-                ReplacementPreviewWorker::new()
-                    .map_err(|error| format!("could not start the preview worker: {error}"))?,
-            );
+            let mut worker = ReplacementPreviewWorker::new()
+                .map_err(|error| format!("could not start the preview worker: {error}"))?;
+            worker.attach_activity_center(self.activity_center.clone());
+            self.replace_preview_worker = Some(worker);
         }
         Ok(())
     }
@@ -3465,20 +3473,26 @@ impl LauncherApp {
                 ctx.clone(),
                 Arc::clone(&plugins.internal_services().mkmacro_store),
             );
+        let activity_center = crate::activity::ActivityCenter::new();
+        crate::mkmacro::runtime::attach_activity_center(activity_center.clone());
         #[cfg(test)]
         let hotfolder_runtime = match init_policy {
-            LauncherInitPolicy::Production => hotfolder_runtime::HotFolderRuntimeDriver::new(
-                data_root,
-                hotfolder_action_adapter.clone(),
-            ),
+            LauncherInitPolicy::Production => {
+                hotfolder_runtime::HotFolderRuntimeDriver::new_with_activity(
+                    data_root,
+                    hotfolder_action_adapter.clone(),
+                    activity_center.clone(),
+                )
+            }
             LauncherInitPolicy::IsolatedTest | LauncherInitPolicy::IsolatedWatcherTest => {
                 hotfolder_runtime::HotFolderRuntimeDriver::dormant(data_root)
             }
         };
         #[cfg(not(test))]
-        let hotfolder_runtime = hotfolder_runtime::HotFolderRuntimeDriver::new(
+        let hotfolder_runtime = hotfolder_runtime::HotFolderRuntimeDriver::new_with_activity(
             data_root,
             hotfolder_action_adapter.clone(),
+            activity_center.clone(),
         );
         let mut app = Self {
             actions: Arc::clone(&actions),
@@ -3524,9 +3538,10 @@ impl LauncherApp {
             screen_draw_recovery_bridge,
             color_pick: color_pick::ColorPickLifecycle::default(),
             ocr: ocr::OcrLifecycle::default(),
-            pinboard_capture: pinboard::PinboardCaptureLifecycle::new(
+            pinboard_capture: pinboard::PinboardCaptureLifecycle::new_with_activity(
                 mkmacro_dialog.visual_overlay_controller(),
                 pinboard_capture_backend,
+                activity_center.clone(),
             ),
             pin_list_open: false,
             screen_draw_launcher_parking: None,
@@ -3739,6 +3754,8 @@ impl LauncherApp {
             table_utility_dialog: TableUtilityDialogState::default(),
             image_compare_dialog: ImageCompareDialogState::new(ctx),
             duplicate_finder_dialog: DuplicateFinderDialogState::new(ctx),
+            activity_center: activity_center.clone(),
+            activity_dialog: activity_dialog::ActivityDialogState::default(),
             qr_dialog: QrDialogState::default(),
             clipboard_modify_config_diagnostic,
             clipboard_modify_watcher,
@@ -3863,6 +3880,20 @@ impl LauncherApp {
             file_search_text: String::new(),
             file_search_active: false,
         };
+
+        // Attach before the first app-owned query or user action can admit work.
+        app.screenshot_capture
+            .attach_activity_center(activity_center.clone());
+        app.table_utility_dialog
+            .attach_activity_center(activity_center.clone());
+        app.duplicate_finder_dialog
+            .attach_activity_center(activity_center.clone());
+        app.xml_toolkit_dialog
+            .attach_activity_center(activity_center.clone());
+        app.hash_generator_dialog
+            .attach_activity_center(activity_center.clone());
+        app.file_search_coordinator
+            .attach_activity_center(activity_center);
 
         tracing::debug!("initial viewport visible: {}", initial_visible);
         apply_visibility(
@@ -4425,7 +4456,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 58] = [
+    const TRACKED_PANELS: [Panel; 59] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4484,6 +4515,7 @@ impl LauncherApp {
         Panel::RadialEditor,
         Panel::ImageCompareDialog,
         Panel::DuplicateFinderDialog,
+        Panel::ActivityDialog,
     ];
 
     fn is_panel_open(&self, panel: Panel) -> bool {
@@ -4530,6 +4562,7 @@ impl LauncherApp {
             Panel::TableUtilityDialog => self.table_utility_dialog.open,
             Panel::ImageCompareDialog => self.image_compare_dialog.open,
             Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.open,
+            Panel::ActivityDialog => self.activity_dialog.open,
             Panel::QrDialog => self.qr_dialog.open,
             Panel::ConvertPanel => self.convert_panel.open,
             Panel::VolumeDialog => self.volume_dialog.open,
@@ -4798,6 +4831,10 @@ impl LauncherApp {
                 self.duplicate_finder_dialog.close();
                 self.panel_states.duplicate_finder_dialog = false;
             }
+            Panel::ActivityDialog => {
+                self.activity_dialog.close();
+                self.panel_states.activity_dialog = false;
+            }
             Panel::JsonUtilityDialog => {
                 self.json_utility_dialog.close();
                 self.panel_states.json_utility_dialog = false;
@@ -5065,6 +5102,10 @@ impl LauncherApp {
                 self.duplicate_finder_dialog.close();
                 self.panel_states.duplicate_finder_dialog = false;
             }
+            Panel::ActivityDialog => {
+                self.activity_dialog.close();
+                self.panel_states.activity_dialog = false;
+            }
             Panel::JsonUtilityDialog => {
                 self.json_utility_dialog.close();
                 self.panel_states.json_utility_dialog = false;
@@ -5196,6 +5237,7 @@ impl LauncherApp {
             Panel::TableUtilityDialog => self.table_utility_dialog.open(),
             Panel::ImageCompareDialog => self.image_compare_dialog.open(),
             Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.open(),
+            Panel::ActivityDialog => self.activity_dialog.open(),
             Panel::ConvertPanel => self.convert_panel.open = true,
             Panel::VolumeDialog => self.volume_dialog.ensure_open(),
             Panel::BrightnessDialog => {
@@ -5348,6 +5390,7 @@ impl LauncherApp {
         check!(table_utility_dialog, Panel::TableUtilityDialog);
         check!(image_compare_dialog, Panel::ImageCompareDialog);
         check!(duplicate_finder_dialog, Panel::DuplicateFinderDialog);
+        check!(activity_dialog, Panel::ActivityDialog);
         check!(qr_dialog, Panel::QrDialog);
         check!(convert_panel, Panel::ConvertPanel);
         check!(volume_dialog, Panel::VolumeDialog);

@@ -14,6 +14,11 @@ use super::{
     RecorderObserverSession, RecorderRuntime, RecorderSnapshot, RecordingResult, RecordingTarget,
     RuntimeVariables, SharedOperationGuard, SystemRecorderClock, production_hook_service,
 };
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityProgress, ActivityProgressUnit, ActivityRetirement, ActivitySlot,
+    ActivityTask,
+};
 use anyhow::{Result, anyhow};
 use once_cell::sync::Lazy;
 #[cfg(test)]
@@ -448,6 +453,7 @@ struct Shared {
     last_preview_snapshot: RwLock<Option<Arc<RuntimeSnapshot>>>,
     control: Arc<RunControl>,
     admission: Mutex<Option<ActiveAdmission>>,
+    activity_center: Mutex<Option<ActivityCenter>>,
     next_run_id: AtomicU64,
     operations: Arc<SharedOperationGuard>,
     #[cfg(test)]
@@ -461,6 +467,7 @@ struct ActiveAdmission {
     origin: RuntimeOrigin,
     run_id: u64,
     owned_start_gate: Option<Arc<OwnedRunStartGate>>,
+    activity: Option<ActivityTask>,
 }
 struct WorkerMessage {
     command: RuntimeCommand,
@@ -526,6 +533,51 @@ impl Drop for TestWorkerBarrier {
     }
 }
 impl MacroRuntime {
+    pub(crate) fn attach_activity_center(&self, center: ActivityCenter) {
+        let mut admission = self.shared.admission.lock().unwrap();
+        *self.shared.activity_center.lock().unwrap() = Some(center.clone());
+        let Some(active) = admission.as_mut() else {
+            return;
+        };
+        if active.activity.is_some() {
+            return;
+        }
+        let snapshot = self.snapshot();
+        let operation = ActivityOperation::PlayMacro;
+        let task = if snapshot.run_id == active.run_id
+            && matches!(
+                snapshot.state,
+                RuntimeState::Running | RuntimeState::Paused | RuntimeState::Stopping
+            ) {
+            center.observe_running(
+                ActivityOwner::Macro,
+                ActivitySlot::MacroRun,
+                ActivityIncarnation::new(self.generation),
+                operation,
+            )
+        } else {
+            center.observe_queued(
+                ActivityOwner::Macro,
+                ActivitySlot::MacroRun,
+                ActivityIncarnation::new(self.generation),
+                operation,
+            )
+        };
+        if let Some(task) = task {
+            if snapshot.state == RuntimeState::Stopping {
+                task.mark_cancelling();
+            }
+            let weak_shared = Arc::downgrade(&self.shared);
+            let run_id = active.run_id;
+            task.set_cancel_handler(move || {
+                if let Some(shared) = weak_shared.upgrade() {
+                    stop_shared_run_if_current(&shared, run_id);
+                }
+            });
+            active.activity = Some(task);
+        }
+    }
+
     fn ensure_available(&self) -> ExecResult {
         let admission = self.shared.admission.lock().unwrap();
         if !self.available.load(Ordering::Acquire) {
@@ -660,6 +712,7 @@ impl MacroRuntime {
             last_preview_snapshot: RwLock::new(None),
             control: Arc::new(RunControl::default()),
             admission: Mutex::new(None),
+            activity_center: Mutex::new(None),
             next_run_id: AtomicU64::new(1),
             operations,
             #[cfg(test)]
@@ -822,11 +875,34 @@ impl MacroRuntime {
                 }
                 _ => RuntimeOrigin::Stored,
             };
+            let activity = self
+                .shared
+                .activity_center
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|center| {
+                    center.start(
+                        ActivityOwner::Macro,
+                        ActivitySlot::MacroRun,
+                        ActivityIncarnation::new(self.generation),
+                        ActivityOperation::PlayMacro,
+                    )
+                });
+            if let Some(activity) = &activity {
+                let weak_shared = Arc::downgrade(&self.shared);
+                activity.set_cancel_handler(move || {
+                    if let Some(shared) = weak_shared.upgrade() {
+                        stop_shared_run_if_current(&shared, admitted_run_id);
+                    }
+                });
+            }
             *admission = Some(ActiveAdmission {
                 macro_id: request.macro_id,
                 origin,
                 run_id: admitted_run_id,
                 owned_start_gate: owned_start_gate.clone(),
+                activity,
             });
             run_id = Some(admitted_run_id);
         }
@@ -880,6 +956,16 @@ impl MacroRuntime {
             })
             .is_err()
         {
+            if let Some(activity) = admission
+                .as_ref()
+                .and_then(|active| active.activity.as_ref())
+            {
+                activity.finish(
+                    ActivityOutcome::Failed,
+                    Some(ActivityDiagnostic::WorkerUnavailable),
+                    ActivityRetirement::Confirmed,
+                );
+            }
             self.shared.control.finish();
             self.shared.operations.release(Operation::Playback);
             *admission = None;
@@ -920,24 +1006,7 @@ impl MacroRuntime {
     /// Stop only the run whose ID is still admitted. The ID comparison and
     /// Stop latch are atomic with respect to admission of another run.
     fn stop_if_current(&self, run_id: u64) -> bool {
-        let admission = self.shared.admission.lock().unwrap();
-        let Some(active) = admission.as_ref().filter(|active| active.run_id == run_id) else {
-            return false;
-        };
-        if let Some(gate) = active.owned_start_gate.as_ref() {
-            gate.transition(OWNED_RUN_CANCELLED);
-        }
-        self.shared.control.stop();
-        let snapshot = self.snapshot();
-        if snapshot.run_id == run_id
-            && matches!(snapshot.state, RuntimeState::Running | RuntimeState::Paused)
-        {
-            publish(&self.shared, |snapshot| {
-                snapshot.state = RuntimeState::Stopping;
-                snapshot.pause_reason = None;
-            });
-        }
-        true
+        stop_shared_run_if_current(&self.shared, run_id)
     }
 
     fn activate_owned_if_current(
@@ -1430,6 +1499,28 @@ fn set_manual_pause(snapshot: &mut RuntimeSnapshot) {
     }
 }
 
+fn stop_shared_run_if_current(shared: &Shared, run_id: u64) -> bool {
+    let admission = shared.admission.lock().unwrap();
+    let Some(active) = admission.as_ref().filter(|active| active.run_id == run_id) else {
+        return false;
+    };
+    if let Some(gate) = active.owned_start_gate.as_ref() {
+        gate.transition(OWNED_RUN_CANCELLED);
+    }
+    shared.control.stop();
+    let snapshot = shared.snapshot.read().unwrap();
+    if snapshot.run_id == run_id
+        && matches!(snapshot.state, RuntimeState::Running | RuntimeState::Paused)
+    {
+        drop(snapshot);
+        publish(shared, |snapshot| {
+            snapshot.state = RuntimeState::Stopping;
+            snapshot.pause_reason = None;
+        });
+    }
+    true
+}
+
 fn clear_pause_reason(shared: &Shared) {
     if shared.snapshot.read().unwrap().pause_reason.is_some() {
         publish(shared, |snapshot| snapshot.pause_reason = None);
@@ -1496,14 +1587,17 @@ struct RootRunGuard<'a> {
     completed: bool,
 }
 impl RootRunGuard<'_> {
-    fn complete<T>(mut self, publish_terminal: impl FnOnce() -> T) -> T {
+    fn complete<T>(mut self, publish_terminal: impl FnOnce() -> T) -> (T, Option<ActivityTask>) {
         let mut admission = self.shared.admission.lock().unwrap();
         self.shared.control.finish();
         let result = publish_terminal();
+        let activity = admission
+            .as_ref()
+            .and_then(|active| active.activity.clone());
         self.shared.operations.release(Operation::Playback);
         *admission = None;
         self.completed = true;
-        result
+        (result, activity)
     }
 }
 impl Drop for RootRunGuard<'_> {
@@ -1543,6 +1637,16 @@ fn run_one(
     let start_cancelled = owned_start_gate
         .as_ref()
         .is_some_and(|gate| !gate.wait_for_start());
+    let activity = shared
+        .admission
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|active| active.run_id == run_id)
+        .and_then(|active| active.activity.clone());
+    if let Some(activity) = activity {
+        activity.mark_running();
+    }
     let mut clipboard_privacy_active = false;
     let result = if start_cancelled {
         Err(ExecutionDiagnostic::new(
@@ -1602,6 +1706,18 @@ fn run_one(
                 publish(shared, |snapshot| {
                     apply_execution_event(snapshot, &program, context, event, state)
                 });
+                if let Some(activity) = _admission
+                    .as_ref()
+                    .filter(|active| active.run_id == run_id)
+                    .and_then(|active| active.activity.as_ref())
+                {
+                    let snapshot = shared.snapshot.read().unwrap();
+                    activity.set_progress(Some(ActivityProgress::new(
+                        snapshot.completed_steps as u64,
+                        Some(snapshot.total_steps as u64),
+                        ActivityProgressUnit::Steps,
+                    )));
+                }
             };
             let executor = Executor::new(backends.clone(), shared.control.clone());
             let options = match mode {
@@ -1646,7 +1762,7 @@ fn run_one(
         })
     };
     let failure_kind = result.as_ref().err().map(|diagnostic| diagnostic.kind);
-    let state = run_guard.complete(|| {
+    let (state, activity) = run_guard.complete(|| {
         let stopped = shared.control.is_stopped();
         let state = match &result {
             Ok(()) if stopped => RuntimeState::Stopped,
@@ -1699,6 +1815,18 @@ fn run_one(
         });
         state
     });
+    if let Some(activity) = activity {
+        let outcome = match state {
+            RuntimeState::Completed => ActivityOutcome::Completed,
+            RuntimeState::Stopped => ActivityOutcome::Cancelled,
+            _ => ActivityOutcome::Failed,
+        };
+        activity.finish(
+            outcome,
+            (outcome == ActivityOutcome::Failed).then_some(ActivityDiagnostic::WorkerFailed),
+            ActivityRetirement::Unavailable,
+        );
+    }
     if let Some(completion) = owned_completion {
         let _ = completion.send(OwnedMacroRunCompletion {
             run_id,
@@ -2021,6 +2149,13 @@ pub fn stop() -> Result<()> {
 /// Returns transient execution state; it is never serialized by `MkMacroStore`.
 pub fn snapshot() -> Option<Arc<RuntimeSnapshot>> {
     RUNTIME.read().unwrap().as_ref().map(|r| r.snapshot())
+}
+
+pub(crate) fn attach_activity_center(center: ActivityCenter) {
+    let runtime = RUNTIME.read().unwrap().clone();
+    if let Some(runtime) = runtime {
+        runtime.attach_activity_center(center);
+    }
 }
 /// Returns admission and the last retained snapshot for one preview ticket.
 /// The retained snapshot survives later stored playback snapshots.
@@ -2561,6 +2696,87 @@ mod run_mode_tests {
             );
             thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn macro_activity_routes_cancel_to_exact_run_and_reports_terminal_progress() {
+        let target = test_macro(
+            1,
+            true,
+            vec![step(
+                1,
+                MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 0,
+                    ..Default::default()
+                }),
+            )],
+        );
+        let (_dir, runtime, _guard) = runtime_with(vec![target]);
+        let center = ActivityCenter::new();
+        runtime.attach_activity_center(center.clone());
+
+        let first_barrier = runtime.install_test_worker_barrier();
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        first_barrier.wait_until_blocked();
+        let first = center.snapshot();
+        assert_eq!(first.rows.len(), 1);
+        let first_key = first.rows[0].key;
+        assert_eq!(
+            first.rows[0].lifecycle,
+            crate::activity::ActivityLifecycle::Queued
+        );
+        assert_eq!(
+            center.request_cancel(first_key),
+            crate::activity::ActivityCancelResult::Requested
+        );
+        assert_eq!(
+            center.snapshot().rows[0].lifecycle,
+            crate::activity::ActivityLifecycle::Cancelling
+        );
+        first_barrier.release();
+        let stopped = wait_for_terminal(&runtime);
+        assert_eq!(stopped.state, RuntimeState::Stopped);
+        let stopped_activity = center.snapshot();
+        assert_eq!(stopped_activity.rows.len(), 1);
+        assert_eq!(stopped_activity.rows[0].key, first_key);
+        assert_eq!(
+            stopped_activity.rows[0].lifecycle,
+            crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Cancelled)
+        );
+        assert_eq!(
+            stopped_activity.rows[0].retirement,
+            ActivityRetirement::Unavailable
+        );
+
+        let second_barrier = runtime.install_test_worker_barrier();
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        second_barrier.wait_until_blocked();
+        assert_eq!(
+            center.request_cancel(first_key),
+            crate::activity::ActivityCancelResult::Terminal
+        );
+        let active_rows = center.snapshot();
+        assert_eq!(active_rows.rows.len(), 2);
+        assert!(active_rows.rows.iter().any(|row| {
+            row.key != first_key && row.lifecycle == crate::activity::ActivityLifecycle::Queued
+        }));
+        second_barrier.release();
+        let completed = wait_for_terminal_after(&runtime, stopped.run_id);
+        assert_eq!(completed.state, RuntimeState::Completed);
+        let completed_activity = center.snapshot();
+        assert_eq!(completed_activity.rows.len(), 2);
+        assert!(completed_activity.rows.iter().any(|row| {
+            row.key != first_key
+                && row.lifecycle
+                    == crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Completed)
+                && row.progress.is_some_and(|progress| progress.completed == 1)
+        }));
     }
 
     fn wait_for_state(runtime: &MacroRuntime, wanted: RuntimeState) -> Arc<RuntimeSnapshot> {

@@ -1,9 +1,15 @@
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityProgress, ActivityProgressUnit, ActivityRetirement, ActivitySlot,
+    ActivityTask,
+};
 use crate::file_search::executor::FileSearchExecutor;
 use crate::file_search::model::{
-    SearchBackend, SearchEvent, SearchId, SearchKind, SearchRequest, SearchResult, SearchScope,
-    SearchStatus,
+    SearchBackend, SearchEvent, SearchId, SearchKind, SearchProgress, SearchRequest, SearchResult,
+    SearchScope, SearchStatus,
 };
 use crate::file_search::settings::FileSearchSettings;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -47,8 +53,99 @@ pub trait SearchExecutor: Send + Sync + 'static {
         id: SearchId,
         request: SearchRequest,
         token: CancellationToken,
-        events: mpsc::Sender<SearchEvent>,
+        events: SearchEventSender,
     );
+}
+
+/// Cloneable publication endpoint that observes terminal search events on the
+/// worker thread before forwarding them to the GUI event queue.
+#[derive(Clone)]
+pub struct SearchEventSender {
+    sender: mpsc::Sender<SearchEvent>,
+    activity: Option<Arc<SearchActivityReporter>>,
+}
+
+struct SearchActivityReporter {
+    task: ActivityTask,
+    terminal: AtomicBool,
+}
+
+impl SearchActivityReporter {
+    fn set_progress(&self, progress: ActivityProgress) {
+        if !self.terminal.load(Ordering::Acquire) {
+            self.task.set_progress(Some(progress));
+        }
+    }
+
+    fn finish(&self, outcome: ActivityOutcome, diagnostic: Option<ActivityDiagnostic>) {
+        if !self.terminal.swap(true, Ordering::AcqRel) {
+            self.task
+                .finish(outcome, diagnostic, ActivityRetirement::Unavailable);
+        }
+    }
+}
+
+impl SearchEventSender {
+    fn with_activity(sender: mpsc::Sender<SearchEvent>, activity: Option<ActivityTask>) -> Self {
+        Self {
+            sender,
+            activity: activity.map(|task| {
+                Arc::new(SearchActivityReporter {
+                    task,
+                    terminal: AtomicBool::new(false),
+                })
+            }),
+        }
+    }
+
+    fn finish_if_missing(&self, outcome: ActivityOutcome, diagnostic: Option<ActivityDiagnostic>) {
+        if let Some(activity) = &self.activity {
+            activity.finish(outcome, diagnostic);
+        }
+    }
+
+    fn has_terminal(&self) -> bool {
+        self.activity
+            .as_ref()
+            .is_some_and(|activity| activity.terminal.load(Ordering::Acquire))
+    }
+
+    pub fn send(&self, event: SearchEvent) -> Result<(), mpsc::SendError<SearchEvent>> {
+        match &event {
+            SearchEvent::Progress { progress, .. } => {
+                if let Some(activity) = &self.activity {
+                    activity.set_progress(ActivityProgress::new(
+                        progress.files_scanned,
+                        None,
+                        ActivityProgressUnit::Files,
+                    ));
+                }
+            }
+            SearchEvent::Completed { .. } => {
+                self.finish_if_missing(ActivityOutcome::Completed, None);
+            }
+            SearchEvent::Cancelled { .. } => {
+                self.finish_if_missing(ActivityOutcome::Cancelled, None);
+            }
+            SearchEvent::Failed { .. } => {
+                self.finish_if_missing(
+                    ActivityOutcome::Failed,
+                    Some(ActivityDiagnostic::WorkerFailed),
+                );
+            }
+            SearchEvent::Started { .. }
+            | SearchEvent::BackendFallback { .. }
+            | SearchEvent::Diagnostic { .. }
+            | SearchEvent::Result { .. } => {}
+        }
+        self.sender.send(event)
+    }
+}
+
+impl From<mpsc::Sender<SearchEvent>> for SearchEventSender {
+    fn from(sender: mpsc::Sender<SearchEvent>) -> Self {
+        Self::with_activity(sender, None)
+    }
 }
 
 pub struct SearchCoordinator {
@@ -62,6 +159,8 @@ pub struct SearchCoordinator {
     diagnostics: SearchDiagnostics,
     executor: Arc<dyn SearchExecutor>,
     production_settings: Option<FileSearchSettings>,
+    activity_center: Option<ActivityCenter>,
+    active_activity: Option<ActivityTask>,
 }
 
 impl Default for SearchCoordinator {
@@ -104,7 +203,13 @@ impl SearchCoordinator {
             diagnostics: SearchDiagnostics::default(),
             executor,
             production_settings,
+            activity_center: None,
+            active_activity: None,
         }
+    }
+
+    pub fn attach_activity_center(&mut self, center: ActivityCenter) {
+        self.activity_center = Some(center);
     }
 
     pub fn reconfigure_from_settings(&mut self, settings: FileSearchSettings) {
@@ -123,19 +228,58 @@ impl SearchCoordinator {
         let id = SearchId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
         let token = CancellationToken::new();
+        let activity = self.activity_center.as_ref().and_then(|center| {
+            center.start(
+                ActivityOwner::FileSearch,
+                ActivitySlot::Primary,
+                ActivityIncarnation::new(id.0),
+                ActivityOperation::SearchFiles,
+            )
+        });
+        if let Some(activity) = activity.as_ref() {
+            let cancel = token.clone();
+            activity.set_cancel_handler(move || cancel.cancel());
+        }
 
         self.active_search_id = Some(id);
         self.active_token = Some(token.clone());
         self.active_status = SearchStatus::Running;
         self.last_backend = None;
 
-        let events = self.event_sender.clone();
+        let events = SearchEventSender::with_activity(self.event_sender.clone(), activity.clone());
+        let activity_events = events.clone();
         let executor = Arc::clone(&self.executor);
         let worker_request = request;
         let worker_token = token;
+        let worker_activity = activity.clone();
         thread::spawn(move || {
-            executor.execute(id, worker_request, worker_token, events);
+            if let Some(activity) = worker_activity.as_ref() {
+                activity.mark_running();
+            }
+            let execution = catch_unwind(AssertUnwindSafe(|| {
+                executor.execute(id, worker_request, worker_token.clone(), events)
+            }));
+            if !activity_events.has_terminal() {
+                let (outcome, diagnostic) = if execution.is_err() {
+                    (
+                        ActivityOutcome::Failed,
+                        Some(ActivityDiagnostic::WorkerFailed),
+                    )
+                } else if worker_token.is_cancelled() {
+                    (ActivityOutcome::Cancelled, None)
+                } else {
+                    (
+                        ActivityOutcome::Failed,
+                        Some(ActivityDiagnostic::WorkerFailed),
+                    )
+                };
+                activity_events.finish_if_missing(outcome, diagnostic);
+            }
+            if let Err(payload) = execution {
+                resume_unwind(payload);
+            }
         });
+        self.active_activity = activity;
 
         id
     }
@@ -198,6 +342,11 @@ impl SearchCoordinator {
     }
 
     fn cancel_active_token(&mut self) {
+        if let Some(activity) = self.active_activity.as_ref()
+            && let Some(center) = self.activity_center.as_ref()
+        {
+            let _ = center.request_cancel(activity.key());
+        }
         if let Some(token) = &self.active_token {
             token.cancel();
         }
@@ -289,7 +438,7 @@ pub fn event_id(event: &SearchEvent) -> SearchId {
 }
 
 pub fn send_result_limited(
-    events: &mpsc::Sender<SearchEvent>,
+    events: &SearchEventSender,
     id: SearchId,
     result: SearchResult,
     emitted: &mut usize,
@@ -317,6 +466,7 @@ mod tests {
     enum FakeMode {
         Success(usize),
         Empty,
+        Progress(u64),
         Failure,
         Wait,
     }
@@ -464,7 +614,7 @@ mod tests {
                 .expect("cancelled fake worker must still own its release gate");
         }
 
-        fn publish(&self, events: &mpsc::Sender<SearchEvent>, event: SearchEvent) {
+        fn publish(&self, events: &SearchEventSender, event: SearchEvent) {
             events
                 .send(event.clone())
                 .expect("coordinator must receive the fake worker event");
@@ -480,7 +630,7 @@ mod tests {
             id: SearchId,
             request: SearchRequest,
             token: CancellationToken,
-            events: mpsc::Sender<SearchEvent>,
+            events: SearchEventSender,
         ) {
             let mode = self.modes[&id].clone();
             self.receipt_sender
@@ -526,6 +676,22 @@ mod tests {
                     self.publish(&events, SearchEvent::Completed { id });
                 }
                 FakeMode::Empty => {
+                    self.publish(&events, SearchEvent::Completed { id });
+                }
+                FakeMode::Progress(files_scanned) => {
+                    self.publish(
+                        &events,
+                        SearchEvent::Progress {
+                            id,
+                            progress: SearchProgress {
+                                files_scanned,
+                                directories_scanned: 0,
+                                results_found: 0,
+                                status: SearchStatus::Running,
+                                global_truncated: false,
+                            },
+                        },
+                    );
                     self.publish(&events, SearchEvent::Completed { id });
                 }
                 FakeMode::Failure => {
@@ -852,7 +1018,7 @@ mod tests {
                 id: SearchId,
                 request: SearchRequest,
                 token: CancellationToken,
-                events: mpsc::Sender<SearchEvent>,
+                events: SearchEventSender,
             ) {
                 if id == SearchId(1) {
                     self.blocked
@@ -916,6 +1082,97 @@ mod tests {
         assert_eq!(
             coordinator.diagnostics().last_error.as_deref(),
             Some("fake failure")
+        );
+    }
+
+    #[test]
+    fn terminal_failure_is_published_to_activity_without_gui_event_drain() {
+        let executor = FakeExecutor::new(vec![FakeMode::Failure]);
+        let mut coordinator = SearchCoordinator::with_executor(executor.clone());
+        let activity_center = ActivityCenter::new();
+        coordinator.attach_activity_center(activity_center.clone());
+        let id = coordinator.start_search(request(
+            SearchKind::Filename,
+            SearchScope::Roots { roots: Vec::new() },
+            10,
+        ));
+
+        assert_eq!(
+            executor.publications(id),
+            [SearchEvent::Failed {
+                id,
+                error: "fake failure".to_owned(),
+            }]
+        );
+        let row = activity_center
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.key.incarnation().get() == id.0)
+            .expect("worker terminal event publishes its Activity fact");
+        assert_eq!(
+            row.lifecycle,
+            crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Failed)
+        );
+        assert_eq!(row.retirement, ActivityRetirement::Unavailable);
+        assert_eq!(
+            coordinator.active_status(),
+            SearchStatus::Running,
+            "GUI status is intentionally still undrained"
+        );
+    }
+
+    #[test]
+    fn worker_progress_is_published_to_activity_without_gui_event_drain() {
+        let files_scanned = 37;
+        let executor = FakeExecutor::new(vec![FakeMode::Progress(files_scanned)]);
+        let mut coordinator = SearchCoordinator::with_executor(executor.clone());
+        let activity_center = ActivityCenter::new();
+        coordinator.attach_activity_center(activity_center.clone());
+        let id = coordinator.start_search(request(
+            SearchKind::Filename,
+            SearchScope::Roots { roots: Vec::new() },
+            10,
+        ));
+
+        assert_eq!(
+            executor.publications(id),
+            [
+                SearchEvent::Progress {
+                    id,
+                    progress: SearchProgress {
+                        files_scanned,
+                        directories_scanned: 0,
+                        results_found: 0,
+                        status: SearchStatus::Running,
+                        global_truncated: false,
+                    },
+                },
+                SearchEvent::Completed { id },
+            ]
+        );
+        let row = activity_center
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.key.incarnation().get() == id.0)
+            .expect("worker progress publishes its Activity fact");
+        assert_eq!(
+            row.progress,
+            Some(ActivityProgress::new(
+                files_scanned,
+                None,
+                ActivityProgressUnit::Files,
+            ))
+        );
+        assert_eq!(
+            row.lifecycle,
+            crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Completed)
+        );
+        assert_eq!(
+            coordinator.active_status(),
+            SearchStatus::Running,
+            "GUI status is intentionally still undrained"
         );
     }
 

@@ -13,8 +13,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::{Arc, atomic::AtomicUsize};
-use std::thread::JoinHandle;
-
 const MIB: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -507,7 +505,7 @@ pub struct Pinboard {
     image_budget: Arc<SharedImageBudget>,
     gpu_budget: Arc<live::SharedGpuBudget>,
     pending: Option<PendingCapture>,
-    retired_live_workers: Vec<JoinHandle<()>>,
+    retired_live_workers: Vec<live::RetiredLiveWorker>,
     next_pin_id: u64,
     next_capture_generation: u64,
 }

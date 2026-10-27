@@ -52,10 +52,11 @@ pub(crate) enum NavigationDialogKind {
     TableUtility,
     ImageCompare,
     DuplicateFinder,
+    Activity,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 17] = [
+    pub(crate) const ALL: [Self; 18] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -73,6 +74,7 @@ impl NavigationDialogKind {
         Self::TableUtility,
         Self::ImageCompare,
         Self::DuplicateFinder,
+        Self::Activity,
     ];
 
     const fn index(self) -> usize {
@@ -94,6 +96,7 @@ impl NavigationDialogKind {
             Self::TableUtility => 14,
             Self::ImageCompare => 15,
             Self::DuplicateFinder => 16,
+            Self::Activity => 17,
         }
     }
 
@@ -116,6 +119,7 @@ impl NavigationDialogKind {
             Self::TableUtility => "table-utility",
             Self::ImageCompare => "image-compare",
             Self::DuplicateFinder => "duplicate-finder",
+            Self::Activity => "activity",
         }
     }
 
@@ -141,6 +145,7 @@ impl NavigationDialogKind {
             Self::TableUtility => egui::Id::new(Some("Table Utility")),
             Self::ImageCompare => egui::Id::new(Some("Image Comparison")),
             Self::DuplicateFinder => egui::Id::new(Some("Duplicate Finder")),
+            Self::Activity => egui::Id::new("activity_dialog"),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -3938,6 +3943,11 @@ mod tests {
                     }
                     NavigationDialogKind::DuplicateFinder => {
                         egui::Window::new("Duplicate Finder").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::Activity => {
+                        egui::Window::new("Activity")
+                            .id(egui::Id::new("activity_dialog"))
+                            .show(ctx, |_| {});
                     }
                     NavigationDialogKind::MouseSettings => {
                         egui::Window::new("Mouse Settings").show(ctx, |_| {});

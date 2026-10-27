@@ -2888,7 +2888,7 @@ impl FileSearchDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
+    use crate::file_search::coordinator::{CancellationToken, SearchEventSender, SearchExecutor};
     use crate::file_search::model::{
         ContentFileResult, ContentMatch, FileKind, FilenameRank, FilenameResult, SearchProgress,
     };
@@ -2912,7 +2912,7 @@ mod tests {
             _id: SearchId,
             request: SearchRequest,
             _token: CancellationToken,
-            events: mpsc::Sender<SearchEvent>,
+            events: SearchEventSender,
         ) {
             self.requests.lock().unwrap().push(request);
             let _ = events.send(SearchEvent::Completed { id: SearchId(1) });
