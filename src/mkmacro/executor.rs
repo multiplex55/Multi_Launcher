@@ -24,6 +24,42 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Shared monotonic and wall-clock source for one admitted macro run. Wall time
+/// is display-only; elapsed measurements use only `monotonic_now`.
+pub(crate) trait MonotonicClock: Send + Sync {
+    fn monotonic_now(&self) -> Duration;
+    fn wall_now(&self) -> std::time::SystemTime;
+}
+
+#[derive(Debug)]
+pub(crate) struct SystemMonotonicClock {
+    started: Instant,
+}
+
+impl SystemMonotonicClock {
+    pub(crate) fn new() -> Self {
+        Self {
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Default for SystemMonotonicClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MonotonicClock for SystemMonotonicClock {
+    fn monotonic_now(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    fn wall_now(&self) -> std::time::SystemTime {
+        std::time::SystemTime::now()
+    }
+}
+
 pub(crate) fn program_contains_clipboard_actions(program: &MkCompiledProgram) -> bool {
     let mut pending = vec![program.root_macro_id];
     let mut visited = std::collections::HashSet::new();
@@ -945,6 +981,9 @@ struct ControlState {
     paused: bool,
     stopped: bool,
     active: bool,
+    clock: Option<Arc<dyn MonotonicClock>>,
+    pause_started_at: Option<Duration>,
+    paused_elapsed: Duration,
 }
 #[derive(Default)]
 pub struct RunControl {
@@ -953,28 +992,59 @@ pub struct RunControl {
 }
 impl RunControl {
     pub fn reset(&self) {
+        self.reset_with_clock(Arc::new(SystemMonotonicClock::new()));
+    }
+    pub(crate) fn reset_with_clock(&self, clock: Arc<dyn MonotonicClock>) {
         let mut s = self.state.lock().unwrap();
         *s = ControlState {
             active: true,
+            clock: Some(clock),
             ..Default::default()
         };
         self.wake.notify_all()
     }
     pub(crate) fn finish(&self) {
-        self.state.lock().unwrap().active = false;
+        let mut s = self.state.lock().unwrap();
+        close_pause_interval(&mut s);
+        s.active = false;
         self.wake.notify_all();
     }
     pub fn pause(&self) {
-        self.state.lock().unwrap().paused = true;
+        let mut s = self.state.lock().unwrap();
+        if !s.paused {
+            s.paused = true;
+            if s.active {
+                s.pause_started_at = s.clock.as_ref().map(|clock| clock.monotonic_now());
+            }
+        }
         self.wake.notify_all()
     }
     pub fn resume(&self) {
-        self.state.lock().unwrap().paused = false;
+        let mut s = self.state.lock().unwrap();
+        if s.paused {
+            close_pause_interval(&mut s);
+            s.paused = false;
+        }
         self.wake.notify_all()
     }
     pub fn stop(&self) {
-        self.state.lock().unwrap().stopped = true;
+        let mut s = self.state.lock().unwrap();
+        close_pause_interval(&mut s);
+        s.stopped = true;
         self.wake.notify_all()
+    }
+    /// Actual paused duration across real RunControl transitions, including a
+    /// currently open interval. The runtime reads it only at root termination.
+    pub(crate) fn paused_duration(&self) -> Duration {
+        let s = self.state.lock().unwrap();
+        let ongoing = s.pause_started_at.and_then(|started| {
+            s.clock
+                .as_ref()
+                .map(|clock| clock.monotonic_now().saturating_sub(started))
+        });
+        ongoing.map_or(s.paused_elapsed, |duration| {
+            s.paused_elapsed.saturating_add(duration)
+        })
     }
     pub fn is_active(&self) -> bool {
         self.state.lock().unwrap().active
@@ -1023,6 +1093,14 @@ impl RunControl {
                 return Ok(());
             }
         }
+    }
+}
+
+fn close_pause_interval(state: &mut ControlState) {
+    if let (Some(started), Some(clock)) = (state.pause_started_at.take(), state.clock.as_ref()) {
+        state.paused_elapsed = state
+            .paused_elapsed
+            .saturating_add(clock.monotonic_now().saturating_sub(started));
     }
 }
 
@@ -9151,5 +9229,69 @@ mod phase_d_tests {
 
         assert_eq!(error.kind, DiagnosticKind::TargetNotFound);
         assert_eq!(configured[0].action, MkAction::ImageFind(payload));
+    }
+}
+
+#[cfg(test)]
+mod run_control_timing_tests {
+    use super::{MonotonicClock, RunControl};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[derive(Default)]
+    struct ManualClock(AtomicU64);
+
+    impl ManualClock {
+        fn set_millis(&self, value: u64) {
+            self.0
+                .store(value.saturating_mul(1_000_000), Ordering::SeqCst);
+        }
+    }
+
+    impl MonotonicClock for ManualClock {
+        fn monotonic_now(&self) -> Duration {
+            Duration::from_nanos(self.0.load(Ordering::SeqCst))
+        }
+
+        fn wall_now(&self) -> SystemTime {
+            UNIX_EPOCH
+        }
+    }
+
+    #[test]
+    fn pause_duration_tracks_control_transitions_and_closes_open_intervals() {
+        let clock = Arc::new(ManualClock::default());
+        let control = RunControl::default();
+        control.reset_with_clock(clock.clone());
+
+        clock.set_millis(10);
+        control.pause();
+        clock.set_millis(12);
+        control.pause();
+        assert_eq!(control.paused_duration(), Duration::from_millis(2));
+
+        clock.set_millis(20);
+        control.resume();
+        clock.set_millis(25);
+        control.pause();
+        clock.set_millis(28);
+        assert_eq!(control.paused_duration(), Duration::from_millis(13));
+        clock.set_millis(31);
+        control.stop();
+        assert_eq!(control.paused_duration(), Duration::from_millis(16));
+        clock.set_millis(40);
+        control.finish();
+        assert_eq!(control.paused_duration(), Duration::from_millis(16));
+
+        clock.set_millis(50);
+        control.reset_with_clock(clock.clone());
+        clock.set_millis(55);
+        control.pause();
+        clock.set_millis(59);
+        control.finish();
+        assert_eq!(control.paused_duration(), Duration::from_millis(4));
     }
 }

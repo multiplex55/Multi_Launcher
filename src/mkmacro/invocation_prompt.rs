@@ -3,7 +3,7 @@
 use super::executor::ExecResult;
 use super::{
     DiagnosticKind, ExecutionDiagnostic, MkInvocation, MkInvocationValues, MkMacroParameter,
-    runtime::MacroRuntime,
+    runtime::{InvocationSource, MacroRuntime},
 };
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -18,6 +18,7 @@ pub struct InvocationPromptRequest {
     pub macro_description: String,
     pub parameters: Vec<MkMacroParameter>,
     pub prepared_values: MkInvocationValues,
+    pub invocation_source: InvocationSource,
 }
 
 struct QueuedInvocation {
@@ -435,7 +436,11 @@ mod tests {
                     ..MkInvocation::new(1)
                 };
                 runtime
-                    .prepare_invocation(invocation.clone(), &broker)
+                    .prepare_invocation_with_source(
+                        invocation.clone(),
+                        &broker,
+                        InvocationSource::MacroDialog,
+                    )
                     .unwrap();
                 let mut pending = registration.take_pending().unwrap();
                 assert_eq!(pending.request().invocation, invocation);
@@ -445,8 +450,46 @@ mod tests {
                     "Input description"
                 );
                 assert!(runtime.take_test_commands().is_empty());
+                runtime.with_run_summaries(|revision, summaries| {
+                    assert_eq!(revision, 0);
+                    assert!(
+                        summaries.is_empty(),
+                        "waiting for input is not a run admission"
+                    );
+                });
                 pending.submit(values()).unwrap();
                 wait(&runtime, RuntimeState::Completed);
+                let terminal = runtime.snapshot();
+                assert_eq!(terminal.state, RuntimeState::Completed);
+                let completed_run_id = terminal.run_id;
+                let summary_deadline = Instant::now() + Duration::from_secs(3);
+                let summary_published = loop {
+                    let published = runtime.with_run_summaries(|_, summaries| {
+                        summaries
+                            .iter()
+                            .any(|summary| summary.run_id == completed_run_id)
+                    });
+                    if published {
+                        break true;
+                    }
+                    if Instant::now() >= summary_deadline {
+                        break false;
+                    }
+                    std::thread::yield_now();
+                };
+                assert!(
+                    summary_published,
+                    "completed run {completed_run_id} was not published to summary history"
+                );
+                runtime.with_run_summaries(|_, summaries| {
+                    assert_eq!(summaries.len(), 1);
+                    assert_eq!(summaries[0].run_id, completed_run_id);
+                    assert_eq!(
+                        summaries[0].invocation_source,
+                        InvocationSource::MacroDialog,
+                        "confirming typed input preserves the original invocation source"
+                    );
+                });
                 let commands = runtime.take_test_commands();
                 assert_eq!(
                     commands,

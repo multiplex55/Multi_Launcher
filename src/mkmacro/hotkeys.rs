@@ -652,7 +652,10 @@ impl MkMacroHotkeyService {
             active_window_backend,
             reserved,
             Arc::new(|id| {
-                if let Err(error) = crate::mkmacro::runtime::run(id) {
+                if let Err(error) = crate::mkmacro::runtime::run_with_source(
+                    id,
+                    crate::mkmacro::InvocationSource::Hotkey,
+                ) {
                     let message = format!("Macro {id} hotkey invocation failed: {error}");
                     tracing::error!(macro_id = id, error = %error, "mkmacro hotkey invocation failed");
                     crate::toast_log::append_toast_log(&message);

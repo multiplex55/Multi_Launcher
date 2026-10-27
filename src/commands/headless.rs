@@ -904,7 +904,10 @@ fn execute_macro(command: MacroCommand) -> anyhow::Result<()> {
         MacroCommand::LegacyDialog => crate::plugins::macros::run_macro("dialog"),
         MacroCommand::MkDialog => Ok(()),
         MacroCommand::RunLegacy(name) => crate::plugins::macros::run_macro(&name),
-        MacroCommand::MkRun(id) => crate::mkmacro::runtime::run(id),
+        MacroCommand::MkRun(id) => crate::mkmacro::runtime::run_with_source(
+            id,
+            crate::mkmacro::InvocationSource::LauncherCommand,
+        ),
         MacroCommand::MkPause => crate::mkmacro::runtime::pause(),
         MacroCommand::MkResume => crate::mkmacro::runtime::resume(),
         MacroCommand::MkStop => crate::mkmacro::runtime::stop(),

@@ -6993,27 +6993,46 @@ impl MkMacroDialog {
 
     pub fn run_selected_macro(&mut self) -> anyhow::Result<()> {
         let id = self.prepare_execution_checked()?;
-        crate::mkmacro::runtime::run(id)
+        crate::mkmacro::runtime::run_with_source(id, crate::mkmacro::InvocationSource::MacroDialog)
     }
     pub fn run_from_step(&mut self, original_step_id: u64) -> anyhow::Result<()> {
         let (id, step) = self.prepare_from_step(original_step_id)?;
-        crate::mkmacro::runtime::run_from(id, step)
+        crate::mkmacro::runtime::run_from_with_source(
+            id,
+            step,
+            crate::mkmacro::InvocationSource::MacroDialog,
+        )
     }
     pub fn run_selected_steps(&mut self) -> anyhow::Result<()> {
         let (id, ids) = self.prepare_selected_steps()?;
-        crate::mkmacro::runtime::run_selection(id, ids)
+        crate::mkmacro::runtime::run_selection_with_source(
+            id,
+            ids,
+            crate::mkmacro::InvocationSource::MacroDialog,
+        )
     }
     pub fn debug_selected_macro(&mut self) -> anyhow::Result<()> {
         let id = self.prepare_execution_checked()?;
-        crate::mkmacro::runtime::debug_run(id)
+        crate::mkmacro::runtime::debug_run_with_source(
+            id,
+            crate::mkmacro::InvocationSource::MacroDialog,
+        )
     }
     pub fn debug_from_step(&mut self, original_step_id: u64) -> anyhow::Result<()> {
         let (id, step) = self.prepare_from_step(original_step_id)?;
-        crate::mkmacro::runtime::debug_run_from(id, step)
+        crate::mkmacro::runtime::debug_run_from_with_source(
+            id,
+            step,
+            crate::mkmacro::InvocationSource::MacroDialog,
+        )
     }
     pub fn debug_selected_steps(&mut self) -> anyhow::Result<()> {
         let (id, ids) = self.prepare_selected_steps()?;
-        crate::mkmacro::runtime::debug_run_selection(id, ids)
+        crate::mkmacro::runtime::debug_run_selection_with_source(
+            id,
+            ids,
+            crate::mkmacro::InvocationSource::MacroDialog,
+        )
     }
 
     fn observe_runtime_snapshot(&mut self, snapshot: Option<Arc<crate::mkmacro::RuntimeSnapshot>>) {
