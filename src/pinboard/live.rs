@@ -1177,7 +1177,8 @@ mod native {
     use windows::Foundation::{EventRegistrationToken, TypedEventHandler};
     use windows::Graphics::Capture::{
         Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem,
-        GraphicsCaptureSession,
+        GraphicsCaptureSession, IDirect3D11CaptureFramePoolStatics2,
+        IGraphicsCaptureSessionStatics,
     };
     use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
     use windows::Graphics::DirectX::DirectXPixelFormat;
@@ -1201,7 +1202,7 @@ mod native {
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
     };
-    use windows::core::{Interface, factory};
+    use windows::core::{Interface, Type, factory};
 
     struct RoApartment;
 
@@ -1229,6 +1230,40 @@ mod native {
         frame_token: Option<EventRegistrationToken>,
         closed_token: Option<EventRegistrationToken>,
         capture_session: Option<GraphicsCaptureSession>,
+    }
+
+    fn create_free_threaded_frame_pool(
+        device: &IDirect3DDevice,
+        pixel_format: DirectXPixelFormat,
+        number_of_buffers: i32,
+        size: SizeInt32,
+    ) -> windows::core::Result<Direct3D11CaptureFramePool> {
+        let statics = factory::<Direct3D11CaptureFramePool, IDirect3D11CaptureFramePoolStatics2>()?;
+        // SAFETY: the typed factory and borrowed device are alive for this ABI
+        // call. The factory writes the declared interface output, which
+        // `from_abi` validates and takes ownership of only on success.
+        unsafe {
+            let mut result = std::ptr::null_mut();
+            (statics.vtable().CreateFreeThreaded)(
+                statics.as_raw(),
+                device.as_raw(),
+                pixel_format,
+                number_of_buffers,
+                size,
+                &mut result,
+            )
+            .and_then(|| Type::from_abi(result))
+        }
+    }
+
+    fn graphics_capture_is_supported() -> windows::core::Result<bool> {
+        let statics = factory::<GraphicsCaptureSession, IGraphicsCaptureSessionStatics>()?;
+        // SAFETY: the scoped typed factory remains live for this synchronous
+        // call, and the ABI writes the declared boolean result.
+        unsafe {
+            let mut result = false;
+            (statics.vtable().IsSupported)(statics.as_raw(), &mut result).map(|| result)
+        }
     }
 
     impl NativeCaptureResources {
@@ -1286,7 +1321,7 @@ mod native {
             validate_source_frame_geometry(binding, source_dimensions, false)?;
             gpu_reservation.resize(estimate_gpu_bytes(source_dimensions, binding.crop)?)?;
 
-            let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+            let frame_pool = create_free_threaded_frame_pool(
                 &self.winrt_device,
                 DirectXPixelFormat::B8G8R8A8UIntNormalized,
                 FRAME_POOL_BUFFERS as i32,
@@ -1400,7 +1435,7 @@ mod native {
         first_frame_sender: SyncSender<Result<(), String>>,
     ) -> Result<(), String> {
         let _apartment = RoApartment::initialize()?;
-        if !GraphicsCaptureSession::IsSupported()
+        if !graphics_capture_is_supported()
             .map_err(|error| format!("Windows Graphics Capture support check failed: {error}"))?
         {
             return Err("Windows Graphics Capture is not supported on this Windows version".into());
@@ -3019,6 +3054,13 @@ mod tests {
             }
             let _host_apartment = HostApartment;
             eprintln!("native baseline host: one balanced MTA lifetime across two sessions");
+            run_owned_window_smoke(true);
+            run_owned_window_smoke(true);
+        }
+
+        #[test]
+        #[ignore = "requires an interactive Windows desktop with Windows Graphics Capture support"]
+        fn activity_native_live_pin_cancel_and_warm_cycle_without_host_apartment() {
             run_owned_window_smoke(true);
             run_owned_window_smoke(true);
         }
