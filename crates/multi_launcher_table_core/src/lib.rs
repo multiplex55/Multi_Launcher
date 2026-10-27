@@ -12,8 +12,13 @@ mod resource;
 mod stream_scan;
 pub use file_source::{
     TABLE_FILE_INDEX_STRIDE, TABLE_FILE_MAX_COLUMNS, TABLE_FILE_MAX_FIELD_BYTES,
-    TABLE_FILE_MAX_RECORD_BYTES, TableAcceptedSource, TableFileBackedSource, TableFileParseOptions,
-    TableFileRow, TableFileRowCursor, TableFileRowId, TableFileSourceError, TableSourceDiagnostic,
+    TABLE_FILE_MAX_RECORD_BYTES, TABLE_FILE_PAGE_MAX_BYTES, TABLE_FILE_PAGE_MAX_ROWS,
+    TABLE_FILE_PAGE_PREVIEW_CHARS, TABLE_FILE_PROVISIONAL_CELL_CHARS,
+    TABLE_FILE_PROVISIONAL_MAX_BYTES, TABLE_FILE_PROVISIONAL_MAX_COLUMNS,
+    TABLE_FILE_PROVISIONAL_MAX_ROWS, TableAcceptedSource, TableFileBackedSource, TableFilePageStop,
+    TableFileParseOptions, TableFileProjectedPage, TableFileProjectedRow, TableFileRow,
+    TableFileRowCursor, TableFileRowId, TableFileRowSelection, TableFileRowSelectionError,
+    TableFileRowSelectionMode, TableFileScanProgress, TableFileSourceError, TableSourceDiagnostic,
     TableSourceId, TableSourceIdentity,
 };
 pub use resource::{

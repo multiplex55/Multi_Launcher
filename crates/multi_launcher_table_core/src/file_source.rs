@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Cursor, Seek, SeekFrom};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +16,13 @@ pub const TABLE_FILE_MAX_COLUMNS: usize = 1024;
 pub const TABLE_FILE_MAX_RECORD_BYTES: u64 = 8 * 1024 * 1024;
 pub const TABLE_FILE_MAX_FIELD_BYTES: u64 = 4 * 1024 * 1024;
 pub const TABLE_FILE_INDEX_STRIDE: u64 = 1024;
+pub const TABLE_FILE_PAGE_MAX_ROWS: usize = 64;
+pub const TABLE_FILE_PAGE_MAX_BYTES: u64 = 2 * 1024 * 1024;
+pub const TABLE_FILE_PAGE_PREVIEW_CHARS: usize = 160;
+pub const TABLE_FILE_PROVISIONAL_MAX_ROWS: usize = 16;
+pub const TABLE_FILE_PROVISIONAL_MAX_BYTES: u64 = 256 * 1024;
+pub const TABLE_FILE_PROVISIONAL_MAX_COLUMNS: usize = 32;
+pub const TABLE_FILE_PROVISIONAL_CELL_CHARS: usize = 80;
 const FILE_WORKING_RAM_BYTES: u64 = 3 * TABLE_FILE_MAX_RECORD_BYTES
     + 64 * 1024
     + TABLE_FILE_MAX_COLUMNS as u64
@@ -102,6 +110,8 @@ pub enum TableFileSourceError {
     Io(String),
     SourceChanged,
     RowOutOfRange,
+    ProjectionColumnOutOfRange,
+    ProjectionLimit,
 }
 
 impl std::fmt::Display for TableFileSourceError {
@@ -114,6 +124,12 @@ impl std::fmt::Display for TableFileSourceError {
                 "The selected table file changed while it was being validated; the previous source was kept.",
             ),
             Self::RowOutOfRange => formatter.write_str("The requested table row is out of range."),
+            Self::ProjectionColumnOutOfRange => {
+                formatter.write_str("The projected table column is outside the source schema.")
+            }
+            Self::ProjectionLimit => {
+                formatter.write_str("The projected table page exceeds its bounded page budget.")
+            }
         }
     }
 }
@@ -146,6 +162,311 @@ impl TableFileRowId {
     pub const fn ordinal(self) -> u64 {
         self.ordinal
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TableFilePageStop {
+    Provisional,
+    RowLimit,
+    ByteLimit,
+    EndOfSource,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableFileProjectedRow {
+    id: TableFileRowId,
+    cells: Vec<String>,
+}
+
+impl TableFileProjectedRow {
+    pub const fn id(&self) -> TableFileRowId {
+        self.id
+    }
+
+    pub fn cells(&self) -> &[String] {
+        &self.cells
+    }
+
+    pub fn cell_for_source_column(
+        &self,
+        page: &TableFileProjectedPage,
+        column: usize,
+    ) -> Option<&str> {
+        let index = page
+            .source_columns
+            .iter()
+            .position(|source| *source == column)?;
+        self.cells.get(index).map(String::as_str)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableFileProjectedPage {
+    source_id: TableSourceId,
+    start_row: u64,
+    next_row: u64,
+    total_rows: Option<u64>,
+    source_columns: Vec<usize>,
+    rows: Vec<TableFileProjectedRow>,
+    stop: TableFilePageStop,
+}
+
+impl TableFileProjectedPage {
+    pub const fn source_id(&self) -> TableSourceId {
+        self.source_id
+    }
+
+    pub const fn start_row(&self) -> u64 {
+        self.start_row
+    }
+
+    pub const fn next_row(&self) -> u64 {
+        self.next_row
+    }
+
+    pub const fn total_rows(&self) -> Option<u64> {
+        self.total_rows
+    }
+
+    pub fn source_columns(&self) -> &[usize] {
+        &self.source_columns
+    }
+
+    pub fn rows(&self) -> &[TableFileProjectedRow] {
+        &self.rows
+    }
+
+    pub const fn stop(&self) -> TableFilePageStop {
+        self.stop
+    }
+
+    pub const fn is_complete(&self) -> bool {
+        self.total_rows.is_some()
+    }
+}
+
+#[derive(Clone)]
+pub struct TableFileScanProgress {
+    preview: TableResourceOwned<TableFileProjectedPage>,
+    validated_rows: u64,
+    schema_columns: usize,
+}
+
+impl TableFileScanProgress {
+    pub fn preview(&self) -> &TableResourceOwned<TableFileProjectedPage> {
+        &self.preview
+    }
+
+    pub const fn validated_rows(&self) -> u64 {
+        self.validated_rows
+    }
+
+    pub const fn schema_columns(&self) -> usize {
+        self.schema_columns
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TableFileRowSelectionMode {
+    AllExcept,
+    Only,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TableFileRowSelectionError {
+    WrongSource,
+    RowOutOfRange,
+    Resource(TableResourceError),
+    Allocation,
+}
+
+impl std::fmt::Display for TableFileRowSelectionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongSource => {
+                formatter.write_str("The selected row belongs to another file source.")
+            }
+            Self::RowOutOfRange => {
+                formatter.write_str("The selected row is outside the file source.")
+            }
+            Self::Resource(error) => std::fmt::Display::fmt(error, formatter),
+            Self::Allocation => {
+                formatter.write_str("Could not allocate the compact row selection.")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TableFileRowSelectionError {}
+
+/// A source-bound exact selection predicate whose retained metadata is sparse.
+/// Clones retain the same resource charge; edits allocate a newly charged set.
+#[derive(Clone)]
+pub struct TableFileRowSelection {
+    source_id: TableSourceId,
+    row_count: u64,
+    mode: TableFileRowSelectionMode,
+    exceptions: TableResourceOwned<HashSet<TableFileRowId>>,
+}
+
+impl TableFileRowSelection {
+    pub fn all_selected(
+        source_id: TableSourceId,
+        row_count: u64,
+        pool: &TableResourcePool,
+    ) -> Result<Self, TableResourceError> {
+        let retained = row_selection_retained_bytes(0)?;
+        let lease = pool.capture_policy().reserve_ram(retained)?;
+        let rows = HashSet::new();
+        Ok(Self {
+            source_id,
+            row_count,
+            mode: TableFileRowSelectionMode::AllExcept,
+            exceptions: TableResourceOwned::new(Arc::new(rows), Arc::new(lease)),
+        })
+    }
+
+    pub fn none_selected(
+        source_id: TableSourceId,
+        row_count: u64,
+        pool: &TableResourcePool,
+    ) -> Result<Self, TableResourceError> {
+        let mut selection = Self::all_selected(source_id, row_count, pool)?;
+        selection.mode = TableFileRowSelectionMode::Only;
+        Ok(selection)
+    }
+
+    pub const fn source_id(&self) -> TableSourceId {
+        self.source_id
+    }
+
+    pub const fn row_count(&self) -> u64 {
+        self.row_count
+    }
+
+    pub const fn mode(&self) -> TableFileRowSelectionMode {
+        self.mode
+    }
+
+    pub fn selected_count(&self) -> u64 {
+        let count = u64::try_from(self.exceptions.len()).unwrap_or(u64::MAX);
+        match self.mode {
+            TableFileRowSelectionMode::AllExcept => self.row_count.saturating_sub(count),
+            TableFileRowSelectionMode::Only => count.min(self.row_count),
+        }
+    }
+
+    pub fn is_selected(&self, row: TableFileRowId) -> bool {
+        if row.source != self.source_id || row.ordinal >= self.row_count {
+            return false;
+        }
+        let contains = self.exceptions.contains(&row);
+        match self.mode {
+            TableFileRowSelectionMode::AllExcept => !contains,
+            TableFileRowSelectionMode::Only => contains,
+        }
+    }
+
+    pub fn exception_count(&self) -> usize {
+        self.exceptions.len()
+    }
+
+    pub fn set_selected(
+        &self,
+        row: TableFileRowId,
+        selected: bool,
+        pool: &TableResourcePool,
+    ) -> Result<Self, TableFileRowSelectionError> {
+        if row.source != self.source_id {
+            return Err(TableFileRowSelectionError::WrongSource);
+        }
+        if row.ordinal >= self.row_count {
+            return Err(TableFileRowSelectionError::RowOutOfRange);
+        }
+        if self.is_selected(row) == selected {
+            return Ok(self.clone());
+        }
+
+        let mut rows = HashSet::new();
+        let old_len = self.exceptions.len();
+        let new_len = match (self.mode, selected) {
+            (TableFileRowSelectionMode::AllExcept, true)
+            | (TableFileRowSelectionMode::Only, false) => old_len.saturating_sub(1),
+            (TableFileRowSelectionMode::AllExcept, false)
+            | (TableFileRowSelectionMode::Only, true) => old_len.saturating_add(1),
+        };
+        let reserved = row_selection_reservation_bytes(new_len)
+            .map_err(TableFileRowSelectionError::Resource)?;
+        let mut lease = pool
+            .capture_policy()
+            .reserve_ram(reserved)
+            .map_err(TableFileRowSelectionError::Resource)?;
+        rows.try_reserve(new_len)
+            .map_err(|_| TableFileRowSelectionError::Allocation)?;
+        let removes_exception = matches!(
+            (self.mode, selected),
+            (TableFileRowSelectionMode::AllExcept, true) | (TableFileRowSelectionMode::Only, false)
+        );
+        if removes_exception {
+            rows.extend(
+                self.exceptions
+                    .iter()
+                    .copied()
+                    .filter(|existing| *existing != row),
+            );
+        } else {
+            rows.extend(self.exceptions.iter().copied());
+            rows.insert(row);
+        }
+        let retained = row_selection_retained_bytes(rows.capacity())
+            .map_err(TableFileRowSelectionError::Resource)?;
+        if retained > lease.bytes() {
+            lease
+                .grow(retained - lease.bytes())
+                .map_err(TableFileRowSelectionError::Resource)?;
+        } else {
+            lease.shrink(lease.bytes() - retained);
+        }
+        Ok(Self {
+            source_id: self.source_id,
+            row_count: self.row_count,
+            mode: self.mode,
+            exceptions: TableResourceOwned::new(Arc::new(rows), Arc::new(lease)),
+        })
+    }
+}
+
+fn row_selection_retained_bytes(capacity: usize) -> Result<u64, TableResourceError> {
+    const HASH_TABLE_OWNER_OVERHEAD: u64 = 64;
+    let per_bucket = u64::try_from(std::mem::size_of::<TableFileRowId>())
+        .map_err(|_| TableResourceError::ArithmeticOverflow)?
+        .checked_add(1)
+        .ok_or(TableResourceError::ArithmeticOverflow)?;
+    let buckets = u64::try_from(capacity)
+        .map_err(|_| TableResourceError::ArithmeticOverflow)?
+        .checked_mul(2)
+        .ok_or(TableResourceError::ArithmeticOverflow)?;
+    u64::try_from(std::mem::size_of::<HashSet<TableFileRowId>>())
+        .map_err(|_| TableResourceError::ArithmeticOverflow)?
+        .checked_add(HASH_TABLE_OWNER_OVERHEAD)
+        .and_then(|fixed| {
+            buckets
+                .checked_mul(per_bucket)
+                .and_then(|bucket_bytes| fixed.checked_add(bucket_bytes))
+        })
+        .ok_or(TableResourceError::ArithmeticOverflow)
+}
+
+fn row_selection_reservation_bytes(new_len: usize) -> Result<u64, TableResourceError> {
+    let capacity_guard = if new_len == 0 {
+        0
+    } else {
+        new_len
+            .checked_mul(2)
+            .ok_or(TableResourceError::ArithmeticOverflow)?
+            .max(3)
+    };
+    row_selection_retained_bytes(capacity_guard)
 }
 
 pub struct TableFileRow {
@@ -220,19 +541,46 @@ pub struct TableFileBackedSource {
 
 impl TableFileBackedSource {
     pub fn scan(
-        mut file: File,
+        file: File,
         identity: TableSourceIdentity,
         options: TableFileParseOptions,
         pool: TableResourcePool,
         workspace: &TableTempWorkspace,
         cancellation: &TableCancellationToken,
     ) -> Result<Self, TableFileSourceError> {
+        Self::scan_with_progress(
+            file,
+            identity,
+            options,
+            pool,
+            workspace,
+            cancellation,
+            |_| {},
+        )
+    }
+
+    /// Validate a file on the caller's worker while publishing only a small,
+    /// charged preview. The callback runs at the record boundary; it must be
+    /// quick and must not retain file buffers or decoded source rows.
+    pub fn scan_with_progress<F>(
+        mut file: File,
+        identity: TableSourceIdentity,
+        options: TableFileParseOptions,
+        pool: TableResourcePool,
+        workspace: &TableTempWorkspace,
+        cancellation: &TableCancellationToken,
+        mut progress: F,
+    ) -> Result<Self, TableFileSourceError>
+    where
+        F: FnMut(TableFileScanProgress),
+    {
         check_parse_cancelled(Some(cancellation))?;
         if !workspace.uses_pool(&pool) {
             return Err(TableFileSourceError::Resource(
                 TableResourceError::PoolMismatch,
             ));
         }
+        let id = next_source_id()?;
         let initial_metadata = file
             .metadata()
             .map_err(|error| TableFileSourceError::Io(error.to_string()))?;
@@ -241,6 +589,15 @@ impl TableFileBackedSource {
         let working_lease = pool.reserve_ram(FILE_WORKING_RAM_BYTES)?;
         let mut metadata_lease = pool.reserve_ram(0)?;
         metadata_lease.grow(DIAGNOSTIC_RESERVATION)?;
+        let mut provisional_lease = pool.reserve_ram(TABLE_FILE_PROVISIONAL_MAX_BYTES).ok();
+        let mut provisional_rows = Vec::new();
+        if provisional_lease.is_some()
+            && provisional_rows
+                .try_reserve_exact(TABLE_FILE_PROVISIONAL_MAX_ROWS)
+                .is_err()
+        {
+            provisional_lease = None;
+        }
 
         let delimiter = select_delimiter(&mut file, options, cancellation, TABLE_FILE_MAX_COLUMNS)?;
         file.seek(SeekFrom::Start(0))
@@ -328,9 +685,30 @@ impl TableFileBackedSource {
                     observed_width = observed_width.max(record.width);
                     // Keep decoded data ephemeral. It is validated here and
                     // materialized only by a bounded cursor request.
+                    if provisional_lease.is_some()
+                        && provisional_rows.len() < TABLE_FILE_PROVISIONAL_MAX_ROWS
+                    {
+                        if let Some(row) = provisional_row(id, data_ordinal, &fields) {
+                            provisional_rows.push(row);
+                        }
+                    }
                     drop(fields);
                 }
                 record_index = record_index.checked_add(1).ok_or_else(identity_error)?;
+                let validated_rows = record_index.saturating_sub(u64::from(options.has_header));
+                if validated_rows == 1
+                    || validated_rows == TABLE_FILE_PROVISIONAL_MAX_ROWS as u64
+                    || validated_rows % 1024 == 0
+                {
+                    publish_scan_progress(
+                        &pool,
+                        id,
+                        &provisional_rows,
+                        observed_width,
+                        validated_rows,
+                        &mut progress,
+                    );
+                }
                 Ok(true)
             },
         )?;
@@ -385,12 +763,6 @@ impl TableFileBackedSource {
         // reservation ends here.
         drop(working_lease);
 
-        let id = NEXT_FILE_SOURCE_ID
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_add(1)
-            })
-            .map(TableSourceId)
-            .map_err(|_| TableParseError::new(TableParseErrorKind::IdentityExhausted, None))?;
         Ok(Self {
             id,
             identity,
@@ -469,19 +841,165 @@ impl TableFileBackedSource {
         self: &Arc<Self>,
         cancellation: TableCancellationToken,
     ) -> Result<TableFileRowCursor, TableFileSourceError> {
-        let buffer_lease = self.pool.reserve_ram(FILE_WORKING_RAM_BYTES)?;
+        self.cursor_with_admission(self.pool.capture_policy(), cancellation)
+    }
+
+    fn cursor_with_admission(
+        self: &Arc<Self>,
+        admission: TableResourcePool,
+        cancellation: TableCancellationToken,
+    ) -> Result<TableFileRowCursor, TableFileSourceError> {
+        let buffer_lease = admission.reserve_ram(FILE_WORKING_RAM_BYTES)?;
         Ok(TableFileRowCursor {
             source: Arc::clone(self),
             next_ordinal: 0,
             cancellation,
+            admission,
             _buffer_lease: buffer_lease,
         })
+    }
+
+    /// Build a bounded page of truncated display cells. Full cells continue to
+    /// be available through the cursor for later complete-file operations.
+    pub fn projected_page(
+        self: &Arc<Self>,
+        start_row: u64,
+        source_columns: &[usize],
+        max_rows: usize,
+        max_bytes: u64,
+        preview_chars: usize,
+        cancellation: TableCancellationToken,
+    ) -> Result<TableResourceOwned<TableFileProjectedPage>, TableFileSourceError> {
+        if start_row > self.row_count {
+            return Err(TableFileSourceError::RowOutOfRange);
+        }
+        if source_columns.len() > TABLE_FILE_MAX_COLUMNS {
+            return Err(TableFileSourceError::ProjectionLimit);
+        }
+        if source_columns
+            .iter()
+            .any(|column| *column >= self.column_count)
+        {
+            return Err(TableFileSourceError::ProjectionColumnOutOfRange);
+        }
+        let max_rows = max_rows.clamp(1, TABLE_FILE_PAGE_MAX_ROWS);
+        let max_bytes = max_bytes.clamp(1, TABLE_FILE_PAGE_MAX_BYTES);
+        let admission = self.pool.capture_policy();
+        let mut lease = admission.reserve_ram(max_bytes)?;
+
+        let mut columns = Vec::new();
+        columns
+            .try_reserve_exact(source_columns.len())
+            .map_err(|_| TableFileSourceError::Parse(allocation_error()))?;
+        columns.extend_from_slice(source_columns);
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(max_rows)
+            .map_err(|_| TableFileSourceError::Parse(allocation_error()))?;
+        let mut page = TableFileProjectedPage {
+            source_id: self.id,
+            start_row,
+            next_row: start_row,
+            total_rows: Some(self.row_count),
+            source_columns: columns,
+            rows,
+            stop: TableFilePageStop::EndOfSource,
+        };
+        if projected_page_retained_bytes(&page)? > max_bytes {
+            return Err(TableFileSourceError::ProjectionLimit);
+        }
+        if start_row < self.row_count {
+            let mut cursor = self.cursor_with_admission(admission, cancellation)?;
+            cursor.seek(start_row);
+            page.stop = TableFilePageStop::RowLimit;
+            for _ in 0..max_rows {
+                check_parse_cancelled(Some(&cursor.cancellation))?;
+                let Some(row) = cursor.next_row()? else {
+                    page.stop = TableFilePageStop::EndOfSource;
+                    break;
+                };
+                let mut string_capacity = 0_usize;
+                for column in source_columns {
+                    let value = row.cell(*column).unwrap_or_default();
+                    let (preview, truncated) = bounded_preview(value, preview_chars);
+                    string_capacity = string_capacity
+                        .checked_add(preview.len())
+                        .and_then(|bytes| bytes.checked_add(if truncated { 3 } else { 0 }))
+                        .ok_or(TableFileSourceError::ProjectionLimit)?;
+                }
+                let cell_bytes = source_columns
+                    .len()
+                    .checked_mul(std::mem::size_of::<String>())
+                    .ok_or(TableFileSourceError::ProjectionLimit)?;
+                let row_estimate = std::mem::size_of::<TableFileProjectedRow>()
+                    .checked_add(cell_bytes.saturating_mul(2))
+                    .and_then(|bytes| bytes.checked_add(string_capacity.saturating_mul(2)))
+                    .ok_or(TableFileSourceError::ProjectionLimit)?;
+                let row_estimate = u64::try_from(row_estimate)
+                    .map_err(|_| TableFileSourceError::ProjectionLimit)?;
+                let estimated_page = projected_page_retained_bytes(&page)?
+                    .checked_add(row_estimate)
+                    .ok_or(TableFileSourceError::ProjectionLimit)?;
+                if estimated_page > max_bytes {
+                    page.stop = TableFilePageStop::ByteLimit;
+                    page.next_row = row.id.ordinal;
+                    break;
+                }
+
+                let mut cells = Vec::new();
+                cells
+                    .try_reserve_exact(source_columns.len())
+                    .map_err(|_| TableFileSourceError::Parse(allocation_error()))?;
+                for column in source_columns {
+                    let value = row.cell(*column).unwrap_or_default();
+                    let (preview, truncated) = bounded_preview(value, preview_chars);
+                    let extra = if truncated { 3 } else { 0 };
+                    let mut text = String::new();
+                    text.try_reserve_exact(preview.len().saturating_add(extra))
+                        .map_err(|_| TableFileSourceError::Parse(allocation_error()))?;
+                    text.push_str(preview);
+                    if truncated {
+                        text.push('…');
+                    }
+                    cells.push(text);
+                }
+                let row_id = row.id;
+                drop(row);
+                page.rows.push(TableFileProjectedRow { id: row_id, cells });
+                let actual_page_bytes = projected_page_retained_bytes(&page)?;
+                if actual_page_bytes as u64 > max_bytes {
+                    let rejected = page
+                        .rows
+                        .pop()
+                        .expect("the projected row was just appended");
+                    page.stop = TableFilePageStop::ByteLimit;
+                    page.next_row = rejected.id.ordinal;
+                    break;
+                }
+                page.next_row = row_id
+                    .ordinal
+                    .checked_add(1)
+                    .ok_or(TableFileSourceError::ProjectionLimit)?;
+                if page.next_row >= self.row_count {
+                    page.stop = TableFilePageStop::EndOfSource;
+                    break;
+                }
+            }
+        }
+
+        let retained = projected_page_retained_bytes(&page)? as u64;
+        if retained > lease.bytes() {
+            lease.grow(retained - lease.bytes())?;
+        } else {
+            lease.shrink(lease.bytes() - retained);
+        }
+        Ok(TableResourceOwned::new(Arc::new(page), Arc::new(lease)))
     }
 
     fn read_row(
         &self,
         ordinal: u64,
         working_lease: &TableResourceLease,
+        admission: &TableResourcePool,
         cancellation: &TableCancellationToken,
     ) -> Result<Option<TableFileRow>, TableFileSourceError> {
         if ordinal >= self.row_count {
@@ -525,7 +1043,7 @@ impl TableFileBackedSource {
             |record, raw| -> Result<bool, TableFileSourceError> {
                 if seen == target {
                     check_parse_cancelled(Some(cancellation))?;
-                    let mut row_lease = self.pool.reserve_ram(MAX_DECODED_ROW_RESERVATION)?;
+                    let mut row_lease = admission.reserve_ram(MAX_DECODED_ROW_RESERVATION)?;
                     let mut fields =
                         decode_record(raw, self.delimiter, start_offset == 0, self.column_count)?;
                     validate_decoded_fields(&fields, record)?;
@@ -562,6 +1080,7 @@ pub struct TableFileRowCursor {
     source: Arc<TableFileBackedSource>,
     next_ordinal: u64,
     cancellation: TableCancellationToken,
+    admission: TableResourcePool,
     _buffer_lease: TableResourceLease,
 }
 
@@ -572,7 +1091,12 @@ impl TableFileRowCursor {
         }
         let row = self
             .source
-            .read_row(self.next_ordinal, &self._buffer_lease, &self.cancellation)?
+            .read_row(
+                self.next_ordinal,
+                &self._buffer_lease,
+                &self.admission,
+                &self.cancellation,
+            )?
             .ok_or(TableFileSourceError::RowOutOfRange)?;
         self.next_ordinal = self
             .next_ordinal
@@ -584,6 +1108,146 @@ impl TableFileRowCursor {
     pub fn seek(&mut self, ordinal: u64) {
         self.next_ordinal = ordinal;
     }
+}
+
+fn bounded_preview(value: &str, max_chars: usize) -> (&str, bool) {
+    value
+        .char_indices()
+        .nth(max_chars)
+        .map_or((value, false), |(end, _)| (&value[..end], true))
+}
+
+fn provisional_row(
+    source_id: TableSourceId,
+    ordinal: u64,
+    fields: &[String],
+) -> Option<TableFileProjectedRow> {
+    let count = fields.len().min(TABLE_FILE_PROVISIONAL_MAX_COLUMNS);
+    let mut cells = Vec::new();
+    cells.try_reserve_exact(count).ok()?;
+    for field in fields.iter().take(count) {
+        let (preview, truncated) = bounded_preview(field, TABLE_FILE_PROVISIONAL_CELL_CHARS);
+        let extra = usize::from(truncated) * '…'.len_utf8();
+        let mut cell = String::new();
+        cell.try_reserve_exact(preview.len().checked_add(extra)?)
+            .ok()?;
+        cell.push_str(preview);
+        if truncated {
+            cell.push('…');
+        }
+        cells.push(cell);
+    }
+    Some(TableFileProjectedRow {
+        id: TableFileRowId {
+            source: source_id,
+            ordinal,
+        },
+        cells,
+    })
+}
+
+fn publish_scan_progress<F>(
+    pool: &TableResourcePool,
+    source_id: TableSourceId,
+    preview_rows: &[TableFileProjectedRow],
+    schema_columns: usize,
+    validated_rows: u64,
+    progress: &mut F,
+) where
+    F: FnMut(TableFileScanProgress),
+{
+    if preview_rows.is_empty() {
+        return;
+    }
+    let mut lease = match pool.reserve_ram(TABLE_FILE_PROVISIONAL_MAX_BYTES) {
+        Ok(lease) => lease,
+        Err(_) => return,
+    };
+    let column_count = schema_columns.min(TABLE_FILE_PROVISIONAL_MAX_COLUMNS);
+    let mut source_columns = Vec::new();
+    if source_columns.try_reserve_exact(column_count).is_err() {
+        return;
+    }
+    source_columns.extend(0..column_count);
+    let mut rows = Vec::new();
+    if rows.try_reserve_exact(preview_rows.len()).is_err() {
+        return;
+    }
+    for row in preview_rows {
+        let mut cells = Vec::new();
+        if cells.try_reserve_exact(column_count).is_err() {
+            return;
+        }
+        for index in 0..column_count {
+            let value = row.cells.get(index).map_or("", String::as_str);
+            let mut cell = String::new();
+            if cell.try_reserve_exact(value.len()).is_err() {
+                return;
+            }
+            cell.push_str(value);
+            cells.push(cell);
+        }
+        rows.push(TableFileProjectedRow { id: row.id, cells });
+    }
+    let page = TableFileProjectedPage {
+        source_id,
+        start_row: 0,
+        next_row: u64::try_from(rows.len()).unwrap_or(u64::MAX),
+        total_rows: None,
+        source_columns,
+        rows,
+        stop: TableFilePageStop::Provisional,
+    };
+    let retained = match projected_page_retained_bytes(&page) {
+        Ok(retained) if retained <= lease.bytes() => retained,
+        _ => return,
+    };
+    lease.shrink(lease.bytes() - retained);
+    progress(TableFileScanProgress {
+        preview: TableResourceOwned::new(Arc::new(page), Arc::new(lease)),
+        validated_rows,
+        schema_columns,
+    });
+}
+
+fn projected_page_retained_bytes(
+    page: &TableFileProjectedPage,
+) -> Result<u64, TableFileSourceError> {
+    let mut bytes = u64::try_from(std::mem::size_of::<TableFileProjectedPage>())
+        .map_err(|_| TableFileSourceError::ProjectionLimit)?;
+    bytes = bytes
+        .checked_add(
+            u64::try_from(page.source_columns.capacity())
+                .map_err(|_| TableFileSourceError::ProjectionLimit)?
+                .checked_mul(std::mem::size_of::<usize>() as u64)
+                .ok_or(TableFileSourceError::ProjectionLimit)?,
+        )
+        .and_then(|current| {
+            u64::try_from(page.rows.capacity())
+                .ok()?
+                .checked_mul(std::mem::size_of::<TableFileProjectedRow>() as u64)
+                .and_then(|row_bytes| current.checked_add(row_bytes))
+        })
+        .ok_or(TableFileSourceError::ProjectionLimit)?;
+    for row in &page.rows {
+        bytes = bytes
+            .checked_add(
+                u64::try_from(row.cells.capacity())
+                    .map_err(|_| TableFileSourceError::ProjectionLimit)?
+                    .checked_mul(std::mem::size_of::<String>() as u64)
+                    .ok_or(TableFileSourceError::ProjectionLimit)?,
+            )
+            .ok_or(TableFileSourceError::ProjectionLimit)?;
+        for cell in &row.cells {
+            bytes = bytes
+                .checked_add(
+                    u64::try_from(cell.capacity())
+                        .map_err(|_| TableFileSourceError::ProjectionLimit)?,
+                )
+                .ok_or(TableFileSourceError::ProjectionLimit)?;
+        }
+    }
+    Ok(bytes)
 }
 
 fn select_delimiter(
@@ -811,9 +1475,19 @@ fn identity_error() -> TableParseError {
     TableParseError::new(TableParseErrorKind::IdentityExhausted, None)
 }
 
+fn next_source_id() -> Result<TableSourceId, TableFileSourceError> {
+    NEXT_FILE_SOURCE_ID
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map(TableSourceId)
+        .map_err(|_| identity_error().into())
+}
+
 #[cfg(test)]
 mod file_source_tests {
     use super::*;
+    use crate::TableResourcePolicy;
     use std::io::Write;
 
     fn workspace() -> (TableResourcePool, TableTempWorkspace) {
@@ -1153,6 +1827,364 @@ mod file_source_tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn file_backed_projected_pages_are_source_bound_bounded_and_sparse_selection_scales_to_u64() {
+        let bytes = b"name,value,note\nr0,v0,first\nr1,v1,second\nr2,v2,third\nr3,v3,last";
+        let source = source_from_bytes(
+            bytes,
+            TableFileParseOptions::for_profile(TableUtilityProfile::Csv, true),
+        );
+        let page = source
+            .projected_page(
+                1,
+                &[2, 0],
+                TABLE_FILE_PAGE_MAX_ROWS,
+                TABLE_FILE_PAGE_MAX_BYTES,
+                16,
+                TableCancellationToken::new(),
+            )
+            .unwrap();
+        assert_eq!(page.source_id(), source.id());
+        assert_eq!(page.start_row(), 1);
+        assert_eq!(page.next_row(), 4);
+        assert_eq!(page.total_rows(), Some(4));
+        assert_eq!(page.stop(), TableFilePageStop::EndOfSource);
+        assert_eq!(page.source_columns(), &[2, 0]);
+        assert_eq!(page.rows().len(), 3);
+        assert_eq!(page.rows()[0].id().ordinal(), 1);
+        assert_eq!(
+            page.rows()[0].cell_for_source_column(&page, 2),
+            Some("second")
+        );
+        assert_eq!(page.rows()[0].cell_for_source_column(&page, 0), Some("r1"));
+
+        let first_page = source
+            .projected_page(
+                0,
+                &[0],
+                2,
+                TABLE_FILE_PAGE_MAX_BYTES,
+                TABLE_FILE_PAGE_PREVIEW_CHARS,
+                TableCancellationToken::new(),
+            )
+            .unwrap();
+        assert_eq!(first_page.rows().len(), 2);
+        assert_eq!(first_page.next_row(), 2);
+        assert_eq!(first_page.stop(), TableFilePageStop::RowLimit);
+
+        let last_page = source
+            .projected_page(
+                3,
+                &[1],
+                2,
+                TABLE_FILE_PAGE_MAX_BYTES,
+                TABLE_FILE_PAGE_PREVIEW_CHARS,
+                TableCancellationToken::new(),
+            )
+            .unwrap();
+        assert_eq!(last_page.rows().len(), 1);
+        assert_eq!(
+            last_page.rows()[0].cell_for_source_column(&last_page, 1),
+            Some("v3")
+        );
+        assert_eq!(last_page.next_row(), 4);
+        assert_eq!(last_page.stop(), TableFilePageStop::EndOfSource);
+        let eof = source
+            .projected_page(
+                4,
+                &[0],
+                1,
+                TABLE_FILE_PAGE_MAX_BYTES,
+                TABLE_FILE_PAGE_PREVIEW_CHARS,
+                TableCancellationToken::new(),
+            )
+            .unwrap();
+        assert!(eof.rows().is_empty());
+        assert!(matches!(
+            source.projected_page(
+                5,
+                &[0],
+                1,
+                TABLE_FILE_PAGE_MAX_BYTES,
+                TABLE_FILE_PAGE_PREVIEW_CHARS,
+                TableCancellationToken::new(),
+            ),
+            Err(TableFileSourceError::RowOutOfRange)
+        ));
+        assert!(matches!(
+            source.projected_page(
+                0,
+                &[TABLE_FILE_MAX_COLUMNS],
+                1,
+                TABLE_FILE_PAGE_MAX_BYTES,
+                TABLE_FILE_PAGE_PREVIEW_CHARS,
+                TableCancellationToken::new(),
+            ),
+            Err(TableFileSourceError::ProjectionColumnOutOfRange)
+        ));
+
+        let pool = source.pool.clone();
+        let all = TableFileRowSelection::all_selected(source.id(), u64::MAX, &pool).unwrap();
+        assert_eq!(all.mode(), TableFileRowSelectionMode::AllExcept);
+        assert_eq!(all.selected_count(), u64::MAX);
+        let exception = TableFileRowId {
+            source: source.id(),
+            ordinal: u64::MAX - 1,
+        };
+        let deselected = all.set_selected(exception, false, &pool).unwrap();
+        assert_eq!(deselected.selected_count(), u64::MAX - 1);
+        assert!(!deselected.is_selected(exception));
+        let restored = deselected.set_selected(exception, true, &pool).unwrap();
+        assert_eq!(restored.selected_count(), u64::MAX);
+
+        let none = TableFileRowSelection::none_selected(source.id(), u64::MAX, &pool).unwrap();
+        let only = none.set_selected(exception, true, &pool).unwrap();
+        assert_eq!(only.mode(), TableFileRowSelectionMode::Only);
+        assert_eq!(only.selected_count(), 1);
+        let cleared = only.set_selected(exception, false, &pool).unwrap();
+        assert_eq!(cleared.selected_count(), 0);
+        assert_eq!(cleared.exception_count(), 0);
+        assert!(matches!(
+            all.set_selected(
+                TableFileRowId {
+                    source: TableSourceId(source.id().value().saturating_add(1)),
+                    ordinal: 0,
+                },
+                false,
+                &pool,
+            ),
+            Err(TableFileRowSelectionError::WrongSource)
+        ));
+    }
+
+    #[test]
+    fn file_backed_page_distinguishes_byte_limit_and_eof_and_bounds_previews() {
+        let payload = "v".repeat(4096);
+        let input = format!("value\n{payload}\n{payload}\n{payload}\n");
+        let source = source_from_bytes(
+            input.as_bytes(),
+            TableFileParseOptions::for_profile(TableUtilityProfile::Table, true),
+        );
+
+        let full = source
+            .projected_page(
+                0,
+                &[0],
+                2,
+                TABLE_FILE_PAGE_MAX_BYTES,
+                160,
+                TableCancellationToken::new(),
+            )
+            .unwrap();
+        assert_eq!(full.rows().len(), 2);
+        assert_eq!(full.stop(), TableFilePageStop::RowLimit);
+        let empty_page_bytes = u64::try_from(std::mem::size_of::<TableFileProjectedPage>())
+            .unwrap()
+            + std::mem::size_of::<usize>() as u64
+            + 2 * std::mem::size_of::<TableFileProjectedRow>() as u64;
+        let one_row_estimate = std::mem::size_of::<TableFileProjectedRow>() as u64
+            + 2 * std::mem::size_of::<String>() as u64
+            + 2 * (160_u64 + 3);
+        let one_row_budget = empty_page_bytes + one_row_estimate;
+        assert!(one_row_budget < TABLE_FILE_PAGE_MAX_BYTES);
+        let byte_limited = source
+            .projected_page(
+                0,
+                &[0],
+                2,
+                one_row_budget,
+                160,
+                TableCancellationToken::new(),
+            )
+            .unwrap();
+        assert_eq!(byte_limited.rows().len(), 1);
+        assert_eq!(byte_limited.stop(), TableFilePageStop::ByteLimit);
+        assert_eq!(byte_limited.total_rows(), Some(3));
+        assert!(
+            byte_limited.next_row() < byte_limited.total_rows().unwrap(),
+            "a byte-limited page is not an end-of-source page"
+        );
+
+        let bounded_cell = source
+            .projected_page(
+                0,
+                &[0],
+                1,
+                TABLE_FILE_PAGE_MAX_BYTES,
+                32,
+                TableCancellationToken::new(),
+            )
+            .unwrap();
+        let cell = bounded_cell.rows()[0]
+            .cell_for_source_column(&bounded_cell, 0)
+            .unwrap();
+        assert_eq!(cell.chars().count(), 33);
+        assert!(cell.ends_with('…'));
+
+        let no_columns = source
+            .projected_page(
+                0,
+                &[],
+                2,
+                TABLE_FILE_PAGE_MAX_BYTES,
+                32,
+                TableCancellationToken::new(),
+            )
+            .unwrap();
+        assert_eq!(no_columns.rows().len(), 2);
+        assert!(
+            no_columns.rows().iter().all(|row| row.cells().is_empty()),
+            "zero-column pages retain row identity without cell payloads"
+        );
+        assert_eq!(no_columns.stop(), TableFilePageStop::RowLimit);
+    }
+
+    #[test]
+    fn file_row_selection_quota_refusal_is_transactional_and_clones_retain_charge() {
+        let pool = TableResourcePool::new(super::super::TableResourcePolicy::default());
+        let source = TableSourceId(0x9a);
+        let selection = TableFileRowSelection::all_selected(source, 8, &pool).unwrap();
+        let retained_snapshot = selection.clone();
+        let baseline = pool.usage().ram_bytes;
+        assert!(
+            baseline > 0,
+            "the empty selection owner has a retained charge"
+        );
+
+        let reserve_for_blocker = TableResourcePolicy::DEFAULT_RAM_BYTES
+            .checked_sub(baseline)
+            .and_then(|available| available.checked_sub(1))
+            .expect("selection leaves room under the default quota");
+        let blocker = pool
+            .capture_policy()
+            .reserve_ram(reserve_for_blocker)
+            .unwrap();
+        let row = TableFileRowId { source, ordinal: 3 };
+        let usage_before_edit = pool.usage().ram_bytes;
+        assert!(matches!(
+            selection.set_selected(row, false, &pool),
+            Err(TableFileRowSelectionError::Resource(
+                TableResourceError::RamQuota { .. }
+            ))
+        ));
+        assert_eq!(pool.usage().ram_bytes, usage_before_edit);
+        assert!(selection.is_selected(row));
+        assert_eq!(selection.exception_count(), 0);
+        drop(blocker);
+
+        drop(selection);
+        assert_eq!(
+            pool.usage().ram_bytes,
+            baseline,
+            "a snapshot clone retains the original selection's full charge"
+        );
+        drop(retained_snapshot);
+        assert_eq!(pool.usage().ram_bytes, 0);
+    }
+
+    #[test]
+    fn late_width_error_leaves_only_provisional_preview_publications() {
+        let path = std::env::temp_dir().join(format!(
+            "table-late-malformed-progress-{}.csv",
+            NEXT_FILE_SOURCE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut bytes = b"id,value\n".to_vec();
+        for row in 0..16 {
+            bytes.extend_from_slice(format!("{row},valid\n").as_bytes());
+        }
+        bytes.extend_from_slice(b"17,late,extra\n");
+        std::fs::write(&path, bytes).unwrap();
+        let file = File::open(&path).unwrap();
+        let (pool, workspace) = workspace();
+        let mut previews = Vec::new();
+        let options = TableFileParseOptions {
+            profile: TableUtilityProfile::Csv,
+            delimiter: DelimiterChoice::Explicit(TableDelimiter::Comma),
+            has_header: true,
+            strict_width: true,
+        };
+        let result = TableFileBackedSource::scan_with_progress(
+            file,
+            identity(),
+            options,
+            pool,
+            &workspace,
+            &TableCancellationToken::new(),
+            |progress| previews.push(progress),
+        );
+        let error = match result {
+            Err(TableFileSourceError::Parse(error)) => error,
+            Err(other) => panic!("late row-width error should preserve parser context: {other}"),
+            Ok(_) => panic!("late row-width error unexpectedly produced an accepted source"),
+        };
+        assert_eq!(error.kind, TableParseErrorKind::RowWidthMismatch);
+        assert_eq!(error.expected_columns, Some(2));
+        assert_eq!(error.actual_columns, Some(3));
+        assert_eq!(error.location.map(|location| location.record), Some(18));
+        assert!(
+            previews
+                .iter()
+                .any(|progress| progress.validated_rows() == 16),
+            "valid preceding rows were observable only through a provisional preview"
+        );
+        assert!(previews.iter().all(|progress| progress.preview().stop()
+            == TableFilePageStop::Provisional
+            && progress.preview().total_rows().is_none()));
+        drop(previews);
+        drop(workspace);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn file_backed_scan_publishes_only_bounded_provisional_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "table-progress-test-{}.csv",
+            NEXT_FILE_SOURCE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut bytes = b"id,value,extra\n".to_vec();
+        for row in 0..40 {
+            bytes.extend_from_slice(format!("{row},{},{}\n", "v".repeat(200), row).as_bytes());
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        let file = File::open(&path).unwrap();
+        let (pool, workspace) = workspace();
+        let mut progress_updates = Vec::new();
+        let source = TableFileBackedSource::scan_with_progress(
+            file,
+            identity(),
+            TableFileParseOptions::for_profile(TableUtilityProfile::Csv, true),
+            pool,
+            &workspace,
+            &TableCancellationToken::new(),
+            |progress| progress_updates.push(progress),
+        )
+        .unwrap();
+        assert_eq!(source.row_count(), 40);
+        assert_eq!(progress_updates.len(), 2);
+        for progress in &progress_updates {
+            let page = progress.preview();
+            assert_eq!(page.source_id(), source.id());
+            assert_eq!(page.stop(), TableFilePageStop::Provisional);
+            assert_eq!(page.total_rows(), None);
+            assert!(page.rows().len() <= TABLE_FILE_PROVISIONAL_MAX_ROWS);
+            assert!(page.source_columns().len() <= TABLE_FILE_PROVISIONAL_MAX_COLUMNS);
+            assert!(page.rows().iter().all(|row| {
+                row.cells()
+                    .iter()
+                    .all(|cell| cell.chars().count() <= TABLE_FILE_PROVISIONAL_CELL_CHARS + 1)
+            }));
+        }
+        assert_eq!(progress_updates[0].validated_rows(), 1);
+        assert_eq!(progress_updates[0].preview().rows().len(), 1);
+        assert_eq!(progress_updates[1].validated_rows(), 16);
+        assert_eq!(progress_updates[1].preview().rows().len(), 16);
+        assert!(progress_updates[1].schema_columns() <= TABLE_FILE_MAX_COLUMNS);
+        drop(progress_updates);
+        drop(source);
+        drop(workspace);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

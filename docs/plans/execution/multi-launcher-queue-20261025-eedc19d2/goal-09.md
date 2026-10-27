@@ -15,8 +15,8 @@ The original Goal09/Kickstart, root AGENTS, master queue and recovery override g
 | Checkpoint | State |
 | --- | --- |
 | M0-A | Complete and pushed |
-| M1-A | Verified; checkpoint commit/push identities recorded externally after creation |
-| M1-B | Pending: projected pages, compact large selections and dialog integration |
+| M1-A | Accepted and pushed: `106f937368b9555d7b1210e2e9b5b9f8c1fa6941` |
+| M1-B | Verified; checkpoint commit/push identities recorded externally after creation |
 | M2-A | Pending: complete-file filtering, sorting and streaming export |
 | M2-B | Pending: lifecycle/native acceptance, actual >500MiB workflow and final lint |
 
@@ -30,7 +30,7 @@ Persisted `table_utility_resources` preferences use `ram_limit_mib` (default 256
 
 Large parsing enforces 1024 columns, 8 MiB encoded/decoded logical-record limits including headers, and 4 MiB decoded fields incrementally. Compact Table/CSV limits/defaults remain unchanged. Profile choice and strict/lenient row-width policy remain independent, including pending typed rereads.
 
-The existing Condvar worker owns file opening and scanning. Windows admission is read-only and denies write/delete sharing, with identity obtained from the retained handle. A failed or stale replacement preserves last-good ownership/options. Close retains accepted ownership; shutdown joins. The typed `request_file_backed_source` is the large-route boundary; legacy `request_file_read` keeps its exact compact limit/refusal semantics. Paging and large full-file outputs are intentionally pending their original checkpoints.
+The existing Condvar worker owns file opening and scanning. Windows admission is read-only and denies write/delete sharing, with identity obtained from the retained handle. A failed or stale replacement preserves last-good ownership/options. Close retains accepted ownership; shutdown joins. The typed `request_file_backed_source` is the large-route boundary; legacy `request_file_read` keeps its exact compact limit/refusal semantics. M1-B supplies bounded paging; full-file outputs remain pending M2-A.
 
 ## Verification and review
 
@@ -47,3 +47,14 @@ Targeted preparations used Cargo Nextest binaries metadata for `multi_launcher_t
 The configured Implementer owned source edits. Parent reviewed the submitted source and actual receipts under the explicitly authorized reviewer-capacity fallback; no configured independent Reviewer acceptance is claimed. The final review corrected profile inference without broadening scope. Final first-party Clippy remains at the original end-of-Goal boundary, after all later implementation/native work; no final Goal09 or lint pass is claimed here.
 
 The external queue ledger records actual checkpoint SHA, exact accepted bindings, commit/push receipts and the next checkpoint. A commit cannot record its own SHA, so no recursive hash-recording commit is used.
+## M1-B: projected pages and compact large selections
+
+The dialog now exposes an explicit Open Large File route, preserving the existing compact opening API and CSV extension delimiter behavior. The accepted source remains fully validated. Scan progress uses a separate bounded, leased provisional preview, with unknown final totals and no export eligibility. A late validation error discards provisional state and preserves the previous accepted source.
+
+The existing worker loads one projected page with at most 64 rows and 2 MiB of retained page data, with bounded display previews and exact source-column/row identities. Page bytes, overlapping snapshots, pending column descriptors and sparse row selections share the existing resource pool. Byte-limit stops remain distinct from EOF. All-minus-one selection retains one exception rather than constructing every row ID; counts remain u64 and edits refuse quota exhaustion transactionally.
+
+Page/source/view/lifetime checks reject obsolete results. Same-page requests and selection-only edits do not refetch unchanged data; idle frames issue no new scan/page work. Failure/cancellation preserves the last good page. A successful resident parse clears superseded file-page state. The large dialog virtualizes rows and visible result columns, uses a bounded schema chooser that remains available after deselecting every column, and registers controls through existing Jump ownership. Full-file filtering, sorting and export remain explicitly unavailable until M2-A.
+
+M1-B verification adds 8 current core cases and 20 current app cases mapped to retained scoped receipts; this is cumulative focused evidence, not a full-suite run. Tests cover cursor/row parity, huge logical row counts, page byte limits/EOF/preview truncation, provisional late failure, shared quota and cloned-handle lifetime, controlled stale completions, close/reopen, page admission refusal/no retry, idle counters, projection recovery, and directly affected small Table/CSV/export/popup behavior. The final affected app run passed 10/10 in 36.731311 seconds with cleanup/output drain verified and all 15 recorded process identities absent. Unchanged earlier passing cases were retained rather than repeated.
+
+Initial compile/fixture failures and their bounded corrections are preserved in `g09/M1B_PARENT_REVIEW.md` and the raw receipts. The configured Implementer owned source changes; the parent independently reviewed that implementation under the user-authorized reviewer-capacity fallback. No configured independent Reviewer acceptance is claimed. No new dependency, Cargo/profile change, native acceptance, >500MiB pipeline or final lint result is claimed. M2-A and M2-B remain pending.

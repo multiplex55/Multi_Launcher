@@ -10,12 +10,13 @@ use crate::activity::{
 };
 use crate::table_utility::{
     DelimiterChoice, RowWidthPolicy, TableAcceptedSource, TableCancellationToken, TableDelimiter,
-    TableDocument, TableDocumentId, TableExportError, TableFileBackedSource, TableFileParseOptions,
-    TableFileSourceError, TableJsonExport, TableJsonShape, TableParseError, TableParseErrorKind,
-    TableParseOptions, TableProjection, TableProjectionError, TableProjectionOptions,
-    TableResourceError, TableResourceLease, TableResourceOwned, TableResourcePolicy,
-    TableResourcePool, TableRowId, TableSelection, TableSort, TableSourceIdentity,
-    TableTempWorkspace, TableUtilityProfile,
+    TableDocument, TableDocumentId, TableExportError, TableFileBackedSource, TableFilePageStop,
+    TableFileParseOptions, TableFileProjectedPage, TableFileRowId, TableFileRowSelection,
+    TableFileRowSelectionError, TableFileScanProgress, TableFileSourceError, TableJsonExport,
+    TableJsonShape, TableParseError, TableParseErrorKind, TableParseOptions, TableProjection,
+    TableProjectionError, TableProjectionOptions, TableResourceError, TableResourceLease,
+    TableResourceOwned, TableResourcePolicy, TableResourcePool, TableResourceUsage, TableRowId,
+    TableSelection, TableSort, TableSourceIdentity, TableTempWorkspace, TableUtilityProfile,
 };
 use eframe::egui;
 use std::collections::HashSet;
@@ -199,6 +200,7 @@ enum JobKind {
     Parse,
     Project,
     Export,
+    Page,
 }
 
 #[cfg(test)]
@@ -208,6 +210,10 @@ pub(crate) struct TableTestJobCounts {
     pub parse_executed: usize,
     pub project_submitted: usize,
     pub project_executed: usize,
+    pub scan_submitted: usize,
+    pub scan_executed: usize,
+    pub page_submitted: usize,
+    pub page_executed: usize,
 }
 
 #[cfg(test)]
@@ -216,26 +222,107 @@ struct TableTestJobCounters(Mutex<TableTestJobCounts>);
 
 #[cfg(test)]
 impl TableTestJobCounters {
-    fn submitted(&self, kind: JobKind) {
+    fn submitted(&self, work: &Work) {
         let mut counts = self.0.lock().unwrap_or_else(|error| error.into_inner());
-        match kind {
-            JobKind::Parse => counts.parse_submitted += 1,
-            JobKind::Project => counts.project_submitted += 1,
-            JobKind::ReadFile | JobKind::Export => {}
+        match work {
+            Work::ScanFile { .. } => counts.scan_submitted += 1,
+            Work::FilePage { .. } => counts.page_submitted += 1,
+            Work::Parse { .. } => counts.parse_submitted += 1,
+            Work::Project { .. } => counts.project_submitted += 1,
+            Work::ReadFile { .. } | Work::Export { .. } => {}
         }
     }
 
-    fn executed(&self, kind: JobKind) {
+    fn executed(&self, work: &Work) {
         let mut counts = self.0.lock().unwrap_or_else(|error| error.into_inner());
-        match kind {
-            JobKind::Parse => counts.parse_executed += 1,
-            JobKind::Project => counts.project_executed += 1,
-            JobKind::ReadFile | JobKind::Export => {}
+        match work {
+            Work::ScanFile { .. } => counts.scan_executed += 1,
+            Work::FilePage { .. } => counts.page_executed += 1,
+            Work::Parse { .. } => counts.parse_executed += 1,
+            Work::Project { .. } => counts.project_executed += 1,
+            Work::ReadFile { .. } | Work::Export { .. } => {}
         }
     }
 
     fn snapshot(&self) -> TableTestJobCounts {
         *self.0.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TableTestJobGateState {
+    entered: bool,
+    released: bool,
+}
+
+#[cfg(test)]
+struct TableTestJobGate {
+    kind: JobKind,
+    state: Mutex<TableTestJobGateState>,
+    wake: Condvar,
+}
+
+#[cfg(test)]
+impl TableTestJobGate {
+    fn block_until_released(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.entered = true;
+        self.wake.notify_all();
+        while !state.released {
+            state = self
+                .wake
+                .wait(state)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+}
+
+#[cfg(test)]
+struct TableTestJobGateHandle(Arc<TableTestJobGate>);
+
+#[cfg(test)]
+impl TableTestJobGateHandle {
+    fn wait_until_entered(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while !state.entered {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next, result) = self
+                .0
+                .wake
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|error| error.into_inner());
+            state = next;
+            if result.timed_out() && !state.entered {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn release(&self) {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.released = true;
+        self.0.wake.notify_all();
+    }
+}
+
+#[cfg(test)]
+impl Drop for TableTestJobGateHandle {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -260,6 +347,13 @@ enum Work {
         path: PathBuf,
         options: TableFileParseOptions,
         pool: TableResourcePool,
+        cancellation: TableCancellationToken,
+    },
+    FilePage {
+        source: Arc<TableFileBackedSource>,
+        start_row: u64,
+        source_columns: Vec<usize>,
+        source_columns_lease: TableResourceLease,
         cancellation: TableCancellationToken,
     },
     Parse {
@@ -291,11 +385,41 @@ struct Job {
     key: JobKey,
     work: Work,
     activity: Option<ActivityTask>,
+    #[cfg(test)]
+    test_drop_probe: Option<TableTestJobDropProbe>,
+}
+
+#[cfg(test)]
+struct TableTestJobDropProbe {
+    center: ActivityCenter,
+    key: crate::activity::ActivityKey,
+    pool: TableResourcePool,
+    expected_usage: TableResourceUsage,
+    observed_before_terminal: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(test)]
+impl Drop for TableTestJobDropProbe {
+    fn drop(&mut self) {
+        let activity_is_nonterminal = self
+            .center
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.key == self.key)
+            .is_some_and(|row| !row.lifecycle.is_terminal());
+        let payload_usage_was_released = self.pool.usage() == self.expected_usage;
+        self.observed_before_terminal.store(
+            activity_is_nonterminal && payload_usage_was_released,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
 }
 
 enum WorkResult {
     FileRead(Result<(PathBuf, Vec<u8>, TableResourceLease), FileReadError>),
     FileScanned(Result<(PathBuf, Arc<TableFileBackedSource>), FileReadError>),
+    FilePage(Result<TableResourceOwned<TableFileProjectedPage>, TableFileSourceError>),
     Parsed(Result<TableResourceOwned<TableDocument>, TableParseError>),
     Projected(Result<TableResourceOwned<TableProjection>, TableProjectionError>),
     Exported(Result<(TableExportPayload, Arc<TableResourceLease>), TableExportError>),
@@ -320,7 +444,14 @@ impl Job {
     }
 
     fn cancel_before_start(self) {
-        if let Some(activity) = self.activity {
+        let work = self.work;
+        let activity = self.activity;
+        #[cfg(test)]
+        let test_drop_probe = self.test_drop_probe;
+        drop(work);
+        #[cfg(test)]
+        drop(test_drop_probe);
+        if let Some(activity) = activity {
             activity.finish(
                 ActivityOutcome::Cancelled,
                 None,
@@ -329,7 +460,10 @@ impl Job {
         }
     }
 
-    fn run(self) -> Completion {
+    fn run<F>(self, mut scan_progress: F) -> Completion
+    where
+        F: FnMut(TableFileScanProgress),
+    {
         let cancellation = self.cancellation();
         if let Some(activity) = self.activity.as_ref() {
             activity.mark_running();
@@ -349,7 +483,32 @@ impl Job {
                 options,
                 pool,
                 cancellation,
-            } => WorkResult::FileScanned(scan_table_file(&path, options, pool, &cancellation)),
+            } => WorkResult::FileScanned(scan_table_file(
+                &path,
+                options,
+                pool,
+                &cancellation,
+                &mut scan_progress,
+            )),
+            Work::FilePage {
+                source,
+                start_row,
+                source_columns,
+                source_columns_lease,
+                cancellation,
+            } => {
+                let result = source.projected_page(
+                    start_row,
+                    &source_columns,
+                    crate::table_utility::TABLE_FILE_PAGE_MAX_ROWS,
+                    crate::table_utility::TABLE_FILE_PAGE_MAX_BYTES,
+                    crate::table_utility::TABLE_FILE_PAGE_PREVIEW_CHARS,
+                    cancellation,
+                );
+                drop(source_columns);
+                drop(source_columns_lease);
+                WorkResult::FilePage(result)
+            }
             Work::Parse {
                 bytes,
                 _input_lease,
@@ -441,6 +600,8 @@ struct WorkerState {
     pending: Option<Job>,
     completed: Option<Completion>,
     active_cancellation: Option<TableCancellationToken>,
+    active_key: Option<JobKey>,
+    scan_progress: Option<(JobKey, TableFileScanProgress)>,
     shutdown: bool,
 }
 
@@ -449,6 +610,8 @@ struct TableWorker {
     join: Option<JoinHandle<()>>,
     #[cfg(test)]
     test_job_counts: Arc<TableTestJobCounters>,
+    #[cfg(test)]
+    test_job_gate: Arc<Mutex<Option<Arc<TableTestJobGate>>>>,
 }
 
 impl TableWorker {
@@ -460,6 +623,10 @@ impl TableWorker {
         let test_job_counts = Arc::new(TableTestJobCounters::default());
         #[cfg(test)]
         let worker_job_counts = Arc::clone(&test_job_counts);
+        #[cfg(test)]
+        let test_job_gate = Arc::new(Mutex::new(None));
+        #[cfg(test)]
+        let worker_test_job_gate = Arc::clone(&test_job_gate);
         let join = thread::Builder::new()
             .name("table-utility-worker".to_owned())
             .spawn(move || {
@@ -477,15 +644,52 @@ impl TableWorker {
                             continue;
                         };
                         state.active_cancellation = Some(job.cancellation());
+                        state.active_key = Some(job.key);
                         job
                     };
 
                     #[cfg(test)]
-                    worker_job_counts.executed(job.key.kind);
-                    let completion = job.run();
+                    worker_job_counts.executed(&job.work);
+                    #[cfg(test)]
+                    {
+                        let gate = {
+                            let mut pending = worker_test_job_gate
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner());
+                            if pending
+                                .as_ref()
+                                .is_some_and(|gate| gate.kind == job.key.kind)
+                            {
+                                pending.take()
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(gate) = gate {
+                            gate.block_until_released();
+                        }
+                    }
+                    let key = job.key;
+                    let progress_state = Arc::clone(&worker_state);
+                    let progress_repaint = repaint.clone();
+                    let completion = job.run(move |progress| {
+                        let (lock, wake) = &*progress_state;
+                        let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
+                        if state.shutdown
+                            || state.active_key != Some(key)
+                            || state.pending.is_some()
+                        {
+                            return;
+                        }
+                        state.scan_progress = Some((key, progress));
+                        drop(state);
+                        progress_repaint.request_repaint();
+                        wake.notify_one();
+                    });
                     let (lock, wake) = &*worker_state;
                     let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
                     state.active_cancellation = None;
+                    state.active_key = None;
                     if state.shutdown {
                         return;
                     }
@@ -495,6 +699,7 @@ impl TableWorker {
                         drop(state);
                         repaint.request_repaint();
                     } else {
+                        state.scan_progress = None;
                         drop(state);
                     }
                     wake.notify_one();
@@ -506,12 +711,14 @@ impl TableWorker {
             join: Some(join),
             #[cfg(test)]
             test_job_counts,
+            #[cfg(test)]
+            test_job_gate,
         })
     }
 
     fn submit(&self, job: Job) {
         #[cfg(test)]
-        self.test_job_counts.submitted(job.key.kind);
+        self.test_job_counts.submitted(&job.work);
         job.install_cancel_handler();
         let (lock, wake) = &*self.shared;
         let replaced = {
@@ -520,6 +727,7 @@ impl TableWorker {
                 active.cancel();
             }
             state.completed = None;
+            state.scan_progress = None;
             let replaced = state.pending.replace(job);
             wake.notify_one();
             replaced
@@ -538,6 +746,7 @@ impl TableWorker {
             }
             let pending = state.pending.take();
             state.completed = None;
+            state.scan_progress = None;
             pending
         };
         if let Some(pending) = pending {
@@ -554,6 +763,14 @@ impl TableWorker {
             .take()
     }
 
+    fn poll_scan_progress(&self) -> Option<(JobKey, TableFileScanProgress)> {
+        let (lock, _) = &*self.shared;
+        lock.lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .scan_progress
+            .take()
+    }
+
     fn shutdown(&mut self) {
         let (lock, wake) = &*self.shared;
         let pending = {
@@ -561,6 +778,7 @@ impl TableWorker {
             state.shutdown = true;
             let pending = state.pending.take();
             state.completed = None;
+            state.scan_progress = None;
             if let Some(active) = state.active_cancellation.as_ref() {
                 active.cancel();
             }
@@ -579,6 +797,25 @@ impl TableWorker {
     fn test_job_counts(&self) -> TableTestJobCounts {
         self.test_job_counts.snapshot()
     }
+
+    #[cfg(test)]
+    fn hold_next_job(&self, kind: JobKind) -> TableTestJobGateHandle {
+        let gate = Arc::new(TableTestJobGate {
+            kind,
+            state: Mutex::new(TableTestJobGateState::default()),
+            wake: Condvar::new(),
+        });
+        let mut pending = self
+            .test_job_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(
+            pending.is_none(),
+            "only one controlled table job gate is supported"
+        );
+        *pending = Some(Arc::clone(&gate));
+        TableTestJobGateHandle(gate)
+    }
 }
 
 impl Drop for TableWorker {
@@ -590,9 +827,9 @@ impl Drop for TableWorker {
 impl Job {
     fn cancellation(&self) -> TableCancellationToken {
         match &self.work {
-            Work::ReadFile { cancellation, .. } | Work::ScanFile { cancellation, .. } => {
-                cancellation.clone()
-            }
+            Work::ReadFile { cancellation, .. }
+            | Work::ScanFile { cancellation, .. }
+            | Work::FilePage { cancellation, .. } => cancellation.clone(),
             Work::Parse { cancellation, .. }
             | Work::Project { cancellation, .. }
             | Work::Export { cancellation, .. } => cancellation.clone(),
@@ -628,6 +865,14 @@ pub struct TableSessionSnapshot {
     pub selected_rows: Option<TableResourceOwned<HashSet<TableRowId>>>,
     pub selected_columns: TableResourceOwned<HashSet<usize>>,
     pub selected_visible_row_count: usize,
+    /// Bounded preview and validated count while a file-backed scan is still
+    /// provisional. This is deliberately separate from `accepted_source`.
+    pub file_scan_progress: Option<TableFileScanProgress>,
+    /// The one bounded page retained for an accepted file-backed source.
+    pub file_page: Option<TableResourceOwned<TableFileProjectedPage>>,
+    pub file_page_pending: bool,
+    pub file_page_start: u64,
+    pub file_row_selection: Option<TableFileRowSelection>,
     pub export_pending: Option<TableExportOperation>,
     pub message: Option<String>,
 }
@@ -726,6 +971,12 @@ pub struct TableUtilitySession {
     selected_rows: Option<TableResourceOwned<HashSet<TableRowId>>>,
     selected_visible_row_count: usize,
     selected_columns: TableResourceOwned<HashSet<usize>>,
+    file_scan_progress: Option<TableFileScanProgress>,
+    file_page: Option<TableResourceOwned<TableFileProjectedPage>>,
+    file_page_pending: bool,
+    file_page_start: u64,
+    file_page_key: Option<JobKey>,
+    file_row_selection: Option<TableFileRowSelection>,
     active_key: Option<JobKey>,
     next_export: u64,
     export_pending: Option<PendingTableExport>,
@@ -789,6 +1040,12 @@ impl TableUtilitySession {
             selected_rows: None,
             selected_visible_row_count: 0,
             selected_columns: TableResourceOwned::without_payload_charge(Arc::new(HashSet::new())),
+            file_scan_progress: None,
+            file_page: None,
+            file_page_pending: false,
+            file_page_start: 0,
+            file_page_key: None,
+            file_row_selection: None,
             active_key: None,
             next_export: 0,
             export_pending: None,
@@ -807,7 +1064,9 @@ impl TableUtilitySession {
         let (slot, operation) = match key.kind {
             JobKind::ReadFile => (ActivitySlot::Primary, ActivityOperation::ReadTableFile),
             JobKind::Parse => (ActivitySlot::Primary, ActivityOperation::ParseTable),
-            JobKind::Project => (ActivitySlot::Secondary, ActivityOperation::ProjectTable),
+            JobKind::Project | JobKind::Page => {
+                (ActivitySlot::Secondary, ActivityOperation::ProjectTable)
+            }
             JobKind::Export => (ActivitySlot::Export, ActivityOperation::ExportTable),
         };
         center.start(
@@ -858,6 +1117,15 @@ impl TableUtilitySession {
         self.active_key = None;
         self.export_pending = None;
         self.export_receipt = None;
+        if self
+            .accepted_source
+            .as_ref()
+            .and_then(TableAcceptedSource::file_source)
+            .is_some()
+            && self.file_page.is_none()
+        {
+            self.file_page_pending = true;
+        }
         if matches!(self.parse_state, TableParseState::Pending(_)) {
             if let Some(admission) = self.requested_source_admission.clone() {
                 self.request_parse_with_admission(admission);
@@ -882,6 +1150,7 @@ impl TableUtilitySession {
         self.pending_file_path = None;
         self.pending_file_backed_options = None;
         self.pending_file_admission = None;
+        self.file_scan_progress = None;
         self.message = None;
         if let Some(worker) = &self.worker {
             worker.cancel_pending();
@@ -1148,6 +1417,78 @@ impl TableUtilitySession {
         self.queue_file_backed_source_with_admission(path, options, admission)
     }
 
+    /// Request one bounded page from the accepted file-backed source. A page
+    /// generation is independent of the source revision, so changing pages
+    /// cancels stale page work without making the accepted source dirty.
+    pub fn request_file_page(&mut self, start_row: u64) -> Result<(), String> {
+        if !self.open {
+            return Err("The Table Utility is closed.".into());
+        }
+        let _admission = self.capture_resource_admission()?;
+        let source = self
+            .accepted_source
+            .as_ref()
+            .and_then(TableAcceptedSource::file_source)
+            .cloned()
+            .ok_or_else(|| "There is no accepted file-backed table source.".to_owned())?;
+        if start_row > source.row_count() {
+            return Err("The requested page starts beyond the end of the table.".into());
+        }
+        if !self.file_page_pending
+            && self.file_page_start == start_row
+            && self.file_page.as_ref().is_some_and(|page| {
+                page.source_id() == source.id() && page.start_row() == start_row
+            })
+            && self.file_page_key.is_some_and(|key| {
+                Some(key.source) == self.accepted_source_revision && key.view == self.view_revision
+            })
+        {
+            return Ok(());
+        }
+        if self.file_page_pending && self.file_page_start == start_row {
+            return Ok(());
+        }
+        self.file_page_start = start_row;
+        self.view_revision = TableViewRevision(self.view_revision.0.wrapping_add(1));
+        self.file_page_key = None;
+        self.file_page_pending = true;
+        self.export_pending = None;
+        self.export_receipt = None;
+        self.schedule();
+        Ok(())
+    }
+
+    pub fn set_file_row_selected(&mut self, row: TableFileRowId, selected: bool) {
+        if let Some(message) = self.invalid_resource_policy_message() {
+            self.message = Some(message);
+            return;
+        }
+        let Some(current) = self.file_row_selection.as_ref() else {
+            return;
+        };
+        if current.is_selected(row) == selected {
+            return;
+        }
+        match current.set_selected(row, selected, &self.resource_pool) {
+            Ok(selection) => {
+                self.file_row_selection = Some(selection);
+                self.selection_revision =
+                    TableSelectionRevision(self.selection_revision.0.wrapping_add(1));
+                self.export_pending = None;
+                self.export_receipt = None;
+            }
+            Err(TableFileRowSelectionError::WrongSource) => {
+                self.message = Some("The selected row belongs to an older file source.".into());
+            }
+            Err(TableFileRowSelectionError::RowOutOfRange) => {
+                self.message = Some("The selected row is outside the accepted file source.".into());
+            }
+            Err(error) => {
+                self.message = Some(format!("Could not update the file row selection: {error}"));
+            }
+        }
+    }
+
     fn queue_file_backed_source_with_admission(
         &mut self,
         path: PathBuf,
@@ -1174,6 +1515,8 @@ impl TableUtilitySession {
         worker.submit(Job {
             key,
             activity,
+            #[cfg(test)]
+            test_drop_probe: None,
             work: Work::ScanFile {
                 path,
                 options,
@@ -1214,6 +1557,8 @@ impl TableUtilitySession {
         worker.submit(Job {
             key,
             activity,
+            #[cfg(test)]
+            test_drop_probe: None,
             work: Work::ReadFile {
                 path,
                 options: self.parse_options,
@@ -1336,10 +1681,19 @@ impl TableUtilitySession {
             self.message = Some(message);
             return;
         }
-        let Some(document) = self.document() else {
+        let column_count = self
+            .document()
+            .map(|document| document.column_count())
+            .or_else(|| {
+                self.accepted_source
+                    .as_ref()
+                    .and_then(TableAcceptedSource::file_source)
+                    .map(|source| source.column_count())
+            });
+        let Some(column_count) = column_count else {
             return;
         };
-        if column >= document.column_count() {
+        if column >= column_count {
             return;
         }
         let capacity = self
@@ -1376,6 +1730,17 @@ impl TableUtilitySession {
                 TableSelectionRevision(self.selection_revision.0.wrapping_add(1));
             self.export_pending = None;
             self.export_receipt = None;
+            if self
+                .accepted_source
+                .as_ref()
+                .and_then(TableAcceptedSource::file_source)
+                .is_some()
+            {
+                self.view_revision = TableViewRevision(self.view_revision.0.wrapping_add(1));
+                self.file_page_key = None;
+                self.file_page_pending = true;
+                self.schedule();
+            }
         }
     }
 
@@ -1502,6 +1867,8 @@ impl TableUtilitySession {
         let job = Job {
             key,
             activity,
+            #[cfg(test)]
+            test_drop_probe: None,
             work: Work::Export {
                 document,
                 projection,
@@ -1574,10 +1941,17 @@ impl TableUtilitySession {
     }
 
     pub fn poll(&mut self) {
-        let Some(worker) = self.worker.as_ref() else {
+        let Some((scan_progress, completion)) = self
+            .worker
+            .as_ref()
+            .map(|worker| (worker.poll_scan_progress(), worker.poll()))
+        else {
             return;
         };
-        if let Some(completion) = worker.poll() {
+        if let Some((key, progress)) = scan_progress {
+            self.accept_file_scan_progress(key, progress);
+        }
+        if let Some(completion) = completion {
             if self.active_key == Some(completion.key) {
                 self.active_key = None;
             }
@@ -1586,6 +1960,22 @@ impl TableUtilitySession {
             }
         }
         self.schedule();
+    }
+
+    fn accept_file_scan_progress(&mut self, key: JobKey, progress: TableFileScanProgress) {
+        if self.open
+            && key.lifetime == self.lifetime
+            && key.source == self.source_revision
+            && key.kind == JobKind::ReadFile
+            && self.source_load_state == TableSourceLoadState::Reading(key.source)
+        {
+            self.message = Some(format!(
+                "Validating the selected file… {} records checked; schema currently has {} columns.",
+                progress.validated_rows(),
+                progress.schema_columns()
+            ));
+            self.file_scan_progress = Some(progress);
+        }
     }
 
     fn accept(&mut self, completion: Completion) {
@@ -1636,6 +2026,12 @@ impl TableUtilitySession {
                         self.selected_columns = selected_columns;
                         self.selection_revision =
                             TableSelectionRevision(self.selection_revision.0.wrapping_add(1));
+                        self.file_scan_progress = None;
+                        self.file_page = None;
+                        self.file_page_key = None;
+                        self.file_page_start = 0;
+                        self.file_page_pending = false;
+                        self.file_row_selection = None;
                         self.projection = None;
                         self.projected_source_revision = None;
                         self.projected_view_revision = None;
@@ -1748,9 +2144,56 @@ impl TableUtilitySession {
                 }
                 self.pending_file_path = None;
                 self.pending_file_backed_options = None;
-                self.pending_file_admission = None;
+                self.file_scan_progress = None;
+                let Some(admission) = self.pending_file_admission.take() else {
+                    let message = "The completed file scan lost its resource admission; the previous source was kept.".to_owned();
+                    self.source_load_state = TableSourceLoadState::Failed {
+                        revision: key.source,
+                        message: message.clone(),
+                    };
+                    self.restore_last_parse_state();
+                    self.message = Some(message);
+                    return;
+                };
                 match result {
                     Ok((path, source)) => {
+                        let selected_columns = match all_selected_columns(
+                            &admission,
+                            source.column_count(),
+                        ) {
+                            Ok(columns) => columns,
+                            Err(error) => {
+                                let message = format!(
+                                    "Could not reserve memory for the file-backed column selection; the previous source was kept: {error}"
+                                );
+                                self.source_load_state = TableSourceLoadState::Failed {
+                                    revision: key.source,
+                                    message: message.clone(),
+                                };
+                                self.restore_last_parse_state();
+                                self.message = Some(message);
+                                return;
+                            }
+                        };
+                        let file_row_selection = match TableFileRowSelection::all_selected(
+                            source.id(),
+                            source.row_count(),
+                            &admission,
+                        ) {
+                            Ok(selection) => selection,
+                            Err(error) => {
+                                let message = format!(
+                                    "Could not reserve memory for the file-backed row selection; the previous source was kept: {error}"
+                                );
+                                self.source_load_state = TableSourceLoadState::Failed {
+                                    revision: key.source,
+                                    message: message.clone(),
+                                };
+                                self.restore_last_parse_state();
+                                self.message = Some(message);
+                                return;
+                            }
+                        };
                         self.parse_options = parse_options_for_file_source(source.options());
                         self.accepted_source = Some(TableAcceptedSource::FileBacked(source));
                         self.accepted_source_revision = Some(key.source);
@@ -1770,15 +2213,18 @@ impl TableUtilitySession {
                         self.projection_state = TableProjectionState::Empty;
                         self.selected_rows = None;
                         self.selected_visible_row_count = 0;
-                        self.selected_columns =
-                            TableResourceOwned::without_payload_charge(Arc::new(HashSet::new()));
+                        self.selected_columns = selected_columns;
+                        self.file_row_selection = Some(file_row_selection);
+                        self.file_page = None;
+                        self.file_page_key = None;
+                        self.file_page_start = 0;
+                        self.file_page_pending = true;
                         self.selection_revision =
                             TableSelectionRevision(self.selection_revision.0.wrapping_add(1));
-                        self.message = Some(self.invalid_resource_policy_message().unwrap_or_else(
-                            || {
-                                "File validation completed. Large-file browsing is not available in this release yet.".into()
-                            },
-                        ));
+                        self.message =
+                            Some(self.invalid_resource_policy_message().unwrap_or_else(|| {
+                                "File validation completed; loading the first bounded page…".into()
+                            }));
                     }
                     Err(FileReadError::Cancelled) => {
                         self.source_load_state = TableSourceLoadState::Idle;
@@ -1791,6 +2237,51 @@ impl TableUtilitySession {
                         };
                         self.restore_last_parse_state();
                         self.message = Some(message);
+                    }
+                }
+            }
+            WorkResult::FilePage(result) => {
+                let accepted_revision = self.accepted_source_revision;
+                let accepted_source_id = self
+                    .accepted_source
+                    .as_ref()
+                    .and_then(TableAcceptedSource::file_id);
+                if !self.open
+                    || key.kind != JobKind::Page
+                    || Some(key.source) != accepted_revision
+                    || key.view != self.view_revision
+                    || !self.file_page_pending
+                {
+                    return;
+                }
+                match result {
+                    Ok(page)
+                        if Some(page.source_id()) == accepted_source_id
+                            && page.start_row() == self.file_page_start =>
+                    {
+                        self.file_page = Some(page);
+                        self.file_page_key = Some(key);
+                        self.file_page_pending = false;
+                        self.message = None;
+                    }
+                    Ok(_) => {
+                        self.file_page_pending = false;
+                        self.message = Some(
+                            "The file-backed page did not match the accepted source; the previous page was kept."
+                                .into(),
+                        );
+                    }
+                    Err(TableFileSourceError::Parse(TableParseError {
+                        kind: TableParseErrorKind::Cancelled,
+                        ..
+                    })) => {
+                        self.file_page_pending = false;
+                    }
+                    Err(error) => {
+                        self.file_page_pending = false;
+                        self.message = Some(format!(
+                            "Could not load the requested file-backed page; the previous page was kept: {error}"
+                        ));
                     }
                 }
             }
@@ -1929,6 +2420,7 @@ impl TableUtilitySession {
         self.requested_source_admission = None;
         if cancel_read {
             self.source_load_state = TableSourceLoadState::Idle;
+            self.file_scan_progress = None;
             self.pending_file_path = None;
             self.pending_file_backed_options = None;
             self.pending_file_admission = None;
@@ -1970,6 +2462,15 @@ impl TableUtilitySession {
             self.schedule_parse();
             return;
         }
+        if self
+            .accepted_source
+            .as_ref()
+            .and_then(TableAcceptedSource::file_source)
+            .is_some()
+        {
+            self.schedule_file_page();
+            return;
+        }
         if self.document().is_some()
             && (self.projected_source_revision != self.accepted_source_revision
                 || self.projected_view_revision != Some(self.view_revision))
@@ -1987,6 +2488,93 @@ impl TableUtilitySession {
             }
             self.schedule_projection();
         }
+    }
+
+    fn schedule_file_page(&mut self) {
+        if !self.file_page_pending {
+            return;
+        }
+        let Some((source, source_revision)) = self
+            .accepted_source
+            .as_ref()
+            .and_then(TableAcceptedSource::file_source)
+            .cloned()
+            .zip(self.accepted_source_revision)
+        else {
+            self.file_page_pending = false;
+            return;
+        };
+        if self.file_page_start > source.row_count() {
+            self.file_page_pending = false;
+            self.message = Some("The requested page starts beyond the end of the file.".into());
+            return;
+        }
+        if let Some(message) = self.invalid_resource_policy_message() {
+            self.file_page_pending = false;
+            self.message = Some(message);
+            return;
+        }
+        let Some(worker) = self.worker.as_ref() else {
+            return;
+        };
+        let key = JobKey {
+            lifetime: self.lifetime,
+            source: source_revision,
+            view: self.view_revision,
+            selection: self.selection_revision,
+            kind: JobKind::Page,
+            export: None,
+        };
+        if self.active_key.is_some_and(|active| {
+            active.lifetime == key.lifetime
+                && active.source == key.source
+                && active.view == key.view
+                && active.kind == key.kind
+                && active.export == key.export
+        }) {
+            return;
+        }
+        let column_admission = self.resource_pool.capture_policy();
+        let source_columns_lease = match reserve_selection_memory_for::<usize>(
+            &column_admission,
+            self.selected_columns.len(),
+        ) {
+            Ok(lease) => lease,
+            Err(error) => {
+                self.file_page_pending = false;
+                self.message = Some(format!(
+                    "Could not reserve memory for the requested file page's column list: {error}"
+                ));
+                return;
+            }
+        };
+        let mut source_columns = Vec::new();
+        if source_columns
+            .try_reserve_exact(self.selected_columns.len())
+            .is_err()
+        {
+            self.file_page_pending = false;
+            self.message =
+                Some("Could not allocate the requested file page's projected columns.".into());
+            return;
+        }
+        source_columns.extend(self.selected_columns.iter().copied());
+        source_columns.sort_unstable();
+        let activity = self.activity_task(key);
+        worker.submit(Job {
+            key,
+            activity,
+            #[cfg(test)]
+            test_drop_probe: None,
+            work: Work::FilePage {
+                source,
+                start_row: self.file_page_start,
+                source_columns,
+                source_columns_lease,
+                cancellation: TableCancellationToken::new(),
+            },
+        });
+        self.active_key = Some(key);
     }
 
     fn schedule_parse(&mut self) {
@@ -2041,6 +2629,8 @@ impl TableUtilitySession {
         worker.submit(Job {
             key,
             activity,
+            #[cfg(test)]
+            test_drop_probe: None,
             work: Work::Parse {
                 bytes: Arc::clone(&self.requested_source),
                 _input_lease: input_lease,
@@ -2099,6 +2689,8 @@ impl TableUtilitySession {
         worker.submit(Job {
             key,
             activity,
+            #[cfg(test)]
+            test_drop_probe: None,
             work: Work::Project {
                 document,
                 projection_lease,
@@ -2136,6 +2728,11 @@ impl TableUtilitySession {
             selected_rows: self.selected_rows.clone(),
             selected_columns: self.selected_columns.clone(),
             selected_visible_row_count: self.selected_visible_row_count,
+            file_scan_progress: self.file_scan_progress.clone(),
+            file_page: self.file_page.clone(),
+            file_page_pending: self.file_page_pending,
+            file_page_start: self.file_page_start,
+            file_row_selection: self.file_row_selection.clone(),
             export_pending: self.export_pending.map(|pending| pending.operation),
             message: self.message.clone(),
         }
@@ -2147,6 +2744,11 @@ impl TableUtilitySession {
             .as_ref()
             .map(TableWorker::test_job_counts)
             .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_resource_usage(&self) -> TableResourceUsage {
+        self.resource_pool.usage()
     }
 
     pub fn clear_message(&mut self) {
@@ -2170,6 +2772,12 @@ fn completion_cancelled(completion: &Completion) -> bool {
         WorkResult::FileScanned(Err(FileReadError::Cancelled))
     ) || matches!(
         &completion.result,
+        WorkResult::FilePage(Err(TableFileSourceError::Parse(TableParseError {
+            kind: TableParseErrorKind::Cancelled,
+            ..
+        })))
+    ) || matches!(
+        &completion.result,
         WorkResult::Parsed(Err(error)) if error.kind == crate::table_utility::TableParseErrorKind::Cancelled
     ) || matches!(
         &completion.result,
@@ -2184,6 +2792,7 @@ fn work_result_succeeded(result: &WorkResult) -> bool {
     match result {
         WorkResult::FileRead(result) => result.is_ok(),
         WorkResult::FileScanned(result) => result.is_ok(),
+        WorkResult::FilePage(result) => result.is_ok(),
         WorkResult::Parsed(result) => result.is_ok(),
         WorkResult::Projected(result) => result.is_ok(),
         WorkResult::Exported(result) => result.is_ok(),
@@ -2521,12 +3130,16 @@ fn read_compact_table_file(
     }
 }
 
-fn scan_table_file(
+fn scan_table_file<F>(
     path: &Path,
     options: TableFileParseOptions,
     pool: TableResourcePool,
     cancellation: &TableCancellationToken,
-) -> Result<(PathBuf, Arc<TableFileBackedSource>), FileReadError> {
+    progress: &mut F,
+) -> Result<(PathBuf, Arc<TableFileBackedSource>), FileReadError>
+where
+    F: FnMut(TableFileScanProgress),
+{
     let path = path.canonicalize().map_err(|error| {
         FileReadError::Failed(format!("Could not resolve the selected file: {error}"))
     })?;
@@ -2540,17 +3153,21 @@ fn scan_table_file(
         ));
     }
     let identity = source_identity(&file)?;
-    let source = scan_open_table_file(file, identity, options, pool, cancellation)?;
+    let source = scan_open_table_file(file, identity, options, pool, cancellation, progress)?;
     Ok((path, Arc::new(source)))
 }
 
-fn scan_open_table_file(
+fn scan_open_table_file<F>(
     file: File,
     identity: TableSourceIdentity,
     options: TableFileParseOptions,
     pool: TableResourcePool,
     cancellation: &TableCancellationToken,
-) -> Result<TableFileBackedSource, FileReadError> {
+    progress: &mut F,
+) -> Result<TableFileBackedSource, FileReadError>
+where
+    F: FnMut(TableFileScanProgress),
+{
     let temp_root = std::env::temp_dir();
     let free_space_root = temp_root.clone();
     let workspace =
@@ -2558,8 +3175,16 @@ fn scan_open_table_file(
             temp_volume_available_bytes(&free_space_root)
         })
         .map_err(|error| FileReadError::Failed(error.to_string()))?;
-    TableFileBackedSource::scan(file, identity, options, pool, &workspace, cancellation)
-        .map_err(file_source_error)
+    TableFileBackedSource::scan_with_progress(
+        file,
+        identity,
+        options,
+        pool,
+        &workspace,
+        cancellation,
+        progress,
+    )
+    .map_err(file_source_error)
 }
 
 fn file_source_error(error: TableFileSourceError) -> FileReadError {
@@ -2673,6 +3298,374 @@ mod tests {
         }
     }
 
+    fn latest_table_activity_key(
+        center: &ActivityCenter,
+        operation: ActivityOperation,
+    ) -> crate::activity::ActivityKey {
+        center
+            .snapshot()
+            .rows
+            .into_iter()
+            .filter(|row| row.key.owner() == ActivityOwner::Table && row.operation == operation)
+            .max_by_key(|row| row.key.operation_id().get())
+            .map(|row| row.key)
+            .expect("the table operation should have an Activity identity")
+    }
+
+    fn wait_for_activity_terminal(
+        center: &ActivityCenter,
+        key: crate::activity::ActivityKey,
+        timeout: Duration,
+    ) -> crate::activity::ActivityRow {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let row = center
+                .snapshot()
+                .rows
+                .into_iter()
+                .find(|row| row.key == key)
+                .expect("the admitted table Activity row should remain observable");
+            if row.lifecycle.is_terminal() {
+                return row;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "table Activity did not terminate"
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn wait_for_worker_completion(session: &TableUtilitySession, key: JobKey, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let published = session.worker.as_ref().is_some_and(|worker| {
+                let state = worker
+                    .shared
+                    .0
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                state
+                    .completed
+                    .as_ref()
+                    .is_some_and(|completion| completion.key == key)
+            });
+            if published {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "table worker completion was not published"
+            );
+            thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn pending_job_releases_its_resource_leases_before_confirmed_activity_retirement() {
+        use crate::activity::{ActivityLifecycle, ActivitySlot};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let pool = TableResourcePool::new(TableResourcePolicy::default());
+        let baseline = pool.usage();
+        let input_lease = pool.reserve_ram(128).expect("reserve job input");
+        let document_lease = pool.reserve_ram(256).expect("reserve job output");
+        assert!(pool.usage().ram_bytes > baseline.ram_bytes);
+
+        let center = ActivityCenter::new();
+        let activity = center
+            .start(
+                ActivityOwner::Table,
+                ActivitySlot::Primary,
+                ActivityIncarnation::new(1),
+                ActivityOperation::ParseTable,
+            )
+            .expect("retain the pending job's Activity row");
+        let activity_key = activity.key();
+        let drop_observed_in_order = Arc::new(AtomicBool::new(false));
+
+        Job {
+            key: JobKey {
+                lifetime: TableSessionLifetime(1),
+                source: TableSourceRevision(1),
+                view: TableViewRevision(1),
+                selection: TableSelectionRevision(1),
+                kind: JobKind::Parse,
+                export: None,
+            },
+            work: Work::Parse {
+                bytes: Arc::from([]),
+                _input_lease: Arc::new(input_lease),
+                document_lease,
+                options: TableParseOptions::utility_default(),
+                cancellation: TableCancellationToken::new(),
+            },
+            activity: Some(activity),
+            test_drop_probe: Some(TableTestJobDropProbe {
+                center: center.clone(),
+                key: activity_key,
+                pool: pool.clone(),
+                expected_usage: baseline,
+                observed_before_terminal: Arc::clone(&drop_observed_in_order),
+            }),
+        }
+        .cancel_before_start();
+
+        assert!(
+            drop_observed_in_order.load(Ordering::SeqCst),
+            "the Work payload and its leases must be gone before Confirmed is published"
+        );
+        assert_eq!(pool.usage(), baseline);
+        let row = center
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.key == activity_key)
+            .expect("the cancelled Activity row remains retained");
+        assert_eq!(
+            row.lifecycle,
+            ActivityLifecycle::Terminal(ActivityOutcome::Cancelled)
+        );
+        assert_eq!(row.retirement, ActivityRetirement::Confirmed);
+    }
+
+    #[test]
+    fn table_activity_observes_file_scan_and_page_lifecycle() {
+        use crate::activity::{ActivityCancelResult, ActivityLifecycle};
+
+        let ctx = egui::Context::default();
+        let center = ActivityCenter::new();
+        let mut session = TableUtilitySession::new();
+        session.attach_activity_center(center.clone());
+        session.open(&ctx).expect("start the table worker");
+        let page_gate = session
+            .worker
+            .as_ref()
+            .expect("the table worker is open")
+            .hold_next_job(JobKind::Page);
+
+        let directory = tempfile::tempdir().expect("file-backed Activity fixture directory");
+        let first_path = directory.path().join("first.tsv");
+        let replaced_path = directory.path().join("replaced.tsv");
+        let current_path = directory.path().join("current.tsv");
+        for path in [&first_path, &replaced_path, &current_path] {
+            std::fs::write(path, b"name\tvalue\nalpha\t1\nbeta\t2\n")
+                .expect("write the small file-backed fixture");
+        }
+        let options = TableFileParseOptions::for_profile(TableUtilityProfile::Table, true);
+        let timeout = Duration::from_secs(5);
+
+        session
+            .request_file_backed_source(first_path.clone(), options)
+            .expect("admit the first file scan");
+        let first_scan_job = session.active_key.expect("the scan has a session key");
+        assert_eq!(first_scan_job.kind, JobKind::ReadFile);
+        let first_scan_activity =
+            latest_table_activity_key(&center, ActivityOperation::ReadTableFile);
+        let first_scan_row = wait_for_activity_terminal(&center, first_scan_activity, timeout);
+        wait_for_worker_completion(&session, first_scan_job, timeout);
+        assert_eq!(
+            first_scan_row.lifecycle,
+            ActivityLifecycle::Terminal(ActivityOutcome::Completed)
+        );
+        assert_eq!(
+            first_scan_row.retirement,
+            ActivityRetirement::Unavailable,
+            "the persistent worker does not provide a per-job join receipt"
+        );
+        let before_scan_poll = session.snapshot();
+        assert_eq!(
+            before_scan_poll.source_load_state,
+            TableSourceLoadState::Reading(first_scan_job.source)
+        );
+        assert!(before_scan_poll.accepted_source.is_none());
+
+        // Acceptance of the scan queues its first page on the same worker.
+        // The test-only gate holds that actual Page job before its work begins.
+        session.poll();
+        let first_page_job = session
+            .active_key
+            .expect("the first page has a session key");
+        assert_eq!(first_page_job.kind, JobKind::Page);
+        assert_eq!(first_page_job.source, first_scan_job.source);
+        assert!(
+            page_gate.wait_until_entered(timeout),
+            "page job did not reach the gate"
+        );
+        let first_page_activity =
+            latest_table_activity_key(&center, ActivityOperation::ProjectTable);
+        assert_ne!(first_page_activity, first_scan_activity);
+        assert_eq!(
+            center
+                .snapshot()
+                .rows
+                .iter()
+                .find(|row| row.key == first_page_activity)
+                .expect("page Activity row")
+                .lifecycle,
+            ActivityLifecycle::Queued
+        );
+        assert_eq!(
+            center.request_cancel(first_page_activity),
+            ActivityCancelResult::Requested,
+            "the page's cancel control targets its own token"
+        );
+
+        // Two source requests arrive while the page is held: the first scan
+        // remains queued and must finish as cancelled when the second replaces it.
+        session
+            .request_file_backed_source(replaced_path, options)
+            .expect("admit the replaceable file scan");
+        let replaced_scan_job = session.active_key.expect("the replaceable scan has a key");
+        let replaced_scan_activity =
+            latest_table_activity_key(&center, ActivityOperation::ReadTableFile);
+        session
+            .request_file_backed_source(current_path.clone(), options)
+            .expect("admit the current file scan");
+        let current_scan_job = session.active_key.expect("the current scan has a key");
+        let current_scan_activity =
+            latest_table_activity_key(&center, ActivityOperation::ReadTableFile);
+        assert_ne!(replaced_scan_activity, current_scan_activity);
+        assert_eq!(current_scan_job.kind, JobKind::ReadFile);
+        assert_eq!(
+            center.request_cancel(first_page_activity),
+            ActivityCancelResult::Requested,
+            "repeating the old key can only signal the old page token"
+        );
+        let replaced_scan_row =
+            wait_for_activity_terminal(&center, replaced_scan_activity, timeout);
+        assert_eq!(
+            replaced_scan_row.lifecycle,
+            ActivityLifecycle::Terminal(ActivityOutcome::Cancelled)
+        );
+        assert_eq!(
+            replaced_scan_row.retirement,
+            ActivityRetirement::Confirmed,
+            "the replaced scan never started and its owned payload was dropped"
+        );
+        assert!(page_gate.wait_until_entered(timeout));
+        let current_scan_row = center
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.key == current_scan_activity)
+            .expect("current scan Activity row");
+        assert!(!current_scan_row.lifecycle.is_terminal());
+
+        page_gate.release();
+        let first_page_row = wait_for_activity_terminal(&center, first_page_activity, timeout);
+        assert_eq!(
+            first_page_row.lifecycle,
+            ActivityLifecycle::Terminal(ActivityOutcome::Cancelled)
+        );
+        assert_eq!(first_page_row.retirement, ActivityRetirement::Unavailable);
+        let current_scan_row = wait_for_activity_terminal(&center, current_scan_activity, timeout);
+        wait_for_worker_completion(&session, current_scan_job, timeout);
+        assert_eq!(
+            current_scan_row.lifecycle,
+            ActivityLifecycle::Terminal(ActivityOutcome::Completed)
+        );
+        assert_eq!(current_scan_row.retirement, ActivityRetirement::Unavailable);
+        let before_current_scan_poll = session.snapshot();
+        assert_eq!(
+            before_current_scan_poll.source_load_state,
+            TableSourceLoadState::Reading(current_scan_job.source)
+        );
+        assert_eq!(
+            before_current_scan_poll.accepted_source_revision,
+            Some(first_scan_job.source),
+            "terminal worker facts are visible before session acceptance"
+        );
+
+        session.poll();
+        let final_page_job = session
+            .active_key
+            .expect("the accepted source schedules a page");
+        assert_eq!(final_page_job.kind, JobKind::Page);
+        assert_eq!(final_page_job.source, current_scan_job.source);
+        let final_page_activity =
+            latest_table_activity_key(&center, ActivityOperation::ProjectTable);
+        let final_page_row = wait_for_activity_terminal(&center, final_page_activity, timeout);
+        wait_for_worker_completion(&session, final_page_job, timeout);
+        assert_eq!(
+            final_page_row.lifecycle,
+            ActivityLifecycle::Terminal(ActivityOutcome::Completed)
+        );
+        assert_eq!(final_page_row.retirement, ActivityRetirement::Unavailable);
+        let before_page_poll = session.snapshot();
+        assert!(before_page_poll.file_page_pending);
+        assert!(before_page_poll.file_page.is_none());
+        session.poll();
+        let accepted = session.snapshot();
+        assert_eq!(
+            accepted.source_path.as_deref(),
+            Some(current_path.as_path())
+        );
+        assert_eq!(
+            accepted.accepted_source_revision,
+            Some(current_scan_job.source)
+        );
+        assert!(accepted.file_page.is_some());
+        assert!(!accepted.file_page_pending);
+
+        // A real scan failure is terminally Failed while preserving the last
+        // accepted source and page. This exercises FileScanned's error mapping.
+        let missing_path = directory.path().join("missing.tsv");
+        session
+            .request_file_backed_source(missing_path, options)
+            .expect("admit the failing file scan");
+        let failed_scan_job = session.active_key.expect("the failed scan has a key");
+        let failed_scan_activity =
+            latest_table_activity_key(&center, ActivityOperation::ReadTableFile);
+        let failed_scan_row = wait_for_activity_terminal(&center, failed_scan_activity, timeout);
+        wait_for_worker_completion(&session, failed_scan_job, timeout);
+        assert_eq!(
+            failed_scan_row.lifecycle,
+            ActivityLifecycle::Terminal(ActivityOutcome::Failed)
+        );
+        assert_eq!(
+            failed_scan_row.diagnostic,
+            Some(ActivityDiagnostic::WorkerFailed)
+        );
+        assert_eq!(failed_scan_row.retirement, ActivityRetirement::Unavailable);
+        assert_eq!(
+            session.snapshot().source_load_state,
+            TableSourceLoadState::Reading(failed_scan_job.source)
+        );
+        session.poll();
+        let after_failure = session.snapshot();
+        assert!(matches!(
+            after_failure.source_load_state,
+            TableSourceLoadState::Failed { revision, .. } if revision == failed_scan_job.source
+        ));
+        assert_eq!(
+            after_failure.accepted_source_revision,
+            Some(current_scan_job.source)
+        );
+        assert!(after_failure.file_page.is_some());
+
+        let rows = center.snapshot().rows;
+        assert!(rows.iter().all(|row| row.lifecycle.is_terminal()));
+        let counts = session.test_job_counts();
+        assert_eq!(counts.scan_submitted, 4);
+        assert_eq!(
+            counts.scan_executed, 3,
+            "the replaced pending scan never executes"
+        );
+        assert_eq!(counts.page_submitted, 2);
+        assert_eq!(counts.page_executed, 2);
+        session.shutdown();
+        drop(before_scan_poll);
+        drop(before_current_scan_poll);
+        drop(before_page_poll);
+        drop(accepted);
+        drop(after_failure);
+        drop(session);
+        directory
+            .close()
+            .expect("all session snapshots and file handles are released before cleanup");
+    }
+
     // Baseline probe: method acknowledgment and active-job clearance are not UI
     // frame latency or worker-thread retirement. No production policy changes.
     #[test]
@@ -2770,6 +3763,140 @@ mod tests {
                 Instant::now() < deadline,
                 "table source worker did not finish: {:?}",
                 snapshot.source_load_state
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn loaded_file_page_snapshot_with_timeout(
+        session: &mut TableUtilitySession,
+        timeout: Duration,
+    ) -> TableSessionSnapshot {
+        let deadline = Instant::now() + timeout;
+        loop {
+            session.poll();
+            let snapshot = session.snapshot();
+            if !snapshot.file_page_pending && snapshot.file_page.is_some() {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "file-backed page did not finish: {:?} / {:?}",
+                snapshot.source_load_state,
+                snapshot.file_page.as_ref().map(|page| page.start_row())
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn controlled_file_fixture(
+        pool: &TableResourcePool,
+        name: &str,
+        contents: &[u8],
+    ) -> (
+        tempfile::TempDir,
+        TableTempWorkspace,
+        Arc<TableFileBackedSource>,
+    ) {
+        let directory = tempfile::tempdir().expect("controlled file fixture directory");
+        let path = directory.path().join(name);
+        std::fs::write(&path, contents).expect("write controlled file fixture");
+        let workspace = TableTempWorkspace::create(std::env::temp_dir(), pool.clone(), u64::MAX)
+            .expect("create controlled file workspace");
+        let file = File::open(path).expect("open controlled file fixture");
+        let source = TableFileBackedSource::scan(
+            file,
+            TableSourceIdentity {
+                volume_serial_number: 1,
+                file_id: [0x5a; 16],
+            },
+            TableFileParseOptions::for_profile(TableUtilityProfile::Table, true),
+            pool.clone(),
+            &workspace,
+            &TableCancellationToken::new(),
+        )
+        .expect("scan controlled file fixture");
+        (directory, workspace, Arc::new(source))
+    }
+
+    fn controlled_file_page(
+        source: &Arc<TableFileBackedSource>,
+        start_row: u64,
+        columns: &[usize],
+    ) -> TableResourceOwned<TableFileProjectedPage> {
+        source
+            .projected_page(
+                start_row,
+                columns,
+                crate::table_utility::TABLE_FILE_PAGE_MAX_ROWS,
+                crate::table_utility::TABLE_FILE_PAGE_MAX_BYTES,
+                crate::table_utility::TABLE_FILE_PAGE_PREVIEW_CHARS,
+                TableCancellationToken::new(),
+            )
+            .expect("build controlled page completion")
+    }
+
+    fn controlled_page_key(session: &TableUtilitySession) -> JobKey {
+        JobKey {
+            lifetime: session.lifetime,
+            source: session
+                .accepted_source_revision
+                .expect("controlled accepted source revision"),
+            view: session.view_revision,
+            selection: session.selection_revision,
+            kind: JobKind::Page,
+            export: None,
+        }
+    }
+
+    fn install_controlled_file_source(
+        session: &mut TableUtilitySession,
+        source: Arc<TableFileBackedSource>,
+        page: TableResourceOwned<TableFileProjectedPage>,
+    ) -> JobKey {
+        session.open = true;
+        session.lifetime = TableSessionLifetime(1);
+        let revision = session.source_revision;
+        session.accepted_source = Some(TableAcceptedSource::FileBacked(Arc::clone(&source)));
+        session.accepted_source_revision = Some(revision);
+        session.parse_options = parse_options_for_file_source(source.options());
+        session.parse_state = TableParseState::Ready(revision);
+        session.source_load_state = TableSourceLoadState::Idle;
+        session.source_dirty = false;
+        session.source_is_inline_editable = false;
+        let admission = session.resource_pool.capture_policy();
+        session.selected_columns = all_selected_columns(&admission, source.column_count())
+            .expect("reserve controlled file columns");
+        session.file_row_selection = Some(
+            TableFileRowSelection::all_selected(source.id(), source.row_count(), &admission)
+                .expect("reserve controlled file row selection"),
+        );
+        session.file_page_start = page.start_row();
+        session.file_page_pending = false;
+        session.file_page_key = None;
+        session.file_page = Some(page);
+        let key = controlled_page_key(session);
+        session.file_page_key = Some(key);
+        key
+    }
+
+    fn await_worker_scan_progress(
+        session: &TableUtilitySession,
+        timeout: Duration,
+    ) -> (JobKey, TableFileScanProgress) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(progress) = session
+                .worker
+                .as_ref()
+                .expect("the controlled scan worker is open")
+                .poll_scan_progress()
+            {
+                return progress;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the scan worker did not publish provisional progress"
             );
             thread::yield_now();
         }
@@ -3243,6 +4370,254 @@ mod tests {
         }
     }
 
+    #[test]
+    fn file_backed_source_can_switch_to_resident_parse_and_keep_last_good_on_failure() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("accepted.csv");
+        std::fs::write(&path, b"name,value\nfile,1\n").expect("write file-backed fixture");
+
+        let ctx = egui::Context::default();
+        let mut session = TableUtilitySession::new();
+        session.open(&ctx).expect("start session worker");
+        session
+            .request_file_backed_source(
+                path,
+                TableFileParseOptions::for_profile(TableUtilityProfile::Table, true),
+            )
+            .expect("queue file-backed source");
+        let file_ready = loaded_source_snapshot(&mut session);
+        let file_id = file_ready
+            .accepted_source
+            .as_ref()
+            .and_then(TableAcceptedSource::file_id)
+            .expect("file source is accepted");
+        assert!(file_ready.document.is_none());
+        drop(file_ready);
+
+        session
+            .paste_source("name,value\nresident,2\n".to_owned())
+            .expect("queue a compact resident parse after the file-backed source");
+        let resident = ready_snapshot(&mut session);
+        let resident_document = resident.document.as_ref().expect("resident document");
+        let resident_id = resident_document.id();
+        assert!(matches!(
+            resident.accepted_source,
+            Some(TableAcceptedSource::Resident(_))
+        ));
+        assert_eq!(
+            resident_document.rows().first().and_then(|row| row.cell(0)),
+            Some("resident")
+        );
+        assert!(resident.file_page.is_none());
+        assert!(!resident.file_page_pending);
+        assert!(resident.file_row_selection.is_none());
+        drop(resident);
+
+        session
+            .paste_source("name,value\n\"unterminated".to_owned())
+            .expect("queue malformed replacement");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let failed = loop {
+            session.poll();
+            let snapshot = session.snapshot();
+            if matches!(&snapshot.parse_state, TableParseState::Failed { .. }) {
+                break snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "malformed resident replacement did not reach a terminal parse state"
+            );
+            thread::yield_now();
+        };
+        let retained_document = failed
+            .document
+            .as_ref()
+            .expect("last-good document retained");
+        assert_eq!(retained_document.id(), resident_id);
+        assert_eq!(
+            retained_document.rows().first().and_then(|row| row.cell(0)),
+            Some("resident")
+        );
+        assert!(
+            matches!(
+                failed.accepted_source.as_ref(),
+                Some(TableAcceptedSource::Resident(_))
+            ),
+            "the failed resident draft cannot replace its previous valid source"
+        );
+        assert!(failed.file_page.is_none());
+        assert!(!failed.file_page_pending);
+        assert!(failed.file_row_selection.is_none());
+        assert_ne!(
+            failed
+                .accepted_source
+                .as_ref()
+                .and_then(TableAcceptedSource::file_id),
+            Some(file_id),
+            "the successfully scheduled resident parse replaced the older file source"
+        );
+        session.shutdown();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provisional_file_scan_progress_is_distinct_and_cleared_on_terminal_results() {
+        let directory = tempfile::tempdir().expect("provisional scan workspace");
+        let valid_path = directory.path().join("valid.csv");
+        std::fs::write(&valid_path, b"name,value\nnew,1\nsecond,2\n")
+            .expect("write valid scan fixture");
+        let invalid_path = directory.path().join("late-width.csv");
+        let mut invalid_source = String::from("name,value\n");
+        for row in 0..16 {
+            invalid_source.push_str(&format!("row-{row},valid\n"));
+        }
+        invalid_source.push_str("late,width,error\n");
+        std::fs::write(&invalid_path, invalid_source).expect("write late-error fixture");
+
+        let ctx = egui::Context::default();
+        let mut session = TableUtilitySession::new();
+        session.open(&ctx).expect("start session worker");
+        session.set_has_header(true);
+        session
+            .paste_source("name,value\nold,1\n".to_owned())
+            .expect("queue previous accepted source");
+        let old = ready_snapshot(&mut session);
+        let old_revision = old.accepted_source_revision.expect("resident revision");
+        let old_document_id = old.document.as_ref().unwrap().id();
+        assert!(old.can_export());
+        drop(old);
+
+        let csv_options = TableFileParseOptions::for_profile(TableUtilityProfile::Csv, true);
+        session
+            .request_file_backed_source(valid_path, csv_options)
+            .expect("queue valid file-backed scan");
+        let (valid_key, valid_progress) =
+            await_worker_scan_progress(&session, Duration::from_secs(5));
+        assert_eq!(valid_key.source, session.source_revision);
+        session.accept_file_scan_progress(valid_key, valid_progress.clone());
+
+        let pending = session.snapshot();
+        assert!(pending.reading_source);
+        assert!(pending.source_dirty);
+        assert_ne!(
+            pending.accepted_source_revision,
+            Some(pending.source_revision)
+        );
+        assert_eq!(pending.accepted_source_revision, Some(old_revision));
+        assert_eq!(pending.document.as_ref().unwrap().id(), old_document_id);
+        assert!(matches!(
+            &pending.accepted_source,
+            Some(TableAcceptedSource::Resident(_))
+        ));
+        assert!(!pending.can_export());
+        assert_eq!(
+            pending
+                .file_scan_progress
+                .as_ref()
+                .unwrap()
+                .validated_rows(),
+            valid_progress.validated_rows()
+        );
+        let current_preview_id = valid_progress.preview().source_id();
+
+        let mut stale_key = valid_key;
+        stale_key.source = old_revision;
+        session.accept_file_scan_progress(stale_key, valid_progress);
+        assert_eq!(
+            session
+                .file_scan_progress
+                .as_ref()
+                .unwrap()
+                .preview()
+                .source_id(),
+            current_preview_id,
+            "a late preview from the previous source cannot replace the active scan preview"
+        );
+
+        let valid = loaded_source_snapshot_with_timeout(&mut session, Duration::from_secs(10));
+        let valid_source_id = valid
+            .accepted_source
+            .as_ref()
+            .and_then(TableAcceptedSource::file_id)
+            .expect("valid scan becomes the accepted file source");
+        assert_eq!(
+            valid
+                .accepted_source
+                .as_ref()
+                .and_then(TableAcceptedSource::file_source)
+                .unwrap()
+                .row_count(),
+            2
+        );
+        assert!(valid.file_scan_progress.is_none());
+        assert!(valid.accepted_options_are_current());
+        drop(valid);
+        let valid_page =
+            loaded_file_page_snapshot_with_timeout(&mut session, Duration::from_secs(5));
+        assert_eq!(
+            valid_page.file_page.as_ref().unwrap().source_id(),
+            valid_source_id
+        );
+        drop(valid_page);
+
+        session
+            .request_file_backed_source(invalid_path, csv_options)
+            .expect("queue late-failing file-backed scan");
+        let (failed_key, failed_progress) =
+            await_worker_scan_progress(&session, Duration::from_secs(5));
+        assert_eq!(failed_key.source, session.source_revision);
+        session.accept_file_scan_progress(failed_key, failed_progress.clone());
+        let pending_failure = session.snapshot();
+        assert!(pending_failure.reading_source);
+        assert!(pending_failure.source_dirty);
+        assert!(!pending_failure.can_export());
+        assert_eq!(
+            pending_failure
+                .accepted_source
+                .as_ref()
+                .and_then(TableAcceptedSource::file_id),
+            Some(valid_source_id)
+        );
+        assert!(pending_failure.file_scan_progress.as_ref().is_some());
+        drop(pending_failure);
+
+        let failed_revision = session.source_revision;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let failed = loop {
+            session.poll();
+            let snapshot = session.snapshot();
+            if matches!(
+                &snapshot.source_load_state,
+                TableSourceLoadState::Failed { revision, .. } if *revision == failed_revision
+            ) {
+                break snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "late width failure did not terminate: {:?}",
+                snapshot.source_load_state
+            );
+            thread::yield_now();
+        };
+        assert!(failed.file_scan_progress.is_none());
+        assert_eq!(
+            failed
+                .accepted_source
+                .as_ref()
+                .and_then(TableAcceptedSource::file_id),
+            Some(valid_source_id),
+            "a late scan error leaves the last accepted source intact"
+        );
+        assert!(failed.source_dirty);
+        assert!(!failed.can_export());
+        drop(failed);
+
+        session.shutdown();
+        drop(session);
+        drop(failed_progress);
+        drop(directory);
+    }
+
     #[cfg(windows)]
     #[test]
     fn table_session_admits_large_file_backed_source_and_preserves_last_good() {
@@ -3278,6 +4653,67 @@ mod tests {
         assert_eq!(accepted_source.byte_count(), byte_count);
         assert_eq!(accepted_source.row_count(), 220_000);
         assert!(accepted.accepted_options_are_current());
+        let first_page_snapshot =
+            loaded_file_page_snapshot_with_timeout(&mut session, Duration::from_secs(120));
+        let first_page = first_page_snapshot.file_page.as_ref().expect("first page");
+        assert_eq!(first_page.source_id(), accepted_source.id());
+        assert_eq!(first_page.start_row(), 0);
+        assert_eq!(first_page.total_rows(), Some(220_000));
+        assert_eq!(
+            first_page.rows().len(),
+            crate::table_utility::TABLE_FILE_PAGE_MAX_ROWS
+        );
+        assert_eq!(first_page.rows()[0].id().ordinal(), 0);
+        assert_eq!(
+            first_page.rows()[0].cell_for_source_column(first_page, 0),
+            Some("0")
+        );
+        assert_eq!(
+            first_page_snapshot
+                .file_row_selection
+                .as_ref()
+                .expect("sparse all-selected default")
+                .selected_count(),
+            220_000
+        );
+        let stale_page = first_page_snapshot
+            .file_page
+            .as_ref()
+            .expect("first page")
+            .clone();
+        let stale_key = JobKey {
+            lifetime: session.lifetime,
+            source: session.accepted_source_revision.unwrap(),
+            view: session.view_revision,
+            selection: session.selection_revision,
+            kind: JobKind::Page,
+            export: None,
+        };
+        drop(first_page_snapshot);
+        session
+            .request_file_page(219_999)
+            .expect("request the indexed last page");
+        session.accept(Completion {
+            key: stale_key,
+            result: WorkResult::FilePage(Ok(stale_page)),
+        });
+        assert_eq!(
+            session.file_page.as_ref().unwrap().start_row(),
+            0,
+            "a page from an older view generation cannot replace the current page"
+        );
+        assert!(session.file_page_pending);
+        let last_page_snapshot =
+            loaded_file_page_snapshot_with_timeout(&mut session, Duration::from_secs(120));
+        let last_page = last_page_snapshot.file_page.as_ref().expect("last page");
+        assert_eq!(last_page.start_row(), 219_999);
+        assert_eq!(last_page.rows().len(), 1);
+        assert_eq!(last_page.rows()[0].id().ordinal(), 219_999);
+        assert_eq!(
+            last_page.rows()[0].cell_for_source_column(last_page, 0),
+            Some("219999")
+        );
+        drop(last_page_snapshot);
         let original_identity = accepted_source.identity();
         let mut last_row_cursor = Arc::clone(accepted_source)
             .cursor()
@@ -3337,6 +4773,326 @@ mod tests {
         session.shutdown();
         drop(session);
         assert!(std::fs::OpenOptions::new().write(true).open(&path).is_ok());
+    }
+
+    #[test]
+    fn file_page_completions_gate_source_and_view_but_not_row_selection() {
+        let mut csv = String::from("left,right\n");
+        for row in 0..130 {
+            csv.push_str(&format!("row-{row},{row}\n"));
+        }
+
+        let mut session = TableUtilitySession::new();
+        let (directory, workspace, source) = controlled_file_fixture(
+            &session.resource_pool,
+            "completion-source.csv",
+            csv.as_bytes(),
+        );
+        let first_page = controlled_file_page(&source, 0, &[0, 1]);
+        let first_row = first_page.rows()[0].id();
+        let first_key =
+            install_controlled_file_source(&mut session, Arc::clone(&source), first_page);
+
+        let initial_view = session.view_revision;
+        session
+            .request_file_page(0)
+            .expect("requesting the already-current page succeeds");
+        assert_eq!(session.view_revision, initial_view);
+        assert!(!session.file_page_pending);
+
+        session
+            .request_file_page(64)
+            .expect("queue the second bounded page");
+        let page_key = controlled_page_key(&session);
+        assert!(session.file_page_pending);
+        assert_ne!(page_key.view, first_key.view);
+        session.set_file_row_selected(first_row, false);
+        assert_ne!(session.selection_revision, page_key.selection);
+        assert_eq!(session.view_revision, page_key.view);
+        session.accept(Completion {
+            key: page_key,
+            result: WorkResult::FilePage(Ok(controlled_file_page(&source, 64, &[0, 1]))),
+        });
+        assert!(!session.file_page_pending);
+        assert_eq!(session.file_page.as_ref().unwrap().start_row(), 64);
+        assert!(
+            !session
+                .file_row_selection
+                .as_ref()
+                .unwrap()
+                .is_selected(first_row)
+        );
+
+        session
+            .request_file_page(0)
+            .expect("queue a page in the current column projection");
+        let stale_view_key = controlled_page_key(&session);
+        session.set_column_selected(1, false);
+        assert_ne!(session.view_revision, stale_view_key.view);
+        session.accept(Completion {
+            key: stale_view_key,
+            result: WorkResult::FilePage(Ok(controlled_file_page(&source, 0, &[0, 1]))),
+        });
+        assert!(session.file_page_pending);
+        assert_eq!(session.file_page.as_ref().unwrap().start_row(), 64);
+
+        let replacement_csv = b"left,right\nreplacement,1\n";
+        let (_replacement_directory, _replacement_workspace, replacement) = controlled_file_fixture(
+            &session.resource_pool,
+            "replacement-source.csv",
+            replacement_csv,
+        );
+        let stale_source_key = controlled_page_key(&session);
+        let replacement_revision =
+            TableSourceRevision(session.source_revision.value().wrapping_add(1));
+        session.source_revision = replacement_revision;
+        session.accepted_source_revision = Some(replacement_revision);
+        session.accepted_source = Some(TableAcceptedSource::FileBacked(Arc::clone(&replacement)));
+        session.parse_options = parse_options_for_file_source(replacement.options());
+        session.parse_state = TableParseState::Ready(replacement_revision);
+        session.source_dirty = false;
+        session.selected_columns = all_selected_columns(
+            &session.resource_pool.capture_policy(),
+            replacement.column_count(),
+        )
+        .unwrap();
+        session.file_row_selection = Some(
+            TableFileRowSelection::all_selected(
+                replacement.id(),
+                replacement.row_count(),
+                &session.resource_pool,
+            )
+            .unwrap(),
+        );
+        let replacement_page = controlled_file_page(&replacement, 0, &[0, 1]);
+        session.file_page = Some(replacement_page);
+        session.file_page_start = 0;
+        session.file_page_pending = true;
+        session.file_page_key = None;
+        session.accept(Completion {
+            key: stale_source_key,
+            result: WorkResult::FilePage(Ok(controlled_file_page(&source, 0, &[0, 1]))),
+        });
+        let retained = session
+            .file_page
+            .as_ref()
+            .expect("replacement page retained");
+        assert_eq!(retained.source_id(), replacement.id());
+        assert!(session.file_page_pending);
+
+        session.close();
+        drop(session);
+        drop(source);
+        drop(replacement);
+        drop(workspace);
+        drop(directory);
+    }
+
+    #[test]
+    fn pending_file_page_is_not_resubmitted_after_row_selection_changes() {
+        let ctx = egui::Context::default();
+        let mut csv = String::from("left,right\n");
+        for row in 0..130 {
+            csv.push_str(&format!("row-{row},{row}\n"));
+        }
+
+        let mut session = TableUtilitySession::new();
+        session.open(&ctx).expect("start session worker");
+        let (directory, workspace, source) = controlled_file_fixture(
+            &session.resource_pool,
+            "row-selection-page-dedup.csv",
+            csv.as_bytes(),
+        );
+        let first_page = controlled_file_page(&source, 0, &[0, 1]);
+        let first_row = first_page.rows()[0].id();
+        install_controlled_file_source(&mut session, Arc::clone(&source), first_page);
+
+        session
+            .request_file_page(64)
+            .expect("submit the second bounded page");
+        let submitted_key = session.active_key.expect("page request is active");
+        assert_eq!(session.test_job_counts().page_submitted, 1);
+        assert_eq!(submitted_key.kind, JobKind::Page);
+
+        session.set_file_row_selected(first_row, false);
+        assert_ne!(session.selection_revision, submitted_key.selection);
+        assert_eq!(session.view_revision, submitted_key.view);
+        assert!(session.file_page_pending);
+
+        // The worker may already have finished, but until poll consumes its
+        // completion the page identity remains active. Scheduling again must
+        // not replace the same page merely because row selection changed.
+        session.schedule_file_page();
+        assert_eq!(session.test_job_counts().page_submitted, 1);
+        assert_eq!(session.active_key, Some(submitted_key));
+
+        session.shutdown();
+        drop(session);
+        drop(source);
+        drop(workspace);
+        drop(directory);
+    }
+
+    #[test]
+    fn file_page_column_metadata_quota_refusal_preserves_old_page() {
+        let ctx = egui::Context::default();
+        let mut session = TableUtilitySession::new();
+        session.open(&ctx).expect("start session worker");
+        let (directory, workspace, source) = controlled_file_fixture(
+            &session.resource_pool,
+            "page-column-quota.csv",
+            b"left,right\na,1\nb,2\n",
+        );
+        let original_page = controlled_file_page(&source, 0, &[0, 1]);
+        install_controlled_file_source(&mut session, Arc::clone(&source), original_page.clone());
+
+        let request_lease = reserve_selection_memory_for::<usize>(
+            &session.resource_pool.capture_policy(),
+            session.selected_columns.len(),
+        )
+        .expect("measure the bounded page-column descriptor reservation");
+        let request_bytes = request_lease.bytes();
+        drop(request_lease);
+        const RAM_LIMIT: u64 = 64 * 1024 * 1024;
+        let policy = TableResourcePolicy::new(RAM_LIMIT, TableResourcePolicy::DEFAULT_TEMP_BYTES)
+            .expect("minimum valid constrained policy");
+        session.set_resource_policy(Ok(policy));
+        let usage_before_fill = session.test_resource_usage();
+        let filler_bytes = RAM_LIMIT
+            .checked_sub(usage_before_fill.ram_bytes)
+            .and_then(|remaining| remaining.checked_sub(request_bytes))
+            .and_then(|remaining| remaining.checked_add(1))
+            .expect("fixture can leave exactly one byte less than the request");
+        let filler_lease = session
+            .resource_pool
+            .reserve_ram(filler_bytes)
+            .expect("fill the policy while leaving the page request one byte short");
+        let usage_before = session.test_resource_usage();
+
+        session
+            .request_file_page(1)
+            .expect("request is accepted before page-column admission");
+        assert!(!session.file_page_pending);
+        assert_eq!(session.test_job_counts().page_submitted, 0);
+        assert_eq!(session.file_page.as_deref(), Some(original_page.as_ref()));
+        assert_eq!(session.file_page.as_ref().unwrap().start_row(), 0);
+        assert_eq!(session.test_resource_usage(), usage_before);
+        assert!(
+            session
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("requested file page's column list"))
+        );
+        for _ in 0..3 {
+            session.poll();
+        }
+        assert!(!session.file_page_pending);
+        assert_eq!(session.test_job_counts().page_submitted, 0);
+        assert_eq!(session.file_page.as_deref(), Some(original_page.as_ref()));
+        assert_eq!(session.test_resource_usage(), usage_before);
+
+        session.shutdown();
+        drop(filler_lease);
+        drop(session);
+        drop(source);
+        drop(workspace);
+        drop(directory);
+    }
+
+    #[test]
+    fn file_page_failure_and_cancellation_preserve_the_last_good_page() {
+        let mut csv = String::from("left,right\n");
+        for row in 0..130 {
+            csv.push_str(&format!("row-{row},{row}\n"));
+        }
+
+        let mut session = TableUtilitySession::new();
+        let (directory, workspace, source) =
+            controlled_file_fixture(&session.resource_pool, "page-errors.csv", csv.as_bytes());
+        let original_page = controlled_file_page(&source, 0, &[0, 1]);
+        install_controlled_file_source(&mut session, Arc::clone(&source), original_page.clone());
+
+        session
+            .request_file_page(64)
+            .expect("queue a page whose completion will fail");
+        let failed_key = controlled_page_key(&session);
+        session.accept(Completion {
+            key: failed_key,
+            result: WorkResult::FilePage(Err(TableFileSourceError::Io(
+                "injected page read failure".into(),
+            ))),
+        });
+        assert!(!session.file_page_pending);
+        assert_eq!(session.file_page.as_deref(), Some(original_page.as_ref()));
+        let failure_message = session.message.clone().expect("page failure is visible");
+        assert!(failure_message.contains("previous page was kept"));
+
+        session
+            .request_file_page(64)
+            .expect("queue a page whose completion will be cancelled");
+        let cancelled_key = controlled_page_key(&session);
+        session.accept(Completion {
+            key: cancelled_key,
+            result: WorkResult::FilePage(Err(TableFileSourceError::Parse(TableParseError {
+                kind: TableParseErrorKind::Cancelled,
+                location: None,
+                expected_columns: None,
+                actual_columns: None,
+            }))),
+        });
+        assert!(!session.file_page_pending);
+        assert_eq!(session.file_page.as_deref(), Some(original_page.as_ref()));
+        assert_eq!(session.message.as_deref(), Some(failure_message.as_str()));
+
+        session.close();
+        drop(session);
+        drop(source);
+        drop(workspace);
+        drop(directory);
+    }
+
+    #[test]
+    fn file_page_completion_from_closed_lifetime_is_ignored_after_reopen() {
+        let ctx = egui::Context::default();
+        let mut session = TableUtilitySession::new();
+        let (directory, workspace, source) = controlled_file_fixture(
+            &session.resource_pool,
+            "page-lifetime.csv",
+            b"left,right\nfirst,1\nsecond,2\n",
+        );
+        let page = controlled_file_page(&source, 0, &[0, 1]);
+        let original_key =
+            install_controlled_file_source(&mut session, Arc::clone(&source), page.clone());
+
+        session.close();
+        session.accept(Completion {
+            key: original_key,
+            result: WorkResult::FilePage(Ok(controlled_file_page(&source, 0, &[0, 1]))),
+        });
+        assert_eq!(session.file_page.as_deref(), Some(page.as_ref()));
+
+        session
+            .open(&ctx)
+            .expect("reopen session with a fresh worker");
+        assert_ne!(session.lifetime, original_key.lifetime);
+        let stale_completion = Completion {
+            key: original_key,
+            result: WorkResult::FilePage(Ok(controlled_file_page(&source, 0, &[0, 1]))),
+        };
+        let worker = session.worker.as_ref().expect("reopened worker");
+        let (lock, _) = &*worker.shared;
+        lock.lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .completed = Some(stale_completion);
+        session.poll();
+        assert_eq!(session.file_page.as_deref(), Some(page.as_ref()));
+        assert!(!session.file_page_pending);
+
+        session.shutdown();
+        drop(session);
+        drop(source);
+        drop(workspace);
+        drop(directory);
     }
 
     #[test]
