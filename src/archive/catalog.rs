@@ -615,6 +615,11 @@ fn inspect_end_candidate<R: Read + Seek>(
             crate::archive::model::ArchiveFormatProblem::InvalidCentralDirectory,
         ));
     }
+    if entry_count == 0 && central_offset != 0 {
+        return Ok(CandidateInspection::Invalid(
+            crate::archive::model::ArchiveFormatProblem::UnsupportedArchiveOffset,
+        ));
+    }
 
     Ok(CandidateInspection::Valid(ArchiveSource {
         revision,
@@ -1768,6 +1773,80 @@ mod tests {
         let catalog = read(&mut reader, ArchiveLimits::default()).unwrap();
         assert_eq!(catalog.entries().len(), 1);
         assert_eq!(catalog.entries()[0].name().as_utf8(), Some("real.txt"));
+    }
+
+    #[test]
+    fn empty_eocd_lookalike_with_nonzero_offset_in_comment_falls_back_to_real_catalog() {
+        let (mut bytes, payloads) = make_zip(&[Spec::file(b"real.txt", b"body")], &[0; 22]);
+        let fake_eocd = bytes.len() - EOCD_FIXED_BYTES;
+        let real_eocd = fake_eocd - EOCD_FIXED_BYTES;
+        let central_header = bytes
+            .windows(4)
+            .position(|window| window == CENTRAL_HEADER_SIGNATURE.to_le_bytes())
+            .expect("the real entry's central record is present");
+        let real_central_size = u32::from_le_bytes(
+            bytes[real_eocd + 12..real_eocd + 16]
+                .try_into()
+                .expect("the real EOCD has a central-directory size"),
+        );
+
+        // A complete zero-entry EOCD whose empty central directory starts at
+        // its own offset is envelope-consistent, but this nonzero offset is
+        // unsupported. It must not hide the actual EOCD immediately before it.
+        bytes[fake_eocd..fake_eocd + 4].copy_from_slice(&EOCD_SIGNATURE.to_le_bytes());
+        bytes[fake_eocd + 4..fake_eocd + 16].fill(0);
+        bytes[fake_eocd + 16..fake_eocd + 20].copy_from_slice(&(fake_eocd as u32).to_le_bytes());
+        bytes[fake_eocd + 20..fake_eocd + 22].fill(0);
+
+        let revision = ArchiveRevision::new(32);
+        let mut reader = RejectPayloadReader::new(bytes.clone(), payloads);
+        let catalog = read_catalog(
+            &mut reader,
+            revision,
+            ArchiveLimits::default(),
+            &ScanCancellation::new(),
+        )
+        .expect("the real EOCD must be retried after the unsupported comment candidate");
+
+        assert_eq!(catalog.source().revision, revision);
+        assert_eq!(catalog.source().archive_len, bytes.len() as u64);
+        assert_eq!(
+            catalog.source().central_directory_offset,
+            central_header as u64
+        );
+        assert_eq!(
+            catalog.source().central_directory_size,
+            u64::from(real_central_size)
+        );
+        assert_eq!(catalog.source().central_directory_end, real_eocd as u64);
+        assert_eq!(catalog.source().entry_count, 1);
+        assert_eq!(catalog.entries().len(), 1);
+        assert_eq!(catalog.entries()[0].id(), ArchiveEntryId::new(revision, 0));
+        assert_eq!(catalog.entries()[0].name().as_utf8(), Some("real.txt"));
+        assert_eq!(
+            catalog.entries()[0].central_header_offset(),
+            central_header as u64
+        );
+        assert_eq!(catalog.entries()[0].uncompressed_size(), 4);
+        assert!(
+            reader.reads < 256,
+            "cataloging remains bounded and does not read the entry payload"
+        );
+
+        // A real empty archive with a nonzero empty-directory offset and no
+        // earlier valid EOCD retains the established typed rejection.
+        let (mut unsupported, no_payloads) = make_zip(&[], b"");
+        unsupported.splice(0..0, [0_u8; 4]);
+        let unsupported_eocd = unsupported.len() - EOCD_FIXED_BYTES;
+        unsupported[unsupported_eocd + 16..unsupported_eocd + 20]
+            .copy_from_slice(&(unsupported_eocd as u32).to_le_bytes());
+        let mut reader = RejectPayloadReader::new(unsupported, no_payloads);
+        assert!(matches!(
+            read(&mut reader, ArchiveLimits::default()),
+            Err(CatalogError::Malformed(
+                crate::archive::model::ArchiveFormatProblem::UnsupportedArchiveOffset
+            ))
+        ));
     }
 
     #[test]
