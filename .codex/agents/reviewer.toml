@@ -1,8 +1,11 @@
 name = "reviewer"
 description = "High-reasoning final architecture and regression reviewer."
 
-model = "gpt-6.1-sol"
-model_reasoning_effort = "high"
+# Previous configuration (retained for rollback):
+# model = "gpt-6.1-sol"
+# model_reasoning_effort = "high"
+model = "gpt-6-astra"
+model_reasoning_effort = "max"
 
 # Astra high alternative:
 # model = "gpt-6-astra"

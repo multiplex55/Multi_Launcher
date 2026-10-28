@@ -1,8 +1,11 @@
 name = "implementer"
 description = "implementation agent for one approved, explicitly scoped pipeline milestone at a time."
 
-model = "gpt-6-luna"
-model_reasoning_effort = "max"
+# Previous configuration (retained for rollback):
+# model = "gpt-6-luna"
+# model_reasoning_effort = "max"
+model = "gpt-6-astra"
+model_reasoning_effort = "xhigh"
 
 sandbox_mode = "workspace-write"
 
