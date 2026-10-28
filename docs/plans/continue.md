@@ -1,9 +1,14 @@
-Read "docs/plans/CODEX_KICKSTART_RESUME_MULTI_GOAL_QUEUE_20261025.md" in full and execute it now.
+Inspect the current Multi Launcher queue integration state without changing anything.
 
-Resume the existing "multi-launcher-queue-20261025-eedc19d2" using its durable queue ledger and preserved Goal 04 recovery records.
+The latest pushed integration branch is "codex/queue-integration-pre-goal17-20261027" at "2a7535086f00359c36037c32cdd3a26f95b9c9bd".
 
-Follow the recovery kickstart's explicitly renewed repair allowances, preserve all prior accepted work, and continue through all remaining goals automatically.
+Read the existing QUEUE_STATE.md, current Git status, any active cherry-pick or merge operation, owned process/test receipts, and the most recent recorded errors.
 
-Do not recreate the queue, repeat completed checkpoints, or request routine approvals. Use the original Goal/Kickstart pairs, configured agents, checkpoint commits, verification requirements, and cumulative branch policy.
+Report:
 
-Continue until all 17 goals are complete or a genuine mandatory blocker requires intervention. Record exact progress and recovery points in the existing queue ledger.
+1. The exact integration step currently active.
+2. Whether Codex is blocked by a merge conflict, compilation, test, process, or another issue.
+3. Which source branches and checkpoints remain to be integrated.
+4. The smallest safe next action.
+
+Do not reset, abort, discard changes, launch duplicate builds, or restart the integration queue. Preserve all existing work and history.
