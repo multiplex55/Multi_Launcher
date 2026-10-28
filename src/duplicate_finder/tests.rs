@@ -4,6 +4,9 @@ use super::model::{
     DiscoveryStatus, DuplicateTotals, RootScan, RootScanStatus, ScanCounts,
 };
 use super::session::{DuplicateFinderSession, DuplicateFinderSessionError};
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityLifecycle, ActivityOutcome, ActivityRetirement,
+};
 use crate::file_operations::ScanCancellation;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -75,6 +78,24 @@ impl DiscoveryJob for CountingJob {
     }
 }
 
+struct PanickingJob(Sender<StartedScan>);
+
+impl DiscoveryJob for PanickingJob {
+    fn scan(
+        &self,
+        roots: Vec<PathBuf>,
+        generation: u64,
+        _limits: DiscoveryLimits,
+        _cancellation: &ScanCancellation,
+        _progress: &mut dyn FnMut(DiscoveryProgress),
+    ) -> DiscoverySnapshot {
+        self.0
+            .send(StartedScan { generation, roots })
+            .expect("test receiver stays connected");
+        panic!("controlled duplicate discovery worker panic");
+    }
+}
+
 fn completed_snapshot(generation: u64, roots: Vec<PathBuf>) -> DiscoverySnapshot {
     let counts = ScanCounts::default();
     DiscoverySnapshot {
@@ -131,6 +152,90 @@ fn finish_close(session: &DuplicateFinderSession) {
         assert!(Instant::now() < deadline, "discovery worker did not retire");
         std::thread::yield_now();
     }
+}
+
+#[test]
+fn dff_activity_finishes_panicking_worker_without_live_cancel_capability() {
+    let (started_tx, started_rx) = mpsc::channel();
+    let mut session = DuplicateFinderSession::with_test_job(
+        DiscoveryLimits::default(),
+        Arc::new(PanickingJob(started_tx)),
+    );
+    let center = ActivityCenter::new();
+    session.attach_activity_center(center.clone());
+
+    let generation = session
+        .start_scan(vec![PathBuf::from("panic-root")])
+        .expect("scan is admitted before the controlled panic");
+    let started = receive_started(&started_rx);
+    assert_eq!(started.generation, generation);
+    assert_eq!(started.roots, vec![PathBuf::from("panic-root")]);
+    let key = center
+        .snapshot()
+        .rows
+        .into_iter()
+        .find(|row| row.key.incarnation().get() == generation)
+        .expect("admitted scan has an exact Activity key")
+        .key;
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let failed = loop {
+        if let Some(row) = center
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.key == key && row.lifecycle.is_terminal())
+        {
+            break row;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "panic unwind did not publish the Activity terminal"
+        );
+        std::thread::yield_now();
+    };
+    assert_eq!(
+        failed.lifecycle,
+        ActivityLifecycle::Terminal(ActivityOutcome::Failed)
+    );
+    assert_eq!(failed.diagnostic, Some(ActivityDiagnostic::WorkerFailed));
+    assert_eq!(failed.retirement, ActivityRetirement::Unavailable);
+    assert!(
+        !failed.can_cancel,
+        "terminal panic rows retain no cancel capability"
+    );
+    assert_eq!(
+        center.request_cancel(key),
+        crate::activity::ActivityCancelResult::Terminal
+    );
+
+    let exit_deadline = Instant::now() + Duration::from_secs(3);
+    while !session.worker_finished_for_test() {
+        assert!(
+            Instant::now() < exit_deadline,
+            "panicking worker did not reach its actual thread exit"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        session.start_scan(vec![PathBuf::from("after-panic")]),
+        Err(DuplicateFinderSessionError::WorkerPanicked),
+        "the existing owner still observes and joins the panicked worker"
+    );
+    let retained = center
+        .snapshot()
+        .rows
+        .into_iter()
+        .find(|row| row.key == key)
+        .expect("the exact failed operation remains in bounded history");
+    assert_eq!(
+        retained.lifecycle,
+        ActivityLifecycle::Terminal(ActivityOutcome::Failed)
+    );
+    assert!(!retained.can_cancel);
+
+    session.close();
+    finish_close(&session);
 }
 
 fn wait_for_current_complete(session: &DuplicateFinderSession, generation: u64) {

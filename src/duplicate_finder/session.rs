@@ -12,6 +12,7 @@ use crate::activity::{
 };
 use crate::file_operations::ScanCancellation;
 use crate::thread_reaper::{self, ReapPermit};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -634,6 +635,14 @@ impl DuplicateFinderSession {
                 if joined.load(Ordering::Acquire) != WORKER_RETIREMENT_PENDING
         )
     }
+
+    #[cfg(test)]
+    pub(super) fn worker_finished_for_test(&self) -> bool {
+        matches!(
+            self.worker.lock().unwrap().as_ref(),
+            Some(WorkerSlot::Running(worker)) if worker.join.is_finished()
+        )
+    }
 }
 
 impl Drop for DuplicateFinderSession {
@@ -844,13 +853,27 @@ fn worker_loop(shared: Arc<SessionShared>, job: Arc<dyn DiscoveryJob>, limits: D
                 (progress_shared.wake)();
             }
         };
-        let result = job.scan(
-            request.roots,
-            generation,
-            limits,
-            &cancellation,
-            &mut publish,
-        );
+        let result = match catch_unwind(AssertUnwindSafe(|| {
+            job.scan(
+                request.roots,
+                generation,
+                limits,
+                &cancellation,
+                &mut publish,
+            )
+        })) {
+            Ok(result) => result,
+            Err(payload) => {
+                if let Some(activity) = activity.as_ref() {
+                    activity.finish(
+                        ActivityOutcome::Failed,
+                        Some(ActivityDiagnostic::WorkerFailed),
+                        ActivityRetirement::Unavailable,
+                    );
+                }
+                std::panic::resume_unwind(payload);
+            }
+        };
         if let Some(activity) = activity.as_ref() {
             let (outcome, diagnostic) = match result.status {
                 DiscoveryStatus::Cancelled => (ActivityOutcome::Cancelled, None),

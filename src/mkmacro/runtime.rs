@@ -2698,6 +2698,28 @@ mod run_mode_tests {
         }
     }
 
+    fn wait_for_activity_terminal(
+        center: &ActivityCenter,
+        key: crate::activity::ActivityKey,
+    ) -> crate::activity::ActivityRow {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(row) = center
+                .snapshot()
+                .rows
+                .into_iter()
+                .find(|row| row.key == key && row.lifecycle.is_terminal())
+            {
+                return row;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Activity owner did not publish terminal state for {key:?}"
+            );
+            thread::yield_now();
+        }
+    }
+
     #[test]
     fn macro_activity_routes_cancel_to_exact_run_and_reports_terminal_progress() {
         let target = test_macro(
@@ -2739,17 +2761,15 @@ mod run_mode_tests {
         first_barrier.release();
         let stopped = wait_for_terminal(&runtime);
         assert_eq!(stopped.state, RuntimeState::Stopped);
+        let stopped_row = wait_for_activity_terminal(&center, first_key);
         let stopped_activity = center.snapshot();
         assert_eq!(stopped_activity.rows.len(), 1);
         assert_eq!(stopped_activity.rows[0].key, first_key);
         assert_eq!(
-            stopped_activity.rows[0].lifecycle,
+            stopped_row.lifecycle,
             crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Cancelled)
         );
-        assert_eq!(
-            stopped_activity.rows[0].retirement,
-            ActivityRetirement::Unavailable
-        );
+        assert_eq!(stopped_row.retirement, ActivityRetirement::Unavailable);
 
         let second_barrier = runtime.install_test_worker_barrier();
         assert_eq!(
@@ -2763,20 +2783,37 @@ mod run_mode_tests {
         );
         let active_rows = center.snapshot();
         assert_eq!(active_rows.rows.len(), 2);
+        let second_key = active_rows
+            .rows
+            .iter()
+            .find(|row| row.key != first_key)
+            .expect("second admitted run has its own Activity key")
+            .key;
         assert!(active_rows.rows.iter().any(|row| {
             row.key != first_key && row.lifecycle == crate::activity::ActivityLifecycle::Queued
         }));
         second_barrier.release();
         let completed = wait_for_terminal_after(&runtime, stopped.run_id);
         assert_eq!(completed.state, RuntimeState::Completed);
+        let completed_row = wait_for_activity_terminal(&center, second_key);
         let completed_activity = center.snapshot();
         assert_eq!(completed_activity.rows.len(), 2);
-        assert!(completed_activity.rows.iter().any(|row| {
-            row.key != first_key
-                && row.lifecycle
-                    == crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Completed)
-                && row.progress.is_some_and(|progress| progress.completed == 1)
-        }));
+        assert_eq!(completed_row.key, second_key);
+        assert_eq!(
+            completed_row.lifecycle,
+            crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Completed)
+        );
+        assert!(
+            completed_row
+                .progress
+                .is_some_and(|progress| progress.completed == 1)
+        );
+        assert!(
+            completed_activity
+                .rows
+                .iter()
+                .any(|row| row.key == first_key)
+        );
     }
 
     fn wait_for_state(runtime: &MacroRuntime, wanted: RuntimeState) -> Arc<RuntimeSnapshot> {
