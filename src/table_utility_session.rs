@@ -624,7 +624,7 @@ impl TableWorker {
         #[cfg(test)]
         let worker_job_counts = Arc::clone(&test_job_counts);
         #[cfg(test)]
-        let test_job_gate = Arc::new(Mutex::new(None));
+        let test_job_gate: Arc<Mutex<Option<Arc<TableTestJobGate>>>> = Arc::new(Mutex::new(None));
         #[cfg(test)]
         let worker_test_job_gate = Arc::clone(&test_job_gate);
         let join = thread::Builder::new()
@@ -3452,6 +3452,8 @@ mod tests {
             std::fs::write(path, b"name\tvalue\nalpha\t1\nbeta\t2\n")
                 .expect("write the small file-backed fixture");
         }
+        let expected_current_path =
+            std::fs::canonicalize(&current_path).expect("canonicalize current fixture path");
         let options = TableFileParseOptions::for_profile(TableUtilityProfile::Table, true);
         let timeout = Duration::from_secs(5);
 
@@ -3599,7 +3601,7 @@ mod tests {
         let accepted = session.snapshot();
         assert_eq!(
             accepted.source_path.as_deref(),
-            Some(current_path.as_path())
+            Some(expected_current_path.as_path())
         );
         assert_eq!(
             accepted.accepted_source_revision,

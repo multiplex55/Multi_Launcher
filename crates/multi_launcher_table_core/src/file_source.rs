@@ -2259,12 +2259,22 @@ mod file_source_tests {
         );
         assert!(pool.usage().ram_bytes < 32 * 1024 * 1024);
         let peak = pool.peak_usage();
+        // The bounded provisional builder remains charged alongside the
+        // working buffers and diagnostic lease. During header decoding, the
+        // maximum header reservation also overlaps those owners; later the
+        // decoded-row reservation is smaller than that header bound.
         let decoder_peak_bound = FILE_WORKING_RAM_BYTES
             + MAX_HEADER_RESERVATION.max(MAX_DECODED_ROW_RESERVATION)
             + DIAGNOSTIC_RESERVATION
+            + TABLE_FILE_PROVISIONAL_MAX_BYTES
             + 8 * 1024;
         assert!(peak.ram_bytes > FILE_WORKING_RAM_BYTES);
-        assert!(peak.ram_bytes <= decoder_peak_bound);
+        assert!(
+            peak.ram_bytes <= decoder_peak_bound,
+            "observed peak {} exceeds derived bound {}",
+            peak.ram_bytes,
+            decoder_peak_bound
+        );
         drop(source);
         drop(workspace);
         let _ = std::fs::remove_file(path);
