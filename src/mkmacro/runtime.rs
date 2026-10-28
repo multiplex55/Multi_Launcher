@@ -6,7 +6,8 @@ pub use super::executor::DebugSnapshotReason;
 use super::executor::{
     Backends, DiagnosticKind, ExecResult, ExecutionDiagnostic, ExecutionEvent,
     ExecutionFrameContext, ExecutionFrameSnapshot, ExecutionMode, ExecutionOptions, Executor,
-    RunControl, StepOutcome, production_backends_with_store, program_contains_clipboard_actions,
+    MonotonicClock, RunControl, StepOutcome, SystemMonotonicClock, production_backends_with_store,
+    program_contains_clipboard_actions,
 };
 use super::{
     EventEnricher, KeyboardTranslator, MkInvocation, MkInvocationSubset, MkInvocationValues,
@@ -14,6 +15,12 @@ use super::{
     RecorderObserverSession, RecorderRuntime, RecorderSnapshot, RecordingResult, RecordingTarget,
     RuntimeVariables, SharedOperationGuard, SystemRecorderClock, production_hook_service,
 };
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityProgress, ActivityProgressUnit, ActivityRetirement, ActivitySlot,
+    ActivityTask,
+};
+mod summary;
 use anyhow::{Result, anyhow};
 use once_cell::sync::Lazy;
 #[cfg(test)]
@@ -28,6 +35,11 @@ use std::{
     thread::{self, JoinHandle},
     time::SystemTime,
 };
+pub use summary::{
+    InvocationSource, MacroRunSummary, SafeFailureLocation, SummaryActionCategory, SummaryOutcome,
+    SummaryStepAggregate, SummarySubset, SummaryVisitTotals,
+};
+use summary::{SummaryAccumulator, SummaryHistory};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeCommand {
@@ -69,6 +81,18 @@ struct RunRequest<'a> {
     arguments: Option<&'a MkInvocationValues>,
 }
 impl RunRequest<'_> {
+    fn summary_subset(self) -> SummarySubset {
+        if let Some(step_id) = self.starting_step {
+            SummarySubset::FromStep { step_id }
+        } else if let Some(ids) = self.selection {
+            SummarySubset::Selected {
+                step_count: u64::try_from(ids.len()).unwrap_or(u64::MAX),
+            }
+        } else {
+            SummarySubset::Whole
+        }
+    }
+
     fn to_invocation(self) -> MkInvocation {
         MkInvocation {
             macro_id: self.macro_id,
@@ -447,20 +471,28 @@ struct Shared {
     // Review window's terminal outcome before its next frame observes it.
     last_preview_snapshot: RwLock<Option<Arc<RuntimeSnapshot>>>,
     control: Arc<RunControl>,
+    monotonic_clock: Arc<dyn MonotonicClock>,
+    summary_history: Mutex<SummaryHistory>,
     admission: Mutex<Option<ActiveAdmission>>,
+    activity_center: Mutex<Option<ActivityCenter>>,
     next_run_id: AtomicU64,
     operations: Arc<SharedOperationGuard>,
     #[cfg(test)]
     test_events: Mutex<Vec<ExecutionEvent>>,
     #[cfg(test)]
     test_worker_barrier: Mutex<Option<Arc<TestWorkerBarrierInner>>>,
+    #[cfg(test)]
+    test_terminal_barrier: Mutex<Option<Arc<TestWorkerBarrierInner>>>,
+    #[cfg(test)]
+    test_breakpoint_observer: Mutex<Option<Box<dyn FnOnce(&RunControl) + Send>>>,
 }
-#[derive(Clone)]
 struct ActiveAdmission {
     macro_id: u64,
     origin: RuntimeOrigin,
     run_id: u64,
     owned_start_gate: Option<Arc<OwnedRunStartGate>>,
+    activity: Option<ActivityTask>,
+    summary: Option<SummaryAccumulator>,
 }
 struct WorkerMessage {
     command: RuntimeCommand,
@@ -525,7 +557,80 @@ impl Drop for TestWorkerBarrier {
         self.release();
     }
 }
+
+#[cfg(test)]
+fn install_test_barrier(
+    slot: &Mutex<Option<Arc<TestWorkerBarrierInner>>>,
+    label: &str,
+) -> TestWorkerBarrier {
+    let barrier = Arc::new(TestWorkerBarrierInner {
+        state: Mutex::new((false, false)),
+        wake: Condvar::new(),
+    });
+    let mut slot = slot.lock().unwrap();
+    assert!(slot.is_none(), "{label} test barrier is already installed");
+    *slot = Some(barrier.clone());
+    TestWorkerBarrier(barrier)
+}
+
+#[cfg(test)]
+fn wait_on_test_barrier(slot: &Mutex<Option<Arc<TestWorkerBarrierInner>>>) {
+    if let Some(barrier) = slot.lock().unwrap().take() {
+        let mut state = barrier.state.lock().unwrap();
+        state.0 = true;
+        barrier.wake.notify_all();
+        while !state.1 {
+            state = barrier.wake.wait(state).unwrap();
+        }
+    }
+}
+
 impl MacroRuntime {
+    pub(crate) fn attach_activity_center(&self, center: ActivityCenter) {
+        let mut admission = self.shared.admission.lock().unwrap();
+        *self.shared.activity_center.lock().unwrap() = Some(center.clone());
+        let Some(active) = admission.as_mut() else {
+            return;
+        };
+        if active.activity.is_some() {
+            return;
+        }
+        let snapshot = self.snapshot();
+        let operation = ActivityOperation::PlayMacro;
+        let task = if snapshot.run_id == active.run_id
+            && matches!(
+                snapshot.state,
+                RuntimeState::Running | RuntimeState::Paused | RuntimeState::Stopping
+            ) {
+            center.observe_running(
+                ActivityOwner::Macro,
+                ActivitySlot::MacroRun,
+                ActivityIncarnation::new(self.generation),
+                operation,
+            )
+        } else {
+            center.observe_queued(
+                ActivityOwner::Macro,
+                ActivitySlot::MacroRun,
+                ActivityIncarnation::new(self.generation),
+                operation,
+            )
+        };
+        if let Some(task) = task {
+            if snapshot.state == RuntimeState::Stopping {
+                task.mark_cancelling();
+            }
+            let weak_shared = Arc::downgrade(&self.shared);
+            let run_id = active.run_id;
+            task.set_cancel_handler(move || {
+                if let Some(shared) = weak_shared.upgrade() {
+                    stop_shared_run_if_current(&shared, run_id);
+                }
+            });
+            active.activity = Some(task);
+        }
+    }
+
     fn ensure_available(&self) -> ExecResult {
         let admission = self.shared.admission.lock().unwrap();
         if !self.available.load(Ordering::Acquire) {
@@ -555,12 +660,26 @@ impl MacroRuntime {
         invocation: MkInvocation,
         broker: &Arc<super::invocation_prompt::InvocationPromptBroker>,
     ) -> ExecResult<InvocationDisposition> {
-        self.prepare_direct_command(RuntimeCommand::Invoke(invocation), broker)
+        self.prepare_direct_command(
+            RuntimeCommand::Invoke(invocation),
+            broker,
+            InvocationSource::UnclassifiedApi,
+        )
+    }
+
+    pub fn prepare_invocation_with_source(
+        self: &Arc<Self>,
+        invocation: MkInvocation,
+        broker: &Arc<super::invocation_prompt::InvocationPromptBroker>,
+        source: InvocationSource,
+    ) -> ExecResult<InvocationDisposition> {
+        self.prepare_direct_command(RuntimeCommand::Invoke(invocation), broker, source)
     }
     fn prepare_direct_command(
         self: &Arc<Self>,
         command: RuntimeCommand,
         broker: &Arc<super::invocation_prompt::InvocationPromptBroker>,
+        invocation_source: InvocationSource,
     ) -> ExecResult<InvocationDisposition> {
         self.ensure_available()?;
         broker.ensure_idle()?;
@@ -596,6 +715,7 @@ impl MacroRuntime {
                     macro_description: target.description.clone(),
                     parameters: target.signature.parameters.clone(),
                     prepared_values: prepared.values,
+                    invocation_source,
                 },
             )?;
             return Ok(InvocationDisposition::AwaitingInput { request_id });
@@ -607,7 +727,7 @@ impl MacroRuntime {
         } else {
             RuntimeCommand::Invoke(invocation)
         };
-        command_result(self.submit_command(command, Some(program)))?;
+        command_result(self.submit_command_with_source(command, Some(program), invocation_source))?;
         Ok(InvocationDisposition::Submitted)
     }
     pub(crate) fn confirm_invocation(
@@ -644,7 +764,11 @@ impl MacroRuntime {
             .clone()
             .into_variables(plan.signature.parameters())?;
         invocation.arguments = prepared.values;
-        command_result(self.submit_command(RuntimeCommand::Invoke(invocation), Some(program)))
+        command_result(self.submit_command_with_source(
+            RuntimeCommand::Invoke(invocation),
+            Some(program),
+            request.invocation_source,
+        ))
     }
     pub fn new(store: Arc<MkMacroStore>, backends: Backends) -> Self {
         Self::with_guard(store, backends, Arc::new(SharedOperationGuard::default()))
@@ -654,18 +778,38 @@ impl MacroRuntime {
         backends: Backends,
         operations: Arc<SharedOperationGuard>,
     ) -> Self {
+        Self::with_guard_and_clock(
+            store,
+            backends,
+            operations,
+            Arc::new(SystemMonotonicClock::new()),
+        )
+    }
+    fn with_guard_and_clock(
+        store: Arc<MkMacroStore>,
+        backends: Backends,
+        operations: Arc<SharedOperationGuard>,
+        monotonic_clock: Arc<dyn MonotonicClock>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared {
             snapshot: RwLock::new(Arc::new(RuntimeSnapshot::default())),
             last_preview_snapshot: RwLock::new(None),
             control: Arc::new(RunControl::default()),
+            monotonic_clock,
+            summary_history: Mutex::new(SummaryHistory::new()),
             admission: Mutex::new(None),
+            activity_center: Mutex::new(None),
             next_run_id: AtomicU64::new(1),
             operations,
             #[cfg(test)]
             test_events: Mutex::new(Vec::new()),
             #[cfg(test)]
             test_worker_barrier: Mutex::new(None),
+            #[cfg(test)]
+            test_terminal_barrier: Mutex::new(None),
+            #[cfg(test)]
+            test_breakpoint_observer: Mutex::new(None),
         });
         let s = shared.clone();
         let worker_store = store.clone();
@@ -702,9 +846,10 @@ impl MacroRuntime {
                 .join("; ");
             ExecutionDiagnostic::new(DiagnosticKind::InvalidPlan, message)
         })?;
-        command_result(self.submit_command(
+        command_result(self.submit_command_with_source(
             RuntimeCommand::RecordingPreview { macro_id, ticket },
             Some(program),
+            InvocationSource::RecordingPreview,
         ))
     }
     fn submit_command(
@@ -712,7 +857,16 @@ impl MacroRuntime {
         c: RuntimeCommand,
         program: Option<super::MkCompiledProgram>,
     ) -> CommandResult {
-        self.submit_command_with_owner(c, program, None, None, None)
+        self.submit_command_with_source(c, program, InvocationSource::UnclassifiedApi)
+    }
+
+    fn submit_command_with_source(
+        &self,
+        c: RuntimeCommand,
+        program: Option<super::MkCompiledProgram>,
+        invocation_source: InvocationSource,
+    ) -> CommandResult {
+        self.submit_command_with_owner(c, program, None, None, None, invocation_source)
             .0
     }
 
@@ -723,6 +877,7 @@ impl MacroRuntime {
         expected_macros: Option<Vec<super::MkMacro>>,
         owned_completion: Option<mpsc::SyncSender<OwnedMacroRunCompletion>>,
         owned_start_gate: Option<Arc<OwnedRunStartGate>>,
+        invocation_source: InvocationSource,
     ) -> (CommandResult, Option<u64>) {
         #[cfg(test)]
         self.test_commands.lock().unwrap().push(c.clone());
@@ -814,7 +969,6 @@ impl MacroRuntime {
                     None,
                 );
             }
-            self.shared.control.reset();
             let admitted_run_id = self.shared.next_run_id.fetch_add(1, Ordering::Relaxed);
             let origin = match &c {
                 RuntimeCommand::RecordingPreview { ticket, .. } => {
@@ -822,11 +976,69 @@ impl MacroRuntime {
                 }
                 _ => RuntimeOrigin::Stored,
             };
+            let document = self.store.snapshot();
+            let macro_name = program
+                .as_ref()
+                .and_then(|program| program.name(request.macro_id))
+                .or_else(|| {
+                    document
+                        .macros
+                        .iter()
+                        .find(|macro_| macro_.id == request.macro_id)
+                        .map(|macro_| macro_.name.as_str())
+                });
+            let summary = self.shared.summary_history.lock().unwrap().begin(
+                admitted_run_id,
+                request.macro_id,
+                macro_name,
+                invocation_source,
+                origin,
+                request.mode,
+                request.summary_subset(),
+                self.shared.monotonic_clock.clone(),
+            );
+            let Some(summary) = summary else {
+                self.shared.operations.release(Operation::Playback);
+                return (
+                    CommandResult::Rejected(ExecutionDiagnostic::new(
+                        DiagnosticKind::RuntimeUnavailable,
+                        "run summary capacity is unavailable",
+                    )),
+                    None,
+                );
+            };
+            self.shared
+                .control
+                .reset_with_clock(self.shared.monotonic_clock.clone());
+            let activity = self
+                .shared
+                .activity_center
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|center| {
+                    center.start(
+                        ActivityOwner::Macro,
+                        ActivitySlot::MacroRun,
+                        ActivityIncarnation::new(self.generation),
+                        ActivityOperation::PlayMacro,
+                    )
+                });
+            if let Some(activity) = &activity {
+                let weak_shared = Arc::downgrade(&self.shared);
+                activity.set_cancel_handler(move || {
+                    if let Some(shared) = weak_shared.upgrade() {
+                        stop_shared_run_if_current(&shared, admitted_run_id);
+                    }
+                });
+            }
             *admission = Some(ActiveAdmission {
                 macro_id: request.macro_id,
                 origin,
                 run_id: admitted_run_id,
                 owned_start_gate: owned_start_gate.clone(),
+                activity,
+                summary: Some(summary),
             });
             run_id = Some(admitted_run_id);
         }
@@ -880,8 +1092,23 @@ impl MacroRuntime {
             })
             .is_err()
         {
+            if let Some(activity) = admission
+                .as_ref()
+                .and_then(|active| active.activity.as_ref())
+            {
+                activity.finish(
+                    ActivityOutcome::Failed,
+                    Some(ActivityDiagnostic::WorkerUnavailable),
+                    ActivityRetirement::Confirmed,
+                );
+            }
             self.shared.control.finish();
             self.shared.operations.release(Operation::Playback);
+            if let Some(active) = admission.as_mut()
+                && let Some(summary) = active.summary.take()
+            {
+                self.shared.summary_history.lock().unwrap().abort(summary);
+            }
             *admission = None;
             return (
                 CommandResult::Rejected(ExecutionDiagnostic::new(
@@ -920,24 +1147,7 @@ impl MacroRuntime {
     /// Stop only the run whose ID is still admitted. The ID comparison and
     /// Stop latch are atomic with respect to admission of another run.
     fn stop_if_current(&self, run_id: u64) -> bool {
-        let admission = self.shared.admission.lock().unwrap();
-        let Some(active) = admission.as_ref().filter(|active| active.run_id == run_id) else {
-            return false;
-        };
-        if let Some(gate) = active.owned_start_gate.as_ref() {
-            gate.transition(OWNED_RUN_CANCELLED);
-        }
-        self.shared.control.stop();
-        let snapshot = self.snapshot();
-        if snapshot.run_id == run_id
-            && matches!(snapshot.state, RuntimeState::Running | RuntimeState::Paused)
-        {
-            publish(&self.shared, |snapshot| {
-                snapshot.state = RuntimeState::Stopping;
-                snapshot.pause_reason = None;
-            });
-        }
-        true
+        stop_shared_run_if_current(&self.shared, run_id)
     }
 
     fn activate_owned_if_current(
@@ -1037,6 +1247,7 @@ impl MacroRuntime {
             Some(expected_macros),
             Some(completion_tx),
             Some(start_gate.clone()),
+            InvocationSource::HotFolder,
         );
         let run_id = match result {
             CommandResult::Accepted => run_id.ok_or_else(|| {
@@ -1062,6 +1273,19 @@ impl MacroRuntime {
     }
     pub fn snapshot(&self) -> Arc<RuntimeSnapshot> {
         self.shared.snapshot.read().unwrap().clone()
+    }
+
+    /// Inspect completed metadata while the bounded history lock is held.
+    /// The callback cannot retain record references past this call.
+    pub fn with_run_summaries<R>(
+        &self,
+        inspect: impl FnOnce(u64, &std::collections::VecDeque<MacroRunSummary>) -> R,
+    ) -> R {
+        self.shared
+            .summary_history
+            .lock()
+            .unwrap()
+            .with_completed(inspect)
     }
     pub fn recording_preview_status(&self, ticket: u64) -> (bool, Option<Arc<RuntimeSnapshot>>) {
         let active = self
@@ -1093,17 +1317,23 @@ impl MacroRuntime {
     }
     #[cfg(test)]
     pub(crate) fn install_test_worker_barrier(&self) -> TestWorkerBarrier {
-        let barrier = Arc::new(TestWorkerBarrierInner {
-            state: Mutex::new((false, false)),
-            wake: Condvar::new(),
-        });
-        let mut slot = self.shared.test_worker_barrier.lock().unwrap();
+        install_test_barrier(&self.shared.test_worker_barrier, "runtime worker")
+    }
+    #[cfg(test)]
+    fn install_test_terminal_barrier(&self) -> TestWorkerBarrier {
+        install_test_barrier(&self.shared.test_terminal_barrier, "runtime terminal")
+    }
+    #[cfg(test)]
+    fn install_test_breakpoint_observer(
+        &self,
+        observer: impl FnOnce(&RunControl) + Send + 'static,
+    ) {
+        let mut slot = self.shared.test_breakpoint_observer.lock().unwrap();
         assert!(
             slot.is_none(),
-            "runtime test worker barrier is already installed"
+            "breakpoint observer test hook already installed"
         );
-        *slot = Some(barrier.clone());
-        TestWorkerBarrier(barrier)
+        *slot = Some(Box::new(observer));
     }
     pub fn shutdown(&self) {
         {
@@ -1162,6 +1392,20 @@ fn controlled_state(control: &RunControl) -> RuntimeState {
         RuntimeState::Paused
     } else {
         RuntimeState::Running
+    }
+}
+
+fn terminal_classification(result: &ExecResult, stopped: bool) -> (RuntimeState, SummaryOutcome) {
+    match result {
+        Ok(()) if stopped => (RuntimeState::Stopped, SummaryOutcome::Stopped),
+        Ok(()) => (RuntimeState::Completed, SummaryOutcome::Completed),
+        Err(diagnostic) if diagnostic.kind == DiagnosticKind::Cancelled => {
+            (RuntimeState::Stopped, SummaryOutcome::Stopped)
+        }
+        Err(diagnostic) => (
+            RuntimeState::Failed,
+            SummaryOutcome::Failed(diagnostic.kind),
+        ),
     }
 }
 
@@ -1430,6 +1674,28 @@ fn set_manual_pause(snapshot: &mut RuntimeSnapshot) {
     }
 }
 
+fn stop_shared_run_if_current(shared: &Shared, run_id: u64) -> bool {
+    let admission = shared.admission.lock().unwrap();
+    let Some(active) = admission.as_ref().filter(|active| active.run_id == run_id) else {
+        return false;
+    };
+    if let Some(gate) = active.owned_start_gate.as_ref() {
+        gate.transition(OWNED_RUN_CANCELLED);
+    }
+    shared.control.stop();
+    let snapshot = shared.snapshot.read().unwrap();
+    if snapshot.run_id == run_id
+        && matches!(snapshot.state, RuntimeState::Running | RuntimeState::Paused)
+    {
+        drop(snapshot);
+        publish(shared, |snapshot| {
+            snapshot.state = RuntimeState::Stopping;
+            snapshot.pause_reason = None;
+        });
+    }
+    true
+}
+
 fn clear_pause_reason(shared: &Shared) {
     if shared.snapshot.read().unwrap().pause_reason.is_some() {
         publish(shared, |snapshot| snapshot.pause_reason = None);
@@ -1493,17 +1759,43 @@ fn worker_loop(
 /// The executor releases owned input before this root lifecycle releases activity.
 struct RootRunGuard<'a> {
     shared: &'a Shared,
+    run_id: u64,
     completed: bool,
 }
 impl RootRunGuard<'_> {
-    fn complete<T>(mut self, publish_terminal: impl FnOnce() -> T) -> T {
+    fn complete<T>(
+        mut self,
+        publish_terminal: impl FnOnce(bool) -> (T, SummaryOutcome),
+    ) -> (T, Option<ActivityTask>, SummaryOutcome) {
+        #[cfg(test)]
+        wait_on_test_barrier(&self.shared.test_terminal_barrier);
         let mut admission = self.shared.admission.lock().unwrap();
+        // Stop and terminal publication use the same admission lock. Capture
+        // the authoritative stopped bit once so the snapshot and summary
+        // cannot disagree if Stop races the end of execution.
+        let stopped = self.shared.control.is_stopped();
         self.shared.control.finish();
-        let result = publish_terminal();
+        let paused = self.shared.control.paused_duration();
+        let (result, outcome) = publish_terminal(stopped);
+        if let Some(active) = admission
+            .as_mut()
+            .filter(|active| active.run_id == self.run_id)
+            && let Some(summary) = active.summary.take()
+        {
+            self.shared
+                .summary_history
+                .lock()
+                .unwrap()
+                .publish(summary, outcome, None, paused);
+        }
+        let activity = admission
+            .as_ref()
+            .filter(|active| active.run_id == self.run_id)
+            .and_then(|active| active.activity.clone());
         self.shared.operations.release(Operation::Playback);
         *admission = None;
         self.completed = true;
-        result
+        (result, activity, outcome)
     }
 }
 impl Drop for RootRunGuard<'_> {
@@ -1511,9 +1803,35 @@ impl Drop for RootRunGuard<'_> {
         if !self.completed {
             let mut admission = self.shared.admission.lock().unwrap();
             self.shared.control.finish();
+            let paused = self.shared.control.paused_duration();
+            if let Some(active) = admission
+                .as_mut()
+                .filter(|active| active.run_id == self.run_id)
+                && let Some(summary) = active.summary.take()
+            {
+                self.shared.summary_history.lock().unwrap().publish(
+                    summary,
+                    SummaryOutcome::Failed(DiagnosticKind::Panic),
+                    None,
+                    paused,
+                );
+            }
             self.shared.operations.release(Operation::Playback);
             *admission = None;
         }
+    }
+}
+
+fn update_active_summary(
+    shared: &Shared,
+    run_id: u64,
+    update: impl FnOnce(&mut SummaryAccumulator),
+) {
+    let mut admission = shared.admission.lock().unwrap();
+    if let Some(active) = admission.as_mut().filter(|active| active.run_id == run_id)
+        && let Some(summary) = active.summary.as_mut()
+    {
+        update(summary);
     }
 }
 
@@ -1536,6 +1854,7 @@ fn run_one(
     } = request;
     let run_guard = RootRunGuard {
         shared,
+        run_id,
         completed: false,
     };
     #[cfg(test)]
@@ -1543,6 +1862,16 @@ fn run_one(
     let start_cancelled = owned_start_gate
         .as_ref()
         .is_some_and(|gate| !gate.wait_for_start());
+    let activity = shared
+        .admission
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|active| active.run_id == run_id)
+        .and_then(|active| active.activity.clone());
+    if let Some(activity) = activity {
+        activity.mark_running();
+    }
     let mut clipboard_privacy_active = false;
     let result = if start_cancelled {
         Err(ExecutionDiagnostic::new(
@@ -1554,6 +1883,9 @@ fn run_one(
             let program = match prepared_program {
                 Some(program) => program,
                 None => {
+                    update_active_summary(shared, run_id, |summary| {
+                        summary.mark_worker_preparation_started();
+                    });
                     let invocation = request.to_invocation();
                     super::invocation::compile_invocation_program(&store.snapshot(), &invocation)?
                 }
@@ -1595,14 +1927,52 @@ fn run_one(
                 {
                     shared.test_events.lock().unwrap().push(event.clone());
                 }
+                #[cfg(test)]
+                let immediate_breakpoint_observer = if context.depth == 1
+                    && matches!(&event, ExecutionEvent::BreakpointHit { .. })
+                {
+                    shared.test_breakpoint_observer.lock().unwrap().take()
+                } else {
+                    None
+                };
                 // Serialize state decisions with control commands. Read control
                 // before snapshot publication to preserve the single lock order.
-                let _admission = shared.admission.lock().unwrap();
+                let mut admission = shared.admission.lock().unwrap();
                 let state = controlled_state(&shared.control);
+                if let Some(active) = admission.as_mut().filter(|active| active.run_id == run_id)
+                    && let Some(summary) = active.summary.as_mut()
+                {
+                    summary.observe(
+                        context,
+                        &event,
+                        &program,
+                        &mut shared.summary_history.lock().unwrap(),
+                    );
+                }
                 publish(shared, |snapshot| {
                     apply_execution_event(snapshot, &program, context, event, state)
                 });
+                if let Some(activity) = admission
+                    .as_ref()
+                    .filter(|active| active.run_id == run_id)
+                    .and_then(|active| active.activity.as_ref())
+                {
+                    let snapshot = shared.snapshot.read().unwrap();
+                    activity.set_progress(Some(ActivityProgress::new(
+                        snapshot.completed_steps as u64,
+                        Some(snapshot.total_steps as u64),
+                        ActivityProgressUnit::Steps,
+                    )));
+                }
+                drop(admission);
+                #[cfg(test)]
+                if let Some(observer) = immediate_breakpoint_observer {
+                    observer(&shared.control);
+                }
             };
+            update_active_summary(shared, run_id, |summary| {
+                summary.mark_execution_started();
+            });
             let executor = Executor::new(backends.clone(), shared.control.clone());
             let options = match mode {
                 RuntimeRunMode::Normal => ExecutionOptions::normal(),
@@ -1646,16 +2016,8 @@ fn run_one(
         })
     };
     let failure_kind = result.as_ref().err().map(|diagnostic| diagnostic.kind);
-    let state = run_guard.complete(|| {
-        let stopped = shared.control.is_stopped();
-        let state = match &result {
-            Ok(()) if stopped => RuntimeState::Stopped,
-            Ok(()) => RuntimeState::Completed,
-            Err(diagnostic) if diagnostic.kind == DiagnosticKind::Cancelled => {
-                RuntimeState::Stopped
-            }
-            Err(_) => RuntimeState::Failed,
-        };
+    let (state, activity, terminal_outcome) = run_guard.complete(|stopped| {
+        let (state, terminal_outcome) = terminal_classification(&result, stopped);
         publish(shared, |s| {
             // Failed preparation still belongs to this admitted run, rather
             // than retaining the identity/status maps of an earlier macro.
@@ -1697,8 +2059,20 @@ fn run_one(
             s.pause_reason = None;
             s.finished_at = Some(SystemTime::now());
         });
-        state
+        (state, terminal_outcome)
     });
+    if let Some(activity) = activity {
+        let outcome = match terminal_outcome {
+            SummaryOutcome::Completed => ActivityOutcome::Completed,
+            SummaryOutcome::Stopped => ActivityOutcome::Cancelled,
+            SummaryOutcome::Failed(_) => ActivityOutcome::Failed,
+        };
+        activity.finish(
+            outcome,
+            (outcome == ActivityOutcome::Failed).then_some(ActivityDiagnostic::WorkerFailed),
+            ActivityRetirement::Unavailable,
+        );
+    }
     if let Some(completion) = owned_completion {
         let _ = completion.send(OwnedMacroRunCompletion {
             run_id,
@@ -1961,9 +2335,17 @@ fn command_result(result: CommandResult) -> ExecResult {
 /// Success includes a queued parameter request; no execution is admitted until
 /// complete typed values have been confirmed.
 fn prepare_direct(command: RuntimeCommand) -> Result<()> {
+    prepare_direct_with_source(command, InvocationSource::UnclassifiedApi)
+}
+
+fn prepare_direct_with_source(
+    command: RuntimeCommand,
+    invocation_source: InvocationSource,
+) -> Result<()> {
     global()?.prepare_direct_command(
         command,
         &super::invocation_prompt::production_invocation_prompt_broker(),
+        invocation_source,
     )?;
     Ok(())
 }
@@ -1976,23 +2358,56 @@ fn accepted(r: CommandResult) -> Result<()> {
 pub fn invoke(invocation: MkInvocation) -> Result<()> {
     prepare_direct(RuntimeCommand::Invoke(invocation))
 }
+pub fn invoke_with_source(invocation: MkInvocation, source: InvocationSource) -> Result<()> {
+    prepare_direct_with_source(RuntimeCommand::Invoke(invocation), source)
+}
 pub fn run(id: u64) -> Result<()> {
     prepare_direct(RuntimeCommand::Run(id))
+}
+pub fn run_with_source(id: u64, source: InvocationSource) -> Result<()> {
+    prepare_direct_with_source(RuntimeCommand::Run(id), source)
 }
 pub fn run_from(macro_id: u64, step_id: u64) -> Result<()> {
     prepare_direct(RuntimeCommand::RunFrom(macro_id, step_id))
 }
+pub fn run_from_with_source(macro_id: u64, step_id: u64, source: InvocationSource) -> Result<()> {
+    prepare_direct_with_source(RuntimeCommand::RunFrom(macro_id, step_id), source)
+}
 pub fn run_selection(macro_id: u64, ids: Vec<u64>) -> Result<()> {
     prepare_direct(RuntimeCommand::RunSelection(macro_id, ids))
+}
+pub fn run_selection_with_source(
+    macro_id: u64,
+    ids: Vec<u64>,
+    source: InvocationSource,
+) -> Result<()> {
+    prepare_direct_with_source(RuntimeCommand::RunSelection(macro_id, ids), source)
 }
 pub fn debug_run(macro_id: u64) -> Result<()> {
     prepare_direct(RuntimeCommand::DebugRun(macro_id))
 }
+pub fn debug_run_with_source(macro_id: u64, source: InvocationSource) -> Result<()> {
+    prepare_direct_with_source(RuntimeCommand::DebugRun(macro_id), source)
+}
 pub fn debug_run_from(macro_id: u64, step_id: u64) -> Result<()> {
     prepare_direct(RuntimeCommand::DebugRunFrom(macro_id, step_id))
 }
+pub fn debug_run_from_with_source(
+    macro_id: u64,
+    step_id: u64,
+    source: InvocationSource,
+) -> Result<()> {
+    prepare_direct_with_source(RuntimeCommand::DebugRunFrom(macro_id, step_id), source)
+}
 pub fn debug_run_selection(macro_id: u64, ids: Vec<u64>) -> Result<()> {
     prepare_direct(RuntimeCommand::DebugRunSelection(macro_id, ids))
+}
+pub fn debug_run_selection_with_source(
+    macro_id: u64,
+    ids: Vec<u64>,
+    source: InvocationSource,
+) -> Result<()> {
+    prepare_direct_with_source(RuntimeCommand::DebugRunSelection(macro_id, ids), source)
 }
 /// Compile and submit an ephemeral document snapshot without publishing it to
 /// the store. It shares the normal worker, admission, controls, diagnostics,
@@ -2021,6 +2436,23 @@ pub fn stop() -> Result<()> {
 /// Returns transient execution state; it is never serialized by `MkMacroStore`.
 pub fn snapshot() -> Option<Arc<RuntimeSnapshot>> {
     RUNTIME.read().unwrap().as_ref().map(|r| r.snapshot())
+}
+
+pub(crate) fn attach_activity_center(center: ActivityCenter) {
+    let runtime = RUNTIME.read().unwrap().clone();
+    if let Some(runtime) = runtime {
+        runtime.attach_activity_center(center);
+    }
+}
+
+pub fn with_run_summaries<R>(
+    inspect: impl FnOnce(u64, &std::collections::VecDeque<MacroRunSummary>) -> R,
+) -> Option<R> {
+    RUNTIME
+        .read()
+        .unwrap()
+        .as_ref()
+        .map(|runtime| runtime.with_run_summaries(inspect))
 }
 /// Returns admission and the last retained snapshot for one preview ticket.
 /// The retained snapshot survives later stored playback snapshots.
@@ -2393,8 +2825,28 @@ mod run_mode_tests {
         executor::fake::FakeBackend,
     };
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Condvar, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    #[derive(Default)]
+    struct ManualRuntimeClock(AtomicU64);
+
+    impl ManualRuntimeClock {
+        fn set_millis(&self, millis: u64) {
+            self.0.store(millis, Ordering::SeqCst);
+        }
+    }
+
+    impl MonotonicClock for ManualRuntimeClock {
+        fn monotonic_now(&self) -> Duration {
+            Duration::from_millis(self.0.load(Ordering::SeqCst))
+        }
+
+        fn wall_now(&self) -> SystemTime {
+            UNIX_EPOCH
+        }
+    }
 
     struct AckHookLoop;
     impl crate::mkmacro::HookLoopAdapter for AckHookLoop {
@@ -2505,6 +2957,34 @@ mod run_mode_tests {
         (dir, runtime, guard, fake)
     }
 
+    fn runtime_with_effects_and_clock(
+        macros: Vec<MkMacro>,
+        clock: Arc<dyn MonotonicClock>,
+    ) -> (
+        tempfile::TempDir,
+        MacroRuntime,
+        Arc<SharedOperationGuard>,
+        Arc<FakeBackend>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        store
+            .save(MkMacroDocument {
+                macros,
+                ..Default::default()
+            })
+            .unwrap();
+        let guard = Arc::new(SharedOperationGuard::default());
+        let fake = Arc::new(FakeBackend::default());
+        let runtime = MacroRuntime::with_guard_and_clock(
+            Arc::new(store),
+            fake.clone().backends(),
+            guard.clone(),
+            clock,
+        );
+        (dir, runtime, guard, fake)
+    }
+
     fn runtime_with_backends(
         macros: Vec<MkMacro>,
         backends: Backends,
@@ -2561,6 +3041,175 @@ mod run_mode_tests {
             );
             thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    fn wait_for_activity_terminal(
+        center: &ActivityCenter,
+        key: crate::activity::ActivityKey,
+    ) -> crate::activity::ActivityRow {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(row) = center
+                .snapshot()
+                .rows
+                .into_iter()
+                .find(|row| row.key == key && row.lifecycle.is_terminal())
+            {
+                return row;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Activity owner did not publish terminal state for {key:?}"
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn wait_for_run_summary(runtime: &MacroRuntime, run_id: u64) -> SummaryOutcome {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let matching = runtime.with_run_summaries(|_, summaries| {
+                summaries
+                    .iter()
+                    .filter(|summary| summary.run_id == run_id)
+                    .map(|summary| summary.outcome)
+                    .collect::<Vec<_>>()
+            });
+            if !matching.is_empty() {
+                assert_eq!(
+                    matching.len(),
+                    1,
+                    "run {run_id} must publish exactly one terminal summary"
+                );
+                return matching[0];
+            }
+            assert!(
+                Instant::now() < deadline,
+                "summary owner did not publish terminal state for run {run_id}"
+            );
+            thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn macro_activity_routes_cancel_to_exact_run_and_reports_terminal_progress() {
+        let target = test_macro(
+            1,
+            true,
+            vec![step(
+                1,
+                MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 0,
+                    ..Default::default()
+                }),
+            )],
+        );
+        let (_dir, runtime, _guard) = runtime_with(vec![target]);
+        let center = ActivityCenter::new();
+        runtime.attach_activity_center(center.clone());
+
+        let first_barrier = runtime.install_test_worker_barrier();
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        first_barrier.wait_until_blocked();
+        let first = center.snapshot();
+        assert_eq!(first.rows.len(), 1);
+        let first_key = first.rows[0].key;
+        assert_eq!(
+            first.rows[0].lifecycle,
+            crate::activity::ActivityLifecycle::Queued
+        );
+        assert_eq!(
+            center.request_cancel(first_key),
+            crate::activity::ActivityCancelResult::Requested
+        );
+        assert_eq!(
+            center.snapshot().rows[0].lifecycle,
+            crate::activity::ActivityLifecycle::Cancelling
+        );
+        first_barrier.release();
+        let stopped = wait_for_terminal(&runtime);
+        assert_eq!(stopped.state, RuntimeState::Stopped);
+        let stopped_row = wait_for_activity_terminal(&center, first_key);
+        let stopped_activity = center.snapshot();
+        assert_eq!(stopped_activity.rows.len(), 1);
+        assert_eq!(stopped_activity.rows[0].key, first_key);
+        assert_eq!(
+            stopped_row.lifecycle,
+            crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Cancelled)
+        );
+        assert_eq!(stopped_row.retirement, ActivityRetirement::Unavailable);
+        assert_eq!(
+            wait_for_run_summary(&runtime, stopped.run_id),
+            SummaryOutcome::Stopped
+        );
+
+        let second_barrier = runtime.install_test_worker_barrier();
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        second_barrier.wait_until_blocked();
+        assert_eq!(
+            center.request_cancel(first_key),
+            crate::activity::ActivityCancelResult::Terminal
+        );
+        let active_rows = center.snapshot();
+        assert_eq!(active_rows.rows.len(), 2);
+        let second_key = active_rows
+            .rows
+            .iter()
+            .find(|row| row.key != first_key)
+            .expect("second admitted run has its own Activity key")
+            .key;
+        assert!(active_rows.rows.iter().any(|row| {
+            row.key != first_key && row.lifecycle == crate::activity::ActivityLifecycle::Queued
+        }));
+        second_barrier.release();
+        let completed = wait_for_terminal_after(&runtime, stopped.run_id);
+        assert_eq!(completed.state, RuntimeState::Completed);
+        let completed_row = wait_for_activity_terminal(&center, second_key);
+        let completed_activity = center.snapshot();
+        assert_eq!(completed_activity.rows.len(), 2);
+        assert_eq!(completed_row.key, second_key);
+        assert_eq!(
+            completed_row.lifecycle,
+            crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Completed)
+        );
+        assert!(
+            completed_row
+                .progress
+                .is_some_and(|progress| progress.completed == 1)
+        );
+        assert!(
+            completed_activity
+                .rows
+                .iter()
+                .any(|row| row.key == first_key)
+        );
+        assert_eq!(
+            wait_for_run_summary(&runtime, completed.run_id),
+            SummaryOutcome::Completed
+        );
+
+        let summaries = runtime.with_run_summaries(|_, summaries| {
+            summaries
+                .iter()
+                .map(|summary| (summary.run_id, summary.outcome))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            summaries,
+            vec![
+                (stopped.run_id, SummaryOutcome::Stopped),
+                (completed.run_id, SummaryOutcome::Completed),
+            ],
+            "each exact Activity run has one matching summary and no duplicate completion"
+        );
+        assert_eq!(stopped_row.key, first_key);
+        assert_eq!(completed_row.key, second_key);
     }
 
     fn wait_for_state(runtime: &MacroRuntime, wanted: RuntimeState) -> Arc<RuntimeSnapshot> {
@@ -3048,6 +3697,24 @@ mod run_mode_tests {
         );
         let failed = wait_for_terminal(&runtime);
         assert_eq!(failed.state, RuntimeState::Failed);
+        assert_eq!(
+            wait_for_run_summary(&runtime, failed.run_id),
+            SummaryOutcome::Failed(DiagnosticKind::Panic)
+        );
+        wait_for_admission_release(&runtime);
+        runtime.with_run_summaries(|revision, summaries| {
+            assert_eq!(revision, 1);
+            assert_eq!(summaries.len(), 1);
+            let summary = &summaries[0];
+            assert_eq!(summary.run_id, failed.run_id);
+            assert_eq!(
+                summary.outcome,
+                SummaryOutcome::Failed(DiagnosticKind::Panic)
+            );
+            assert_eq!(summary.failure.unwrap().kind, DiagnosticKind::Panic);
+            let debug = format!("{summary:?}");
+            assert!(!debug.contains("injected sound panic"));
+        });
         assert!(failed.call_stack.is_empty());
         assert_eq!(failed.active_frame(), None);
         assert_eq!(
@@ -3103,6 +3770,30 @@ mod run_mode_tests {
         assert_eq!(failed.state, RuntimeState::Failed);
         assert_eq!(failed.macro_id, Some(999));
         assert!(failed.run_id > 0);
+        assert_eq!(
+            wait_for_run_summary(&runtime, failed.run_id),
+            SummaryOutcome::Failed(DiagnosticKind::TargetNotFound)
+        );
+        wait_for_admission_release(&runtime);
+        runtime.with_run_summaries(|revision, summaries| {
+            assert_eq!(revision, 1);
+            assert_eq!(summaries.len(), 1);
+            assert_eq!(summaries[0].run_id, failed.run_id);
+            assert_eq!(
+                summaries[0].outcome,
+                SummaryOutcome::Failed(DiagnosticKind::TargetNotFound)
+            );
+            assert_eq!(
+                summaries[0].invocation_source,
+                InvocationSource::UnclassifiedApi
+            );
+            assert!(summaries[0].worker_preparation.is_some());
+            assert_eq!(summaries[0].execution_started_after, None);
+            assert_eq!(
+                summaries[0].failure.unwrap().kind,
+                DiagnosticKind::TargetNotFound
+            );
+        });
         assert!(matches!(
             runtime.command(RuntimeCommand::Resume),
             CommandResult::Rejected(_)
@@ -3122,6 +3813,302 @@ mod run_mode_tests {
             wait_for_terminal_after(&runtime, failed.run_id).state,
             RuntimeState::Completed
         );
+    }
+
+    #[test]
+    fn admitted_macro_summary_records_source_subset_and_only_safe_visit_metadata() {
+        let target = test_macro(
+            31,
+            true,
+            vec![
+                step(
+                    1,
+                    MkAction::Text(MkTextPayload {
+                        text: "not selected".into(),
+                        mode: MkTextMode::Type,
+                    }),
+                ),
+                step(
+                    2,
+                    MkAction::Text(MkTextPayload {
+                        text: "selected".into(),
+                        mode: MkTextMode::Type,
+                    }),
+                ),
+            ],
+        );
+        let (_dir, runtime, _guard, fake) = runtime_with_effects(vec![target]);
+        assert_eq!(
+            runtime.submit_command_with_source(
+                RuntimeCommand::RunSelection(31, vec![2]),
+                None,
+                InvocationSource::MacroDialog,
+            ),
+            CommandResult::Accepted
+        );
+        let completed = wait_for_terminal(&runtime);
+        assert_eq!(completed.state, RuntimeState::Completed);
+        assert_eq!(fake.events(), ["text:selected"]);
+        assert_eq!(
+            wait_for_run_summary(&runtime, completed.run_id),
+            SummaryOutcome::Completed
+        );
+        wait_for_admission_release(&runtime);
+        runtime.with_run_summaries(|revision, summaries| {
+            assert_eq!(revision, 1);
+            assert_eq!(summaries.len(), 1);
+            let summary = &summaries[0];
+            assert_eq!(summary.run_id, completed.run_id);
+            assert_eq!(summary.macro_id, 31);
+            assert_eq!(summary.macro_name, "macro 31");
+            assert_eq!(summary.invocation_source, InvocationSource::MacroDialog);
+            assert_eq!(summary.origin, RuntimeOrigin::Stored);
+            assert_eq!(summary.mode, RuntimeRunMode::Normal);
+            assert_eq!(summary.subset, SummarySubset::Selected { step_count: 1 });
+            assert_eq!(summary.outcome, SummaryOutcome::Completed);
+            assert_eq!(summary.visits.started, 1);
+            assert_eq!(summary.visits.succeeded, 1);
+            assert_eq!(summary.step_aggregates.len(), 1);
+            assert_eq!(summary.step_aggregates[0].step_id, 2);
+            assert_eq!(
+                summary.step_aggregates[0].category,
+                SummaryActionCategory::TextEntry
+            );
+        });
+
+        // Rejected preflight has no admission and must not create a history row.
+        assert!(matches!(
+            runtime.submit_command_with_source(
+                RuntimeCommand::RunSelection(31, Vec::new()),
+                None,
+                InvocationSource::MacroDialog,
+            ),
+            CommandResult::Rejected(_)
+        ));
+        runtime.with_run_summaries(|revision, summaries| {
+            assert_eq!(revision, 1);
+            assert_eq!(summaries.len(), 1);
+        });
+    }
+
+    #[test]
+    fn stop_after_execution_uses_one_terminal_classification_for_snapshot_and_summary() {
+        let target = test_macro(
+            81,
+            true,
+            vec![step(
+                1,
+                MkAction::SetVariable {
+                    name: "finished".into(),
+                    value: MkValue::Boolean(true),
+                },
+            )],
+        );
+        let (_dir, runtime, _guard, _fake) = runtime_with_effects(vec![target]);
+        let terminal_barrier = runtime.install_test_terminal_barrier();
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(81)),
+            CommandResult::Accepted
+        );
+        terminal_barrier.wait_until_blocked();
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+        terminal_barrier.release();
+
+        let terminal = wait_for_terminal(&runtime);
+        assert_eq!(terminal.state, RuntimeState::Stopped);
+        assert_eq!(
+            wait_for_run_summary(&runtime, terminal.run_id),
+            SummaryOutcome::Stopped
+        );
+        runtime.with_run_summaries(|_, summaries| {
+            assert_eq!(summaries.len(), 1);
+            assert_eq!(summaries[0].run_id, terminal.run_id);
+            assert_eq!(summaries[0].outcome, SummaryOutcome::Stopped);
+        });
+    }
+
+    #[test]
+    fn breakpoint_observer_resume_stop_records_pause_time_without_phantom_visit() {
+        let clock = Arc::new(ManualRuntimeClock::default());
+        let mut first = step(
+            1,
+            MkAction::SetVariable {
+                name: "resumed".into(),
+                value: MkValue::Boolean(true),
+            },
+        );
+        first.breakpoint = true;
+        let mut second = step(
+            2,
+            MkAction::SetVariable {
+                name: "never_started".into(),
+                value: MkValue::Boolean(true),
+            },
+        );
+        second.breakpoint = true;
+        let (_dir, runtime, _guard, _fake) = runtime_with_effects_and_clock(
+            vec![test_macro(82, true, vec![first, second])],
+            clock.clone(),
+        );
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(82)),
+            CommandResult::Accepted
+        );
+        let first_pause = wait_for_state(&runtime, RuntimeState::Paused);
+        assert_eq!(first_pause.breakpoint_sequence, 1);
+        assert_eq!(first_pause.steps[&1], StepState::Pending);
+        clock.set_millis(13);
+        assert_eq!(
+            runtime.command(RuntimeCommand::Resume),
+            CommandResult::Accepted
+        );
+
+        let second_pause = wait_for_state(&runtime, RuntimeState::Paused);
+        assert_eq!(second_pause.breakpoint_sequence, 2);
+        assert_eq!(second_pause.steps[&1], StepState::Success);
+        assert_eq!(second_pause.steps[&2], StepState::Pending);
+        clock.set_millis(18);
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+
+        let terminal = wait_for_terminal(&runtime);
+        assert_eq!(terminal.state, RuntimeState::Stopped);
+        assert_eq!(
+            wait_for_run_summary(&runtime, terminal.run_id),
+            SummaryOutcome::Stopped
+        );
+        runtime.with_run_summaries(|_, summaries| {
+            assert_eq!(summaries.len(), 1);
+            let summary = &summaries[0];
+            assert_eq!(summary.run_id, terminal.run_id);
+            assert_eq!(summary.outcome, SummaryOutcome::Stopped);
+            assert_eq!(summary.paused, Duration::from_millis(18));
+            assert_eq!(summary.visits.started, 1);
+            assert_eq!(summary.visits.succeeded, 1);
+            assert_eq!(summary.visits.interrupted, 0);
+            assert_eq!(summary.step_aggregates.len(), 1);
+            assert_eq!(summary.step_aggregates[0].step_id, 1);
+        });
+    }
+
+    #[test]
+    fn breakpoint_observer_immediately_resumes_and_closes_injected_pause() {
+        let clock = Arc::new(ManualRuntimeClock::default());
+        let mut breakpoint_step = step(
+            1,
+            MkAction::SetVariable {
+                name: "resumed_in_observer".into(),
+                value: MkValue::Boolean(true),
+            },
+        );
+        breakpoint_step.breakpoint = true;
+        let (_dir, runtime, _guard, _fake) = runtime_with_effects_and_clock(
+            vec![test_macro(85, true, vec![breakpoint_step])],
+            clock.clone(),
+        );
+        let observer_clock = clock.clone();
+        runtime.install_test_breakpoint_observer(move |control| {
+            observer_clock.set_millis(9);
+            control.resume();
+        });
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(85)),
+            CommandResult::Accepted
+        );
+        let terminal = wait_for_terminal(&runtime);
+        assert_eq!(terminal.state, RuntimeState::Completed);
+        assert_eq!(
+            wait_for_run_summary(&runtime, terminal.run_id),
+            SummaryOutcome::Completed
+        );
+        let events = runtime.take_test_events();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ExecutionEvent::BreakpointHit { step_id: 1, .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ExecutionEvent::StepStarted(1)))
+        );
+
+        runtime.with_run_summaries(|_, summaries| {
+            assert_eq!(summaries.len(), 1);
+            let summary = &summaries[0];
+            assert_eq!(summary.run_id, terminal.run_id);
+            assert_eq!(summary.outcome, SummaryOutcome::Completed);
+            assert_eq!(summary.paused, Duration::from_millis(9));
+            assert_eq!(summary.visits.started, 1);
+            assert_eq!(summary.visits.succeeded, 1);
+            assert_eq!(summary.visits.interrupted, 0);
+            assert_eq!(summary.step_aggregates.len(), 1);
+            assert_eq!(summary.step_aggregates[0].step_id, 1);
+        });
+    }
+
+    #[test]
+    fn breakpoint_observer_immediately_stops_without_starting_the_step() {
+        let clock = Arc::new(ManualRuntimeClock::default());
+        let mut breakpoint_step = step(
+            1,
+            MkAction::SetVariable {
+                name: "must_not_start".into(),
+                value: MkValue::Boolean(true),
+            },
+        );
+        breakpoint_step.breakpoint = true;
+        let (_dir, runtime, _guard, _fake) = runtime_with_effects_and_clock(
+            vec![test_macro(86, true, vec![breakpoint_step])],
+            clock.clone(),
+        );
+        let observer_clock = clock.clone();
+        runtime.install_test_breakpoint_observer(move |control| {
+            observer_clock.set_millis(11);
+            control.stop();
+        });
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(86)),
+            CommandResult::Accepted
+        );
+        let terminal = wait_for_terminal(&runtime);
+        assert_eq!(terminal.state, RuntimeState::Stopped);
+        assert_eq!(
+            wait_for_run_summary(&runtime, terminal.run_id),
+            SummaryOutcome::Stopped
+        );
+        let events = runtime.take_test_events();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ExecutionEvent::BreakpointHit { step_id: 1, .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ExecutionEvent::StepStarted(1)))
+        );
+
+        runtime.with_run_summaries(|_, summaries| {
+            assert_eq!(summaries.len(), 1);
+            let summary = &summaries[0];
+            assert_eq!(summary.run_id, terminal.run_id);
+            assert_eq!(summary.outcome, SummaryOutcome::Stopped);
+            assert_eq!(summary.paused, Duration::from_millis(11));
+            assert_eq!(summary.visits.started, 0);
+            assert_eq!(summary.visits.succeeded, 0);
+            assert_eq!(summary.visits.interrupted, 0);
+            assert!(summary.step_aggregates.is_empty());
+        });
     }
 
     #[test]
@@ -4698,6 +5685,10 @@ mod run_mode_tests {
             })
         ));
         guard.release(Operation::Recording);
+        runtime.with_run_summaries(|revision, summaries| {
+            assert_eq!(revision, 0);
+            assert!(summaries.is_empty(), "rejected preview is not admitted");
+        });
 
         runtime.preview(&document, 1, 91).unwrap();
         assert!(matches!(
@@ -4707,6 +5698,21 @@ mod run_mode_tests {
         assert!(runtime.stop_recording_preview(91));
         let preview = wait_for_terminal(&runtime);
         wait_for_admission_release(&runtime);
+        runtime.with_run_summaries(|_, summaries| {
+            let summary = summaries
+                .iter()
+                .find(|summary| summary.run_id == preview.run_id)
+                .unwrap();
+            assert_eq!(
+                summary.invocation_source,
+                InvocationSource::RecordingPreview
+            );
+            assert_eq!(
+                summary.origin,
+                RuntimeOrigin::RecordingPreview { ticket: 91 }
+            );
+            assert_eq!(summary.outcome, SummaryOutcome::Stopped);
+        });
 
         assert_eq!(
             runtime.command(RuntimeCommand::Run(1)),
@@ -4859,6 +5865,14 @@ mod run_mode_tests {
         assert_eq!(user_terminal.run_id, user_run_id);
         assert_eq!(user_terminal.state, RuntimeState::Completed);
         assert_eq!(user_backend.events(), ["text:user run remains owned"]);
+        user_runtime.with_run_summaries(|_, summaries| {
+            assert_eq!(summaries.len(), 1);
+            assert_eq!(summaries[0].run_id, user_run_id);
+            assert_eq!(
+                summaries[0].invocation_source,
+                InvocationSource::UnclassifiedApi
+            );
+        });
 
         let root = test_macro(
             702,
@@ -4938,6 +5952,12 @@ mod run_mode_tests {
         assert_eq!(terminal.state, RuntimeState::Stopped);
         assert!(owned_backend.events().is_empty());
         assert_eq!(owned_runtime.snapshot().run_id, owned_run_id);
+        owned_runtime.with_run_summaries(|_, summaries| {
+            assert_eq!(summaries.len(), 1);
+            assert_eq!(summaries[0].run_id, owned_run_id);
+            assert_eq!(summaries[0].invocation_source, InvocationSource::HotFolder);
+            assert_eq!(summaries[0].outcome, SummaryOutcome::Stopped);
+        });
 
         let next_barrier = owned_runtime.install_test_worker_barrier();
         assert_eq!(

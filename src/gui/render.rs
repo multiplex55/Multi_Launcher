@@ -5504,6 +5504,7 @@ impl LauncherApp {
                         | super::Panel::TableUtilityDialog
                         | super::Panel::ImageCompareDialog
                         | super::Panel::DuplicateFinderDialog
+                        | super::Panel::ActivityDialog
                         | super::Panel::MouseSettingsDialog
                         | super::Panel::MouseGesturesDialog
                         | super::Panel::MouseGestureSettingsDialog
@@ -5587,6 +5588,10 @@ impl LauncherApp {
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::DuplicateFinder,
                 self.duplicate_finder_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::Activity,
+                self.activity_dialog.open,
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::MouseSettings,
@@ -6438,6 +6443,9 @@ impl LauncherApp {
                     if ui.button("Pin List").clicked() && first_ui_pass {
                         self.pin_list_open = true;
                         ctx.request_repaint_of(egui::ViewportId::ROOT);
+                    }
+                    if ui.button("Activity").clicked() && first_ui_pass {
+                        self.focus_panel(crate::gui::Panel::ActivityDialog);
                     }
                     apps_menu_state = (
                         apps_menu.response.hovered(),
@@ -9170,7 +9178,7 @@ impl LauncherApp {
         if first_ui_pass {
             self.submit_ready_search_replace_confirmation();
         }
-        self.diff_dialog.ui(&ctx);
+        self.diff_dialog.ui(&ctx, &self.activity_center);
         let notes_owner =
             self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
         let notes_scope = match notes_owner {
@@ -9454,6 +9462,60 @@ impl LauncherApp {
             owner_transition_pending,
         );
         self.render_hotfolder_manager(&ctx, first_ui_pass);
+        for action in self.activity_dialog.show(
+            &ctx,
+            &self.activity_center,
+            frame_logic.should_be_visible,
+            !self.screenshot_editors.is_empty(),
+            || Some(self.pinboard_capture.pinboard().image_bytes() as u64),
+        ) {
+            let super::activity_dialog::ActivityDialogAction::Navigate(owner) = action;
+            self.force_close_panel(super::Panel::ActivityDialog);
+            let panel = match owner {
+                crate::activity::ActivityOwner::FileSearch => Some(super::Panel::FileSearchDialog),
+                crate::activity::ActivityOwner::Table => Some(super::Panel::TableUtilityDialog),
+                crate::activity::ActivityOwner::DuplicateFinder => {
+                    Some(super::Panel::DuplicateFinderDialog)
+                }
+                crate::activity::ActivityOwner::Hash => Some(super::Panel::HashGeneratorDialog),
+                crate::activity::ActivityOwner::Rename => Some(super::Panel::BatchRenameDialog),
+                crate::activity::ActivityOwner::SearchReplace => {
+                    Some(super::Panel::SearchReplaceDialog)
+                }
+                crate::activity::ActivityOwner::Xml => Some(super::Panel::XmlToolkitDialog),
+                crate::activity::ActivityOwner::Macro => Some(super::Panel::MkMacroDialog),
+                crate::activity::ActivityOwner::FolderCompare => {
+                    self.diff_dialog.open = true;
+                    ctx.request_repaint();
+                    None
+                }
+                crate::activity::ActivityOwner::Screenshot => {
+                    (!self.screenshot_editors.is_empty()).then_some(super::Panel::ScreenshotEditor)
+                }
+                crate::activity::ActivityOwner::HotFolder => {
+                    self.open_hotfolder_manager();
+                    None
+                }
+                crate::activity::ActivityOwner::Indexing => {
+                    self.activity_dialog.close();
+                    self.focus_input();
+                    None
+                }
+                crate::activity::ActivityOwner::Ocr => {
+                    self.activity_dialog.close();
+                    self.focus_input();
+                    None
+                }
+                crate::activity::ActivityOwner::LivePin => {
+                    self.activity_dialog.close();
+                    self.pin_list_open = true;
+                    None
+                }
+            };
+            if let Some(panel) = panel {
+                self.focus_panel(panel);
+            }
+        }
         #[cfg(feature = "qa-framebuffer-capture")]
         if self.qa_framebuffer_needs_qr_observation() {
             let observation = self.qr_dialog.show_with_qa_observation(&ctx);
@@ -10920,6 +10982,7 @@ mod tests {
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc,
         },
         thread,
         time::{Duration, Instant},
@@ -11181,6 +11244,9 @@ mod tests {
     }
 
     fn new_app_with_settings(ctx: &egui::Context, settings: Settings) -> LauncherApp {
+        let mut settings = settings;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
@@ -11201,6 +11267,7 @@ mod tests {
 
     #[test]
     fn launcher_initialization_restores_macro_property_preferences() {
+        let mut fixture = crate::gui::test_fixtures::IsolatedAppWorkspace::new();
         let context = egui::Context::default();
         let mut settings = Settings::default();
         settings.mkmacro_properties.expand_all();
@@ -11208,15 +11275,24 @@ mod tests {
         settings.mkmacro_properties.recording_open = false;
         let expected = settings.mkmacro_properties.clone();
 
-        let mut app = new_app_with_settings(&context, settings);
+        {
+            let app = fixture
+                .create_app(&context, "macro-preferences", settings)
+                .expect("isolated app fixture constructs");
+            assert!(app.isolated_services_are_dormant_for_test());
 
-        assert_eq!(app.mkmacro_dialog.mkmacro_properties_preferences, expected);
-        assert_eq!(
-            app.mkmacro_dialog
-                .take_macro_properties_preferences_for_persist(),
-            None,
-            "loading preferences does not schedule a redundant settings write"
-        );
+            assert_eq!(app.mkmacro_dialog.mkmacro_properties_preferences, expected);
+            assert_eq!(
+                app.mkmacro_dialog
+                    .take_macro_properties_preferences_for_persist(),
+                None,
+                "loading preferences does not schedule a redundant settings write"
+            );
+        }
+        let teardown = fixture.finish().expect("fixture cleanup succeeds");
+        assert!(teardown.cwd_restored);
+        assert!(teardown.root_removed);
+        eprintln!("isolated app fixture teardown: {teardown:?}");
     }
 
     #[test]
@@ -12797,6 +12873,21 @@ mod tests {
         results: Vec<Action>,
         root: &std::path::Path,
     ) -> LauncherApp {
+        root_list_app_at_with_initialization(ctx, results, root, RootListAppInitialization::Normal)
+    }
+
+    #[derive(Clone, Copy)]
+    enum RootListAppInitialization {
+        Normal,
+        IsolatedOracle,
+    }
+
+    fn root_list_app_at_with_initialization(
+        ctx: &egui::Context,
+        results: Vec<Action>,
+        root: &std::path::Path,
+        initialization: RootListAppInitialization,
+    ) -> LauncherApp {
         let mut settings = Settings::default();
         settings.hotkey = None;
         settings.quit_hotkey = None;
@@ -12808,22 +12899,35 @@ mod tests {
         settings.show_error_toasts = false;
         settings.dashboard.enabled = false;
         settings.pinned_panels.clear();
-        let mut app = LauncherApp::new(
-            ctx,
-            Arc::new(Vec::new()),
-            0,
-            PluginManager::new_inert_for_test(),
-            root.join("actions.json").to_string_lossy().into_owned(),
-            root.join("settings.json").to_string_lossy().into_owned(),
-            settings,
-            None,
-            None,
-            Some(std::collections::HashSet::new()),
-            Some(HashMap::new()),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
-        );
+        let mut app = match initialization {
+            RootListAppInitialization::Normal => LauncherApp::new(
+                ctx,
+                Arc::new(Vec::new()),
+                0,
+                PluginManager::new_inert_for_test(),
+                root.join("actions.json").to_string_lossy().into_owned(),
+                root.join("settings.json").to_string_lossy().into_owned(),
+                settings,
+                None,
+                None,
+                Some(std::collections::HashSet::new()),
+                Some(HashMap::new()),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+            ),
+            RootListAppInitialization::IsolatedOracle => {
+                let app = LauncherApp::new_isolated_for_test_at(
+                    ctx,
+                    root,
+                    settings,
+                    Some(std::collections::HashSet::new()),
+                    Some(HashMap::new()),
+                );
+                assert!(app.isolated_services_are_dormant_for_test());
+                app
+            }
+        };
         // The first root frame otherwise starts the production dashboard's
         // all-sources refresh even though the dashboard is disabled. This
         // isolated observer fixture intentionally keeps that worker dormant.
@@ -14651,8 +14755,36 @@ mod tests {
         actions: &[Action],
         cold: bool,
     ) -> TrackCRootListState {
+        track_c_prepare_root_list_state_with_initialization(
+            root,
+            actions,
+            cold,
+            RootListAppInitialization::Normal,
+        )
+    }
+
+    fn track_c_prepare_root_list_oracle_state(
+        root: &std::path::Path,
+        actions: &[Action],
+        cold: bool,
+    ) -> TrackCRootListState {
+        track_c_prepare_root_list_state_with_initialization(
+            root,
+            actions,
+            cold,
+            RootListAppInitialization::IsolatedOracle,
+        )
+    }
+
+    fn track_c_prepare_root_list_state_with_initialization(
+        root: &std::path::Path,
+        actions: &[Action],
+        cold: bool,
+        initialization: RootListAppInitialization,
+    ) -> TrackCRootListState {
         let ctx = egui::Context::default();
-        let mut app = root_list_app_at(&ctx, actions.to_vec(), root);
+        let mut app =
+            root_list_app_at_with_initialization(&ctx, actions.to_vec(), root, initialization);
         app.visible_flag.store(true, Ordering::SeqCst);
         app.last_visible = true;
         for frame in 0..9 {
@@ -16150,8 +16282,40 @@ mod tests {
         columns: usize,
         cold: bool,
     ) -> TrackCRootGridState {
+        track_c_prepare_root_grid_state_with_initialization(
+            root,
+            actions,
+            columns,
+            cold,
+            RootListAppInitialization::Normal,
+        )
+    }
+
+    fn track_c_prepare_root_grid_oracle_state(
+        root: &std::path::Path,
+        actions: &[Action],
+        columns: usize,
+        cold: bool,
+    ) -> TrackCRootGridState {
+        track_c_prepare_root_grid_state_with_initialization(
+            root,
+            actions,
+            columns,
+            cold,
+            RootListAppInitialization::IsolatedOracle,
+        )
+    }
+
+    fn track_c_prepare_root_grid_state_with_initialization(
+        root: &std::path::Path,
+        actions: &[Action],
+        columns: usize,
+        cold: bool,
+        initialization: RootListAppInitialization,
+    ) -> TrackCRootGridState {
         let ctx = egui::Context::default();
-        let mut app = root_list_app_at(&ctx, actions.to_vec(), root);
+        let mut app =
+            root_list_app_at_with_initialization(&ctx, actions.to_vec(), root, initialization);
         app.visible_flag.store(true, Ordering::SeqCst);
         app.last_visible = true;
         app.query_results_layout.enabled = true;
@@ -16462,7 +16626,7 @@ mod tests {
         let fixture = action_fixture(100);
         for cold in [true, false] {
             let mut state =
-                track_c_prepare_root_list_state(workspace.root(), &fixture.values, cold);
+                track_c_prepare_root_list_oracle_state(workspace.root(), &fixture.values, cold);
             let frame = state.frame_index;
             state.frame_index += 1;
             run_root_list_frame(&state.ctx, &mut state.app, frame, 960.0, 640.0, Vec::new())
@@ -17386,7 +17550,7 @@ mod tests {
         let fixture = action_fixture(100);
         for columns in [1, 2, 3, 5, 6] {
             for cold in [true, false] {
-                let mut state = track_c_prepare_root_grid_state(
+                let mut state = track_c_prepare_root_grid_oracle_state(
                     workspace.root(),
                     &fixture.values,
                     columns,
@@ -19077,9 +19241,33 @@ mod tests {
         root: &std::path::Path,
         actions: &[Action],
     ) -> TrackCRootQueryState {
+        track_c_prepare_root_query_state_with_initialization(
+            root,
+            actions,
+            RootListAppInitialization::Normal,
+        )
+    }
+
+    fn track_c_prepare_root_query_oracle_state(
+        root: &std::path::Path,
+        actions: &[Action],
+    ) -> TrackCRootQueryState {
+        track_c_prepare_root_query_state_with_initialization(
+            root,
+            actions,
+            RootListAppInitialization::IsolatedOracle,
+        )
+    }
+
+    fn track_c_prepare_root_query_state_with_initialization(
+        root: &std::path::Path,
+        actions: &[Action],
+        initialization: RootListAppInitialization,
+    ) -> TrackCRootQueryState {
         const QUERY_SUFFIX: &str = "00009";
         let ctx = egui::Context::default();
-        let mut app = root_list_app_at(&ctx, actions.to_vec(), root);
+        let mut app =
+            root_list_app_at_with_initialization(&ctx, actions.to_vec(), root, initialization);
         // `default_folders()` supplies path entries when the isolated workspace
         // has no folders file. Clear those constructor defaults so this owner
         // exercises only the synthetic action catalog and no host paths.
@@ -19465,7 +19653,7 @@ mod tests {
 
         let workspace = TrackCWorkspace::new();
         let fixture = action_fixture(100);
-        let mut state = track_c_prepare_root_query_state(workspace.root(), &fixture.values);
+        let mut state = track_c_prepare_root_query_oracle_state(workspace.root(), &fixture.values);
         let _output = track_c_run_root_query_owner(&mut state);
         let _ = track_c_validate_root_query_frame(&state, &_output);
         drop(state);
@@ -20346,6 +20534,24 @@ mod tests {
         progress_enabled: bool,
         eager_layout_mode: TrackC2GEagerLayoutMode,
     ) -> TrackC2GState {
+        track_c2g_prepare_state_with_progress_and_initialization(
+            root,
+            count,
+            case,
+            progress_enabled,
+            eager_layout_mode,
+            RootListAppInitialization::Normal,
+        )
+    }
+
+    fn track_c2g_prepare_state_with_progress_and_initialization(
+        root: &std::path::Path,
+        count: usize,
+        case: TrackC2GCase,
+        progress_enabled: bool,
+        eager_layout_mode: TrackC2GEagerLayoutMode,
+        initialization: RootListAppInitialization,
+    ) -> TrackC2GState {
         use crate::performance::track_c_workloads::action_fixture;
 
         let preparation_started = Instant::now();
@@ -20374,7 +20580,8 @@ mod tests {
             Some(preparation_started.elapsed()),
         );
         let ctx = egui::Context::default();
-        let mut app = root_list_app_at(&ctx, catalog.clone(), root);
+        let mut app =
+            root_list_app_at_with_initialization(&ctx, catalog.clone(), root, initialization);
         app.folder_aliases.clear();
         app.folder_aliases_lc.clear();
         app.bookmark_aliases.clear();
@@ -21501,6 +21708,7 @@ mod tests {
             root,
             false,
             TrackC2GEagerLayoutMode::FreshPerFrame,
+            RootListAppInitialization::Normal,
         )
     }
 
@@ -21516,6 +21724,7 @@ mod tests {
             root,
             progress_enabled,
             TrackC2GEagerLayoutMode::ReuseEquivalentInputs,
+            RootListAppInitialization::IsolatedOracle,
         )
     }
 
@@ -21525,6 +21734,7 @@ mod tests {
         root: &std::path::Path,
         progress_enabled: bool,
         eager_layout_mode: TrackC2GEagerLayoutMode,
+        initialization: RootListAppInitialization,
     ) -> serde_json::Value {
         track_c2g_progress(
             progress_enabled,
@@ -21537,12 +21747,13 @@ mod tests {
             None,
             None,
         );
-        let mut state = track_c2g_prepare_state_with_progress(
+        let mut state = track_c2g_prepare_state_with_progress_and_initialization(
             root,
             count,
             case,
             progress_enabled,
             eager_layout_mode,
+            initialization,
         );
         let sample = track_c2g_run_sequence(&mut state);
         let fixture_signature = state.fixture_signature;
@@ -47246,64 +47457,138 @@ mod tests {
         set_execute_action_hook(None);
     }
 
-    fn wait_for_repaint(wakes: &AtomicUsize) {
-        for _ in 0..100 {
-            if wakes.load(Ordering::SeqCst) != 0 {
-                return;
+    fn create_macro_launcher_test_app<'a>(
+        fixture: &'a mut crate::gui::test_fixtures::IsolatedAppWorkspace,
+        ctx: &egui::Context,
+        profile: &str,
+    ) -> &'a mut LauncherApp {
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        let app = fixture
+            .create_app(ctx, profile, settings)
+            .expect("isolated macro launcher app constructs");
+        assert!(app.isolated_services_are_dormant_for_test());
+        app
+    }
+
+    struct CancelAndJoinOnDrop<T> {
+        control: Arc<RunControl>,
+        worker: Option<thread::JoinHandle<T>>,
+    }
+
+    impl<T> CancelAndJoinOnDrop<T> {
+        fn new(control: Arc<RunControl>, worker: thread::JoinHandle<T>) -> Self {
+            Self {
+                control,
+                worker: Some(worker),
             }
-            thread::sleep(Duration::from_millis(2));
         }
-        panic!("worker submission did not wake egui");
+
+        fn join(mut self) -> thread::Result<T> {
+            self.worker
+                .take()
+                .expect("worker handle is available until join")
+                .join()
+        }
+    }
+
+    impl<T> Drop for CancelAndJoinOnDrop<T> {
+        fn drop(&mut self) {
+            if let Some(worker) = self.worker.take() {
+                self.control.stop();
+                let _ = worker.join();
+            }
+        }
+    }
+
+    fn wait_for_completion<T>(
+        receiver: &mpsc::Receiver<T>,
+        event: &'static str,
+        timeout: Duration,
+    ) -> Result<T, String> {
+        receiver.recv_timeout(timeout).map_err(|error| match error {
+            mpsc::RecvTimeoutError::Timeout => {
+                format!("{event} did not arrive within {timeout:?}")
+            }
+            mpsc::RecvTimeoutError::Disconnected => {
+                format!("{event} sender disconnected before completion")
+            }
+        })
     }
 
     #[test]
     fn macro_launcher_poll_consumes_one_request_and_mutates_query_on_gui_dispatch() {
         let ctx = egui::Context::default();
         let broker = Arc::new(LauncherCommandBroker::default());
-        let mut app = new_app(&ctx);
-        app.command_cache = two_results();
-        app.query = "before polling".into();
+        let mut fixture = crate::gui::test_fixtures::IsolatedAppWorkspace::new();
+        {
+            let app = create_macro_launcher_test_app(&mut fixture, &ctx, "macro-launcher-poll");
+            app.command_cache = two_results();
+            app.query = "before polling".into();
 
-        // Consume repaint requests made while constructing the app. An immediate
-        // egui repaint intentionally remains outstanding for another frame, so
-        // one frame is not sufficient to put the context back to sleep. If a
-        // repaint is already pending, another `request_repaint` is coalesced and
-        // does not invoke the integration callback.
-        for _ in 0..8 {
-            ctx.run_ui(egui::RawInput::default(), |_| {})
-                .drop_without_applying_deltas();
-            if !ctx.has_requested_repaint() {
-                break;
+            // Consume repaint requests made while constructing the app. An immediate
+            // egui repaint intentionally remains outstanding for another frame, so
+            // one frame is not sufficient to put the context back to sleep. If a
+            // repaint is already pending, another `request_repaint` is coalesced and
+            // does not invoke the integration callback.
+            for _ in 0..8 {
+                ctx.run_ui(egui::RawInput::default(), |_| {})
+                    .drop_without_applying_deltas();
+                if !ctx.has_requested_repaint() {
+                    break;
+                }
             }
+            assert!(!ctx.has_requested_repaint());
+            let wakes = Arc::new(AtomicUsize::new(0));
+            let callback_wakes = Arc::clone(&wakes);
+            let (repaint_tx, repaint_rx) = mpsc::sync_channel(1);
+            ctx.set_request_repaint_callback(move |_| {
+                callback_wakes.fetch_add(1, Ordering::SeqCst);
+                let _ = repaint_tx.try_send(());
+            });
+
+            // The empty poll installs the wakeup callback but changes no GUI state.
+            app.poll_macro_launcher_commands_from(&ctx, &broker);
+            assert_eq!(app.query, "before polling");
+
+            let control = Arc::new(RunControl::default());
+            let submit_control = Arc::clone(&control);
+            let submit_broker = Arc::clone(&broker);
+            let submitter = CancelAndJoinOnDrop::new(
+                Arc::clone(&control),
+                thread::spawn(move || submit_broker.submit_query("", &submit_control)),
+            );
+            if let Err(error) = wait_for_completion(
+                &repaint_rx,
+                "egui repaint callback for macro launcher request",
+                Duration::from_millis(200),
+            ) {
+                control.stop();
+                let worker_result = submitter
+                    .join()
+                    .expect("macro launcher worker joins after cancellation");
+                panic!("{error}; worker returned {worker_result:?}");
+            }
+            assert!(wakes.load(Ordering::SeqCst) > 0);
+            assert_eq!(app.query, "before polling");
+
+            app.poll_macro_launcher_commands_from(&ctx, &broker);
+            assert_eq!(app.query, "");
+            assert!(broker.take_pending().is_none());
+            assert_eq!(
+                submitter.join().unwrap().unwrap(),
+                LauncherCommandResponse::PresentedForSelection { result_count: 2 }
+            );
+
+            // A second poll cannot respond to, or otherwise process, the request again.
+            app.poll_macro_launcher_commands_from(&ctx, &broker);
+            assert_eq!(app.query, "");
         }
-        assert!(!ctx.has_requested_repaint());
-        let wakes = Arc::new(AtomicUsize::new(0));
-        let callback_wakes = Arc::clone(&wakes);
-        ctx.set_request_repaint_callback(move |_| {
-            callback_wakes.fetch_add(1, Ordering::SeqCst);
-        });
-
-        // The empty poll installs the wakeup callback but changes no GUI state.
-        app.poll_macro_launcher_commands_from(&ctx, &broker);
-        assert_eq!(app.query, "before polling");
-
-        let submit_broker = Arc::clone(&broker);
-        let submitter =
-            thread::spawn(move || submit_broker.submit_query("", &RunControl::default()));
-        wait_for_repaint(&wakes);
-        assert_eq!(app.query, "before polling");
-
-        app.poll_macro_launcher_commands_from(&ctx, &broker);
-        assert_eq!(app.query, "");
-        assert!(broker.take_pending().is_none());
-        assert_eq!(
-            submitter.join().unwrap().unwrap(),
-            LauncherCommandResponse::PresentedForSelection { result_count: 2 }
-        );
-
-        // A second poll cannot respond to, or otherwise process, the request again.
-        app.poll_macro_launcher_commands_from(&ctx, &broker);
-        assert_eq!(app.query, "");
+        let teardown = fixture.finish().expect("isolated fixture cleanup succeeds");
+        assert!(teardown.cwd_restored);
+        assert!(teardown.root_removed);
+        eprintln!("isolated app fixture teardown: {teardown:?}");
     }
 
     #[test]
@@ -47322,25 +47607,90 @@ mod tests {
     #[test]
     fn disconnected_macro_launcher_waiter_does_not_panic_gui_dispatch() {
         let ctx = egui::Context::default();
+        let mut fixture = crate::gui::test_fixtures::IsolatedAppWorkspace::new();
         let broker = Arc::new(LauncherCommandBroker::default());
         let control = Arc::new(RunControl::default());
+        let (repaint_tx, repaint_rx) = mpsc::sync_channel(1);
+        broker.set_repaint(Arc::new(move || {
+            let _ = repaint_tx.try_send(());
+        }));
         let submit_broker = Arc::clone(&broker);
         let submit_control = Arc::clone(&control);
-        let submitter =
-            thread::spawn(move || submit_broker.submit_query("missing", &submit_control));
-        let pending = loop {
-            if let Some(pending) = broker.take_pending() {
-                break pending;
-            }
-            thread::yield_now();
+        let submitter = CancelAndJoinOnDrop::new(
+            Arc::clone(&control),
+            thread::spawn(move || submit_broker.submit_query("missing", &submit_control)),
+        );
+        let notification = wait_for_completion(
+            &repaint_rx,
+            "broker repaint publication for cancelled macro launcher request",
+            Duration::from_millis(200),
+        );
+        let pending = if notification.is_ok() {
+            broker.take_pending()
+        } else {
+            None
         };
         control.stop();
-        assert!(submitter.join().unwrap().is_err());
+        let submission = submitter
+            .join()
+            .expect("macro launcher worker joins after cancellation");
+        assert!(submission.is_err());
+        let pending = match notification {
+            Ok(()) => pending.expect("repaint follows pending request publication"),
+            Err(error) => panic!("{error}; worker returned {submission:?}"),
+        };
 
-        let mut app = new_app(&ctx);
-        let response = app.handle_macro_launcher_command(&pending.request);
-        assert_eq!(response, LauncherCommandResponse::NoResults);
-        assert!(!pending.respond(response));
+        {
+            let app =
+                create_macro_launcher_test_app(&mut fixture, &ctx, "macro-launcher-disconnected");
+            let response = app.handle_macro_launcher_command(&pending.request);
+            assert_eq!(response, LauncherCommandResponse::NoResults);
+            assert!(!pending.respond(response));
+        }
+        let teardown = fixture.finish().expect("isolated fixture cleanup succeeds");
+        assert!(teardown.cwd_restored);
+        assert!(teardown.root_removed);
+        eprintln!("isolated app fixture teardown: {teardown:?}");
+    }
+
+    #[test]
+    fn completion_wait_handles_prearrival_timeout_and_disconnection() {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        ready_tx.send("published before wait").unwrap();
+        assert_eq!(
+            wait_for_completion(
+                &ready_rx,
+                "pre-arrived repaint publication",
+                Duration::from_millis(10),
+            )
+            .unwrap(),
+            "published before wait"
+        );
+
+        let (timeout_tx, timeout_rx) = mpsc::channel::<()>();
+        let timeout_error = wait_for_completion(
+            &timeout_rx,
+            "missing repaint publication",
+            Duration::from_millis(10),
+        )
+        .unwrap_err();
+        assert_eq!(
+            timeout_error,
+            "missing repaint publication did not arrive within 10ms"
+        );
+        drop(timeout_tx);
+
+        let (disconnected_tx, disconnected_rx) = mpsc::channel::<()>();
+        drop(disconnected_tx);
+        assert_eq!(
+            wait_for_completion(
+                &disconnected_rx,
+                "repaint publication",
+                Duration::from_millis(10),
+            )
+            .unwrap_err(),
+            "repaint publication sender disconnected before completion"
+        );
     }
 
     #[test]

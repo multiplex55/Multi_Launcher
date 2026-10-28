@@ -546,28 +546,22 @@ impl HotFolderWatchService {
     }
 
     pub fn snapshot(&self) -> HotFolderRuntimeSnapshot {
-        let mut snapshot = HotFolderRuntimeSnapshot {
-            paused: true,
-            ..HotFolderRuntimeSnapshot::default()
-        };
-        if let Some(worker) = self.worker.as_ref() {
-            let (reply_tx, reply_rx) = mpsc::channel();
-            if worker
-                .sender
-                .send(WorkerMessage::Snapshot { reply: reply_tx })
-                .is_ok()
-                && let Ok(worker_snapshot) = reply_rx.recv()
-            {
-                snapshot = worker_snapshot;
-            }
-        }
-        if let Ok(output) = self.output.lock() {
-            snapshot.ready_candidates = output.ready.len();
-            snapshot.lease_active = output.leased.is_some();
-            snapshot.diagnostics = output.diagnostics.iter().cloned().collect();
-            snapshot.dropped_diagnostics = output.dropped_diagnostics;
-        }
-        snapshot
+        self.output.lock().map_or_else(
+            |_| HotFolderRuntimeSnapshot {
+                paused: true,
+                ..HotFolderRuntimeSnapshot::default()
+            },
+            |output| HotFolderRuntimeSnapshot {
+                paused: output.core.paused,
+                active_roots: output.core.active_roots,
+                active_rules: output.core.active_rules,
+                pending_files: output.core.pending_files,
+                ready_candidates: output.ready.len(),
+                lease_active: output.leased.is_some(),
+                diagnostics: output.diagnostics.iter().cloned().collect(),
+                dropped_diagnostics: output.dropped_diagnostics,
+            },
+        )
     }
 
     pub fn shutdown(&mut self) -> Result<(), HotFolderRuntimeError> {
@@ -689,6 +683,7 @@ impl Drop for HotFolderWatchService {
 }
 
 struct OutputState {
+    core: HotFolderCoreSnapshot,
     ready: VecDeque<HotFolderReadyCandidate>,
     leased: Option<ActiveLease>,
     next_lease_id: u64,
@@ -696,9 +691,29 @@ struct OutputState {
     dropped_diagnostics: u64,
 }
 
+#[derive(Clone, Copy)]
+struct HotFolderCoreSnapshot {
+    paused: bool,
+    active_roots: usize,
+    active_rules: usize,
+    pending_files: usize,
+}
+
+impl Default for HotFolderCoreSnapshot {
+    fn default() -> Self {
+        Self {
+            paused: true,
+            active_roots: 0,
+            active_rules: 0,
+            pending_files: 0,
+        }
+    }
+}
+
 impl Default for OutputState {
     fn default() -> Self {
         Self {
+            core: HotFolderCoreSnapshot::default(),
             ready: VecDeque::new(),
             leased: None,
             next_lease_id: 1,
@@ -892,9 +907,6 @@ enum WorkerMessage {
     Pause {
         reply: mpsc::Sender<()>,
     },
-    Snapshot {
-        reply: mpsc::Sender<HotFolderRuntimeSnapshot>,
-    },
     FinishLease {
         lease_id: u64,
         disposition: HotFolderLeaseDisposition,
@@ -946,6 +958,7 @@ fn worker_main(
         match received {
             Ok(WorkerMessage::Shutdown) => {
                 pause_core(&mut core, &output, false);
+                publish_core_snapshot(&core, &output);
                 return;
             }
             Ok(message) => handle_message(
@@ -959,12 +972,14 @@ fn worker_main(
             ),
             Err(RecvTimeoutError::Disconnected) => {
                 pause_core(&mut core, &output, false);
+                publish_core_snapshot(&core, &output);
                 return;
             }
             Err(RecvTimeoutError::Timeout) => {
                 while let Ok(message) = receiver.try_recv() {
                     if matches!(message, WorkerMessage::Shutdown) {
                         pause_core(&mut core, &output, false);
+                        publish_core_snapshot(&core, &output);
                         return;
                     }
                     handle_message(
@@ -980,6 +995,7 @@ fn worker_main(
                 process_lost_roots(&mut core, &output);
                 expire_lease(&output, clock.now());
                 process_due(&mut core, &output, &*boundary, clock.now());
+                publish_core_snapshot(&core, &output);
             }
         }
     }
@@ -1039,27 +1055,13 @@ fn handle_message(
                 boundary,
                 watcher_factory,
             );
+            publish_core_snapshot(core, output);
             let _ = reply.send(report);
         }
         WorkerMessage::Pause { reply } => {
             pause_core(core, output, true);
+            publish_core_snapshot(core, output);
             let _ = reply.send(());
-        }
-        WorkerMessage::Snapshot { reply } => {
-            let mut snapshot = HotFolderRuntimeSnapshot {
-                paused: core.paused,
-                active_roots: core.roots.len(),
-                active_rules: core.roots.values().map(|root| root.rules.len()).sum(),
-                pending_files: core.pending.len(),
-                ..HotFolderRuntimeSnapshot::default()
-            };
-            if let Ok(output) = output.lock() {
-                snapshot.ready_candidates = output.ready.len();
-                snapshot.lease_active = output.leased.is_some();
-                snapshot.diagnostics = output.diagnostics.iter().cloned().collect();
-                snapshot.dropped_diagnostics = output.dropped_diagnostics;
-            }
-            let _ = reply.send(snapshot);
         }
         WorkerMessage::FinishLease {
             lease_id,
@@ -1068,6 +1070,7 @@ fn handle_message(
         } => {
             let result =
                 finish_lease_in_output(lease_id, disposition, output, clock.now(), Some(core));
+            publish_core_snapshot(core, output);
             let _ = reply.send(result);
         }
         WorkerMessage::Notify {
@@ -1081,6 +1084,18 @@ fn handle_message(
     process_lost_roots(core, output);
     expire_lease(output, clock.now());
     process_due(core, output, &**boundary, clock.now());
+    publish_core_snapshot(core, output);
+}
+
+fn publish_core_snapshot(core: &RuntimeCore, output: &Arc<Mutex<OutputState>>) {
+    if let Ok(mut output) = output.lock() {
+        output.core = HotFolderCoreSnapshot {
+            paused: core.paused,
+            active_roots: core.roots.len(),
+            active_rules: core.roots.values().map(|root| root.rules.len()).sum(),
+            pending_files: core.pending.len(),
+        };
+    }
 }
 
 fn reconcile_core(
@@ -2245,6 +2260,38 @@ mod tests {
         }
     }
 
+    struct GatedWatchBoundary {
+        inner: FakeWatchBoundary,
+        entered: Mutex<Option<mpsc::Sender<()>>>,
+        release: Mutex<Receiver<()>>,
+    }
+
+    impl WatchBoundary for GatedWatchBoundary {
+        fn admit_root(&self, root: &Path) -> Result<NativeWatchRoot, NativeWatchErrorKind> {
+            if let Some(entered) = self.entered.lock().expect("gate lock").take() {
+                let _ = entered.send(());
+                let _ = self.release.lock().expect("release lock").recv();
+            }
+            self.inner.admit_root(root)
+        }
+
+        fn refresh_root(
+            &self,
+            root: &NativeWatchRoot,
+        ) -> Result<NativeWatchRoot, NativeWatchErrorKind> {
+            self.inner.refresh_root(root)
+        }
+
+        fn observe_file(
+            &self,
+            root: &NativeWatchRoot,
+            path: &Path,
+            require_read_lock: bool,
+        ) -> Result<NativeWatchFileObservation, NativeWatchErrorKind> {
+            self.inner.observe_file(root, path, require_read_lock)
+        }
+    }
+
     #[derive(Default)]
     struct FakeWatcherFactory {
         callbacks: Mutex<Vec<(PathBuf, WatcherCallback)>>,
@@ -2356,6 +2403,7 @@ mod tests {
                 .map(NativeWatchRoot::identity)
                 .collect::<std::collections::HashSet<_>>();
             assert_eq!(report.active_roots, unique_roots.len());
+            publish_core_snapshot(&core, &output);
             Self {
                 core,
                 output,
@@ -2668,6 +2716,73 @@ mod tests {
             2,
             "ordinary reconcile does not resurrect lost coverage"
         );
+    }
+
+    #[test]
+    fn snapshot_is_cached_while_worker_is_held_and_reconcile_ack_follows_publication() {
+        let root = test_root("cached-snapshot");
+        let rule = test_rule("cached", root.clone());
+        let inner = FakeWatchBoundary::new([root.clone()], Vec::new());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut service = HotFolderWatchService::new();
+        service.boundary = Arc::new(GatedWatchBoundary {
+            inner,
+            entered: Mutex::new(Some(entered_tx)),
+            release: Mutex::new(release_rx),
+        });
+        service.watcher_factory = Arc::new(FakeWatcherFactory::default());
+        service.ensure_worker().expect("worker starts");
+
+        let eligible = EligibleRule {
+            fingerprint: ConfigurationFingerprint::of_serializable(&rule)
+                .expect("rule fingerprint"),
+            rule,
+        };
+        let (ack_tx, ack_rx) = mpsc::channel();
+        service
+            .worker
+            .as_ref()
+            .expect("worker exists")
+            .sender
+            .send(WorkerMessage::Reconcile {
+                revision: 1,
+                eligible: vec![eligible],
+                skipped: 0,
+                activation: ActivationPolicy::AllEnabled,
+                reply: ack_tx,
+            })
+            .expect("reconcile queued");
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker reached controlled root admission");
+
+        let service = Arc::new(Mutex::new(service));
+        let snapshot_service = Arc::clone(&service);
+        let (snapshot_tx, snapshot_rx) = mpsc::channel();
+        let snapshot_thread = std::thread::spawn(move || {
+            let snapshot = snapshot_service.lock().expect("service lock").snapshot();
+            let _ = snapshot_tx.send(snapshot);
+        });
+        let early_snapshot = snapshot_rx.recv_timeout(Duration::from_millis(100));
+
+        release_tx.send(()).expect("release controlled admission");
+        let report = ack_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reconcile acknowledgment");
+        assert_eq!(report.active_roots, 1);
+        snapshot_thread.join().expect("snapshot reader exits");
+        let snapshot = early_snapshot.expect("snapshot read must not wait on worker");
+        assert!(snapshot.paused);
+        let published = service.lock().expect("service lock").snapshot();
+        assert!(!published.paused);
+        assert_eq!(published.active_roots, report.active_roots);
+        assert_eq!(published.active_rules, report.active_rules);
+        service
+            .lock()
+            .expect("service lock")
+            .shutdown()
+            .expect("worker shuts down cleanly");
     }
 
     #[test]

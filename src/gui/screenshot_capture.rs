@@ -1,4 +1,8 @@
 use crate::actions::screenshot::WindowCaptureTarget;
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityRetirement, ActivitySlot, ActivityTask,
+};
 use crate::commands::{
     CommandInvocation, ScreenshotDelay, ScreenshotDestination, ScreenshotMarkup, ScreenshotMode,
 };
@@ -67,6 +71,8 @@ struct ScreenshotRequest {
     capture_started_at_unix_ms: Option<u64>,
     acquisition_count: u32,
     expected_window_target: Option<WindowCaptureTarget>,
+    cancelled: Arc<AtomicBool>,
+    activity: Option<ActivityTask>,
 }
 
 type WorkerResult = Result<Option<RgbaImage>, String>;
@@ -107,6 +113,7 @@ pub(crate) struct ScreenshotCaptureOwner {
     worker: Option<CaptureWorker>,
     shutdown: bool,
     capture: Arc<CaptureFn>,
+    activity_center: Option<ActivityCenter>,
     #[cfg(test)]
     after_result_poll: Option<Box<dyn FnOnce(&JoinHandle<()>)>>,
 }
@@ -145,9 +152,14 @@ impl ScreenshotCaptureOwner {
             worker: None,
             shutdown: false,
             capture,
+            activity_center: None,
             #[cfg(test)]
             after_result_poll: None,
         }
+    }
+
+    pub(crate) fn attach_activity_center(&mut self, center: ActivityCenter) {
+        self.activity_center = Some(center);
     }
 
     pub(crate) fn schedule(
@@ -201,6 +213,19 @@ impl ScreenshotCaptureOwner {
         let deadline_unix_ms =
             scheduled_at_unix_ms.saturating_add(duration_millis(delay.duration()));
         let id = ScreenshotRequestId(self.generation);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let activity = self.activity_center.as_ref().and_then(|center| {
+            center.start(
+                ActivityOwner::Screenshot,
+                ActivitySlot::Primary,
+                ActivityIncarnation::new(id.0),
+                ActivityOperation::CaptureScreenshot,
+            )
+        });
+        if let Some(activity) = activity.as_ref() {
+            let cancel_signal = Arc::clone(&cancelled);
+            activity.set_cancel_handler(move || cancel_signal.store(true, Ordering::Release));
+        }
         self.request = Some(ScreenshotRequest {
             id,
             deadline,
@@ -215,6 +240,8 @@ impl ScreenshotCaptureOwner {
             capture_started_at_unix_ms: None,
             acquisition_count: 0,
             expected_window_target,
+            cancelled,
+            activity,
         });
         self.phase = Some(ScreenshotCapturePhase::Waiting);
         ctx.request_repaint_after(delay.duration());
@@ -227,6 +254,14 @@ impl ScreenshotCaptureOwner {
         now: Instant,
         ctx: &egui::Context,
     ) -> Option<ScreenshotCaptureCompletion> {
+        if self
+            .request
+            .as_ref()
+            .is_some_and(|request| request.cancelled.load(Ordering::Acquire))
+            && self.worker.is_none()
+        {
+            self.cancel();
+        }
         if let Some(request) = self.request.as_ref()
             && self.phase == Some(ScreenshotCapturePhase::Waiting)
         {
@@ -270,6 +305,7 @@ impl ScreenshotCaptureOwner {
             reap_permit,
         } = self.worker.take().expect("worker checked above");
         let join_result = join.join();
+        let worker_joined = join_result.is_ok();
         // A send can race the first nonblocking poll: the worker may finish
         // after returning Empty but before is_finished becomes true.
         let result = observed_result.or_else(|| result_rx.try_recv().ok());
@@ -281,6 +317,13 @@ impl ScreenshotCaptureOwner {
                 result.unwrap_or_else(|| Err("Screenshot capture worker returned no result".into()))
             }
         };
+        if let Some(activity) = request.activity.as_ref() {
+            if worker_joined {
+                activity.retirement_confirmed();
+            } else {
+                activity.retirement_unavailable();
+            }
+        }
         let was_current = self.phase == Some(ScreenshotCapturePhase::Capturing)
             && self.generation == request.id.0
             && !cancelled.load(Ordering::Acquire)
@@ -347,10 +390,29 @@ impl ScreenshotCaptureOwner {
 
         let mode = request.mode;
         let expected_window_target = request.expected_window_target;
+        let cancelled = Arc::clone(&request.cancelled);
+        let activity = request.activity.clone();
+        if let Some(activity) = activity.as_ref() {
+            activity.mark_running();
+        }
         let capture = Arc::clone(&self.capture);
-        let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
-        let reap_permit = thread_reaper::reserve().map_err(str::to_owned)?;
+        let reap_permit = thread_reaper::reserve().map_err(|error| {
+            if let Some(activity) = self
+                .request
+                .as_ref()
+                .and_then(|request| request.activity.as_ref())
+            {
+                activity.finish(
+                    ActivityOutcome::Failed,
+                    Some(ActivityDiagnostic::WorkerUnavailable),
+                    ActivityRetirement::Confirmed,
+                );
+            }
+            self.request = None;
+            self.phase = None;
+            error.to_string()
+        })?;
         let completion_notifier = reap_permit.completion_notifier();
         let wake = ctx.clone();
         let (result_tx, result_rx) = mpsc::sync_channel(1);
@@ -370,11 +432,33 @@ impl ScreenshotCaptureOwner {
                         result
                     }
                 };
+                if let Some(activity) = activity {
+                    let (outcome, diagnostic) = match &result {
+                        Ok(Some(_)) => (ActivityOutcome::Completed, None),
+                        Ok(None) => (ActivityOutcome::Cancelled, None),
+                        Err(_) => (
+                            ActivityOutcome::Failed,
+                            Some(ActivityDiagnostic::WorkerFailed),
+                        ),
+                    };
+                    activity.finish(outcome, diagnostic, ActivityRetirement::Unavailable);
+                }
                 let _ = result_tx.try_send(result);
                 wake.request_repaint_of(egui::ViewportId::ROOT);
                 drop(completion_notifier);
             })
             .map_err(|error| {
+                if let Some(activity) = self
+                    .request
+                    .as_ref()
+                    .and_then(|request| request.activity.as_ref())
+                {
+                    activity.finish(
+                        ActivityOutcome::Failed,
+                        Some(ActivityDiagnostic::WorkerUnavailable),
+                        ActivityRetirement::Confirmed,
+                    );
+                }
                 self.request = None;
                 self.phase = None;
                 error.to_string()
@@ -403,10 +487,24 @@ impl ScreenshotCaptureOwner {
             return false;
         }
         self.generation = self.generation.wrapping_add(1).max(1);
+        if let Some(request) = self.request.as_ref() {
+            request.cancelled.store(true, Ordering::Release);
+        }
         if let Some(worker) = self.worker.as_ref() {
             worker.cancelled.store(true, Ordering::Release);
             self.phase = Some(ScreenshotCapturePhase::Draining);
         } else {
+            if let Some(activity) = self
+                .request
+                .as_ref()
+                .and_then(|request| request.activity.as_ref())
+            {
+                activity.finish(
+                    ActivityOutcome::Cancelled,
+                    None,
+                    ActivityRetirement::Confirmed,
+                );
+            }
             self.request = None;
             self.phase = None;
         }
@@ -998,5 +1096,129 @@ mod tests {
             reaped.is_reaped(),
             "the bounded reaper joins the transferred worker"
         );
+    }
+
+    #[test]
+    fn screenshot_activity_publishes_actual_capture_before_gui_join() {
+        let ctx = egui::Context::default();
+        let started = Instant::now();
+        let center = ActivityCenter::new();
+        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(|_, _, _| {
+            Ok(Some(RgbaImage::from_pixel(
+                1,
+                1,
+                image::Rgba([7, 8, 9, 255]),
+            )))
+        }));
+        owner.attach_activity_center(center.clone());
+        let (mode, destination, markup) = options();
+        let id = owner
+            .schedule(
+                ScreenshotDelay::ThreeSeconds,
+                mode,
+                destination,
+                markup,
+                &invocation(),
+                "private query payload",
+                RootLauncherPolicy::Legacy,
+                started,
+                &ctx,
+            )
+            .unwrap();
+        let queued = center.snapshot();
+        assert_eq!(queued.rows.len(), 1);
+        let key = queued.rows[0].key;
+        assert_eq!(
+            queued.rows[0].lifecycle,
+            crate::activity::ActivityLifecycle::Queued
+        );
+
+        owner.tick(started + Duration::from_secs(3), &ctx);
+        owner
+            .grant_presentation(id, started + Duration::from_secs(3), &ctx)
+            .unwrap();
+        let completion_deadline = Instant::now() + Duration::from_secs(2);
+        let terminal = loop {
+            let row = center
+                .snapshot()
+                .rows
+                .into_iter()
+                .find(|row| row.key == key)
+                .expect("activity row remains observable");
+            if row.lifecycle.is_terminal() {
+                break row;
+            }
+            assert!(
+                Instant::now() < completion_deadline,
+                "capture worker did not publish activity completion"
+            );
+            thread::yield_now();
+        };
+        assert_eq!(
+            terminal.lifecycle,
+            crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Completed)
+        );
+        assert_eq!(terminal.retirement, ActivityRetirement::Unavailable);
+        assert!(
+            center
+                .snapshot()
+                .rows
+                .iter()
+                .all(|row| row.diagnostic.is_none())
+        );
+
+        let mut completion = None;
+        let join_deadline = Instant::now() + Duration::from_secs(2);
+        while owner.is_busy() && Instant::now() < join_deadline {
+            completion = owner
+                .tick(started + Duration::from_secs(3), &ctx)
+                .or(completion);
+            thread::yield_now();
+        }
+        assert!(!owner.is_busy(), "screenshot worker join completed");
+        assert!(completion.is_some(), "current capture result was delivered");
+        let joined = center
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.key == key)
+            .expect("activity row retained after join");
+        assert_eq!(joined.retirement, ActivityRetirement::Confirmed);
+    }
+
+    #[test]
+    fn screenshot_activity_cancel_routes_to_exact_waiting_request() {
+        let ctx = egui::Context::default();
+        let started = Instant::now();
+        let center = ActivityCenter::new();
+        let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(|_, _, _| Ok(None)));
+        owner.attach_activity_center(center.clone());
+        let (mode, destination, markup) = options();
+        owner
+            .schedule(
+                ScreenshotDelay::TenSeconds,
+                mode,
+                destination,
+                markup,
+                &invocation(),
+                "",
+                RootLauncherPolicy::Legacy,
+                started,
+                &ctx,
+            )
+            .unwrap();
+        let key = center.snapshot().rows[0].key;
+        assert_eq!(
+            center.request_cancel(key),
+            crate::activity::ActivityCancelResult::Requested
+        );
+        owner.tick(started, &ctx);
+        assert!(!owner.is_busy());
+        let snapshot = center.snapshot();
+        assert_eq!(
+            snapshot.rows[0].lifecycle,
+            crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Cancelled)
+        );
+        assert_eq!(snapshot.rows[0].retirement, ActivityRetirement::Confirmed);
     }
 }

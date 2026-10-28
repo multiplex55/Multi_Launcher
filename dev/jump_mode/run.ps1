@@ -8,11 +8,14 @@ param(
     [ValidateRange(5, 120)][int]$CaptureTimeoutSeconds = 45,
     [ValidateRange(1, 30)][int]$GracefulCloseSeconds = 6,
     [ValidateRange(90, 7200)][int]$OverallTimeoutSeconds = 2400,
+    [ValidateRange(90, 300)][int]$PostBuildTimeoutSeconds = 300,
+    [ValidateRange(15, 60)][int]$PostBuildShutdownReserveSeconds = 30,
     [switch]$NativeOnly,
     [switch]$FixtureInputSelfTest,
     [string]$PrebuiltArtifactManifest,
     [ValidateSet('FileCancel', 'FileConfirm', 'FolderConfirm')][string]$TargetRepairOutcome,
-    [string]$NativeBatchDeadlineUtc
+    [string]$NativeBatchDeadlineUtc,
+    [string]$WorkflowReceiptPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,6 +32,13 @@ $targetRepairOutcomeKey = switch ($TargetRepairOutcome) {
     default { $null }
 }
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+$isWorkflowSettingsRun = ![string]::IsNullOrWhiteSpace($WorkflowReceiptPath)
+if ($isWorkflowSettingsRun -and ($Scenario -ne 'Phase2' -or $Surface -ne 'Settings' -or $NativeOnly -or $PrebuiltArtifactManifest)) {
+    throw '-WorkflowReceiptPath is reserved for the fresh Phase 2 Settings workflow and cannot be combined with native-only or prebuilt runs.'
+}
+if ($isWorkflowSettingsRun -and !$FixturesOnly -and ($PostBuildTimeoutSeconds -ne 300 -or $PostBuildShutdownReserveSeconds -ne 30)) {
+    throw 'The workflow-owned Phase 2 Settings native selection requires a 300-second post-build deadline with a 30-second shutdown reserve.'
+}
 $cargoFeatures = 'dev-smoke-binaries,qa-framebuffer-capture'
 $isFinalSmoke = $Scenario -eq 'Phase1Enabled' -and $Screen -eq 'FinalSmoke'
 $phase2SurfaceKey = switch ($Surface) {
@@ -60,6 +70,20 @@ $summaryPath = Join-Path $evidenceRoot 'summary.md'
 $manifestPath = Join-Path $evidenceRoot 'manifest.json'
 $scenariosPath = Join-Path $evidenceRoot 'scenarios.json'
 $lifecyclePath = Join-Path $evidenceRoot 'process_lifecycle.json'
+$workflowReceiptFullPath = $null
+$workflowMeasurementRoot = $null
+if ($isWorkflowSettingsRun) {
+    $workflowReceiptFullPath = [IO.Path]::GetFullPath($WorkflowReceiptPath)
+    $workflowReceiptParent = [IO.Path]::GetDirectoryName($workflowReceiptFullPath)
+    if (![IO.Directory]::Exists($workflowReceiptParent)) { throw 'The workflow evidence directory must exist before Jump Mode starts.' }
+    if ([IO.File]::Exists($workflowReceiptFullPath)) { throw 'The workflow link receipt path already exists.' }
+    $repoPrefix = $repoRoot.TrimEnd('\') + [IO.Path]::DirectorySeparatorChar
+    if ($workflowReceiptFullPath.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        $workflowReceiptFullPath.Equals($repoRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Workflow receipts and nested command measurements must remain outside the source worktree.'
+    }
+    $workflowMeasurementRoot = Join-Path $workflowReceiptParent 'jump-measurements'
+}
 $stdoutPath = Join-Path $evidenceRoot 'stdout.log'
 $stderrPath = Join-Path $evidenceRoot 'stderr.log'
 $fixtureStdoutPath = Join-Path $evidenceRoot 'fixture.stdout.log'
@@ -90,6 +114,15 @@ if (![string]::IsNullOrWhiteSpace($NativeBatchDeadlineUtc)) {
     throw 'NoteReplace NativeOnly requires the shared two-profile NativeBatchDeadlineUtc'
 }
 $targetDirectory = $null
+$workflowMeasurements = [Collections.Generic.List[object]]::new()
+$phase2NativeStartedAtUtc = $null
+$phase2NativeDeadlineUtc = $null
+$phase2InteractionDeadlineUtc = $null
+$phase2CleanupStartedAtUtc = $null
+$phase2NativeFinishedAtUtc = $null
+$phase2NativeDeadlineReached = $false
+$processOutputDrainVerified = $false
+$processOutputBytes = $null
 $previousTargetDirectory = $env:CARGO_TARGET_DIR
 $nativeQueryProbeInitialized = $false
 $process = $null
@@ -140,6 +173,7 @@ $phase1CaptureCount = if ($Scenario -eq 'Phase1Enabled') {
 } elseif ($Scenario -eq 'Phase1Disabled') { 1 } else { 0 }
 $phase1BaseActivationCount = 1
 $appWindowMetadata = $null
+$script:workflowSettingsCaptureWindowMetadata = $null
 $finalSmokeResizeMetadata = $null
 $phase2CaptureCount = if (($Scenario -eq 'Phase2' -and $Surface -eq 'Settings') -or $Scenario -eq 'SettingsSearch') { 3 } elseif ($Scenario -eq 'Phase2') { 2 } elseif ($Scenario -eq 'TargetRepair') { 1 } else { 0 }
 $prebuiltSettingsPath = $null
@@ -185,13 +219,44 @@ $noteReplaceBeforeSha256 = $null
 $script:noteReplaceLastCoherentObservationSummary = $null
 
 function Get-RemainingRunSeconds([int]$RequestedSeconds = 86400) {
-    $remaining = [int][Math]::Floor(($script:runDeadlineUtc - [DateTime]::UtcNow).TotalSeconds)
-    if ($remaining -le 0) { throw "overall runner deadline of $OverallTimeoutSeconds seconds expired" }
+    $deadline = $script:runDeadlineUtc
+    $deadlineDescription = "overall runner deadline of $OverallTimeoutSeconds seconds"
+    if ($script:isWorkflowSettingsRun -and $script:phase2NativeDeadlineUtc) {
+        $deadline = if ($script:phase2CleanupStartedAtUtc) { $script:phase2NativeDeadlineUtc } else { $script:phase2InteractionDeadlineUtc }
+        $deadlineDescription = if ($script:phase2CleanupStartedAtUtc) { '300-second post-build native lifecycle deadline' } else { '270-second post-build native interaction deadline (30 seconds reserved for shutdown)' }
+        if ($script:runDeadlineUtc -lt $deadline) { $deadline = $script:runDeadlineUtc }
+    }
+    $remaining = [int][Math]::Floor(($deadline - [DateTime]::UtcNow).TotalSeconds)
+    if ($remaining -le 0) {
+        if ($script:isWorkflowSettingsRun -and $script:phase2NativeDeadlineUtc) { $script:phase2NativeDeadlineReached = $true }
+        throw "$deadlineDescription expired"
+    }
     return [Math]::Min($RequestedSeconds, $remaining)
 }
 
 function Get-RunDeadline([int]$RequestedSeconds) {
     return [DateTime]::UtcNow.AddSeconds((Get-RemainingRunSeconds $RequestedSeconds))
+}
+
+function Get-RemainingPostBuildMilliseconds([int]$RequestedMilliseconds = 5000) {
+    if (!$script:isWorkflowSettingsRun -or !$script:phase2NativeDeadlineUtc) { return $RequestedMilliseconds }
+    $remaining = [int][Math]::Floor(($script:phase2NativeDeadlineUtc - [DateTime]::UtcNow).TotalMilliseconds)
+    if ($remaining -le 0) {
+        $script:phase2NativeDeadlineReached = $true
+        throw '300-second post-build native lifecycle deadline expired'
+    }
+    return [Math]::Min($RequestedMilliseconds, $remaining)
+}
+
+function Get-ProcessTableTimeoutSeconds {
+    if (!$script:isWorkflowSettingsRun -or !$script:phase2NativeStartedAtUtc) { return $null }
+    $remainingMilliseconds = if ($script:phase2CleanupStartedAtUtc) {
+        Get-RemainingPostBuildMilliseconds 5000
+    } else {
+        (Get-RemainingRunSeconds 5) * 1000
+    }
+    if ($remainingMilliseconds -lt 1000) { throw 'less than one second remains for a bounded Windows process-table query' }
+    return [int][Math]::Min(5, [Math]::Floor($remainingMilliseconds / 1000))
 }
 
 function Invoke-BoundedCommand([string]$FilePath, [string[]]$Arguments, [string]$WorkingDirectory, [string]$StdoutPath, [string]$StderrPath, [string]$Description) {
@@ -256,12 +321,191 @@ function Invoke-BoundedCommand([string]$FilePath, [string[]]$Arguments, [string]
         try { $commandProcess.Dispose() } catch { }
     }
 }
+
+function Invoke-WorkflowMeasuredCommand {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Executable,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][ValidateSet('compile', 'test', 'provenance')][string]$Stage,
+        [Parameter(Mandatory)][ValidateRange(1, 1800)][int]$TimeoutSeconds,
+        [Parameter(Mandatory)][string]$StdoutPath,
+        [Parameter(Mandatory)][string]$StderrPath,
+        [switch]$VerifiedMsvcCompile
+    )
+    if (!$script:isWorkflowSettingsRun -or !$script:workflowMeasurementRoot) {
+        throw 'Measured command dispatch is available only for the workflow-owned Phase 2 Settings path.'
+    }
+    $measurePath = Join-Path $script:repoRoot 'dev\track_b\measure.ps1'
+    if (!(Test-Path -LiteralPath $measurePath -PathType Leaf)) { throw 'The existing checked command measurement owner is missing.' }
+    $scenarioId = "jump-m3a-$($Name.ToLowerInvariant().Replace('_', '-'))-$($script:runSuffix)"
+    $measureArguments = @{
+        Executable = $Executable
+        ArgumentList = @($Arguments)
+        ScenarioId = $scenarioId
+        EvidenceDirectory = $script:workflowMeasurementRoot
+        WorkingDirectory = $script:repoRoot
+        SourceRoot = $script:repoRoot
+        Profile = 'fast-dev'
+        CacheState = 'unknown'
+        Stage = $Stage
+        TimeoutSeconds = (Get-RemainingRunSeconds $TimeoutSeconds)
+        CleanupTimeoutSeconds = 5
+        AuxiliaryProcessPolicy = if ($VerifiedMsvcCompile) { 'verified-msvc-vctip' } else { 'none' }
+    }
+    $measurement = & $measurePath @measureArguments
+    if ($null -eq $measurement) { throw "The checked command owner returned no measurement for $Name." }
+    foreach ($pair in @(@($measurement.StdoutPath, $StdoutPath), @($measurement.StderrPath, $StderrPath))) {
+        if ([string]::IsNullOrWhiteSpace([string]$pair[0]) -or !(Test-Path -LiteralPath ([string]$pair[0]) -PathType Leaf)) {
+            throw "The checked command owner did not persist complete $Name process output."
+        }
+        Copy-Item -LiteralPath ([string]$pair[0]) -Destination ([IO.Path]::GetFullPath([string]$pair[1])) -Force -ErrorAction Stop
+    }
+    $script:workflowMeasurements.Add([ordered]@{
+        name = $Name
+        stage = $Stage
+        source_sha = [string]$measurement.SourceSha
+        executable = [string]$measurement.Executable
+        arguments = @($measurement.ArgumentList)
+        status = if ($measurement.Succeeded) { 'PASS' } else { 'FAIL' }
+        exit_code = $measurement.ExitCode
+        timed_out = [bool]$measurement.TimedOut
+        cleanup_verified = [bool]$measurement.CleanupVerified
+        output_drain_verified = [bool]$measurement.OutputDrainVerified
+        output_bytes = $measurement.OutputBytes
+        auxiliary_process_policy = [string]$measurement.AuxiliaryProcessPolicy
+        auxiliary_disposition = [string]$measurement.AuxiliaryDisposition
+        measurement_path = [string]$measurement.ManifestPath
+        stdout_path = [string]$measurement.StdoutPath
+        stderr_path = [string]$measurement.StderrPath
+    })
+    if (!$measurement.Succeeded -or !$measurement.CleanupVerified -or !$measurement.OutputDrainVerified -or
+        @($measurement.CleanupErrors).Count -gt 0 -or @($measurement.RecordingErrors).Count -gt 0) {
+        throw "Checked command '$Name' failed or did not prove cleanup and output persistence (exit $($measurement.ExitCode)); measurement: $($measurement.ManifestPath)"
+    }
+    return [pscustomobject]@{
+        ExitCode = [int]$measurement.ExitCode
+        SourceSha = [string]$measurement.SourceSha
+        StandardOutput = [IO.File]::ReadAllText([string]$measurement.StdoutPath)
+        StandardError = [IO.File]::ReadAllText([string]$measurement.StderrPath)
+        MeasurementPath = [string]$measurement.ManifestPath
+    }
+}
+
+function Invoke-WorkflowFixtureCommands {
+    param([Parameter(Mandatory)][string]$CargoExecutable)
+    $manifest = Join-Path $script:repoRoot 'Cargo.toml'
+    $preparationDeadlineUtc = [DateTime]::UtcNow.AddSeconds(1800)
+    $fixtureCommandDeadlineUtc = $null
+    $metadataResult = Invoke-WorkflowMeasuredCommand -Name 'cargo-metadata' -Executable $CargoExecutable `
+        -Arguments @('metadata', '--no-deps', '--format-version', '1', '--manifest-path', $manifest) -Stage provenance `
+        -TimeoutSeconds 60 -StdoutPath (Join-Path $script:evidenceRoot 'metadata.stdout.log') `
+        -StderrPath (Join-Path $script:evidenceRoot 'metadata.stderr.log')
+    $metadata = $metadataResult.StandardOutput | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+    $target = [IO.Path]::GetFullPath([string]$metadata.target_directory)
+    $env:CARGO_TARGET_DIR = $target
+
+    $script:phase = 'fixture_preparation'
+    $listArguments = @('nextest', 'list', '--list-type', 'binaries-only', '--message-format', 'json', '--cargo-profile', 'fast-dev',
+        '--features', $script:cargoFeatures, '--bin', 'jump_mode_fixture', '--manifest-path', $manifest)
+    $preparationRemaining = [int][Math]::Floor(($preparationDeadlineUtc - [DateTime]::UtcNow).TotalSeconds)
+    if ($preparationRemaining -le 0) { throw 'the shared 1800-second fixture preparation budget expired before Nextest binary listing' }
+    $listResult = Invoke-WorkflowMeasuredCommand -Name 'fixture-binary-prepare' -Executable $CargoExecutable `
+        -Arguments $listArguments -Stage compile -TimeoutSeconds $preparationRemaining -VerifiedMsvcCompile `
+        -StdoutPath (Join-Path $script:evidenceRoot 'fixture-prepare.stdout.log') `
+        -StderrPath (Join-Path $script:evidenceRoot 'fixture-prepare.stderr.log')
+    $binaryMetadata = $listResult.StandardOutput | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+    $listedBinaries = $binaryMetadata['rust-binaries']
+    $binaryEntries = if ($listedBinaries -is [System.Collections.IDictionary]) { @($listedBinaries.Values) } else { @($listedBinaries) }
+    $binaries = @($binaryEntries | Where-Object {
+        $binaryPath = [string]$_['binary-path']
+        [string]$_['binary-name'] -ceq 'jump_mode_fixture' -and [string]$_['kind'] -ceq 'bin' -and
+            [IO.Path]::GetFileName($binaryPath) -match '^jump_mode_fixture(?:-[A-Za-z0-9_-]+)?\.exe$' -and
+            [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($binaryPath)).TrimEnd('\') -ieq [IO.Path]::GetFullPath((Join-Path $target 'fast-dev\deps')).TrimEnd('\')
+    })
+    if ($binaries.Count -ne 1) { throw "Nextest binaries-only metadata identified $($binaries.Count) exact Phase 2 fixture test executables; one is required." }
+    $fixtureTestExecutable = [IO.Path]::GetFullPath([string]$binaries[0]['binary-path'])
+    if (!(Test-Path -LiteralPath $fixtureTestExecutable -PathType Leaf)) { throw 'Nextest returned a missing fixture test executable.' }
+
+    $preparationRemaining = [int][Math]::Floor(($preparationDeadlineUtc - [DateTime]::UtcNow).TotalSeconds)
+    if ($preparationRemaining -le 0) { throw 'the shared 1800-second fixture preparation budget expired before building the fixture generator' }
+    $fixtureBuild = Invoke-WorkflowMeasuredCommand -Name 'fixture-generator-build' -Executable $CargoExecutable `
+        -Arguments @('build', '--manifest-path', $manifest, '--profile', 'fast-dev', '--features', $script:cargoFeatures, '--bin', 'jump_mode_fixture') `
+        -Stage compile -TimeoutSeconds $preparationRemaining -VerifiedMsvcCompile `
+        -StdoutPath (Join-Path $script:evidenceRoot 'fixture-generator-build.stdout.log') `
+        -StderrPath (Join-Path $script:evidenceRoot 'fixture-generator-build.stderr.log')
+    $fixtureExecutable = Join-Path $target 'fast-dev\jump_mode_fixture.exe'
+    if (!(Test-Path -LiteralPath $fixtureExecutable -PathType Leaf)) { throw "built Jump Mode fixture executable is missing: $fixtureExecutable" }
+
+    $script:phase = 'fixture_tests'
+    Write-Event 'fixture_tests_started' @{ manifest = $manifest; selection = 'Phase2 Settings'; execution = 'direct Nextest-listed test executable; no Cargo execution' }
+    $testResult = Invoke-WorkflowMeasuredCommand -Name 'fixture-tests' -Executable $fixtureTestExecutable `
+        -Arguments @('--test-threads=1') -Stage test -TimeoutSeconds 600 `
+        -StdoutPath $script:testStdoutPath -StderrPath $script:testStderrPath
+    Write-Event 'fixture_tests_completed' @{ exit_code = $testResult.ExitCode; measurement_path = $testResult.MeasurementPath }
+
+    $script:phase = 'fixture_generation'
+    $fixtureCommandDeadlineUtc = [DateTime]::UtcNow.AddSeconds(120)
+    $generateResult = Invoke-WorkflowMeasuredCommand -Name 'fixture-generate' -Executable $fixtureExecutable `
+        -Arguments @('generate', $script:profileRoot, $script:fixtureScenarioArgument) -Stage test -TimeoutSeconds 120 `
+        -StdoutPath $script:fixtureStdoutPath -StderrPath $script:fixtureStderrPath
+    if ($generateResult.ExitCode -ne 0) { throw 'fixture generation failed; see fixture logs' }
+    $fixtureCommandRemaining = [int][Math]::Floor(($fixtureCommandDeadlineUtc - [DateTime]::UtcNow).TotalSeconds)
+    if ($fixtureCommandRemaining -le 0) { throw 'the shared 120-second fixture generation and verification budget expired before verification' }
+    $verifyResult = Invoke-WorkflowMeasuredCommand -Name 'fixture-verify' -Executable $fixtureExecutable `
+        -Arguments @('verify', $script:profileRoot, $script:fixtureScenarioArgument) -Stage test -TimeoutSeconds $fixtureCommandRemaining `
+        -StdoutPath (Join-Path $script:evidenceRoot 'fixture-verify.stdout.log') `
+        -StderrPath (Join-Path $script:evidenceRoot 'fixture-verify.stderr.log')
+    if ($verifyResult.ExitCode -ne 0) { throw 'fixture verification failed; see fixture logs' }
+    return [pscustomobject]@{
+        TargetDirectory = $target
+        FixtureTestExecutable = $fixtureTestExecutable
+        SourceSha = [string]$metadataResult.SourceSha
+    }
+}
 $phase1NextCaptureIndex = 1
 $phase1Orchestration = $null
 
 function Write-Json([string]$Path, $Value) {
     $json = ConvertTo-Json -InputObject $Value -Depth 32
     [IO.File]::WriteAllText($Path, $json + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+}
+
+function Write-WorkflowLinkReceipt {
+    if (!$script:isWorkflowSettingsRun) { return }
+    $selectionKind = if ($FixturesOnly) { 'fixture-only' } else { 'native' }
+    $selectionName = if ($FixturesOnly) { 'phase2-settings-fixture' } else { 'phase2-settings-native' }
+    $nativeStatus = if ($FixturesOnly) { 'NOT_RUN' } elseif ($runStatus -eq 'NOT_RUN_ENVIRONMENT' -and $fixtureScenarioStatus -eq 'PASS') {
+        'NOT_RUN_ENVIRONMENT'
+    } elseif ($runStatus -eq 'PASS' -and $scenarioStatus -eq 'PASS' -and $phase2Captures.Count -eq 3 -and $postCleanupState -eq 'owned_tree_gone') {
+        'PASS'
+    } else { 'FAIL' }
+    $receipt = [ordered]@{
+        schema_version = 1
+        selection_name = $selectionName
+        selection_kind = $selectionKind
+        scenario = $Scenario
+        surface = $Surface
+        run_id = $runId
+        evidence_root = [IO.Path]::GetFullPath($evidenceRoot)
+        manifest_path = [IO.Path]::GetFullPath($manifestPath)
+        scenarios_path = [IO.Path]::GetFullPath($scenariosPath)
+        lifecycle_path = [IO.Path]::GetFullPath($lifecyclePath)
+        status = $runStatus
+        fixture_status = $fixtureScenarioStatus
+        scenario_status = $scenarioStatus
+        native_status = $nativeStatus
+        capture_count = if ($FixturesOnly) { 0 } else { $phase2Captures.Count }
+        post_build_native_timeout_seconds = if ($FixturesOnly) { 0 } else { $PostBuildTimeoutSeconds }
+        post_build_native_started_at_utc = if ($phase2NativeStartedAtUtc) { $phase2NativeStartedAtUtc.ToString('O') } else { $null }
+        post_build_native_deadline_utc = if ($phase2NativeDeadlineUtc) { $phase2NativeDeadlineUtc.ToString('O') } else { $null }
+        post_build_native_finished_at_utc = if ($phase2NativeFinishedAtUtc) { $phase2NativeFinishedAtUtc.ToString('O') } else { $null }
+        post_build_native_shutdown_reserve_seconds = if ($FixturesOnly) { 0 } else { $PostBuildShutdownReserveSeconds }
+        post_build_native_deadline_reached = [bool]$phase2NativeDeadlineReached
+        command_measurements = @($workflowMeasurements.ToArray())
+        failure = $failureText
+    }
+    Write-Json $script:workflowReceiptFullPath $receipt
 }
 
 function Write-Event([string]$Name, [hashtable]$Data = @{}) {
@@ -692,20 +936,23 @@ function Resize-OwnedWindowForFinalSmoke {
     return $after
 }
 
-function Get-FinalSmokeCaptureClientBinding($Png, $Captured) {
-    if (!$script:isFinalSmoke) { return $null }
-    if (!$script:finalSmokeResizeMetadata -or !$script:finalSmokeResizeMetadata.client_bounds) {
-        throw 'FinalSmoke capture has no verified post-resize client-area metadata'
+function Get-OwnedClientCaptureBinding($Png, $Captured, $ExpectedWindow, $CurrentWindow, [string]$ReadinessDescription) {
+    if (!$ExpectedWindow -or !$ExpectedWindow.client_bounds) {
+        throw "$ReadinessDescription has no retained owned client-area metadata"
     }
-    $current = Get-OwnedWindowMetadata
-    $expected = $script:finalSmokeResizeMetadata
-    if ($current.hwnd -cne $expected.hwnd -or $current.process_id -ne $processId -or
-        $current.client_bounds.width -ne $expected.client_bounds.width -or
-        $current.client_bounds.height -ne $expected.client_bounds.height) {
-        throw 'owned HWND/client dimensions changed between resize readiness and ROOT capture'
+    if (!$CurrentWindow -or !$CurrentWindow.client_bounds -or
+        $CurrentWindow.hwnd -cne $ExpectedWindow.hwnd -or
+        [int]$CurrentWindow.process_id -ne $processId -or
+        [int]$ExpectedWindow.process_id -ne $processId -or
+        $CurrentWindow.client_bounds.width -ne $ExpectedWindow.client_bounds.width -or
+        $CurrentWindow.client_bounds.height -ne $ExpectedWindow.client_bounds.height) {
+        $expectedSummary = ConvertTo-Json -InputObject $ExpectedWindow -Depth 6 -Compress
+        $currentSummary = if ($CurrentWindow) { ConvertTo-Json -InputObject $CurrentWindow -Depth 6 -Compress } else { 'null' }
+        $pngSummary = if ($Png) { "{0}x{1}" -f $Png.Width, $Png.Height } else { 'unavailable' }
+        throw "owned HWND/client dimensions changed between $ReadinessDescription and ROOT capture (expected_window=$expectedSummary; current_window=$currentSummary; root_png=$pngSummary)"
     }
-    $clientWidth = [int]$current.client_bounds.width
-    $clientHeight = [int]$current.client_bounds.height
+    $clientWidth = [int]$CurrentWindow.client_bounds.width
+    $clientHeight = [int]$CurrentWindow.client_bounds.height
     $scales = [Collections.Generic.List[object]]::new()
     $scales.Add([pscustomobject]@{ Name = 'client_pixels'; Value = 1.0 })
     if ($null -ne $Captured.native_pixels_per_point -and [double]$Captured.native_pixels_per_point -gt 0) {
@@ -724,18 +971,91 @@ function Get-FinalSmokeCaptureClientBinding($Png, $Captured) {
         }
     }
     if (!$matchedScale) {
-        throw "ROOT PNG $($Png.Width)x$($Png.Height) does not match owned client area ${clientWidth}x${clientHeight} at client/egui pixel scale"
+        throw ("ROOT PNG {0}x{1} does not match owned client area {2}x{3} at client/egui pixel scale" -f $Png.Width, $Png.Height, $clientWidth, $clientHeight)
     }
     return [ordered]@{
-        hwnd = $current.hwnd
+        hwnd = $CurrentWindow.hwnd
         process_id = $processId
-        client_bounds = $current.client_bounds
+        client_bounds = $CurrentWindow.client_bounds
         png_width = [int]$Png.Width
         png_height = [int]$Png.Height
         pixels_per_point = [double]$Captured.pixels_per_point
         native_pixels_per_point = $Captured.native_pixels_per_point
         matched_scale = $matchedScale
     }
+}
+
+function Get-CaptureExpectedWindowMetadata {
+    if ($script:isFinalSmoke) {
+        return $script:finalSmokeResizeMetadata
+    }
+    if ($script:isWorkflowSettingsRun) {
+        return $script:workflowSettingsCaptureWindowMetadata
+    }
+    return $null
+}
+
+function Test-WorkflowSettingsRootReadiness($Observation, [int]$ExpectedProcessId) {
+    return $null -ne $Observation -and $ExpectedProcessId -gt 0 -and
+        [bool]$Observation.root_focused -and [bool]$Observation.root_owner_allowed -and
+        [string]$Observation.navigation_owner.kind -ceq 'root' -and
+        [int]$Observation.process_pid -eq $ExpectedProcessId
+}
+
+function Test-WorkflowSettingsRootWindowAnchor($Observation, $Window, [int]$ExpectedProcessId) {
+    if (!(Test-WorkflowSettingsRootReadiness $Observation $ExpectedProcessId) -or !$Window -or
+        [int]$Window.process_id -ne $ExpectedProcessId -or
+        [string]$Window.hwnd -notmatch '^0x(?!0+$)[0-9A-Fa-f]+$' -or
+        !$Window.bounds -or !$Window.client_bounds -or
+        [int]$Window.bounds.width -le 0 -or [int]$Window.bounds.height -le 0 -or
+        [int]$Window.client_bounds.width -le 0 -or [int]$Window.client_bounds.height -le 0) {
+        return $false
+    }
+    return $true
+}
+
+function Set-WorkflowSettingsCaptureWindowAnchor($RootObservation) {
+    if (!$script:isWorkflowSettingsRun) { throw 'workflow Settings window anchor is only available to the checked native facade run' }
+    if ($null -ne $script:workflowSettingsCaptureWindowMetadata) { throw 'workflow Settings ROOT window anchor was already retained' }
+    if (!(Test-WorkflowSettingsRootReadiness $RootObservation ([int]$processId))) {
+        throw 'workflow Settings window anchor requires a current, owned production ROOT readiness observation'
+    }
+    Assert-OwnedForeground
+
+    $deadline = Get-RunDeadline $CaptureTimeoutSeconds
+    $lastWindowMetadata = $null
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $candidate = Get-OwnedWindowMetadata
+        if (Test-WorkflowSettingsRootWindowAnchor $RootObservation $candidate ([int]$processId)) {
+            $script:workflowSettingsCaptureWindowMetadata = $candidate
+            Write-Event 'workflow_settings_capture_window_anchor_established' @{
+                source = 'production ROOT query readiness'
+                logic_frame_id = $RootObservation.logic_frame_id
+                ui_pass_id = $RootObservation.ui_pass_id
+                foreground_process_id = [JumpModeNativeProbe]::ForegroundProcessId()
+                window = $candidate
+            }
+            return $candidate
+        }
+        $lastWindowMetadata = $candidate
+        Start-Sleep -Milliseconds 100
+    }
+
+    $lastWindowSummary = if ($lastWindowMetadata) { ConvertTo-Json -InputObject $lastWindowMetadata -Depth 6 -Compress } else { 'unavailable' }
+    throw "owned ROOT HWND did not expose positive client dimensions after production ROOT readiness within $CaptureTimeoutSeconds seconds (last_window=$lastWindowSummary)"
+}
+
+function Get-FinalSmokeCaptureClientBinding($Png, $Captured) {
+    $expected = Get-CaptureExpectedWindowMetadata
+    if ($null -eq $expected) { return $null }
+    $readinessDescription = if ($script:isFinalSmoke) {
+        'FinalSmoke post-resize readiness'
+    } else {
+        'workflow Settings production ROOT readiness'
+    }
+    if (!$expected.client_bounds) { throw "$readinessDescription has no retained owned client-area metadata" }
+    $current = Get-OwnedWindowMetadata
+    return Get-OwnedClientCaptureBinding $Png $Captured $expected $current $readinessDescription
 }
 
 function Read-JumpModeObservation {
@@ -1002,6 +1322,7 @@ function Assert-OwnedForeground {
 
 function Invoke-NativeKeyBatch([string]$Name, [uint16[]]$Keys, [string[]]$KeyLabels) {
     if ($Keys.Count -ne $KeyLabels.Count -or $Keys.Count -eq 0) { throw 'native key batch is empty or malformed' }
+    if ($script:isWorkflowSettingsRun -and $script:phase2NativeStartedAtUtc) { $null = Get-RemainingRunSeconds $CaptureTimeoutSeconds }
     Assert-OwnedForeground
     $pressed = [Collections.Generic.List[uint16]]::new()
     $sendFailure = $null
@@ -2941,6 +3262,30 @@ function Test-Phase2OwnerSnapshot($Observation, $Contract, [Nullable[long]]$Expe
     return $true
 }
 
+function Get-Phase2VisibleTargetCount($Observation, [string]$Label) {
+    if ($null -eq $Observation -or $null -eq $Observation.navigation_targets) { return 0 }
+    return @($Observation.navigation_targets | Where-Object {
+        $_.eligible -and $_.label -ceq $Label -and (Test-Phase2TargetGeometry $_)
+    }).Count
+}
+
+function Test-Phase2SettingsCollapseBaseline($Observation, $Contract, [Nullable[long]]$ExpectedInstance = $null) {
+    return (Test-Phase2OwnerSnapshot $Observation $Contract $ExpectedInstance) -and
+        (Get-Phase2VisibleTargetCount $Observation 'Launcher hotkey') -eq 1
+}
+
+function Test-Phase2SettingsCollapseTransition($Observation, $Baseline, $Contract, [Nullable[long]]$ExpectedInstance = $null) {
+    if (!(Test-Phase2SettingsCollapseBaseline $Baseline $Contract $ExpectedInstance)) {
+        return $false
+    }
+    if (!(Test-Phase2OwnerSnapshot $Observation $Contract $ExpectedInstance) -or
+        !(Test-TargetRepairObservationIsNewer $Observation $Baseline)) {
+        return $false
+    }
+    return (Get-Phase2VisibleTargetCount $Observation 'Launcher hotkey') -eq 0 -and
+        (Get-Phase2VisibleTargetCount $Observation 'Experimental Jump Mode') -eq 0
+}
+
 function Get-Phase2Target($Observation, $Contract, [string]$Label, [string]$Kind, [string]$LocalIdentity = '', [switch]$RequireHint, [switch]$RequireFullyVisible) {
     if (!(Test-Phase2OwnerSnapshot $Observation $Contract $script:phase2OwnerInstance)) {
         throw "navigation owner is not the current $($Contract.name) instance while resolving '$Label'"
@@ -3129,6 +3474,9 @@ function Ensure-Phase2SettingsSectionOpen($Contract, [string]$SectionLabel, [str
 function Invoke-Phase2RootOpener($Contract) {
     $baseline = Ensure-Phase1QueryFocus "phase2-$($Contract.name.ToLowerInvariant())-query"
     if ([string]$baseline.query -cne '') { throw 'fresh Phase 2 ROOT query was not empty before the opener query' }
+    if ($script:isWorkflowSettingsRun) {
+        $null = Set-WorkflowSettingsCaptureWindowAnchor $baseline
+    }
     $activationCount = [long]$baseline.activation_count
     Send-NativeText "phase2-$($Contract.name.ToLowerInvariant())-opener-query" ([string]$Contract.query)
     $visible = Wait-JumpModeObservation {
@@ -3419,10 +3767,167 @@ function Test-Phase2WorkflowHelpers {
         throw 'Settings Search focused-target predicate accepted a different current response'
     }
 
+    $collapseContract = [pscustomobject]@{ name = 'Settings'; owner = 'settings'; dialog = 'settings' }
+    $launcherHotkeyTarget = [pscustomobject]@{
+        eligible = $true; label = 'Launcher hotkey'
+        rect = @(10.0, 20.0, 120.0, 40.0); clipped_rect = @(10.0, 20.0, 120.0, 40.0)
+    }
+    $settingsCollapseBaseline = [pscustomobject]@{
+        navigation_owner = [pscustomobject]@{ kind = 'settings'; instance = [long]31 }
+        root_owner_allowed = $false
+        dialog_state = [pscustomobject]@{ surface = 'settings'; instance = [long]31; target_generation = [long]1 }
+        logic_frame_id = [long]48
+        ui_pass_id = [long]7
+        navigation_targets = @($launcherHotkeyTarget)
+    }
+    if ((Get-Phase2VisibleTargetCount $settingsCollapseBaseline 'Experimental Jump Mode') -ne 0) {
+        throw 'Settings Collapse all baseline fixture no longer represents the initial viewport with Experimental Jump Mode already absent'
+    }
+    if (!(Test-Phase2SettingsCollapseBaseline $settingsCollapseBaseline $collapseContract 31)) {
+        throw 'Settings Collapse all baseline rejected the visible Launcher hotkey with Experimental Jump Mode already absent'
+    }
+    $staleCollapsedSettingsObservation = $settingsCollapseBaseline.PSObject.Copy()
+    $staleCollapsedSettingsObservation.navigation_targets = @()
+    if (Test-Phase2SettingsCollapseTransition $staleCollapsedSettingsObservation $settingsCollapseBaseline $collapseContract 31) {
+        throw 'Settings Collapse all accepted a stale pre-action observation with the same frame/pass identity'
+    }
+    $freshUnchangedSettingsObservation = $settingsCollapseBaseline.PSObject.Copy()
+    $freshUnchangedSettingsObservation.logic_frame_id = [long]49
+    $freshUnchangedSettingsObservation.ui_pass_id = [long]8
+    if (Test-Phase2SettingsCollapseTransition $freshUnchangedSettingsObservation $settingsCollapseBaseline $collapseContract 31) {
+        throw 'Settings Collapse all accepted a fresh observation without a visible-control transition'
+    }
+    $freshCollapsedSettingsObservation = $settingsCollapseBaseline.PSObject.Copy()
+    $freshCollapsedSettingsObservation.logic_frame_id = [long]49
+    $freshCollapsedSettingsObservation.ui_pass_id = [long]8
+    $freshCollapsedSettingsObservation.navigation_targets = @()
+    if (!(Test-Phase2SettingsCollapseTransition $freshCollapsedSettingsObservation $settingsCollapseBaseline $collapseContract 31)) {
+        throw 'Settings Collapse all rejected the later frame/pass with the Launcher hotkey removed while Experimental Jump Mode remained absent'
+    }
+
+    $savedProcessId = $script:processId
+    $savedIsFinalSmoke = $script:isFinalSmoke
+    $savedIsWorkflowSettingsRun = $script:isWorkflowSettingsRun
+    $savedAppWindowMetadata = $script:appWindowMetadata
+    $savedWorkflowSettingsCaptureWindowMetadata = $script:workflowSettingsCaptureWindowMetadata
+    $savedFinalSmokeResizeMetadata = $script:finalSmokeResizeMetadata
+    $script:processId = 77
+    $startupWindowMetadata = [pscustomobject]@{
+        hwnd = '0x1234'; process_id = 77
+        bounds = [pscustomobject]@{ width = 16; height = 16 }
+        client_bounds = [pscustomobject]@{ width = 0; height = 0 }
+    }
+    $initialWindowMetadata = [pscustomobject]@{
+        hwnd = '0x1234'; process_id = 77
+        bounds = [pscustomobject]@{ width = 1816; height = 1039 }
+        client_bounds = [pscustomobject]@{ width = 1800; height = 1000 }
+    }
+    $resizeWindowMetadata = [pscustomobject]@{
+        hwnd = '0x1234'; process_id = 77
+        bounds = [pscustomobject]@{ width = 656; height = 519 }
+        client_bounds = [pscustomobject]@{ width = 640; height = 480 }
+    }
+    $script:appWindowMetadata = $startupWindowMetadata
+    $script:workflowSettingsCaptureWindowMetadata = $null
+    $script:finalSmokeResizeMetadata = $resizeWindowMetadata
+    $script:isFinalSmoke = $false
+    $script:isWorkflowSettingsRun = $true
+    if ($null -ne (Get-CaptureExpectedWindowMetadata)) {
+        throw 'workflow Settings capture binding used startup metadata before production ROOT readiness'
+    }
+    $rootReadinessObservation = [pscustomobject]@{
+        process_pid = 77
+        root_focused = $true
+        root_owner_allowed = $true
+        navigation_owner = [pscustomobject]@{ kind = 'root' }
+    }
+    if (Test-WorkflowSettingsRootWindowAnchor $rootReadinessObservation $startupWindowMetadata 77) {
+        throw 'workflow Settings capture anchor accepted startup metadata with a zero-sized client area'
+    }
+    $wrongRootReadinessObservation = $rootReadinessObservation.PSObject.Copy()
+    $wrongRootReadinessObservation.process_pid = 78
+    if (Test-WorkflowSettingsRootWindowAnchor $wrongRootReadinessObservation $initialWindowMetadata 77) {
+        throw 'workflow Settings capture anchor accepted ROOT readiness from another process'
+    }
+    if (!(Test-WorkflowSettingsRootWindowAnchor $rootReadinessObservation $initialWindowMetadata 77)) {
+        throw 'workflow Settings capture anchor rejected positive client bounds on the owned production ROOT HWND'
+    }
+    $script:workflowSettingsCaptureWindowMetadata = $initialWindowMetadata
+    if (![object]::ReferenceEquals((Get-CaptureExpectedWindowMetadata), $initialWindowMetadata)) {
+        throw 'workflow Settings capture binding did not select the retained post-readiness owned-window metadata'
+    }
+    $capturePng = [pscustomobject]@{ Width = 1800; Height = 1000 }
+    $captureScale = [pscustomobject]@{ pixels_per_point = 1.0; native_pixels_per_point = 1.0 }
+    $captureBinding = Get-OwnedClientCaptureBinding $capturePng $captureScale $initialWindowMetadata $initialWindowMetadata 'synthetic workflow Settings production ROOT readiness'
+    if ($captureBinding.hwnd -cne '0x1234' -or $captureBinding.process_id -ne 77 -or
+        $captureBinding.matched_scale -cne 'client_pixels' -or
+        $captureBinding.client_bounds.width -ne 1800 -or $captureBinding.png_width -ne 1800) {
+        throw 'workflow Settings capture binding did not retain the expected owned HWND/client/PNG dimensions'
+    }
+    $wrongClientMetadata = [pscustomobject]@{
+        hwnd = '0x1234'; process_id = 77
+        bounds = [pscustomobject]@{ width = 1817; height = 1039 }
+        client_bounds = [pscustomobject]@{ width = 1801; height = 1000 }
+    }
+    $wrongClientRejected = $false
+    $bindingMismatchMessage = ''
+    try { $null = Get-OwnedClientCaptureBinding $capturePng $captureScale $initialWindowMetadata $wrongClientMetadata 'synthetic workflow Settings production ROOT readiness' } catch { $wrongClientRejected = $true; $bindingMismatchMessage = $_.Exception.Message }
+    if (!$wrongClientRejected) { throw 'workflow Settings capture binding accepted a changed owned client size' }
+    if ($bindingMismatchMessage -notmatch 'expected_window=.*current_window=.*root_png=1800x1000') {
+        throw 'workflow Settings capture binding mismatch did not retain expected/current window metadata and ROOT PNG dimensions'
+    }
+    $wrongHwndMetadata = [pscustomobject]@{
+        hwnd = '0x5678'; process_id = 77
+        bounds = [pscustomobject]@{ width = 1816; height = 1039 }
+        client_bounds = [pscustomobject]@{ width = 1800; height = 1000 }
+    }
+    $wrongHwndRejected = $false
+    try { $null = Get-OwnedClientCaptureBinding $capturePng $captureScale $initialWindowMetadata $wrongHwndMetadata 'synthetic workflow Settings production ROOT readiness' } catch { $wrongHwndRejected = $true }
+    if (!$wrongHwndRejected) { throw 'workflow Settings capture binding accepted a different owned HWND' }
+    $wrongPngRejected = $false
+    try { $null = Get-OwnedClientCaptureBinding ([pscustomobject]@{ Width = 1798; Height = 1000 }) $captureScale $initialWindowMetadata $initialWindowMetadata 'synthetic workflow Settings production ROOT readiness' } catch { $wrongPngRejected = $true }
+    if (!$wrongPngRejected) { throw 'workflow Settings capture binding accepted a ROOT PNG that did not match its owned client area' }
+    $script:isFinalSmoke = $true
+    if (![object]::ReferenceEquals((Get-CaptureExpectedWindowMetadata), $resizeWindowMetadata)) {
+        throw 'FinalSmoke capture binding no longer selects its verified post-resize metadata'
+    }
+    $script:isFinalSmoke = $false
+    $script:isWorkflowSettingsRun = $false
+    if ($null -ne (Get-CaptureExpectedWindowMetadata)) {
+        throw 'capture binding selected window metadata for a non-FinalSmoke, non-workflow run'
+    }
+    $script:processId = $savedProcessId
+    $script:isFinalSmoke = $savedIsFinalSmoke
+    $script:isWorkflowSettingsRun = $savedIsWorkflowSettingsRun
+    $script:appWindowMetadata = $savedAppWindowMetadata
+    $script:workflowSettingsCaptureWindowMetadata = $savedWorkflowSettingsCaptureWindowMetadata
+    $script:finalSmokeResizeMetadata = $savedFinalSmokeResizeMetadata
+
     $script:phase2OwnerInstance = $savedOwnerInstance
     $script:phase2ActivationCount = $savedActivationCount
     $script:phase2Query = $savedQuery
-    Write-Event 'phase2_helper_regressions_passed' @{ semantic_identity = 'structured named target'; exact_opaque_id = $resolved.target_id; observed_hint = $resolved.hint; ambiguous_target_rejected = $ambiguousRejected; exact_root_action_required = $true; ambiguous_root_action_rejected = $true; file_search_exact_open_action = $true; file_search_query_target_identity = $fileSearchResolved.target_id; file_search_wrong_instance_rejected = $wrongFileSearchRejected; explicit_empty_paste_context = $true; clipboard_text_absent = $true; exact_nonempty_notes_focus_required = $true; scoped_wait_closure_preserved_nonzero_owner_count_query = $true; settings_search_exact_query_argument = $true; settings_search_stale_ui_pass_paint_rejected = $true; settings_search_focused_target_response_required = $true }
+    Write-Event 'phase2_helper_regressions_passed' @{
+        semantic_identity = 'structured named target'
+        exact_opaque_id = $resolved.target_id
+        observed_hint = $resolved.hint
+        ambiguous_target_rejected = $ambiguousRejected
+        exact_root_action_required = $true
+        ambiguous_root_action_rejected = $true
+        file_search_exact_open_action = $true
+        file_search_query_target_identity = $fileSearchResolved.target_id
+        file_search_wrong_instance_rejected = $wrongFileSearchRejected
+        explicit_empty_paste_context = $true
+        clipboard_text_absent = $true
+        exact_nonempty_notes_focus_required = $true
+        scoped_wait_closure_preserved_nonzero_owner_count_query = $true
+        settings_search_exact_query_argument = $true
+        settings_search_stale_ui_pass_paint_rejected = $true
+        settings_search_focused_target_response_required = $true
+        settings_collapse_requires_fresh_visible_target_transition = $true
+        workflow_settings_anchor_requires_owned_root_and_positive_client = $true
+        workflow_settings_capture_binding_verified = $true
+        final_smoke_post_resize_binding_preserved = $true
+    }
 }
 
 function Test-Phase2EmptyPasteContext($DialogState) {
@@ -3442,13 +3947,16 @@ function Invoke-Phase2SettingsWorkflow($Contract) {
     $null = Save-Phase2OwnerCapture 15 'settings_hints' $Contract { param($state) $state.dialog_state.settings_draft_jump_mode -eq $true -and $state.dialog_state.settings_committed_jump_mode -eq $true } 'Settings initial active hints and committed Jump Mode state'
     Close-Phase2Hints $Contract | Out-Null
 
-    $null = Complete-Phase2HintTarget $Contract 'Collapse all' 'button' 'sections.collapse_all'
+    $collapseTarget = Complete-Phase2HintTarget $Contract 'Collapse all' 'button' 'sections.collapse_all'
+    $collapseBaseline = $collapseTarget.observation
+    if (!(Test-Phase2SettingsCollapseBaseline $collapseBaseline $Contract $waitContext.owner_instance)) {
+        throw 'Settings Collapse all precondition did not retain the visible Launcher hotkey control'
+    }
     Invoke-NativeKeyBatch 'phase2-settings-collapse-sections' ([uint16[]]@(0x0D)) ([string[]]@('Enter'))
     $null = Wait-JumpModeObservation {
         param($state)
-        (Test-Phase2OwnerSnapshot $state $Contract $waitContext.owner_instance) -and
-            @($state.navigation_targets | Where-Object { $_.label -ceq 'Experimental Jump Mode' }).Count -eq 0
-    }.GetNewClosure() $CaptureTimeoutSeconds 'Settings Collapse all removed the formerly expanded checkbox target'
+        Test-Phase2SettingsCollapseTransition $state $collapseBaseline $Contract $waitContext.owner_instance
+    }.GetNewClosure() $CaptureTimeoutSeconds 'Settings Collapse all removed the visible Launcher hotkey control on a later frame/pass'
     Ensure-Phase2SettingsSectionOpen $Contract 'Launcher Window & Appearance' 'settings_section_launcher_window' 'Experimental Jump Mode' 'checkbox' 'launcher.experimental_jump_mode' | Out-Null
     $null = Complete-Phase2HintTarget $Contract 'Experimental Jump Mode' 'checkbox' 'launcher.experimental_jump_mode'
     Invoke-NativeKeyBatch 'phase2-settings-space-checkbox' ([uint16[]]@(0x20)) ([string[]]@('Space'))
@@ -6163,6 +6671,44 @@ function Invoke-Phase2Workflow {
 
 function Complete-ProcessLogs {
     if (!$process) { return }
+    if ($script:isWorkflowSettingsRun -and $script:phase2NativeStartedAtUtc) {
+        try {
+            if (!$stdoutTask -or !$stderrTask) { throw 'stdout or stderr drain tasks were not created for the retained app process' }
+            $remainingMilliseconds = Get-RemainingPostBuildMilliseconds 30000
+            $tasks = [System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask)
+            if (![System.Threading.Tasks.Task]::WaitAll($tasks, $remainingMilliseconds)) {
+                throw 'stdout/stderr drain did not finish before the post-build native deadline'
+            }
+            $standardOutput = $stdoutTask.GetAwaiter().GetResult()
+            $standardError = $stderrTask.GetAwaiter().GetResult()
+            [IO.File]::WriteAllText($stdoutPath, $standardOutput, [Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText($stderrPath, $standardError, [Text.UTF8Encoding]::new($false))
+            $stdoutBytes = [int64](Get-Item -LiteralPath $stdoutPath -ErrorAction Stop).Length
+            $stderrBytes = [int64](Get-Item -LiteralPath $stderrPath -ErrorAction Stop).Length
+            $expectedStdoutBytes = [int64]([Text.UTF8Encoding]::new($false).GetByteCount($standardOutput))
+            $expectedStderrBytes = [int64]([Text.UTF8Encoding]::new($false).GetByteCount($standardError))
+            if ($stdoutBytes -ne $expectedStdoutBytes -or $stderrBytes -ne $expectedStderrBytes) {
+                throw 'persisted process-log byte counts do not match fully drained stdout/stderr'
+            }
+            $script:processOutputBytes = [ordered]@{
+                stdout_read = $expectedStdoutBytes
+                stdout_persisted = $stdoutBytes
+                stderr_read = $expectedStderrBytes
+                stderr_persisted = $stderrBytes
+            }
+            $script:processOutputDrainVerified = $true
+            Write-CleanupEvent 'process_logs_drained_and_persisted' @{
+                stdout_read = $expectedStdoutBytes
+                stdout_persisted = $stdoutBytes
+                stderr_read = $expectedStderrBytes
+                stderr_persisted = $stderrBytes
+            }
+        } catch {
+            $script:processOutputDrainVerified = $false
+            Record-CleanupIssue 'process log drain and persistence' $_.Exception.Message
+        }
+        return
+    }
     try {
         if ($stdoutTask -and $stdoutTask.IsCompleted) {
             [IO.File]::WriteAllText($stdoutPath, $stdoutTask.GetAwaiter().GetResult(), [Text.UTF8Encoding]::new($false))
@@ -6183,7 +6729,10 @@ function Get-ProcessCreationUtc($CimProcess) {
 }
 
 function Get-OwnedTreeSnapshot {
-    $allProcesses = @(Get-CimInstance -ClassName Win32_Process)
+    $cimArguments = @{ ClassName = 'Win32_Process'; ErrorAction = 'Stop' }
+    $processTableTimeout = Get-ProcessTableTimeoutSeconds
+    if ($null -ne $processTableTimeout) { $cimArguments.OperationTimeoutSec = $processTableTimeout }
+    $allProcesses = @(Get-CimInstance @cimArguments)
     $root = $allProcesses | Where-Object { [int]$_.ProcessId -eq $processId } | Select-Object -First 1
     if (!$root) { return @() }
     $observedRootStart = Get-ProcessCreationUtc $root
@@ -6235,6 +6784,18 @@ function Merge-OwnedTreeSnapshot($NewProcesses) {
 }
 
 function Test-OwnedTreeGone {
+    if ($script:isWorkflowSettingsRun -and $script:phase2NativeStartedAtUtc) {
+        $cimArguments = @{ ClassName = 'Win32_Process'; ErrorAction = 'Stop' }
+        $cimArguments.OperationTimeoutSec = Get-ProcessTableTimeoutSeconds
+        $allProcesses = @(Get-CimInstance @cimArguments)
+        foreach ($owner in $ownedTreeSnapshot) {
+            $liveProcess = $allProcesses | Where-Object { [int]$_.ProcessId -eq [int]$owner.pid } | Select-Object -First 1
+            if (!$liveProcess) { continue }
+            $liveCreation = (Get-ProcessCreationUtc $liveProcess).ToString('O')
+            if ($liveCreation -eq $owner.creation_time_utc) { return $false }
+        }
+        return $true
+    }
     foreach ($owner in $ownedTreeSnapshot) {
         $liveProcess = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($owner.pid)"
         if (!$liveProcess) { continue }
@@ -6256,6 +6817,13 @@ function Test-RetainedProcessIdentity {
 
 function Close-OwnedProcess {
     if (!$process) { return }
+    if ($script:isWorkflowSettingsRun -and $script:phase2NativeStartedAtUtc -and !$script:phase2CleanupStartedAtUtc) {
+        $script:phase2CleanupStartedAtUtc = [DateTime]::UtcNow
+        Write-CleanupEvent 'post_build_cleanup_started' @{
+            at_utc = $script:phase2CleanupStartedAtUtc.ToString('O')
+            deadline_utc = $script:phase2NativeDeadlineUtc.ToString('O')
+        }
+    }
 
     # Process-table or evidence failures must never bypass the retained-handle
     # shutdown path. Record inventory uncertainty first, then independently
@@ -6287,8 +6855,13 @@ function Close-OwnedProcess {
                 } catch {
                     Record-CleanupIssue 'graceful close' $_.Exception.Message
                 }
-                try { $null = $process.WaitForExit($GracefulCloseSeconds * 1000) }
-                catch { Record-CleanupIssue 'graceful wait' $_.Exception.Message }
+                try {
+                    $gracefulWaitMilliseconds = $GracefulCloseSeconds * 1000
+                    if ($script:isWorkflowSettingsRun -and $script:phase2NativeStartedAtUtc) {
+                        $gracefulWaitMilliseconds = Get-RemainingPostBuildMilliseconds $gracefulWaitMilliseconds
+                    }
+                    $null = $process.WaitForExit($gracefulWaitMilliseconds)
+                } catch { Record-CleanupIssue 'graceful wait' $_.Exception.Message }
             }
         }
     } catch {
@@ -6302,9 +6875,13 @@ function Close-OwnedProcess {
                 Record-CleanupIssue 'owned-process fallback' 'refusing forced cleanup because the retained process identity could not be verified'
             } else {
                 try {
+                    $forcedWaitMilliseconds = 5000
+                    if ($script:isWorkflowSettingsRun -and $script:phase2NativeStartedAtUtc) {
+                        $forcedWaitMilliseconds = Get-RemainingPostBuildMilliseconds $forcedWaitMilliseconds
+                    }
                     $process.Kill($true)
                     $script:forcedTreeCleanup = $true
-                    $null = $process.WaitForExit(5000)
+                    $null = $process.WaitForExit($forcedWaitMilliseconds)
                     Write-CleanupEvent 'owned_tree_cleanup_requested' @{ pid = $processId; method = 'retained-process-handle Kill(entireProcessTree=true)' }
                 } catch {
                     Record-CleanupIssue 'owned-process fallback' $_.Exception.Message
@@ -6333,6 +6910,9 @@ function Close-OwnedProcess {
                 Record-CleanupIssue 'descendant verification' 'the owned process tree could not be inventoried before shutdown'
             } else {
                 $treeDeadline = [DateTime]::UtcNow.AddSeconds(5)
+                if ($script:isWorkflowSettingsRun -and $script:phase2NativeStartedAtUtc -and $script:phase2NativeDeadlineUtc -lt $treeDeadline) {
+                    $treeDeadline = $script:phase2NativeDeadlineUtc
+                }
                 do {
                     try {
                         if (Test-OwnedTreeGone) {
@@ -6344,7 +6924,12 @@ function Close-OwnedProcess {
                         Record-CleanupIssue 'descendant verification' $_.Exception.Message
                         break
                     }
-                    Start-Sleep -Milliseconds 200
+                    $sleepMilliseconds = 200
+                    if ($script:isWorkflowSettingsRun -and $script:phase2NativeStartedAtUtc) {
+                        try { $sleepMilliseconds = Get-RemainingPostBuildMilliseconds 200 }
+                        catch { break }
+                    }
+                    Start-Sleep -Milliseconds $sleepMilliseconds
                 } while ([DateTime]::UtcNow -lt $treeDeadline)
                 if (!$script:ownedTreeVerified -and $script:postCleanupState -ne 'cleanup_uncertain') {
                     Record-CleanupIssue 'descendant verification' 'one or more identified owned descendants remain alive'
@@ -6357,6 +6942,18 @@ function Close-OwnedProcess {
     } finally {
         try { Complete-ProcessLogs } catch { Record-CleanupIssue 'log persistence' $_.Exception.Message }
         try { $process.Dispose() } catch { Record-CleanupIssue 'retained process handle disposal' $_.Exception.Message }
+        if ($script:isWorkflowSettingsRun -and $script:phase2NativeStartedAtUtc) {
+            $script:phase2NativeFinishedAtUtc = [DateTime]::UtcNow
+            if ($script:phase2NativeFinishedAtUtc -gt $script:phase2NativeDeadlineUtc) {
+                $script:phase2NativeDeadlineReached = $true
+                Record-CleanupIssue 'post-build native deadline' 'owned shutdown, process-tree verification, or output drain completed after the absolute 300-second deadline'
+            }
+            Write-CleanupEvent 'post_build_native_lifecycle_finished' @{
+                finished_at_utc = $script:phase2NativeFinishedAtUtc.ToString('O')
+                deadline_utc = $script:phase2NativeDeadlineUtc.ToString('O')
+                deadline_reached = $script:phase2NativeDeadlineReached
+            }
+        }
     }
 }
 
@@ -6689,15 +7286,29 @@ try {
         Invoke-Phase1Orchestration
     } else {
     $cargoExecutable = (Get-Command cargo.exe -ErrorAction Stop).Source
-    $metadataResult = Invoke-BoundedCommand $cargoExecutable @('metadata', '--no-deps', '--format-version', '1', '--manifest-path', (Join-Path $repoRoot 'Cargo.toml')) $repoRoot (Join-Path $evidenceRoot 'metadata.stdout.log') (Join-Path $evidenceRoot 'metadata.stderr.log') 'Cargo metadata'
-    if ($metadataResult.ExitCode -ne 0) { throw 'cargo metadata failed; see metadata logs' }
-    $metadata = $metadataResult.StandardOutput | ConvertFrom-Json
-    $targetDirectory = [IO.Path]::GetFullPath([string]$metadata.target_directory)
-    $env:CARGO_TARGET_DIR = $targetDirectory
-    $headSha = (& git -C $repoRoot rev-parse HEAD).Trim()
-    if ($LASTEXITCODE -ne 0) { throw 'git rev-parse HEAD failed' }
+    if ($isWorkflowSettingsRun) {
+        $phase = 'fixture_preparation'
+        $fixturePreparation = Invoke-WorkflowFixtureCommands -CargoExecutable $cargoExecutable
+        $targetDirectory = $fixturePreparation.TargetDirectory
+    } else {
+        $metadataResult = Invoke-BoundedCommand $cargoExecutable @('metadata', '--no-deps', '--format-version', '1', '--manifest-path', (Join-Path $repoRoot 'Cargo.toml')) $repoRoot (Join-Path $evidenceRoot 'metadata.stdout.log') (Join-Path $evidenceRoot 'metadata.stderr.log') 'Cargo metadata'
+        if ($metadataResult.ExitCode -ne 0) { throw 'cargo metadata failed; see metadata logs' }
+        $metadata = $metadataResult.StandardOutput | ConvertFrom-Json
+        $targetDirectory = [IO.Path]::GetFullPath([string]$metadata.target_directory)
+        $env:CARGO_TARGET_DIR = $targetDirectory
+    }
+    if ($isWorkflowSettingsRun) {
+        $headSha = [string]$fixturePreparation.SourceSha
+        if ($headSha -notmatch '^(?:[0-9a-f]{40}|[0-9a-f]{64})$') {
+            throw 'the checked Cargo metadata measurement did not provide a valid source HEAD'
+        }
+    } else {
+        $headSha = (& git -C $repoRoot rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0) { throw 'git rev-parse HEAD failed' }
+    }
 
     $phase = 'fixture_validation'
+    if (!$isWorkflowSettingsRun) {
     Write-Event 'fixture_tests_started' @{ manifest = (Join-Path $repoRoot 'Cargo.toml') }
     $fixtureTestResult = Invoke-BoundedCommand $cargoExecutable @('test', '--manifest-path', (Join-Path $repoRoot 'Cargo.toml'), '--profile', 'fast-dev', '--features', $cargoFeatures, '--bin', 'jump_mode_fixture') $repoRoot $testStdoutPath $testStderrPath 'jump mode fixture tests'
     $fixtureTestsExitCode = $fixtureTestResult.ExitCode
@@ -6712,6 +7323,7 @@ try {
     $fixtureVerifyExitCode = $fixtureVerifyResult.ExitCode
     Write-Event 'fixture_generation_completed' @{ generate_exit_code = $fixtureGenerateExitCode; verify_exit_code = $fixtureVerifyExitCode }
     if ($fixtureVerifyExitCode -ne 0) { throw 'fixture verification failed; see fixture logs' }
+    }
     if ($Scenario -eq 'Phase1Enabled') {
         $invalidProfileRoot = Join-Path $evidenceRoot 'invalid-gate-profile'
         Copy-Item -LiteralPath $profileRoot -Destination $invalidProfileRoot -Recurse
@@ -6770,10 +7382,29 @@ try {
     } else {
         $phase = 'app_build'
         Write-Event 'app_build_started' @{ target_directory = $targetDirectory }
-        $buildResult = Invoke-BoundedCommand $cargoExecutable @('build', '--manifest-path', (Join-Path $repoRoot 'Cargo.toml'), '--profile', 'fast-dev', '--features', $cargoFeatures, '--bin', 'multi_launcher') $repoRoot $buildStdoutPath $buildStderrPath 'qa-framebuffer-capture app build'
+        if ($isWorkflowSettingsRun) {
+            $buildResult = Invoke-WorkflowMeasuredCommand -Name 'app-build' -Executable $cargoExecutable `
+                -Arguments @('build', '--manifest-path', (Join-Path $repoRoot 'Cargo.toml'), '--profile', 'fast-dev', '--features', $cargoFeatures, '--bin', 'multi_launcher') `
+                -Stage compile -TimeoutSeconds 1800 -VerifiedMsvcCompile -StdoutPath $buildStdoutPath -StderrPath $buildStderrPath
+        } else {
+            $buildResult = Invoke-BoundedCommand $cargoExecutable @('build', '--manifest-path', (Join-Path $repoRoot 'Cargo.toml'), '--profile', 'fast-dev', '--features', $cargoFeatures, '--bin', 'multi_launcher') $repoRoot $buildStdoutPath $buildStderrPath 'qa-framebuffer-capture app build'
+        }
         $buildExitCode = $buildResult.ExitCode
         Write-Event 'app_build_completed' @{ exit_code = $buildExitCode }
         if ($buildExitCode -ne 0) { throw 'qa-framebuffer-capture app build failed; see build logs' }
+
+        if ($isWorkflowSettingsRun) {
+            $script:phase2NativeStartedAtUtc = [DateTime]::UtcNow
+            $script:phase2NativeDeadlineUtc = $script:phase2NativeStartedAtUtc.AddSeconds($PostBuildTimeoutSeconds)
+            $script:phase2InteractionDeadlineUtc = $script:phase2NativeDeadlineUtc.AddSeconds(-$PostBuildShutdownReserveSeconds)
+            Write-Event 'post_build_native_deadline_started' @{
+                started_at_utc = $script:phase2NativeStartedAtUtc.ToString('O')
+                interaction_deadline_utc = $script:phase2InteractionDeadlineUtc.ToString('O')
+                deadline_utc = $script:phase2NativeDeadlineUtc.ToString('O')
+                timeout_seconds = $PostBuildTimeoutSeconds
+                shutdown_reserve_seconds = $PostBuildShutdownReserveSeconds
+            }
+        }
 
         $executablePath = Join-Path $targetDirectory 'fast-dev\multi_launcher.exe'
         if (!(Test-Path -LiteralPath $executablePath -PathType Leaf)) { throw "built app executable is missing: $executablePath" }
@@ -7145,6 +7776,10 @@ try {
             post_cleanup_state = $postCleanupState
             owned_tree_verified = $ownedTreeVerified
             owned_tree_snapshot = $ownedTreeSnapshot
+            process_output_drain_verified = if ($isWorkflowSettingsRun -and $phase2NativeStartedAtUtc) { [bool]$processOutputDrainVerified } else { $null }
+            process_output_bytes = $processOutputBytes
+            cleanup_issues = @($cleanupIssues.ToArray())
+            post_build_native_deadline_reached = [bool]$phase2NativeDeadlineReached
             method = if ($forcedTreeCleanup) { 'retained Process handle Kill(entireProcessTree=true)' } elseif ($processId) { 'CloseMainWindow and bounded wait' } else { 'not launched' }
         }
         Write-Json $lifecyclePath $cleanup
@@ -7201,10 +7836,27 @@ try {
             } else { $null }
             screen_filter = $Screen
             overall_timeout_seconds = $OverallTimeoutSeconds
+            post_build_native_timeout_seconds = if ($isWorkflowSettingsRun -and !$FixturesOnly) { $PostBuildTimeoutSeconds } else { 0 }
+            post_build_native_shutdown_reserve_seconds = if ($isWorkflowSettingsRun -and !$FixturesOnly) { $PostBuildShutdownReserveSeconds } else { 0 }
+            post_build_native_started_at_utc = if ($phase2NativeStartedAtUtc) { $phase2NativeStartedAtUtc.ToString('O') } else { $null }
+            post_build_native_interaction_deadline_utc = if ($phase2InteractionDeadlineUtc) { $phase2InteractionDeadlineUtc.ToString('O') } else { $null }
+            post_build_native_deadline_utc = if ($phase2NativeDeadlineUtc) { $phase2NativeDeadlineUtc.ToString('O') } else { $null }
+            post_build_native_finished_at_utc = if ($phase2NativeFinishedAtUtc) { $phase2NativeFinishedAtUtc.ToString('O') } else { $null }
+            post_build_native_deadline_reached = [bool]$phase2NativeDeadlineReached
+            command_measurements = @($workflowMeasurements.ToArray())
             cleanup = $cleanup
             failure = $failureText
         }
         Write-Json $manifestPath $finalManifest
+        try { Write-WorkflowLinkReceipt }
+        catch {
+            $runStatus = 'FAIL'
+            if (!$failureText) { $failureText = "workflow link receipt failed: $($_.Exception.Message)" }
+            $finalManifest.status = $runStatus
+            $finalManifest.failure = $failureText
+            Write-Json $manifestPath $finalManifest
+            Write-Summary 'FAIL' $failureText
+        }
         if ($runStatus -eq 'PASS') {
             $passDetails = if ($FixturesOnly) {
                 "Fixture validation passed. The $Scenario GUI scenario remains blocked because this invocation did not request an app launch."

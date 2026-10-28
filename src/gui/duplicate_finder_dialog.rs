@@ -177,6 +177,10 @@ pub struct DuplicateFinderDialogState {
 }
 
 impl DuplicateFinderDialogState {
+    pub(crate) fn attach_activity_center(&mut self, center: crate::activity::ActivityCenter) {
+        self.session.attach_activity_center(center);
+    }
+
     pub fn new(ctx: &egui::Context) -> Self {
         let wake_context = ctx.clone();
         Self::from_session(DuplicateFinderSession::with_wake(Arc::new(move || {

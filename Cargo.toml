@@ -82,7 +82,7 @@ eframe = {
 } # egui-based GUI; preserve Glow instead of enabling the new Wgpu default
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-csv = "1.4"
+multi_launcher_table_core = { path = "crates/multi_launcher_table_core" }
 fuzzy-matcher = "0.3"
 fst = { version = "0.4", features = ["levenshtein"] }
 open = "5.0"                   # Open files/folders/apps cross-platform
@@ -222,6 +222,7 @@ time = ">=0.3.47, <0.4"
 bytes = ">=1.11.1, <2"
 sha2 = "0.10"
 sha1 = "0.10"
+zip = { version = "=9.1.2", default-features = false, features = ["deflate-flate2"] }
 qrcode = { version = "0.14.1", default-features = false }
 
 [features]
@@ -293,3 +294,7 @@ eframe = { path = "vendor/eframe" }
 image = { path = "vendor/image" }
 # Preserve toast hover-pause behavior with egui 0.36's full-rect close interaction.
 egui-toast = { path = "vendor/egui-toast" }
+
+[workspace]
+members = [".", "crates/multi_launcher_table_core"]
+default-members = [".", "crates/multi_launcher_table_core"]

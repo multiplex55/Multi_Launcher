@@ -211,6 +211,34 @@ impl HandlerOwnedWorkspace {
             .root()
     }
 
+    pub(crate) fn original_cwd(&self) -> &Path {
+        self.workspace
+            .as_ref()
+            .expect("handler-owned workspace remains present")
+            .original_cwd()
+    }
+
+    pub(crate) fn original_notes_directory(&self) -> Option<std::ffi::OsString> {
+        self.workspace
+            .as_ref()
+            .expect("handler-owned workspace remains present")
+            .original_notes_directory()
+    }
+
+    pub(crate) fn original_template_directory(&self) -> Option<std::ffi::OsString> {
+        self.workspace
+            .as_ref()
+            .expect("handler-owned workspace remains present")
+            .original_template_directory()
+    }
+
+    pub(crate) fn original_skip_clipboard_sync(&self) -> Option<std::ffi::OsString> {
+        self.workspace
+            .as_ref()
+            .expect("handler-owned workspace remains present")
+            .original_skip_clipboard_sync()
+    }
+
     pub(crate) fn callbacks_may_use_paths(&mut self) {
         self.callbacks_quiescent = false;
     }

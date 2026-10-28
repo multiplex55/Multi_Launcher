@@ -5,6 +5,10 @@
 //! the bounded capture worker, and the native pin-window owner.
 
 use super::LauncherApp;
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityRetirement, ActivitySlot, ActivityTask,
+};
 use crate::gui::mkmacro_dialog::visual_capture_workflow::SharedVisualOverlayController;
 use crate::gui::mkmacro_dialog::visual_overlay::{
     OperationId, RectanglePurpose, VisualOverlayEvent,
@@ -187,6 +191,7 @@ struct CaptureJob {
     rect: ScreenRect,
     cancelled: Arc<AtomicBool>,
     join: JoinHandle<Result<RgbaImage, String>>,
+    activity: ActivityTask,
 }
 
 impl CaptureJob {
@@ -205,11 +210,13 @@ impl CaptureJob {
     }
 
     fn join_result(self) -> (PinCaptureIdentity, ScreenRect, Result<RgbaImage, String>) {
+        let activity = self.activity.clone();
         let result = self
             .join
             .join()
             .map_err(|_| "screen capture worker terminated unexpectedly".to_owned())
             .and_then(|result| result);
+        activity.retirement_confirmed();
         (self.identity, self.rect, result)
     }
 
@@ -235,6 +242,7 @@ pub(super) struct PinboardCaptureLifecycle {
     parking_factory: Arc<dyn LauncherCaptureParkingFactory>,
     windows: PinWindowPresenter,
     pin_windows: Box<dyn PinWindowVisibilityCoordinator>,
+    activity_center: ActivityCenter,
     session: Option<PinCaptureSession>,
     pending_capture_error: Option<String>,
 }
@@ -243,6 +251,14 @@ impl PinboardCaptureLifecycle {
     pub(super) fn new(
         overlay: SharedVisualOverlayController,
         capture_backend: Arc<dyn ScreenCaptureBackend>,
+    ) -> Self {
+        Self::new_with_activity(overlay, capture_backend, ActivityCenter::new())
+    }
+
+    pub(super) fn new_with_activity(
+        overlay: SharedVisualOverlayController,
+        capture_backend: Arc<dyn ScreenCaptureBackend>,
+        activity_center: ActivityCenter,
     ) -> Self {
         let windows = PinWindowPresenter::new();
         let pin_windows = windows.visibility_coordinator();
@@ -255,6 +271,7 @@ impl PinboardCaptureLifecycle {
             parking_factory: Arc::new(NativeLauncherCaptureParkingFactory),
             windows,
             pin_windows,
+            activity_center,
             session: None,
             pending_capture_error: None,
         }
@@ -856,6 +873,7 @@ impl PinboardCaptureLifecycle {
                                     Arc::clone(&self.capture_backend),
                                     session.identity,
                                     rect,
+                                    self.activity_center.clone(),
                                 ) {
                                     Ok(job) => {
                                         session.capture_job = Some(job);
@@ -871,11 +889,12 @@ impl PinboardCaptureLifecycle {
                                 Ok(binding) => {
                                     match self.board.take_live_reservation(session.identity) {
                                         Ok(reservation) => {
-                                            match self.live_backend.start(
+                                            match self.live_backend.start_with_activity(
                                                 binding,
                                                 session.identity.generation,
                                                 reservation,
                                                 self.board.gpu_budget(),
+                                                self.activity_center.clone(),
                                             ) {
                                                 Ok(worker) => {
                                                     session.source_binding = Some(binding);
@@ -1298,27 +1317,67 @@ fn spawn_capture_job(
     backend: Arc<dyn ScreenCaptureBackend>,
     identity: PinCaptureIdentity,
     rect: ScreenRect,
+    activity_center: ActivityCenter,
 ) -> Result<CaptureJob, String> {
     let cancelled = Arc::new(AtomicBool::new(false));
     let worker_cancelled = Arc::clone(&cancelled);
+    let activity = activity_center
+        .start(
+            ActivityOwner::Screenshot,
+            ActivitySlot::Export,
+            ActivityIncarnation::new(identity.generation.get()),
+            ActivityOperation::CaptureScreenshot,
+        )
+        .ok_or_else(|| "could not allocate screenshot activity identity".to_owned())?;
+    let cancel_for_activity = Arc::clone(&cancelled);
+    activity.set_cancel_handler(move || cancel_for_activity.store(true, Ordering::Release));
+    let worker_activity = activity.clone();
     let join = thread::Builder::new()
         .name(format!("pin-capture-{}", identity.generation.get()))
         .spawn(move || {
-            let result = backend
-                .capture_rect(rect, &|| worker_cancelled.load(Ordering::Acquire))
-                .map_err(|error: ExecutionDiagnostic| error.to_string());
+            worker_activity.mark_running();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                backend
+                    .capture_rect(rect, &|| worker_cancelled.load(Ordering::Acquire))
+                    .map_err(|error: ExecutionDiagnostic| error.to_string())
+            }))
+            .unwrap_or_else(|_| Err("screen capture worker terminated unexpectedly".into()));
             if worker_cancelled.load(Ordering::Acquire) {
+                worker_activity.finish(
+                    ActivityOutcome::Cancelled,
+                    None,
+                    ActivityRetirement::Pending,
+                );
                 Err("screen capture was cancelled".to_owned())
             } else {
+                let outcome = if result.is_ok() {
+                    ActivityOutcome::Completed
+                } else {
+                    ActivityOutcome::Failed
+                };
+                worker_activity.finish(
+                    outcome,
+                    (outcome == ActivityOutcome::Failed)
+                        .then_some(ActivityDiagnostic::WorkerFailed),
+                    ActivityRetirement::Pending,
+                );
                 result
             }
         })
-        .map_err(|error| format!("could not start screen capture worker: {error}"))?;
+        .map_err(|error| {
+            activity.finish(
+                ActivityOutcome::Failed,
+                Some(ActivityDiagnostic::WorkerUnavailable),
+                ActivityRetirement::Confirmed,
+            );
+            format!("could not start screen capture worker: {error}")
+        })?;
     Ok(CaptureJob {
         identity,
         rect,
         cancelled,
         join,
+        activity,
     })
 }
 
@@ -1408,6 +1467,7 @@ fn restore_root_visibility_intent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activity::{ActivityLifecycle, ActivityOutcome};
     use crate::gui::mkmacro_dialog::visual_capture_workflow::SharedVisualOverlayController;
     use crate::gui::mkmacro_dialog::visual_overlay::{
         OverlayErrorKind, RectanglePurpose, VisualOverlayError,
@@ -1620,6 +1680,26 @@ mod tests {
         desktop: ScreenRect,
     }
 
+    struct ImmediateCaptureBackend;
+
+    impl ScreenCaptureBackend for ImmediateCaptureBackend {
+        fn virtual_desktop(&self) -> ExecResult<ScreenRect> {
+            Ok(ScreenRect::new(0, 0, 2, 2))
+        }
+
+        fn region_bounds(&self, _: &SearchRegion) -> ExecResult<ScreenRect> {
+            Ok(ScreenRect::new(0, 0, 2, 2))
+        }
+
+        fn capture_rect(&self, rect: ScreenRect, _: &dyn Fn() -> bool) -> ExecResult<RgbaImage> {
+            Ok(RgbaImage::from_pixel(
+                rect.width,
+                rect.height,
+                image::Rgba([3, 5, 7, 255]),
+            ))
+        }
+    }
+
     impl ScreenCaptureBackend for FailingCaptureBackend {
         fn virtual_desktop(&self) -> ExecResult<ScreenRect> {
             Ok(self.desktop)
@@ -1635,6 +1715,37 @@ mod tests {
                 "controlled static capture failure",
             ))
         }
+    }
+
+    #[test]
+    fn static_pin_capture_activity_is_published_by_worker_before_join_receipt() {
+        let mut board = Pinboard::default();
+        let identity = board
+            .reserve_capture(PinCaptureOperationId::new(1).unwrap())
+            .unwrap();
+        let center = ActivityCenter::new();
+        let job = spawn_capture_job(
+            Arc::new(ImmediateCaptureBackend),
+            identity,
+            ScreenRect::new(0, 0, 2, 2),
+            center.clone(),
+        )
+        .unwrap();
+        let key = job.activity.key();
+        let (joined_identity, _, image) = job.join_result();
+        assert_eq!(joined_identity, identity);
+        assert_eq!(image.unwrap().dimensions(), (2, 2));
+
+        let snapshot = center.snapshot();
+        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(snapshot.rows[0].key, key);
+        assert_eq!(
+            snapshot.rows[0].lifecycle,
+            ActivityLifecycle::Terminal(ActivityOutcome::Completed)
+        );
+        assert_eq!(snapshot.rows[0].retirement, ActivityRetirement::Confirmed);
+        assert!(format!("{:?}", snapshot.rows[0]).len() < 512);
+        board.cancel_capture(identity);
     }
 
     fn poll_lifecycle(

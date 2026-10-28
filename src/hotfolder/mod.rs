@@ -25,13 +25,15 @@ pub use execution::{
     HotFolderRunDisposition, HotFolderTerminalStatus,
 };
 pub use model::{
-    ConfigurationFingerprint, FilenameFilter, HOT_FOLDER_RULES_FILE,
-    HOT_FOLDER_RULES_FORMAT_VERSION, HotFolderEventKind, HotFolderRule, MAX_DOCUMENT_BYTES,
+    ConfigurationFingerprint, FILE_CONDITIONS_NOT_EVALUATED, FileMetadata, FilenameFilter,
+    HOT_FOLDER_RULES_FILE, HOT_FOLDER_RULES_FORMAT_VERSION, HotFolderConditions,
+    HotFolderEventKind, HotFolderRule, InclusiveU64Range, LEGACY_HOT_FOLDER_RULES_FORMAT_VERSION,
+    LiteralContentCondition, MAX_CONTENT_LITERAL_BYTES, MAX_DOCUMENT_BYTES,
     MAX_DUE_OBSERVATIONS_PER_TURN, MAX_EVENT_PATH_BYTES, MAX_EVENT_PATHS, MAX_EXTENSIONS,
     MAX_FILENAME_GLOB_CHARS, MAX_PENDING_FILES, MAX_QUARANTINED_ROWS, MAX_READY_CANDIDATES,
     MAX_RULE_PATH_CHARS, MAX_RULES, MAX_RUNTIME_DIAGNOSTICS, MAX_WATCH_INGRESS_EVENTS,
-    MAX_WATCHED_ROOTS, READY_LEASE_TIMEOUT_MS, RuleAction, RuleId, RuleTrigger, SettlePolicy,
-    evaluate_rule_conditions,
+    MAX_WATCHED_ROOTS, MetadataConditionResult, READY_LEASE_TIMEOUT_MS, RuleAction, RuleId,
+    RuleTrigger, SettlePolicy, evaluate_rule_conditions,
 };
 pub(crate) use runtime::relative_path_beneath;
 pub use runtime::{

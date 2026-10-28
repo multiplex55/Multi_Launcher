@@ -175,7 +175,7 @@ impl LauncherApp {
             .coordinator
             .as_ref()
             .expect("coordinator was just installed")
-            .submit(config);
+            .submit_with_activity(config, &self.activity_center);
         match submission {
             Ok(generation) => {
                 self.indexing.expected_generation = Some(generation);

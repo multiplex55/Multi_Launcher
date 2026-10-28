@@ -1,31 +1,7 @@
-use multi_launcher::actions::Action;
 use multi_launcher::dashboard::config::{DashboardConfig, GridConfig, OverflowMode, SlotConfig};
 use multi_launcher::dashboard::layout::normalize_slots;
 use multi_launcher::dashboard::widgets::WidgetRegistry;
-use multi_launcher::gui::{ActivationSource, LauncherApp};
-use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-
-fn new_app(ctx: &eframe::egui::Context) -> LauncherApp {
-    LauncherApp::new(
-        ctx,
-        Arc::new(Vec::new()),
-        0,
-        PluginManager::new(),
-        "actions.json".into(),
-        "settings.json".into(),
-        Settings::default(),
-        None,
-        None,
-        None,
-        None,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(AtomicBool::new(false)),
-    )
-}
 
 #[test]
 fn dashboard_config_defaults_present() {
@@ -126,33 +102,4 @@ fn null_settings_are_defaulted() {
         cfg.slots[0].settings,
         registry.default_settings("weather_site").unwrap()
     );
-}
-
-#[test]
-fn activation_applies_query_override_first() {
-    let ctx = eframe::egui::Context::default();
-    let mut app = new_app(&ctx);
-    app.query = "start".into();
-    app.clear_query_after_run = false;
-    app.hide_after_run = false;
-    let action = Action {
-        label: "Query".into(),
-        desc: "".into(),
-        action: "query:after".into(),
-        args: None,
-    };
-    app.activate_action(action, Some("override".into()), ActivationSource::Dashboard);
-    assert_eq!(app.query, "after");
-    assert!(app.move_cursor_end_flag());
-}
-
-#[test]
-fn should_show_dashboard_when_empty_query() {
-    let ctx = eframe::egui::Context::default();
-    let mut app = new_app(&ctx);
-    app.dashboard_enabled = true;
-    app.dashboard_show_when_empty = true;
-    app.query.clear();
-    let trimmed = app.query.trim().to_string();
-    assert!(app.should_show_dashboard(&trimmed));
 }

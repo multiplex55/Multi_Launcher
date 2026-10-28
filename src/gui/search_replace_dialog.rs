@@ -305,6 +305,7 @@ pub(crate) struct SearchReplaceConfirmationIdentity {
 pub(crate) struct ReplacementPreviewWorker {
     shared: Arc<(Mutex<PreviewWorkerState>, Condvar)>,
     worker: Option<JoinHandle<()>>,
+    activity_center: Option<crate::activity::ActivityCenter>,
 }
 
 struct PreviewWorkerState {
@@ -320,11 +321,55 @@ pub(crate) enum PreviewJob {
         search: Arc<TextSearchResult>,
         replacement: ReplacementSpec,
         selected: Vec<MatchId>,
+        activity: Option<crate::activity::ActivityTask>,
     },
     Confirm {
         revision: u64,
         candidate: ReplacementCandidate,
+        activity: Option<crate::activity::ActivityTask>,
     },
+}
+
+impl PreviewJob {
+    fn revision(&self) -> u64 {
+        match self {
+            Self::Compute { revision, .. } | Self::Confirm { revision, .. } => *revision,
+        }
+    }
+
+    fn operation(&self) -> crate::activity::ActivityOperation {
+        match self {
+            Self::Compute { .. } => crate::activity::ActivityOperation::PreviewReplacement,
+            Self::Confirm { .. } => crate::activity::ActivityOperation::ConfirmReplacement,
+        }
+    }
+
+    fn activity(&self) -> Option<&crate::activity::ActivityTask> {
+        match self {
+            Self::Compute { activity, .. } | Self::Confirm { activity, .. } => activity.as_ref(),
+        }
+    }
+
+    fn set_activity(&mut self, activity: Option<crate::activity::ActivityTask>) {
+        match self {
+            Self::Compute {
+                activity: current, ..
+            }
+            | Self::Confirm {
+                activity: current, ..
+            } => *current = activity,
+        }
+    }
+
+    fn cancel_before_start(self) {
+        if let Some(activity) = self.activity() {
+            activity.finish(
+                crate::activity::ActivityOutcome::Cancelled,
+                None,
+                crate::activity::ActivityRetirement::Confirmed,
+            );
+        }
+    }
 }
 
 enum PreviewResult {
@@ -361,20 +406,44 @@ impl ReplacementPreviewWorker {
         Ok(Self {
             shared,
             worker: Some(worker),
+            activity_center: None,
         })
     }
 
-    pub(crate) fn submit(&self, job: PreviewJob) -> Result<(), String> {
+    pub(crate) fn attach_activity_center(&mut self, center: crate::activity::ActivityCenter) {
+        self.activity_center = Some(center);
+    }
+
+    pub(crate) fn submit(&self, mut job: PreviewJob) -> Result<(), String> {
+        let activity = self.activity_center.as_ref().and_then(|center| {
+            center.start(
+                crate::activity::ActivityOwner::SearchReplace,
+                crate::activity::ActivitySlot::Preview,
+                crate::activity::ActivityIncarnation::new(job.revision()),
+                job.operation(),
+            )
+        });
+        job.set_activity(activity);
         let (lock, wake) = &*self.shared;
-        let mut state = lock
-            .lock()
-            .map_err(|_| "replacement preview worker state is unavailable".to_owned())?;
+        let mut state = match lock.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                job.cancel_before_start();
+                return Err("replacement preview worker state is unavailable".to_owned());
+            }
+        };
         if state.shutdown {
+            drop(state);
+            job.cancel_before_start();
             return Err("replacement preview worker is shutting down".into());
         }
-        state.pending = Some(job);
+        let replaced = state.pending.replace(job);
         state.result = None;
         wake.notify_one();
+        drop(state);
+        if let Some(replaced) = replaced {
+            replaced.cancel_before_start();
+        }
         Ok(())
     }
 
@@ -393,10 +462,16 @@ impl ReplacementPreviewWorker {
 
     pub(crate) fn shutdown(mut self) -> std::io::Result<()> {
         let (lock, wake) = &*self.shared;
-        if let Ok(mut state) = lock.lock() {
+        let pending = if let Ok(mut state) = lock.lock() {
             state.shutdown = true;
-            state.pending = None;
+            let pending = state.pending.take();
             wake.notify_all();
+            pending
+        } else {
+            None
+        };
+        if let Some(pending) = pending {
+            pending.cancel_before_start();
         }
         if let Some(worker) = self.worker.take() {
             worker
@@ -410,10 +485,16 @@ impl ReplacementPreviewWorker {
 impl Drop for ReplacementPreviewWorker {
     fn drop(&mut self) {
         let (lock, wake) = &*self.shared;
-        if let Ok(mut state) = lock.lock() {
+        let pending = if let Ok(mut state) = lock.lock() {
             state.shutdown = true;
-            state.pending = None;
+            let pending = state.pending.take();
             wake.notify_all();
+            pending
+        } else {
+            None
+        };
+        if let Some(pending) = pending {
+            pending.cancel_before_start();
         }
     }
 }
@@ -441,12 +522,18 @@ fn replacement_preview_loop(shared: Arc<(Mutex<PreviewWorkerState>, Condvar)>) {
             job
         };
 
+        let activity = job.activity().cloned();
+        if let Some(activity) = activity.as_ref() {
+            activity.mark_running();
+        }
+
         let result = match job {
             PreviewJob::Compute {
                 revision,
                 search,
                 replacement,
                 selected,
+                activity: _,
             } => {
                 let result = replacement
                     .compile(search.pattern())
@@ -486,12 +573,37 @@ fn replacement_preview_loop(shared: Arc<(Mutex<PreviewWorkerState>, Condvar)>) {
             PreviewJob::Confirm {
                 revision,
                 candidate,
+                activity: _,
             } => PreviewResult::Confirmed {
                 revision,
                 request: ConfirmedReplacementRequest::confirm(candidate)
                     .map_err(|error| error.to_string()),
             },
         };
+
+        if let Some(activity) = activity.as_ref() {
+            let (outcome, diagnostic) = match &result {
+                PreviewResult::Candidate { candidate, .. } => match candidate {
+                    Ok(_) => (crate::activity::ActivityOutcome::Completed, None),
+                    Err(_) => (
+                        crate::activity::ActivityOutcome::Failed,
+                        Some(crate::activity::ActivityDiagnostic::WorkerFailed),
+                    ),
+                },
+                PreviewResult::Confirmed { request, .. } => match request {
+                    Ok(_) => (crate::activity::ActivityOutcome::Completed, None),
+                    Err(_) => (
+                        crate::activity::ActivityOutcome::Failed,
+                        Some(crate::activity::ActivityDiagnostic::WorkerFailed),
+                    ),
+                },
+            };
+            activity.finish(
+                outcome,
+                diagnostic,
+                crate::activity::ActivityRetirement::Unavailable,
+            );
+        }
 
         let (lock, _) = &*shared;
         let Ok(mut state) = lock.lock() else {
@@ -1114,6 +1226,7 @@ impl SearchReplaceDialogState {
                 ReplacementRevision(self.preview_revision),
             ),
             selected,
+            activity: None,
         })
     }
 
@@ -1127,6 +1240,7 @@ impl SearchReplaceDialogState {
         Some(PreviewJob::Confirm {
             revision: self.preview_revision,
             candidate,
+            activity: None,
         })
     }
 

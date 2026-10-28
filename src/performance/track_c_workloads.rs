@@ -160,6 +160,22 @@ impl TrackCWorkspace {
     pub fn settings_path(&self) -> PathBuf {
         self.root().join("settings.json")
     }
+
+    pub(crate) fn original_cwd(&self) -> &Path {
+        self.workspace.original_cwd()
+    }
+
+    pub(crate) fn original_notes_directory(&self) -> Option<OsString> {
+        self.workspace.original_notes_directory()
+    }
+
+    pub(crate) fn original_template_directory(&self) -> Option<OsString> {
+        self.workspace.original_template_directory()
+    }
+
+    pub(crate) fn original_skip_clipboard_sync(&self) -> Option<OsString> {
+        self.previous_skip_clipboard_sync.clone()
+    }
 }
 
 impl Default for TrackCWorkspace {

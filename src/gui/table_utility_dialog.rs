@@ -4,7 +4,8 @@ use crate::clipboard_modify::clipboard::{
 use crate::common::atomic_file;
 use crate::table_utility::{
     DelimiterChoice, EffectiveSortMode, RowWidthPolicy, TableDelimiter, TableDocument,
-    TableJsonShape, TableObjectShapeAvailability, TableSort, TableSortDirection, TableSortMode,
+    TableFileParseOptions, TableFileProjectedPage, TableJsonShape, TableObjectShapeAvailability,
+    TableResourceError, TableResourcePolicy, TableSort, TableSortDirection, TableSortMode,
     TableUtilityProfile, TableWarning,
 };
 use crate::table_utility_session::{
@@ -18,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const RESULT_ROW_HEIGHT: f32 = 28.0;
+const FILE_RESULT_COLUMN_WIDTH: f32 = 180.0;
 const SOURCE_PREVIEW_CHARS: usize = 2_048;
 
 #[cfg(test)]
@@ -90,6 +92,14 @@ pub struct TableUtilityDialogState {
     test_paste_response: Option<TestWidgetResponse>,
     #[cfg(test)]
     test_open_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_open_large_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_file_page_next_response: Option<TestWidgetResponse>,
+    #[cfg(test)]
+    test_file_visible_column_range: Option<(usize, usize)>,
+    #[cfg(test)]
+    test_file_schema_column_range: Option<(usize, usize)>,
     #[cfg(test)]
     test_header_response: Option<TestWidgetResponse>,
     #[cfg(test)]
@@ -176,6 +186,14 @@ impl Default for TableUtilityDialogState {
             #[cfg(test)]
             test_open_response: None,
             #[cfg(test)]
+            test_open_large_response: None,
+            #[cfg(test)]
+            test_file_page_next_response: None,
+            #[cfg(test)]
+            test_file_visible_column_range: None,
+            #[cfg(test)]
+            test_file_schema_column_range: None,
+            #[cfg(test)]
             test_header_response: None,
             #[cfg(test)]
             test_copy_tsv_response: None,
@@ -222,6 +240,25 @@ impl Default for TableUtilityDialogState {
 }
 
 impl TableUtilityDialogState {
+    pub(crate) fn with_resource_policy(
+        policy: Result<TableResourcePolicy, TableResourceError>,
+    ) -> Self {
+        let mut state = Self::default();
+        state.session.set_resource_policy(policy);
+        state
+    }
+
+    pub(crate) fn update_resource_policy(
+        &mut self,
+        policy: Result<TableResourcePolicy, TableResourceError>,
+    ) {
+        self.session.set_resource_policy(policy);
+    }
+
+    pub(crate) fn attach_activity_center(&mut self, center: crate::activity::ActivityCenter) {
+        self.session.attach_activity_center(center);
+    }
+
     pub fn open(&mut self) {
         self.open = true;
         self.pending_overwrite = None;
@@ -438,6 +475,10 @@ impl TableUtilityDialogState {
         {
             self.test_paste_response = None;
             self.test_open_response = None;
+            self.test_open_large_response = None;
+            self.test_file_page_next_response = None;
+            self.test_file_visible_column_range = None;
+            self.test_file_schema_column_range = None;
             self.test_header_response = None;
             self.test_copy_tsv_response = None;
             self.test_copy_csv_response = None;
@@ -586,9 +627,14 @@ impl TableUtilityDialogState {
 
     fn sync_editors(&mut self, snapshot: &TableSessionSnapshot) {
         if self.source_editor_revision != Some(snapshot.source_display_revision) {
-            self.source_editor.clear();
             if snapshot.source_is_editable() {
+                self.source_editor.clear();
                 self.source_editor.push_str(snapshot.source.as_ref());
+            } else {
+                // Large-source preview mode does not use the inline editor.
+                // Drop its previous capacity so the old editor allocation is
+                // not retained after the source lease has been replaced.
+                self.source_editor = String::new();
             }
             self.source_editor_revision = Some(snapshot.source_display_revision);
         }
@@ -676,6 +722,50 @@ impl TableUtilityDialogState {
                             .set_delimiter(DelimiterChoice::Explicit(delimiter));
                     }
                     match self.session.request_file_read(path) {
+                        Ok(()) => self.status = None,
+                        Err(error) => self.status = Some(error),
+                    }
+                }
+            }
+
+            let open_large_file = ui.add_enabled(enabled, egui::Button::new("Open Large File..."));
+            #[cfg(test)]
+            {
+                self.test_open_large_response = Some(TestWidgetResponse {
+                    id: open_large_file.id,
+                    rect: open_large_file.rect,
+                    enabled: open_large_file.enabled(),
+                });
+            }
+            register_target(
+                scope,
+                ui,
+                &open_large_file,
+                "action/open-large-file",
+                "Validate a large delimited file and browse it in bounded pages",
+                crate::gui::jump_mode::TargetKind::Button,
+                order,
+            );
+            if open_large_file.clicked() && commit_enabled {
+                #[cfg(test)]
+                let selected_path = self.test_open_file_path.take();
+                #[cfg(not(test))]
+                let selected_path = rfd::FileDialog::new()
+                    .add_filter("Delimited text", &["csv", "tsv", "txt"])
+                    .pick_file();
+                if let Some(path) = selected_path {
+                    let mut options = TableFileParseOptions {
+                        profile: self.profile,
+                        delimiter: snapshot.parse_options.delimiter,
+                        has_header: snapshot.parse_options.has_header,
+                        strict_width: snapshot.parse_options.row_width == RowWidthPolicy::Strict,
+                    };
+                    if self.profile.is_csv()
+                        && let Some(delimiter) = delimiter_for_path(&path)
+                    {
+                        options.delimiter = DelimiterChoice::Explicit(delimiter);
+                    }
+                    match self.session.request_file_backed_source(path, options) {
                         Ok(()) => self.status = None,
                         Err(error) => self.status = Some(error),
                     }
@@ -883,6 +973,13 @@ impl TableUtilityDialogState {
             });
             show_warnings(ui, document);
         }
+        if let Some(progress) = snapshot.file_scan_progress.as_ref() {
+            ui.weak(format!(
+                "Large-file validation: {} records checked; {} columns currently identified. The preview is provisional until validation completes.",
+                progress.validated_rows(),
+                progress.schema_columns()
+            ));
+        }
     }
 
     fn show_source(
@@ -894,6 +991,43 @@ impl TableUtilityDialogState {
         scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         order: &mut u64,
     ) {
+        if let Some(progress) = snapshot.file_scan_progress.as_ref() {
+            ui.label(
+                "Large file source is read-only. Only bounded preview rows and the current result page are retained.",
+            );
+            let preview = progress.preview().as_ref();
+            for row in preview.rows().iter().take(3) {
+                ui.horizontal_wrapped(|ui| {
+                    ui.weak(format!("Row {}", row.id().ordinal() + 1));
+                    for source_column in preview.source_columns().iter().take(5).copied() {
+                        ui.monospace(
+                            row.cell_for_source_column(preview, source_column)
+                                .unwrap_or(""),
+                        );
+                    }
+                });
+            }
+            return;
+        }
+        if let Some(source) = snapshot
+            .accepted_source
+            .as_ref()
+            .and_then(|source| source.file_source())
+        {
+            ui.label(
+                "Large file source is read-only; the validated source stays on disk and results are loaded one bounded page at a time.",
+            );
+            ui.weak(format!(
+                "{} bytes · {} validated rows · {} columns",
+                source.byte_count(),
+                source.row_count(),
+                source.column_count()
+            ));
+            if let Some(path) = snapshot.source_path.as_deref() {
+                ui.monospace(path.display().to_string());
+            }
+            return;
+        }
         ui.label("Source (UTF-8; parsing is explicit)");
         if snapshot.source_is_editable() {
             let mut source_editor = self.source_editor.clone();
@@ -960,6 +1094,22 @@ impl TableUtilityDialogState {
         scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         order: &mut u64,
     ) {
+        if let Some(source) = snapshot
+            .accepted_source
+            .as_ref()
+            .and_then(|source| source.file_source())
+        {
+            self.show_file_backed_results(
+                ui,
+                snapshot,
+                source,
+                enabled,
+                commit_enabled,
+                scope,
+                order,
+            );
+            return;
+        }
         ui.horizontal(|ui| {
             ui.label("Filter visible rows:");
             let mut filter_editor = self.filter_editor.clone();
@@ -1216,6 +1366,335 @@ impl TableUtilityDialogState {
             self.test_results_inner_rect = Some(results.inner_rect);
         }
         let _ = results;
+    }
+
+    fn show_file_backed_results(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &TableSessionSnapshot,
+        source: &multi_launcher_table_core::TableFileBackedSource,
+        enabled: bool,
+        commit_enabled: bool,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        order: &mut u64,
+    ) {
+        let selected_rows = snapshot
+            .file_row_selection
+            .as_ref()
+            .map_or(0, |selection| selection.selected_count());
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!(
+                "{} validated rows · {} selected · {} columns · {} bytes",
+                source.row_count(),
+                selected_rows,
+                source.column_count(),
+                source.byte_count()
+            ));
+            ui.weak("File-backed browsing keeps one bounded result page.");
+        });
+
+        let page = snapshot.file_page.as_deref();
+        let page_start = page.map_or(snapshot.file_page_start, TableFileProjectedPage::start_row);
+        let page_next = page
+            .map(TableFileProjectedPage::next_row)
+            .unwrap_or(page_start);
+        let last_start = source.row_count().saturating_sub(1)
+            / crate::table_utility::TABLE_FILE_PAGE_MAX_ROWS as u64
+            * crate::table_utility::TABLE_FILE_PAGE_MAX_ROWS as u64;
+        ui.horizontal(|ui| {
+            let first = ui.add_enabled(
+                enabled && !snapshot.file_page_pending && page_start > 0,
+                egui::Button::new("First"),
+            );
+            register_target(
+                scope,
+                ui,
+                &first,
+                "page/first",
+                "Show the first bounded result page",
+                crate::gui::jump_mode::TargetKind::Button,
+                order,
+            );
+            if first.clicked() && commit_enabled {
+                if let Err(error) = self.session.request_file_page(0) {
+                    self.status = Some(error);
+                }
+            }
+
+            let previous = ui.add_enabled(
+                enabled && !snapshot.file_page_pending && page_start > 0,
+                egui::Button::new("Previous page"),
+            );
+            register_target(
+                scope,
+                ui,
+                &previous,
+                "page/previous",
+                "Show an earlier bounded result page",
+                crate::gui::jump_mode::TargetKind::Button,
+                order,
+            );
+            if previous.clicked() && commit_enabled {
+                let start = page_start
+                    .saturating_sub(crate::table_utility::TABLE_FILE_PAGE_MAX_ROWS as u64);
+                if let Err(error) = self.session.request_file_page(start) {
+                    self.status = Some(error);
+                }
+            }
+
+            let next = ui.add_enabled(
+                enabled
+                    && !snapshot.file_page_pending
+                    && page.is_some_and(|page| page.next_row() < source.row_count()),
+                egui::Button::new("Next page"),
+            );
+            #[cfg(test)]
+            {
+                self.test_file_page_next_response = Some(TestWidgetResponse {
+                    id: next.id,
+                    rect: next.rect,
+                    enabled: next.enabled(),
+                });
+            }
+            register_target(
+                scope,
+                ui,
+                &next,
+                "page/next",
+                "Show the next bounded result page",
+                crate::gui::jump_mode::TargetKind::Button,
+                order,
+            );
+            if next.clicked() && commit_enabled {
+                if let Err(error) = self.session.request_file_page(page_next) {
+                    self.status = Some(error);
+                }
+            }
+
+            let last = ui.add_enabled(
+                enabled && !snapshot.file_page_pending && page_start < last_start,
+                egui::Button::new("Last"),
+            );
+            register_target(
+                scope,
+                ui,
+                &last,
+                "page/last",
+                "Show the final bounded result page",
+                crate::gui::jump_mode::TargetKind::Button,
+                order,
+            );
+            if last.clicked() && commit_enabled {
+                if let Err(error) = self.session.request_file_page(last_start) {
+                    self.status = Some(error);
+                }
+            }
+
+            if snapshot.file_page_pending {
+                ui.weak(format!(
+                    "Loading page starting at row {}...",
+                    snapshot.file_page_start.saturating_add(1)
+                ));
+            } else if let Some(page) = page {
+                ui.weak(format!(
+                    "Rows {}-{} of {} · {:?}",
+                    page.start_row().saturating_add(1),
+                    page.next_row(),
+                    source.row_count(),
+                    page.stop()
+                ));
+            }
+        });
+
+        ui.label(format!(
+            "Columns included in result pages ({}/{})",
+            snapshot.selected_columns.len(),
+            source.column_count()
+        ));
+        egui::ScrollArea::vertical()
+            .id_salt("table-file-schema-columns")
+            .max_height(128.0)
+            .show_rows(ui, RESULT_ROW_HEIGHT, source.column_count(), |ui, range| {
+                #[cfg(test)]
+                {
+                    self.test_file_schema_column_range = Some((range.start, range.end));
+                }
+                for column in range {
+                    let label = file_column_label(source, column);
+                    let mut selected = snapshot.selected_columns.contains(&column);
+                    let response = ui
+                        .push_id(("file-schema-column", column), |ui| {
+                            ui.add_sized(
+                                [220.0, RESULT_ROW_HEIGHT],
+                                egui::Checkbox::new(&mut selected, format!("{column}: {label}")),
+                            )
+                        })
+                        .inner;
+                    register_target(
+                        scope,
+                        ui,
+                        &response,
+                        format!("column/{column}/select"),
+                        format!("Include {label} in file-backed result pages"),
+                        crate::gui::jump_mode::TargetKind::Button,
+                        order,
+                    );
+                    if response.changed() && commit_enabled {
+                        self.session.set_column_selected(column, selected);
+                    }
+                    #[cfg(test)]
+                    {
+                        self.test_column_select_responses.push((
+                            column,
+                            TestWidgetResponse {
+                                id: response.id,
+                                rect: response.rect,
+                                enabled: response.enabled(),
+                            },
+                        ));
+                        if column == 0 {
+                            self.test_first_column_select_response = Some(TestWidgetResponse {
+                                id: response.id,
+                                rect: response.rect,
+                                enabled: response.enabled(),
+                            });
+                        }
+                    }
+                }
+            });
+
+        let Some(page) = page else {
+            ui.weak("Loading the first bounded result page...");
+            return;
+        };
+        if page.source_id() != source.id() {
+            ui.weak("The displayed page belongs to an older source and is being replaced.");
+            return;
+        }
+
+        let source_columns = page.source_columns();
+        let header_height = 32.0;
+        #[cfg(test)]
+        {
+            self.test_first_header_column_rect = None;
+            self.test_first_data_column_rect = None;
+            self.test_file_visible_column_range = None;
+        }
+        let results = egui::ScrollArea::horizontal()
+            .id_salt("table-file-results-horizontal")
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_sized([30.0, header_height], egui::Label::new("Row"));
+                    let origin_x = ui.cursor().left();
+                    let (start, end) =
+                        visible_file_column_range(ui, origin_x, source_columns.len());
+                    #[cfg(test)]
+                    {
+                        self.test_file_visible_column_range = Some((start, end));
+                    }
+                    ui.add_space(start as f32 * FILE_RESULT_COLUMN_WIDTH);
+                    for projected_column in start..end {
+                        let source_column = source_columns[projected_column];
+                        let label = file_column_label(source, source_column);
+                        let slot = ui.allocate_ui_with_layout(
+                            egui::vec2(FILE_RESULT_COLUMN_WIDTH, header_height),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |cell_ui| {
+                                cell_ui.add_sized(
+                                    [148.0, header_height],
+                                    egui::Label::new(label).truncate(),
+                                )
+                            },
+                        );
+                        #[cfg(test)]
+                        if projected_column == 0 {
+                            self.test_first_header_column_rect = Some(slot.inner.rect);
+                        }
+                    }
+                    ui.add_space(
+                        source_columns.len().saturating_sub(end) as f32 * FILE_RESULT_COLUMN_WIDTH,
+                    );
+                });
+
+                egui::ScrollArea::vertical()
+                    .id_salt("table-file-results-rows")
+                    .max_height(250.0)
+                    .show_rows(ui, RESULT_ROW_HEIGHT, page.rows().len(), |ui, range| {
+                        #[cfg(test)]
+                        {
+                            self.test_rendered_row_range = Some((range.start, range.end));
+                            self.test_visible_row_count = page.rows().len();
+                        }
+                        for row_index in range {
+                            let Some(row) = page.rows().get(row_index) else {
+                                continue;
+                            };
+                            ui.horizontal(|ui| {
+                                let row_id = row.id();
+                                let mut selected = snapshot
+                                    .file_row_selection
+                                    .as_ref()
+                                    .is_none_or(|selection| selection.is_selected(row_id));
+                                let response = ui.add_sized(
+                                    [30.0, RESULT_ROW_HEIGHT],
+                                    egui::Checkbox::new(&mut selected, ""),
+                                );
+                                register_target(
+                                    scope,
+                                    ui,
+                                    &response,
+                                    format!("row/{}/select", row_id.ordinal()),
+                                    format!("Select file row {}", row_id.ordinal() + 1),
+                                    crate::gui::jump_mode::TargetKind::Button,
+                                    order,
+                                );
+                                if response.changed() && commit_enabled {
+                                    self.session.set_file_row_selected(row_id, selected);
+                                }
+                                #[cfg(test)]
+                                if row_index == 0 {
+                                    self.test_first_row_select_response =
+                                        Some(TestWidgetResponse {
+                                            id: response.id,
+                                            rect: response.rect,
+                                            enabled: response.enabled(),
+                                        });
+                                }
+                                let origin_x = ui.cursor().left();
+                                let (start, end) =
+                                    visible_file_column_range(ui, origin_x, source_columns.len());
+                                ui.add_space(start as f32 * FILE_RESULT_COLUMN_WIDTH);
+                                for projected_column in start..end {
+                                    let source_column = source_columns[projected_column];
+                                    let text = row
+                                        .cell_for_source_column(page, source_column)
+                                        .unwrap_or("");
+                                    let response = ui.add_sized(
+                                        [FILE_RESULT_COLUMN_WIDTH, RESULT_ROW_HEIGHT],
+                                        egui::Label::new(text)
+                                            .truncate()
+                                            .sense(egui::Sense::hover()),
+                                    );
+                                    #[cfg(test)]
+                                    if row_index == 0 && projected_column == 0 {
+                                        self.test_first_data_column_rect = Some(response.rect);
+                                    }
+                                }
+                                ui.add_space(
+                                    source_columns.len().saturating_sub(end) as f32
+                                        * FILE_RESULT_COLUMN_WIDTH,
+                                );
+                            });
+                        }
+                    });
+            });
+        #[cfg(test)]
+        {
+            self.test_results_horizontal_offset = results.state.offset.x;
+            self.test_results_scroll_area_id = Some(results.id);
+            self.test_results_content_size = results.content_size;
+            self.test_results_inner_rect = Some(results.inner_rect);
+        }
     }
 
     fn show_footer(
@@ -1496,12 +1975,24 @@ impl TableUtilityDialogState {
                 *close_requested = true;
             }
         });
-        ui.weak(format!(
-            "Output selection: {} visible rows × {} columns.",
-            snapshot.selected_visible_row_count,
-            selected_columns.len()
-        ));
-        if snapshot.selected_visible_row_count == 0 || selected_columns.is_empty() {
+        let file_backed = snapshot
+            .accepted_source
+            .as_ref()
+            .and_then(|source| source.file_source())
+            .is_some();
+        if file_backed {
+            ui.weak(
+                "File-backed mode supports bounded page browsing and row/column selection; filtering, sorting, and full-file export are unavailable.",
+            );
+        } else {
+            ui.weak(format!(
+                "Output selection: {} visible rows × {} columns.",
+                snapshot.selected_visible_row_count,
+                selected_columns.len()
+            ));
+        }
+        if !file_backed && (snapshot.selected_visible_row_count == 0 || selected_columns.is_empty())
+        {
             #[cfg(test)]
             {
                 self.test_no_output_selection_hint = true;
@@ -1518,7 +2009,7 @@ impl TableUtilityDialogState {
             && let Some(TableExportPayload::Json(json)) = self
                 .pending_overwrite
                 .as_ref()
-                .map(|pending| &pending.receipt.payload)
+                .map(|pending| pending.receipt.payload.as_ref())
             && let Some(reason) = json.fallback_reason
         {
             ui.weak(format!(
@@ -1572,14 +2063,14 @@ impl TableUtilityDialogState {
             }
             match pending.action {
                 ExportAction::Clipboard => {
-                    let Some(payload) = payload_text(&receipt.payload) else {
+                    let Some(payload) = payload_text(receipt.payload.as_ref()) else {
                         self.status = Some("The requested output was not valid text.".into());
                         return;
                     };
                     match self.clipboard.write_text(payload) {
                         Ok(()) => {
                             self.status = Some("Copied the current table selection.".into());
-                            if let TableExportPayload::Json(json) = receipt.payload
+                            if let TableExportPayload::Json(json) = receipt.payload.as_ref()
                                 && let Some(reason) = json.fallback_reason
                             {
                                 self.status = Some(format!(
@@ -1606,7 +2097,7 @@ impl TableUtilityDialogState {
         if !self.session.export_receipt_is_current(&receipt) {
             return Err("The selected table changed before it could be saved.".into());
         }
-        let TableExportPayload::Json(json) = &receipt.payload else {
+        let TableExportPayload::Json(json) = receipt.payload.as_ref() else {
             return Err("Only JSON output can be saved from this action.".into());
         };
         let snapshot = self.session.snapshot();
@@ -1697,7 +2188,7 @@ impl TableUtilityDialogState {
             self.status = Some("The table changed; the captured JSON export was discarded.".into());
             return;
         }
-        let TableExportPayload::Json(json) = &pending.receipt.payload else {
+        let TableExportPayload::Json(json) = pending.receipt.payload.as_ref() else {
             self.status = Some("The captured output was no longer JSON.".into());
             return;
         };
@@ -1784,6 +2275,38 @@ fn header_label(document: &TableDocument, column: usize) -> String {
         .filter(|header| !header.is_empty())
         .map(|header| crate::table_utility::bounded_cell_preview(header, 64))
         .unwrap_or_else(|| format!("Column {}", column + 1))
+}
+
+fn file_column_label(
+    source: &multi_launcher_table_core::TableFileBackedSource,
+    column: usize,
+) -> String {
+    source
+        .headers()
+        .and_then(|headers| headers.get(column))
+        .and_then(Option::as_deref)
+        .filter(|header| !header.is_empty())
+        .map(|header| crate::table_utility::bounded_cell_preview(header, 64))
+        .unwrap_or_else(|| format!("Column {}", column + 1))
+}
+
+fn visible_file_column_range(
+    ui: &egui::Ui,
+    columns_origin_x: f32,
+    column_count: usize,
+) -> (usize, usize) {
+    if column_count == 0 {
+        return (0, 0);
+    }
+    let clip = ui.clip_rect();
+    let start = ((clip.left() - columns_origin_x) / FILE_RESULT_COLUMN_WIDTH)
+        .floor()
+        .max(0.0) as usize;
+    let end = ((clip.right() - columns_origin_x) / FILE_RESULT_COLUMN_WIDTH)
+        .ceil()
+        .max(start as f32) as usize;
+    let start = start.min(column_count);
+    (start, end.min(column_count).max(start))
 }
 
 fn show_warnings(ui: &mut egui::Ui, document: &TableDocument) {
@@ -2539,6 +3062,83 @@ mod tests {
             after_idle.projection.as_ref().unwrap().visible_rows()[0],
             first_visible
         );
+
+        let directory = tempfile::tempdir().expect("temporary file-backed idle fixture");
+        let path = directory.path().join("idle-wide.csv");
+        let column_count = 16;
+        let row_count = 6;
+        let headers = (0..column_count)
+            .map(|column| format!("column-{column}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut file_source = format!("{headers}\n");
+        for row in 0..row_count {
+            for column in 0..column_count {
+                if column > 0 {
+                    file_source.push(',');
+                }
+                file_source.push_str(&format!("{row}-{column}"));
+            }
+            file_source.push('\n');
+        }
+        fs::write(&path, file_source).expect("write bounded wide fixture");
+        dialog
+            .session
+            .request_file_backed_source(
+                path,
+                crate::table_utility::TableFileParseOptions::for_profile(
+                    TableUtilityProfile::Table,
+                    true,
+                ),
+            )
+            .expect("queue bounded file-backed scan");
+        let file_ready = await_dialog(&context, &mut dialog, |snapshot| {
+            snapshot
+                .accepted_source
+                .as_ref()
+                .and_then(|source| source.file_source())
+                .is_some_and(|source| source.row_count() == row_count as u64)
+                && !snapshot.file_page_pending
+                && snapshot.file_page.is_some()
+        });
+        let file_source_id = file_ready
+            .accepted_source
+            .as_ref()
+            .and_then(|source| source.file_id())
+            .expect("accepted bounded file source");
+        let stable_page = file_ready.file_page.clone().expect("accepted first page");
+        let stable_usage = dialog.session.test_resource_usage();
+        let file_counts = dialog.session.test_job_counts();
+        assert!(file_counts.scan_submitted > 0 && file_counts.scan_executed > 0);
+        assert!(file_counts.page_submitted > 0 && file_counts.page_executed > 0);
+        let visible_columns = dialog
+            .test_file_visible_column_range
+            .expect("file-backed result viewport was rendered");
+        assert!(visible_columns.1 > visible_columns.0);
+        assert!(visible_columns.1 - visible_columns.0 < column_count);
+
+        let view_before_noop = file_ready.view_revision;
+        dialog
+            .session
+            .request_file_page(stable_page.start_row())
+            .expect("requesting the current page is a no-op");
+        assert_eq!(dialog.session.snapshot().view_revision, view_before_noop);
+        assert!(!dialog.session.snapshot().file_page_pending);
+        for _ in 0..4 {
+            table_frame(&context, &mut dialog, Vec::new());
+        }
+        let idle_file = dialog.session.snapshot();
+        assert_eq!(dialog.session.test_job_counts(), file_counts);
+        assert_eq!(dialog.session.test_resource_usage(), stable_usage);
+        assert_eq!(
+            idle_file
+                .accepted_source
+                .as_ref()
+                .and_then(|source| source.file_id()),
+            Some(file_source_id)
+        );
+        assert_eq!(idle_file.file_page.as_deref(), Some(stable_page.as_ref()));
+        assert!(!idle_file.file_page_pending);
         dialog.shutdown();
     }
 
@@ -2631,7 +3231,9 @@ mod tests {
                 .find_map(|(column, response)| (*column == 1).then_some(*response))
         });
         let selected = dialog.session.snapshot();
-        assert_eq!(selected.selected_column_indices(), [0, 2]);
+        let mut selected_columns = selected.selected_column_indices();
+        selected_columns.sort_unstable();
+        assert_eq!(selected_columns, [0, 2]);
         assert_eq!(selected.selected_visible_row_count, 1);
 
         click_test_widget(&context, &mut dialog, |state| state.test_copy_csv_response);
@@ -3217,6 +3819,187 @@ mod tests {
         assert_eq!(
             fs::read(&target).expect("stale confirmation cannot replace destination"),
             b"unchanged stale destination"
+        );
+        dialog.shutdown();
+    }
+
+    #[test]
+    fn table_dialog_opens_large_file_and_pages_only_visible_columns() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let source_path = directory.path().join("wide.csv");
+        let column_count = 80;
+        let row_count = 130;
+        let headers = (0..column_count)
+            .map(|column| format!("field-{column}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut source_text = format!("{headers}\n");
+        for row in 0..row_count {
+            for column in 0..column_count {
+                if column != 0 {
+                    source_text.push(',');
+                }
+                if column == 0 {
+                    source_text.push_str(&format!("r{row}"));
+                } else {
+                    source_text.push_str(&format!("{row}-{column}"));
+                }
+            }
+            source_text.push('\n');
+        }
+        fs::write(&source_path, source_text).expect("write large-file route fixture");
+
+        let context = egui::Context::default();
+        let mut dialog = TableUtilityDialogState::default();
+        dialog.open();
+        dialog
+            .session
+            .open(&context)
+            .expect("start the table worker");
+        dialog.session.set_has_header(true);
+        // Let the dialog window establish its egui layer before the first
+        // input. The first visibility pass intentionally keeps controls
+        // disabled until the real dialog owns the foreground middle layer.
+        table_frame(&context, &mut dialog, Vec::new());
+        dialog.test_open_file_path = Some(source_path.clone());
+        click_test_widget(&context, &mut dialog, |state| {
+            state.test_open_large_response
+        });
+
+        let loaded = await_dialog(&context, &mut dialog, |snapshot| {
+            snapshot
+                .accepted_source
+                .as_ref()
+                .and_then(|source| source.file_source())
+                .is_some_and(|source| source.row_count() == row_count as u64)
+                && !snapshot.file_page_pending
+                && snapshot.file_page.is_some()
+        });
+        let source = loaded
+            .accepted_source
+            .as_ref()
+            .and_then(|source| source.file_source())
+            .expect("the large-file route accepts a file-backed source");
+        assert_eq!(source.column_count(), column_count);
+        assert!(
+            loaded.document.is_none(),
+            "large data has no compact document"
+        );
+        assert!(
+            !loaded.can_export(),
+            "full-file operations stay unavailable"
+        );
+        assert!(dialog.test_filter_response.is_none());
+        let page = loaded.file_page.as_ref().expect("first result page");
+        assert_eq!(page.rows().len(), 64);
+        assert_eq!(
+            dialog
+                .test_file_visible_column_range
+                .map(|(start, end)| end - start)
+                .expect("file-backed columns were virtualized")
+                < column_count,
+            true
+        );
+
+        click_test_widget(&context, &mut dialog, |state| {
+            state.test_first_column_select_response
+        });
+        let narrowed = await_dialog(&context, &mut dialog, |snapshot| {
+            snapshot.selected_columns.len() == column_count - 1
+                && !snapshot.file_page_pending
+                && snapshot
+                    .file_page
+                    .as_ref()
+                    .is_some_and(|page| page.source_columns().len() == column_count - 1)
+        });
+        assert!(!narrowed.selected_columns.contains(&0));
+
+        click_test_widget(&context, &mut dialog, |state| {
+            state.test_first_row_select_response
+        });
+        let deselected = await_dialog(&context, &mut dialog, |snapshot| {
+            snapshot
+                .file_row_selection
+                .as_ref()
+                .is_some_and(|selection| selection.selected_count() == row_count as u64 - 1)
+        });
+
+        click_test_widget(&context, &mut dialog, |state| {
+            state.test_file_page_next_response
+        });
+        let second_page = await_dialog(&context, &mut dialog, |snapshot| {
+            !snapshot.file_page_pending
+                && snapshot
+                    .file_page
+                    .as_ref()
+                    .is_some_and(|page| page.start_row() == 64)
+        });
+        let page = second_page.file_page.as_ref().expect("second result page");
+        assert_eq!(
+            page.rows()[0]
+                .cell_for_source_column(page, 1)
+                .expect("second retained column"),
+            "64-1"
+        );
+        assert_eq!(
+            second_page
+                .file_row_selection
+                .as_ref()
+                .expect("source-bound selection")
+                .selected_count(),
+            row_count as u64 - 1
+        );
+        assert_eq!(deselected.selected_columns.len(), column_count - 1);
+        assert!(dialog.test_filter_response.is_none());
+        assert!(
+            dialog
+                .test_copy_tsv_response
+                .is_some_and(|response| !response.enabled),
+            "file-backed output controls remain disabled"
+        );
+
+        let selected_columns = second_page
+            .selected_columns
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        dialog.session.close();
+        for column in selected_columns {
+            dialog.session.set_column_selected(column, false);
+        }
+        let empty_projection = await_dialog(&context, &mut dialog, |snapshot| {
+            snapshot.selected_columns.is_empty()
+                && !snapshot.file_page_pending
+                && snapshot
+                    .file_page
+                    .as_ref()
+                    .is_some_and(|page| page.source_columns().is_empty())
+        });
+        assert!(empty_projection.selected_columns.is_empty());
+        let schema_range = dialog
+            .test_file_schema_column_range
+            .expect("schema chooser virtualizes the accepted file columns");
+        assert!(schema_range.1 > schema_range.0);
+        assert!(schema_range.1 - schema_range.0 < column_count);
+        click_test_widget(&context, &mut dialog, |state| {
+            state.test_first_column_select_response
+        });
+        let recovered_projection = await_dialog(&context, &mut dialog, |snapshot| {
+            snapshot.selected_columns.len() == 1
+                && snapshot.selected_columns.contains(&0)
+                && !snapshot.file_page_pending
+                && snapshot
+                    .file_page
+                    .as_ref()
+                    .is_some_and(|page| page.source_columns() == [0])
+        });
+        assert_eq!(
+            recovered_projection
+                .file_page
+                .as_ref()
+                .expect("recovered page")
+                .source_columns(),
+            [0]
         );
         dialog.shutdown();
     }

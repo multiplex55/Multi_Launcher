@@ -12,6 +12,7 @@ use once_cell::sync::Lazy;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
@@ -70,14 +71,21 @@ pub struct IsolatedWorkspace {
     previous_cwd: PathBuf,
     previous_notes_dir: Option<OsString>,
     previous_template_dir: Option<OsString>,
+    process_state_restored: bool,
     _lock: MutexGuard<'static, ()>,
 }
 
 impl IsolatedWorkspace {
     pub fn new() -> Self {
-        let lock = WORKLOAD_ENV_LOCK
-            .lock()
-            .expect("workload environment lock poisoned");
+        // The guard's Drop restores process state before the mutex guard is
+        // released, including during unwinding. A caught fixture panic can
+        // therefore poison the mutex even though the protected state is safe
+        // to reuse.
+        let lock = WORKLOAD_ENV_LOCK.lock().unwrap_or_else(|poisoned| {
+            let guard = poisoned.into_inner();
+            WORKLOAD_ENV_LOCK.clear_poison();
+            guard
+        });
         let temp = tempfile::tempdir().expect("create isolated workload workspace");
         let root = temp.path().to_path_buf();
         let notes_dir = root.join("notes");
@@ -98,12 +106,95 @@ impl IsolatedWorkspace {
             previous_cwd,
             previous_notes_dir,
             previous_template_dir,
+            process_state_restored: false,
             _lock: lock,
         }
     }
 
     pub fn root(&self) -> &Path {
         self.temp.as_ref().expect("workspace is alive").path()
+    }
+
+    pub(crate) fn scope_to_profile(&mut self, profile_root: &Path) -> io::Result<()> {
+        fs::create_dir_all(profile_root.join("notes"))?;
+        fs::create_dir_all(profile_root.join("templates"))?;
+        std::env::set_current_dir(profile_root)?;
+        // Environment mutation is process-local while the workspace mutex is held.
+        unsafe {
+            std::env::set_var("ML_NOTES_DIR", profile_root.join("notes"));
+            std::env::set_var("ML_NOTE_TEMPLATES_DIR", profile_root.join("templates"));
+        }
+        Ok(())
+    }
+
+    pub fn original_cwd(&self) -> &Path {
+        &self.previous_cwd
+    }
+
+    pub fn original_notes_directory(&self) -> Option<OsString> {
+        self.previous_notes_dir.clone()
+    }
+
+    pub fn original_template_directory(&self) -> Option<OsString> {
+        self.previous_template_dir.clone()
+    }
+
+    /// Restore process-global test state and report directory cleanup errors.
+    /// Drop remains a best-effort fallback for assertion panics.
+    pub fn finish(mut self) -> io::Result<()> {
+        let root = self
+            .temp
+            .as_ref()
+            .expect("workspace is alive")
+            .path()
+            .to_path_buf();
+        restore_env("ML_NOTES_DIR", self.previous_notes_dir.clone());
+        restore_env("ML_NOTE_TEMPLATES_DIR", self.previous_template_dir.clone());
+
+        let mut errors = Vec::new();
+        match std::env::set_current_dir(&self.previous_cwd) {
+            Err(error) => errors.push(format!(
+                "restore current directory to {}: {error}",
+                self.previous_cwd.display()
+            )),
+            Ok(()) => match std::env::current_dir() {
+                Ok(current) if current == self.previous_cwd => {
+                    self.process_state_restored = true;
+                }
+                Ok(current) => errors.push(format!(
+                    "current directory restored to {}, expected {}",
+                    current.display(),
+                    self.previous_cwd.display()
+                )),
+                Err(error) => errors.push(format!("verify restored current directory: {error}")),
+            },
+        }
+
+        if let Some(temp) = self.temp.take()
+            && let Err(error) = temp.close()
+        {
+            errors.push(format!(
+                "remove isolated workspace {}: {error}",
+                root.display()
+            ));
+        }
+        match root.try_exists() {
+            Ok(false) => {}
+            Ok(true) => errors.push(format!(
+                "isolated workspace still exists after cleanup: {}",
+                root.display()
+            )),
+            Err(error) => errors.push(format!(
+                "verify isolated workspace cleanup at {}: {error}",
+                root.display()
+            )),
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::other(errors.join("; ")))
+        }
     }
 }
 
@@ -115,9 +206,11 @@ impl Default for IsolatedWorkspace {
 
 impl Drop for IsolatedWorkspace {
     fn drop(&mut self) {
-        restore_env("ML_NOTES_DIR", self.previous_notes_dir.take());
-        restore_env("ML_NOTE_TEMPLATES_DIR", self.previous_template_dir.take());
-        let _ = std::env::set_current_dir(&self.previous_cwd);
+        if !self.process_state_restored {
+            restore_env("ML_NOTES_DIR", self.previous_notes_dir.clone());
+            restore_env("ML_NOTE_TEMPLATES_DIR", self.previous_template_dir.clone());
+            self.process_state_restored = std::env::set_current_dir(&self.previous_cwd).is_ok();
+        }
         drop(self.temp.take());
         // `_lock` is dropped after this method, once paths and temp files are restored.
     }

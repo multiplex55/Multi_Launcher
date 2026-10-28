@@ -1,5 +1,8 @@
 mod files;
 
+use crate::activity::{
+    ActivityDiagnostic, ActivityOperation, ActivityOutcome, ActivityRetirement, ActivityTask,
+};
 use crate::clipboard_modify::clipboard::{ArboardClipboardBackend, ClipboardBackend};
 use crate::gui::jump_mode::ui::{
     FocusDirective, JumpModeScope, JumpModeUi, NavigationDialogKind, NavigationOwner,
@@ -142,6 +145,7 @@ enum FileJob {
         source_generation: u64,
         dialog_generation: u64,
         path: PathBuf,
+        activity: Option<ActivityTask>,
     },
     Save {
         id: u64,
@@ -149,6 +153,7 @@ enum FileJob {
         path: PathBuf,
         payload: Arc<str>,
         overwrite_confirmed: bool,
+        activity: Option<ActivityTask>,
     },
 }
 
@@ -195,30 +200,71 @@ impl XmlFileWorker {
                             source_generation,
                             dialog_generation,
                             path,
-                        } => FileCompletion {
-                            id,
-                            source_generation: Some(source_generation),
-                            dialog_generation,
-                            path: path.clone(),
-                            result: FileResult::Loaded(read_xml_file(&path)),
-                        },
+                            activity,
+                        } => {
+                            if let Some(activity) = activity.as_ref() {
+                                activity.mark_running();
+                            }
+                            let result = read_xml_file(&path);
+                            if let Some(activity) = activity.as_ref() {
+                                let outcome = if result.is_ok() {
+                                    ActivityOutcome::Completed
+                                } else {
+                                    ActivityOutcome::Failed
+                                };
+                                activity.finish(
+                                    outcome,
+                                    (outcome == ActivityOutcome::Failed)
+                                        .then_some(ActivityDiagnostic::WorkerFailed),
+                                    ActivityRetirement::Unavailable,
+                                );
+                            }
+                            FileCompletion {
+                                id,
+                                source_generation: Some(source_generation),
+                                dialog_generation,
+                                path: path.clone(),
+                                result: FileResult::Loaded(result),
+                            }
+                        }
                         FileJob::Save {
                             id,
                             dialog_generation,
                             path,
                             payload,
                             overwrite_confirmed,
-                        } => FileCompletion {
-                            id,
-                            source_generation: None,
-                            dialog_generation,
-                            path: path.clone(),
-                            result: FileResult::Saved(save_xml_file(
-                                &path,
-                                payload.as_bytes(),
-                                overwrite_confirmed,
-                            )),
-                        },
+                            activity,
+                        } => {
+                            if let Some(activity) = activity.as_ref() {
+                                activity.mark_running();
+                            }
+                            let result =
+                                save_xml_file(&path, payload.as_bytes(), overwrite_confirmed);
+                            if let Some(activity) = activity.as_ref() {
+                                let (outcome, diagnostic) = match &result {
+                                    Ok(SaveOutcome::Saved) => (ActivityOutcome::Completed, None),
+                                    Ok(SaveOutcome::OverwriteRequired) => {
+                                        (ActivityOutcome::Completed, None)
+                                    }
+                                    Err(_) => (
+                                        ActivityOutcome::Failed,
+                                        Some(ActivityDiagnostic::WorkerFailed),
+                                    ),
+                                };
+                                activity.finish(
+                                    outcome,
+                                    diagnostic,
+                                    ActivityRetirement::Unavailable,
+                                );
+                            }
+                            FileCompletion {
+                                id,
+                                source_generation: None,
+                                dialog_generation,
+                                path: path.clone(),
+                                result: FileResult::Saved(result),
+                            }
+                        }
                     };
                     if completion_sender.send(completion).is_err() {
                         return;
@@ -323,6 +369,7 @@ pub struct XmlToolkitDialogState {
     pending_save: Option<PendingSave>,
     feedback: Option<Result<String, String>>,
     schema_path_draft: Option<PathBuf>,
+    activity_center: Option<crate::activity::ActivityCenter>,
     #[cfg(test)]
     overwrite_button_rects: [egui::Rect; 2],
 }
@@ -334,6 +381,10 @@ impl Default for XmlToolkitDialogState {
 }
 
 impl XmlToolkitDialogState {
+    pub(crate) fn attach_activity_center(&mut self, center: crate::activity::ActivityCenter) {
+        self.activity_center = Some(center);
+    }
+
     pub fn with_clipboard(clipboard: Arc<dyn ClipboardBackend>) -> Self {
         Self {
             open: false,
@@ -357,6 +408,7 @@ impl XmlToolkitDialogState {
             pending_save: None,
             feedback: None,
             schema_path_draft: None,
+            activity_center: None,
             #[cfg(test)]
             overwrite_button_rects: [egui::Rect::NOTHING; 2],
         }
@@ -1452,6 +1504,7 @@ impl XmlToolkitDialogState {
         self.next_file_request = next_id;
         let source_generation = self.source_generation;
         let dialog_generation = self.dialog_generation;
+        let activity_center = self.activity_center.clone();
         let worker = match self.ensure_file_worker(ctx) {
             Ok(worker) => worker,
             Err(error) => {
@@ -1459,6 +1512,14 @@ impl XmlToolkitDialogState {
                 return;
             }
         };
+        let activity = activity_center.as_ref().and_then(|center| {
+            center.start(
+                crate::activity::ActivityOwner::Xml,
+                crate::activity::ActivitySlot::Primary,
+                crate::activity::ActivityIncarnation::new(id),
+                ActivityOperation::LoadXmlFile,
+            )
+        });
         match worker.submit(
             id,
             FileJob::Load {
@@ -1466,10 +1527,20 @@ impl XmlToolkitDialogState {
                 source_generation,
                 dialog_generation,
                 path,
+                activity: activity.clone(),
             },
         ) {
             Ok(()) => self.feedback = Some(Ok("Loading selected XML file…".into())),
-            Err(error) => self.feedback = Some(Err(error)),
+            Err(error) => {
+                if let Some(activity) = activity {
+                    activity.finish(
+                        ActivityOutcome::Failed,
+                        Some(ActivityDiagnostic::WorkerUnavailable),
+                        ActivityRetirement::Confirmed,
+                    );
+                }
+                self.feedback = Some(Err(error));
+            }
         }
     }
 
@@ -1508,6 +1579,7 @@ impl XmlToolkitDialogState {
             payload: Arc::clone(&payload),
             needs_confirmation: false,
         };
+        let activity_center = self.activity_center.clone();
         let worker = match self.ensure_file_worker(ctx) {
             Ok(worker) => worker,
             Err(error) => {
@@ -1515,6 +1587,19 @@ impl XmlToolkitDialogState {
                 return;
             }
         };
+        let operation = if overwrite_confirmed {
+            ActivityOperation::SaveXmlFile
+        } else {
+            ActivityOperation::PrepareXmlSave
+        };
+        let activity = activity_center.as_ref().and_then(|center| {
+            center.start(
+                crate::activity::ActivityOwner::Xml,
+                crate::activity::ActivitySlot::Primary,
+                crate::activity::ActivityIncarnation::new(id),
+                operation,
+            )
+        });
         match worker.submit(
             id,
             FileJob::Save {
@@ -1523,13 +1608,23 @@ impl XmlToolkitDialogState {
                 path,
                 payload,
                 overwrite_confirmed,
+                activity: activity.clone(),
             },
         ) {
             Ok(()) => {
                 self.pending_save = Some(pending);
                 self.feedback = Some(Ok("Saving the selected XML payload…".into()));
             }
-            Err(error) => self.feedback = Some(Err(error)),
+            Err(error) => {
+                if let Some(activity) = activity {
+                    activity.finish(
+                        ActivityOutcome::Failed,
+                        Some(ActivityDiagnostic::WorkerUnavailable),
+                        ActivityRetirement::Confirmed,
+                    );
+                }
+                self.feedback = Some(Err(error));
+            }
         }
     }
 
@@ -1661,10 +1756,14 @@ impl XmlToolkitDialogState {
             return;
         }
         let repaint_context = ctx.clone();
+        let activity_center = self.activity_center.clone();
         match thread::Builder::new()
             .name("xml-toolkit-session-start".to_owned())
             .spawn(move || {
-                let result = XmlEngineSession::start();
+                let result = activity_center.map_or_else(
+                    XmlEngineSession::start,
+                    XmlEngineSession::start_with_activity,
+                );
                 repaint_context.request_repaint();
                 result
             }) {

@@ -1,5 +1,6 @@
 use crate::coordinate_tool::settings::CoordinateToolPreferences;
 use crate::gui::Panel;
+use crate::gui::jump_mode::config::{HintAlphabet, JumpModeChord};
 use crate::hotkey::Key;
 use crate::hotkey::{Hotkey, parse_hotkey};
 use crate::settings::defaults::*;
@@ -690,6 +691,8 @@ pub struct Settings {
     pub help_hotkey: Option<String>,
     #[serde(default)]
     pub paste_sequence: PasteSequencePreferences,
+    #[serde(default)]
+    pub table_utility_resources: TableUtilityResourcePreferences,
     pub index_paths: Option<Vec<String>>,
     pub max_indexed_items: Option<usize>,
     pub plugin_dirs: Option<Vec<String>>,
@@ -763,6 +766,10 @@ pub struct Settings {
     pub show_launcher_title: bool,
     #[serde(default)]
     pub experimental_jump_mode_enabled: bool,
+    #[serde(default)]
+    pub jump_mode_activation_chord: JumpModeChord,
+    #[serde(default)]
+    pub jump_mode_hint_alphabet: HintAlphabet,
     #[serde(default = "default_timer_refresh")]
     pub timer_refresh: f32,
     #[serde(default)]
@@ -823,6 +830,46 @@ pub struct Settings {
     /// and authoring undo cannot erase migration recovery state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radial_submenu_migration: Option<SubmenuPresentationMigrationReceipt>,
+}
+
+/// Validated size caps for the Table Utility's aggregate memory and owned
+/// temporary-file budget. These preferences do not persist runtime paths or
+/// current usage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableUtilityResourcePreferences {
+    pub ram_limit_mib: u64,
+    pub temp_limit_gib: u64,
+}
+
+impl Default for TableUtilityResourcePreferences {
+    fn default() -> Self {
+        Self {
+            ram_limit_mib: 256,
+            temp_limit_gib: 8,
+        }
+    }
+}
+
+impl TableUtilityResourcePreferences {
+    pub fn to_policy(
+        self,
+    ) -> Result<
+        multi_launcher_table_core::TableResourcePolicy,
+        multi_launcher_table_core::TableResourceError,
+    > {
+        let ram_bytes = self.ram_limit_mib.checked_mul(1024 * 1024).ok_or(
+            multi_launcher_table_core::TableResourceError::InvalidPolicy(
+                "RAM limit overflows the supported byte range.",
+            ),
+        )?;
+        let temp_bytes = self.temp_limit_gib.checked_mul(1024 * 1024 * 1024).ok_or(
+            multi_launcher_table_core::TableResourceError::InvalidPolicy(
+                "Temporary storage limit overflows the supported byte range.",
+            ),
+        )?;
+        multi_launcher_table_core::TableResourcePolicy::new(ram_bytes, temp_bytes)
+    }
 }
 
 /// Persistent, local presentation state for the MkMacro property pane.
@@ -1094,6 +1141,7 @@ impl Default for Settings {
             quit_hotkey: None,
             help_hotkey: Some("F1".into()),
             paste_sequence: PasteSequencePreferences::default(),
+            table_utility_resources: TableUtilityResourcePreferences::default(),
             index_paths: None,
             max_indexed_items: None,
             plugin_dirs: None,
@@ -1132,6 +1180,8 @@ impl Default for Settings {
             show_launcher_icon: true,
             show_launcher_title: true,
             experimental_jump_mode_enabled: false,
+            jump_mode_activation_chord: JumpModeChord::default(),
+            jump_mode_hint_alphabet: HintAlphabet::default(),
             timer_refresh: default_timer_refresh(),
             net_refresh: default_net_refresh(),
             net_unit: NetUnit::Auto,
@@ -1225,8 +1275,8 @@ impl Settings {
 mod tests {
     use super::{
         CoordinateToolPreferences, MultiManagerSettings, NoteSettings, NoteViewMode,
-        QueryResultsLayoutSettings, Settings, ThemeColor, ThemeDensity, ThemeMode,
-        ThemePreferences, ThemeSettings,
+        QueryResultsLayoutSettings, Settings, TableUtilityResourcePreferences, ThemeColor,
+        ThemeDensity, ThemeMode, ThemePreferences, ThemeSettings,
     };
     use crate::radial::model::RadialFeatureSettings;
 
@@ -1234,6 +1284,10 @@ mod tests {
     fn empty_settings_deserializes_with_note_defaults() {
         let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
         assert_eq!(parsed.note, NoteSettings::default());
+        assert_eq!(
+            parsed.table_utility_resources,
+            TableUtilityResourcePreferences::default()
+        );
         assert_eq!(parsed.coordinate_tool, CoordinateToolPreferences::default());
         assert_eq!(
             parsed.mkmacro_properties,
@@ -1252,6 +1306,67 @@ mod tests {
         assert_eq!(
             parsed.note.effective_default_view_mode(),
             NoteViewMode::Preview
+        );
+    }
+
+    #[test]
+    fn table_resource_preferences_validate_range_and_round_trip() {
+        let defaults = TableUtilityResourcePreferences::default();
+        assert_eq!(defaults.ram_limit_mib, 256);
+        assert_eq!(defaults.temp_limit_gib, 8);
+        assert!(defaults.to_policy().is_ok());
+
+        for preferences in [
+            TableUtilityResourcePreferences {
+                ram_limit_mib: 64,
+                temp_limit_gib: 1,
+            },
+            TableUtilityResourcePreferences {
+                ram_limit_mib: 1024,
+                temp_limit_gib: 64,
+            },
+        ] {
+            assert!(preferences.to_policy().is_ok());
+        }
+        for preferences in [
+            TableUtilityResourcePreferences {
+                ram_limit_mib: 63,
+                temp_limit_gib: 8,
+            },
+            TableUtilityResourcePreferences {
+                ram_limit_mib: 1025,
+                temp_limit_gib: 8,
+            },
+            TableUtilityResourcePreferences {
+                ram_limit_mib: 256,
+                temp_limit_gib: 0,
+            },
+            TableUtilityResourcePreferences {
+                ram_limit_mib: 256,
+                temp_limit_gib: 65,
+            },
+            TableUtilityResourcePreferences {
+                ram_limit_mib: u64::MAX,
+                temp_limit_gib: 8,
+            },
+            TableUtilityResourcePreferences {
+                ram_limit_mib: 256,
+                temp_limit_gib: u64::MAX,
+            },
+        ] {
+            assert!(preferences.to_policy().is_err());
+        }
+
+        let mut settings = Settings::default();
+        settings.table_utility_resources = TableUtilityResourcePreferences {
+            ram_limit_mib: 512,
+            temp_limit_gib: 16,
+        };
+        let serialized = serde_json::to_string(&settings).unwrap();
+        let restored: Settings = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(
+            restored.table_utility_resources,
+            settings.table_utility_resources
         );
     }
 
@@ -1834,6 +1949,86 @@ mod tests {
         .expect("missing unrelated settings retain defaults");
         assert!(!old_defaults.show_launcher_icon);
         assert!(!old_defaults.show_launcher_title);
+    }
+
+    #[test]
+    fn jump_preferences_default_round_trip_and_recover_independently() {
+        let legacy: Settings = serde_json::from_value(serde_json::json!({
+            "show_examples": true,
+        }))
+        .expect("legacy settings remain readable");
+        assert_eq!(
+            legacy.jump_mode_activation_chord.canonical_text(),
+            "Shift+Space"
+        );
+        assert_eq!(
+            legacy.jump_mode_hint_alphabet.canonical_text(),
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        );
+
+        let mut custom = Settings::default();
+        custom.jump_mode_activation_chord =
+            crate::gui::jump_mode::config::JumpModeChord::parse(" control + shift + F8 ").unwrap();
+        custom.jump_mode_hint_alphabet =
+            crate::gui::jump_mode::config::HintAlphabet::parse("asDfjklq").unwrap();
+        assert!(!custom.experimental_jump_mode_enabled);
+        let encoded = serde_json::to_value(&custom).unwrap();
+        assert_eq!(encoded["jump_mode_activation_chord"], "Ctrl+Shift+F8");
+        assert_eq!(encoded["jump_mode_hint_alphabet"], "ASDFJKLQ");
+        let restored: Settings = serde_json::from_value(encoded).unwrap();
+        assert!(!restored.experimental_jump_mode_enabled);
+        assert_eq!(
+            restored.jump_mode_activation_chord,
+            custom.jump_mode_activation_chord
+        );
+        assert_eq!(
+            restored.jump_mode_hint_alphabet,
+            custom.jump_mode_hint_alphabet
+        );
+        assert_eq!(restored.show_examples, custom.show_examples);
+
+        let invalid_chord: Settings = serde_json::from_value(serde_json::json!({
+            "jump_mode_activation_chord": "Ctrl++F8",
+            "jump_mode_hint_alphabet": "zY",
+            "show_examples": true,
+        }))
+        .expect("one malformed preference must not reject Settings");
+        assert_eq!(
+            invalid_chord.jump_mode_activation_chord.canonical_text(),
+            "Shift+Space"
+        );
+        assert_eq!(invalid_chord.jump_mode_hint_alphabet.canonical_text(), "ZY");
+        assert!(invalid_chord.show_examples);
+
+        let invalid_alphabet: Settings = serde_json::from_value(serde_json::json!({
+            "jump_mode_activation_chord": "Control+F8",
+            "jump_mode_hint_alphabet": "AAB",
+            "show_examples": false,
+        }))
+        .expect("invalid alphabet must recover independently");
+        assert_eq!(
+            invalid_alphabet.jump_mode_activation_chord.canonical_text(),
+            "Ctrl+F8"
+        );
+        assert_eq!(
+            invalid_alphabet.jump_mode_hint_alphabet.canonical_text(),
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        );
+        assert!(!invalid_alphabet.show_examples);
+
+        let invalid_types: Settings = serde_json::from_value(serde_json::json!({
+            "jump_mode_activation_chord": {"key": "F8"},
+            "jump_mode_hint_alphabet": 27,
+        }))
+        .expect("wrong preference JSON types must recover independently");
+        assert_eq!(
+            invalid_types.jump_mode_activation_chord.canonical_text(),
+            "Shift+Space"
+        );
+        assert_eq!(
+            invalid_types.jump_mode_hint_alphabet.canonical_text(),
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        );
     }
 
     #[test]

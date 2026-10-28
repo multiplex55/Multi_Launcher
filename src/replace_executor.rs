@@ -5,6 +5,11 @@
 //! `file_operations`; this module owns operation admission, backup receipts,
 //! progress, and truthful per-file outcomes.
 
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityProgress, ActivityProgressUnit, ActivityRetirement, ActivitySlot,
+    ActivityTask,
+};
 use crate::batch_rename::{self, ExplicitDirectoryRoot, SnapshotEntryKind};
 use crate::common::persistence::save_json_atomic;
 use crate::file_operations::{
@@ -3280,6 +3285,7 @@ enum ReplaceWorkerCommand {
     Run {
         operation: ReplaceWorkerOperation,
         cancellation: ScanCancellation,
+        activity: Option<ActivityTask>,
     },
     Shutdown,
 }
@@ -3293,6 +3299,7 @@ enum ReplaceWorkerOperation {
 struct ReplaceWorkerState {
     snapshot: ReplaceWorkerSnapshot,
     active_cancellation: Option<ScanCancellation>,
+    active_activity: Option<ActivityTask>,
 }
 
 /// One bounded worker owner for confirmed replace and Restore operations.
@@ -3302,6 +3309,8 @@ pub struct ReplaceExecutorWorker {
     sender: SyncSender<ReplaceWorkerCommand>,
     state: Arc<Mutex<ReplaceWorkerState>>,
     worker: Option<JoinHandle<()>>,
+    activity_center: Option<ActivityCenter>,
+    next_activity_incarnation: std::sync::atomic::AtomicU64,
 }
 
 impl ReplaceExecutorWorker {
@@ -3310,6 +3319,7 @@ impl ReplaceExecutorWorker {
         let state = Arc::new(Mutex::new(ReplaceWorkerState {
             snapshot: ReplaceWorkerSnapshot::default(),
             active_cancellation: None,
+            active_activity: None,
         }));
         let worker_state = Arc::clone(&state);
         let executor = Arc::new(executor);
@@ -3320,7 +3330,13 @@ impl ReplaceExecutorWorker {
             sender,
             state,
             worker: Some(worker),
+            activity_center: None,
+            next_activity_incarnation: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    pub fn attach_activity_center(&mut self, center: ActivityCenter) {
+        self.activity_center = Some(center);
     }
 
     pub fn submit_apply(&self, request: ConfirmedReplacementRequest) -> std::io::Result<()> {
@@ -3337,7 +3353,7 @@ impl ReplaceExecutorWorker {
 
     fn submit(&self, operation: ReplaceWorkerOperation) -> std::io::Result<()> {
         let cancellation = ScanCancellation::new();
-        {
+        let activity = {
             let mut state = self.state.lock().map_err(|_| replace_worker_poisoned())?;
             if state.snapshot.shutdown_requested {
                 return Err(std::io::Error::new(
@@ -3351,20 +3367,46 @@ impl ReplaceExecutorWorker {
                     "the search and replace worker is busy or has an unconsumed result",
                 ));
             }
+            let activity = self.activity_center.as_ref().and_then(|center| {
+                center.start(
+                    ActivityOwner::SearchReplace,
+                    ActivitySlot::Secondary,
+                    ActivityIncarnation::new(
+                        self.next_activity_incarnation
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    ),
+                    ActivityOperation::ReplaceFiles,
+                )
+            });
+            if let Some(activity) = activity.as_ref() {
+                let cancel = cancellation.clone();
+                activity.set_cancel_handler(move || cancel.cancel());
+            }
             state.snapshot.active = true;
             state.snapshot.progress = None;
             state.snapshot.result = None;
             state.active_cancellation = Some(cancellation.clone());
-        }
+            state.active_activity = activity.clone();
+            activity
+        };
         match self.sender.try_send(ReplaceWorkerCommand::Run {
             operation,
             cancellation,
+            activity: activity.clone(),
         }) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
                 if let Ok(mut state) = self.state.lock() {
                     state.snapshot.active = false;
                     state.active_cancellation = None;
+                    state.active_activity = None;
+                }
+                if let Some(activity) = activity {
+                    activity.finish(
+                        ActivityOutcome::Failed,
+                        Some(ActivityDiagnostic::WorkerUnavailable),
+                        ActivityRetirement::Confirmed,
+                    );
                 }
                 Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
@@ -3376,6 +3418,14 @@ impl ReplaceExecutorWorker {
                     state.snapshot.active = false;
                     state.snapshot.worker_exited = true;
                     state.active_cancellation = None;
+                    state.active_activity = None;
+                }
+                if let Some(activity) = activity {
+                    activity.finish(
+                        ActivityOutcome::Failed,
+                        Some(ActivityDiagnostic::WorkerUnavailable),
+                        ActivityRetirement::Confirmed,
+                    );
                 }
                 Err(std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
@@ -3403,6 +3453,9 @@ impl ReplaceExecutorWorker {
             return false;
         };
         cancellation.cancel();
+        if let Some(activity) = state.active_activity.as_ref() {
+            activity.mark_cancelling();
+        }
         true
     }
 
@@ -3417,6 +3470,9 @@ impl ReplaceExecutorWorker {
             state.snapshot.shutdown_requested = true;
             if let Some(cancellation) = state.active_cancellation.as_ref() {
                 cancellation.cancel();
+                if let Some(activity) = state.active_activity.as_ref() {
+                    activity.mark_cancelling();
+                }
             }
         }
         let _ = self.sender.try_send(ReplaceWorkerCommand::Shutdown);
@@ -3473,9 +3529,21 @@ fn replace_worker_loop(
             ReplaceWorkerCommand::Run {
                 operation,
                 cancellation,
+                activity,
             } => {
+                if let Some(activity) = activity.as_ref() {
+                    activity.mark_running();
+                }
                 let report_state = Arc::clone(&state);
+                let report_activity = activity.clone();
                 let report = move |progress: ReplaceProgress| {
+                    if let Some(activity) = report_activity.as_ref() {
+                        activity.set_progress(Some(ActivityProgress::new(
+                            progress.completed as u64,
+                            Some(progress.total as u64),
+                            ActivityProgressUnit::Items,
+                        )));
+                    }
                     if let Ok(mut state) = report_state.lock()
                         && state.snapshot.active
                     {
@@ -3496,10 +3564,28 @@ fn replace_worker_loop(
                         executor.recover(&transaction_id, &cancellation, report)
                     }
                 };
+                if let Some(activity) = activity.as_ref() {
+                    let (outcome, diagnostic) = match result.receipt.status() {
+                        ReplaceTransactionStatus::Cancelled => (ActivityOutcome::Cancelled, None),
+                        ReplaceTransactionStatus::Failed
+                        | ReplaceTransactionStatus::Refused
+                        | ReplaceTransactionStatus::RecoveryRequired => (
+                            ActivityOutcome::Failed,
+                            Some(ActivityDiagnostic::ResultUnavailable),
+                        ),
+                        ReplaceTransactionStatus::Applying
+                        | ReplaceTransactionStatus::Applied
+                        | ReplaceTransactionStatus::Partial
+                        | ReplaceTransactionStatus::Restoring
+                        | ReplaceTransactionStatus::Restored => (ActivityOutcome::Completed, None),
+                    };
+                    activity.finish(outcome, diagnostic, ActivityRetirement::Unavailable);
+                }
                 let should_shutdown = if let Ok(mut state) = state.lock() {
                     state.snapshot.result = Some(result);
                     state.snapshot.active = false;
                     state.active_cancellation = None;
+                    state.active_activity = None;
                     state.snapshot.shutdown_requested
                 } else {
                     true
@@ -3514,6 +3600,7 @@ fn replace_worker_loop(
         state.snapshot.active = false;
         state.snapshot.worker_exited = true;
         state.active_cancellation = None;
+        state.active_activity = None;
     }
 }
 

@@ -1,6 +1,11 @@
 use crate::annotation::raster::{
     self, Color as RasterColor, Point as RasterPoint, Rect as RasterRect,
 };
+use crate::annotation::redaction::{
+    self, DEFAULT_BLUR_RADIUS, DEFAULT_PIXEL_BLOCK_SIZE, MAX_BLUR_RADIUS, MAX_PIXEL_BLOCK_SIZE,
+    MIN_BLUR_RADIUS, MIN_PIXEL_BLOCK_SIZE, RedactionEffect, RedactionError, RedactionMode,
+    RedactionOperation,
+};
 use crate::gui::LauncherApp;
 use eframe::egui::{
     self, Color32, PointerButton, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
@@ -20,6 +25,7 @@ pub enum MarkupTool {
     Highlight,
     Marker,
     Text,
+    Redact,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -79,12 +85,14 @@ pub enum MarkupLayer {
     Highlight(MarkupRect),
     Marker(MarkupMarker),
     Text(MarkupText),
+    Redaction(RedactionOperation),
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct MarkupHistory {
     layers: Vec<MarkupLayer>,
     redo_stack: Vec<MarkupLayer>,
+    revision: u64,
 }
 
 impl MarkupHistory {
@@ -92,14 +100,30 @@ impl MarkupHistory {
         &self.layers
     }
 
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn contains_redaction(&self) -> bool {
+        self.layers
+            .iter()
+            .any(|layer| matches!(layer, MarkupLayer::Redaction(_)))
+    }
+
+    fn changed(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     pub fn push(&mut self, layer: MarkupLayer) {
         self.layers.push(layer);
         self.redo_stack.clear();
+        self.changed();
     }
 
     pub fn undo(&mut self) -> bool {
         if let Some(layer) = self.layers.pop() {
             self.redo_stack.push(layer);
+            self.changed();
             true
         } else {
             false
@@ -109,11 +133,75 @@ impl MarkupHistory {
     pub fn redo(&mut self) -> bool {
         if let Some(layer) = self.redo_stack.pop() {
             self.layers.push(layer);
+            self.changed();
             true
         } else {
             false
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreviewKey {
+    Original,
+    History(u64),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PreviewState {
+    Uninitialized,
+    Ready(PreviewKey),
+    Failed { key: PreviewKey, message: String },
+}
+
+fn color_image_from_rgba(image: &RgbaImage) -> Result<egui::ColorImage, String> {
+    let width = usize::try_from(image.width())
+        .map_err(|_| "image width does not fit the preview address space".to_owned())?;
+    let height = usize::try_from(image.height())
+        .map_err(|_| "image height does not fit the preview address space".to_owned())?;
+    let count = width
+        .checked_mul(height)
+        .ok_or_else(|| "preview dimensions overflow".to_owned())?;
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(count)
+        .map_err(|error| format!("could not reserve preview pixels: {error}"))?;
+    for pixel in image.pixels() {
+        pixels.push(Color32::from_rgba_unmultiplied(
+            pixel[0], pixel[1], pixel[2], pixel[3],
+        ));
+    }
+    if pixels.len() != count {
+        return Err("preview pixel count does not match image dimensions".to_owned());
+    }
+    Ok(egui::ColorImage::new([width, height], pixels))
+}
+
+fn redaction_operation_from_drag(
+    first: Pos2,
+    second: Pos2,
+    image_size: [u32; 2],
+    effect: RedactionEffect,
+) -> Option<RedactionOperation> {
+    let [width, height] = image_size;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let clip = |value: f32, extent: u32| {
+        if value.is_finite() {
+            value.clamp(0.0, extent as f32)
+        } else {
+            f32::NAN
+        }
+    };
+    let bounds = redaction::RedactionBounds::from_corners(
+        clip(first.x, width),
+        clip(first.y, height),
+        clip(second.x, width),
+        clip(second.y, height),
+    )
+    .ok()?;
+    Some(RedactionOperation::new(bounds, effect))
 }
 
 fn draw_line(img: &mut RgbaImage, start: Pos2, end: Pos2, color: Color32, thickness: f32) {
@@ -233,7 +321,10 @@ fn marker_text_color(background: Color32) -> Color32 {
     }
 }
 
-pub fn render_markup_layers(base: &RgbaImage, layers: &[MarkupLayer]) -> RgbaImage {
+pub fn render_markup_layers(
+    base: &RgbaImage,
+    layers: &[MarkupLayer],
+) -> Result<RgbaImage, RedactionError> {
     let mut img = base.clone();
     let font = default_font_arc();
     for layer in layers {
@@ -309,9 +400,12 @@ pub fn render_markup_layers(base: &RgbaImage, layers: &[MarkupLayer]) -> RgbaIma
                     );
                 }
             }
+            MarkupLayer::Redaction(operation) => {
+                redaction::apply_redaction(&mut img, *operation)?;
+            }
         }
     }
-    img
+    Ok(img)
 }
 
 /// Editor window for captured screenshots allowing simple cropping and annotation.
@@ -323,8 +417,8 @@ pub fn render_markup_layers(base: &RgbaImage, layers: &[MarkupLayer]) -> RgbaIma
 pub struct ScreenshotEditor {
     pub open: bool,
     image: RgbaImage,
-    color_image: egui::ColorImage,
     tex: Option<TextureHandle>,
+    preview_state: PreviewState,
     crop_start: Option<Pos2>,
     crop_rect: Option<Rect>,
     active_start: Option<Pos2>,
@@ -341,6 +435,12 @@ pub struct ScreenshotEditor {
     color_index: usize,
     thickness: f32,
     text_size: f32,
+    redaction_mode: RedactionMode,
+    blur_radius: u8,
+    pixel_block_size: u8,
+    redaction_color_index: usize,
+    active_redaction_effect: Option<RedactionEffect>,
+    redaction_drag_transform: Option<(Pos2, f32)>,
     marker_font: Option<(ab_glyph::FontArc, egui::FontTweak)>,
     #[cfg(test)]
     test_content_clip: Option<Rect>,
@@ -360,6 +460,16 @@ pub struct ScreenshotEditor {
     test_force_marker_discard: bool,
     #[cfg(test)]
     test_marker_ui_passes: Vec<(u64, usize)>,
+    #[cfg(test)]
+    test_preview_render_attempts: u64,
+    #[cfg(test)]
+    test_preview_texture_updates: u64,
+    #[cfg(test)]
+    test_preview_texture_bytes: usize,
+    #[cfg(test)]
+    test_preview_last_hash: Option<[u8; 32]>,
+    #[cfg(test)]
+    test_preview_displayed: bool,
     #[cfg(feature = "qa-framebuffer-capture")]
     capture_request_id: Option<u64>,
 }
@@ -411,13 +521,11 @@ impl ScreenshotEditor {
         auto_save: bool,
         tool: MarkupTool,
     ) -> Self {
-        let size = [img.width() as usize, img.height() as usize];
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
         Self {
             open: true,
             image: img,
-            color_image,
             tex: None,
+            preview_state: PreviewState::Uninitialized,
             crop_start: None,
             crop_rect: None,
             active_start: None,
@@ -434,6 +542,12 @@ impl ScreenshotEditor {
             color_index: 0,
             thickness: 4.0,
             text_size: 18.0,
+            redaction_mode: RedactionMode::Solid,
+            blur_radius: DEFAULT_BLUR_RADIUS,
+            pixel_block_size: DEFAULT_PIXEL_BLOCK_SIZE,
+            redaction_color_index: 0,
+            active_redaction_effect: None,
+            redaction_drag_transform: None,
             marker_font: default_font_arc(),
             #[cfg(test)]
             test_content_clip: None,
@@ -453,6 +567,16 @@ impl ScreenshotEditor {
             test_force_marker_discard: false,
             #[cfg(test)]
             test_marker_ui_passes: Vec::new(),
+            #[cfg(test)]
+            test_preview_render_attempts: 0,
+            #[cfg(test)]
+            test_preview_texture_updates: 0,
+            #[cfg(test)]
+            test_preview_texture_bytes: 0,
+            #[cfg(test)]
+            test_preview_last_hash: None,
+            #[cfg(test)]
+            test_preview_displayed: false,
             #[cfg(feature = "qa-framebuffer-capture")]
             capture_request_id: None,
         }
@@ -470,7 +594,7 @@ impl ScreenshotEditor {
 
     #[cfg(feature = "qa-framebuffer-capture")]
     pub(crate) fn qa_write_applied_png(&self, path: &Path) -> std::io::Result<(String, u32, u32)> {
-        let image = self.apply_edits();
+        let image = self.apply_edits().map_err(std::io::Error::other)?;
         let dimensions = (image.width(), image.height());
         let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
         let result = (|| {
@@ -491,8 +615,8 @@ impl ScreenshotEditor {
         result
     }
 
-    fn apply_edits(&self) -> RgbaImage {
-        let mut img = render_markup_layers(&self.image, self.history.layers());
+    fn apply_edits(&self) -> Result<RgbaImage, RedactionError> {
+        let mut img = render_markup_layers(&self.image, self.history.layers())?;
         if let Some(rect) = self.crop_rect {
             let x1 = rect.min.x.max(0.0) as u32;
             let y1 = rect.min.y.max(0.0) as u32;
@@ -502,21 +626,21 @@ impl ScreenshotEditor {
             let h = (y2 - y1).max(1);
             img = image::imageops::crop_imm(&img, x1, y1, w, h).to_image();
         }
-        img
+        Ok(img)
     }
 
     fn save_image(&self, path: &PathBuf) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let img = self.apply_edits();
+        let img = self.apply_edits()?;
         img.save(path)?;
         Ok(())
     }
 
     fn copy_to_clipboard(&self) -> anyhow::Result<()> {
         use std::borrow::Cow;
-        let img = self.apply_edits();
+        let img = self.apply_edits()?;
         let (w, h) = img.dimensions();
         let mut cb = arboard::Clipboard::new()?;
         cb.set_image(arboard::ImageData {
@@ -543,6 +667,151 @@ impl ScreenshotEditor {
             Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 96)
         } else {
             base
+        }
+    }
+
+    fn redaction_palette() -> [[u8; 3]; 6] {
+        [
+            [0, 0, 0],
+            [231, 76, 60],
+            [241, 196, 15],
+            [46, 204, 113],
+            [52, 152, 219],
+            [155, 89, 182],
+        ]
+    }
+
+    fn current_redaction_effect(&self) -> Result<RedactionEffect, RedactionError> {
+        match self.redaction_mode {
+            RedactionMode::Solid => Ok(RedactionEffect::solid(
+                Self::redaction_palette()[self.redaction_color_index],
+            )),
+            RedactionMode::Blur => RedactionEffect::blur(self.blur_radius),
+            RedactionMode::Pixelate => RedactionEffect::pixelate(self.pixel_block_size),
+        }
+    }
+
+    fn current_preview_key(&self) -> PreviewKey {
+        if self.history.contains_redaction() {
+            PreviewKey::History(self.history.revision())
+        } else {
+            PreviewKey::Original
+        }
+    }
+
+    fn update_preview_texture(&mut self, ctx: &egui::Context, color_image: egui::ColorImage) {
+        let size = color_image.size;
+        if let Some(texture) = &mut self.tex {
+            texture.set(color_image, TextureOptions::LINEAR);
+        } else {
+            self.tex = Some(ctx.load_texture("screenshot", color_image, TextureOptions::LINEAR));
+        }
+        #[cfg(test)]
+        {
+            self.test_preview_texture_updates = self.test_preview_texture_updates.wrapping_add(1);
+            self.test_preview_texture_bytes = size[0]
+                .checked_mul(size[1])
+                .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<Color32>()))
+                .unwrap_or(usize::MAX);
+        }
+        #[cfg(not(test))]
+        let _ = size;
+    }
+
+    fn ensure_preview_texture(&mut self, ctx: &egui::Context, app: &mut LauncherApp) -> bool {
+        let key = self.current_preview_key();
+        match &self.preview_state {
+            PreviewState::Ready(ready_key) if *ready_key == key && self.tex.is_some() => {
+                return true;
+            }
+            PreviewState::Failed {
+                key: failed_key, ..
+            } if *failed_key == key => return false,
+            _ => {}
+        }
+
+        let prepared = match key {
+            PreviewKey::Original => {
+                color_image_from_rgba(&self.image).map(|color_image| (color_image, None))
+            }
+            PreviewKey::History(_) => {
+                #[cfg(test)]
+                {
+                    self.test_preview_render_attempts =
+                        self.test_preview_render_attempts.wrapping_add(1);
+                }
+                render_markup_layers(&self.image, self.history.layers())
+                    .map_err(|error| error.to_string())
+                    .and_then(|rendered| {
+                        #[cfg(test)]
+                        {
+                            use sha2::Digest as _;
+                            self.test_preview_last_hash =
+                                Some(sha2::Sha256::digest(rendered.as_raw()).into());
+                        }
+                        color_image_from_rgba(&rendered)
+                            .map(|color_image| (color_image, Some(rendered.dimensions())))
+                    })
+            }
+        };
+
+        match prepared {
+            Ok((color_image, rendered_dimensions)) => {
+                self.update_preview_texture(ctx, color_image);
+                self.preview_state = PreviewState::Ready(key);
+                if rendered_dimensions.is_none() {
+                    #[cfg(test)]
+                    {
+                        self.test_preview_last_hash = None;
+                    }
+                }
+                true
+            }
+            Err(message) => {
+                self.tex = None;
+                self.preview_state = PreviewState::Failed {
+                    key,
+                    message: message.clone(),
+                };
+                #[cfg(test)]
+                {
+                    self.test_preview_texture_bytes = 0;
+                    self.test_preview_last_hash = None;
+                }
+                app.report_error(
+                    "screenshot preview",
+                    format!("Screenshot preview is unavailable: {message}"),
+                );
+                false
+            }
+        }
+    }
+
+    fn preview_error_message(&self) -> Option<&str> {
+        match &self.preview_state {
+            PreviewState::Failed { message, .. } => Some(message),
+            _ => None,
+        }
+    }
+
+    fn cancel_redaction_gesture(&mut self) {
+        if self.active_redaction_effect.is_some() {
+            self.active_start = None;
+            self.active_end = None;
+            self.active_redaction_effect = None;
+            self.redaction_drag_transform = None;
+        }
+    }
+
+    fn clear_closed_preview(&mut self) {
+        self.cancel_redaction_gesture();
+        self.tex = None;
+        self.preview_state = PreviewState::Uninitialized;
+        #[cfg(test)]
+        {
+            self.test_preview_texture_bytes = 0;
+            self.test_preview_last_hash = None;
+            self.test_preview_displayed = false;
         }
     }
 
@@ -599,8 +868,10 @@ impl ScreenshotEditor {
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         if !self.open {
+            self.clear_closed_preview();
             return;
         }
+        let history_revision_before_frame = self.history.revision();
         let mut open = self.open;
         #[cfg(test)]
         let test_width = self.test_window_width;
@@ -810,10 +1081,97 @@ impl ScreenshotEditor {
                     ui.selectable_value(&mut self.tool, MarkupTool::Highlight, "Highlight");
                     ui.selectable_value(&mut self.tool, MarkupTool::Marker, "Marker");
                     ui.selectable_value(&mut self.tool, MarkupTool::Text, "Text");
+                    ui.selectable_value(&mut self.tool, MarkupTool::Redact, "Redact");
                 });
                 #[cfg(test)]
                 {
                     self.test_tool_row_rect = Some(_tool_row.response.rect);
+                }
+                if self.tool == MarkupTool::Redact {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Redaction");
+                        ui.selectable_value(
+                            &mut self.redaction_mode,
+                            RedactionMode::Solid,
+                            "Solid",
+                        );
+                        ui.selectable_value(
+                            &mut self.redaction_mode,
+                            RedactionMode::Blur,
+                            "Blur",
+                        )
+                        .on_hover_text(
+                            "Blur is a visual obscuring effect, not guaranteed removal of sensitive information.",
+                        );
+                        ui.selectable_value(
+                            &mut self.redaction_mode,
+                            RedactionMode::Pixelate,
+                            "Pixelate",
+                        )
+                        .on_hover_text(
+                            "Pixelation is a visual obscuring effect, not guaranteed removal of sensitive information.",
+                        );
+                    });
+                    match self.redaction_mode {
+                        RedactionMode::Solid => {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Opaque fill");
+                                let labels = [
+                                    "Black fill",
+                                    "Red fill",
+                                    "Yellow fill",
+                                    "Green fill",
+                                    "Blue fill",
+                                    "Purple fill",
+                                ];
+                                for (index, (label, color)) in labels
+                                    .into_iter()
+                                    .zip(Self::redaction_palette())
+                                    .enumerate()
+                                {
+                                    let color = Color32::from_rgb(color[0], color[1], color[2]);
+                                    let stroke = if index == self.redaction_color_index {
+                                        Stroke::new(2.0, Color32::WHITE)
+                                    } else {
+                                        Stroke::new(1.0, Color32::BLACK)
+                                    };
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new(label)
+                                                    .color(marker_text_color(color)),
+                                            )
+                                                .fill(color)
+                                                .stroke(stroke),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.redaction_color_index = index;
+                                    }
+                                }
+                            });
+                        }
+                        RedactionMode::Blur => {
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut self.blur_radius,
+                                    MIN_BLUR_RADIUS..=MAX_BLUR_RADIUS,
+                                )
+                                .integer()
+                                .text("Blur radius (image px)"),
+                            );
+                        }
+                        RedactionMode::Pixelate => {
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut self.pixel_block_size,
+                                    MIN_PIXEL_BLOCK_SIZE..=MAX_PIXEL_BLOCK_SIZE,
+                                )
+                                .integer()
+                                .text("Pixel block size (image px)"),
+                            );
+                        }
+                    }
                 }
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
@@ -852,8 +1210,13 @@ impl ScreenshotEditor {
                 if prev_tool == MarkupTool::Text && self.tool != MarkupTool::Text {
                     self.commit_active_text();
                 }
+                if prev_tool != self.tool {
+                    self.cancel_redaction_gesture();
+                }
 
-                let pressed_undo = ctx.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl);
+                let pressed_undo = ctx.input(|i| {
+                    i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && !i.modifiers.shift
+                });
                 let pressed_redo = ctx.input(|i| {
                     (i.key_pressed(egui::Key::Y) && i.modifiers.ctrl)
                         || (i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && i.modifiers.shift)
@@ -917,17 +1280,7 @@ impl ScreenshotEditor {
                 } else if ctx.input(|i| i.key_pressed(egui::Key::Num5)) {
                     self.color_index = 4;
                 }
-                let tex = self.tex.get_or_insert_with(|| {
-                    ctx.load_texture(
-                        "screenshot",
-                        self.color_image.clone(),
-                        TextureOptions::LINEAR,
-                    )
-                });
-                let img_size = egui::vec2(
-                    self.color_image.size[0] as f32,
-                    self.color_image.size[1] as f32,
-                );
+                let img_size = egui::vec2(self.image.width() as f32, self.image.height() as f32);
                 let display = img_size * self.zoom;
                 let canvas_sense = if self.tool == MarkupTool::Marker {
                     Sense::click_and_drag()
@@ -948,12 +1301,6 @@ impl ScreenshotEditor {
                 let rect_min = response.rect.min;
                 let to_img = |pos: Pos2| ((pos - rect_min) / zoom).to_pos2();
                 let to_screen = |p: Pos2| rect_min + (p * zoom).to_vec2();
-                painter.image(
-                    tex.id(),
-                    response.rect,
-                    Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                    Color32::WHITE,
-                );
                 let marker_secondary_press = self.tool == MarkupTool::Marker
                     && response.hovered()
                     && ctx.input(|input| input.pointer.button_pressed(PointerButton::Secondary));
@@ -999,7 +1346,14 @@ impl ScreenshotEditor {
                 if response.drag_started_by(PointerButton::Primary)
                     && let Some(pos) = response.interact_pointer_pos()
                 {
-                    let start = to_img(pos);
+                    let redaction_start = ctx
+                        .input(|input| input.pointer.press_origin())
+                        .unwrap_or(pos);
+                    let start = to_img(if self.tool == MarkupTool::Redact {
+                        redaction_start
+                    } else {
+                        pos
+                    });
                     match self.tool {
                         MarkupTool::Pen => {
                             self.active_stroke = Some(MarkupStroke {
@@ -1012,6 +1366,18 @@ impl ScreenshotEditor {
                             self.active_start = Some(start);
                             self.active_end = Some(start);
                         }
+                        MarkupTool::Redact => match self.current_redaction_effect() {
+                            Ok(effect) => {
+                                self.active_start = Some(start);
+                                self.active_end = Some(start);
+                                self.active_redaction_effect = Some(effect);
+                                self.redaction_drag_transform = Some((rect_min, zoom));
+                            }
+                            Err(error) => app.report_error(
+                                "screenshot redaction",
+                                format!("Could not start redaction: {error}"),
+                            ),
+                        },
                         MarkupTool::Text => {
                             // If a text instance is currently active, commit it and start a new one.
                             if self.active_text.is_some() {
@@ -1040,10 +1406,24 @@ impl ScreenshotEditor {
                         MarkupTool::Arrow | MarkupTool::Rectangle | MarkupTool::Highlight => {
                             self.active_end = Some(current);
                         }
-                        MarkupTool::Marker | MarkupTool::Text => {}
+                        MarkupTool::Marker | MarkupTool::Text | MarkupTool::Redact => {}
                     }
                 }
-                if response.drag_stopped_by(PointerButton::Primary) {
+                if self.active_redaction_effect.is_some()
+                    && ctx.input(|input| input.pointer.primary_down())
+                    && let Some((origin, drag_zoom)) = self.redaction_drag_transform
+                    && let Some(pointer) = ctx.input(|input| {
+                        input
+                            .pointer
+                            .latest_pos()
+                            .or_else(|| input.pointer.interact_pos())
+                    })
+                {
+                    self.active_end = Some(((pointer - origin) / drag_zoom).to_pos2());
+                }
+                if response.drag_stopped_by(PointerButton::Primary)
+                    && self.active_redaction_effect.is_none()
+                {
                     match self.tool {
                         MarkupTool::Pen => {
                             if let Some(stroke) = self.active_stroke.take()
@@ -1086,11 +1466,77 @@ impl ScreenshotEditor {
                                 }));
                             }
                         }
-                        MarkupTool::Marker | MarkupTool::Text => {}
+                        MarkupTool::Marker | MarkupTool::Text | MarkupTool::Redact => {}
                     }
                     self.active_start = None;
                     self.active_end = None;
                     self.active_stroke = None;
+                }
+                if self.active_redaction_effect.is_some()
+                    && ctx.input(|input| input.pointer.button_released(PointerButton::Primary))
+                {
+                    let final_screen = ctx.input(|input| {
+                        input
+                            .pointer
+                            .latest_pos()
+                            .or_else(|| input.pointer.interact_pos())
+                    });
+                    if let (Some(start), Some(effect)) =
+                        (self.active_start, self.active_redaction_effect)
+                    {
+                        let final_image = final_screen
+                            .zip(self.redaction_drag_transform)
+                            .map(|(pointer, (origin, drag_zoom))| {
+                                ((pointer - origin) / drag_zoom).to_pos2()
+                            })
+                            .or(self.active_end);
+                        if let Some(end) = final_image
+                            && let Some(operation) = redaction_operation_from_drag(
+                                start,
+                                end,
+                                [self.image.width(), self.image.height()],
+                                effect,
+                            )
+                        {
+                            self.push_layer(MarkupLayer::Redaction(operation));
+                            ctx.request_repaint();
+                        }
+                    }
+                    self.active_start = None;
+                    self.active_end = None;
+                    self.active_redaction_effect = None;
+                    self.redaction_drag_transform = None;
+                }
+                let preview_available = self.ensure_preview_texture(ctx, app);
+                #[cfg(test)]
+                {
+                    self.test_preview_displayed = preview_available;
+                }
+                let flattened_preview = matches!(
+                    &self.preview_state,
+                    PreviewState::Ready(PreviewKey::History(revision))
+                        if *revision == self.history.revision()
+                );
+                if preview_available {
+                    if let Some(texture) = &self.tex {
+                        painter.image(
+                            texture.id(),
+                            response.rect,
+                            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    }
+                } else {
+                    painter.rect_filled(response.rect, 0.0, Color32::DARK_GRAY);
+                    if let Some(message) = self.preview_error_message() {
+                        painter.text(
+                            response.rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            format!("Screenshot preview unavailable\n{message}"),
+                            egui::FontId::proportional(14.0),
+                            Color32::WHITE,
+                        );
+                    }
                 }
                 if let Some(rect) = self.crop_rect {
                     let draw = Rect::from_min_max(to_screen(rect.min), to_screen(rect.max));
@@ -1101,7 +1547,8 @@ impl ScreenshotEditor {
                         egui::StrokeKind::Middle,
                     );
                 }
-                for layer in self.history.layers() {
+                if preview_available && !flattened_preview {
+                    for layer in self.history.layers() {
                     match layer {
                         MarkupLayer::Stroke(stroke) => {
                             for points in stroke.points.windows(2) {
@@ -1190,54 +1637,84 @@ impl ScreenshotEditor {
                                 text.color,
                             );
                         }
+                        // A redaction selects the flattened raster preview above, so it is never
+                        // separately painted as a rectangle over the source image.
+                        MarkupLayer::Redaction(_) => {}
                     }
                 }
-                if let (Some(start), Some(end)) = (self.active_start, self.active_end) {
-                    let rect = Rect::from_two_pos(start, end);
-                    match self.tool {
-                        MarkupTool::Arrow => {
+                }
+                if preview_available {
+                    if let (Some(start), Some(end)) = (self.active_start, self.active_end) {
+                        let rect = Rect::from_two_pos(start, end);
+                        match self.tool {
+                            MarkupTool::Arrow => {
+                                painter.line_segment(
+                                    [to_screen(start), to_screen(end)],
+                                    Stroke::new(self.thickness, self.current_color()),
+                                );
+                            }
+                            MarkupTool::Rectangle => {
+                                let draw =
+                                    Rect::from_min_max(to_screen(rect.min), to_screen(rect.max));
+                                painter.rect_stroke(
+                                    draw,
+                                    0.0,
+                                    Stroke::new(self.thickness, self.current_color()),
+                                    egui::StrokeKind::Middle,
+                                );
+                            }
+                            MarkupTool::Highlight => {
+                                let draw =
+                                    Rect::from_min_max(to_screen(rect.min), to_screen(rect.max));
+                                painter.rect_filled(draw, 0.0, self.current_color());
+                            }
+                            MarkupTool::Redact => {
+                                let draw =
+                                    Rect::from_min_max(to_screen(rect.min), to_screen(rect.max));
+                                painter.rect_stroke(
+                                    draw,
+                                    0.0,
+                                    Stroke::new(2.0, Color32::WHITE),
+                                    egui::StrokeKind::Middle,
+                                );
+                                painter.rect_stroke(
+                                    draw,
+                                    0.0,
+                                    Stroke::new(1.0, Color32::BLACK),
+                                    egui::StrokeKind::Middle,
+                                );
+                            }
+                            MarkupTool::Pen | MarkupTool::Marker | MarkupTool::Text => {}
+                        }
+                    }
+                    if let Some(stroke) = &self.active_stroke {
+                        for points in stroke.points.windows(2) {
                             painter.line_segment(
-                                [to_screen(start), to_screen(end)],
-                                Stroke::new(self.thickness, self.current_color()),
+                                [to_screen(points[0]), to_screen(points[1])],
+                                Stroke::new(stroke.thickness, stroke.color),
                             );
                         }
-                        MarkupTool::Rectangle => {
-                            let draw = Rect::from_min_max(to_screen(rect.min), to_screen(rect.max));
-                            painter.rect_stroke(
-                                draw,
-                                0.0,
-                                Stroke::new(self.thickness, self.current_color()),
-                                egui::StrokeKind::Middle,
-                            );
-                        }
-                        MarkupTool::Highlight => {
-                            let draw = Rect::from_min_max(to_screen(rect.min), to_screen(rect.max));
-                            painter.rect_filled(draw, 0.0, self.current_color());
-                        }
-                        MarkupTool::Pen | MarkupTool::Marker | MarkupTool::Text => {}
                     }
-                }
-                if let Some(stroke) = &self.active_stroke {
-                    for points in stroke.points.windows(2) {
-                        painter.line_segment(
-                            [to_screen(points[0]), to_screen(points[1])],
-                            Stroke::new(stroke.thickness, stroke.color),
+                    if let Some(active) = &self.active_text
+                        && !active.text.is_empty()
+                    {
+                        painter.text(
+                            to_screen(active.position),
+                            egui::Align2::LEFT_TOP,
+                            &active.text,
+                            egui::FontId::proportional(active.size),
+                            active.color,
                         );
                     }
                 }
-                if let Some(active) = &self.active_text
-                    && !active.text.is_empty()
-                {
-                    painter.text(
-                        to_screen(active.position),
-                        egui::Align2::LEFT_TOP,
-                        &active.text,
-                        egui::FontId::proportional(active.size),
-                        active.color,
-                    );
-                }
             });
         self.open = open;
+        if self.history.revision() != history_revision_before_frame {
+            ctx.request_repaint();
+        }
+        if !self.open {
+            self.clear_closed_preview();
+        }
     }
 }
 
@@ -1246,7 +1723,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, atomic::AtomicBool};
 
-    const CONTROLS: [&str; 19] = [
+    const CONTROLS: [&str; 20] = [
         "Save",
         "Copy",
         "Pen",
@@ -1255,6 +1732,7 @@ mod tests {
         "Highlight",
         "Marker",
         "Text",
+        "Redact",
         "1",
         "2",
         "3",
@@ -1503,7 +1981,7 @@ mod tests {
         screen: Rect,
         events: Vec<egui::Event>,
     ) {
-        screenshot_editor_frame_output(context, editor, app, screen, events)
+        screenshot_editor_frame_output_limited(context, editor, app, screen, events, None)
             .drop_without_applying_deltas();
     }
 
@@ -1514,17 +1992,145 @@ mod tests {
         screen: Rect,
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
+        screenshot_editor_frame_output_limited(context, editor, app, screen, events, None)
+    }
+
+    fn screenshot_editor_frame_output_limited(
+        context: &egui::Context,
+        editor: &mut ScreenshotEditor,
+        app: &mut LauncherApp,
+        screen: Rect,
+        events: Vec<egui::Event>,
+        max_texture_side: Option<usize>,
+    ) -> egui::FullOutput {
         context.run_ui(
             egui::RawInput {
                 screen_rect: Some(screen),
                 focused: true,
                 events,
+                max_texture_side,
                 ..Default::default()
             },
             |ctx| {
                 editor.ui(ctx, app);
             },
         )
+    }
+
+    fn click_at(
+        context: &egui::Context,
+        editor: &mut ScreenshotEditor,
+        app: &mut LauncherApp,
+        screen: Rect,
+        position: Pos2,
+    ) {
+        screenshot_editor_frame(
+            context,
+            editor,
+            app,
+            screen,
+            vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        screenshot_editor_frame(
+            context,
+            editor,
+            app,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: position,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+    }
+
+    fn click_control(
+        context: &egui::Context,
+        editor: &mut ScreenshotEditor,
+        app: &mut LauncherApp,
+        screen: Rect,
+        label: &str,
+    ) -> Rect {
+        let output = screenshot_editor_frame_output(context, editor, app, screen, Vec::new());
+        let bounds = control_bounds(&output, label).map(|(_, bounds)| bounds);
+        output.drop_without_applying_deltas();
+        let bounds =
+            bounds.unwrap_or_else(|| panic!("the {label} control exposes a real UI response"));
+        click_at(context, editor, app, screen, bounds.center());
+        bounds
+    }
+
+    fn drag_primary(
+        context: &egui::Context,
+        editor: &mut ScreenshotEditor,
+        app: &mut LauncherApp,
+        screen: Rect,
+        start: Pos2,
+        end: Pos2,
+    ) {
+        screenshot_editor_frame(
+            context,
+            editor,
+            app,
+            screen,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        screenshot_editor_frame(
+            context,
+            editor,
+            app,
+            screen,
+            vec![egui::Event::PointerMoved(end)],
+        );
+        screenshot_editor_frame(
+            context,
+            editor,
+            app,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+    }
+
+    fn redaction_layers(history: &MarkupHistory) -> Vec<RedactionOperation> {
+        history
+            .layers()
+            .iter()
+            .filter_map(|layer| match layer {
+                MarkupLayer::Redaction(operation) => Some(*operation),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn output_preview_uploads(output: &egui::FullOutput, texture_id: egui::TextureId) -> usize {
+        output
+            .textures_delta
+            .set
+            .iter()
+            .filter(|(set_id, _)| **set_id == texture_id)
+            .count()
     }
 
     fn marker_layers(history: &MarkupHistory) -> Vec<MarkupMarker> {
@@ -1538,6 +2144,16 @@ mod tests {
             .collect()
     }
 
+    fn redaction_bounds(
+        first: Pos2,
+        second: Pos2,
+    ) -> crate::annotation::redaction::RedactionBounds {
+        crate::annotation::redaction::RedactionBounds::from_corners(
+            first.x, first.y, second.x, second.y,
+        )
+        .unwrap()
+    }
+
     fn generated_grid_image(width: u32, height: u32) -> RgbaImage {
         RgbaImage::from_fn(width, height, |x, y| {
             if (x / 8 + y / 8) % 2 == 0 {
@@ -1546,6 +2162,820 @@ mod tests {
                 image::Rgba([56, 76, 96, 255])
             }
         })
+    }
+
+    fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn key_release_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn send_key_shortcut(
+        context: &egui::Context,
+        editor: &mut ScreenshotEditor,
+        app: &mut LauncherApp,
+        screen: Rect,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+        max_texture_side: Option<usize>,
+    ) {
+        for event in [
+            egui::Event::ModifiersChanged(modifiers),
+            key_event(key, modifiers),
+            key_release_event(key, modifiers),
+            egui::Event::ModifiersChanged(egui::Modifiers::default()),
+        ] {
+            screenshot_editor_frame_output_limited(
+                context,
+                editor,
+                app,
+                screen,
+                vec![event],
+                max_texture_side,
+            )
+            .drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn screenshot_redaction_drag_captures_effects_and_history_shortcuts() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let root = tempfile::tempdir().unwrap();
+        let mut app = screenshot_editor_test_app(&context, root.path());
+        context.style_mut_of(context.theme(), |style| style.animation_time = 0.0);
+        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(1100.0, 900.0));
+        let image = generated_grid_image(200, 130);
+        let mut editor = ScreenshotEditor::new(
+            image.clone(),
+            root.path().join("unused-redaction-preview.png"),
+            false,
+            false,
+            MarkupTool::Pen,
+        );
+        editor.test_window_width = Some(850.0);
+        editor.zoom = 1.5;
+        editor.push_layer(MarkupLayer::Marker(MarkupMarker {
+            center: Pos2::new(30.0, 25.0),
+            number: 1,
+            color: Color32::RED,
+            size: 24.0,
+        }));
+        for _ in 0..3 {
+            screenshot_editor_frame(&context, &mut editor, &mut app, screen, Vec::new());
+        }
+
+        editor.zoom = 0.25;
+        let tool_output = screenshot_editor_frame_output_limited(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            Vec::new(),
+            Some(8192),
+        );
+        let redact_button = control_bounds(&tool_output, "Redact").map(|(_, bounds)| bounds);
+        tool_output.drop_without_applying_deltas();
+        let redact_button = redact_button.expect("the large-image editor exposes the Redact tool");
+        for event in [
+            egui::Event::PointerMoved(redact_button.center()),
+            egui::Event::PointerButton {
+                pos: redact_button.center(),
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ] {
+            screenshot_editor_frame_output_limited(
+                &context,
+                &mut editor,
+                &mut app,
+                screen,
+                vec![event],
+                Some(8192),
+            )
+            .drop_without_applying_deltas();
+        }
+        screenshot_editor_frame_output_limited(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: redact_button.center(),
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            Some(8192),
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(editor.tool, MarkupTool::Redact);
+        assert_eq!(editor.redaction_mode, RedactionMode::Solid);
+        click_control(&context, &mut editor, &mut app, screen, "Blur");
+        let output =
+            screenshot_editor_frame_output(&context, &mut editor, &mut app, screen, Vec::new());
+        let blur_slider = slider_accessibility_bounds(&output, "Blur radius (image px)");
+        output.drop_without_applying_deltas();
+        let (blur_track, _, _) =
+            blur_slider.expect("Blur mode exposes its image-pixel radius slider");
+        let blur_slider_point = Pos2::new(
+            blur_track.left() + blur_track.width() * 0.86,
+            blur_track.center().y,
+        );
+        click_at(&context, &mut editor, &mut app, screen, blur_slider_point);
+        assert!((MIN_BLUR_RADIUS..=MAX_BLUR_RADIUS).contains(&editor.blur_radius));
+        assert_ne!(editor.blur_radius, DEFAULT_BLUR_RADIUS);
+
+        let image_rect = editor
+            .test_image_rect
+            .expect("the canvas response is retained");
+        let start = image_rect.min + (Pos2::new(155.0, 95.0) * editor.zoom).to_vec2();
+        let outside_release = image_rect.min + (Pos2::new(-20.0, 25.0) * editor.zoom).to_vec2();
+        let renders_before_drag = editor.test_preview_render_attempts;
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        let dragged_to = image_rect.min + (Pos2::new(130.0, 80.0) * editor.zoom).to_vec2();
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerMoved(dragged_to)],
+        );
+        assert!(redaction_layers(&editor.history).is_empty());
+        assert_eq!(editor.test_preview_render_attempts, renders_before_drag);
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerMoved(outside_release)],
+        );
+        assert!(editor.active_redaction_effect.is_some());
+        assert!(redaction_layers(&editor.history).is_empty());
+        assert_eq!(editor.test_preview_render_attempts, renders_before_drag);
+        let release_output = screenshot_editor_frame_output(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: outside_release,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        let uploaded_texture = editor.tex.as_ref().map(TextureHandle::id);
+        let preview_uploads =
+            uploaded_texture.map(|texture_id| output_preview_uploads(&release_output, texture_id));
+        release_output.drop_without_applying_deltas();
+        assert_eq!(
+            uploaded_texture.is_some(),
+            true,
+            "the redacted preview is uploaded"
+        );
+        assert_eq!(preview_uploads, Some(1));
+        let operations = redaction_layers(&editor.history);
+        assert_eq!(operations.len(), 1);
+        let bounds = operations[0].bounds();
+        assert_eq!(bounds.min()[0], 0.0);
+        assert!((bounds.min()[1] - 25.0).abs() < 0.01);
+        assert!((bounds.max()[0] - 155.0).abs() < 0.01);
+        assert!((bounds.max()[1] - 95.0).abs() < 0.01);
+        assert_eq!(
+            operations[0].effect(),
+            RedactionEffect::blur(editor.blur_radius).unwrap()
+        );
+        assert!(editor.test_marker_preview.is_empty());
+        assert_eq!(editor.test_preview_render_attempts, 1);
+        assert_eq!(editor.test_preview_texture_updates, 2);
+        let expected = render_markup_layers(&image, editor.history.layers()).unwrap();
+        use sha2::Digest as _;
+        assert_eq!(
+            editor.test_preview_last_hash,
+            Some(sha2::Sha256::digest(expected.as_raw()).into())
+        );
+
+        click_control(&context, &mut editor, &mut app, screen, "Pixelate");
+        let output =
+            screenshot_editor_frame_output(&context, &mut editor, &mut app, screen, Vec::new());
+        let block_slider = slider_accessibility_bounds(&output, "Pixel block size (image px)");
+        output.drop_without_applying_deltas();
+        let (block_track, _, _) =
+            block_slider.expect("Pixelate mode exposes its image-pixel block-size slider");
+        let block_slider_point = Pos2::new(
+            block_track.left() + block_track.width() * 0.82,
+            block_track.center().y,
+        );
+        click_at(&context, &mut editor, &mut app, screen, block_slider_point);
+        assert!((MIN_PIXEL_BLOCK_SIZE..=MAX_PIXEL_BLOCK_SIZE).contains(&editor.pixel_block_size));
+        assert_ne!(editor.pixel_block_size, DEFAULT_PIXEL_BLOCK_SIZE);
+        let image_rect = editor
+            .test_image_rect
+            .expect("the canvas response is retained");
+        let pixelate_start = image_rect.min + (Pos2::new(20.0, 20.0) * editor.zoom).to_vec2();
+        let pixelate_end = image_rect.min + (Pos2::new(70.0, 60.0) * editor.zoom).to_vec2();
+        drag_primary(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            pixelate_start,
+            pixelate_end,
+        );
+        let operations = redaction_layers(&editor.history);
+        assert_eq!(operations.len(), 2);
+        assert_eq!(
+            operations[0].effect(),
+            RedactionEffect::blur(operations[0].effect().strength()).unwrap(),
+            "later mode/radius edits cannot alter an earlier operation"
+        );
+        assert_eq!(
+            operations[1].effect(),
+            RedactionEffect::pixelate(editor.pixel_block_size).unwrap()
+        );
+
+        click_control(&context, &mut editor, &mut app, screen, "Solid");
+        click_control(&context, &mut editor, &mut app, screen, "Red fill");
+        let image_rect = editor
+            .test_image_rect
+            .expect("the canvas response is retained");
+        let solid_start = image_rect.min + (Pos2::new(82.0, 22.0) * editor.zoom).to_vec2();
+        let solid_end = image_rect.min + (Pos2::new(126.0, 50.0) * editor.zoom).to_vec2();
+        drag_primary(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            solid_start,
+            solid_end,
+        );
+        let operations = redaction_layers(&editor.history);
+        assert_eq!(operations.len(), 3);
+        assert_eq!(
+            operations[2].effect(),
+            RedactionEffect::solid([231, 76, 60])
+        );
+        assert_eq!(
+            operations[0].effect(),
+            RedactionEffect::blur(operations[0].effect().strength()).unwrap()
+        );
+        assert_eq!(
+            operations[1].effect(),
+            RedactionEffect::pixelate(editor.pixel_block_size).unwrap()
+        );
+
+        let ctrl = egui::Modifiers::CTRL;
+        let ctrl_shift = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
+        send_key_shortcut(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            egui::Key::Z,
+            ctrl,
+            None,
+        );
+        assert_eq!(redaction_layers(&editor.history).len(), 2);
+        send_key_shortcut(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            egui::Key::Z,
+            ctrl_shift,
+            None,
+        );
+        assert_eq!(redaction_layers(&editor.history).len(), 3);
+        send_key_shortcut(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            egui::Key::Z,
+            ctrl,
+            None,
+        );
+        assert_eq!(redaction_layers(&editor.history).len(), 2);
+        send_key_shortcut(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            egui::Key::Y,
+            ctrl,
+            None,
+        );
+        assert_eq!(redaction_layers(&editor.history).len(), 3);
+        assert_eq!(editor.test_preview_render_attempts, 7);
+
+        let clipped = redaction_operation_from_drag(
+            Pos2::new(120.0, 90.0),
+            Pos2::new(-5.0, 20.0),
+            [200, 130],
+            RedactionEffect::solid_black(),
+        )
+        .expect("reverse drags clipped to a non-empty image region remain valid");
+        assert_eq!(clipped.bounds().min(), [0.0, 20.0]);
+        assert_eq!(clipped.bounds().max(), [120.0, 90.0]);
+        assert!(
+            redaction_operation_from_drag(
+                Pos2::new(15.0, 10.0),
+                Pos2::new(15.0, 40.0),
+                [200, 130],
+                RedactionEffect::solid_black(),
+            )
+            .is_none()
+        );
+        assert!(
+            redaction_operation_from_drag(
+                Pos2::new(-20.0, 10.0),
+                Pos2::new(-5.0, 40.0),
+                [200, 130],
+                RedactionEffect::solid_black(),
+            )
+            .is_none()
+        );
+
+        let image_rect = editor
+            .test_image_rect
+            .expect("the canvas response is retained");
+        let cancelled_start = image_rect.min + (Pos2::new(30.0, 80.0) * editor.zoom).to_vec2();
+        let cancelled_end = image_rect.min + (Pos2::new(75.0, 105.0) * editor.zoom).to_vec2();
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![
+                egui::Event::PointerMoved(cancelled_start),
+                egui::Event::PointerButton {
+                    pos: cancelled_start,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        screenshot_editor_frame(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerMoved(cancelled_end)],
+        );
+        assert!(editor.active_redaction_effect.is_some());
+        let committed_before_close = editor.history.layers().len();
+        editor.open = false;
+        screenshot_editor_frame(&context, &mut editor, &mut app, screen, Vec::new());
+        assert_eq!(editor.history.layers().len(), committed_before_close);
+        assert!(editor.active_redaction_effect.is_none());
+        assert!(editor.tex.is_none());
+        assert_eq!(editor.test_preview_texture_bytes, 0);
+    }
+
+    #[test]
+    fn screenshot_redaction_preview_reuses_4k_texture_until_history_changes() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let root = tempfile::tempdir().unwrap();
+        let mut app = screenshot_editor_test_app(&context, root.path());
+        context.style_mut_of(context.theme(), |style| style.animation_time = 0.0);
+        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 720.0));
+        let image = generated_grid_image(3840, 2160);
+        let mut editor = ScreenshotEditor::new(
+            image,
+            root.path().join("unused-4k.png"),
+            false,
+            false,
+            MarkupTool::Pen,
+        );
+        editor.push_layer(MarkupLayer::Marker(MarkupMarker {
+            center: Pos2::new(30.0, 32.0),
+            number: 1,
+            color: Color32::RED,
+            size: 24.0,
+        }));
+        editor.push_layer(MarkupLayer::Redaction(RedactionOperation::new(
+            redaction_bounds(Pos2::new(10.0, 20.0), Pos2::new(80.0, 90.0)),
+            RedactionEffect::solid_black(),
+        )));
+        editor.push_layer(MarkupLayer::Redaction(RedactionOperation::new(
+            redaction_bounds(Pos2::new(120.0, 40.0), Pos2::new(220.0, 110.0)),
+            RedactionEffect::solid([190, 20, 30]),
+        )));
+
+        let first_output = screenshot_editor_frame_output_limited(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            Vec::new(),
+            Some(8192),
+        );
+        let uploaded_texture = editor.tex.as_ref().map(TextureHandle::id);
+        let preview_uploads =
+            uploaded_texture.map(|texture_id| output_preview_uploads(&first_output, texture_id));
+        first_output.drop_without_applying_deltas();
+        assert!(uploaded_texture.is_some(), "large preview texture is ready");
+        assert_eq!(preview_uploads, Some(1));
+        assert_eq!(editor.test_preview_render_attempts, 1);
+        assert_eq!(editor.test_preview_texture_updates, 1);
+        assert_eq!(
+            editor.test_preview_texture_bytes,
+            3840 * 2160 * std::mem::size_of::<Color32>()
+        );
+        assert_eq!(
+            editor.history.layers().len(),
+            3,
+            "history stores one compact marker and two region/effect operations"
+        );
+        assert!(editor.test_preview_last_hash.is_some());
+
+        for _ in 0..4 {
+            let output = screenshot_editor_frame_output_limited(
+                &context,
+                &mut editor,
+                &mut app,
+                screen,
+                Vec::new(),
+                Some(8192),
+            );
+            let preview_uploads =
+                uploaded_texture.map(|texture_id| output_preview_uploads(&output, texture_id));
+            output.drop_without_applying_deltas();
+            assert_eq!(preview_uploads, Some(0));
+        }
+        assert_eq!(editor.test_preview_render_attempts, 1);
+        assert_eq!(editor.test_preview_texture_updates, 1);
+
+        editor.zoom = 1.5;
+        editor.crop_rect = Some(Rect::from_min_max(
+            Pos2::new(5.0, 6.0),
+            Pos2::new(1200.0, 900.0),
+        ));
+        editor.redaction_mode = RedactionMode::Blur;
+        editor.blur_radius = MIN_BLUR_RADIUS;
+        editor.pixel_block_size = MAX_PIXEL_BLOCK_SIZE;
+        let view_only_output = screenshot_editor_frame_output_limited(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            Vec::new(),
+            Some(8192),
+        );
+        let view_only_uploads = uploaded_texture
+            .map(|texture_id| output_preview_uploads(&view_only_output, texture_id));
+        view_only_output.drop_without_applying_deltas();
+        assert_eq!(view_only_uploads, Some(0));
+        assert_eq!(editor.test_preview_render_attempts, 1);
+        assert_eq!(editor.test_preview_texture_updates, 1);
+
+        send_key_shortcut(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            egui::Key::Z,
+            egui::Modifiers::CTRL,
+            Some(8192),
+        );
+        assert_eq!(redaction_layers(&editor.history).len(), 1);
+        assert_eq!(editor.test_preview_render_attempts, 2);
+        assert_eq!(editor.test_preview_texture_updates, 2);
+        send_key_shortcut(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            egui::Key::Z,
+            egui::Modifiers::CTRL,
+            Some(8192),
+        );
+        assert_eq!(redaction_layers(&editor.history).len(), 0);
+        assert_eq!(
+            editor.test_marker_preview.len(),
+            1,
+            "the original base and ordinary overlay return exactly once after the last redaction is undone"
+        );
+        assert_eq!(editor.test_preview_render_attempts, 2);
+        assert_eq!(editor.test_preview_texture_updates, 3);
+        send_key_shortcut(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            egui::Key::Y,
+            egui::Modifiers::CTRL,
+            Some(8192),
+        );
+        assert_eq!(redaction_layers(&editor.history).len(), 1);
+        assert_eq!(editor.test_preview_render_attempts, 3);
+        send_key_shortcut(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            egui::Key::Y,
+            egui::Modifiers::CTRL,
+            Some(8192),
+        );
+        assert_eq!(redaction_layers(&editor.history).len(), 2);
+        assert_eq!(editor.test_preview_render_attempts, 4);
+        assert_eq!(editor.test_preview_texture_updates, 5);
+
+        editor.zoom = 0.25;
+        let tool_output = screenshot_editor_frame_output_limited(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            Vec::new(),
+            Some(8192),
+        );
+        let redact_button = control_bounds(&tool_output, "Redact").map(|(_, bounds)| bounds);
+        tool_output.drop_without_applying_deltas();
+        let redact_button = redact_button.expect("the large-image editor exposes the Redact tool");
+        for event in [
+            egui::Event::PointerMoved(redact_button.center()),
+            egui::Event::PointerButton {
+                pos: redact_button.center(),
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ] {
+            screenshot_editor_frame_output_limited(
+                &context,
+                &mut editor,
+                &mut app,
+                screen,
+                vec![event],
+                Some(8192),
+            )
+            .drop_without_applying_deltas();
+        }
+        screenshot_editor_frame_output_limited(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: redact_button.center(),
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            Some(8192),
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(editor.tool, MarkupTool::Redact);
+        let redact_controls = screenshot_editor_frame_output_limited(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            Vec::new(),
+            Some(8192),
+        );
+        let blur_mode_is_visible = control_bounds(&redact_controls, "Blur").is_some();
+        redact_controls.drop_without_applying_deltas();
+        assert!(
+            blur_mode_is_visible,
+            "the large-image Redact tool exposes its contextual effect controls"
+        );
+
+        let image_rect = editor
+            .test_image_rect
+            .expect("the large canvas response is retained");
+        let content_clip = editor
+            .test_content_clip
+            .expect("the actual editor content clip is retained");
+        let visible_canvas = image_rect.intersect(content_clip).intersect(screen);
+        assert!(visible_canvas.width() > 48.0 && visible_canvas.height() > 48.0);
+        let zoom = editor.zoom;
+        let drag_start = visible_canvas.min + egui::vec2(8.0, 8.0);
+        let drag_end = visible_canvas.min + egui::vec2(48.0, 40.0);
+        assert!(visible_canvas.contains(drag_start) && visible_canvas.contains(drag_end));
+        let expected_start = (drag_start - image_rect.min) / zoom;
+        let expected_end = (drag_end - image_rect.min) / zoom;
+        let render_attempts_before_drag = editor.test_preview_render_attempts;
+        let texture_updates_before_drag = editor.test_preview_texture_updates;
+        let press_output = screenshot_editor_frame_output_limited(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![
+                egui::Event::PointerMoved(drag_start),
+                egui::Event::PointerButton {
+                    pos: drag_start,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            Some(8192),
+        );
+        let press_uploads =
+            uploaded_texture.map(|texture_id| output_preview_uploads(&press_output, texture_id));
+        press_output.drop_without_applying_deltas();
+        assert_eq!(press_uploads, Some(0));
+        assert_eq!(
+            editor.test_preview_render_attempts,
+            render_attempts_before_drag
+        );
+        assert_eq!(
+            editor.test_preview_texture_updates,
+            texture_updates_before_drag
+        );
+        let motion_output = screenshot_editor_frame_output_limited(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerMoved(drag_end)],
+            Some(8192),
+        );
+        let motion_uploads =
+            uploaded_texture.map(|texture_id| output_preview_uploads(&motion_output, texture_id));
+        motion_output.drop_without_applying_deltas();
+        assert_eq!(motion_uploads, Some(0));
+        assert_eq!(
+            editor.test_preview_render_attempts,
+            render_attempts_before_drag
+        );
+        assert_eq!(
+            editor.test_preview_texture_updates,
+            texture_updates_before_drag
+        );
+        assert!(editor.active_redaction_effect.is_some());
+        assert_eq!(redaction_layers(&editor.history).len(), 2);
+        let release_output = screenshot_editor_frame_output_limited(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: drag_end,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            Some(8192),
+        );
+        let release_uploads =
+            uploaded_texture.map(|texture_id| output_preview_uploads(&release_output, texture_id));
+        release_output.drop_without_applying_deltas();
+        assert_eq!(release_uploads, Some(1));
+        assert_eq!(
+            editor.test_preview_render_attempts,
+            render_attempts_before_drag + 1
+        );
+        assert_eq!(
+            editor.test_preview_texture_updates,
+            texture_updates_before_drag + 1
+        );
+        let operations = redaction_layers(&editor.history);
+        assert_eq!(operations.len(), 3);
+        assert_eq!(
+            operations[2].effect(),
+            RedactionEffect::blur(editor.blur_radius).unwrap()
+        );
+        let actual_bounds = operations[2].bounds();
+        assert!((actual_bounds.min()[0] - expected_start.x).abs() < 0.02);
+        assert!((actual_bounds.min()[1] - expected_start.y).abs() < 0.02);
+        assert!((actual_bounds.max()[0] - expected_end.x).abs() < 0.02);
+        assert!((actual_bounds.max()[1] - expected_end.y).abs() < 0.02);
+        assert_eq!(
+            editor.history.layers().len(),
+            4,
+            "the drag commits one compact operation to history"
+        );
+
+        editor.open = false;
+        let close_output = screenshot_editor_frame_output_limited(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            Vec::new(),
+            Some(8192),
+        );
+        let texture_was_freed = uploaded_texture
+            .is_some_and(|texture_id| close_output.textures_delta.free.contains(&texture_id));
+        close_output.drop_without_applying_deltas();
+        assert!(
+            editor.tex.is_none(),
+            "closed editor releases its GPU texture handle"
+        );
+        assert!(
+            texture_was_freed,
+            "closing the editor emits a GPU texture free delta"
+        );
+        assert_eq!(editor.test_preview_texture_bytes, 0);
+        assert!(!editor.test_preview_displayed);
+    }
+
+    #[test]
+    fn screenshot_redaction_render_error_never_displays_stale_pixels_or_retries_idle() {
+        let context = egui::Context::default();
+        let root = tempfile::tempdir().unwrap();
+        let mut app = screenshot_editor_test_app(&context, root.path());
+        context.style_mut_of(context.theme(), |style| style.animation_time = 0.0);
+        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 720.0));
+        context
+            .run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    focused: true,
+                    ..Default::default()
+                },
+                |_| {},
+            )
+            .drop_without_applying_deltas();
+        let mut editor = ScreenshotEditor::new(
+            RgbaImage::from_pixel(2900, 2900, image::Rgba([80, 90, 100, 255])),
+            root.path().join("unused-failed-preview.png"),
+            false,
+            false,
+            MarkupTool::Pen,
+        );
+        editor.push_layer(MarkupLayer::Redaction(RedactionOperation::new(
+            redaction_bounds(Pos2::new(0.0, 0.0), Pos2::new(2900.0, 2900.0)),
+            RedactionEffect::blur(MIN_BLUR_RADIUS).unwrap(),
+        )));
+
+        let first_output = screenshot_editor_frame_output_limited(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            Vec::new(),
+            Some(8192),
+        );
+        first_output.drop_without_applying_deltas();
+        assert!(editor.tex.is_none());
+        assert!(!editor.test_preview_displayed);
+        assert!(editor.preview_error_message().is_some());
+        assert_eq!(editor.test_preview_render_attempts, 1);
+        assert_eq!(editor.test_preview_texture_updates, 0);
+        let idle_output = screenshot_editor_frame_output_limited(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            Vec::new(),
+            Some(8192),
+        );
+        idle_output.drop_without_applying_deltas();
+        assert_eq!(editor.test_preview_render_attempts, 1);
+
+        editor.undo();
+        let recovery_output = screenshot_editor_frame_output_limited(
+            &context,
+            &mut editor,
+            &mut app,
+            screen,
+            Vec::new(),
+            Some(8192),
+        );
+        recovery_output.drop_without_applying_deltas();
+        assert!(editor.tex.is_some());
+        assert!(editor.test_preview_displayed);
+        assert!(editor.preview_error_message().is_none());
+        assert_eq!(editor.test_preview_texture_updates, 1);
+        assert!(editor.test_preview_last_hash.is_none());
     }
 
     #[test]
@@ -1619,6 +3049,127 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_redaction_layers_compose_current_pixels_and_follow_history() {
+        use crate::annotation::redaction::{RedactionEffect, RedactionOperation};
+
+        let first_base = RgbaImage::from_fn(4, 1, |x, _| {
+            let value = [20, 40, 60, 80][x as usize];
+            image::Rgba([value, value, value, 255])
+        });
+        let second_base = RgbaImage::from_fn(4, 1, |x, _| {
+            let value = [200, 220, 60, 80][x as usize];
+            image::Rgba([value, value, value, 255])
+        });
+        let solid = RedactionOperation::new(
+            redaction_bounds(Pos2::new(0.0, 0.0), Pos2::new(2.0, 1.0)),
+            RedactionEffect::solid_black(),
+        );
+        let blur = RedactionOperation::new(
+            redaction_bounds(Pos2::new(0.0, 0.0), Pos2::new(4.0, 1.0)),
+            RedactionEffect::blur(1).unwrap(),
+        );
+        let mut history = MarkupHistory::default();
+        history.push(MarkupLayer::Redaction(solid));
+        let solid_only = render_markup_layers(&first_base, history.layers()).unwrap();
+        assert_eq!(solid_only.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        assert_eq!(solid_only.get_pixel(1, 0).0, [0, 0, 0, 255]);
+
+        history.push(MarkupLayer::Redaction(blur));
+        let composed = render_markup_layers(&first_base, history.layers()).unwrap();
+        let alternate_composed = render_markup_layers(&second_base, history.layers()).unwrap();
+        assert_eq!(
+            composed, alternate_composed,
+            "a later effect must sample the already-redacted working pixels"
+        );
+        assert_eq!(
+            (0..4)
+                .map(|x| composed.get_pixel(x, 0)[0])
+                .collect::<Vec<_>>(),
+            [0, 20, 47, 73]
+        );
+        assert_eq!(
+            match &history.layers()[1] {
+                MarkupLayer::Redaction(operation) => operation.effect(),
+                other => panic!("expected redaction layer, got {other:?}"),
+            },
+            RedactionEffect::blur(1).unwrap(),
+            "captured history parameters do not track subsequent tool settings"
+        );
+        let later_tool_setting = RedactionEffect::pixelate(4).unwrap();
+        assert_ne!(later_tool_setting, blur.effect());
+
+        assert!(history.undo());
+        assert_eq!(
+            render_markup_layers(&first_base, history.layers()).unwrap(),
+            solid_only
+        );
+        assert!(history.redo());
+        assert_eq!(
+            render_markup_layers(&first_base, history.layers()).unwrap(),
+            composed
+        );
+        assert!(history.undo());
+        history.push(MarkupLayer::Highlight(MarkupRect {
+            rect: Rect::from_min_max(Pos2::new(3.0, 0.0), Pos2::new(4.0, 1.0)),
+            color: Color32::RED,
+            thickness: 1.0,
+        }));
+        let annotated = render_markup_layers(&first_base, history.layers()).unwrap();
+        assert_eq!(annotated.get_pixel(3, 0).0, [255, 0, 0, 255]);
+        assert!(history.redo_stack.is_empty());
+        assert!(history.undo());
+        assert!(history.redo());
+        assert_eq!(
+            render_markup_layers(&first_base, history.layers()).unwrap(),
+            annotated
+        );
+        assert!(history.undo());
+        history.push(MarkupLayer::Text(MarkupText {
+            position: Pos2::new(0.0, 0.0),
+            text: "later ordinary layer".to_owned(),
+            color: Color32::WHITE,
+            size: 8.0,
+        }));
+        assert!(history.redo_stack.is_empty());
+    }
+
+    #[test]
+    fn screenshot_redaction_apply_edits_crops_after_effect_and_saved_png_matches() {
+        use crate::annotation::redaction::{RedactionEffect, RedactionOperation};
+
+        let base = generated_grid_image(8, 6);
+        let mut editor = ScreenshotEditor::new(
+            base.clone(),
+            PathBuf::from("unused-redaction.png"),
+            false,
+            false,
+            MarkupTool::Pen,
+        );
+        editor.push_layer(MarkupLayer::Redaction(RedactionOperation::new(
+            redaction_bounds(Pos2::new(2.2, 1.1), Pos2::new(6.0, 5.0)),
+            RedactionEffect::solid([210, 5, 9]),
+        )));
+        editor.crop_rect = Some(Rect::from_min_max(Pos2::new(1.0, 1.0), Pos2::new(7.0, 5.0)));
+
+        let full = render_markup_layers(&base, editor.history.layers()).unwrap();
+        assert_eq!(full.get_pixel(2, 2).0, [210, 5, 9, 255]);
+        let expected = image::imageops::crop_imm(&full, 1, 1, 6, 4).to_image();
+        let applied = editor.apply_edits().unwrap();
+        assert_eq!(applied, expected);
+        assert_eq!(applied.get_pixel(1, 1).0, [210, 5, 9, 255]);
+
+        let root = tempfile::tempdir().unwrap();
+        let output_path = root.path().join("redacted.png");
+        editor.save_image(&output_path).unwrap();
+        let saved = image::io::Reader::open(output_path)
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(saved, applied);
+    }
+
+    #[test]
     fn screenshot_marker_raster_bounds_center_digits_and_crop_before_saved_export() {
         let base = generated_grid_image(132, 96);
         let font = default_font_arc().expect("the bundled proportional font is available");
@@ -1671,7 +3222,7 @@ mod tests {
         let geometry_10 = marker_geometry(Pos2::ZERO, 10, 24.0, Some(&font));
         assert!(geometry_10.radius > geometry_9.radius);
 
-        let rendered = render_markup_layers(&base, &layers);
+        let rendered = render_markup_layers(&base, &layers).unwrap();
         assert_ne!(rendered.get_pixel(0, 0), base.get_pixel(0, 0));
         let marker_10 = &markers[2];
         assert_eq!(marker_text_color(marker_10.color), Color32::WHITE);
@@ -1725,9 +3276,9 @@ mod tests {
             Pos2::new(0.0, 0.0),
             Pos2::new(100.0, 72.0),
         ));
-        let full = render_markup_layers(&base, editor.history.layers());
+        let full = render_markup_layers(&base, editor.history.layers()).unwrap();
         let expected = image::imageops::crop_imm(&full, 0, 0, 100, 72).to_image();
-        let applied = editor.apply_edits();
+        let applied = editor.apply_edits().unwrap();
         assert_eq!(applied, expected);
 
         let evidence_dir = std::env::var_os("ML_SCREENSHOT_MARKER_EVIDENCE_DIR");
@@ -1988,7 +3539,7 @@ mod tests {
             .unwrap_or_else(|| tempdir.path().to_path_buf());
         std::fs::create_dir_all(&output_dir).unwrap();
         let output_path = output_dir.join("screenshot-marker-ui-crop.png");
-        let expected = editor.apply_edits();
+        let expected = editor.apply_edits().unwrap();
         editor.save_image(&output_path).unwrap();
         let saved = image::io::Reader::open(&output_path)
             .unwrap()

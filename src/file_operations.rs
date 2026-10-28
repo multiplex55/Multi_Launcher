@@ -6,6 +6,11 @@
 //! chain are reopened and checked while scanning and again before a later
 //! mutation boundary.
 
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityProgress, ActivityProgressUnit, ActivityRetirement, ActivitySlot,
+    ActivityTask,
+};
 use crate::batch_rename::{
     self, EntryInclusion, ExplicitDirectoryRoot, RenameInputSnapshot, RenamePlan, RenamePreview,
     RenameRuleSet, RenameSnapshotEntry, SelectionRevision, SnapshotEntryKind, SnapshotEntryRef,
@@ -16,7 +21,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
@@ -4815,14 +4820,17 @@ enum WorkerJob {
         request: RenameScanRequest,
         cancellation: ScanCancellation,
         reply: mpsc::Sender<RenameScanResult>,
+        activity: Option<ActivityTask>,
     },
     Apply {
         plan: VerifiedRenamePlan,
         cancellation: ScanCancellation,
+        activity: Option<ActivityTask>,
     },
     Undo {
         transaction_id: String,
         cancellation: ScanCancellation,
+        activity: Option<ActivityTask>,
     },
 }
 
@@ -4838,19 +4846,35 @@ impl WorkerJob {
     fn is_scan(&self) -> bool {
         matches!(self, Self::Scan { .. })
     }
+
+    fn activity(&self) -> Option<&ActivityTask> {
+        match self {
+            Self::Scan { activity, .. }
+            | Self::Apply { activity, .. }
+            | Self::Undo { activity, .. } => activity.as_ref(),
+        }
+    }
 }
 
 enum ActiveWorker {
-    Scan(RenameScanGeneration, ScanCancellation),
-    Apply(ScanCancellation),
-    Undo(ScanCancellation),
+    Scan(RenameScanGeneration, ScanCancellation, Option<ActivityTask>),
+    Apply(ScanCancellation, Option<ActivityTask>),
+    Undo(ScanCancellation, Option<ActivityTask>),
 }
 
 impl ActiveWorker {
     fn cancellation(&self) -> &ScanCancellation {
         match self {
-            Self::Scan(_, cancellation) | Self::Apply(cancellation) | Self::Undo(cancellation) => {
-                cancellation
+            Self::Scan(_, cancellation, _)
+            | Self::Apply(cancellation, _)
+            | Self::Undo(cancellation, _) => cancellation,
+        }
+    }
+
+    fn activity(&self) -> Option<&ActivityTask> {
+        match self {
+            Self::Scan(_, _, activity) | Self::Apply(_, activity) | Self::Undo(_, activity) => {
+                activity.as_ref()
             }
         }
     }
@@ -4887,6 +4911,8 @@ pub struct RenameScanCoordinator {
     runtime: Arc<Mutex<RenameRuntimeSnapshot>>,
     journal_path: Option<PathBuf>,
     worker: Option<JoinHandle<()>>,
+    activity_center: Option<ActivityCenter>,
+    next_activity_incarnation: AtomicU64,
 }
 
 impl RenameScanCoordinator {
@@ -4929,7 +4955,13 @@ impl RenameScanCoordinator {
             runtime,
             journal_path,
             worker: Some(worker),
+            activity_center: None,
+            next_activity_incarnation: AtomicU64::new(1),
         })
+    }
+
+    pub(crate) fn attach_activity_center(&mut self, center: ActivityCenter) {
+        self.activity_center = Some(center);
     }
 
     pub fn submit(
@@ -4969,15 +5001,31 @@ impl RenameScanCoordinator {
             .ok_or_else(|| std::io::Error::other("rename scan generation overflow"))?;
         if let Some(active) = &state.active {
             active.cancellation().cancel();
+            if let Some(activity) = active.activity() {
+                activity.mark_cancelling();
+            }
         }
         if let Some(pending) = state.pending.take() {
             cancel_pending_job(pending);
         }
         let cancellation = ScanCancellation::new();
+        let activity = self.activity_center.as_ref().and_then(|center| {
+            center.start(
+                ActivityOwner::Rename,
+                ActivitySlot::Primary,
+                ActivityIncarnation::new(generation.0),
+                ActivityOperation::ScanRenameTargets,
+            )
+        });
+        if let Some(activity) = activity.as_ref() {
+            let cancel = cancellation.clone();
+            activity.set_cancel_handler(move || cancel.cancel());
+        }
         state.pending = Some(WorkerJob::Scan {
             request: RenameScanRequest::new(root, recursive, generation),
             cancellation: cancellation.clone(),
             reply,
+            activity,
         });
         wake.notify_one();
         Ok(RenameScanTicket {
@@ -5049,7 +5097,26 @@ impl RenameScanCoordinator {
             ));
         }
         let cancellation = ScanCancellation::new();
-        state.pending = Some(WorkerJob::Apply { plan, cancellation });
+        let activity = self.activity_center.as_ref().and_then(|center| {
+            center.start(
+                ActivityOwner::Rename,
+                ActivitySlot::Secondary,
+                ActivityIncarnation::new(
+                    self.next_activity_incarnation
+                        .fetch_add(1, Ordering::Relaxed),
+                ),
+                ActivityOperation::ApplyRename,
+            )
+        });
+        if let Some(activity) = activity.as_ref() {
+            let cancel = cancellation.clone();
+            activity.set_cancel_handler(move || cancel.cancel());
+        }
+        state.pending = Some(WorkerJob::Apply {
+            plan,
+            cancellation,
+            activity,
+        });
         runtime.operation_active = true;
         runtime.progress = None;
         runtime.last_message = None;
@@ -5106,9 +5173,25 @@ impl RenameScanCoordinator {
             ));
         }
         let cancellation = ScanCancellation::new();
+        let activity = self.activity_center.as_ref().and_then(|center| {
+            center.start(
+                ActivityOwner::Rename,
+                ActivitySlot::Secondary,
+                ActivityIncarnation::new(
+                    self.next_activity_incarnation
+                        .fetch_add(1, Ordering::Relaxed),
+                ),
+                ActivityOperation::UndoRename,
+            )
+        });
+        if let Some(activity) = activity.as_ref() {
+            let cancel = cancellation.clone();
+            activity.set_cancel_handler(move || cancel.cancel());
+        }
         state.pending = Some(WorkerJob::Undo {
             transaction_id,
             cancellation,
+            activity,
         });
         runtime.operation_active = true;
         runtime.progress = None;
@@ -5126,6 +5209,9 @@ impl RenameScanCoordinator {
                 && !active.is_scan()
             {
                 active.cancellation().cancel();
+                if let Some(activity) = active.activity() {
+                    activity.mark_cancelling();
+                }
             }
             if state
                 .pending
@@ -5133,7 +5219,7 @@ impl RenameScanCoordinator {
                 .is_some_and(|pending| !pending.is_scan())
                 && let Some(pending) = state.pending.take()
             {
-                pending.cancellation().cancel();
+                cancel_pending_job(pending);
                 if let Ok(mut runtime) = self.runtime.lock() {
                     runtime.operation_active = false;
                     runtime.progress = None;
@@ -5188,9 +5274,11 @@ impl RenameScanCoordinator {
             state.startup_cancellation.cancel();
             if let Some(active) = &state.active {
                 active.cancellation().cancel();
+                if let Some(activity) = active.activity() {
+                    activity.mark_cancelling();
+                }
             }
             if let Some(pending) = state.pending.take() {
-                pending.cancellation().cancel();
                 cancel_pending_job(pending);
                 if let Ok(mut runtime) = self.runtime.lock() {
                     runtime.operation_active = false;
@@ -5243,12 +5331,36 @@ fn cancel_pending_job(job: WorkerJob) {
             request,
             cancellation,
             reply,
+            activity,
         } => {
             cancellation.cancel();
             let _ = reply.send(empty_scan_result(&request, RenameScanStatus::Cancelled));
+            if let Some(activity) = activity {
+                activity.finish(
+                    ActivityOutcome::Cancelled,
+                    None,
+                    ActivityRetirement::Confirmed,
+                );
+            }
         }
-        WorkerJob::Apply { cancellation, .. } | WorkerJob::Undo { cancellation, .. } => {
+        WorkerJob::Apply {
+            cancellation,
+            activity,
+            ..
+        }
+        | WorkerJob::Undo {
+            cancellation,
+            activity,
+            ..
+        } => {
             cancellation.cancel();
+            if let Some(activity) = activity {
+                activity.finish(
+                    ActivityOutcome::Cancelled,
+                    None,
+                    ActivityRetirement::Confirmed,
+                );
+            }
         }
     }
 }
@@ -5312,10 +5424,19 @@ fn scan_worker_loop(
                 WorkerJob::Scan {
                     request,
                     cancellation,
+                    activity,
                     ..
-                } => ActiveWorker::Scan(request.generation, cancellation.clone()),
-                WorkerJob::Apply { cancellation, .. } => ActiveWorker::Apply(cancellation.clone()),
-                WorkerJob::Undo { cancellation, .. } => ActiveWorker::Undo(cancellation.clone()),
+                } => ActiveWorker::Scan(request.generation, cancellation.clone(), activity.clone()),
+                WorkerJob::Apply {
+                    cancellation,
+                    activity,
+                    ..
+                } => ActiveWorker::Apply(cancellation.clone(), activity.clone()),
+                WorkerJob::Undo {
+                    cancellation,
+                    activity,
+                    ..
+                } => ActiveWorker::Undo(cancellation.clone(), activity.clone()),
             });
             job
         };
@@ -5324,23 +5445,60 @@ fn scan_worker_loop(
                 request,
                 cancellation,
                 reply,
+                activity,
             } => {
                 let generation = request.generation;
+                if let Some(activity) = activity.as_ref() {
+                    activity.mark_running();
+                }
                 let result = scan_rename_root(request.clone(), &cancellation);
+                if let Some(activity) = activity.as_ref() {
+                    let (outcome, diagnostic) = match result.status {
+                        RenameScanStatus::Cancelled => (ActivityOutcome::Cancelled, None),
+                        RenameScanStatus::Unsupported => (
+                            ActivityOutcome::Failed,
+                            Some(ActivityDiagnostic::NativeOperationUnavailable),
+                        ),
+                        RenameScanStatus::InvalidRoot | RenameScanStatus::Inaccessible => (
+                            ActivityOutcome::Failed,
+                            Some(ActivityDiagnostic::InvalidInput),
+                        ),
+                        RenameScanStatus::Complete
+                        | RenameScanStatus::Partial
+                        | RenameScanStatus::ResourceLimit
+                        | RenameScanStatus::ChangedDuringScan => (ActivityOutcome::Completed, None),
+                    };
+                    activity.finish(outcome, diagnostic, ActivityRetirement::Unavailable);
+                }
                 let _ = reply.send(result);
                 clear_active_worker(
                     &state,
-                    |active| matches!(active, ActiveWorker::Scan(active_generation, _) if *active_generation == generation),
+                    |active| matches!(active, ActiveWorker::Scan(active_generation, _, _) if *active_generation == generation),
                 );
             }
-            WorkerJob::Apply { plan, cancellation } => {
+            WorkerJob::Apply {
+                plan,
+                cancellation,
+                activity,
+            } => {
+                if let Some(activity) = activity.as_ref() {
+                    activity.mark_running();
+                }
                 let result = if let Some(path) = journal_path.as_deref() {
                     let report_runtime = Arc::clone(&runtime);
+                    let report_activity = activity.clone();
                     Some(crate::batch_rename_transaction::execute_apply(
                         plan,
                         path,
                         &cancellation,
                         move |progress| {
+                            if let Some(activity) = report_activity.as_ref() {
+                                activity.set_progress(Some(ActivityProgress::new(
+                                    progress.completed as u64,
+                                    Some(progress.total as u64),
+                                    ActivityProgressUnit::Files,
+                                )));
+                            }
                             if let Ok(mut runtime) = report_runtime.lock() {
                                 runtime.progress = Some(progress);
                             }
@@ -5349,7 +5507,11 @@ fn scan_worker_loop(
                 } else {
                     None
                 };
-                clear_active_worker(&state, |active| matches!(active, ActiveWorker::Apply(_)));
+                if let (Some(activity), Some(result)) = (activity.as_ref(), result.as_ref()) {
+                    let (outcome, diagnostic) = rename_activity_outcome(result.receipt.status());
+                    activity.finish(outcome, diagnostic, ActivityRetirement::Unavailable);
+                }
+                clear_active_worker(&state, |active| matches!(active, ActiveWorker::Apply(..)));
                 if let Some(result) = result {
                     publish_operation_result(&runtime, result);
                 } else if let Ok(mut runtime) = runtime.lock() {
@@ -5360,14 +5522,26 @@ fn scan_worker_loop(
             WorkerJob::Undo {
                 transaction_id,
                 cancellation,
+                activity,
             } => {
+                if let Some(activity) = activity.as_ref() {
+                    activity.mark_running();
+                }
                 let result = if let Some(path) = journal_path.as_deref() {
                     let report_runtime = Arc::clone(&runtime);
+                    let report_activity = activity.clone();
                     Some(crate::batch_rename_transaction::execute_undo(
                         &transaction_id,
                         path,
                         &cancellation,
                         move |progress| {
+                            if let Some(activity) = report_activity.as_ref() {
+                                activity.set_progress(Some(ActivityProgress::new(
+                                    progress.completed as u64,
+                                    Some(progress.total as u64),
+                                    ActivityProgressUnit::Files,
+                                )));
+                            }
                             if let Ok(mut runtime) = report_runtime.lock() {
                                 runtime.progress = Some(progress);
                             }
@@ -5376,7 +5550,11 @@ fn scan_worker_loop(
                 } else {
                     None
                 };
-                clear_active_worker(&state, |active| matches!(active, ActiveWorker::Undo(_)));
+                if let (Some(activity), Some(result)) = (activity.as_ref(), result.as_ref()) {
+                    let (outcome, diagnostic) = rename_activity_outcome(result.receipt.status());
+                    activity.finish(outcome, diagnostic, ActivityRetirement::Unavailable);
+                }
+                clear_active_worker(&state, |active| matches!(active, ActiveWorker::Undo(..)));
                 if let Some(result) = result {
                     publish_operation_result(&runtime, result);
                 } else if let Ok(mut runtime) = runtime.lock() {
@@ -5428,6 +5606,27 @@ fn publish_operation_result(
         }
         runtime.last_message = Some(result.message);
         runtime.operation_active = false;
+    }
+}
+
+fn rename_activity_outcome(
+    status: crate::batch_rename_transaction::RenameTransactionStatus,
+) -> (ActivityOutcome, Option<ActivityDiagnostic>) {
+    use crate::batch_rename_transaction::RenameTransactionStatus;
+    match status {
+        RenameTransactionStatus::Cancelled => (ActivityOutcome::Cancelled, None),
+        RenameTransactionStatus::Applied
+        | RenameTransactionStatus::Partial
+        | RenameTransactionStatus::Undone
+        | RenameTransactionStatus::Restored => (ActivityOutcome::Completed, None),
+        RenameTransactionStatus::Applying
+        | RenameTransactionStatus::Undoing
+        | RenameTransactionStatus::RecoveryRequired
+        | RenameTransactionStatus::Failed
+        | RenameTransactionStatus::Refused => (
+            ActivityOutcome::Failed,
+            Some(ActivityDiagnostic::ResultUnavailable),
+        ),
     }
 }
 

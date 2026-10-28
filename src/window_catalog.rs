@@ -207,6 +207,14 @@ impl WindowCatalog {
     }
 
     #[cfg(test)]
+    pub(crate) fn has_worker_for_test(&self) -> bool {
+        self.worker
+            .lock()
+            .map(|worker| worker.is_some())
+            .unwrap_or(true)
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_snapshot_with_descriptor(
         windows: Vec<WindowDescriptor>,
         current_window: impl Fn(usize) -> Option<WindowDescriptor> + Send + Sync + 'static,

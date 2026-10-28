@@ -3,6 +3,10 @@ use super::{
     capture_screen_region, recognize_captured_screen_region_with_profile_provider,
     selection::OcrGeneration,
 };
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityRetirement, ActivitySlot,
+};
 use crate::mkmacro::{
     DiagnosticKind, ExecResult, ExecutionDiagnostic, ScreenCaptureBackend, ScreenRect,
     ocr::OcrBackend,
@@ -39,7 +43,8 @@ impl OcrJob {
         ocr: Arc<dyn OcrBackend>,
         repaint: Arc<dyn Fn() + Send + Sync>,
     ) -> ExecResult<Self> {
-        Self::start_with_profile_provider(
+        Self::start_with_profile_provider_and_activity(
+            None,
             generation,
             rect,
             capture,
@@ -57,7 +62,67 @@ impl OcrJob {
         repaint: Arc<dyn Fn() + Send + Sync>,
         profile_languages: fn() -> ExecResult<Vec<String>>,
     ) -> ExecResult<Self> {
-        Self::start_with_spawn(
+        Self::start_with_activity_and_profile_provider(
+            None,
+            generation,
+            rect,
+            capture,
+            ocr,
+            repaint,
+            profile_languages,
+        )
+    }
+
+    pub(crate) fn start_with_activity(
+        activity_center: ActivityCenter,
+        generation: OcrGeneration,
+        rect: ScreenRect,
+        capture: Arc<dyn ScreenCaptureBackend>,
+        ocr: Arc<dyn OcrBackend>,
+        repaint: Arc<dyn Fn() + Send + Sync>,
+    ) -> ExecResult<Self> {
+        Self::start_with_activity_and_profile_provider(
+            Some(activity_center),
+            generation,
+            rect,
+            capture,
+            ocr,
+            repaint,
+            super::profile_language_tags,
+        )
+    }
+
+    pub(crate) fn start_with_profile_provider_and_activity(
+        activity_center: Option<ActivityCenter>,
+        generation: OcrGeneration,
+        rect: ScreenRect,
+        capture: Arc<dyn ScreenCaptureBackend>,
+        ocr: Arc<dyn OcrBackend>,
+        repaint: Arc<dyn Fn() + Send + Sync>,
+        profile_languages: fn() -> ExecResult<Vec<String>>,
+    ) -> ExecResult<Self> {
+        Self::start_with_activity_and_profile_provider(
+            activity_center,
+            generation,
+            rect,
+            capture,
+            ocr,
+            repaint,
+            profile_languages,
+        )
+    }
+
+    fn start_with_activity_and_profile_provider(
+        activity_center: Option<ActivityCenter>,
+        generation: OcrGeneration,
+        rect: ScreenRect,
+        capture: Arc<dyn ScreenCaptureBackend>,
+        ocr: Arc<dyn OcrBackend>,
+        repaint: Arc<dyn Fn() + Send + Sync>,
+        profile_languages: fn() -> ExecResult<Vec<String>>,
+    ) -> ExecResult<Self> {
+        Self::start_with_activity_and_spawn(
+            activity_center,
             generation,
             rect,
             capture,
@@ -82,10 +147,48 @@ impl OcrJob {
         profile_languages: fn() -> ExecResult<Vec<String>>,
         spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
     ) -> ExecResult<Self> {
+        Self::start_with_activity_and_spawn(
+            None,
+            generation,
+            rect,
+            capture,
+            ocr,
+            repaint,
+            profile_languages,
+            spawn,
+        )
+    }
+
+    fn start_with_activity_and_spawn(
+        activity_center: Option<ActivityCenter>,
+        generation: OcrGeneration,
+        rect: ScreenRect,
+        capture: Arc<dyn ScreenCaptureBackend>,
+        ocr: Arc<dyn OcrBackend>,
+        repaint: Arc<dyn Fn() + Send + Sync>,
+        profile_languages: fn() -> ExecResult<Vec<String>>,
+        spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+    ) -> ExecResult<Self> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = cancelled.clone();
+        let activity = activity_center.and_then(|center| {
+            center.start(
+                ActivityOwner::Ocr,
+                ActivitySlot::Primary,
+                ActivityIncarnation::new(generation.get()),
+                ActivityOperation::CaptureOcr,
+            )
+        });
+        if let Some(activity) = activity.as_ref() {
+            let cancel_signal = Arc::clone(&cancelled);
+            activity.set_cancel_handler(move || cancel_signal.store(true, Ordering::Release));
+        }
+        let worker_activity = activity.clone();
         let (sender, receiver) = mpsc::channel();
         let worker = Box::new(move || {
+            if let Some(activity) = worker_activity.as_ref() {
+                activity.mark_running();
+            }
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let frame = capture_screen_region(capture.as_ref(), rect, &|| {
                     worker_cancelled.load(Ordering::Acquire)
@@ -108,14 +211,35 @@ impl OcrJob {
                 )
             }))
             .unwrap_or_else(|_| Err(worker_error("OCR worker panicked")));
+            if let Some(activity) = worker_activity {
+                let (outcome, diagnostic) = if result.is_ok() {
+                    (ActivityOutcome::Completed, None)
+                } else if worker_cancelled.load(Ordering::Acquire) {
+                    (ActivityOutcome::Cancelled, None)
+                } else {
+                    (
+                        ActivityOutcome::Failed,
+                        Some(ActivityDiagnostic::WorkerFailed),
+                    )
+                };
+                activity.finish(outcome, diagnostic, ActivityRetirement::Unavailable);
+            }
             let _ = sender.send(OcrJobEvent {
                 generation,
                 kind: OcrJobEventKind::Finished(result),
             });
             repaint();
         });
-        spawn(worker)
-            .map_err(|error| worker_error(format!("Could not start OCR worker: {error}")))?;
+        if let Err(error) = spawn(worker) {
+            if let Some(activity) = activity {
+                activity.finish(
+                    ActivityOutcome::Failed,
+                    Some(ActivityDiagnostic::WorkerUnavailable),
+                    ActivityRetirement::Confirmed,
+                );
+            }
+            return Err(worker_error(format!("Could not start OCR worker: {error}")));
+        }
         Ok(Self {
             generation,
             receiver: Some(receiver),

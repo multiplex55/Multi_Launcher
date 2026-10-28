@@ -6,6 +6,10 @@
 //! separate output value. Callers must opt in explicitly before copying output
 //! into their editor source.
 
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityRetirement, ActivitySlot, ActivityTask,
+};
 use crate::xml_toolkit_engine::{
     MAX_XML_INPUT_BYTES, MAX_XML_SCHEMA_DIAGNOSTIC_BYTES, MAX_XPATH_EXPRESSION_BYTES,
     MAX_XPATH_NAMESPACE_BYTES, XmlDocumentId, XmlEngineError, XmlFormatMode, XmlNodeDetailKind,
@@ -306,9 +310,9 @@ struct Mailbox {
     snapshot: Arc<XmlSessionSnapshot>,
     pending_source: Option<SourceJob>,
     pending_format: Option<FormatJob>,
-    pending_detail: Option<XmlNodeDetailRequest>,
-    pending_xpath: Option<XmlXPathQueryRequest>,
-    pending_schema: Option<XmlSchemaValidationRequest>,
+    pending_detail: Option<DetailJob>,
+    pending_xpath: Option<XPathJob>,
+    pending_schema: Option<SchemaJob>,
     next_schema_request: u64,
     stopped: bool,
 }
@@ -316,6 +320,7 @@ struct Mailbox {
 struct SourceJob {
     revision: XmlSourceRevision,
     input: SourceInput,
+    activity: Option<ActivityTask>,
 }
 
 enum SourceInput {
@@ -327,10 +332,22 @@ enum SourceInput {
 struct FormatJob {
     revision: XmlSourceRevision,
     mode: XmlFormatMode,
+    activity: Option<ActivityTask>,
 }
 
 struct DetailJob {
     request: XmlNodeDetailRequest,
+    activity: Option<ActivityTask>,
+}
+
+struct XPathJob {
+    request: XmlXPathQueryRequest,
+    activity: Option<ActivityTask>,
+}
+
+struct SchemaJob {
+    request: XmlSchemaValidationRequest,
+    activity: Option<ActivityTask>,
 }
 
 /// One bounded source/format bridge. Its mailbox retains at most one pending
@@ -338,6 +355,7 @@ struct DetailJob {
 /// parse or spawn a worker per keystroke. `snapshot` is cheap to poll from egui.
 pub struct XmlEngineSession {
     shared: Arc<Shared>,
+    activity_center: Option<ActivityCenter>,
 }
 
 #[cfg(any(windows, test))]
@@ -433,22 +451,55 @@ impl SessionEngine for crate::xml_toolkit_engine::XmlEngineWorker {
 }
 
 impl XmlEngineSession {
+    fn start_activity(
+        &self,
+        slot: ActivitySlot,
+        incarnation: u64,
+        operation: ActivityOperation,
+    ) -> Option<ActivityTask> {
+        self.activity_center.as_ref()?.start(
+            ActivityOwner::Xml,
+            slot,
+            ActivityIncarnation::new(incarnation),
+            operation,
+        )
+    }
+
     /// Starts the single XML COM owner and its coalescing caller bridge.
     pub fn start() -> Result<Self, XmlSessionError> {
+        Self::start_with_optional_activity(None)
+    }
+
+    pub fn start_with_activity(center: ActivityCenter) -> Result<Self, XmlSessionError> {
+        Self::start_with_optional_activity(Some(center))
+    }
+
+    fn start_with_optional_activity(
+        activity_center: Option<ActivityCenter>,
+    ) -> Result<Self, XmlSessionError> {
         #[cfg(windows)]
         {
             let engine = crate::xml_toolkit_engine::XmlEngineWorker::start()
                 .map_err(XmlSessionError::Engine)?;
-            Self::start_with_engine(engine)
+            Self::start_with_engine_and_activity(engine, activity_center)
         }
         #[cfg(not(windows))]
         {
+            let _ = activity_center;
             Err(XmlSessionError::Engine(XmlEngineError::UnsupportedPlatform))
         }
     }
 
     #[cfg(any(windows, test))]
     fn start_with_engine<E: SessionEngine>(engine: E) -> Result<Self, XmlSessionError> {
+        Self::start_with_engine_and_activity(engine, None)
+    }
+
+    #[cfg(any(windows, test))]
+    fn start_with_engine_and_activity<E: SessionEngine>(
+        engine: E,
+        activity_center: Option<ActivityCenter>,
+    ) -> Result<Self, XmlSessionError> {
         let shared = Arc::new(Shared {
             mailbox: Mutex::new(Mailbox {
                 snapshot: Arc::new(XmlSessionSnapshot::default()),
@@ -469,7 +520,10 @@ impl XmlEngineSession {
             .spawn(move || session_main(engine, worker_shared))
             .map_err(|_| XmlSessionError::Engine(XmlEngineError::WorkerUnavailable))?;
         *lock(&shared.join) = Some(join);
-        Ok(Self { shared })
+        Ok(Self {
+            shared,
+            activity_center,
+        })
     }
 
     /// Replaces the active source without waiting for parsing. Older queued
@@ -525,11 +579,35 @@ impl XmlEngineSession {
                 },
             },
         });
-        mailbox.pending_source = Some(SourceJob { revision, input });
-        mailbox.pending_format = None;
-        mailbox.pending_detail = None;
-        mailbox.pending_xpath = None;
-        mailbox.pending_schema = None;
+        if let Some(job) = mailbox.pending_source.take() {
+            finish_xml_pending(job.activity);
+        }
+        if let Some(job) = mailbox.pending_format.take() {
+            finish_xml_pending(job.activity);
+        }
+        if let Some(job) = mailbox.pending_detail.take() {
+            finish_xml_pending(job.activity);
+        }
+        if let Some(job) = mailbox.pending_xpath.take() {
+            finish_xml_pending(job.activity);
+        }
+        if let Some(job) = mailbox.pending_schema.take() {
+            finish_xml_pending(job.activity);
+        }
+        let activity = if source_empty {
+            None
+        } else {
+            self.start_activity(
+                ActivitySlot::Primary,
+                revision.0,
+                ActivityOperation::ParseXml,
+            )
+        };
+        mailbox.pending_source = Some(SourceJob {
+            revision,
+            input,
+            activity,
+        });
         self.shared.wake.notify_one();
         Ok(revision)
     }
@@ -574,7 +652,9 @@ impl XmlEngineSession {
             status,
         };
         mailbox.snapshot = Arc::new(snapshot);
-        mailbox.pending_schema = None;
+        if let Some(job) = mailbox.pending_schema.take() {
+            finish_xml_pending(job.activity);
+        }
         self.shared.wake.notify_one();
         Ok(revision)
     }
@@ -614,10 +694,21 @@ impl XmlEngineSession {
             schema_revision: mailbox.snapshot.schema.revision,
             request: XmlSchemaRequestId::from_counter(request_id),
         };
+        let activity = self.start_activity(
+            ActivitySlot::Preview,
+            request.schema_revision.0,
+            ActivityOperation::ValidateXmlSchema,
+        );
         let mut snapshot = (*mailbox.snapshot).clone();
         snapshot.schema.status = XmlSchemaStatus::Pending(request.clone());
         mailbox.snapshot = Arc::new(snapshot);
-        mailbox.pending_schema = Some(request.clone());
+        if let Some(previous) = mailbox.pending_schema.take() {
+            finish_xml_pending(previous.activity);
+        }
+        mailbox.pending_schema = Some(SchemaJob {
+            request: request.clone(),
+            activity,
+        });
         self.shared.wake.notify_one();
         Ok(request)
     }
@@ -642,7 +733,19 @@ impl XmlEngineSession {
         let mut snapshot = (*mailbox.snapshot).clone();
         snapshot.output = XmlOutputStatus::Pending(mode);
         mailbox.snapshot = Arc::new(snapshot);
-        mailbox.pending_format = Some(FormatJob { revision, mode });
+        let activity = self.start_activity(
+            ActivitySlot::Secondary,
+            revision.0,
+            ActivityOperation::FormatXml,
+        );
+        if let Some(previous) = mailbox.pending_format.take() {
+            finish_xml_pending(previous.activity);
+        }
+        mailbox.pending_format = Some(FormatJob {
+            revision,
+            mode,
+            activity,
+        });
         self.shared.wake.notify_one();
         Ok(())
     }
@@ -674,7 +777,15 @@ impl XmlEngineSession {
         let mut snapshot = (*mailbox.snapshot).clone();
         snapshot.detail = XmlDetailStatus::Pending(request);
         mailbox.snapshot = Arc::new(snapshot);
-        mailbox.pending_detail = Some(request);
+        let activity = self.start_activity(
+            ActivitySlot::Preview,
+            request.detail_request.0,
+            ActivityOperation::InspectXmlNode,
+        );
+        if let Some(previous) = mailbox.pending_detail.take() {
+            finish_xml_pending(previous.activity);
+        }
+        mailbox.pending_detail = Some(DetailJob { request, activity });
         self.shared.wake.notify_one();
         Ok(())
     }
@@ -699,7 +810,9 @@ impl XmlEngineSession {
             XmlXPathStatus::NotRun
         };
         mailbox.snapshot = Arc::new(snapshot);
-        mailbox.pending_xpath = None;
+        if let Some(job) = mailbox.pending_xpath.take() {
+            finish_xml_pending(job.activity);
+        }
         self.shared.wake.notify_one();
         Ok(())
     }
@@ -733,7 +846,15 @@ impl XmlEngineSession {
         let mut snapshot = (*mailbox.snapshot).clone();
         snapshot.xpath = XmlXPathStatus::Pending(request.clone());
         mailbox.snapshot = Arc::new(snapshot);
-        mailbox.pending_xpath = Some(request);
+        let activity = self.start_activity(
+            ActivitySlot::Preview,
+            request.request.0,
+            ActivityOperation::QueryXml,
+        );
+        if let Some(previous) = mailbox.pending_xpath.take() {
+            finish_xml_pending(previous.activity);
+        }
+        mailbox.pending_xpath = Some(XPathJob { request, activity });
         self.shared.wake.notify_one();
         Ok(())
     }
@@ -785,11 +906,21 @@ impl XmlEngineSession {
     fn signal_shutdown(&self) {
         let mut mailbox = lock(&self.shared.mailbox);
         mailbox.stopped = true;
-        mailbox.pending_source = None;
-        mailbox.pending_format = None;
-        mailbox.pending_detail = None;
-        mailbox.pending_xpath = None;
-        mailbox.pending_schema = None;
+        if let Some(job) = mailbox.pending_source.take() {
+            finish_xml_pending(job.activity);
+        }
+        if let Some(job) = mailbox.pending_format.take() {
+            finish_xml_pending(job.activity);
+        }
+        if let Some(job) = mailbox.pending_detail.take() {
+            finish_xml_pending(job.activity);
+        }
+        if let Some(job) = mailbox.pending_xpath.take() {
+            finish_xml_pending(job.activity);
+        }
+        if let Some(job) = mailbox.pending_schema.take() {
+            finish_xml_pending(job.activity);
+        }
         mailbox.snapshot = Arc::new(XmlSessionSnapshot::default());
         self.shared.wake.notify_one();
     }
@@ -819,14 +950,14 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                 if let Some(format) = mailbox.pending_format.take() {
                     break Some(SessionAction::Format(format));
                 }
-                if let Some(request) = mailbox.pending_detail.take() {
-                    break Some(SessionAction::Detail(DetailJob { request }));
+                if let Some(job) = mailbox.pending_detail.take() {
+                    break Some(SessionAction::Detail(job));
                 }
-                if let Some(request) = mailbox.pending_xpath.take() {
-                    break Some(SessionAction::XPath(request));
+                if let Some(job) = mailbox.pending_xpath.take() {
+                    break Some(SessionAction::XPath(job));
                 }
-                if let Some(request) = mailbox.pending_schema.take() {
-                    break Some(SessionAction::Schema(request));
+                if let Some(job) = mailbox.pending_schema.take() {
+                    break Some(SessionAction::Schema(job));
                 }
                 mailbox = shared
                     .wake
@@ -840,6 +971,7 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
         };
         match action {
             SessionAction::Source(job) => {
+                let completion = XmlActivityCompletion::new(job.activity);
                 if let Some((_, document, _)) = current_document.take() {
                     engine.close(document);
                 }
@@ -851,6 +983,7 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                     SourceInput::Text(source) => engine.parse(source),
                     SourceInput::Failed(error) => Err(error),
                 };
+                completion.finish_result(result.is_ok());
                 let mut mailbox = lock(&shared.mailbox);
                 if mailbox.stopped || mailbox.snapshot.revision != Some(job.revision) {
                     drop(mailbox);
@@ -875,6 +1008,7 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                 mailbox.snapshot = Arc::new(snapshot);
             }
             SessionAction::Format(job) => {
+                let completion = XmlActivityCompletion::new(job.activity);
                 let Some((revision, document, _)) = current_document else {
                     continue;
                 };
@@ -882,6 +1016,7 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                     continue;
                 }
                 let result = engine.format(document, job.mode);
+                completion.finish_result(result.is_ok());
                 let mut mailbox = lock(&shared.mailbox);
                 if mailbox.stopped
                     || mailbox.snapshot.revision != Some(job.revision)
@@ -901,6 +1036,7 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                 mailbox.snapshot = Arc::new(snapshot);
             }
             SessionAction::Detail(job) => {
+                let completion = XmlActivityCompletion::new(job.activity);
                 let Some((revision, document, document_id)) = current_document else {
                     continue;
                 };
@@ -909,6 +1045,7 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                     continue;
                 }
                 let result = engine.detail(document, request.node, request.kind);
+                completion.finish_result(result.is_ok());
                 let mut mailbox = lock(&shared.mailbox);
                 if mailbox.stopped
                     || mailbox.snapshot.revision != Some(request.revision)
@@ -925,7 +1062,9 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                 };
                 mailbox.snapshot = Arc::new(snapshot);
             }
-            SessionAction::XPath(request) => {
+            SessionAction::XPath(job) => {
+                let completion = XmlActivityCompletion::new(job.activity);
+                let request = job.request;
                 let Some((revision, document, document_id)) = current_document else {
                     continue;
                 };
@@ -933,6 +1072,7 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                     continue;
                 }
                 let result = engine.query(document, &request.expression, &request.namespaces);
+                completion.finish_result(result.is_ok());
                 let mut mailbox = lock(&shared.mailbox);
                 if mailbox.stopped
                     || mailbox.snapshot.revision != Some(request.revision)
@@ -954,7 +1094,9 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                 };
                 mailbox.snapshot = Arc::new(snapshot);
             }
-            SessionAction::Schema(request) => {
+            SessionAction::Schema(job) => {
+                let completion = XmlActivityCompletion::new(job.activity);
+                let request = job.request;
                 let Some((revision, document, document_id)) = current_document else {
                     continue;
                 };
@@ -977,6 +1119,7 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                 let result = engine
                     .validate(document, request.schema_path.as_path())
                     .map_err(bound_schema_error);
+                completion.finish_result(result.is_ok());
                 let mut mailbox = lock(&shared.mailbox);
                 if mailbox.stopped
                     || mailbox.snapshot.revision != Some(request.source_revision)
@@ -1019,8 +1162,55 @@ enum SessionAction {
     Source(SourceJob),
     Format(FormatJob),
     Detail(DetailJob),
-    XPath(XmlXPathQueryRequest),
-    Schema(XmlSchemaValidationRequest),
+    XPath(XPathJob),
+    Schema(SchemaJob),
+}
+
+struct XmlActivityCompletion(Option<ActivityTask>);
+
+impl XmlActivityCompletion {
+    fn new(task: Option<ActivityTask>) -> Self {
+        if let Some(task) = task.as_ref() {
+            task.mark_running();
+        }
+        Self(task)
+    }
+
+    fn finish_result(mut self, succeeded: bool) {
+        if let Some(task) = self.0.take() {
+            task.finish(
+                if succeeded {
+                    ActivityOutcome::Completed
+                } else {
+                    ActivityOutcome::Failed
+                },
+                (!succeeded).then_some(ActivityDiagnostic::WorkerFailed),
+                ActivityRetirement::Unavailable,
+            );
+        }
+    }
+}
+
+impl Drop for XmlActivityCompletion {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.finish(
+                ActivityOutcome::Cancelled,
+                Some(ActivityDiagnostic::Retiring),
+                ActivityRetirement::Unavailable,
+            );
+        }
+    }
+}
+
+fn finish_xml_pending(task: Option<ActivityTask>) {
+    if let Some(task) = task {
+        task.finish(
+            ActivityOutcome::Cancelled,
+            None,
+            ActivityRetirement::Confirmed,
+        );
+    }
 }
 
 fn bound_schema_error(error: XmlEngineError) -> XmlEngineError {

@@ -70,8 +70,10 @@ pub use recorder_suggestions::*;
 pub use recorder_windows::*;
 pub use runtime::{
     BreakpointOccurrence, CommandResult, CompletedStep, CompletedStepOutcome, DebugSnapshot,
-    DiagnosticKey, MacroDiagnosticKey, MacroRuntime, MacroStepKey, RuntimeCommand, RuntimeOrigin,
-    RuntimePauseReason, RuntimeRunMode, RuntimeSnapshot, RuntimeState, StepState,
+    DiagnosticKey, InvocationSource, MacroDiagnosticKey, MacroRunSummary, MacroRuntime,
+    MacroStepKey, RuntimeCommand, RuntimeOrigin, RuntimePauseReason, RuntimeRunMode,
+    RuntimeSnapshot, RuntimeState, SafeFailureLocation, StepState, SummaryActionCategory,
+    SummaryOutcome, SummaryStepAggregate, SummarySubset, SummaryVisitTotals,
 };
 pub use screen::*;
 pub use store::*;

@@ -348,7 +348,8 @@ impl LauncherApp {
                 Arc::new(move || repaint_ctx.request_repaint());
             #[cfg(test)]
             let job = if let Some(provider) = lifecycle.profile_provider {
-                OcrJob::start_with_profile_provider(
+                OcrJob::start_with_profile_provider_and_activity(
+                    Some(self.activity_center.clone()),
                     generation,
                     rect,
                     lifecycle.desktop.clone(),
@@ -357,7 +358,8 @@ impl LauncherApp {
                     provider,
                 )
             } else {
-                OcrJob::start(
+                OcrJob::start_with_activity(
+                    self.activity_center.clone(),
                     generation,
                     rect,
                     lifecycle.desktop.clone(),
@@ -366,7 +368,8 @@ impl LauncherApp {
                 )
             };
             #[cfg(not(test))]
-            let job = OcrJob::start(
+            let job = OcrJob::start_with_activity(
+                self.activity_center.clone(),
                 generation,
                 rect,
                 lifecycle.desktop.clone(),

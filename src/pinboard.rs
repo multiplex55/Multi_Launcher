@@ -13,8 +13,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::{Arc, atomic::AtomicUsize};
-use std::thread::JoinHandle;
-
 const MIB: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -507,7 +505,7 @@ pub struct Pinboard {
     image_budget: Arc<SharedImageBudget>,
     gpu_budget: Arc<live::SharedGpuBudget>,
     pending: Option<PendingCapture>,
-    retired_live_workers: Vec<JoinHandle<()>>,
+    retired_live_workers: Vec<live::RetiredLiveWorker>,
     next_pin_id: u64,
     next_capture_generation: u64,
 }
@@ -1237,6 +1235,84 @@ mod tests {
         assert_eq!(stale_commit_board.image_bytes(), 4);
         assert!(stale_commit_board.commit_capture(current).is_ok());
         assert_eq!(stale_commit_board.image_bytes(), 4);
+    }
+
+    #[test]
+    fn activity_baseline_synthetic_live_pin_cancel_and_warm_reopen() {
+        let mut board = Pinboard::with_limits(PinboardLimits::new(3, 48, 16)).unwrap();
+        for cycle in 0..2 {
+            let identity = board
+                .reserve_live_capture(operation_id(0x6000 + cycle))
+                .unwrap();
+            let rect = ScreenRect::new(0, 0, 2, 2);
+            board.reserve_selected_rect(identity, rect).unwrap();
+            let reservation = board.take_live_reservation(identity).unwrap();
+            let binding = PinSourceBinding {
+                window: PinSourceWindowIdentity {
+                    hwnd: 51,
+                    process_id: 52,
+                    thread_id: 53,
+                },
+                captured_bounds: ScreenRect::new(0, 0, 12, 10),
+                crop: PinSourceCrop {
+                    x: 0,
+                    y: 0,
+                    width: 2,
+                    height: 2,
+                },
+            };
+            let (_tx, rx) = mpsc::channel();
+            let backend = FakePinLiveCaptureBackend {
+                first_image: RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255])),
+                first_content_size: (12, 10),
+                stream: Mutex::new(Some(rx)),
+                first_frame_gate: None,
+            };
+            let mut session = backend
+                .start(
+                    binding,
+                    identity.generation,
+                    reservation,
+                    board.gpu_budget(),
+                )
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                if let Some(result) = session.try_first_frame_result() {
+                    result.unwrap();
+                    break;
+                }
+                assert!(Instant::now() < deadline, "synthetic first frame deadline");
+                std::thread::yield_now();
+            }
+            board
+                .stage_live_capture(identity, binding, session)
+                .unwrap();
+            let pin = board.commit_capture(identity).unwrap();
+            let lease = board.get(pin).unwrap().current_image_handle().unwrap();
+            let cancel = Instant::now();
+            assert!(board.close(pin));
+            let ack_us = cancel.elapsed().as_micros();
+            board.shutdown_live_sessions_and_join().unwrap();
+            let join_us = cancel.elapsed().as_micros();
+            assert_eq!(
+                board.image_bytes(),
+                16,
+                "external lease deliberately retains pixels after join"
+            );
+            drop(lease);
+            assert_eq!(board.image_bytes(), 0);
+            eprintln!(
+                "ACTIVITY_BASELINE {}",
+                serde_json::json!({
+                    "owner":"synthetic_live_pin","cycle":cycle,"warm_cycle":cycle==1,
+                    "operation":format!("{:?}",identity),"fixture_pixels":[2,2],
+                    "cancel_ack_us":ack_us,"worker_join_us":join_us,
+                    "retained_external_lease_bytes_after_join":16,"owner_bytes_after_lease_drop":0,
+                    "native_capture":false,"ui_frame_latency":"not measured","cleanup":"joined"
+                })
+            );
+        }
     }
 
     #[test]

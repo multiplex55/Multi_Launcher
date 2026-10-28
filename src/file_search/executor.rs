@@ -1,4 +1,4 @@
-use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
+use crate::file_search::coordinator::{CancellationToken, SearchEventSender, SearchExecutor};
 use crate::file_search::everything::{EverythingSearchExecutor, everything_diagnostic};
 use crate::file_search::model::{
     FileTypeFilter, FilenameMatchMode, SearchBackend, SearchEvent, SearchId, SearchKind,
@@ -158,7 +158,7 @@ impl SearchExecutor for FileSearchExecutor {
         id: SearchId,
         request: SearchRequest,
         token: CancellationToken,
-        events: mpsc::Sender<SearchEvent>,
+        events: SearchEventSender,
     ) {
         let plan = Self::plan_for_request(&request, &self.settings);
         let mut skipped: Option<(SearchBackend, String)> = None;
@@ -284,7 +284,7 @@ mod tests {
             id: SearchId,
             _request: SearchRequest,
             _token: CancellationToken,
-            events: mpsc::Sender<SearchEvent>,
+            events: SearchEventSender,
         ) {
             self.calls.lock().unwrap().push(id);
             let _ = events.send(SearchEvent::Completed { id });
@@ -392,7 +392,7 @@ mod tests {
                 },
             ),
             CancellationToken::new(),
-            tx,
+            tx.into(),
         );
         let events: Vec<_> = rx.try_iter().collect();
         assert!(events.contains(&SearchEvent::Started {
@@ -430,7 +430,7 @@ mod tests {
                 },
             ),
             CancellationToken::new(),
-            tx,
+            tx.into(),
         );
         let events: Vec<_> = rx.try_iter().collect();
         assert!(events.iter().any(|event| matches!(event, SearchEvent::BackendFallback { id: SearchId(2), from: SearchBackend::Ripgrep, to: SearchBackend::Native, reason } if reason.contains("ripgrep"))));
@@ -537,7 +537,7 @@ mod tests {
                 },
             ),
             CancellationToken::new(),
-            tx,
+            tx.into(),
         );
         assert!(rx.try_iter().any(|e| e
             == SearchEvent::Started {
@@ -571,7 +571,7 @@ mod tests {
                 },
             ),
             CancellationToken::new(),
-            tx,
+            tx.into(),
         );
         let events: Vec<_> = rx.try_iter().collect();
         assert!(events.iter().any(|e| matches!(
@@ -643,7 +643,7 @@ mod tests {
             SearchId(33),
             request(SearchKind::Filename, SearchScope::Roots { roots: vec![] }),
             CancellationToken::new(),
-            tx,
+            tx.into(),
         );
         assert!(rx.try_iter().any(|e| e
             == SearchEvent::Started {

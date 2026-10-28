@@ -1,4 +1,4 @@
-use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
+use crate::file_search::coordinator::{CancellationToken, SearchEventSender, SearchExecutor};
 use crate::file_search::matching::filename_highlight_match;
 use crate::file_search::model::{
     FileKind, FilenameResult, SearchEvent, SearchId, SearchKind, SearchProgress, SearchRequest,
@@ -28,7 +28,7 @@ impl SearchExecutor for WalkDirSearchExecutor {
         id: SearchId,
         request: SearchRequest,
         token: CancellationToken,
-        events: mpsc::Sender<SearchEvent>,
+        events: SearchEventSender,
     ) {
         if let Err(error) =
             search_filenames_in_directory(request, &self.settings, &token, &events, id)
@@ -53,7 +53,7 @@ pub fn search_filenames_in_directory(
     request: SearchRequest,
     settings: &FileSearchSettings,
     cancellation: &CancellationToken,
-    event_sender: &mpsc::Sender<SearchEvent>,
+    event_sender: &SearchEventSender,
     search_id: SearchId,
 ) -> Result<WalkDirSearchSummary, String> {
     let roots = match &request.scope {
@@ -352,11 +352,12 @@ mod tests {
 
     fn run(req: SearchRequest) -> (WalkDirSearchSummary, Vec<SearchEvent>) {
         let (tx, rx) = mpsc::channel();
+        let event_sender: SearchEventSender = tx.into();
         let summary = search_filenames_in_directory(
             req,
             &FileSearchSettings::default(),
             &CancellationToken::new(),
-            &tx,
+            &event_sender,
             SearchId(7),
         )
         .unwrap();
@@ -465,12 +466,13 @@ mod tests {
         let mut req = request(temp.path().join("missing"), "match", 20);
         req.scope = SearchScope::Roots { roots: vec![] };
         let (tx, _) = mpsc::channel();
+        let event_sender: SearchEventSender = tx.into();
         assert!(
             search_filenames_in_directory(
                 req,
                 &FileSearchSettings::default(),
                 &CancellationToken::new(),
-                &tx,
+                &event_sender,
                 SearchId(1)
             )
             .is_err()
@@ -506,13 +508,14 @@ mod tests {
         assert_eq!(summary.results_found, 3);
 
         let (tx, _rx) = mpsc::channel();
+        let event_sender: SearchEventSender = tx.into();
         let token = CancellationToken::new();
         token.cancel();
         let summary = search_filenames_in_directory(
             request(temp.path().to_path_buf(), "match", 20),
             &FileSearchSettings::default(),
             &token,
-            &tx,
+            &event_sender,
             SearchId(8),
         )
         .unwrap();
@@ -530,7 +533,7 @@ mod tests {
                 req,
                 &FileSearchSettings::default(),
                 &CancellationToken::new(),
-                &mpsc::channel().0,
+                &SearchEventSender::from(mpsc::channel().0),
                 SearchId(1)
             )
             .is_err()
@@ -543,7 +546,7 @@ mod tests {
                 req,
                 &FileSearchSettings::default(),
                 &CancellationToken::new(),
-                &mpsc::channel().0,
+                &SearchEventSender::from(mpsc::channel().0),
                 SearchId(1)
             )
             .is_err()

@@ -789,6 +789,293 @@ mod tests {
     static TRACK_C_EVENT_REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use tempfile::tempdir;
 
+    struct RealWatcherFixture {
+        app: Option<LauncherApp>,
+        release_probe: Option<crate::performance::track_c_watcher_lifecycle::HandlerReleaseProbe>,
+        workspace: Option<crate::performance::track_c_watcher_lifecycle::HandlerOwnedWorkspace>,
+        root: PathBuf,
+        original_cwd: PathBuf,
+        original_notes_directory: Option<std::ffi::OsString>,
+        original_template_directory: Option<std::ffi::OsString>,
+        original_skip_clipboard_sync: Option<std::ffi::OsString>,
+    }
+
+    impl RealWatcherFixture {
+        fn new(ctx: &egui::Context, initial_actions: Vec<crate::actions::Action>) -> Self {
+            use crate::performance::track_c_watcher_lifecycle::{
+                HandlerOwnedWorkspace, HandlerReleaseProbe,
+            };
+
+            let mut workspace = HandlerOwnedWorkspace::new();
+            let root = workspace.root().to_path_buf();
+            let original_cwd = workspace.original_cwd().to_path_buf();
+            let original_notes_directory = workspace.original_notes_directory();
+            let original_template_directory = workspace.original_template_directory();
+            let original_skip_clipboard_sync = workspace.original_skip_clipboard_sync();
+            workspace.callbacks_may_use_paths();
+            let release_probe = HandlerReleaseProbe::begin(&root);
+            let mut fixture = Self {
+                app: None,
+                release_probe: Some(release_probe),
+                workspace: Some(workspace),
+                root,
+                original_cwd,
+                original_notes_directory,
+                original_template_directory,
+                original_skip_clipboard_sync,
+            };
+
+            let actions_path = fixture.actions_path();
+            crate::actions::save_actions(&actions_path.to_string_lossy(), &initial_actions)
+                .expect("write initial actions before installing the app watcher");
+            crate::plugins::folders::save_folders(crate::plugins::folders::FOLDERS_FILE, &[])
+                .expect("write initial folders before installing the app watcher");
+            crate::plugins::bookmarks::save_bookmarks(
+                crate::plugins::bookmarks::BOOKMARKS_FILE,
+                &[],
+            )
+            .expect("write initial bookmarks before installing the app watcher");
+
+            fixture.app = Some(LauncherApp::new_for_real_watch_test_at(
+                ctx,
+                &fixture.root,
+                initial_actions,
+            ));
+            let app = fixture
+                .app
+                .as_ref()
+                .expect("the watcher app was constructed");
+            assert!(
+                app.real_watch_test_services_are_dormant_for_test(),
+                "the real-watcher policy must enable exactly three GUI file watchers while keeping non-watcher services dormant"
+            );
+            fixture
+        }
+
+        fn app(&self) -> &LauncherApp {
+            self.app.as_ref().expect("real-watcher app remains alive")
+        }
+
+        fn actions_path(&self) -> PathBuf {
+            self.root.join("actions.json")
+        }
+
+        fn finish(mut self) {
+            let mut report = self.release_callbacks();
+            let mut expected = [
+                crate::performance::track_c_watcher_lifecycle::HandlerKind::GuiActions,
+                crate::performance::track_c_watcher_lifecycle::HandlerKind::GuiFolders,
+                crate::performance::track_c_watcher_lifecycle::HandlerKind::GuiBookmarks,
+            ];
+            expected.sort_by_key(|kind| kind.token());
+            report.attempts.sort_by_key(|kind| kind.token());
+            report.created.sort_by_key(|kind| kind.token());
+            report.released.sort_by_key(|kind| kind.token());
+            assert_eq!(
+                report.attempts, expected,
+                "the watcher fixture attempted exactly the intended callback registrations"
+            );
+            assert_eq!(
+                report.created, expected,
+                "all intended watcher callbacks registered successfully"
+            );
+            assert_eq!(
+                report.released, expected,
+                "every registered watcher callback released before workspace cleanup"
+            );
+            assert!(
+                !report.overflowed,
+                "callback release report did not overflow"
+            );
+            assert!(
+                report.complete,
+                "all watcher callback closures were released"
+            );
+
+            let root = self.root.clone();
+            drop(self.workspace.take());
+            assert_eq!(
+                std::env::current_dir().expect("read current directory after fixture cleanup"),
+                self.original_cwd,
+                "watcher fixture restored the process current directory"
+            );
+            assert_eq!(
+                std::env::var_os("ML_NOTES_DIR"),
+                self.original_notes_directory,
+                "watcher fixture restored the notes directory environment variable"
+            );
+            assert_eq!(
+                std::env::var_os("ML_NOTE_TEMPLATES_DIR"),
+                self.original_template_directory,
+                "watcher fixture restored the template directory environment variable"
+            );
+            assert_eq!(
+                std::env::var_os("ML_SKIP_CLIPBOARD_SYNC"),
+                self.original_skip_clipboard_sync,
+                "watcher fixture restored the clipboard-sync environment variable"
+            );
+            assert!(
+                !root
+                    .try_exists()
+                    .expect("check watcher fixture root cleanup"),
+                "watcher fixture removed its owned root after callback release"
+            );
+        }
+
+        fn release_callbacks(
+            &mut self,
+        ) -> crate::performance::track_c_watcher_lifecycle::ReleaseReport {
+            drop(self.app.take());
+            let probe = self
+                .release_probe
+                .take()
+                .expect("the watcher callback release probe is still active");
+            let mut report = probe.wait(std::time::Duration::from_secs(5));
+            report.attempts.sort_by_key(|kind| kind.token());
+            report.created.sort_by_key(|kind| kind.token());
+            report.released.sort_by_key(|kind| kind.token());
+            eprintln!(
+                "real watcher callback release: attempted={:?}, registered={:?}, released={:?}, complete={}, overflowed={}",
+                report.attempts,
+                report.created,
+                report.released,
+                report.complete,
+                report.overflowed
+            );
+            self.workspace
+                .as_mut()
+                .expect("the watcher workspace remains owned")
+                .callbacks_released(&report);
+            report
+        }
+    }
+
+    impl Drop for RealWatcherFixture {
+        fn drop(&mut self) {
+            if self.release_probe.is_some() {
+                let report = self.release_callbacks();
+                assert!(
+                    report.complete || std::thread::panicking(),
+                    "captured watcher callbacks must release before restoring fixture paths"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn actions_watcher_sends_event() {
+        let actions = vec![crate::actions::Action {
+            label: "one".into(),
+            desc: String::new(),
+            action: "a".into(),
+            args: None,
+        }];
+        let ctx = egui::Context::default();
+        let fixture = RealWatcherFixture::new(&ctx, actions);
+
+        crate::actions::save_actions(&fixture.actions_path().to_string_lossy(), &[])
+            .expect("save changed actions to the watched file");
+        let event = crate::gui::recv_test_event_timeout(
+            fixture.app().watch_receiver(),
+            std::time::Duration::from_secs(3),
+        )
+        .expect("real actions file save should produce an app watcher event within three seconds");
+        assert!(matches!(event, crate::gui::TestWatchEvent::Actions));
+        fixture.finish();
+    }
+
+    #[test]
+    fn folders_watcher_sends_event() {
+        let ctx = egui::Context::default();
+        let fixture = RealWatcherFixture::new(&ctx, Vec::new());
+
+        crate::plugins::folders::save_folders(
+            crate::plugins::folders::FOLDERS_FILE,
+            &[crate::plugins::folders::FolderEntry {
+                label: "l".into(),
+                path: "p".into(),
+                alias: None,
+            }],
+        )
+        .expect("save changed folders to the watched file");
+        let event = crate::gui::recv_test_event_timeout(
+            fixture.app().watch_receiver(),
+            std::time::Duration::from_secs(3),
+        )
+        .expect("real folders file save should produce an app watcher event within three seconds");
+        assert!(matches!(event, crate::gui::TestWatchEvent::Folders));
+        fixture.finish();
+    }
+
+    #[test]
+    fn bookmarks_watcher_sends_event() {
+        let ctx = egui::Context::default();
+        let fixture = RealWatcherFixture::new(&ctx, Vec::new());
+
+        crate::plugins::bookmarks::save_bookmarks(
+            crate::plugins::bookmarks::BOOKMARKS_FILE,
+            &[crate::plugins::bookmarks::BookmarkEntry {
+                url: "u".into(),
+                alias: None,
+            }],
+        )
+        .expect("save changed bookmarks to the watched file");
+        let event = crate::gui::recv_test_event_timeout(
+            fixture.app().watch_receiver(),
+            std::time::Duration::from_secs(3),
+        )
+        .expect(
+            "real bookmarks file save should produce an app watcher event within three seconds",
+        );
+        assert!(matches!(event, crate::gui::TestWatchEvent::Bookmarks));
+        fixture.finish();
+    }
+
+    #[test]
+    fn real_watcher_fixture_unwind_releases_callbacks_before_workspace_cleanup() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let ctx = egui::Context::default();
+        let mut root = None;
+        let mut original_process_state = None;
+        let unwind = catch_unwind(AssertUnwindSafe(|| {
+            let fixture = RealWatcherFixture::new(&ctx, Vec::new());
+            root = Some(fixture.root.clone());
+            original_process_state = Some((
+                fixture.original_cwd.clone(),
+                fixture.original_notes_directory.clone(),
+                fixture.original_template_directory.clone(),
+                fixture.original_skip_clipboard_sync.clone(),
+            ));
+            panic!("exercise real watcher fixture cleanup during unwinding");
+        }));
+
+        assert!(
+            unwind.is_err(),
+            "the test must exercise its intentional panic"
+        );
+        let (original_cwd, original_notes_directory, original_template_directory, original_skip) =
+            original_process_state
+                .expect("the watcher fixture captured its original process state");
+        assert_eq!(
+            std::env::current_dir().expect("read current directory after unwind cleanup"),
+            original_cwd
+        );
+        assert_eq!(std::env::var_os("ML_NOTES_DIR"), original_notes_directory);
+        assert_eq!(
+            std::env::var_os("ML_NOTE_TEMPLATES_DIR"),
+            original_template_directory
+        );
+        assert_eq!(std::env::var_os("ML_SKIP_CLIPBOARD_SYNC"), original_skip);
+        assert!(
+            !root
+                .expect("the watcher fixture captured its owned root")
+                .try_exists()
+                .expect("check watcher root cleanup after unwind"),
+            "the workspace can be restored and removed only after callbacks release"
+        );
+    }
+
     fn action_reload_payload(
         seed: u64,
         count: usize,

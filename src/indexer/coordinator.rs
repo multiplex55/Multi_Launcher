@@ -4,6 +4,10 @@
 use super::IndexCheckpoint;
 use super::{IndexBatchIter, IndexBatchStep, IndexOptions};
 use crate::actions::Action;
+use crate::activity::{
+    ActivityCenter, ActivityIncarnation, ActivityOperation, ActivityOutcome, ActivityOwner,
+    ActivityRetirement, ActivitySlot, ActivityTask,
+};
 use crate::thread_reaper::{self, ReapPermit};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -201,6 +205,7 @@ struct ScanRequest {
     generation: u64,
     config: IndexConfig,
     cancellation: Arc<AtomicBool>,
+    activity: Option<ActivityTask>,
 }
 
 struct RequestIdentity {
@@ -332,7 +337,25 @@ impl IndexCoordinator {
     /// cancels the active token, replaces any pending request, and invalidates
     /// a result not yet consumed.
     pub fn submit(&self, config: IndexConfig) -> Result<u64, CoordinatorError> {
-        let generation = {
+        self.submit_inner(config, None)
+    }
+
+    /// Submit a request whose execution facts are published by the scanner
+    /// worker itself, independent of whether the GUI is currently visible.
+    pub fn submit_with_activity(
+        &self,
+        config: IndexConfig,
+        activity_center: &ActivityCenter,
+    ) -> Result<u64, CoordinatorError> {
+        self.submit_inner(config, Some(activity_center))
+    }
+
+    fn submit_inner(
+        &self,
+        config: IndexConfig,
+        activity_center: Option<&ActivityCenter>,
+    ) -> Result<u64, CoordinatorError> {
+        let (generation, replaced_pending_activity) = {
             let mut state = self.shared.state();
             if state.closed {
                 return Err(CoordinatorError::Closed);
@@ -348,18 +371,40 @@ impl IndexCoordinator {
                 active.store(true, Ordering::Release);
             }
             let cancellation = Arc::new(AtomicBool::new(false));
+            let activity = activity_center.and_then(|center| {
+                let task = center.start(
+                    ActivityOwner::Indexing,
+                    ActivitySlot::Primary,
+                    ActivityIncarnation::new(generation),
+                    ActivityOperation::IndexActions,
+                )?;
+                let cancel = Arc::clone(&cancellation);
+                task.set_cancel_handler(move || cancel.store(true, Ordering::Release));
+                Some(task)
+            });
             state.latest = Some(RequestIdentity {
                 generation,
                 config: config.clone(),
             });
-            state.pending = Some(ScanRequest {
+            let replaced_pending = state.pending.replace(ScanRequest {
                 generation,
                 config,
                 cancellation,
+                activity,
             });
             state.result = None;
-            generation
+            (
+                generation,
+                replaced_pending.and_then(|request| request.activity),
+            )
         };
+        if let Some(activity) = replaced_pending_activity {
+            activity.finish(
+                ActivityOutcome::Cancelled,
+                None,
+                ActivityRetirement::Confirmed,
+            );
+        }
         self.shared.changed.notify_all();
         Ok(generation)
     }
@@ -512,19 +557,29 @@ impl IndexCoordinator {
     /// handle is joined immediately; a live handle is transferred to the
     /// supervisor after coordinator locks are released.
     pub fn shutdown(&self) -> Result<(), ShutdownError> {
-        let panicked = {
+        let (panicked, pending_activity) = {
             let mut state = self.shared.state();
             state.closed = true;
             if let Some(cancellation) = state.active_cancellation.as_ref() {
                 cancellation.store(true, Ordering::Release);
             }
-            state.pending = None;
+            let pending_activity = state.pending.take().and_then(|request| request.activity);
             state.result = None;
             state.latest = None;
             state.notifier = None;
             state.notification_outstanding = false;
-            state.terminal == Some(WorkerTermination::Panicked)
+            (
+                state.terminal == Some(WorkerTermination::Panicked),
+                pending_activity,
+            )
         };
+        if let Some(activity) = pending_activity {
+            activity.finish(
+                ActivityOutcome::Cancelled,
+                None,
+                ActivityRetirement::Confirmed,
+            );
+        }
         self.shared.changed.notify_all();
 
         let (worker, reap_permit) = {
@@ -720,7 +775,39 @@ fn worker_loop(shared: Arc<Shared>, scanner: Scanner) {
             request
         };
 
-        let disposition = scanner(&request.config, Arc::clone(&request.cancellation));
+        if let Some(activity) = request.activity.as_ref() {
+            activity.mark_running();
+        }
+
+        let disposition = match catch_unwind(AssertUnwindSafe(|| {
+            scanner(&request.config, Arc::clone(&request.cancellation))
+        })) {
+            Ok(disposition) => disposition,
+            Err(payload) => {
+                if let Some(activity) = request.activity.as_ref() {
+                    activity.finish(
+                        ActivityOutcome::Failed,
+                        Some(crate::activity::ActivityDiagnostic::WorkerFailed),
+                        ActivityRetirement::Unavailable,
+                    );
+                }
+                std::panic::resume_unwind(payload);
+            }
+        };
+        if let Some(activity) = request.activity.as_ref() {
+            let outcome = if request.cancellation.load(Ordering::Acquire)
+                || matches!(&disposition, ScanDisposition::Cancelled)
+            {
+                ActivityOutcome::Cancelled
+            } else if matches!(&disposition, ScanDisposition::Failed(_)) {
+                ActivityOutcome::Failed
+            } else {
+                ActivityOutcome::Completed
+            };
+            let diagnostic = matches!(outcome, ActivityOutcome::Failed)
+                .then_some(crate::activity::ActivityDiagnostic::WorkerFailed);
+            activity.finish(outcome, diagnostic, ActivityRetirement::Unavailable);
+        }
         let callback = {
             let mut state = shared.state();
             if state
@@ -784,16 +871,23 @@ fn mark_unexpected_exit_if_open(shared: &Shared) {
 }
 
 fn mark_worker_termination(shared: &Shared, termination: WorkerTermination) {
-    let callback = {
+    let (callback, pending_activity) = {
         let mut state = shared.state();
         state.terminal = Some(termination);
         if let Some(active) = state.active_cancellation.as_ref() {
             active.store(true, Ordering::Release);
         }
         state.active_cancellation = None;
-        state.pending = None;
-        schedule_notification(&mut state)
+        let pending_activity = state.pending.take().and_then(|request| request.activity);
+        (schedule_notification(&mut state), pending_activity)
     };
+    if let Some(activity) = pending_activity {
+        activity.finish(
+            ActivityOutcome::Failed,
+            Some(crate::activity::ActivityDiagnostic::WorkerFailed),
+            ActivityRetirement::Confirmed,
+        );
+    }
     shared.changed.notify_all();
     if let Some(callback) = callback {
         invoke_callback(callback);
@@ -851,6 +945,7 @@ mod tests {
     #[test]
     fn index_coordinator_replaces_pending_and_suppresses_stale_completion() {
         let _serial = test_lock();
+        let activity_center = ActivityCenter::new();
         let (entered_tx, entered_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let _release_on_drop = ReleaseOnDrop(Some(release_tx.clone()));
@@ -882,16 +977,29 @@ mod tests {
             .unwrap();
 
         let first = coordinator
-            .submit(IndexConfig::new(vec!["A".into()], None))
+            .submit_with_activity(IndexConfig::new(vec!["A".into()], None), &activity_center)
             .unwrap();
         receive(&entered_rx);
         let second = coordinator
-            .submit(IndexConfig::new(vec!["B".into()], None))
+            .submit_with_activity(IndexConfig::new(vec!["B".into()], None), &activity_center)
             .unwrap();
         let third_config = IndexConfig::new(vec!["C".into()], None);
-        let third = coordinator.submit(third_config.clone()).unwrap();
+        let third = coordinator
+            .submit_with_activity(third_config.clone(), &activity_center)
+            .unwrap();
         assert!(third > second && second > first);
         assert_eq!(coordinator.bounds_for_test(), (1, 1, 0, 0));
+        let replaced = activity_center
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.key.incarnation().get() == second)
+            .expect("coalesced pending request remains visible as a terminal fact");
+        assert_eq!(
+            replaced.lifecycle,
+            crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Cancelled)
+        );
+        assert_eq!(replaced.retirement, ActivityRetirement::Confirmed);
 
         release_tx.send(()).unwrap();
 

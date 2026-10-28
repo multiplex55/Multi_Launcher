@@ -177,9 +177,45 @@ pub(crate) struct HotFolderRuntimeDriver {
 }
 
 impl HotFolderRuntimeDriver {
+    /// Construct the app-owned driver state without starting its worker.
+    /// Requests fail through the same disconnected-channel path used when a
+    /// live driver has shut down, while reads retain a valid empty snapshot.
+    #[cfg(test)]
+    pub(crate) fn dormant(data_root: AppDataRoot) -> Self {
+        let repair_store = crate::hotfolder::HotFolderRulesStore::new(&data_root);
+        let (sender, receiver) = mpsc::sync_channel(DRIVER_QUEUE_CAPACITY);
+        drop(receiver);
+        Self {
+            sender,
+            snapshot: Arc::new(RwLock::new(HotFolderDriverSnapshot::default())),
+            next_request_id: AtomicU64::new(1),
+            execution_control: HotFolderExecutionControl::initially_blocked(),
+            shutdown_requested: Arc::new(AtomicBool::new(true)),
+            worker: None,
+            reaper: None,
+            repair_store,
+        }
+    }
+
     pub(crate) fn new(
         data_root: AppDataRoot,
         adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter>,
+    ) -> Self {
+        Self::new_with_optional_activity(data_root, adapter, None)
+    }
+
+    pub(crate) fn new_with_activity(
+        data_root: AppDataRoot,
+        adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter>,
+        activity_center: crate::activity::ActivityCenter,
+    ) -> Self {
+        Self::new_with_optional_activity(data_root, adapter, Some(activity_center))
+    }
+
+    fn new_with_optional_activity(
+        data_root: AppDataRoot,
+        adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter>,
+        activity_center: Option<crate::activity::ActivityCenter>,
     ) -> Self {
         let repair_store = crate::hotfolder::HotFolderRulesStore::new(&data_root);
         let (sender, receiver) = mpsc::sync_channel(DRIVER_QUEUE_CAPACITY);
@@ -200,6 +236,7 @@ impl HotFolderRuntimeDriver {
                     worker_control,
                     worker_shutdown,
                     worker_snapshot,
+                    activity_center,
                 )
             })
             .expect("Hot Folder app driver thread must start");
@@ -217,6 +254,11 @@ impl HotFolderRuntimeDriver {
 
     pub(crate) fn repair_store_handle(&self) -> crate::hotfolder::HotFolderRulesStore {
         self.repair_store.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_workers_for_test(&self) -> bool {
+        self.worker.is_some() || self.reaper.is_some()
     }
 
     pub(crate) fn snapshot(&self) -> HotFolderDriverSnapshot {
@@ -740,6 +782,7 @@ fn driver_main(
     control: HotFolderExecutionControl,
     shutdown_requested: Arc<AtomicBool>,
     published: Arc<RwLock<HotFolderDriverSnapshot>>,
+    activity_center: Option<crate::activity::ActivityCenter>,
 ) {
     let mut store_loaded = false;
     let mut inputs = HotFolderCapabilityInputs::empty();
@@ -821,6 +864,10 @@ fn driver_main(
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+
+        if let (Some(center), Some(engine)) = (activity_center.as_ref(), engine.as_mut()) {
+            engine.attach_activity_center(center.clone());
         }
 
         if plugin_enabled
@@ -1703,6 +1750,157 @@ mod m10e_driver_lifecycle_fixtures {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    struct RejectAllExternalActions;
+
+    impl crate::hotfolder::HotFolderExternalActionAdapter for RejectAllExternalActions {
+        fn supports(&self, _action: &RuleAction) -> bool {
+            false
+        }
+
+        fn dispatch(
+            &self,
+            _request: HotFolderExternalActionRequest,
+            _cancellation: &crate::file_operations::ScanCancellation,
+        ) -> HotFolderExternalActionOutcome {
+            panic!("the stale-preview fixture must not dispatch external actions")
+        }
+    }
+
+    #[test]
+    fn condition_edit_retires_a_previously_prepared_enable_confirmation() {
+        use crate::hotfolder::{
+            HotFolderConditions, HotFolderRulesStore, InclusiveU64Range, StrongActionConfirmation,
+        };
+
+        let temporary = tempfile::tempdir().expect("create isolated runtime fixture");
+        let watched = temporary.path().join("incoming");
+        let destination = temporary.path().join("moved");
+        std::fs::create_dir_all(&watched).expect("create watched root");
+        std::fs::create_dir_all(&destination).expect("create move destination");
+        let data_root = AppDataRoot::from_path(temporary.path().join("app_data"));
+        let store = HotFolderRulesStore::new(&data_root);
+        let empty = store.load();
+        let disabled = store
+            .add_rule(
+                empty.snapshot.revision,
+                HotFolderRule::new(
+                    "condition preview fixture",
+                    &watched,
+                    RuleAction::Move { destination },
+                ),
+            )
+            .expect("persist a disabled move rule");
+        let rule_id = disabled.rules[0].id.clone();
+        let inputs = HotFolderCapabilityInputs::empty();
+        let adapter: Arc<dyn crate::hotfolder::HotFolderExternalActionAdapter> =
+            Arc::new(RejectAllExternalActions);
+        let mut driver = HotFolderRuntimeDriver::new(data_root, adapter);
+
+        let start = driver.start(inputs.clone()).expect("start the rule owner");
+        let started = wait_for_acknowledgement(&driver, start);
+        assert!(
+            started
+                .acknowledgements
+                .iter()
+                .find(|ack| ack.request_id == start)
+                .expect("start acknowledgement")
+                .result
+                .is_ok()
+        );
+
+        let prepare = driver
+            .prepare_enable(disabled.revision, rule_id.clone(), inputs.clone())
+            .expect("prepare the existing strong-action confirmation");
+        let prepared = wait_for_acknowledgement(&driver, prepare);
+        assert!(
+            prepared
+                .acknowledgements
+                .iter()
+                .find(|ack| ack.request_id == prepare)
+                .expect("prepare acknowledgement")
+                .result
+                .is_ok()
+        );
+        let preview = prepared
+            .enable_previews
+            .iter()
+            .find(|preview| preview.rule.id == rule_id)
+            .expect("Move requires the usual explicit enable confirmation");
+        let stale_confirmation = StrongActionConfirmation::from_explicit_confirmation(
+            preview.rule.id.clone(),
+            preview.resulting_revision,
+            preview.fingerprint.clone(),
+        );
+
+        let mut changed = disabled.rules[0].clone();
+        changed.conditions = HotFolderConditions {
+            size_bytes: Some(InclusiveU64Range {
+                min: Some(1),
+                max: None,
+            }),
+            ..HotFolderConditions::default()
+        };
+        let save = driver
+            .save_edit(disabled.revision, changed, inputs.clone())
+            .expect("save a condition-only edit through the existing store owner");
+        let saved = wait_for_acknowledgement(&driver, save);
+        assert!(
+            saved
+                .acknowledgements
+                .iter()
+                .find(|ack| ack.request_id == save)
+                .expect("condition-save acknowledgement")
+                .result
+                .is_ok()
+        );
+        assert_eq!(
+            saved.store.as_ref().unwrap().rules[0].conditions.size_bytes,
+            Some(InclusiveU64Range {
+                min: Some(1),
+                max: None,
+            })
+        );
+        assert!(
+            !saved.store.as_ref().unwrap().rules[0].enabled,
+            "editing conditions uses the existing disable-on-change behavior"
+        );
+
+        let confirm = driver
+            .confirm_enable(preview.request_id, stale_confirmation, inputs.clone())
+            .expect("submit the now-stale confirmation");
+        let rejected = wait_for_acknowledgement(&driver, confirm);
+        let confirmation_ack = rejected
+            .acknowledgements
+            .iter()
+            .find(|ack| ack.request_id == confirm)
+            .expect("stale confirmation acknowledgement");
+        assert!(
+            confirmation_ack.result.is_err(),
+            "a condition-only store revision change invalidates the prepared authorization"
+        );
+        assert!(!rejected.store.as_ref().unwrap().rules[0].enabled);
+
+        let fresh_prepare = driver
+            .prepare_enable(saved.store.as_ref().unwrap().revision, rule_id, inputs)
+            .expect("submit a fresh prepare request for the condition-bearing row");
+        let refused = wait_for_acknowledgement(&driver, fresh_prepare);
+        let prepare_ack = refused
+            .acknowledgements
+            .iter()
+            .find(|ack| ack.request_id == fresh_prepare)
+            .expect("fresh prepare acknowledgement");
+        assert!(
+            prepare_ack.result.is_err(),
+            "the intermediate runtime never offers authorization that ignores conditions"
+        );
+        assert!(refused.enable_previews.is_empty());
+        assert!(!refused.store.as_ref().unwrap().rules[0].enabled);
+
+        driver.shutdown_and_reap();
+        driver.join_reaper();
+        assert!(!driver.has_workers_for_test());
     }
 
     #[cfg(windows)]

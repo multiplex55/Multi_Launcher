@@ -19,7 +19,9 @@
 pub mod actions;
 pub mod actions_editor;
 pub mod active_window;
+pub mod activity;
 pub mod annotation;
+pub mod archive;
 pub mod batch_rename;
 pub(crate) mod batch_rename_transaction;
 pub mod brightness_service;

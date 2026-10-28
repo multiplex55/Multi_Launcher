@@ -5,6 +5,10 @@
 //! path used by future pin-window callbacks.
 
 use super::{ImageBudgetReservation, PinImageHandle};
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityRetirement, ActivitySlot, ActivityTask,
+};
 use crate::pinboard::PinCaptureGeneration;
 use crate::pinboard::source::{PinSourceBinding, PinSourceCrop};
 use image::RgbaImage;
@@ -468,6 +472,8 @@ pub(crate) struct PinLiveCaptureSession {
     first_frame: Receiver<Result<(), String>>,
     first_frame_reported: bool,
     worker: Option<JoinHandle<()>>,
+    activity: Option<ActivityTask>,
+    join_retained: Arc<AtomicBool>,
 }
 
 impl fmt::Debug for PinLiveCaptureSession {
@@ -486,28 +492,65 @@ impl PinLiveCaptureSession {
         generation: PinCaptureGeneration,
         reservation: ImageBudgetReservation,
         gpu_budget: Arc<SharedGpuBudget>,
+        activity_center: Option<ActivityCenter>,
         worker: LiveWorker,
     ) -> Result<Self, String> {
         let slot = Arc::new(PinLiveFrameSlot::new(generation));
         let signal = Arc::new(WorkerSignal::new());
         let worker_running = Arc::new(AtomicBool::new(true));
         let (first_frame_tx, first_frame) = mpsc::sync_channel(1);
+        let activity = activity_center.and_then(|center| {
+            center.start(
+                ActivityOwner::LivePin,
+                ActivitySlot::LiveCapture,
+                ActivityIncarnation::new(generation.get()),
+                ActivityOperation::CaptureLivePin,
+            )
+        });
+        if let Some(activity) = &activity {
+            let cancel_signal = Arc::downgrade(&signal);
+            let cancel_slot = Arc::downgrade(&slot);
+            activity.set_cancel_handler(move || {
+                if let Some(signal) = cancel_signal.upgrade() {
+                    signal.cancel();
+                }
+                if let Some(slot) = cancel_slot.upgrade() {
+                    slot.cancel(generation);
+                }
+            });
+        }
         let thread_binding = binding;
         let thread_slot = Arc::clone(&slot);
         let thread_signal = Arc::clone(&signal);
         let thread_worker_running = Arc::clone(&worker_running);
+        let thread_activity = activity.clone();
+        let thread_join_retained = Arc::new(AtomicBool::new(true));
+        let worker_join_retained = Arc::clone(&thread_join_retained);
         let join = thread::Builder::new()
             .name(format!("pin-live-{}", generation.get()))
             .spawn(move || {
-                let result = worker(
-                    thread_binding,
-                    generation,
-                    reservation,
-                    gpu_budget,
-                    Arc::clone(&thread_signal),
-                    Arc::clone(&thread_slot),
-                    first_frame_tx.clone(),
-                );
+                if let Some(activity) = &thread_activity {
+                    activity.mark_running();
+                }
+                let mut panic_payload = None;
+                let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    worker(
+                        thread_binding,
+                        generation,
+                        reservation,
+                        gpu_budget,
+                        Arc::clone(&thread_signal),
+                        Arc::clone(&thread_slot),
+                        first_frame_tx.clone(),
+                    )
+                })) {
+                    Ok(result) => result,
+                    Err(payload) => {
+                        panic_payload = Some(payload);
+                        Err("window capture worker terminated unexpectedly".to_owned())
+                    }
+                };
+                let worker_failed = result.is_err();
                 if let Err(error) = result {
                     thread_slot.set_status(generation, PinLiveStatus::Error(error.clone()));
                     let _ = first_frame_tx.try_send(Err(error));
@@ -523,9 +566,42 @@ impl PinLiveCaptureSession {
                         PinLiveStatus::TemporarilyUnavailable("live capture worker stopped".into()),
                     );
                 }
+                if let Some(activity) = &thread_activity {
+                    let status = thread_slot.status();
+                    let outcome = if thread_signal.snapshot().cancelled {
+                        ActivityOutcome::Cancelled
+                    } else if worker_failed
+                        || matches!(status, PinLiveStatus::Error(_))
+                        || !is_terminal_status(&status)
+                    {
+                        ActivityOutcome::Failed
+                    } else {
+                        ActivityOutcome::Completed
+                    };
+                    let diagnostic = (outcome == ActivityOutcome::Failed)
+                        .then_some(ActivityDiagnostic::WorkerFailed);
+                    let retirement = if worker_join_retained.load(Ordering::Acquire) {
+                        ActivityRetirement::Pending
+                    } else {
+                        ActivityRetirement::Unavailable
+                    };
+                    activity.finish(outcome, diagnostic, retirement);
+                }
                 thread_worker_running.store(false, Ordering::Release);
+                if let Some(payload) = panic_payload {
+                    std::panic::resume_unwind(payload);
+                }
             })
-            .map_err(|error| format!("could not start the live capture worker: {error}"))?;
+            .map_err(|error| {
+                if let Some(activity) = &activity {
+                    activity.finish(
+                        ActivityOutcome::Failed,
+                        Some(ActivityDiagnostic::WorkerUnavailable),
+                        ActivityRetirement::Confirmed,
+                    );
+                }
+                format!("could not start the live capture worker: {error}")
+            })?;
         Ok(Self {
             binding,
             source: PinLiveFrameSource {
@@ -537,6 +613,8 @@ impl PinLiveCaptureSession {
             first_frame,
             first_frame_reported: false,
             worker: Some(join),
+            activity,
+            join_retained: thread_join_retained,
         })
     }
 
@@ -633,9 +711,12 @@ impl PinLiveCaptureSession {
         Ok(())
     }
 
-    pub(crate) fn cancel_and_take_worker(&mut self) -> Option<JoinHandle<()>> {
+    pub(crate) fn cancel_and_take_worker(&mut self) -> Option<RetiredLiveWorker> {
         self.cancel();
-        self.worker.take()
+        self.worker.take().map(|worker| RetiredLiveWorker {
+            worker,
+            activity: self.activity.take(),
+        })
     }
 
     /// Creates a real bounded live-session owner for the generated native
@@ -731,7 +812,7 @@ impl PinLiveCaptureSession {
                 Ok(())
             },
         );
-        let session = Self::spawn(binding, generation, reservation, gpu_budget, worker)?;
+        let session = Self::spawn(binding, generation, reservation, gpu_budget, None, worker)?;
         Ok((session, frames_tx))
     }
 }
@@ -741,7 +822,35 @@ impl Drop for PinLiveCaptureSession {
         self.cancel();
         // Closing one child must not block the root UI on native teardown. The
         // worker owns its resources and exits after the cancellation signal.
-        self.worker.take();
+        if self.worker.take().is_some() {
+            self.join_retained.store(false, Ordering::Release);
+            if let Some(activity) = &self.activity {
+                activity.retirement_unavailable();
+            }
+        }
+    }
+}
+
+pub(crate) struct RetiredLiveWorker {
+    worker: JoinHandle<()>,
+    activity: Option<ActivityTask>,
+}
+
+impl RetiredLiveWorker {
+    pub(crate) fn is_finished(&self) -> bool {
+        self.worker.is_finished()
+    }
+
+    pub(crate) fn join(self) -> thread::Result<()> {
+        let result = self.worker.join();
+        if let Some(activity) = self.activity {
+            if result.is_ok() {
+                activity.retirement_confirmed();
+            } else {
+                activity.retirement_unavailable();
+            }
+        }
+        result
     }
 }
 
@@ -753,6 +862,17 @@ pub(crate) trait PinLiveCaptureBackend: Send + Sync {
         reservation: ImageBudgetReservation,
         gpu_budget: Arc<SharedGpuBudget>,
     ) -> Result<PinLiveCaptureSession, String>;
+
+    fn start_with_activity(
+        &self,
+        binding: PinSourceBinding,
+        generation: PinCaptureGeneration,
+        reservation: ImageBudgetReservation,
+        gpu_budget: Arc<SharedGpuBudget>,
+        _activity_center: ActivityCenter,
+    ) -> Result<PinLiveCaptureSession, String> {
+        self.start(binding, generation, reservation, gpu_budget)
+    }
 }
 
 #[derive(Default)]
@@ -771,6 +891,25 @@ impl PinLiveCaptureBackend for NativePinLiveCaptureBackend {
             generation,
             reservation,
             gpu_budget,
+            None,
+            Box::new(run_native_capture),
+        )
+    }
+
+    fn start_with_activity(
+        &self,
+        binding: PinSourceBinding,
+        generation: PinCaptureGeneration,
+        reservation: ImageBudgetReservation,
+        gpu_budget: Arc<SharedGpuBudget>,
+        activity_center: ActivityCenter,
+    ) -> Result<PinLiveCaptureSession, String> {
+        PinLiveCaptureSession::spawn(
+            binding,
+            generation,
+            reservation,
+            gpu_budget,
+            Some(activity_center),
             Box::new(run_native_capture),
         )
     }
@@ -1038,7 +1177,8 @@ mod native {
     use windows::Foundation::{EventRegistrationToken, TypedEventHandler};
     use windows::Graphics::Capture::{
         Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem,
-        GraphicsCaptureSession,
+        GraphicsCaptureSession, IDirect3D11CaptureFramePoolStatics2,
+        IGraphicsCaptureSessionStatics,
     };
     use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
     use windows::Graphics::DirectX::DirectXPixelFormat;
@@ -1062,7 +1202,7 @@ mod native {
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
     };
-    use windows::core::{Interface, factory};
+    use windows::core::{Interface, Type, factory};
 
     struct RoApartment;
 
@@ -1090,6 +1230,40 @@ mod native {
         frame_token: Option<EventRegistrationToken>,
         closed_token: Option<EventRegistrationToken>,
         capture_session: Option<GraphicsCaptureSession>,
+    }
+
+    fn create_free_threaded_frame_pool(
+        device: &IDirect3DDevice,
+        pixel_format: DirectXPixelFormat,
+        number_of_buffers: i32,
+        size: SizeInt32,
+    ) -> windows::core::Result<Direct3D11CaptureFramePool> {
+        let statics = factory::<Direct3D11CaptureFramePool, IDirect3D11CaptureFramePoolStatics2>()?;
+        // SAFETY: the typed factory and borrowed device are alive for this ABI
+        // call. The factory writes the declared interface output, which
+        // `from_abi` validates and takes ownership of only on success.
+        unsafe {
+            let mut result = std::ptr::null_mut();
+            (statics.vtable().CreateFreeThreaded)(
+                statics.as_raw(),
+                device.as_raw(),
+                pixel_format,
+                number_of_buffers,
+                size,
+                &mut result,
+            )
+            .and_then(|| Type::from_abi(result))
+        }
+    }
+
+    fn graphics_capture_is_supported() -> windows::core::Result<bool> {
+        let statics = factory::<GraphicsCaptureSession, IGraphicsCaptureSessionStatics>()?;
+        // SAFETY: the scoped typed factory remains live for this synchronous
+        // call, and the ABI writes the declared boolean result.
+        unsafe {
+            let mut result = false;
+            (statics.vtable().IsSupported)(statics.as_raw(), &mut result).map(|| result)
+        }
     }
 
     impl NativeCaptureResources {
@@ -1147,7 +1321,7 @@ mod native {
             validate_source_frame_geometry(binding, source_dimensions, false)?;
             gpu_reservation.resize(estimate_gpu_bytes(source_dimensions, binding.crop)?)?;
 
-            let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+            let frame_pool = create_free_threaded_frame_pool(
                 &self.winrt_device,
                 DirectXPixelFormat::B8G8R8A8UIntNormalized,
                 FRAME_POOL_BUFFERS as i32,
@@ -1261,7 +1435,7 @@ mod native {
         first_frame_sender: SyncSender<Result<(), String>>,
     ) -> Result<(), String> {
         let _apartment = RoApartment::initialize()?;
-        if !GraphicsCaptureSession::IsSupported()
+        if !graphics_capture_is_supported()
             .map_err(|error| format!("Windows Graphics Capture support check failed: {error}"))?
         {
             return Err("Windows Graphics Capture is not supported on this Windows version".into());
@@ -1895,13 +2069,14 @@ pub(crate) mod test_support {
         pub(crate) processed: SyncSender<()>,
     }
 
-    impl PinLiveCaptureBackend for FakePinLiveCaptureBackend {
-        fn start(
+    impl FakePinLiveCaptureBackend {
+        fn start_internal(
             &self,
             binding: PinSourceBinding,
             generation: PinCaptureGeneration,
             reservation: ImageBudgetReservation,
             gpu_budget: Arc<SharedGpuBudget>,
+            activity_center: Option<ActivityCenter>,
         ) -> Result<PinLiveCaptureSession, String> {
             let first_image = self.first_image.clone();
             let content_size = self.first_content_size;
@@ -1912,6 +2087,7 @@ pub(crate) mod test_support {
                 generation,
                 reservation,
                 gpu_budget,
+                activity_center,
                 Box::new(
                     move |binding, generation, reservation, _, signal, slot, first_tx| {
                         let cpu_budget = reservation.shared_budget();
@@ -2011,11 +2187,41 @@ pub(crate) mod test_support {
             )
         }
     }
+
+    impl PinLiveCaptureBackend for FakePinLiveCaptureBackend {
+        fn start(
+            &self,
+            binding: PinSourceBinding,
+            generation: PinCaptureGeneration,
+            reservation: ImageBudgetReservation,
+            gpu_budget: Arc<SharedGpuBudget>,
+        ) -> Result<PinLiveCaptureSession, String> {
+            self.start_internal(binding, generation, reservation, gpu_budget, None)
+        }
+
+        fn start_with_activity(
+            &self,
+            binding: PinSourceBinding,
+            generation: PinCaptureGeneration,
+            reservation: ImageBudgetReservation,
+            gpu_budget: Arc<SharedGpuBudget>,
+            activity_center: ActivityCenter,
+        ) -> Result<PinLiveCaptureSession, String> {
+            self.start_internal(
+                binding,
+                generation,
+                reservation,
+                gpu_budget,
+                Some(activity_center),
+            )
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activity::{ActivityCancelResult, ActivityLifecycle};
     use crate::mkmacro::ScreenRect;
     use crate::pinboard::source::PinSourceWindowIdentity;
     use crate::pinboard::{PinCaptureGeneration, SharedImageBudget};
@@ -2031,6 +2237,58 @@ mod tests {
             captured_bounds: ScreenRect::new(-20, 15, 12, 10),
             crop,
         }
+    }
+
+    #[test]
+    fn live_pin_activity_cancels_exact_session_and_confirms_join() {
+        let center = ActivityCenter::new();
+        let budget = Arc::new(SharedImageBudget {
+            limit: 32,
+            reserved_and_allocated_bytes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let generation = PinCaptureGeneration(std::num::NonZeroU64::new(57).unwrap());
+        let backend = test_support::FakePinLiveCaptureBackend {
+            first_image: RgbaImage::from_pixel(2, 2, image::Rgba([7, 8, 9, 255])),
+            first_content_size: (12, 10),
+            stream: Mutex::new(None),
+            first_frame_gate: None,
+        };
+        let mut session = backend
+            .start_with_activity(
+                binding(PinSourceCrop {
+                    x: 3,
+                    y: 2,
+                    width: 2,
+                    height: 2,
+                }),
+                generation,
+                budget.reserve(16).unwrap(),
+                Arc::new(SharedGpuBudget::default()),
+                center.clone(),
+            )
+            .unwrap();
+        session
+            .wait_first_frame_result(Duration::from_secs(2))
+            .expect("worker reports first frame before its bounded deadline")
+            .unwrap();
+
+        let active = center.snapshot();
+        assert_eq!(active.rows.len(), 1);
+        let key = active.rows[0].key;
+        assert_eq!(active.rows[0].lifecycle, ActivityLifecycle::Running);
+        assert!(active.rows[0].can_cancel);
+        assert_eq!(center.request_cancel(key), ActivityCancelResult::Requested);
+        session.cancel_and_join().unwrap();
+
+        let terminal = center.snapshot();
+        assert_eq!(terminal.rows.len(), 1);
+        assert_eq!(terminal.rows[0].key, key);
+        assert_eq!(
+            terminal.rows[0].lifecycle,
+            ActivityLifecycle::Terminal(ActivityOutcome::Cancelled)
+        );
+        assert_eq!(terminal.rows[0].retirement, ActivityRetirement::Confirmed);
+        assert!(!terminal.rows[0].can_cancel);
     }
 
     #[test]
@@ -2773,6 +3031,41 @@ mod tests {
         #[test]
         #[ignore = "requires an interactive Windows desktop with Windows Graphics Capture support"]
         fn native_live_pin_owned_window_smoke() {
+            run_owned_window_smoke(false);
+        }
+
+        #[test]
+        #[ignore = "requires an interactive Windows desktop with Windows Graphics Capture support"]
+        fn activity_baseline_native_live_pin_cancel_and_warm_cycle() {
+            use windows::Win32::System::WinRT::{
+                RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize,
+            };
+            // This repeated-session fixture owns one host apartment lifetime.
+            // Workers still initialize, cancel, release resources and join as
+            // before. It does not prove standalone last-MTA teardown/restart.
+            unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.unwrap();
+            struct HostApartment;
+            impl Drop for HostApartment {
+                fn drop(&mut self) {
+                    // SAFETY: balances this test thread's successful initialize,
+                    // after both owned capture workers and fixtures have retired.
+                    unsafe { RoUninitialize() };
+                }
+            }
+            let _host_apartment = HostApartment;
+            eprintln!("native baseline host: one balanced MTA lifetime across two sessions");
+            run_owned_window_smoke(true);
+            run_owned_window_smoke(true);
+        }
+
+        #[test]
+        #[ignore = "requires an interactive Windows desktop with Windows Graphics Capture support"]
+        fn activity_native_live_pin_cancel_and_warm_cycle_without_host_apartment() {
+            run_owned_window_smoke(true);
+            run_owned_window_smoke(true);
+        }
+
+        fn run_owned_window_smoke(active_cancel_baseline: bool) {
             use windows::Win32::Foundation::HWND;
             use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
 
@@ -2926,6 +3219,42 @@ mod tests {
                 Duration::from_secs(5),
             )
             .unwrap_or_else(|error| panic!("resumed source did not publish phase C: {error}"));
+
+            if active_cancel_baseline {
+                assert!(
+                    unsafe { IsWindow(hwnd) }.as_bool(),
+                    "source must still be live at cancel"
+                );
+                let cancel = Instant::now();
+                assert!(board.close(pin_id));
+                let ack_us = cancel.elapsed().as_micros();
+                board.shutdown_live_sessions_and_join().unwrap();
+                let join_us = cancel.elapsed().as_micros();
+                let retained_bytes = board.image_bytes();
+                drop(initial);
+                drop(covered);
+                drop(frozen);
+                drop(resumed);
+                drop(wake_source);
+                assert_eq!(board.image_bytes(), 0);
+                assert_eq!(gpu_budget.used.load(Ordering::Acquire), 0);
+                fixture.finish().unwrap();
+                eprintln!(
+                    "ACTIVITY_BASELINE {}",
+                    serde_json::json!({
+                        "owner":"native_wgc_live_pin", "operation":format!("{:?}",capture),
+                        "source_nonce":nonce,"source_pid":ready.process_id,"source_hwnd":ready.hwnd,
+                        "fixture_bounds":[360,240],"crop":[CROP_SIZE,CROP_SIZE],
+                        "warm_cycle":"paint/move/pause/resume, repeated owned-source session",
+                        "cancel_ack_us":ack_us,"worker_join_us":join_us,
+                        "cpu_lease_bytes_after_join":retained_bytes,
+                        "cpu_bytes_after_external_lease_drop":0,"gpu_bytes_after_join":0,
+                        "ui_frame_latency":"not measured","cleanup":"capture joined, owned source finished",
+                        "initial_png":initial_path,"updated_png":covered_path
+                    })
+                );
+                return;
+            }
 
             fixture.command("CLOSE_SOURCE").unwrap();
             let closed_deadline = Instant::now() + Duration::from_secs(2);

@@ -283,6 +283,37 @@ mod duplicate_finder_headless_tests {
 }
 
 #[cfg(test)]
+mod activity_headless_tests {
+    use super::*;
+
+    #[test]
+    fn activity_headless_route_requires_gui_without_external_fallback() {
+        let original = Action {
+            label: "Open Activity".into(),
+            desc: String::new(),
+            action: "activity:open".into(),
+            args: None,
+        };
+        let command = crate::commands::parse_action(&original).unwrap();
+        assert_eq!(command, Command::Dialog(DialogCommand::Activity));
+
+        let mut external_calls = Vec::new();
+        let error = execute_with_external(command, &original, &mut |target, args| {
+            external_calls.push((target.to_owned(), args.map(str::to_owned)));
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Activity requires the launcher interface")
+        );
+        assert!(external_calls.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod csv_route_headless_tests {
     use super::*;
 
@@ -378,6 +409,9 @@ fn execute_with_external(
         }
         Command::Dialog(DialogCommand::DuplicateFinder) => {
             anyhow::bail!("Duplicate Finder requires the launcher interface")
+        }
+        Command::Dialog(DialogCommand::Activity) => {
+            anyhow::bail!("Activity requires the launcher interface")
         }
         Command::Dialog(DialogCommand::Qr { .. }) => {
             anyhow::bail!("QR Generator requires the launcher interface")
@@ -870,7 +904,10 @@ fn execute_macro(command: MacroCommand) -> anyhow::Result<()> {
         MacroCommand::LegacyDialog => crate::plugins::macros::run_macro("dialog"),
         MacroCommand::MkDialog => Ok(()),
         MacroCommand::RunLegacy(name) => crate::plugins::macros::run_macro(&name),
-        MacroCommand::MkRun(id) => crate::mkmacro::runtime::run(id),
+        MacroCommand::MkRun(id) => crate::mkmacro::runtime::run_with_source(
+            id,
+            crate::mkmacro::InvocationSource::LauncherCommand,
+        ),
         MacroCommand::MkPause => crate::mkmacro::runtime::pause(),
         MacroCommand::MkResume => crate::mkmacro::runtime::resume(),
         MacroCommand::MkStop => crate::mkmacro::runtime::stop(),

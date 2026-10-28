@@ -837,6 +837,7 @@ pub(super) mod tests {
             ("volume:dialog", Panel::VolumeDialog),
             ("brightness:dialog", Panel::BrightnessDialog),
             ("sysinfo:cpu_list:4", Panel::CpuListDialog),
+            ("activity:open", Panel::ActivityDialog),
         ];
 
         for (raw, panel) in cases {
@@ -892,6 +893,17 @@ pub(super) mod tests {
                 "{raw} did not restore"
             );
             assert!(!app.usage.contains_key(raw), "{raw} recorded history");
+            if raw == "activity:open" {
+                app.update_panel_stack();
+                assert!(app.panel_states.activity_dialog);
+                assert!(app.panel_stack.contains(&Panel::ActivityDialog));
+
+                app.force_close_panel(Panel::ActivityDialog);
+                app.update_panel_stack();
+                assert!(!app.activity_dialog.open);
+                assert!(!app.panel_states.activity_dialog);
+                assert!(!app.panel_stack.contains(&Panel::ActivityDialog));
+            }
         }
     }
     #[test]

@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod asciiart;
 pub mod base_convert;
 pub mod batch_rename;

@@ -236,6 +236,10 @@ impl DialogCommandHost for LauncherApp {
         self.focus_panel(super::Panel::DuplicateFinderDialog);
     }
 
+    fn open_activity_dialog(&mut self) {
+        self.focus_panel(super::Panel::ActivityDialog);
+    }
+
     fn open_timer_dialog(&mut self) {
         self.timer_dialog.open_timer();
     }

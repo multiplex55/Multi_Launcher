@@ -498,7 +498,7 @@ impl DiffDialogState {
         self.binary_views.clear();
         self.watch_views.clear();
     }
-    pub fn ui(&mut self, ctx: &egui::Context) {
+    pub fn ui(&mut self, ctx: &egui::Context, activity_center: &crate::activity::ActivityCenter) {
         if !self.open {
             return;
         }
@@ -633,8 +633,10 @@ impl DiffDialogState {
                     self.navigate_back();
                 }
                 ui.separator();
-                let outcome =
-                    allocate_remaining_workspace(ui, |ui| self.render_workspace(ctx, ui)).inner;
+                let outcome = allocate_remaining_workspace(ui, |ui| {
+                    self.render_workspace(ctx, ui, activity_center)
+                })
+                .inner;
                 if let Some(error) = outcome.error {
                     self.workspace.error = Some(error);
                 }
@@ -710,6 +712,7 @@ impl DiffDialogState {
         &mut self,
         ctx: &egui::Context,
         ui: &mut egui::Ui,
+        activity_center: &crate::activity::ActivityCenter,
     ) -> WorkspaceRenderOutcome {
         // Copy only lightweight context before borrowing the retained view.
         let workspace_id = self.workspace.workspace_id;
@@ -906,6 +909,7 @@ impl DiffDialogState {
             }
             DiffView::FolderCompare(s) => {
                 let runtime = self.folder_runtimes.entry(view_id).or_default();
+                runtime.attach_activity_center(activity_center.clone());
                 poll_folder_runtime(s, runtime);
                 let tag = crate::diff::watch::WatchTag {
                     workspace: workspace_id,
@@ -1321,15 +1325,17 @@ fn poll_folder_runtime(
         runtime.right_error = None;
         state.left_scan_complete = false;
         state.right_scan_complete = false;
-        runtime.left_scan = Some(crate::diff::folder_scan::spawn_scan(
+        runtime.left_scan = Some(runtime.spawn_scan(
             state.left_root.clone(),
             runtime.generation,
             state.applied_scan_rules.clone(),
+            crate::activity::ActivitySlot::Primary,
         ));
-        runtime.right_scan = Some(crate::diff::folder_scan::spawn_scan(
+        runtime.right_scan = Some(runtime.spawn_scan(
             state.right_root.clone(),
             runtime.generation,
             state.applied_scan_rules.clone(),
+            crate::activity::ActivitySlot::Secondary,
         ));
     }
 

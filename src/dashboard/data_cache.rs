@@ -463,6 +463,17 @@ impl DashboardRuntime {
         Self::start_with_backend(ProductionDashboardBackend::default(), repaint)
     }
 
+    /// A valid cache owner for tests that do not exercise dashboard refreshes.
+    /// It preserves the normal shutdown-aware cache behavior without starting
+    /// a background worker.
+    #[cfg(test)]
+    pub(crate) fn dormant() -> Self {
+        Self {
+            cache: DashboardDataCache::disconnected(),
+            worker: None,
+        }
+    }
+
     fn start_with_backend(
         backend: impl DashboardDataBackend,
         repaint: impl Fn() + Send + Sync + 'static,
@@ -492,6 +503,11 @@ impl DashboardRuntime {
 
     pub fn cache(&self) -> DashboardDataCache {
         self.cache.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_worker_for_test(&self) -> bool {
+        self.worker.is_some()
     }
 }
 

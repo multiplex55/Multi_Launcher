@@ -16,9 +16,11 @@ must be prepared separately; this task's paired warm no-op measurements found
 For opt-in benchmark probes and bounded Job Object execution, see the
 [performance harness](perf_harness/README.md).
 
-Use `run_owned_process.ps1` for bounded test executables and native probes.
-Requires Windows, PowerShell 7, and access to process inventory and Application
-events (elevation may be needed). Use a fresh evidence directory for each run.
+Use `run_owned_process.ps1` for bounded native executables. Requires Windows
+and PowerShell 7. The runner creates the process suspended, verifies assignment
+to a kill-on-close Job Object, and only then resumes it; it does not scan or kill
+processes by name. It does not query Application event providers. Use a
+fresh evidence directory for each run.
 
 ```powershell
 & .\dev\run_owned_process.ps1 `
@@ -29,25 +31,35 @@ events (elevation may be needed). Use a fresh evidence directory for each run.
 
 The native OCR regression requires an installed English OCR pack and a working
 user-profile recognizer. Compile with a separately contained `cargo test --lib
---no-run` first. Launch the compiled test binary directly when its exact PID
-must be recorded; 200 ms descendant sampling can miss short-lived test children
-of a runner such as Nextest.
+--no-run` first. The runner records process identities from its verified Job
+Object, including short-lived descendants while they remain active.
 
-`Start-Process` joins the argument array into a Windows command line. Include
-literal double quotes around arguments containing spaces or expressions that
-need quoting, for example `@('nextest', 'run', '--lib', '-E', '"test(/^ocr::job::tests::/)"')`.
-This script does not reinterpret arguments through another shell.
+`-ArgumentList` accepts raw native arguments and keeps spaces, embedded quotes,
+and filter punctuation in their original argument. The legacy `-Arguments`
+parameter remains pre-encoded for existing callers such as `dev/test_perf`; do
+not pass raw strings to that compatibility parameter when they require quoting.
 
 Windows start hidden by default. Use `-WindowStyle Normal` only for explicitly
-requested interactive verification. Timeout, an owned crash reporter, or an
-inventory failure triggers cleanup of the launched process tree and verified
-recorded identities. A reporter whose target identity cannot be verified is
-logged as uncertain and left alone. No processes are killed by name.
+requested interactive verification. Timeout or an ownership-monitor failure
+triggers cleanup of the verified Job Object and recorded identities. No
+processes are killed by name.
 
-Evidence includes stdout/stderr, PID/creation/parent records, relevant Application
-Error/WER events, termination/errors, post-cleanup identity checks, and
-`result.json`. Event reporting may be delayed or unavailable; an empty event log
-does not disprove a native crash. Unknown/alive cleanup states produce failure.
+The workflow facade keeps auxiliary-process handling disabled by default. It
+opts into `verified-msvc-vctip` only for its fixed Cargo compiler and target-
+preparation phases after a bounded preflight verifies the installed MSVC
+`vctip.exe` signature and held file identity. The checked owner still requires
+the live PID, creation identity, canonical image and exact Job membership to
+match; all survivors must be verified, and the existing five-second grace and
+final Job-empty, output, recording and cleanup checks still apply. Unknown or
+mixed descendants remain failures. Run
+`& .\dev\workflows\test_msvc_auxiliary.ps1` for its focused lifecycle fixtures.
+
+Evidence includes stdout/stderr, PID/creation records, execution/cleanup errors,
+post-cleanup identity checks, and `result.json`. For compatibility,
+`windows-events.json` remains an empty JSON array; `EventCollectionStatus` is
+`NotCollected` with an explanatory `EventCollectionReason`. This means events
+were not queried, not that no crash occurred. Optional event providers cannot
+delay process-result publication. Unknown/alive cleanup states produce failure.
 Exit 0 means successful execution and verified recorded-process cleanup; exit 1
 means failure, with the executable's actual exit code preserved in `result.json`.
 Log-storage failures are reported but cannot guarantee durable evidence.
@@ -85,9 +97,206 @@ profile selectors; use Cargo directly for those advanced workflows. Nextest
 runner profiles remain available through `-CargoArguments @('-P', 'default')`;
 `--cargo-profile` is blocked because it changes the compiler profile.
 
+## Bounded workflow facade
+
+`workflows/run.ps1` resolves a fixed catalog request and routes each native
+command through `track_b/measure.ps1` and the checked owned-process runner. Its
+build modes are `quick-check`, `full-debug`, `fast-dev-build`, `iteration`, and
+`production`; `fast-dev-tests` is the selected-test mode. The production mode
+uses the existing release profile. All modes keep Cargo's default features and
+the facade does not expand a selection to the whole suite.
+
+```powershell
+& .\dev\workflows\run.ps1 -Action Preview -Mode quick-check
+& .\dev\workflows\run.ps1 -Action Discover -Mode fast-dev-tests -TargetKind lib
+& .\dev\workflows\run.ps1 -Action Discover -Mode fast-dev-tests -TargetKind integration
+& .\dev\workflows\run.ps1 -Action Preview -Mode fast-dev-tests -SelectionName tables `
+    -DiscoveryReceipt '<discovery.json path from the Discover result>'
+& .\dev\workflows\run.ps1 -Action Run -Mode fast-dev-tests -SelectionName tables
+& .\dev\workflows\run.ps1 -Action Replay -ReplayReceipt '<original failed workflow.json path>'
+```
+
+Build previews print the resolved executable and native argument array without
+launching it. Test previews require a successful discovery receipt whose
+catalog, source fingerprint, Cargo/Nextest tools, metadata file, target, and
+exact case still match; missing or stale receipts require another Discover.
+Discover prepares the catalog-owned packages for the requested target kind,
+then inventories its cases without running them. The library selection set
+currently prepares `multi_launcher` and `multi_launcher_table_core` together;
+the `pure` integration target remains in `multi_launcher`. Run prepares only
+the package and target for its selected case, validates that the exact case
+matches one runnable test, and executes only that case. Target preparation has
+an 1800-second deadline;
+inventory and selected test execution each have a 600-second deadline. Every
+phase publishes its arguments, exit/timeout, output-drain, owned-process and
+cleanup evidence under an external evidence directory.
+
+The pure table engine is owned by `crates/multi_launcher_table_core`; the
+`multi_launcher::table_utility` module re-exports its public API for existing
+application consumers. Its 23 unit cases can be selected directly with
+`cargo nextest run -p multi_launcher_table_core --lib`. The root workspace's
+default members include both packages, so normal workspace test discovery keeps
+these cases alongside application tests; an explicit `-p multi_launcher`
+selection intentionally includes only the application package's tests.
+
+The two application-session cases remain in the `multi_launcher` library test
+target: `table_utility_session::tests::table_session_latest_source_wins_across_close_and_reopen`
+and `table_utility_session::tests::table_session_stale_parse_cannot_accept_an_inline_edit`.
+Select just those cases with:
+
+```powershell
+cargo nextest run -p multi_launcher --lib -E 'test(/^table_utility_session::tests::table_session_latest_source_wins_across_close_and_reopen$/) | test(/^table_utility_session::tests::table_session_stale_parse_cannot_accept_an_inline_edit$/)'
+```
+
+Each selected run writes `results.json` with terminal pass/fail/timeout counts,
+ignored and filtered cases, unexecuted or started-only cases, per-case durations,
+and the slowest cases. Incomplete output records observed timeout events while
+leaving the total timeout count unknown (`TimedOut: null`), rather than claiming
+an incomplete stream had zero timeouts. A generic failed case also leaves that
+total unknown because its failure is not a reliable timeout classification.
+Suite `started` and `ok`/`failed` terminal events are recorded separately from
+case counts; a missing suite terminal makes the results incomplete. Preparation
+time is reported by its own phase receipt and does not contribute to test-case
+duration. Unknown identities or uncertain cleanup also make the results
+incomplete and the workflow fails closed.
+
+Replay accepts only an original failed `Run` receipt. It preserves the recorded
+runner profile and test arguments, prepares the current target again, verifies
+the exact binary-qualified failed case in a fresh inventory, then intersects
+that identity with Nextest's portable recording. The receipt records whether
+source inputs changed since the original failure; catalog, tool, archive, or
+identity mismatches are rejected. The original failure receipt and archive are
+left unchanged.
+
+The test catalog is `workflows/catalog.json`. Each test entry records its
+package, Cargo target, exact case, source, default-feature set, host/resource
+notes, and native-selection metadata. Those pure-test entries remain separate
+from the Phase 2 smoke selections below. `fast-dev-tests` uses `--cargo-profile fast-dev` for
+compilation; an optional `-RunnerProfile` maps separately to Nextest `-P`.
+Forward test-binary options as a string array with `-TestArguments`, for
+example `-TestArguments @('--exact', 'tests::table_parse_csv_quotes_escaped_quotes_and_embedded_newlines_preserve_strings')`;
+the facade places those arguments after the native `--` separator. Structured
+workflow results require captured test output, so `--nocapture` and
+`--no-capture` are rejected before launch. Use capture-preserving filters such
+as `--exact` when narrowing a selected test.
+
+Run the focused reducer and facade fixtures with
+`& .\dev\workflows\test_results.ps1` and
+`& .\dev\workflows\test_run.ps1`. These synthetic fixtures cover structured
+result reduction, duplicate/ambiguous identities, retry counts, slow-case
+ordering, exact replay filters, catalog/source agreement, argument arrays,
+preview and execution resolution, stale/empty discovery, replay provenance,
+and bounded failure propagation without compiling the application.
+
+The same catalog also declares two checked Phase 2 Settings smoke selections.
+Preview or run the typed-fixture-only selection with
+`-SmokeSelectionName phase2-settings-fixture`, or select the native workflow
+with `-SmokeSelectionName phase2-settings-native`:
+
+```powershell
+& .\dev\workflows\run.ps1 -Action Preview -SmokeSelectionName phase2-settings-fixture
+& .\dev\workflows\run.ps1 -Action Run -SmokeSelectionName phase2-settings-fixture `
+    -EvidenceDirectory (Join-Path $env:TEMP ('multi-launcher-settings-fixture-' + [guid]::NewGuid().ToString('N')))
+& .\dev\workflows\run.ps1 -Action Run -SmokeSelectionName phase2-settings-native `
+    -EvidenceDirectory (Join-Path $env:TEMP ('multi-launcher-settings-native-' + [guid]::NewGuid().ToString('N')))
+```
+
+Both selections use the fixed existing Phase 2 Settings scenario and explicit
+Cargo features. The facade measures metadata, fixture-test preparation and
+execution, fixture generation/verification, and (for the native selection) the
+application build through the existing checked command owner. The native run
+allows at most three ROOT/F11 captures and gives post-build interaction,
+process shutdown, tree verification, and output draining one 300-second
+deadline with a 30-second shutdown reserve. It reports native acceptance only
+when linked capture evidence and owned-process cleanup are verified. An
+unavailable interactive desktop is recorded as `NOT_RUN_ENVIRONMENT`, never as
+a native pass. The fixture profile disables Paste Sequences' Next and Cancel
+shortcuts before application construction. These smoke requests do not widen
+the existing pure-test selections or change production settings.
+
+Native capture and exact-failure replay were verified in a bounded isolated
+Rust library fixture (this does not substitute for application or GUI tests).
+The original run failed its one selected case with a complete structured result
+and no parse errors. Its Nextest run ID was
+`e3fe9c18-fb77-4517-9296-e7204e6e2c3e`; replay run ID was
+`c27799e2-7f86-4556-92cc-fe0f23135d77`. Nextest exported a 12,016-byte archive with SHA-256
+`c9ba7cd1493443181c0daa24b9a8832d6312cd864ebaba588017812f4d243cd5`. After the
+fixture source was corrected, replay selected the same binary-qualified case
+with the same test arguments and passed. The replay disclosed the source change,
+used a short private staged copy with the same archive hash, and removed that
+copy after execution. Original receipt, result, stdout, stderr and archive
+hashes remained unchanged. The checked owner and trusted MSVC helper cleanup
+verified all 270 recorded identity observations absent; the generated fixture
+workspace was removed and recorded in
+`supplemental-fixture-workspace-cleanup.json`.
+
+The earlier cold-preparation, capture-format, long-export-path and environment
+restoration failures remain in separate evidence directories as history. The
+focused environment regression is
+`& .\dev\track_b\test_measure_environment.ps1`; it checks absent, empty and
+null-override restoration. Structured workflows continue to reject
+`--nocapture`/`--no-capture` and publish archives through short private staging.
+
 For a quick library check, run `cargo check --lib`. To deliberately build all
 package binaries, use `cargo build --release` directly; the release preset
 selects only `multi_launcher`.
+
+## Build measurement and comparison
+
+For repeatable build observations, run the fixed workflow with explicit work
+and cache labels. Leave either label `unknown` unless its state was actually
+established; the report does not turn an unknown or warm-cache timing into an
+optimization claim.
+
+```powershell
+$evidence = Join-Path $env:TEMP ('multi-launcher-quick-check-pair-' + [guid]::NewGuid().ToString('N'))
+[IO.Directory]::CreateDirectory($evidence) | Out-Null
+$first = Join-Path $evidence 'sample-1'
+$second = Join-Path $evidence 'sample-2'
+& .\dev\workflows\run.ps1 -Action Run -Mode quick-check `
+    -WorkKind unknown -CacheState unknown -EvidenceDirectory $first
+& .\dev\workflows\run.ps1 -Action Run -Mode quick-check `
+    -WorkKind unknown -CacheState unknown -EvidenceDirectory $second
+$measurements = foreach ($sample in @($first, $second)) {
+    $workflow = Get-Content -Raw (Get-ChildItem $sample -Filter workflow.json -Recurse -File |
+        Select-Object -First 1 -ExpandProperty FullName) | ConvertFrom-Json
+    $workflow.Phases[0].MeasurementPath
+}
+& .\dev\track_b\compare_measurements.ps1 -MeasurementPath $measurements `
+    -OwnedEvidenceRoot $evidence -MaximumEvidenceFiles 5000 `
+    -MaximumEvidenceEntries 10000 -MaximumEvidenceBytes 5368709120 `
+    -OutputPath (Join-Path $evidence 'comparison.json')
+```
+
+Quick-check executes `cargo check --lib` with a compile deadline of 1,800
+seconds. Each measurement records whole-command wall time, source identity,
+host and tool identity, selected target/features/profile, effective target
+directory, allowlisted environment state and hashes, and Cargo configuration
+file labels and hashes. The environment allowlist includes inherited
+`CARGO_BUILD_RUSTFLAGS` and target-specific `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`
+and `CARGO_TARGET_<TRIPLE>_LINKER` settings. Cargo and Rustc version probes run
+through the checked owner only for an explicit Cargo compile command. Generic
+measured executables are never invoked with guessed version arguments. Raw environment values and
+configuration file contents are not retained; an explicit environment override
+outside the allowlist makes provenance incomplete. The comparison details
+show sanitized before/after values, including environment names/states/hashes
+and configuration file labels/hashes.
+
+The comparison helper rejects missing, malformed, legacy, failed, timed-out or
+incomplete-provenance samples. It keeps Cargo timing-artifact freshness separate
+from wall time, and never infers linker duration from process time. Evidence
+retention is an explicit report-only census bounded by file count, directory
+entry count and total bytes; it reports truncation or excess without deleting
+or rewriting evidence. Comparison output must be a new path and all input
+measurements must be inside the explicitly selected evidence root when a
+retention report is requested.
+
+The M2-B representative pair used the same quick-check request and unchanged
+source, with work/cache labels left unknown. Its measured wall times were
+0.895 and 0.867 seconds; the cache cause was not established. The comparison
+was compatible but explicitly made no improvement claim; these timings are
+workflow evidence, not a speedup result. The retained comparison receipt
+records the full provenance and report-only census.
 
 ## Opt-in reduced-symbol development profile
 
@@ -139,6 +348,38 @@ cargo nextest run --lib -E 'test(history_prepare_)'
 ~~~
 
 Timings are process wall time, not isolated linker time.
+
+The bundled Windows linker candidate is an opt-in measured path selected with
+`dev/track_b/cargo.ps1 -Preset fast-dev-build -LinkerMode bundled-lld`; test
+binary preparation accepts the same mode only with `-Preset fast-dev-tests
+-WorkflowPhase prepare`. Omitting `-LinkerMode` preserves the ordinary Cargo
+commands. The candidate is limited to the active native MSVC toolchain and
+refuses competing target, compiler, Rust-flag, and `dev`/`fast-dev` profile
+settings. Its Cargo configuration check recognizes ordinary table settings
+such as `[build].jobs` and `[net].retry`, while rejecting root-level inline or
+dotted target settings and ambiguous `dev`/`fast-dev` profile forms, including
+quoted keys. Escaped key and table spellings are also refused without decoding
+them. The check is deliberately conservative rather than a general TOML parser;
+use ordinary Cargo mode without `-LinkerMode` when one of these configuration
+forms is needed. The bounded M1-B recovery compiled the candidate and passed
+artifact compatibility, app/root small-edit measurement, PDB/source-line,
+icon-resource, selected-root-test, and responsive native-window/normal-close
+checks. The selected-test aggregate parser limitation and initial native
+auxiliary-window failure, followed by the corrected passing native check, are
+recorded in the execution report. One paired app sample measured 36.693609 s
+versus the 41.135731 s baseline; the root-library diagnostic sample measured
+47.465428 s versus 54.345498 s. These are host-specific whole-Cargo-command
+times, not isolated linker durations or a general speedup guarantee. Original-
+source candidate preparation took 270.374517 s for the app and 250.240402 s
+for the root-library test binary; preparation is excluded from the edit
+comparison. The measured app executable/PDB were 118,012,928 and 366,055,424
+bytes; the root-library test executable/PDB were 172,518,400 and 492,756,992
+bytes. These are artifact sizes, not a total cache-footprint measurement.
+Fast-dev remains line-tables-only: use the default `dev` profile
+for full debug information and `--release` for canonical release artifacts.
+Each profile has a separate cache; the pre-existing fast-dev profile results
+and cache caveats above apply. M1-B evidence is complete and awaits checkpoint
+review; no default Cargo behavior changes.
 
 ## Release-like local iteration profile
 
@@ -208,9 +449,13 @@ cargo nextest run --test history
 cargo nextest run --test domain -E 'test(indexer_)'
 cargo nextest run --test plugin_queries -E 'test(/^help_plugin::search_returns_help_action$/)'
 cargo nextest run --test multi_manager_plugin
+cargo nextest run --test pure -E 'test(hotkey_events::)'
+cargo nextest run --test pure -E 'test(quit_hotkey::)'
 ~~~
 
-The current Windows roster selects respectively 8, 5, 4, 1 and 8 cases.
+The current Windows roster selects respectively 8, 5, 4, 1, 8, 4 and 1 cases.
+The final two recipes select the moved hotkey and quit cases under the `pure`
+target; together with its existing five cases, that target now contains ten.
 These are explicit selections, not a whole-application acceptance suite. Add
 `--cargo-profile fast-dev` when its reduced-symbol tradeoff suits the work.
 The existing helper supports the same target boundary via `lib-test` or
@@ -220,5 +465,25 @@ The existing helper supports the same target boundary via `lib-test` or
 targets. A bare case filter can still compile unrelated executables. Integration
 targets may retain normal binary prerequisites. Use unrestricted `cargo nextest
 run` deliberately for broad coverage, and `cargo build --features
-dev-smoke-binaries --bin coordinate_tool_smoke` when that auxiliary binary is relevant. No targets or
-logical cases were removed to provide these recipes.
+dev-smoke-binaries --bin coordinate_tool_smoke` when that auxiliary binary is
+relevant. The five original recipes above remain unchanged. Separately, M2-B
+migrated the three watcher cases from the obsolete `watchers` integration
+target into the library and added one unwind guard case; no watcher behavior
+was dropped.
+
+The real Actions, Folders and Bookmarks file-watcher cases live under
+`gui::watch::tests` in the library target. They save files through the existing
+production save functions and wait up to three seconds for the app-owned OS
+watcher event. Their fixture drops the app, waits up to five seconds for the
+captured callback closures to release, then restores process paths and removes
+the temporary root. The release receipt covers callback closures; it does not
+claim that Windows `notify` backend threads have joined.
+
+Each case uses its own temporary files, so this roster has no demonstrated
+shared exclusive resource and needs no Nextest group. Keep default concurrency;
+the fixture's existing process-local workspace lock protects its CWD and
+environment changes.
+
+~~~powershell
+cargo nextest run --lib -E 'test(=gui::watch::tests::actions_watcher_sends_event) | test(=gui::watch::tests::folders_watcher_sends_event) | test(=gui::watch::tests::bookmarks_watcher_sends_event) | test(=gui::watch::tests::real_watcher_fixture_unwind_releases_callbacks_before_workspace_cleanup)' --success-output immediate
+~~~

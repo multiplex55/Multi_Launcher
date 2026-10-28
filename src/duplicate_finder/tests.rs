@@ -4,6 +4,9 @@ use super::model::{
     DiscoveryStatus, DuplicateTotals, RootScan, RootScanStatus, ScanCounts,
 };
 use super::session::{DuplicateFinderSession, DuplicateFinderSessionError};
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityLifecycle, ActivityOutcome, ActivityRetirement,
+};
 use crate::file_operations::ScanCancellation;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -75,6 +78,24 @@ impl DiscoveryJob for CountingJob {
     }
 }
 
+struct PanickingJob(Sender<StartedScan>);
+
+impl DiscoveryJob for PanickingJob {
+    fn scan(
+        &self,
+        roots: Vec<PathBuf>,
+        generation: u64,
+        _limits: DiscoveryLimits,
+        _cancellation: &ScanCancellation,
+        _progress: &mut dyn FnMut(DiscoveryProgress),
+    ) -> DiscoverySnapshot {
+        self.0
+            .send(StartedScan { generation, roots })
+            .expect("test receiver stays connected");
+        panic!("controlled duplicate discovery worker panic");
+    }
+}
+
 fn completed_snapshot(generation: u64, roots: Vec<PathBuf>) -> DiscoverySnapshot {
     let counts = ScanCounts::default();
     DiscoverySnapshot {
@@ -133,6 +154,90 @@ fn finish_close(session: &DuplicateFinderSession) {
     }
 }
 
+#[test]
+fn dff_activity_finishes_panicking_worker_without_live_cancel_capability() {
+    let (started_tx, started_rx) = mpsc::channel();
+    let mut session = DuplicateFinderSession::with_test_job(
+        DiscoveryLimits::default(),
+        Arc::new(PanickingJob(started_tx)),
+    );
+    let center = ActivityCenter::new();
+    session.attach_activity_center(center.clone());
+
+    let generation = session
+        .start_scan(vec![PathBuf::from("panic-root")])
+        .expect("scan is admitted before the controlled panic");
+    let started = receive_started(&started_rx);
+    assert_eq!(started.generation, generation);
+    assert_eq!(started.roots, vec![PathBuf::from("panic-root")]);
+    let key = center
+        .snapshot()
+        .rows
+        .into_iter()
+        .find(|row| row.key.incarnation().get() == generation)
+        .expect("admitted scan has an exact Activity key")
+        .key;
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let failed = loop {
+        if let Some(row) = center
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.key == key && row.lifecycle.is_terminal())
+        {
+            break row;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "panic unwind did not publish the Activity terminal"
+        );
+        std::thread::yield_now();
+    };
+    assert_eq!(
+        failed.lifecycle,
+        ActivityLifecycle::Terminal(ActivityOutcome::Failed)
+    );
+    assert_eq!(failed.diagnostic, Some(ActivityDiagnostic::WorkerFailed));
+    assert_eq!(failed.retirement, ActivityRetirement::Unavailable);
+    assert!(
+        !failed.can_cancel,
+        "terminal panic rows retain no cancel capability"
+    );
+    assert_eq!(
+        center.request_cancel(key),
+        crate::activity::ActivityCancelResult::Terminal
+    );
+
+    let exit_deadline = Instant::now() + Duration::from_secs(3);
+    while !session.worker_finished_for_test() {
+        assert!(
+            Instant::now() < exit_deadline,
+            "panicking worker did not reach its actual thread exit"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        session.start_scan(vec![PathBuf::from("after-panic")]),
+        Err(DuplicateFinderSessionError::WorkerPanicked),
+        "the existing owner still observes and joins the panicked worker"
+    );
+    let retained = center
+        .snapshot()
+        .rows
+        .into_iter()
+        .find(|row| row.key == key)
+        .expect("the exact failed operation remains in bounded history");
+    assert_eq!(
+        retained.lifecycle,
+        ActivityLifecycle::Terminal(ActivityOutcome::Failed)
+    );
+    assert!(!retained.can_cancel);
+
+    session.close();
+    finish_close(&session);
+}
+
 fn wait_for_current_complete(session: &DuplicateFinderSession, generation: u64) {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -148,6 +253,79 @@ fn wait_for_current_complete(session: &DuplicateFinderSession, generation: u64) 
         );
         std::thread::yield_now();
     }
+}
+
+#[test]
+fn activity_baseline_native_file_scan_cancel_and_warm_reopen() {
+    use super::content::FirstReadCheckpointGate;
+    let directory = tempfile::tempdir().unwrap();
+    let payload = vec![42u8; 128 * 1024];
+    for index in 0..8 {
+        std::fs::write(
+            directory.path().join(format!("fixture-{index}.bin")),
+            &payload,
+        )
+        .unwrap();
+    }
+    let gate = Arc::new(FirstReadCheckpointGate::new());
+    // Release on unwind too, so a failed observation cannot strand the reaper.
+    struct Release(Arc<FirstReadCheckpointGate>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    let _release = Release(Arc::clone(&gate));
+    let session = DuplicateFinderSession::with_wake_and_first_read_checkpoint(
+        Arc::new(|| {}),
+        Arc::clone(&gate),
+    );
+    let operation = session
+        .start_scan(vec![directory.path().to_owned()])
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !gate.reached() {
+        assert!(
+            Instant::now() < deadline,
+            "native reader checkpoint not reached"
+        );
+        std::thread::yield_now();
+    }
+    let cancel = Instant::now();
+    assert!(session.cancel().unwrap());
+    let ack_us = cancel.elapsed().as_micros();
+    assert_eq!(session.view().snapshot.status, DiscoveryStatus::Cancelled);
+    assert!(
+        session.is_busy(),
+        "cancel publication is not native read retirement"
+    );
+    gate.release();
+    while session.is_busy() {
+        assert!(Instant::now() < deadline, "native scan did not drain");
+        std::thread::yield_now();
+    }
+    let drained_us = cancel.elapsed().as_micros();
+    session.close();
+    finish_close(&session);
+    let joined_us = cancel.elapsed().as_micros();
+    let warm = session
+        .start_scan(vec![directory.path().to_owned()])
+        .unwrap();
+    wait_for_current_complete(&session, warm);
+    assert_eq!(session.view().snapshot.verified_duplicate_groups.len(), 1);
+    session.close();
+    finish_close(&session);
+    eprintln!(
+        "ACTIVITY_BASELINE {}",
+        serde_json::json!({
+            "owner":"duplicate_native_scan","operation_generation":operation,
+            "fixture_files":8,"fixture_bytes":8*payload.len(),"warm_reopen":true,
+            "cancel_ack_us":ack_us,"job_drain_us":drained_us,"worker_join_observed_us":joined_us,
+            "gate":"first native read; released immediately after cancel",
+            "timing_scope":"controlled checkpoint, not arbitrary native IO worst case",
+            "ui_frame_latency":"not measured","deadline_seconds":10,"cleanup":"post-join reopen confirmed"
+        })
+    );
 }
 
 #[test]

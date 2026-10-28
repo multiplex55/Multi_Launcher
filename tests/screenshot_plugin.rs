@@ -67,7 +67,7 @@ fn markup_layers_render_on_image() {
         color: Color32::from_rgb(0, 255, 0),
         thickness: 1.0,
     });
-    let rendered = render_markup_layers(&base, &[stroke, rect, arrow]);
+    let rendered = render_markup_layers(&base, &[stroke, rect, arrow]).unwrap();
     let changed = rendered
         .pixels()
         .zip(base.pixels())

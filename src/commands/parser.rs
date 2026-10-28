@@ -448,6 +448,20 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         )
         .with_gui_failure_policy());
     }
+    if s.starts_with("activity:") {
+        if s == "activity:open" && action.args.is_none() {
+            return Ok(Command::Dialog(DialogCommand::Activity));
+        }
+        return Err(CommandError::new(
+            "activity",
+            if action.args.is_some() {
+                "Activity does not accept a path or content payload"
+            } else {
+                "unknown Activity command"
+            },
+        )
+        .with_gui_failure_policy());
+    }
     if s.starts_with("hotfolder:") {
         let command = match (s, action.args.is_none()) {
             ("hotfolder:open", true) => Some(HotFolderCommand::Open),

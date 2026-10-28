@@ -171,6 +171,19 @@ the corresponding run produces matching receipts, screenshots, state
 assertions, and verified cleanup; fixture-only validation does not claim a GUI
 result.
 
+The checked workflow catalog exposes this existing Settings scenario through
+`dev/workflows/run.ps1 -SmokeSelectionName phase2-settings-fixture` and
+`phase2-settings-native`. The fixture selection validates and runs the Phase 2
+fixtures without starting the application. The native selection also builds
+the app and delegates interaction to this harness, preserving its owned HWND,
+input, capture, and shutdown path. Its 300-second post-build deadline includes
+interaction, up to three ROOT/F11 captures, graceful shutdown, bounded process
+inventory checks, and verified output-log draining; cleanup uncertainty is a
+failure. The workflow writes a linked receipt outside the harness evidence
+directory that points to the unique run manifest, scenarios, lifecycle record,
+and measured command receipts. Use the workflow facade for these requests so
+the fixed command and its feature set remain catalog-validated.
+
 The FileSearch profile configures only its isolated `file-search-root`, which
 contains one harmless generated text file. Its native proof opens File Search
 through the `fs` root action, focuses and types into the query field without

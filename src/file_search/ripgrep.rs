@@ -1,4 +1,4 @@
-use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
+use crate::file_search::coordinator::{CancellationToken, SearchEventSender, SearchExecutor};
 pub use crate::file_search::discovery::{
     ExecutableSearchContext, detect_ripgrep_executable, resolve_ripgrep_executable,
     resolve_ripgrep_with_context,
@@ -38,7 +38,7 @@ impl SearchExecutor for RipgrepSearchExecutor {
         id: SearchId,
         request: SearchRequest,
         token: CancellationToken,
-        events: mpsc::Sender<SearchEvent>,
+        events: SearchEventSender,
     ) {
         let result = match request.kind {
             SearchKind::Content => {
@@ -73,7 +73,7 @@ fn execute_content_search(
     request: SearchRequest,
     settings: &FileSearchSettings,
     token: &CancellationToken,
-    events: &mpsc::Sender<SearchEvent>,
+    events: &SearchEventSender,
 ) -> Result<(), FileSearchError> {
     let summary = search_content_with_ripgrep(request, settings, token)?;
     if let Some(details) = summary.execution_details.clone() {
@@ -122,7 +122,7 @@ fn execute_filename_search(
     request: SearchRequest,
     settings: &FileSearchSettings,
     token: &CancellationToken,
-    events: &mpsc::Sender<SearchEvent>,
+    events: &SearchEventSender,
 ) -> Result<(), FileSearchError> {
     let summary = search_filenames_with_ripgrep(request, settings, token)?;
     if let Some(details) = summary.execution_details.clone() {
@@ -166,7 +166,7 @@ fn execute_filename_search(
     Ok(())
 }
 
-fn send_bounded_stderr_diagnostic(id: SearchId, stderr: &str, events: &mpsc::Sender<SearchEvent>) {
+fn send_bounded_stderr_diagnostic(id: SearchId, stderr: &str, events: &SearchEventSender) {
     if stderr.trim().is_empty() {
         return;
     }

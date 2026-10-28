@@ -139,6 +139,11 @@ pub fn evaluate_action_capability(
     if let Err(reason) = rule.validate() {
         return ActionCapability::Invalid { reason };
     }
+    if rule.enabled && rule.conditions.is_configured() {
+        return ActionCapability::Unsupported {
+            reason: super::model::FILE_CONDITIONS_NOT_EVALUATED,
+        };
+    }
     match context.root_availability.get(&rule.watched_root) {
         Some(RootAvailability::ExistingDirectory) => {}
         Some(RootAvailability::Missing) => {
@@ -779,6 +784,43 @@ mod tests {
             evaluate_action_capability(&rule(macro_action), &changed_context),
             ActionCapability::Unavailable { .. }
         ));
+    }
+
+    #[test]
+    fn enabled_condition_rules_fail_closed_until_the_shared_evaluator_is_installed() {
+        use crate::hotfolder::{HotFolderConditions, InclusiveU64Range};
+
+        let document = MkMacroDocument::default();
+        let roots = roots();
+        let targets = [];
+        let context = capability_context(&targets, &document, &roots);
+        let mut configured = rule(RuleAction::Rename {
+            prefix: "ready-".into(),
+            suffix: String::new(),
+        });
+        configured.conditions = HotFolderConditions {
+            size_bytes: Some(InclusiveU64Range {
+                min: Some(0),
+                max: None,
+            }),
+            ..HotFolderConditions::default()
+        };
+
+        assert!(
+            matches!(
+                evaluate_action_capability(&configured, &context),
+                ActionCapability::Supported { .. }
+            ),
+            "the disabled row remains editable without claiming it is malformed"
+        );
+        configured.enabled = true;
+        assert_eq!(
+            evaluate_action_capability(&configured, &context),
+            ActionCapability::Unsupported {
+                reason: crate::hotfolder::FILE_CONDITIONS_NOT_EVALUATED,
+            },
+            "restored or prepared condition-bearing rows cannot execute before M1-B"
+        );
     }
 
     #[test]

@@ -1,6 +1,11 @@
 //! Bounded, cancellable folder traversal. Directory symlinks/reparse points
 //! are reported as entries but are never followed.
 use super::folder_compare::{EntryKind, EntryMetadata, EntrySide, normalized_relative};
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityProgress, ActivityProgressUnit, ActivityRetirement, ActivitySlot,
+    ActivityTask,
+};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -202,11 +207,63 @@ pub fn spawn_scan_with(
     rules: ScanRules,
     capacity: usize,
 ) -> ScanHandle {
+    spawn_scan_with_optional_activity(
+        fs,
+        root_path,
+        generation,
+        rules,
+        capacity,
+        None,
+        ActivitySlot::Primary,
+    )
+}
+
+pub fn spawn_scan_with_activity(
+    fs: Arc<dyn FileSystem>,
+    root_path: PathBuf,
+    generation: u64,
+    rules: ScanRules,
+    capacity: usize,
+    activity_center: ActivityCenter,
+    slot: ActivitySlot,
+) -> ScanHandle {
+    spawn_scan_with_optional_activity(
+        fs,
+        root_path,
+        generation,
+        rules,
+        capacity,
+        Some(activity_center),
+        slot,
+    )
+}
+
+fn spawn_scan_with_optional_activity(
+    fs: Arc<dyn FileSystem>,
+    root_path: PathBuf,
+    generation: u64,
+    rules: ScanRules,
+    capacity: usize,
+    activity_center: Option<ActivityCenter>,
+    slot: ActivitySlot,
+) -> ScanHandle {
     let root = RootIdentity::new(root_path.clone());
     let (tx, rx) = mpsc::sync_channel(capacity.max(1));
     let cancel = Arc::new(AtomicBool::new(false));
     let c = cancel.clone();
-    std::thread::spawn(move || scan(fs, &root_path, generation, root, rules, c, tx));
+    let activity = activity_center.and_then(|center| {
+        center.start(
+            ActivityOwner::FolderCompare,
+            slot,
+            ActivityIncarnation::new(generation),
+            ActivityOperation::CompareFolders,
+        )
+    });
+    if let Some(activity) = activity.as_ref() {
+        let cancel_signal = Arc::clone(&cancel);
+        activity.set_cancel_handler(move || cancel_signal.store(true, Ordering::Release));
+    }
+    std::thread::spawn(move || scan(fs, &root_path, generation, root, rules, c, tx, activity));
     ScanHandle {
         receiver: rx,
         cancel,
@@ -226,7 +283,47 @@ fn scan(
     rules: ScanRules,
     c: Arc<AtomicBool>,
     tx: SyncSender<ScanEvent>,
+    activity: Option<ActivityTask>,
 ) {
+    if let Some(activity) = activity.as_ref() {
+        activity.mark_running();
+    }
+    let completed = scan_inner(
+        fs,
+        base,
+        g,
+        root,
+        rules,
+        Arc::clone(&c),
+        tx,
+        activity.as_ref(),
+    );
+    if let Some(activity) = activity {
+        let outcome = if completed {
+            ActivityOutcome::Completed
+        } else if c.load(Ordering::Acquire) {
+            ActivityOutcome::Cancelled
+        } else {
+            ActivityOutcome::Failed
+        };
+        activity.finish(
+            outcome,
+            (outcome == ActivityOutcome::Failed).then_some(ActivityDiagnostic::WorkerFailed),
+            ActivityRetirement::Unavailable,
+        );
+    }
+}
+
+fn scan_inner(
+    fs: Arc<dyn FileSystem>,
+    base: &Path,
+    g: u64,
+    root: RootIdentity,
+    rules: ScanRules,
+    c: Arc<AtomicBool>,
+    tx: SyncSender<ScanEvent>,
+    activity: Option<&ActivityTask>,
+) -> bool {
     if !send(
         &tx,
         ScanEvent::ScanStarted {
@@ -242,7 +339,7 @@ fn scan(
                 visited: 0,
             });
         }
-        return;
+        return false;
     }
     let mut stack = vec![base.to_path_buf()];
     let mut batch = Vec::with_capacity(64);
@@ -254,7 +351,7 @@ fn scan(
                 root,
                 visited,
             });
-            return;
+            return false;
         }
         let children = match fs.read_dir(&dir) {
             Ok(x) => x,
@@ -265,7 +362,7 @@ fn scan(
                         root,
                         error: e.to_string(),
                     });
-                    return;
+                    return false;
                 }
                 batch.push(error_entry(base, &dir, e));
                 continue;
@@ -278,7 +375,7 @@ fn scan(
                     root,
                     visited,
                 });
-                return;
+                return false;
             }
             let path = match child {
                 Ok(x) => x,
@@ -339,7 +436,14 @@ fn scan(
                     },
                     &c,
                 ) {
-                    return;
+                    return false;
+                }
+                if let Some(activity) = activity {
+                    activity.set_progress(Some(ActivityProgress::new(
+                        visited,
+                        None,
+                        ActivityProgressUnit::Items,
+                    )));
                 }
                 if !send(
                     &tx,
@@ -350,7 +454,7 @@ fn scan(
                     },
                     &c,
                 ) {
-                    return;
+                    return false;
                 }
             }
         }
@@ -366,7 +470,7 @@ fn scan(
             &c,
         )
     {
-        return;
+        return false;
     }
     let _ = tx.send(ScanEvent::Progress {
         generation: g,
@@ -378,6 +482,14 @@ fn scan(
         root,
         visited,
     });
+    if let Some(activity) = activity {
+        activity.set_progress(Some(ActivityProgress::new(
+            visited,
+            Some(visited),
+            ActivityProgressUnit::Items,
+        )));
+    }
+    true
 }
 fn error_entry(base: &Path, path: &Path, e: io::Error) -> DiscoveredEntry {
     DiscoveredEntry {
