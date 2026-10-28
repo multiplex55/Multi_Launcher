@@ -487,3 +487,53 @@ environment changes.
 ~~~powershell
 cargo nextest run --lib -E 'test(=gui::watch::tests::actions_watcher_sends_event) | test(=gui::watch::tests::folders_watcher_sends_event) | test(=gui::watch::tests::bookmarks_watcher_sends_event) | test(=gui::watch::tests::real_watcher_fixture_unwind_releases_callbacks_before_workspace_cleanup)' --success-output immediate
 ~~~
+
+## Goal04 rust-analyzer profile candidate (not accepted)
+
+`editor/rust_analyzer_profile.lua` is an experimental, project-scoped adapter
+candidate. Its focused Neovim self-check did not pass, and it has not been
+validated in a UI-attached Rustaceanvim/rust-analyzer session. Treat the code
+and the commands below as unverified examples, not as an accepted or supported
+editor workflow. The current personal Lazy configuration and global settings
+were not changed.
+
+The intended activation is explicit, from this repository root, before
+Rustaceanvim caches its configuration or starts a rust-analyzer client:
+
+~~~lua
+local profile = dofile(vim.fn.getcwd() .. '/dev/editor/rust_analyzer_profile.lua')
+local ok, err = profile.apply(vim.fn.getcwd())
+assert(ok, err)
+~~~
+
+The adapter is intended to bind settings to the exact repository root, compose
+the existing personal settings, and refuse buffers from another Cargo root.
+Its profile command is intended to switch between these default-feature,
+default-profile Cargo check scopes:
+
+- **light:** `cargo check --manifest-path <root>/Cargo.toml -p multi_launcher --lib --bin multi_launcher --message-format=json`
+- **full:** `cargo check --manifest-path <root>/Cargo.toml --workspace --all-targets --message-format=json`
+
+Neither scope adds `--all-features`, changes linker flags, or selects a separate
+artifact directory. The light command narrows compiler diagnostics to the app
+library and binary; the intended semantic settings retain test configuration,
+procedural-macro analysis, and build-script analysis. The full command checks
+workspace targets, including tests, without executing tests. These are intended
+settings and argument arrays only; editor/server invocation of the configured
+command and effective settings have not been demonstrated.
+
+The candidate exposes `:MultiLauncherRustAnalyzerProfile light|full` and
+`:MultiLauncherRustAnalyzerRevert`. Reversion is intended only after stopping
+the owned rust-analyzer client. Activation after plugin configuration is cached
+or after a client exists is expected to refuse. Rustaceanvim may reuse an
+existing client for another workspace; actual mixed-root refusal and workspace
+isolation have not been verified, so do not treat the candidate as safe for a
+session already sharing Rust workspaces.
+
+No M2-A compiler error/clearance, semantic response, effective client
+configuration, or reversion result was accepted. A separate direct default-
+feature Cargo workspace/all-target check succeeded, but it does not establish
+that the candidate adapter applies its command or settings in the editor. The
+actual `no_checks` baseline has no usable diagnostic-latency denominator, and
+no editor speedup or no-gain conclusion is supported. Goal04 M2-A remains
+unaccepted and M2-B comparison remains pending.

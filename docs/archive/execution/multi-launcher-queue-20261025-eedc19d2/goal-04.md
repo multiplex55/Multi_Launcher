@@ -175,3 +175,124 @@ All M1-B verification gates are now complete. The single-pair timings above do
 not establish a generally reproducible speedup or isolated linker improvement.
 M1-B awaits checkpoint review and acceptance; no commit or push is claimed in
 this worker report.
+
+## M2-A — Adapter candidate remains unaccepted
+
+The experimental adapter and focused self-check are present at
+`dev/editor/rust_analyzer_profile.lua` and
+`dev/editor/test_rust_analyzer_profile.lua`. Their final file hashes are
+`9725EBC0E227F87CEF786765D1C0BDD6C14DCF2E8ED3B2315D62CD6C0B1B6B00`
+(15,022 bytes) and
+`03FCCAEC1A495E8FD1610CEC1173EA12E35CD977E1286BD0291A77EC8BC2EF51`
+(13,322 bytes). They are candidate-only; their existence does not establish
+accepted profile settings or an editor workflow.
+
+The first headless self-check was invoked directly, not through the checked
+owner:
+
+~~~powershell
+& 'C:\Program Files\Neovim\bin\nvim.exe' --headless -u NONE -l 'dev/editor/test_rust_analyzer_profile.lua'
+~~~
+
+Its first input snapshot is `g04-m2a/probe-inputs-0` (manifest SHA-256
+`AFEC6F568853EEAE3D8F21C17A5ADE4EC901BD60D92C65DAEABF1FED0D2DBB57`). The
+raw console output and process receipt were not retained. Only a summary of the
+failure labels remains; the exact exit code, PID/creation identity, output
+drain, and cleanup state are unknown and are not claimed as verified.
+
+Two subsequent focused self-check attempts used the checked owner with a
+60-second deadline and five-second cleanup grace. The first (`repair1`) used
+snapshot `g04-m2a/probe-inputs-2`, manifest SHA-256
+`C8A8B7E740D15A88CDD4BD50D2CE4F1BF1D3ED2569DACB2D6D2E2961C5D692AE`; its
+receipt is `g04-m2a/selfcheck-repair1-checked/result.json`. Neovim exited 1
+after 0.403582 s; stdout was 0/0 bytes and stderr was read/recorded as
+551/551 bytes. Cleanup and output drain were verified. The preserved stderr
+identified `E95: Buffer with this name already exists` while setting a second
+temporary buffer to the same path. Recorded process identities were PID 8320
+(`nvim.exe`, creation `2026-10-26T01:19:46.6470956Z`) and PID 16948 (owned
+process, creation `2026-10-26T01:19:46.6709933Z`); both were absent after
+cleanup.
+
+The second and final permitted self-check (`repair2`) used snapshot
+`g04-m2a/probe-inputs-3`, manifest SHA-256
+`DB3FBA29573AE2CC28BDA2675AF3F8351EC8168A42C3E99EEC54DC2B8904F9D3`; its
+receipt is `g04-m2a/selfcheck-repair2-checked/result.json`. Neovim exited 1
+after 0.313109 s; stdout was 0/0 bytes and stderr was read/recorded as
+195/195 bytes. Cleanup and output drain were verified. Exact assertions that
+failed were `matching-root pre-start admission delegates to Rustaceanvim
+default` and `cached hook delegates to Rustaceanvim default after reversion`.
+Recorded process identities were PID 5688 (`nvim.exe`, creation
+`2026-10-26T01:20:22.9420406Z`) and PID 29128 (owned process, creation
+`2026-10-26T01:20:22.9638551Z`); both were absent after cleanup. The two-repair
+boundary is exhausted; no further self-check or code correction was performed.
+
+For both checked attempts, `NVIM_LOG_FILE` pointed to the corresponding
+external evidence directory and its prior process value was restored. Frozen
+M1-B file hashes and the empty `nvim.log` hash matched before/after execution.
+The original `src/table_utility_session.rs` remained 83,352 bytes with SHA-256
+`6ed3263edebfb4b140b04cb54a66bed17b238c01df0675203fb4efdeeac66d5f`; no
+temporary Rust fixture was written.
+
+No UI-attached Rustaceanvim/rust-analyzer session was run. Consequently there
+is no accepted effective client configuration, compiler error/clearance,
+applicable semantic response, or actual foreign-workspace refusal/reversion.
+No workspace/all-target Cargo check was accepted as M2-A adapter evidence. A
+separate, direct Cargo command was run once after the self-check boundary was
+closed; its command-level result is recorded below, but it does not establish
+adapter activation or effective server command/settings.
+
+The one independently authorized full-check command used Cargo defaults and
+did not invoke the frozen Track B Cargo wrapper, linker helper, or an editor:
+
+~~~text
+C:\Users\Jay\.cargo\bin\cargo.exe check --manifest-path G:\Repos\rust\Multi_Launcher\Cargo.toml --workspace --all-targets --message-format=json
+~~~
+
+Its read-only pre-run snapshot is `g04-m2a/probe-inputs-4-fullcheck/input-manifest.json`
+(SHA-256 `ED66CBA4EA45B7150EEDAEB496E4EA29337831E0394D2CEE90C0F4A4935D589A`).
+The checked measurement is
+`g04-m2a/direct-fullcheck-checked/g04-m2a-direct-full-test-cargo-check_20261026T012531722Z_ffa2d6df3a20415f816e16f8a7975df3/measurement.json`.
+The parsed target proof is at
+`g04-m2a/direct-fullcheck-checked/cargo-json-target-observation.json` (the
+parent of the measurement run directory).
+It exited 0 in 20.431543 s (start `2026-10-25T21:25:36.2691679-04:00`, end
+`2026-10-25T21:25:56.700725-04:00`), within its 1,800-second deadline; output
+drain and cleanup passed. Captured output was stdout 454,392/454,392 bytes and
+stderr 73/73 bytes. The verified MSVC auxiliary-process preflight passed.
+The verified `vctip.exe` identity had SHA-256
+`dfaee6bdd1d491a73a2fd5a04c2d8b19764967eade20be84fd2f3c882a8cee48` and a
+Microsoft signature. The Cargo owner recorded PID 31592 (`cargo.exe`, creation
+`2026-10-26T01:25:36.2788367Z`) and owned-process PIDs 16620 and 20568
+(creation `2026-10-26T01:25:36.2850577Z` and
+`2026-10-26T01:25:36.313775Z`); all three identities were absent after
+cleanup. The auxiliary preflight recorded PID 24800 (`pwsh.exe`, creation
+`2026-10-26T01:25:34.6134203Z`) and owned-process PID 34632 (creation
+`2026-10-26T01:25:34.6212957Z`); both were absent after cleanup.
+Cargo JSON reported 532 compiler artifacts, 47 build-script events, 11
+compiler messages and a successful build-finished event; 516 distinct target
+identities were observed, 74 workspace-local. This command successfully checked workspace all-targets, including test and
+bench targets, without executing tests. All 532 compiler-artifact events
+reported fresh=true; no fresh compilation is claimed. Its
+successful direct result is not evidence that the adapter's configured editor
+command or effective client settings work.
+
+The bounded parent fallback review at `g04-m2a/parent-partial-review.md` was
+not an independent review or acceptance. It noted that the current nearest-
+Cargo.toml admission check excludes the declared table-core workspace member,
+the foreign-root fixture uses a hardcoded unrelated checkout instead of an
+owned temporary project, and the two default-admission assertions fail with
+the current scratch-buffer fixtures. These are source/fixture review findings,
+not additional runtime results; no code or assertion changes followed. The
+same partial review noted M1-B portability/contract concerns around accepted
+case variants and the line-oriented Cargo TOML scan; these do not explain its
+preserved pre-compilation schema failures or establish runtime behavior.
+
+The test self-check failures do not establish the missing runtime behaviors.
+
+## M2-B and Goal04 disposition
+
+M2-B remains pending because the M1-B checkpoint is awaiting review and the
+M2-A editor-profile checkpoint is unaccepted. No comparative benchmark,
+editor speedup/no-gain result, or final Clippy run was performed for these
+candidate checkpoints. No Goal04 success commit or push was created by this
+work. Goal05 remains not started pending Goal04 completion.
