@@ -6,3 +6,5 @@
 
 - PROGRAM_BOOTSTRAP_SHA: 02d0ac64d51655f43d6e958ea551f5bf658ee48d (pushed).
 - G00 branch base bootstrap; tip 7e53f4d28ca5b66a21e30e41545692cce5fa6b6a pushed; accepted import tip 41cc682e pushed.
+
+- G01 codex/closeout-g01-diff-failure-information-20261029-r01 from bootstrap: M0-A 269508d4; M1-A 4d21b035; M1-B 8d183f663b212f8a707ac16a4c056eef5fe641ff. All pushed normally. SOURCE NOT ACCEPTED/IMPORTED: focused execution and independent review pending. Only G00 docs remain accepted integration content.
