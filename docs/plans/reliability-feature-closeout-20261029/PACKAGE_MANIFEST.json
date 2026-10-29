@@ -1,0 +1,224 @@
+{
+  "package": "Multi_Launcher_Reliability_Feature_Closeout_20261029",
+  "verified_source_sha_at_authoring": "56223fdc123396f4c41c48e0542506d912c6c634",
+  "goals": [
+    {
+      "id": "G00",
+      "title": "Source Baseline, Stale Continuation Cleanup and Execution Ledger",
+      "slug": "baseline-and-continuation",
+      "priority": "P0 / mandatory"
+    },
+    {
+      "id": "G01",
+      "title": "Folder Diff: Preserve Destination Read Errors and Operation Feedback",
+      "slug": "diff-failure-information",
+      "priority": "P0 / first production fix"
+    },
+    {
+      "id": "G02",
+      "title": "G09 Table Utility: Full-File Publication Safety Foundation",
+      "slug": "table-publication-safety",
+      "priority": "P1 / high safety"
+    },
+    {
+      "id": "G03",
+      "title": "G09 Table Utility: Conditional Full-File Operations and UX Closure",
+      "slug": "table-full-file-operations",
+      "priority": "P2 / hard-gated"
+    },
+    {
+      "id": "G04",
+      "title": "G12 Screenshot Redaction: Native Crop, Output and Interaction Acceptance",
+      "slug": "screenshot-native-redaction",
+      "priority": "P1 / output safety"
+    },
+    {
+      "id": "G05",
+      "title": "G16 Hot Folder: Safe Size, Age and Literal-Content Conditions",
+      "slug": "hotfolder-condition-evaluator",
+      "priority": "P1 / unattended automation"
+    },
+    {
+      "id": "G06",
+      "title": "G11 Jump Mode: Finish Customization UI and Focus Regression Coverage",
+      "slug": "jump-settings-and-focus",
+      "priority": "P2 / daily usability"
+    },
+    {
+      "id": "G07",
+      "title": "G14 ZIP: Bounded Extraction Writer and Safe UI Integration",
+      "slug": "zip-extraction",
+      "priority": "P2 / security-sensitive utility"
+    },
+    {
+      "id": "G08",
+      "title": "G15 MkMacro: Bounded Run History and Conditional Safe Recipes",
+      "slug": "mkmacro-run-history",
+      "priority": "P2 / productivity"
+    },
+    {
+      "id": "G09",
+      "title": "G06 Activity Center: Source-Grounded Native Retirement Acceptance",
+      "slug": "activity-center-retirement",
+      "priority": "P2 / reliability"
+    },
+    {
+      "id": "G10",
+      "title": "Residual Defects, Deferred Goals and Final Integration Closeout",
+      "slug": "residual-defect-triage-integration",
+      "priority": "P0 at end / coordination"
+    }
+  ],
+  "files": [
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/FOLLOW_ON_GOAL_TEMPLATE.md",
+      "bytes": 2149,
+      "sha256": "e15b79a6e48e3536c6f18433792e64a0d77d74b35a19fa056f275ff3a2ebfb42"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/FOLLOW_ON_KICKSTART_TEMPLATE.md",
+      "bytes": 849,
+      "sha256": "7731669a6e1a8a78da63ef5d8a082a336931e5f4f5d7ea924086b5cf5087f9c3"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/MEGA_GOAL.md",
+      "bytes": 23781,
+      "sha256": "fff20866c85db44ea5aa34b08d3c92d2f0beed22fa4fb2b8005fdc2def136351"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/ORCHESTRATOR_KICKSTART.md",
+      "bytes": 14495,
+      "sha256": "830c79ec8ffe98401935fd4058e8a121d713fa1dd47a467fcea1885c24c8d77f"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/PROGRESS_AND_STALL_TEMPLATES.md",
+      "bytes": 2256,
+      "sha256": "1e9252d5a649dddce5c05e84660126f6e7a89b9f7d1b2b02d31aafcc56712073"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/README.md",
+      "bytes": 5316,
+      "sha256": "2b555fb8e57f9079d90124b44cefd34323acc9c65d64ab35a126ba58d60af34d"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/SOURCE_AND_RISK_BASELINE.md",
+      "bytes": 7835,
+      "sha256": "47444d3fa2d2e00ee74a2950aa97bacadb17f51873d058fcb1c0530e1fad713d"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/VERIFICATION_POLICY.md",
+      "bytes": 5567,
+      "sha256": "2bdef93907b62a2d23190c95bc636a92c322c676eddcadcea59141d724d44571"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G00-baseline-and-continuation/GOAL.md",
+      "bytes": 15620,
+      "sha256": "fc3f669963fec5431fe9ad896042b129115aed2edced35cbc22104f5dc3645b2"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G00-baseline-and-continuation/KICKSTART.md",
+      "bytes": 7900,
+      "sha256": "fc94d2339de52bd9a1dd2c2815425902a00caa414a59f2485263f38aacf380da"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G01-diff-failure-information/GOAL.md",
+      "bytes": 17991,
+      "sha256": "0ece13977a8783f97367d282292621b5397ebecf32c734debf36d0efa7f9cc95"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G01-diff-failure-information/KICKSTART.md",
+      "bytes": 9564,
+      "sha256": "f778113ff8a5ec48f3150bb5a6c2ed8b90693e4e520117ae111d02be90fa06eb"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G02-table-publication-safety/GOAL.md",
+      "bytes": 17831,
+      "sha256": "cd924eccca46007cf15ae838edc9a832044ffb5a7ea18c6fc518907b8bd91dc4"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G02-table-publication-safety/KICKSTART.md",
+      "bytes": 9289,
+      "sha256": "12ed94bf7d3c846657be2ed4312eebdac462b54be4c084ec58e69ab9f048ed82"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G03-table-full-file-operations/GOAL.md",
+      "bytes": 15986,
+      "sha256": "5178f2cb98aa8b3f870a2383d53078babdeba4f171a781d1e08283719b7f146f"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G03-table-full-file-operations/KICKSTART.md",
+      "bytes": 8192,
+      "sha256": "705f2d40d3bd85c39558257b978acfb6217a9762a35ed7febad5f0846f3a6608"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G04-screenshot-native-redaction/GOAL.md",
+      "bytes": 17282,
+      "sha256": "63b179cd6fab293b86e0c309820580406fe90c0a54f775c9210476176c996b1c"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G04-screenshot-native-redaction/KICKSTART.md",
+      "bytes": 8844,
+      "sha256": "19ff6cd45c40eb7f1ff79dd9749841b568f42d19eb735a46539c8ddcce2dd894"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G05-hotfolder-condition-evaluator/GOAL.md",
+      "bytes": 17845,
+      "sha256": "252d69f1ecab6cedf34c6777faf9f0fee0998fe17fe2f99a1dd608ea2a866aea"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G05-hotfolder-condition-evaluator/KICKSTART.md",
+      "bytes": 9051,
+      "sha256": "671a3b87224d56544af6ea911747d10618d01ea84799dcca99559204653285f4"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G06-jump-settings-and-focus/GOAL.md",
+      "bytes": 16446,
+      "sha256": "5d7267bda7376ca916e1aeb3432ec9cc7ae0ba03987f6e1d0e62607ee59e60e3"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G06-jump-settings-and-focus/KICKSTART.md",
+      "bytes": 8451,
+      "sha256": "bc7a022a180be2017c77eba7d244ed57aa3421a0e0531f1ea3ec648211ba1be9"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G07-zip-extraction/GOAL.md",
+      "bytes": 17839,
+      "sha256": "aeda9cab0e2013b7f14d6c0eb0c72209dbbd48e7ff0105d628f999d3566d5d25"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G07-zip-extraction/KICKSTART.md",
+      "bytes": 9119,
+      "sha256": "d65a5fd5b688cb6daa82a9cea9666ee0d861dd45eb2f2bd8d293f484a16e087c"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G08-mkmacro-run-history/GOAL.md",
+      "bytes": 16655,
+      "sha256": "b3a3843d0ae25563e4546228ae1098956388a2e47919853f155a68c0be205a4a"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G08-mkmacro-run-history/KICKSTART.md",
+      "bytes": 8356,
+      "sha256": "3dffb5934986b1e6f823d755e90a271327553ceb1c3e16f320ceb360142140c3"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G09-activity-center-retirement/GOAL.md",
+      "bytes": 16394,
+      "sha256": "10f2b709c74ce3d830cbac5902e3398e739c258185879d10a03cd3b918ece1a5"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G09-activity-center-retirement/KICKSTART.md",
+      "bytes": 8266,
+      "sha256": "b11d4a8f341c9198de358ea46160248ed5008ccc93b2ee58a2ec734a70ffea28"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G10-residual-defect-triage-integration/GOAL.md",
+      "bytes": 18585,
+      "sha256": "592b185c1bf97c646d528413777381056eacb1f6377eb6b29f2beff1741f6021"
+    },
+    {
+      "path": "docs/plans/reliability-feature-closeout-20261029/goals/G10-residual-defect-triage-integration/KICKSTART.md",
+      "bytes": 9519,
+      "sha256": "24b45414db0e1b799ee9e1a1eae7b81dfff7eaa56ac912d83968413c6d61b293"
+    }
+  ]
+}
