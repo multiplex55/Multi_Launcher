@@ -122,10 +122,10 @@ The new run has a verified source/role baseline, a safe current continuation poi
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `NOT_STARTED`.
+- **Current state:** `ACCEPTED_COMPLETE` (20261029-r01; documentation scope).
 - **Run ID and branch:** assigned by the orchestrator after safe source verification.
-- **Actual master/source base:** `UNVERIFIED_FOR_EXECUTION`.
-- **Current milestone:** `M0-A` pending.
+- **Actual master/source base:** `4a1283e6edd2c245f562a07dbe3dcc6a61061eed`; bootstrap `02d0ac64d51655f43d6e958ea551f5bf658ee48d`.
+- **Current milestone:** M0-A through M3-A accepted after independent review.
 - **Active role and requested/configured/resolved model:** `NONE / unverified`.
 - **Last known commit / push:** none for this package.
 - **Next action:** read [KICKSTART](KICKSTART.md), confirm prerequisite and revalidate source; then begin on a fresh task branch.
@@ -141,3 +141,12 @@ The new run has a verified source/role baseline, a safe current continuation poi
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
+
+### Runtime event — 2026-10-29 / 20261029-r01
+
+- M0-A ACCEPTED_COMPLETE (bootstrap scope): actual fetched master 4a1283e6edd2c245f562a07dbe3dcc6a61061eed; integration bootstrap 02d0ac64d51655f43d6e958ea551f5bf658ee48d; G00 baseline 76eae87c7a0e40bb5ce4aca1fb62c9823fbcf2b2, both pushed.
+- Goal IN_PROGRESS; M1-A implementer active; M2-A ledger initialized; M3-A independent review pending. No production acceptance claimed.
+- Actual role config differs from historical assertions; explicit Astra dispatch selected per user. See allocated execution root SOURCE_BASELINE.md.
+- Actual run root: ../../../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/ (repository path docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/).
+
+- Closure event: G00 docs independently reviewed with no substantive findings; all four milestones accepted. Final source/import SHAs and current next action are recorded in the authoritative run ledger. Cargo/native NOT_RUN; no new actionable finding.
