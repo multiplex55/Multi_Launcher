@@ -1,0 +1,18 @@
+# External design evidence — parent contribution
+
+Author: `/root`, 2026-10-28. Requested repository configuration Astra/xhigh; resolved parent backend/effort unverified. Read-only web research; no product trial, installation or benchmark. These are interaction precedents, not evidence that a proposed Multi Launcher ranking algorithm works.
+
+## Primary sources inspected
+
+| Source and access | Observed documented behavior | Bounded design inference | What this does not establish |
+|---|---|---|---|
+| [Microsoft PowerToys Command Palette overview](https://learn.microsoft.com/en-us/windows/powertoys/command-palette/overview), accessed 2026-10-28; page reports updated 2026-10-21 | Keyboard-first discovery coexists with explicit routes for commands, files, web and settings. Home includes recent and pinned commands. Bookmarks with placeholders request values. | Preserve explicit routing while adding discoverable capabilities; missing arguments should lead to a visible input step. | No verified score formula, relevance gain, performance budget or compatibility with this repository's command semantics. |
+| [Alfred fallback searches](https://www.alfredapp.com/help/features/default-results/fallback-searches/), accessed 2026-10-28; no publication date shown | Configurable web/custom/workflow fallbacks can appear when no local result matches, or at the end when relevant. Ordering is configurable. | Fallback admission and placement should be explicit policy rather than an accidental side effect of scoring. | Alfred's policy is not Multi Launcher's policy. The repository's `g ` early return, provider-vector fallback and capacity deferral remain source-defined and distinct. |
+| [Alfred Universal Actions](https://www.alfredapp.com/help/features/universal-actions/), accessed 2026-10-28; no publication date shown | The user selects a file, text or link and then chooses an action. Available actions narrow according to item type, and the action panel is available from multiple result contexts. | Target compatibility should gate action suggestions. Reuse the repository's existing Universal Actions and typed targets. | No justification for adding a parallel action bus, bypassing existing capability checks or executing a natural-language guess. |
+| [Raycast Action Panel API](https://developers.raycast.com/api-reference/user-interface/action-panel), accessed 2026-10-28; no publication date shown | Selected-item actions can be context-aware, grouped and assigned shortcuts. Primary and secondary positions have default shortcuts. Submenus can preserve section order while filtering. | Make selected-result actions and grouping visible; rank changes must not silently change the payload a user intended to activate. | No evidence about semantic search accuracy, this application's keyboard bindings, native focus behavior or a universally appropriate shortcut. |
+
+## Disposition and use
+
+These sources support interaction comparisons in the main alternatives/UX documents. They do not introduce a separate actionable recommendation. Incorporate any accepted implication into the canonical search catalog, ranking/runtime or interaction package with precise repository ownership. Reject external-product imitation where it conflicts with the corrected [audit handoff](../../../01-static-audit/SEARCH_HANDOFF.md).
+
+The search query returned some third-party/forum material; none was used. No proprietary relevance algorithm was inferred from marketing language. No linked code examples were copied. All four pages were opened and read through the web tool on the access date; external pages can change independently of the pinned repository baseline.

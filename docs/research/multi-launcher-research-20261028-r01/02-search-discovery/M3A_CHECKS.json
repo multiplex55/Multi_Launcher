@@ -1,0 +1,39 @@
+{
+  "status": "PASS",
+  "scope": "Static documentation/identity/source-locator checks only; no prototype/provider/evaluator/build/native execution",
+  "canonical_package_directories": [
+    "SEARCH-F001-built-in-discovery-metadata",
+    "SEARCH-F002-discovery-admission-consumer-proof"
+  ],
+  "canonical_pairs": 2,
+  "canonical_goal_template_sections_checked": 28,
+  "raw_planner_files_preserved": 2,
+  "raw_author_files_preserved": 2,
+  "F002_navigation_only_transform_verified": true,
+  "F001_seed_ids_verified": 11,
+  "frozen_v1_hashes_unchanged": 17,
+  "v2_overlay_hashes_unchanged": 4,
+  "M2A_artifact_hashes_unchanged": 37,
+  "M2B_results_examples_unchanged": 2,
+  "local_links_checked": 255,
+  "pinned_source_locators_checked": 14,
+  "source_files_for_locator_bounds_only": 9,
+  "evaluation_attempt_count_unchanged": 5,
+  "hash_semantics": "strict UTF-8 LF canonical text; self/mutable role/progress excluded",
+  "review_state": "AUTHOR_COMPLETE_REVIEW_PENDING",
+  "canonical_and_consolidation_hashes": {
+    "follow-on/SEARCH-F001-built-in-discovery-metadata/GOAL.md": "b78b98539411f3480db30bf1b6d2997906da7b647cc4918d0a9845e70e17587f",
+    "follow-on/SEARCH-F001-built-in-discovery-metadata/KICKSTART.md": "73c1c4db7f4d6c11ade5b8e072b11c7cb598b07149c5b3b79c0bafa2f8ab92bb",
+    "follow-on/SEARCH-F002-discovery-admission-consumer-proof/GOAL.md": "21dd550929d7febc1506d6cacc58af03127d1122163e1e09c264db3dc4490b97",
+    "follow-on/SEARCH-F002-discovery-admission-consumer-proof/KICKSTART.md": "15330a01eb09767b0dd7c1b15d89cdc8e6fb83268e021ed6f11f9465528c1b91",
+    "roles/implementer/follow-on/SEARCH-F002-discovery-admission-consumer-proof/GOAL.md": "ee5fa6083605ef27055a5421c8cca637e079a9a818231708e06106089e934198",
+    "roles/implementer/follow-on/SEARCH-F002-discovery-admission-consumer-proof/KICKSTART.md": "5ce44dc9edd93f89da7f1700b828548feb383d42f87c47671b1ad23e2944ea41",
+    "CANONICAL_DESIGN_AMENDMENTS.md": "5cc20ee2913c689aed8786acde537ba67bde9772f5a339bf441098acb07b0cda",
+    "FOLLOW_ON_INDEX.md": "994829bc0e6864e7fae2d87af20c24c7df4e12a22ccc2e2de0ddb1122e5bc3db",
+    "RECOMMENDATIONS.md": "ae7df0989aa7c3f13858c9c885ff8ac22f3b2ad2f85f5a27ef2a44c508de96f5",
+    "cross-goal/SEARCH_AUDIT_RECONCILIATION.md": "5ab61f8a1a6a3e374e538395c5593323c0efe7b9f3273501ffdb67de25f220a3",
+    "REVIEW_HANDOFF.md": "c48ce53c2c3a73bbce6045907c1e9011e5c733f444d30dbee22658fca5814918",
+    "README.md": "1b0639d234c79c322a96ee4c4f6573cdd72ae3999a3ff29bf513c0d9120c14fb",
+    "DECISION_RECORDS.md": "4ace038e44f15d5af6953600f2048e4f1e75adfe8dfe3b7f66a2aa2374ef9ebb"
+  }
+}

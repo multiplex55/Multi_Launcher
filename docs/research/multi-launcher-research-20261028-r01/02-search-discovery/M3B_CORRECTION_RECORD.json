@@ -1,0 +1,30 @@
+{
+  "checkpoint": "G02/M3-B",
+  "status": "PASS_PARENT_CORRECTION_ACCEPTED",
+  "reviewed_commit": "3a4924e20a95de38af3ba60aca6b86ade1e1c0f6",
+  "finding": "G02-REVIEW-01",
+  "parent_correction_passes": 1,
+  "second_reviewer_pass": false,
+  "new_packages": 0,
+  "prototype_or_application_runs": 0,
+  "historical_M3A_record_preserved": true,
+  "historical_canonical_hashes": {
+    "follow-on/SEARCH-F001-built-in-discovery-metadata/GOAL.md": "b78b98539411f3480db30bf1b6d2997906da7b647cc4918d0a9845e70e17587f",
+    "follow-on/SEARCH-F001-built-in-discovery-metadata/KICKSTART.md": "73c1c4db7f4d6c11ade5b8e072b11c7cb598b07149c5b3b79c0bafa2f8ab92bb",
+    "follow-on/SEARCH-F002-discovery-admission-consumer-proof/GOAL.md": "21dd550929d7febc1506d6cacc58af03127d1122163e1e09c264db3dc4490b97",
+    "follow-on/SEARCH-F002-discovery-admission-consumer-proof/KICKSTART.md": "15330a01eb09767b0dd7c1b15d89cdc8e6fb83268e021ed6f11f9465528c1b91"
+  },
+  "post_review_canonical_hashes": {
+    "follow-on/SEARCH-F001-built-in-discovery-metadata/GOAL.md": "323ef6f9b2d2d00241ab733e4528999066834748aff937cffa4f9ae15b3ff7e8",
+    "follow-on/SEARCH-F001-built-in-discovery-metadata/KICKSTART.md": "73c1c4db7f4d6c11ade5b8e072b11c7cb598b07149c5b3b79c0bafa2f8ab92bb",
+    "follow-on/SEARCH-F002-discovery-admission-consumer-proof/GOAL.md": "292da00cf3e3a876d76a363669101d7d2b82a464ed4eb1a6db56c170fd1f8b17",
+    "follow-on/SEARCH-F002-discovery-admission-consumer-proof/KICKSTART.md": "7644de329d71f6726839f5ba109f685e58d2b307a61c55c654a93352ba2c7d3d"
+  },
+  "reviewer_file_hashes": {
+    "ROLE_RECORD.md": "a080a0484c810a3c167a8fb6040f67b8e8021bf3d51a2785b43f5640140a04a8",
+    "REVIEW.md": "268fa3692559c35397dd4cd72900004c2fb5ca5d64ceb3e9b781d8f3398c41fa"
+  },
+  "hash_semantics": "UTF-8 with physical CRLF normalized to LF; preserved text otherwise; historical M3A hashes are not replaced",
+  "parent_transcription_note": "Five source URL hashes initially contained omitted characters during manual reviewer persistence; restored to match returned review and all affected locators validated before acceptance.",
+  "parent_acceptance": "Both companions agree; raw/frozen/historical evidence unchanged. Parent affected checks passed; no second reviewer pass."
+}

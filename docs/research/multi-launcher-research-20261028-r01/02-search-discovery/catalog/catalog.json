@@ -1,0 +1,1991 @@
+{
+  "schema_version": 1,
+  "catalog_version": "g02-m1-c-frozen-1",
+  "freeze_state": "FROZEN_FOR_EVALUATION_V1",
+  "source_sha": "59156d96adcc73939c7171487a0cb582e3286587",
+  "program_id": "multi-launcher-research-20261028-r01",
+  "goal01_closing_commit": "3b79d73f12a791b8b077ed0bf7d6631bd885b68c",
+  "provenance": {
+    "author": "/root/audit_author",
+    "method": "Static first-party source inspection; no provider invocation or live metadata probing",
+    "wire_derivation": "Fixed strings copied from source; Diff/FS mode encodings derived with compact UTF-8 JSON and URL-safe base64 without padding, not Rust execution",
+    "runtime_verified": false,
+    "proposed_aliases_are_current_registration": false,
+    "freeze_identity": "g02-eval-v1; canonical UTF-8/LF text hashes in evaluation/freeze_manifest.json; strict UTF-8, no BOM or lone physical CR; no JSON reformatting",
+    "typed_command": "Source-symbol trace with imports elided, not evaluated Rust; FileSearchKindPayload wire names lowercase by serde",
+    "m1_b_alias_normalization": "One draft alias changed remove json whitespace -> strip json whitespace to avoid conflict with common destructive-intent abstention; exact source Action/shortcuts/owners/subsets unchanged"
+  },
+  "subset_policy": {
+    "SEARCH_F001_INITIAL": {
+      "count": 11,
+      "ids": [
+        "tool.json.open",
+        "tool.json.format",
+        "tool.json.minify",
+        "tool.hash.open",
+        "tool.xml.open",
+        "tool.regex.open",
+        "tool.table.open",
+        "tool.csv.open",
+        "tool.image_compare.open",
+        "tool.duplicates.open",
+        "tool.activity.open"
+      ],
+      "meaning": "Exactly the 11 planner future-shipping seeds; package remains proposed and is not implemented"
+    },
+    "RESEARCH_ONLY_EXTENSION": {
+      "count": 4,
+      "ids": [
+        "tool.diff.open",
+        "tool.file_search.open",
+        "tool.file_search.filename",
+        "tool.file_search.content"
+      ],
+      "meaning": "Verified existing openers for research coverage; outside raw SEARCH-F001 scope; no shipping expansion accepted"
+    },
+    "future_reporting_requirement": "Report full-research and SEARCH-F001-initial-only quality separately on identical case denominators and labels; state absent-target cases rather than dropping them. Extra-descriptor results cannot justify an eleven-descriptor implementation. Canonical future scope expansion requires source-backed amended Goal/Kickstart/tests at M3-A."
+  },
+  "global_constraints": [
+    "All entries are metadata and exact existing tool-opening payloads, not auto-execution permission",
+    "No canonical self.results/command_cache/completion/Macro cardinality insertion",
+    "Fresh-user list/grid-only/query-origin and complete protected-route admission are proposed future integration policy, not existing source types",
+    "No natural-language payload/path/clipboard sampling or inferred operation",
+    "Missing/duplicate/wrong-origin/disabled/stale owner fails closed in proposed discovery",
+    "Complete protected-prefix inventory is NOT supplied by this catalog or has_enabled_query_prefix"
+  ],
+  "entries": [
+    {
+      "id": "tool.json.open",
+      "id_kind": "PROPOSED_SYNTHETIC_DISCOVERY_ID_NOT_EXISTING_ACTION_ID",
+      "record_kind": "tool_opener",
+      "implementation_status": "EXISTING_ACTION_SOURCE_VERIFIED_RUNTIME_UNTESTED",
+      "metadata_status": "RESEARCH_DRAFT_NOT_REGISTERED_IN_APPLICATION",
+      "scope_subset": "SEARCH_F001_INITIAL",
+      "owner": {
+        "kind": "builtin_plugin",
+        "name": "json_utility",
+        "origin_required_for_proposed_discovery": "Builtin",
+        "source_file": "src/plugins/json_utility.rs"
+      },
+      "label": "Open JSON Utility",
+      "description": "Open the JSON formatter and minifier",
+      "current_action": {
+        "label": "Open JSON Utility",
+        "desc": "Open the JSON formatter and minifier",
+        "action": "json_utility:open",
+        "args": null
+      },
+      "typed_command": "Command::JsonUtility(JsonUtilityCommand::Open { intent: JsonUtilityIntent::General })",
+      "fixed_decoded_payload": null,
+      "existing_queries": [
+        "json"
+      ],
+      "query_prefixes": [
+        "json"
+      ],
+      "query_policy": {
+        "value": "ActionFilters",
+        "origin": "Plugin default; source owner has no override",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 100,
+          "end_line": 138,
+          "symbol": "Plugin::query_policy",
+          "supports": "Default policy only; does not create complete protected-prefix inventory",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L100-L138"
+        }
+      },
+      "existing_shortcuts": [
+        {
+          "query": "json",
+          "kind": "query_shortcut",
+          "action": {
+            "label": "json",
+            "desc": "JSON formatter and minifier",
+            "action": "query:json",
+            "args": null
+          }
+        }
+      ],
+      "declared_capabilities": [
+        "search"
+      ],
+      "canonical_eligibility": {
+        "runtime_policy": "UNKNOWN_NOT_READ_FROM_USER_SETTINGS",
+        "required_enabled_plugin": "json_utility",
+        "configured_capability": "search",
+        "absent_plugin_capability_restriction": "unrestricted",
+        "present_list_without_search": "denied",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 1411,
+          "end_line": 1437,
+          "symbol": "plugin_matches_search",
+          "supports": "Current enabled-provider/configured-capability gates",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L1411-L1437"
+        }
+      },
+      "proposed_discovery_eligibility": [
+        "unique current builtin owner",
+        "snapshot enabled plus caller enabled set",
+        "declared search and configured search permission",
+        "current owner epoch/revision/policy at activation",
+        "separate interactive list/grid admission; not yet implemented"
+      ],
+      "target_types_after_explicit_open": [
+        "explicit JSON text or file later loaded by user"
+      ],
+      "natural_language_prefill": "NONE; never insert query words into args/path/content/query_override",
+      "opener_effect": "open_existing_tool_via_existing_typed_host",
+      "operation_effects": "Only later explicit tool interaction; retained draft/session work is not asserted absent",
+      "confirmation": "Existing tool, preview, file-picker and mutation owners remain authoritative; no automatic inferred operation",
+      "proposed_aliases": [
+        "json utility",
+        "inspect json",
+        "json formatter"
+      ],
+      "alias_provenance": "model-authored research vocabulary, not existing registered aliases or frozen evaluation labels",
+      "capability_limits": [
+        "Strict JSON tool; no inferred query payload, YAML or JSON5 conversion claim"
+      ],
+      "source_evidence": [
+        {
+          "path": "src/plugins/json_utility.rs",
+          "start_line": 8,
+          "end_line": 82,
+          "symbol": "JsonUtilityPlugin::{search,commands}",
+          "supports": "Exact opening action fields, mode aliases and separate query shortcuts",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/json_utility.rs#L8-L82"
+        },
+        {
+          "path": "src/commands/parser.rs",
+          "start_line": 943,
+          "end_line": 950,
+          "symbol": "parse_json_utility",
+          "supports": "Typed opening intent",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/commands/parser.rs#L943-L950"
+        },
+        {
+          "path": "src/gui/command_host.rs",
+          "start_line": 822,
+          "end_line": 827,
+          "symbol": "JsonUtilityCommandHost::open_json_utility",
+          "supports": "Open existing dialog with intent",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/gui/command_host.rs#L822-L827"
+        }
+      ]
+    },
+    {
+      "id": "tool.json.format",
+      "id_kind": "PROPOSED_SYNTHETIC_DISCOVERY_ID_NOT_EXISTING_ACTION_ID",
+      "record_kind": "tool_opener",
+      "implementation_status": "EXISTING_ACTION_SOURCE_VERIFIED_RUNTIME_UNTESTED",
+      "metadata_status": "RESEARCH_DRAFT_NOT_REGISTERED_IN_APPLICATION",
+      "scope_subset": "SEARCH_F001_INITIAL",
+      "owner": {
+        "kind": "builtin_plugin",
+        "name": "json_utility",
+        "origin_required_for_proposed_discovery": "Builtin",
+        "source_file": "src/plugins/json_utility.rs"
+      },
+      "label": "Format JSON",
+      "description": "Open the JSON utility in format mode",
+      "current_action": {
+        "label": "Format JSON",
+        "desc": "Open the JSON utility in format mode",
+        "action": "json_utility:format",
+        "args": null
+      },
+      "typed_command": "Command::JsonUtility(JsonUtilityCommand::Open { intent: JsonUtilityIntent::Format })",
+      "fixed_decoded_payload": null,
+      "existing_queries": [
+        "json format",
+        "json pretty"
+      ],
+      "query_prefixes": [
+        "json"
+      ],
+      "query_policy": {
+        "value": "ActionFilters",
+        "origin": "Plugin default; source owner has no override",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 100,
+          "end_line": 138,
+          "symbol": "Plugin::query_policy",
+          "supports": "Default policy only; does not create complete protected-prefix inventory",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L100-L138"
+        }
+      },
+      "existing_shortcuts": [
+        {
+          "query": "json format",
+          "kind": "query_shortcut",
+          "action": {
+            "label": "json format",
+            "desc": "JSON formatter and minifier",
+            "action": "query:json format",
+            "args": null
+          }
+        },
+        {
+          "query": "json pretty",
+          "kind": "query_shortcut",
+          "action": {
+            "label": "json pretty",
+            "desc": "JSON formatter and minifier",
+            "action": "query:json pretty",
+            "args": null
+          }
+        }
+      ],
+      "declared_capabilities": [
+        "search"
+      ],
+      "canonical_eligibility": {
+        "runtime_policy": "UNKNOWN_NOT_READ_FROM_USER_SETTINGS",
+        "required_enabled_plugin": "json_utility",
+        "configured_capability": "search",
+        "absent_plugin_capability_restriction": "unrestricted",
+        "present_list_without_search": "denied",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 1411,
+          "end_line": 1437,
+          "symbol": "plugin_matches_search",
+          "supports": "Current enabled-provider/configured-capability gates",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L1411-L1437"
+        }
+      },
+      "proposed_discovery_eligibility": [
+        "unique current builtin owner",
+        "snapshot enabled plus caller enabled set",
+        "declared search and configured search permission",
+        "current owner epoch/revision/policy at activation",
+        "separate interactive list/grid admission; not yet implemented"
+      ],
+      "target_types_after_explicit_open": [
+        "explicit JSON text or file later loaded by user"
+      ],
+      "natural_language_prefill": "NONE; never insert query words into args/path/content/query_override",
+      "opener_effect": "open_existing_tool_via_existing_typed_host",
+      "operation_effects": "Only later explicit tool interaction; retained draft/session work is not asserted absent",
+      "confirmation": "Existing tool, preview, file-picker and mutation owners remain authoritative; no automatic inferred operation",
+      "proposed_aliases": [
+        "pretty print json",
+        "make json readable",
+        "indent json"
+      ],
+      "alias_provenance": "model-authored research vocabulary, not existing registered aliases or frozen evaluation labels",
+      "capability_limits": [
+        "Opens format intent; does not format the natural-language query or silently load clipboard"
+      ],
+      "source_evidence": [
+        {
+          "path": "src/plugins/json_utility.rs",
+          "start_line": 8,
+          "end_line": 82,
+          "symbol": "JsonUtilityPlugin::{search,commands}",
+          "supports": "Exact opening action fields, mode aliases and separate query shortcuts",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/json_utility.rs#L8-L82"
+        },
+        {
+          "path": "src/commands/parser.rs",
+          "start_line": 943,
+          "end_line": 950,
+          "symbol": "parse_json_utility",
+          "supports": "Typed opening intent",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/commands/parser.rs#L943-L950"
+        },
+        {
+          "path": "src/gui/command_host.rs",
+          "start_line": 822,
+          "end_line": 827,
+          "symbol": "JsonUtilityCommandHost::open_json_utility",
+          "supports": "Open existing dialog with intent",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/gui/command_host.rs#L822-L827"
+        }
+      ]
+    },
+    {
+      "id": "tool.json.minify",
+      "id_kind": "PROPOSED_SYNTHETIC_DISCOVERY_ID_NOT_EXISTING_ACTION_ID",
+      "record_kind": "tool_opener",
+      "implementation_status": "EXISTING_ACTION_SOURCE_VERIFIED_RUNTIME_UNTESTED",
+      "metadata_status": "RESEARCH_DRAFT_NOT_REGISTERED_IN_APPLICATION",
+      "scope_subset": "SEARCH_F001_INITIAL",
+      "owner": {
+        "kind": "builtin_plugin",
+        "name": "json_utility",
+        "origin_required_for_proposed_discovery": "Builtin",
+        "source_file": "src/plugins/json_utility.rs"
+      },
+      "label": "Minify JSON",
+      "description": "Open the JSON utility in minify mode",
+      "current_action": {
+        "label": "Minify JSON",
+        "desc": "Open the JSON utility in minify mode",
+        "action": "json_utility:minify",
+        "args": null
+      },
+      "typed_command": "Command::JsonUtility(JsonUtilityCommand::Open { intent: JsonUtilityIntent::Minify })",
+      "fixed_decoded_payload": null,
+      "existing_queries": [
+        "json minify"
+      ],
+      "query_prefixes": [
+        "json"
+      ],
+      "query_policy": {
+        "value": "ActionFilters",
+        "origin": "Plugin default; source owner has no override",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 100,
+          "end_line": 138,
+          "symbol": "Plugin::query_policy",
+          "supports": "Default policy only; does not create complete protected-prefix inventory",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L100-L138"
+        }
+      },
+      "existing_shortcuts": [
+        {
+          "query": "json minify",
+          "kind": "query_shortcut",
+          "action": {
+            "label": "json minify",
+            "desc": "JSON formatter and minifier",
+            "action": "query:json minify",
+            "args": null
+          }
+        }
+      ],
+      "declared_capabilities": [
+        "search"
+      ],
+      "canonical_eligibility": {
+        "runtime_policy": "UNKNOWN_NOT_READ_FROM_USER_SETTINGS",
+        "required_enabled_plugin": "json_utility",
+        "configured_capability": "search",
+        "absent_plugin_capability_restriction": "unrestricted",
+        "present_list_without_search": "denied",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 1411,
+          "end_line": 1437,
+          "symbol": "plugin_matches_search",
+          "supports": "Current enabled-provider/configured-capability gates",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L1411-L1437"
+        }
+      },
+      "proposed_discovery_eligibility": [
+        "unique current builtin owner",
+        "snapshot enabled plus caller enabled set",
+        "declared search and configured search permission",
+        "current owner epoch/revision/policy at activation",
+        "separate interactive list/grid admission; not yet implemented"
+      ],
+      "target_types_after_explicit_open": [
+        "explicit JSON text or file later loaded by user"
+      ],
+      "natural_language_prefill": "NONE; never insert query words into args/path/content/query_override",
+      "opener_effect": "open_existing_tool_via_existing_typed_host",
+      "operation_effects": "Only later explicit tool interaction; retained draft/session work is not asserted absent",
+      "confirmation": "Existing tool, preview, file-picker and mutation owners remain authoritative; no automatic inferred operation",
+      "proposed_aliases": [
+        "compact json",
+        "strip json whitespace",
+        "minify json"
+      ],
+      "alias_provenance": "model-authored research vocabulary, not existing registered aliases or frozen evaluation labels",
+      "capability_limits": [
+        "Opens minify intent; no compression/archive or inferred output file"
+      ],
+      "source_evidence": [
+        {
+          "path": "src/plugins/json_utility.rs",
+          "start_line": 8,
+          "end_line": 82,
+          "symbol": "JsonUtilityPlugin::{search,commands}",
+          "supports": "Exact opening action fields, mode aliases and separate query shortcuts",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/json_utility.rs#L8-L82"
+        },
+        {
+          "path": "src/commands/parser.rs",
+          "start_line": 943,
+          "end_line": 950,
+          "symbol": "parse_json_utility",
+          "supports": "Typed opening intent",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/commands/parser.rs#L943-L950"
+        },
+        {
+          "path": "src/gui/command_host.rs",
+          "start_line": 822,
+          "end_line": 827,
+          "symbol": "JsonUtilityCommandHost::open_json_utility",
+          "supports": "Open existing dialog with intent",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/gui/command_host.rs#L822-L827"
+        }
+      ]
+    },
+    {
+      "id": "tool.hash.open",
+      "id_kind": "PROPOSED_SYNTHETIC_DISCOVERY_ID_NOT_EXISTING_ACTION_ID",
+      "record_kind": "tool_opener",
+      "implementation_status": "EXISTING_ACTION_SOURCE_VERIFIED_RUNTIME_UNTESTED",
+      "metadata_status": "RESEARCH_DRAFT_NOT_REGISTERED_IN_APPLICATION",
+      "scope_subset": "SEARCH_F001_INITIAL",
+      "owner": {
+        "kind": "builtin_plugin",
+        "name": "hash_generator",
+        "origin_required_for_proposed_discovery": "Builtin",
+        "source_file": "src/plugins/hash_generator.rs"
+      },
+      "label": "Open Hash Generator",
+      "description": "Hash text, loaded clipboard text, or a local file with SHA-256, SHA-512, or legacy SHA-1",
+      "current_action": {
+        "label": "Open Hash Generator",
+        "desc": "Hash text, loaded clipboard text, or a local file with SHA-256, SHA-512, or legacy SHA-1",
+        "action": "hash:open",
+        "args": null
+      },
+      "typed_command": "Command::HashGenerator(HashGeneratorCommand::Open)",
+      "fixed_decoded_payload": null,
+      "existing_queries": [
+        "hash"
+      ],
+      "query_prefixes": [
+        "hash"
+      ],
+      "query_policy": {
+        "value": "ActionFilters",
+        "origin": "Plugin default; source owner has no override",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 100,
+          "end_line": 138,
+          "symbol": "Plugin::query_policy",
+          "supports": "Default policy only; does not create complete protected-prefix inventory",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L100-L138"
+        }
+      },
+      "existing_shortcuts": [
+        {
+          "query": "hash",
+          "kind": "query_shortcut",
+          "action": {
+            "label": "hash",
+            "desc": "Open the Hash Generator",
+            "action": "query:hash",
+            "args": null
+          }
+        }
+      ],
+      "declared_capabilities": [
+        "search"
+      ],
+      "canonical_eligibility": {
+        "runtime_policy": "UNKNOWN_NOT_READ_FROM_USER_SETTINGS",
+        "required_enabled_plugin": "hash_generator",
+        "configured_capability": "search",
+        "absent_plugin_capability_restriction": "unrestricted",
+        "present_list_without_search": "denied",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 1411,
+          "end_line": 1437,
+          "symbol": "plugin_matches_search",
+          "supports": "Current enabled-provider/configured-capability gates",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L1411-L1437"
+        }
+      },
+      "proposed_discovery_eligibility": [
+        "unique current builtin owner",
+        "snapshot enabled plus caller enabled set",
+        "declared search and configured search permission",
+        "current owner epoch/revision/policy at activation",
+        "separate interactive list/grid admission; not yet implemented"
+      ],
+      "target_types_after_explicit_open": [
+        "text",
+        "explicitly loaded clipboard text",
+        "explicit local file"
+      ],
+      "natural_language_prefill": "NONE; never insert query words into args/path/content/query_override",
+      "opener_effect": "open_existing_tool_via_existing_typed_host",
+      "operation_effects": "Only later explicit tool interaction; retained draft/session work is not asserted absent",
+      "confirmation": "Existing tool, preview, file-picker and mutation owners remain authoritative; no automatic inferred operation",
+      "proposed_aliases": [
+        "checksum",
+        "file digest",
+        "sha256 hash"
+      ],
+      "alias_provenance": "model-authored research vocabulary, not existing registered aliases or frozen evaluation labels",
+      "capability_limits": [
+        "SHA-256/SHA-512/legacy SHA-1 only as verified owner describes; no cryptographic signature verification or implicit file path"
+      ],
+      "source_evidence": [
+        {
+          "path": "src/plugins/hash_generator.rs",
+          "start_line": 6,
+          "end_line": 44,
+          "symbol": "hash_generator Plugin::search/commands",
+          "supports": "Exact fixed opener, provider identity/prefix/search declaration and separate query shortcut",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/hash_generator.rs#L6-L44"
+        },
+        {
+          "path": "src/commands/parser.rs",
+          "start_line": 380,
+          "end_line": 538,
+          "symbol": "parse_action",
+          "supports": "Existing typed opening protocols",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/commands/parser.rs#L380-L538"
+        }
+      ]
+    },
+    {
+      "id": "tool.xml.open",
+      "id_kind": "PROPOSED_SYNTHETIC_DISCOVERY_ID_NOT_EXISTING_ACTION_ID",
+      "record_kind": "tool_opener",
+      "implementation_status": "EXISTING_ACTION_SOURCE_VERIFIED_RUNTIME_UNTESTED",
+      "metadata_status": "RESEARCH_DRAFT_NOT_REGISTERED_IN_APPLICATION",
+      "scope_subset": "SEARCH_F001_INITIAL",
+      "owner": {
+        "kind": "builtin_plugin",
+        "name": "xml_toolkit",
+        "origin_required_for_proposed_discovery": "Builtin",
+        "source_file": "src/plugins/xml_toolkit.rs"
+      },
+      "label": "Open XML Toolkit",
+      "description": "Browse, query, validate, format, and save bounded local UTF-8 XML",
+      "current_action": {
+        "label": "Open XML Toolkit",
+        "desc": "Browse, query, validate, format, and save bounded local UTF-8 XML",
+        "action": "xml:open",
+        "args": null
+      },
+      "typed_command": "Command::XmlToolkit(XmlToolkitCommand::Open)",
+      "fixed_decoded_payload": null,
+      "existing_queries": [
+        "xml"
+      ],
+      "query_prefixes": [
+        "xml"
+      ],
+      "query_policy": {
+        "value": "ActionFilters",
+        "origin": "Plugin default; source owner has no override",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 100,
+          "end_line": 138,
+          "symbol": "Plugin::query_policy",
+          "supports": "Default policy only; does not create complete protected-prefix inventory",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L100-L138"
+        }
+      },
+      "existing_shortcuts": [
+        {
+          "query": "xml",
+          "kind": "query_shortcut",
+          "action": {
+            "label": "xml",
+            "desc": "Open the bounded offline XML Toolkit",
+            "action": "query:xml",
+            "args": null
+          }
+        }
+      ],
+      "declared_capabilities": [
+        "search"
+      ],
+      "canonical_eligibility": {
+        "runtime_policy": "UNKNOWN_NOT_READ_FROM_USER_SETTINGS",
+        "required_enabled_plugin": "xml_toolkit",
+        "configured_capability": "search",
+        "absent_plugin_capability_restriction": "unrestricted",
+        "present_list_without_search": "denied",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 1411,
+          "end_line": 1437,
+          "symbol": "plugin_matches_search",
+          "supports": "Current enabled-provider/configured-capability gates",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L1411-L1437"
+        }
+      },
+      "proposed_discovery_eligibility": [
+        "unique current builtin owner",
+        "snapshot enabled plus caller enabled set",
+        "declared search and configured search permission",
+        "current owner epoch/revision/policy at activation",
+        "separate interactive list/grid admission; not yet implemented"
+      ],
+      "target_types_after_explicit_open": [
+        "bounded local UTF-8 XML",
+        "explicit root-confined XSD"
+      ],
+      "natural_language_prefill": "NONE; never insert query words into args/path/content/query_override",
+      "opener_effect": "open_existing_tool_via_existing_typed_host",
+      "operation_effects": "Only later explicit tool interaction; retained draft/session work is not asserted absent",
+      "confirmation": "Existing tool, preview, file-picker and mutation owners remain authoritative; no automatic inferred operation",
+      "proposed_aliases": [
+        "xml viewer",
+        "xpath",
+        "validate xml"
+      ],
+      "alias_provenance": "model-authored research vocabulary, not existing registered aliases or frozen evaluation labels",
+      "capability_limits": [
+        "DTD/external resources disabled; local bounded tool, no network schema fetch or arbitrary XML expansion"
+      ],
+      "source_evidence": [
+        {
+          "path": "src/plugins/xml_toolkit.rs",
+          "start_line": 6,
+          "end_line": 44,
+          "symbol": "xml_toolkit Plugin::search/commands",
+          "supports": "Exact fixed opener, provider identity/prefix/search declaration and separate query shortcut",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/xml_toolkit.rs#L6-L44"
+        },
+        {
+          "path": "src/commands/parser.rs",
+          "start_line": 380,
+          "end_line": 538,
+          "symbol": "parse_action",
+          "supports": "Existing typed opening protocols",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/commands/parser.rs#L380-L538"
+        }
+      ]
+    },
+    {
+      "id": "tool.regex.open",
+      "id_kind": "PROPOSED_SYNTHETIC_DISCOVERY_ID_NOT_EXISTING_ACTION_ID",
+      "record_kind": "tool_opener",
+      "implementation_status": "EXISTING_ACTION_SOURCE_VERIFIED_RUNTIME_UNTESTED",
+      "metadata_status": "RESEARCH_DRAFT_NOT_REGISTERED_IN_APPLICATION",
+      "scope_subset": "SEARCH_F001_INITIAL",
+      "owner": {
+        "kind": "builtin_plugin",
+        "name": "regex_tester",
+        "origin_required_for_proposed_discovery": "Builtin",
+        "source_file": "src/plugins/regex_tester.rs"
+      },
+      "label": "Open Regex Tester",
+      "description": "Open the local, offline Rust Regex Tester",
+      "current_action": {
+        "label": "Open Regex Tester",
+        "desc": "Open the local, offline Rust Regex Tester",
+        "action": "regex:open",
+        "args": null
+      },
+      "typed_command": "Command::Dialog(DialogCommand::RegexTester)",
+      "fixed_decoded_payload": null,
+      "existing_queries": [
+        "regex"
+      ],
+      "query_prefixes": [
+        "regex"
+      ],
+      "query_policy": {
+        "value": "ActionFilters",
+        "origin": "Plugin default; source owner has no override",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 100,
+          "end_line": 138,
+          "symbol": "Plugin::query_policy",
+          "supports": "Default policy only; does not create complete protected-prefix inventory",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L100-L138"
+        }
+      },
+      "existing_shortcuts": [
+        {
+          "query": "regex",
+          "kind": "query_shortcut",
+          "action": {
+            "label": "regex",
+            "desc": "Open the local, offline Rust Regex Tester",
+            "action": "query:regex",
+            "args": null
+          }
+        }
+      ],
+      "declared_capabilities": [
+        "search"
+      ],
+      "canonical_eligibility": {
+        "runtime_policy": "UNKNOWN_NOT_READ_FROM_USER_SETTINGS",
+        "required_enabled_plugin": "regex_tester",
+        "configured_capability": "search",
+        "absent_plugin_capability_restriction": "unrestricted",
+        "present_list_without_search": "denied",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 1411,
+          "end_line": 1437,
+          "symbol": "plugin_matches_search",
+          "supports": "Current enabled-provider/configured-capability gates",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L1411-L1437"
+        }
+      },
+      "proposed_discovery_eligibility": [
+        "unique current builtin owner",
+        "snapshot enabled plus caller enabled set",
+        "declared search and configured search permission",
+        "current owner epoch/revision/policy at activation",
+        "separate interactive list/grid admission; not yet implemented"
+      ],
+      "target_types_after_explicit_open": [
+        "explicit pattern",
+        "explicit sample text"
+      ],
+      "natural_language_prefill": "NONE; never insert query words into args/path/content/query_override",
+      "opener_effect": "open_existing_tool_via_existing_typed_host",
+      "operation_effects": "Only later explicit tool interaction; retained draft/session work is not asserted absent",
+      "confirmation": "Existing tool, preview, file-picker and mutation owners remain authoritative; no automatic inferred operation",
+      "proposed_aliases": [
+        "regular expression tester",
+        "test regex",
+        "pattern matching"
+      ],
+      "alias_provenance": "model-authored research vocabulary, not existing registered aliases or frozen evaluation labels",
+      "capability_limits": [
+        "Rust regex semantics and configured budgets; no arbitrary script or inferred regex execution"
+      ],
+      "source_evidence": [
+        {
+          "path": "src/plugins/regex_tester.rs",
+          "start_line": 6,
+          "end_line": 44,
+          "symbol": "regex_tester Plugin::search/commands",
+          "supports": "Exact fixed opener, provider identity/prefix/search declaration and separate query shortcut",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/regex_tester.rs#L6-L44"
+        },
+        {
+          "path": "src/commands/parser.rs",
+          "start_line": 380,
+          "end_line": 538,
+          "symbol": "parse_action",
+          "supports": "Existing typed opening protocols",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/commands/parser.rs#L380-L538"
+        }
+      ]
+    },
+    {
+      "id": "tool.table.open",
+      "id_kind": "PROPOSED_SYNTHETIC_DISCOVERY_ID_NOT_EXISTING_ACTION_ID",
+      "record_kind": "tool_opener",
+      "implementation_status": "EXISTING_ACTION_SOURCE_VERIFIED_RUNTIME_UNTESTED",
+      "metadata_status": "RESEARCH_DRAFT_NOT_REGISTERED_IN_APPLICATION",
+      "scope_subset": "SEARCH_F001_INITIAL",
+      "owner": {
+        "kind": "builtin_plugin",
+        "name": "table_utility",
+        "origin_required_for_proposed_discovery": "Builtin",
+        "source_file": "src/plugins/table_utility.rs"
+      },
+      "label": "Open Table Utility",
+      "description": "Inspect CSV or TSV text, filter rows, and export selected results",
+      "current_action": {
+        "label": "Open Table Utility",
+        "desc": "Inspect CSV or TSV text, filter rows, and export selected results",
+        "action": "table:open",
+        "args": null
+      },
+      "typed_command": "Command::TableUtility(TableUtilityCommand::Open { profile: TableUtilityProfile::Table })",
+      "fixed_decoded_payload": null,
+      "existing_queries": [
+        "table"
+      ],
+      "query_prefixes": [
+        "table"
+      ],
+      "query_policy": {
+        "value": "ActionFilters",
+        "origin": "Plugin default; source owner has no override",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 100,
+          "end_line": 138,
+          "symbol": "Plugin::query_policy",
+          "supports": "Default policy only; does not create complete protected-prefix inventory",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L100-L138"
+        }
+      },
+      "existing_shortcuts": [
+        {
+          "query": "table",
+          "kind": "query_shortcut",
+          "action": {
+            "label": "table",
+            "desc": "Open the Table Utility",
+            "action": "query:table",
+            "args": null
+          }
+        }
+      ],
+      "declared_capabilities": [
+        "search"
+      ],
+      "canonical_eligibility": {
+        "runtime_policy": "UNKNOWN_NOT_READ_FROM_USER_SETTINGS",
+        "required_enabled_plugin": "table_utility",
+        "configured_capability": "search",
+        "absent_plugin_capability_restriction": "unrestricted",
+        "present_list_without_search": "denied",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 1411,
+          "end_line": 1437,
+          "symbol": "plugin_matches_search",
+          "supports": "Current enabled-provider/configured-capability gates",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L1411-L1437"
+        }
+      },
+      "proposed_discovery_eligibility": [
+        "unique current builtin owner",
+        "snapshot enabled plus caller enabled set",
+        "declared search and configured search permission",
+        "current owner epoch/revision/policy at activation",
+        "separate interactive list/grid admission; not yet implemented"
+      ],
+      "target_types_after_explicit_open": [
+        "CSV text",
+        "TSV text",
+        "explicit bounded file source"
+      ],
+      "natural_language_prefill": "NONE; never insert query words into args/path/content/query_override",
+      "opener_effect": "open_existing_tool_via_existing_typed_host",
+      "operation_effects": "Only later explicit tool interaction; retained draft/session work is not asserted absent",
+      "confirmation": "Existing tool, preview, file-picker and mutation owners remain authoritative; no automatic inferred operation",
+      "proposed_aliases": [
+        "table viewer",
+        "filter table rows",
+        "inspect tsv"
+      ],
+      "alias_provenance": "model-authored research vocabulary, not existing registered aliases or frozen evaluation labels",
+      "capability_limits": [
+        "Read-only source workflow; export only the owner-authorized materialized selection/basis; no complete unmaterialized file export"
+      ],
+      "source_evidence": [
+        {
+          "path": "src/plugins/table_utility.rs",
+          "start_line": 6,
+          "end_line": 44,
+          "symbol": "table_utility Plugin::search/commands",
+          "supports": "Exact fixed opener, provider identity/prefix/search declaration and separate query shortcut",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/table_utility.rs#L6-L44"
+        },
+        {
+          "path": "src/commands/parser.rs",
+          "start_line": 380,
+          "end_line": 538,
+          "symbol": "parse_action",
+          "supports": "Existing typed opening protocols",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/commands/parser.rs#L380-L538"
+        }
+      ]
+    },
+    {
+      "id": "tool.csv.open",
+      "id_kind": "PROPOSED_SYNTHETIC_DISCOVERY_ID_NOT_EXISTING_ACTION_ID",
+      "record_kind": "tool_opener",
+      "implementation_status": "EXISTING_ACTION_SOURCE_VERIFIED_RUNTIME_UNTESTED",
+      "metadata_status": "RESEARCH_DRAFT_NOT_REGISTERED_IN_APPLICATION",
+      "scope_subset": "SEARCH_F001_INITIAL",
+      "owner": {
+        "kind": "builtin_plugin",
+        "name": "csv",
+        "origin_required_for_proposed_discovery": "Builtin",
+        "source_file": "src/plugins/csv.rs"
+      },
+      "label": "Open CSV Viewer",
+      "description": "Inspect a comma-delimited file with strict CSV parsing",
+      "current_action": {
+        "label": "Open CSV Viewer",
+        "desc": "Inspect a comma-delimited file with strict CSV parsing",
+        "action": "csv:open",
+        "args": null
+      },
+      "typed_command": "Command::TableUtility(TableUtilityCommand::Open { profile: TableUtilityProfile::Csv })",
+      "fixed_decoded_payload": null,
+      "existing_queries": [
+        "csv"
+      ],
+      "query_prefixes": [
+        "csv"
+      ],
+      "query_policy": {
+        "value": "ActionFilters",
+        "origin": "Plugin default; source owner has no override",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 100,
+          "end_line": 138,
+          "symbol": "Plugin::query_policy",
+          "supports": "Default policy only; does not create complete protected-prefix inventory",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L100-L138"
+        }
+      },
+      "existing_shortcuts": [
+        {
+          "query": "csv",
+          "kind": "query_shortcut",
+          "action": {
+            "label": "csv",
+            "desc": "Open the strict CSV viewer",
+            "action": "query:csv",
+            "args": null
+          }
+        }
+      ],
+      "declared_capabilities": [
+        "search"
+      ],
+      "canonical_eligibility": {
+        "runtime_policy": "UNKNOWN_NOT_READ_FROM_USER_SETTINGS",
+        "required_enabled_plugin": "csv",
+        "configured_capability": "search",
+        "absent_plugin_capability_restriction": "unrestricted",
+        "present_list_without_search": "denied",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 1411,
+          "end_line": 1437,
+          "symbol": "plugin_matches_search",
+          "supports": "Current enabled-provider/configured-capability gates",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L1411-L1437"
+        }
+      },
+      "proposed_discovery_eligibility": [
+        "unique current builtin owner",
+        "snapshot enabled plus caller enabled set",
+        "declared search and configured search permission",
+        "current owner epoch/revision/policy at activation",
+        "separate interactive list/grid admission; not yet implemented"
+      ],
+      "target_types_after_explicit_open": [
+        "explicit comma-delimited file"
+      ],
+      "natural_language_prefill": "NONE; never insert query words into args/path/content/query_override",
+      "opener_effect": "open_existing_tool_via_existing_typed_host",
+      "operation_effects": "Only later explicit tool interaction; retained draft/session work is not asserted absent",
+      "confirmation": "Existing tool, preview, file-picker and mutation owners remain authoritative; no automatic inferred operation",
+      "proposed_aliases": [
+        "csv viewer",
+        "comma separated values",
+        "inspect csv"
+      ],
+      "alias_provenance": "model-authored research vocabulary, not existing registered aliases or frozen evaluation labels",
+      "capability_limits": [
+        "Strict CSV profile, distinct from general Table/TSV profile; no spreadsheet editing or guessed full export"
+      ],
+      "source_evidence": [
+        {
+          "path": "src/plugins/csv.rs",
+          "start_line": 6,
+          "end_line": 44,
+          "symbol": "csv Plugin::search/commands",
+          "supports": "Exact fixed opener, provider identity/prefix/search declaration and separate query shortcut",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/csv.rs#L6-L44"
+        },
+        {
+          "path": "src/commands/parser.rs",
+          "start_line": 380,
+          "end_line": 538,
+          "symbol": "parse_action",
+          "supports": "Existing typed opening protocols",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/commands/parser.rs#L380-L538"
+        }
+      ]
+    },
+    {
+      "id": "tool.image_compare.open",
+      "id_kind": "PROPOSED_SYNTHETIC_DISCOVERY_ID_NOT_EXISTING_ACTION_ID",
+      "record_kind": "tool_opener",
+      "implementation_status": "EXISTING_ACTION_SOURCE_VERIFIED_RUNTIME_UNTESTED",
+      "metadata_status": "RESEARCH_DRAFT_NOT_REGISTERED_IN_APPLICATION",
+      "scope_subset": "SEARCH_F001_INITIAL",
+      "owner": {
+        "kind": "builtin_plugin",
+        "name": "image_compare",
+        "origin_required_for_proposed_discovery": "Builtin",
+        "source_file": "src/plugins/image_compare.rs"
+      },
+      "label": "Open Image Comparison",
+      "description": "Compare two images by exact RGBA pixels without changing either source",
+      "current_action": {
+        "label": "Open Image Comparison",
+        "desc": "Compare two images by exact RGBA pixels without changing either source",
+        "action": "imgdiff:open",
+        "args": null
+      },
+      "typed_command": "Command::Dialog(DialogCommand::ImageCompare)",
+      "fixed_decoded_payload": null,
+      "existing_queries": [
+        "imgdiff"
+      ],
+      "query_prefixes": [
+        "imgdiff"
+      ],
+      "query_policy": {
+        "value": "ActionFilters",
+        "origin": "Plugin default; source owner has no override",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 100,
+          "end_line": 138,
+          "symbol": "Plugin::query_policy",
+          "supports": "Default policy only; does not create complete protected-prefix inventory",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L100-L138"
+        }
+      },
+      "existing_shortcuts": [
+        {
+          "query": "imgdiff",
+          "kind": "query_shortcut",
+          "action": {
+            "label": "imgdiff",
+            "desc": "Open Image Comparison",
+            "action": "query:imgdiff",
+            "args": null
+          }
+        }
+      ],
+      "declared_capabilities": [
+        "search"
+      ],
+      "canonical_eligibility": {
+        "runtime_policy": "UNKNOWN_NOT_READ_FROM_USER_SETTINGS",
+        "required_enabled_plugin": "image_compare",
+        "configured_capability": "search",
+        "absent_plugin_capability_restriction": "unrestricted",
+        "present_list_without_search": "denied",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 1411,
+          "end_line": 1437,
+          "symbol": "plugin_matches_search",
+          "supports": "Current enabled-provider/configured-capability gates",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L1411-L1437"
+        }
+      },
+      "proposed_discovery_eligibility": [
+        "unique current builtin owner",
+        "snapshot enabled plus caller enabled set",
+        "declared search and configured search permission",
+        "current owner epoch/revision/policy at activation",
+        "separate interactive list/grid admission; not yet implemented"
+      ],
+      "target_types_after_explicit_open": [
+        "two explicitly chosen images"
+      ],
+      "natural_language_prefill": "NONE; never insert query words into args/path/content/query_override",
+      "opener_effect": "open_existing_tool_via_existing_typed_host",
+      "operation_effects": "Only later explicit tool interaction; retained draft/session work is not asserted absent",
+      "confirmation": "Existing tool, preview, file-picker and mutation owners remain authoritative; no automatic inferred operation",
+      "proposed_aliases": [
+        "compare images",
+        "pixel difference",
+        "image comparison"
+      ],
+      "alias_provenance": "model-authored research vocabulary, not existing registered aliases or frozen evaluation labels",
+      "capability_limits": [
+        "Exact RGBA/session-only; no perceptual or AI similarity and no supplied path prefill"
+      ],
+      "source_evidence": [
+        {
+          "path": "src/plugins/image_compare.rs",
+          "start_line": 6,
+          "end_line": 44,
+          "symbol": "image_compare Plugin::search/commands",
+          "supports": "Exact fixed opener, provider identity/prefix/search declaration and separate query shortcut",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/image_compare.rs#L6-L44"
+        },
+        {
+          "path": "src/commands/parser.rs",
+          "start_line": 380,
+          "end_line": 538,
+          "symbol": "parse_action",
+          "supports": "Existing typed opening protocols",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/commands/parser.rs#L380-L538"
+        }
+      ]
+    },
+    {
+      "id": "tool.duplicates.open",
+      "id_kind": "PROPOSED_SYNTHETIC_DISCOVERY_ID_NOT_EXISTING_ACTION_ID",
+      "record_kind": "tool_opener",
+      "implementation_status": "EXISTING_ACTION_SOURCE_VERIFIED_RUNTIME_UNTESTED",
+      "metadata_status": "RESEARCH_DRAFT_NOT_REGISTERED_IN_APPLICATION",
+      "scope_subset": "SEARCH_F001_INITIAL",
+      "owner": {
+        "kind": "builtin_plugin",
+        "name": "duplicate_finder",
+        "origin_required_for_proposed_discovery": "Builtin",
+        "source_file": "src/plugins/duplicate_finder.rs"
+      },
+      "label": "Open Duplicate Finder",
+      "description": "Find byte-identical files under folders you explicitly select",
+      "current_action": {
+        "label": "Open Duplicate Finder",
+        "desc": "Find byte-identical files under folders you explicitly select",
+        "action": "dff:open",
+        "args": null
+      },
+      "typed_command": "Command::Dialog(DialogCommand::DuplicateFinder)",
+      "fixed_decoded_payload": null,
+      "existing_queries": [
+        "dff"
+      ],
+      "query_prefixes": [
+        "dff"
+      ],
+      "query_policy": {
+        "value": "ActionFilters",
+        "origin": "Plugin default; source owner has no override",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 100,
+          "end_line": 138,
+          "symbol": "Plugin::query_policy",
+          "supports": "Default policy only; does not create complete protected-prefix inventory",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L100-L138"
+        }
+      },
+      "existing_shortcuts": [
+        {
+          "query": "dff",
+          "kind": "query_shortcut",
+          "action": {
+            "label": "dff",
+            "desc": "Open Duplicate Finder",
+            "action": "query:dff",
+            "args": null
+          }
+        }
+      ],
+      "declared_capabilities": [
+        "search"
+      ],
+      "canonical_eligibility": {
+        "runtime_policy": "UNKNOWN_NOT_READ_FROM_USER_SETTINGS",
+        "required_enabled_plugin": "duplicate_finder",
+        "configured_capability": "search",
+        "absent_plugin_capability_restriction": "unrestricted",
+        "present_list_without_search": "denied",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 1411,
+          "end_line": 1437,
+          "symbol": "plugin_matches_search",
+          "supports": "Current enabled-provider/configured-capability gates",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L1411-L1437"
+        }
+      },
+      "proposed_discovery_eligibility": [
+        "unique current builtin owner",
+        "snapshot enabled plus caller enabled set",
+        "declared search and configured search permission",
+        "current owner epoch/revision/policy at activation",
+        "separate interactive list/grid admission; not yet implemented"
+      ],
+      "target_types_after_explicit_open": [
+        "explicit folders"
+      ],
+      "natural_language_prefill": "NONE; never insert query words into args/path/content/query_override",
+      "opener_effect": "open_existing_tool_via_existing_typed_host",
+      "operation_effects": "Only later explicit tool interaction; retained draft/session work is not asserted absent",
+      "confirmation": "Existing tool, preview, file-picker and mutation owners remain authoritative; no automatic inferred operation",
+      "proposed_aliases": [
+        "duplicate files",
+        "byte identical files",
+        "find repeated files"
+      ],
+      "alias_provenance": "model-authored research vocabulary, not existing registered aliases or frozen evaluation labels",
+      "capability_limits": [
+        "Read-only duplicate discovery; no automatic deletion or inferred directory"
+      ],
+      "source_evidence": [
+        {
+          "path": "src/plugins/duplicate_finder.rs",
+          "start_line": 6,
+          "end_line": 44,
+          "symbol": "duplicate_finder Plugin::search/commands",
+          "supports": "Exact fixed opener, provider identity/prefix/search declaration and separate query shortcut",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/duplicate_finder.rs#L6-L44"
+        },
+        {
+          "path": "src/commands/parser.rs",
+          "start_line": 380,
+          "end_line": 538,
+          "symbol": "parse_action",
+          "supports": "Existing typed opening protocols",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/commands/parser.rs#L380-L538"
+        }
+      ]
+    },
+    {
+      "id": "tool.activity.open",
+      "id_kind": "PROPOSED_SYNTHETIC_DISCOVERY_ID_NOT_EXISTING_ACTION_ID",
+      "record_kind": "tool_opener",
+      "implementation_status": "EXISTING_ACTION_SOURCE_VERIFIED_RUNTIME_UNTESTED",
+      "metadata_status": "RESEARCH_DRAFT_NOT_REGISTERED_IN_APPLICATION",
+      "scope_subset": "SEARCH_F001_INITIAL",
+      "owner": {
+        "kind": "builtin_plugin",
+        "name": "activity",
+        "origin_required_for_proposed_discovery": "Builtin",
+        "source_file": "src/plugins/activity.rs"
+      },
+      "label": "Open Activity",
+      "description": "View bounded, payload-free snapshots of background work",
+      "current_action": {
+        "label": "Open Activity",
+        "desc": "View bounded, payload-free snapshots of background work",
+        "action": "activity:open",
+        "args": null
+      },
+      "typed_command": "Command::Dialog(DialogCommand::Activity)",
+      "fixed_decoded_payload": null,
+      "existing_queries": [
+        "activity"
+      ],
+      "query_prefixes": [
+        "activity"
+      ],
+      "query_policy": {
+        "value": "ActionFilters",
+        "origin": "Plugin default; source owner has no override",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 100,
+          "end_line": 138,
+          "symbol": "Plugin::query_policy",
+          "supports": "Default policy only; does not create complete protected-prefix inventory",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L100-L138"
+        }
+      },
+      "existing_shortcuts": [
+        {
+          "query": "activity",
+          "kind": "query_shortcut",
+          "action": {
+            "label": "activity",
+            "desc": "Open the Activity view",
+            "action": "query:activity",
+            "args": null
+          }
+        }
+      ],
+      "declared_capabilities": [
+        "search"
+      ],
+      "canonical_eligibility": {
+        "runtime_policy": "UNKNOWN_NOT_READ_FROM_USER_SETTINGS",
+        "required_enabled_plugin": "activity",
+        "configured_capability": "search",
+        "absent_plugin_capability_restriction": "unrestricted",
+        "present_list_without_search": "denied",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 1411,
+          "end_line": 1437,
+          "symbol": "plugin_matches_search",
+          "supports": "Current enabled-provider/configured-capability gates",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L1411-L1437"
+        }
+      },
+      "proposed_discovery_eligibility": [
+        "unique current builtin owner",
+        "snapshot enabled plus caller enabled set",
+        "declared search and configured search permission",
+        "current owner epoch/revision/policy at activation",
+        "separate interactive list/grid admission; not yet implemented"
+      ],
+      "target_types_after_explicit_open": [
+        "bounded background activity metadata"
+      ],
+      "natural_language_prefill": "NONE; never insert query words into args/path/content/query_override",
+      "opener_effect": "open_existing_tool_via_existing_typed_host",
+      "operation_effects": "Only later explicit tool interaction; retained draft/session work is not asserted absent",
+      "confirmation": "Existing tool, preview, file-picker and mutation owners remain authoritative; no automatic inferred operation",
+      "proposed_aliases": [
+        "background work",
+        "running tasks",
+        "worker status"
+      ],
+      "alias_provenance": "model-authored research vocabulary, not existing registered aliases or frozen evaluation labels",
+      "capability_limits": [
+        "Activity snapshots distinguish retirement; not a Macro run-history browser or process manager"
+      ],
+      "source_evidence": [
+        {
+          "path": "src/plugins/activity.rs",
+          "start_line": 6,
+          "end_line": 44,
+          "symbol": "activity Plugin::search/commands",
+          "supports": "Exact fixed opener, provider identity/prefix/search declaration and separate query shortcut",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/activity.rs#L6-L44"
+        },
+        {
+          "path": "src/commands/parser.rs",
+          "start_line": 380,
+          "end_line": 538,
+          "symbol": "parse_action",
+          "supports": "Existing typed opening protocols",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/commands/parser.rs#L380-L538"
+        }
+      ]
+    },
+    {
+      "id": "tool.diff.open",
+      "id_kind": "PROPOSED_SYNTHETIC_DISCOVERY_ID_NOT_EXISTING_ACTION_ID",
+      "record_kind": "tool_opener",
+      "implementation_status": "EXISTING_ACTION_SOURCE_VERIFIED_RUNTIME_UNTESTED",
+      "metadata_status": "RESEARCH_DRAFT_NOT_REGISTERED_IN_APPLICATION",
+      "scope_subset": "RESEARCH_ONLY_EXTENSION",
+      "owner": {
+        "kind": "builtin_plugin",
+        "name": "diff",
+        "origin_required_for_proposed_discovery": "Builtin",
+        "source_file": "src/plugins/diff.rs"
+      },
+      "label": "Open Diff",
+      "description": "Open native file and folder comparison",
+      "current_action": {
+        "label": "Open Diff",
+        "desc": "Open native file and folder comparison",
+        "action": "diff:open:eyJsZWZ0IjpudWxsLCJyaWdodCI6bnVsbH0",
+        "args": null
+      },
+      "typed_command": "Command::Diff(DiffCommand::Open(DiffOpenPayload { left: None, right: None }))",
+      "fixed_decoded_payload": {
+        "left": null,
+        "right": null
+      },
+      "existing_queries": [
+        "diff"
+      ],
+      "query_prefixes": [
+        "diff"
+      ],
+      "query_policy": {
+        "value": "ActionFilters",
+        "origin": "Plugin default; source owner has no override",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 100,
+          "end_line": 138,
+          "symbol": "Plugin::query_policy",
+          "supports": "Default policy only; does not create complete protected-prefix inventory",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L100-L138"
+        }
+      },
+      "existing_shortcuts": [
+        {
+          "query": "diff",
+          "kind": "direct_tool_opener",
+          "action": {
+            "label": "diff",
+            "desc": "Open file and folder comparison",
+            "action": "diff:open:eyJsZWZ0IjpudWxsLCJyaWdodCI6bnVsbH0",
+            "args": null
+          }
+        }
+      ],
+      "declared_capabilities": [
+        "search"
+      ],
+      "canonical_eligibility": {
+        "runtime_policy": "UNKNOWN_NOT_READ_FROM_USER_SETTINGS",
+        "required_enabled_plugin": "diff",
+        "configured_capability": "search",
+        "absent_plugin_capability_restriction": "unrestricted",
+        "present_list_without_search": "denied",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 1411,
+          "end_line": 1437,
+          "symbol": "plugin_matches_search",
+          "supports": "Current enabled-provider/configured-capability gates",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L1411-L1437"
+        }
+      },
+      "proposed_discovery_eligibility": [
+        "unique current builtin owner",
+        "snapshot enabled plus caller enabled set",
+        "declared search and configured search permission",
+        "current owner epoch/revision/policy at activation",
+        "separate interactive list/grid admission; not yet implemented"
+      ],
+      "target_types_after_explicit_open": [
+        "two explicit files",
+        "two explicit folders",
+        "text comparison views"
+      ],
+      "natural_language_prefill": "NONE; never insert query words into args/path/content/query_override",
+      "opener_effect": "open_existing_tool_via_existing_typed_host",
+      "operation_effects": "Only later explicit tool interaction; retained draft/session work is not asserted absent",
+      "confirmation": "Existing tool, preview, file-picker and mutation owners remain authoritative; no automatic inferred operation",
+      "proposed_aliases": [
+        "compare directories",
+        "compare files",
+        "folder differences"
+      ],
+      "alias_provenance": "model-authored research vocabulary, not existing registered aliases or frozen evaluation labels",
+      "capability_limits": [
+        "Open empty comparison only; no inferred paths/copy/delete/merge. Existing explicit preview/mutation policy retained; AUD-F002 independent"
+      ],
+      "source_evidence": [
+        {
+          "path": "src/plugins/diff.rs",
+          "start_line": 14,
+          "end_line": 60,
+          "symbol": "DiffPlugin::{search,commands}",
+          "supports": "Empty opener separate from supplied paths; direct command shortcut",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/diff.rs#L14-L60"
+        },
+        {
+          "path": "src/plugins/diff.rs",
+          "start_line": 107,
+          "end_line": 122,
+          "symbol": "open_action",
+          "supports": "Exact empty opener label/desc and encoded payload",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/diff.rs#L107-L122"
+        },
+        {
+          "path": "src/diff/query.rs",
+          "start_line": 5,
+          "end_line": 11,
+          "symbol": "DiffOpenPayload",
+          "supports": "Field order and null empty inputs",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/diff/query.rs#L5-L11"
+        },
+        {
+          "path": "src/diff/query.rs",
+          "start_line": 88,
+          "end_line": 97,
+          "symbol": "encode_payload/decode_payload",
+          "supports": "Compact JSON URL-safe no-pad encoding",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/diff/query.rs#L88-L97"
+        },
+        {
+          "path": "src/commands/handlers/file_search_diff.rs",
+          "start_line": 24,
+          "end_line": 40,
+          "symbol": "handle_diff",
+          "supports": "Typed host dispatch",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/commands/handlers/file_search_diff.rs#L24-L40"
+        }
+      ]
+    },
+    {
+      "id": "tool.file_search.open",
+      "id_kind": "PROPOSED_SYNTHETIC_DISCOVERY_ID_NOT_EXISTING_ACTION_ID",
+      "record_kind": "tool_opener",
+      "implementation_status": "EXISTING_ACTION_SOURCE_VERIFIED_RUNTIME_UNTESTED",
+      "metadata_status": "RESEARCH_DRAFT_NOT_REGISTERED_IN_APPLICATION",
+      "scope_subset": "RESEARCH_ONLY_EXTENSION",
+      "owner": {
+        "kind": "builtin_plugin",
+        "name": "file_search",
+        "origin_required_for_proposed_discovery": "Builtin",
+        "source_file": "src/plugins/file_search.rs"
+      },
+      "label": "Open file search",
+      "description": "Open local filename/content search",
+      "current_action": {
+        "label": "Open file search",
+        "desc": "Open local filename/content search",
+        "action": "file_search:open",
+        "args": null
+      },
+      "typed_command": "Command::FileSearch(FileSearchCommand::Open)",
+      "fixed_decoded_payload": null,
+      "existing_queries": [
+        "fs"
+      ],
+      "query_prefixes": [
+        "fs"
+      ],
+      "query_policy": {
+        "value": "ActionFilters",
+        "origin": "Plugin default; source owner has no override",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 100,
+          "end_line": 138,
+          "symbol": "Plugin::query_policy",
+          "supports": "Default policy only; does not create complete protected-prefix inventory",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L100-L138"
+        }
+      },
+      "existing_shortcuts": [
+        {
+          "query": "fs",
+          "kind": "query_shortcut",
+          "action": {
+            "label": "fs",
+            "desc": "Open local file search",
+            "action": "query:fs",
+            "args": null
+          }
+        }
+      ],
+      "declared_capabilities": [
+        "search"
+      ],
+      "canonical_eligibility": {
+        "runtime_policy": "UNKNOWN_NOT_READ_FROM_USER_SETTINGS",
+        "required_enabled_plugin": "file_search",
+        "configured_capability": "search",
+        "absent_plugin_capability_restriction": "unrestricted",
+        "present_list_without_search": "denied",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 1411,
+          "end_line": 1437,
+          "symbol": "plugin_matches_search",
+          "supports": "Current enabled-provider/configured-capability gates",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L1411-L1437"
+        }
+      },
+      "proposed_discovery_eligibility": [
+        "unique current builtin owner",
+        "snapshot enabled plus caller enabled set",
+        "declared search and configured search permission",
+        "current owner epoch/revision/policy at activation",
+        "separate interactive list/grid admission; not yet implemented"
+      ],
+      "target_types_after_explicit_open": [
+        "explicit local search root and pattern after opening"
+      ],
+      "natural_language_prefill": "NONE; never insert query words into args/path/content/query_override",
+      "opener_effect": "open_existing_tool_via_existing_typed_host",
+      "operation_effects": "Only later explicit tool interaction; retained draft/session work is not asserted absent",
+      "confirmation": "Existing tool, preview, file-picker and mutation owners remain authoritative; no automatic inferred operation",
+      "proposed_aliases": [
+        "find local files",
+        "search local disk",
+        "file search window"
+      ],
+      "alias_provenance": "model-authored research vocabulary, not existing registered aliases or frozen evaluation labels",
+      "capability_limits": [
+        "No implicit search start, directory or content read from query. Backend availability/options checked by existing tool"
+      ],
+      "source_evidence": [
+        {
+          "path": "src/plugins/file_search.rs",
+          "start_line": 33,
+          "end_line": 72,
+          "symbol": "FileSearchPlugin::{search,commands}",
+          "supports": "Open/mode/start separation and six existing query shortcuts",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/file_search.rs#L33-L72"
+        },
+        {
+          "path": "src/plugins/file_search.rs",
+          "start_line": 661,
+          "end_line": 731,
+          "symbol": "open_action/mode_action/start_action/command_action",
+          "supports": "Full Action fields and distinct payload owners",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/file_search.rs#L661-L731"
+        },
+        {
+          "path": "src/file_search/actions.rs",
+          "start_line": 12,
+          "end_line": 33,
+          "symbol": "FileSearchModePayload/FileSearchKindPayload",
+          "supports": "Existing wire and lowercase kind",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/file_search/actions.rs#L12-L33"
+        },
+        {
+          "path": "src/gui/command_host.rs",
+          "start_line": 886,
+          "end_line": 923,
+          "symbol": "FileSearchCommandHost/DiffCommandHost",
+          "supports": "Open and mode differ from open_and_start",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/gui/command_host.rs#L886-L923"
+        }
+      ]
+    },
+    {
+      "id": "tool.file_search.filename",
+      "id_kind": "PROPOSED_SYNTHETIC_DISCOVERY_ID_NOT_EXISTING_ACTION_ID",
+      "record_kind": "tool_opener",
+      "implementation_status": "EXISTING_ACTION_SOURCE_VERIFIED_RUNTIME_UNTESTED",
+      "metadata_status": "RESEARCH_DRAFT_NOT_REGISTERED_IN_APPLICATION",
+      "scope_subset": "RESEARCH_ONLY_EXTENSION",
+      "owner": {
+        "kind": "builtin_plugin",
+        "name": "file_search",
+        "origin_required_for_proposed_discovery": "Builtin",
+        "source_file": "src/plugins/file_search.rs"
+      },
+      "label": "Open file search (filename)",
+      "description": "Open local search with filename mode selected",
+      "current_action": {
+        "label": "Open file search (filename)",
+        "desc": "Open local search with filename mode selected",
+        "action": "file_search:mode:eyJraW5kIjoiZmlsZSJ9",
+        "args": null
+      },
+      "typed_command": "Command::FileSearch(FileSearchCommand::SetMode(FileSearchModePayload { kind: FileSearchKindPayload::File }))",
+      "fixed_decoded_payload": {
+        "kind": "file"
+      },
+      "existing_queries": [
+        "fs file"
+      ],
+      "query_prefixes": [
+        "fs"
+      ],
+      "query_policy": {
+        "value": "ActionFilters",
+        "origin": "Plugin default; source owner has no override",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 100,
+          "end_line": 138,
+          "symbol": "Plugin::query_policy",
+          "supports": "Default policy only; does not create complete protected-prefix inventory",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L100-L138"
+        }
+      },
+      "existing_shortcuts": [
+        {
+          "query": "fs file",
+          "kind": "query_shortcut",
+          "action": {
+            "label": "fs file",
+            "desc": "Search local filenames",
+            "action": "query:fs file",
+            "args": null
+          }
+        }
+      ],
+      "declared_capabilities": [
+        "search"
+      ],
+      "canonical_eligibility": {
+        "runtime_policy": "UNKNOWN_NOT_READ_FROM_USER_SETTINGS",
+        "required_enabled_plugin": "file_search",
+        "configured_capability": "search",
+        "absent_plugin_capability_restriction": "unrestricted",
+        "present_list_without_search": "denied",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 1411,
+          "end_line": 1437,
+          "symbol": "plugin_matches_search",
+          "supports": "Current enabled-provider/configured-capability gates",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L1411-L1437"
+        }
+      },
+      "proposed_discovery_eligibility": [
+        "unique current builtin owner",
+        "snapshot enabled plus caller enabled set",
+        "declared search and configured search permission",
+        "current owner epoch/revision/policy at activation",
+        "separate interactive list/grid admission; not yet implemented"
+      ],
+      "target_types_after_explicit_open": [
+        "explicit local search root",
+        "explicit pattern after opening"
+      ],
+      "natural_language_prefill": "NONE; never insert query words into args/path/content/query_override",
+      "opener_effect": "open_existing_tool_via_existing_typed_host",
+      "operation_effects": "Only later explicit tool interaction; retained draft/session work is not asserted absent",
+      "confirmation": "Existing tool, preview, file-picker and mutation owners remain authoritative; no automatic inferred operation",
+      "proposed_aliases": [
+        "find filenames",
+        "filename search",
+        "locate file names"
+      ],
+      "alias_provenance": "model-authored research vocabulary, not existing registered aliases or frozen evaluation labels",
+      "capability_limits": [
+        "Selects mode only, never calls start payload; backend availability/permissions and bounded previews remain current tool policy"
+      ],
+      "source_evidence": [
+        {
+          "path": "src/plugins/file_search.rs",
+          "start_line": 33,
+          "end_line": 72,
+          "symbol": "FileSearchPlugin::{search,commands}",
+          "supports": "Open/mode/start separation and six existing query shortcuts",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/file_search.rs#L33-L72"
+        },
+        {
+          "path": "src/plugins/file_search.rs",
+          "start_line": 661,
+          "end_line": 731,
+          "symbol": "open_action/mode_action/start_action/command_action",
+          "supports": "Full Action fields and distinct payload owners",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/file_search.rs#L661-L731"
+        },
+        {
+          "path": "src/file_search/actions.rs",
+          "start_line": 12,
+          "end_line": 33,
+          "symbol": "FileSearchModePayload/FileSearchKindPayload",
+          "supports": "Existing wire and lowercase kind",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/file_search/actions.rs#L12-L33"
+        },
+        {
+          "path": "src/gui/command_host.rs",
+          "start_line": 886,
+          "end_line": 923,
+          "symbol": "FileSearchCommandHost/DiffCommandHost",
+          "supports": "Open and mode differ from open_and_start",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/gui/command_host.rs#L886-L923"
+        }
+      ]
+    },
+    {
+      "id": "tool.file_search.content",
+      "id_kind": "PROPOSED_SYNTHETIC_DISCOVERY_ID_NOT_EXISTING_ACTION_ID",
+      "record_kind": "tool_opener",
+      "implementation_status": "EXISTING_ACTION_SOURCE_VERIFIED_RUNTIME_UNTESTED",
+      "metadata_status": "RESEARCH_DRAFT_NOT_REGISTERED_IN_APPLICATION",
+      "scope_subset": "RESEARCH_ONLY_EXTENSION",
+      "owner": {
+        "kind": "builtin_plugin",
+        "name": "file_search",
+        "origin_required_for_proposed_discovery": "Builtin",
+        "source_file": "src/plugins/file_search.rs"
+      },
+      "label": "Open file search (content)",
+      "description": "Open local search with content mode selected",
+      "current_action": {
+        "label": "Open file search (content)",
+        "desc": "Open local search with content mode selected",
+        "action": "file_search:mode:eyJraW5kIjoiY29udGVudCJ9",
+        "args": null
+      },
+      "typed_command": "Command::FileSearch(FileSearchCommand::SetMode(FileSearchModePayload { kind: FileSearchKindPayload::Content }))",
+      "fixed_decoded_payload": {
+        "kind": "content"
+      },
+      "existing_queries": [
+        "fs content"
+      ],
+      "query_prefixes": [
+        "fs"
+      ],
+      "query_policy": {
+        "value": "ActionFilters",
+        "origin": "Plugin default; source owner has no override",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 100,
+          "end_line": 138,
+          "symbol": "Plugin::query_policy",
+          "supports": "Default policy only; does not create complete protected-prefix inventory",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L100-L138"
+        }
+      },
+      "existing_shortcuts": [
+        {
+          "query": "fs content",
+          "kind": "query_shortcut",
+          "action": {
+            "label": "fs content",
+            "desc": "Search local file contents",
+            "action": "query:fs content",
+            "args": null
+          }
+        }
+      ],
+      "declared_capabilities": [
+        "search"
+      ],
+      "canonical_eligibility": {
+        "runtime_policy": "UNKNOWN_NOT_READ_FROM_USER_SETTINGS",
+        "required_enabled_plugin": "file_search",
+        "configured_capability": "search",
+        "absent_plugin_capability_restriction": "unrestricted",
+        "present_list_without_search": "denied",
+        "evidence": {
+          "path": "src/plugin.rs",
+          "start_line": 1411,
+          "end_line": 1437,
+          "symbol": "plugin_matches_search",
+          "supports": "Current enabled-provider/configured-capability gates",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugin.rs#L1411-L1437"
+        }
+      },
+      "proposed_discovery_eligibility": [
+        "unique current builtin owner",
+        "snapshot enabled plus caller enabled set",
+        "declared search and configured search permission",
+        "current owner epoch/revision/policy at activation",
+        "separate interactive list/grid admission; not yet implemented"
+      ],
+      "target_types_after_explicit_open": [
+        "explicit local search root",
+        "explicit pattern after opening"
+      ],
+      "natural_language_prefill": "NONE; never insert query words into args/path/content/query_override",
+      "opener_effect": "open_existing_tool_via_existing_typed_host",
+      "operation_effects": "Only later explicit tool interaction; retained draft/session work is not asserted absent",
+      "confirmation": "Existing tool, preview, file-picker and mutation owners remain authoritative; no automatic inferred operation",
+      "proposed_aliases": [
+        "search inside files",
+        "find text in files",
+        "file contents search"
+      ],
+      "alias_provenance": "model-authored research vocabulary, not existing registered aliases or frozen evaluation labels",
+      "capability_limits": [
+        "Selects mode only, never calls start payload; backend availability/permissions and bounded previews remain current tool policy"
+      ],
+      "source_evidence": [
+        {
+          "path": "src/plugins/file_search.rs",
+          "start_line": 33,
+          "end_line": 72,
+          "symbol": "FileSearchPlugin::{search,commands}",
+          "supports": "Open/mode/start separation and six existing query shortcuts",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/file_search.rs#L33-L72"
+        },
+        {
+          "path": "src/plugins/file_search.rs",
+          "start_line": 661,
+          "end_line": 731,
+          "symbol": "open_action/mode_action/start_action/command_action",
+          "supports": "Full Action fields and distinct payload owners",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/file_search.rs#L661-L731"
+        },
+        {
+          "path": "src/file_search/actions.rs",
+          "start_line": 12,
+          "end_line": 33,
+          "symbol": "FileSearchModePayload/FileSearchKindPayload",
+          "supports": "Existing wire and lowercase kind",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/file_search/actions.rs#L12-L33"
+        },
+        {
+          "path": "src/gui/command_host.rs",
+          "start_line": 886,
+          "end_line": 923,
+          "symbol": "FileSearchCommandHost/DiffCommandHost",
+          "supports": "Open and mode differ from open_and_start",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/gui/command_host.rs#L886-L923"
+        }
+      ]
+    }
+  ],
+  "unsupported_requests": [
+    {
+      "id": "unsupported.zip.extract",
+      "request": "extract a ZIP archive now",
+      "status": "NO_VERIFIED_EXECUTABLE_CATALOG_CAPABILITY",
+      "reason": "Archive module stops at metadata and pure extraction-plan construction; no extraction command/UI is advertised.",
+      "source_evidence": [
+        {
+          "path": "src/archive/mod.rs",
+          "start_line": 1,
+          "end_line": 22,
+          "symbol": "archive module boundary",
+          "supports": "Planning/catalog core does not read entry payload or touch destination",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/archive/mod.rs#L1-L22"
+        }
+      ]
+    },
+    {
+      "id": "unsupported.macro.run_history",
+      "request": "open macro run history browser",
+      "status": "NO_VERIFIED_EXECUTABLE_CATALOG_CAPABILITY",
+      "reason": "Bounded summary collector is not an established run-history UI; Activity is not a substitute claim.",
+      "source_evidence": [
+        {
+          "path": "src/mkmacro/runtime/summary.rs",
+          "start_line": 158,
+          "end_line": 229,
+          "symbol": "MacroRunSummary/SummaryHistory",
+          "supports": "Metadata collector; does not establish UI command",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/mkmacro/runtime/summary.rs#L158-L229"
+        }
+      ]
+    },
+    {
+      "id": "unsupported.table.unmaterialized_export",
+      "request": "export all unmaterialized rows from an arbitrarily large file",
+      "status": "OUTSIDE_VERIFIED_CAPABILITY",
+      "reason": "Current session exports have exact accepted source/view/selection/basis/resource authority; do not advertise a deferred full-file exporter.",
+      "source_evidence": [
+        {
+          "path": "src/table_utility_session.rs",
+          "start_line": 1917,
+          "end_line": 1961,
+          "symbol": "export_receipt_is_current/poll",
+          "supports": "Current export acceptance authority",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/table_utility_session.rs#L1917-L1961"
+        }
+      ]
+    },
+    {
+      "id": "unsupported.duplicates.auto_delete",
+      "request": "delete duplicates automatically",
+      "status": "NO_INFERRED_OPERATION",
+      "reason": "Catalog opener is read-only discovery over explicitly selected folders; deletion is not inferred.",
+      "source_evidence": [
+        {
+          "path": "src/plugins/duplicate_finder.rs",
+          "start_line": 6,
+          "end_line": 36,
+          "symbol": "DuplicateFinderPlugin",
+          "supports": "Read-only explicit-folder discovery",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/duplicate_finder.rs#L6-L36"
+        }
+      ]
+    },
+    {
+      "id": "unsupported.image.semantic_similarity",
+      "request": "find visually similar images using AI",
+      "status": "OUTSIDE_VERIFIED_CAPABILITY",
+      "reason": "Image Compare is exact RGBA comparison, not semantic/perceptual matching.",
+      "source_evidence": [
+        {
+          "path": "src/plugins/image_compare.rs",
+          "start_line": 6,
+          "end_line": 36,
+          "symbol": "ImageComparePlugin",
+          "supports": "Exact pixel capability",
+          "url": "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/image_compare.rs#L6-L36"
+        }
+      ]
+    }
+  ],
+  "reference_domains": [
+    {
+      "id": "domain.application_actions",
+      "kind": "existing action catalog",
+      "owner": "src/actions/mod.rs::Action",
+      "scope": "Persisted/custom plus indexed application Actions; private/user records not loaded here; action+args identity preserved"
+    },
+    {
+      "id": "domain.provider_content",
+      "kind": "existing runtime provider results",
+      "owner": "src/plugin.rs::Plugin; src/plugins/omni_search.rs",
+      "scope": "Notes/bookmarks/folders/todos/etc remain live owner search results, not static tool descriptors; no content ingested"
+    },
+    {
+      "id": "domain.command_shortcuts",
+      "kind": "existing shortcut catalog",
+      "owner": "src/plugin.rs::commands_filtered; src/gui/search.rs::update_command_cache",
+      "scope": "query: shortcuts and occasional direct opener are preserved exactly; not a full capability registry"
+    },
+    {
+      "id": "domain.settings",
+      "kind": "existing settings metadata catalog",
+      "owner": "src/settings_editor/catalog.rs::SettingsCatalog",
+      "scope": "Separate settings-navigation catalog; reused identity/ambiguity pattern only"
+    },
+    {
+      "id": "domain.universal_actions",
+      "kind": "existing context actions",
+      "owner": "src/universal_actions/model.rs::ActionSurface/UniversalActionInvocationContext",
+      "scope": "Existing selected-target availability/operations; no second dispatcher or unscoped action execution"
+    }
+  ]
+}

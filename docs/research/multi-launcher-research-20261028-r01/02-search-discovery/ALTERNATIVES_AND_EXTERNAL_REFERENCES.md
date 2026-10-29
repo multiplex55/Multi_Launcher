@@ -1,0 +1,28 @@
+# Alternatives and official interaction references
+
+M1-C research judgment. Reuses the parent's [external evidence record](roles/orchestrator/EXTERNAL_EVIDENCE.md), whose four official pages were opened/read on 2026-10-28. No product trial, installation, copied implementation, proprietary algorithm inference or new quality benchmark occurred. These are interaction precedents, not evidence P1/P2 improves Multi Launcher. External pages may change; application claims remain pinned to source `59156d96adcc73939c7171487a0cb582e3286587`.
+
+| Official documented precedent | Repository-specific inference / choice | Rejected extrapolation |
+|---|---|---|
+| PowerToys Command Palette documents keyboard-first commands/files/web/settings routes, recent/pinned commands and visible parameter inputs for placeholder bookmarks. [Microsoft overview](https://learn.microsoft.com/en-us/windows/powertoys/command-palette/overview) | Keep explicit routes and visible later data selection. Our opener metadata does not fill arguments from natural language; existing data/tool owners retain input authority. | No borrowed score formula, recency model, new pinned store or claim its behavior matches current command semantics. |
+| Alfred permits configurable fallbacks when local matches are absent, with explicit ordering/placement policy. [Fallback searches](https://www.alfredapp.com/help/features/default-results/fallback-searches/) | Declare admission/placement separately from relevance. Our conservative proposal requires zero canonical rows and no pending/deferral; exclusions must be measured. | Alfred's fallback does not override g early-return, pre-postfilter distinctions or capacity composition in this repository. |
+| Alfred Universal Actions starts with selected files/text/links and narrows available actions by type across contexts. [Universal Actions](https://www.alfredapp.com/help/features/universal-actions/) | Reuse existing selected-target/type/capability boundaries if later contextual operations are offered. Initial research remains tool opening, not object-action discovery. | No second action bus, automatic target capture or natural-language execution permission. |
+| Raycast Action Panel supports selected-item actions, grouping/shortcuts and ordered filtered submenus. [Action Panel API](https://developers.raycast.com/api-reference/user-interface/action-panel) | Make selected action/effect visible and preserve stable intended payload under reranking. Use current keyboard/input ownership rather than importing shortcuts. | No native-focus guarantee, universal keybinding or evidence of semantic ranking quality. |
+
+The source record distinguishes dates: Microsoft page reported updated 2026-10-21; the other pages showed no publication date in that access. All were accessed 2026-10-28. These narrow paraphrases use no code examples or long quotations.
+
+## Compared design alternatives
+
+| Alternative | Benefit / concrete cost | Current research disposition |
+|---|---|---|
+| Current application unchanged | Preserves all routes and avoids unused infrastructure; cannot claim a new discoverability benefit. | Real no-change option. Prototype cannot beat an unimplemented “current ranker” by relabeling a lexical surrogate as production. |
+| Add aliases/commands directly to providers/cache | Could reuse fallback/completion machinery; would alter empty browse, Macro cardinality, queryexec/radial and completion before interactive admission. | Reject this integration topology. Metadata projection may use aliases, but not new shared command rows. |
+| Typed fixed metadata + separate pure ranking | Bounded/testable/intelligible at 11/15 entries, exact source Actions and stable IDs. Needs a justified consumer and live eligibility. | Candidate research design. Existing F001 remains proposed; no production ranking accepted before evidence/consumer gate. |
+| Synchronous direct scan | Simple at current catalog size; bounded integer comparisons and one current result avoid queues/retirement. | Preferred proposed ownership, subject to future Rust targets. No measured speedup claimed. |
+| New worker/index/LRU | Could matter at larger scale; adds invalidation, queues, cancellation, query retention and memory that are unjustified here. | Deferred absent real measurement; not a future package by default. |
+| Embeddings/LLM intent execution | Could express richer semantics; adds model/dependency/deployment/privacy/calibration burden and still cannot grant authority. | Rejected initial scope. No remote queries, learned weights or arbitrary execution. |
+| Existing enabled-prefix helper as admission | Cheap-looking reuse, but locks providers and omits disabled/denied/global hidden grammar. | Reject as completeness proof. Manager metadata+reviewed coverage decision is a hard integration gate, with 43 remaining global contracts. |
+| Ship metadata/ranker first regardless of usable UI | Independently testable infrastructure, but no demonstrated user benefit without an accepted consumer. | Final sequencing must test admission/usability first; pure research success is not shipping justification. |
+| General parser/plugin ABI/Universal Actions rewrite | Could centralize concepts, but current owners already exist; no source-backed need for broad replacement. | Reject. Existing AUD-F001/AUD-F002 are linked independently; no duplicates. |
+
+Research policies P0/P1/P2 distinguish field vocabulary/role/typo effects under identical gates, not competing product emulations. Failure, no measurable gain or incomplete admission may justify no implementation or a bounded decision spike. External similarities do not remove the Complete-manifest/default-reachability acceptance gap or authorize future goals.

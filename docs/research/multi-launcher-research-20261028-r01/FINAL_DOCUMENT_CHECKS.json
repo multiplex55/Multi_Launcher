@@ -1,0 +1,53 @@
+{
+  "status": "PASS",
+  "scope": "Final static document/link/ID/JSON/hash/source-locator/Git-scope check only; no prototype imports or execution, Rust/application/native tests, semantic re-evaluation or further review campaign.",
+  "source_baseline": "59156d96adcc73939c7171487a0cb582e3286587",
+  "goal01_closing": "3b79d73f12a791b8b077ed0bf7d6631bd885b68c",
+  "checked_parent_head": "3a4924e20a95de38af3ba60aca6b86ade1e1c0f6",
+  "counts": {
+    "json_files": 25,
+    "jsonl_records": 4200,
+    "jsonl_files": 14,
+    "frozen_inputs": 17,
+    "M2A_preserved_artifacts": 37,
+    "changed_research_or_progress_paths": 128,
+    "preserved_raw_directories": 3,
+    "canonical_pairs": 4,
+    "markdown_files": 81,
+    "local_links": 693,
+    "markdown_anchors": 32,
+    "reference_uses": 0,
+    "line_anchors": 26,
+    "unique_pinned_source_urls": 493,
+    "source_blob_paths": 238,
+    "immutable_charter_bodies": 3
+  },
+  "initial_checker_diagnostics": [
+    "immutable charter docs/plans/ai-research/01_GOAL_STATIC_ARCHITECTURE_AUDIT.md",
+    "undefined reference CANONICAL_DESIGN_AMENDMENTS.md: a-z0-9_.-",
+    "undefined reference RANKING_SPECIFICATION.md: a-z0-9_.-",
+    "undefined reference GOAL.md: a-z0-9_.-"
+  ],
+  "checker_corrections": [
+    "Preparation JavaScript string quoting fixed before any check execution.",
+    "Initial check stopped at the historical Goal01 plan BOM; scope comparison now decodes UTF-8 with optional leading BOM. Goal01 charter body is identical to MASTER_START; the already-closed BOM representation is preserved, with no Goal01 edits.",
+    "Inline-code regex character classes were false Markdown reference uses; excluded inline code and rechecked only charter bodies/reference-use parsing. Frozen inputs still use strict BOM-rejecting canonical hashes."
+  ],
+  "errors": [],
+  "phase": "PASS: baseline and affected post-review checks complete; subsequent edits only finalize status/disposition text. Closing Git publication follows.",
+  "post_review_affected_check": {
+    "status": "PASS",
+    "counts": {
+      "affected_markdown_files": 19,
+      "affected_local_links": 242,
+      "affected_markdown_anchors": 1,
+      "affected_unique_source_urls": 18,
+      "affected_json_files": 2,
+      "F002_companions_reconciled": 2
+    },
+    "errors": [],
+    "preservation": "Git-normalized diff from reviewed M3-A confirms Goal01, frozen17, all evaluation/code/receipts, raw role pairs and historical promotion/check records unchanged.",
+    "source_review_transcription": "Five source URL SHA omissions restored to match returned review; all affected locators valid.",
+    "execution": "Static checks only; no prototype imports/runs, Rust/application/native check or second review."
+  }
+}

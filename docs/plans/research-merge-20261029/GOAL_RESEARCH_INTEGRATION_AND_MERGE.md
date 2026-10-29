@@ -323,20 +323,20 @@ The independent reviewer should address material risks, not cosmetic formatting:
 **State:** `IN_PROGRESS`
 **RUN_ID:** `20261029-r01`
 **Observed initial master:** `59156d96adcc73939c7171487a0cb582e3286587` (one normal fetch; local equals remote)
-**PR 1:** [#1456](https://github.com/multiplex55/Multi_Launcher/pull/1456), OPEN, normal merge gate pending
+**PR 1:** [#1456](https://github.com/multiplex55/Multi_Launcher/pull/1456), OPEN / BLOCKED_EXTERNAL: automatic approval review rejected normal master merge
 **PR 2:** `NOT_CREATED`
-**Active branch/worktree:** `codex/integrate-query-escape-20261029-r01`; `G:/Repos/rust/Multi_Launcher`
+**Active branch/worktree:** `codex/integrate-research-docs-20261029-r01`, STACKED_ON_UNMERGED_PR1; `G:/Repos/rust/Multi_Launcher`
 **Current owner/role:** `/root`, sole integration writer and Git/PR owner; separate reviewer follows
 **Last accepted checkpoint / commit / push:** M1-A `0035d85d39d0fa27583547764969fdf362ea1abc`, pushed; independent review accepted
-**Next action:** Publish accepted M1-A, then create/inspect PR1 and resolve its normal merge gate
+**Next action:** Publish M2-A research import; import decision studies/final ledger, then bounded docs check/review and stacked PR2
 **Output index:** [STATUS](../execution/research-consolidation-20261029-r01/STATUS.md).
 
 | Milestone | State | Evidence / next action |
 |---|---|---|
 | M0-A — baseline | COMPLETE | [Intake](../execution/research-consolidation-20261029-r01/INTAKE_AND_PROVENANCE.md), [branch map](../execution/research-consolidation-20261029-r01/BRANCH_MAP.md), [host receipt](../execution/research-consolidation-20261029-r01/receipts/host-intake.json); commit/push follows |
 | M1-A — exact fix | COMPLETE | Exact three Rust blobs and nine evidence files, same baseline; [parity/scope](../execution/research-consolidation-20261029-r01/PR1_SCOPE_AND_VERIFICATION.md), [independent review ACCEPTED](../execution/research-consolidation-20261029-r01/roles/reviewer/PR1_REVIEW.md). Commit/push follows this checkpoint |
-| M1-B — PR 1 | IN_PROGRESS | [Actual PR1 state](../execution/research-consolidation-20261029-r01/PR1_STATE.md): #1456 OPEN, clean, no checks reported; receipt publication then normal merge |
-| M2-A — research docs | PENDING | Base on updated master or published PR1; import full two-goal whitelist |
+| M1-B — PR 1 | BLOCKED_EXTERNAL | #1456 OPEN; host clean/no checks reported, but automatic approval review rejected merge. [Report](../execution/research-consolidation-20261029-r01/stalls/G03-M1-B-20261029T212244Z.md), pushed reporting tip ed25f9dc. Continue stacked docs |
+| M2-A — research docs | COMPLETE | [Exact 133-file research import](../execution/research-consolidation-20261029-r01/M2A_RESEARCH_IMPORT.md), source tree parity; stacked base ed25f9dc. Publication follows |
 | M2-B — decisions/queue | PENDING | Exact decision roots and final Diff ledger/G04 |
 | M2-C — PR 2 | PENDING | One bounded metadata check, docs-only review, PR and normal merge gate |
 | M3-A — final check | PENDING | Verify actual master/PR state and report |

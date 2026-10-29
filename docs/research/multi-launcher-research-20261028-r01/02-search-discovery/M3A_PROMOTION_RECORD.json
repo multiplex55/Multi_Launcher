@@ -1,0 +1,37 @@
+{
+  "checkpoint": "G02/M3-A",
+  "source_sha": "59156d96adcc73939c7171487a0cb582e3286587",
+  "M2B_commit": "a1bd78758f61f3fc9dd5a96a57b1d5280d1b3a2b",
+  "hash_semantics": "strict UTF-8; CRLF to LF only, reject BOM/lone CR; no Unicode/JSON/whitespace reformatting; not raw byte/Git blob equality",
+  "raw_planner_before": {
+    "GOAL.md": "9afb8610bdd977fb565cf606a6243b534d342a5b1fb259712bae20468495a023",
+    "KICKSTART.md": "513fe478fe0eb66202209d03c8d7a0afebdb49c5ab287ac0ba337d8498121f70"
+  },
+  "state": "AUTHOR_COMPLETE_REVIEW_PENDING",
+  "raw_planner_after": {
+    "GOAL.md": "9afb8610bdd977fb565cf606a6243b534d342a5b1fb259712bae20468495a023",
+    "KICKSTART.md": "513fe478fe0eb66202209d03c8d7a0afebdb49c5ab287ac0ba337d8498121f70"
+  },
+  "raw_author_F002_frozen": {
+    "GOAL.md": "ee5fa6083605ef27055a5421c8cca637e079a9a818231708e06106089e934198",
+    "KICKSTART.md": "5ce44dc9edd93f89da7f1700b828548feb383d42f87c47671b1ad23e2944ea41"
+  },
+  "canonical_pair_hashes": {
+    "follow-on/SEARCH-F001-built-in-discovery-metadata/GOAL.md": "b78b98539411f3480db30bf1b6d2997906da7b647cc4918d0a9845e70e17587f",
+    "follow-on/SEARCH-F001-built-in-discovery-metadata/KICKSTART.md": "73c1c4db7f4d6c11ade5b8e072b11c7cb598b07149c5b3b79c0bafa2f8ab92bb",
+    "follow-on/SEARCH-F002-discovery-admission-consumer-proof/GOAL.md": "21dd550929d7febc1506d6cacc58af03127d1122163e1e09c264db3dc4490b97",
+    "follow-on/SEARCH-F002-discovery-admission-consumer-proof/KICKSTART.md": "15330a01eb09767b0dd7c1b15d89cdc8e6fb83268e021ed6f11f9465528c1b91"
+  },
+  "allowed_F001_amendments": [
+    "accepted concrete F002 consumer/compatibility prerequisite in both documents and separate F001 authorization",
+    "readiness/priority/unused-consumer/rollback corrections",
+    "single src/search_discovery owner",
+    "explicit narrower metadata field/text bounds and tests, research-vs-shipping separation",
+    "eleven-entry annotation provenance without copied executable Actions",
+    "relative navigation/provenance"
+  ],
+  "allowed_F002_amendments": [
+    "relative links four levels to two (audit links five to three)",
+    "raw/canonical authorship/provenance navigation only; scope/bounds/outcomes unchanged"
+  ]
+}

@@ -6,3 +6,7 @@
 - Original source branches remain intact. SOURCE_AUDIT is already included in SOURCE_RESEARCH; no separate audit import. No force updates, branch deletion, reset, rebase or configuration import.
 
 See [intake](INTAKE_AND_PROVENANCE.md) for exact source pins/dates and [Goal](../../research-merge-20261029/GOAL_RESEARCH_INTEGRATION_AND_MERGE.md) for the primary progress ledger. Actual PR/base/head/merge identities are appended at their checkpoint, never guessed.
+
+## Actual stacked topology
+
+PR1 #1456 remains OPEN after automatic approval review rejected its normal merge. PR1 published integration tip is `ed25f9dcc32f9bb74d2277d25d6fb62e292636c6`. PR2 branch `codex/integrate-research-docs-20261029-r01` starts at that exact tip and will target `codex/integrate-query-escape-20261029-r01`. State STACKED_ON_UNMERGED_PR1; its docs-only scope is measured against that branch/tip, never against master while the code remains unmerged.

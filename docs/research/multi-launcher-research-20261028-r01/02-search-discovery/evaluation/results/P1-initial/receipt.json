@@ -1,0 +1,58 @@
+{
+  "environment": {
+    "python_version": "3.11.3 (tags/v3.11.3:f3909b8, Apr  4 2023, 23:49:59) [MSC v.1934 64 bit (AMD64)]",
+    "sys_platform": "win32",
+    "command_argv": [
+      "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/prototype/evaluate.py",
+      "--candidate",
+      "P1"
+    ],
+    "interpreter_flags": "-X utf8 -B required",
+    "prototype_canonical_hashes": {
+      "evaluate.py": "1ee39ee89b6fce3ea7c53875229fbc03f7bf941203402ba160fa5d04c69af994",
+      "README.md": "b35664fda68afb9d0c526f5b6aab3b8025a02acf0344db5e1924ae76050b46ca",
+      "reference.py": "d1a269a6e5ef7102c17c55d0e6d8d599707cc59bf5aee2f2d2069dff6e10a5db",
+      "runtime_io.py": "0910ec685db8f3898859215c493943cf704d80cac1c3dd22b206358de2d222a6",
+      "smoke.py": "08d7dbcc852c5087978e24bd4fd2bbe73f2b2e4d6621c44f2e28ce9accda9ddc"
+    },
+    "timing": "perf_counter from guarded main entry through raw/summary output; interpreter startup and final receipt/ledger writes excluded"
+  },
+  "freeze_verified": true,
+  "completed_candidates": [
+    "P1"
+  ],
+  "evidence_limits": [
+    "synthetic labels",
+    "P0 surrogate",
+    "Complete hypothetical",
+    "no native/Rust/human proof"
+  ],
+  "manifest_sha256": "1c5afb884db309b7a4dbef079243a05384deb66621b1206511d93ed219531a1c",
+  "input_hashes": {
+    "catalog/catalog.json": "bf5dc51273bebae40610d763445148507288b2940e1b4d92a1239061a3835fb5",
+    "evaluation/candidate_policies.json": "c906952e0f8b9c7e328b8cda13ed949ef517aa7a1454f719825f8451769ce3be",
+    "evaluation/queries.jsonl": "9dc9da67a36d02728e4c581179597fefcc5a5023ddaa530fdfd931b203b7b46d",
+    "evaluation/splits.json": "23aecd15c04dc67bfba569266d533afcadde649045ea1922aab3ef1151dad472",
+    "evaluation/route_fixtures.json": "6b6ecd814bee5a8178c5365bae3cc8aa93037456b09e7742479b19af57657a91",
+    "evaluation/DATASET_README.md": "4fa0775e6f94b72cb38913eadbc55d948f464dfedd5c69f2e6ee9da4bf7aacbe",
+    "evaluation/EVALUATION_PROTOCOL.md": "6279c15b50e3ac6c1510783642fd2c8227298258c6f7829bf694aa2199911224",
+    "INTENT_TAXONOMY_AND_GRAMMAR.md": "c81df2189dcf60e2f17a3d8abd572c3ad53599f64949e44fac1e8e4d94870525",
+    "RANKING_SPECIFICATION.md": "1617fe502a06ec1f60c72546bcccbac636fa7895e18b8ea57758d28993146494",
+    "RUNTIME_AND_INTEGRATION_DESIGN.md": "c9423b5c2f18318964d14c0642c8bd90fe97c2da9e75ed7a3089dbfb6d226c80",
+    "KEYBOARD_AND_RESULTS_UX.md": "182dbc43d4df930c80be43ac00f8897239b5bc1a35b959368f656253a397f946",
+    "PRIVACY_SAFETY_AND_COMPATIBILITY.md": "9998d65d3baacc7d9a8df23e09374f43ccf8dbd3b04accb565b3c35d25c317de",
+    "ALTERNATIVES_AND_EXTERNAL_REFERENCES.md": "d99c75c6ab3fa6d9b6958ba5053740f6141d367c15626be9c59ed4b2e0ee2f1a",
+    "CURRENT_SEARCH_ARCHITECTURE.md": "22f055b4bd8756d7205dfd29365de9a7b1d99a879def94a738fc122ab539c31c",
+    "COMMAND_AND_CAPABILITY_CATALOG.md": "ae9c2d8d6fab436bd1a642b9eaf94d87364b5f0f4fb9d40de4458a46a030e64f",
+    "roles/orchestrator/EXTERNAL_EVIDENCE.md": "883ce09ee21e3767d7321e36a19b683b2b9ba3b3fe47187588ce5b7cd0820c78",
+    "roles/orchestrator/ROUTING_METADATA_SURVEY.md": "2d6b06c93bb1f62b1d0c971c96813083bd2fd775c9b1bc0f741a3ac4d6a286bc"
+  },
+  "source_sha": "59156d96adcc73939c7171487a0cb582e3286587",
+  "policy_revision": "g02-m1-b-v1",
+  "attempt_id": "P1-initial",
+  "status": "COMPLETED",
+  "elapsed_seconds": 0.4963672999292612,
+  "limit_seconds": 120.0,
+  "cumulative_actual_seconds": 0.9888058998622,
+  "aggregate_limit_seconds": 600
+}

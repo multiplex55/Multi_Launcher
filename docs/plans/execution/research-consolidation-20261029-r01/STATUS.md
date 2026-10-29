@@ -2,8 +2,8 @@
 
 Primary ledger: [Goal mutable progress](../../research-merge-20261029/GOAL_RESEARCH_INTEGRATION_AND_MERGE.md#9-execution-progress--mutable).
 
-M0-A `762ce52d5aabe52fc6006dff30430a63d97cccc6` and M1-A `0035d85d39d0fa27583547764969fdf362ea1abc` are pushed. Exact three-source/nine-evidence parity and separate review ACCEPTED. Original 11/11 Nextest and scoped Clippy proof reused; no new Rust checks ran.
+PR1 [#1456](https://github.com/multiplex55/Multi_Launcher/pull/1456) is OPEN; automatic approval review rejected normal merge. Source/evidence/review are accepted; no checks reported. [Actual disposition](PR1_STATE.md) and [gate report](stalls/G03-M1-B-20261029T212244Z.md) preserve the block. PR1's published tip `ed25f9dcc32f9bb74d2277d25d6fb62e292636c6` is PR2's exact stacked base; master remains `59156d96adcc73939c7171487a0cb582e3286587`.
 
-M1-B: [PR1 #1456](https://github.com/multiplex55/Multi_Launcher/pull/1456) OPEN to master, clean/mergeable for observed M1-A head; no checks or GitHub reviews reported. [State/next action](PR1_STATE.md), [host receipt](receipts/pr1-publication.json). This checkpoint publishes actual PR metadata, then the parent normally merges with exact expected head if the host gate remains satisfied. Actual merge SHA is a subsequent observation.
+M2-A acceptance complete: [133 exact research files](M2A_RESEARCH_IMPORT.md) preserve both studies and all original data/prototype/roles; no production difference against PR1. PR2 NOT_CREATED, planned base `codex/integrate-query-escape-20261029-r01`.
 
-PR2 NOT_CREATED. Next: merge PR1 normally if permitted; otherwise create a safely stacked docs branch. No routine user action needed mid-plan. No future proposal is executed.
+Next: publish M2-A, import both decision trees and final Diff queue/G04, run one bounded metadata pass, obtain separate docs review, open review-ready stacked PR2. No mid-plan user action or merge workaround.

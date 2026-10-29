@@ -348,19 +348,24 @@ Verify local relative links and IDs once, parse structured files once, inspect d
 
 ## 12. Execution progress — mutable
 
-**State:** NOT_STARTED  
-**Program ID / output root:** Resolved by the orchestrator at execution.  
-**MASTER_START:** Not yet observed for this run.  
-**Current goal/checkpoint:** None.  
-**Active writer / observed model:** None.  
-**Last committed checkpoint / push:** None.  
-**Next action:** Execute `ORCHESTRATOR_KICKSTART.md` on the user's intended new master.
+**State:** RESEARCH_COMPLETE_WITH_LIMITATIONS — both goals completed sequentially, reviewed and checked.
+**Program:** multi-launcher-research-20261028-r01
+**MASTER_START:** 59156d96adcc73939c7171487a0cb582e3286587
+**Branch/worktree:** codex/research-search-discovery-20261028-r01; G:/Repos/rust/Multi_Launcher
+**Active writer:** parent closeout; all child roles complete.
+**Last known checkpoint/push:** 3a4924e20a95de38af3ba60aca6b86ade1e1c0f6; M3-A normally pushed.
+**Next action:** publish closing checkpoint/report exact SHA and normal-push outcome; then await future package selection. No further evaluation, production work, PR or master merge.
 
-| Goal | State | Branch | Closing commit | Handoff / limits |
-|---|---|---|---|---|
-| 01 Static Architecture Audit | NOT_STARTED | Resolve at bootstrap | — | — |
-| 02 Search and Action Discovery | NOT_STARTED | After Goal 01 | — | — |
+[Authoritative status and ordered goals](../../research/multi-launcher-research-20261028-r01/PROGRAM_STATUS.md)
 
 ### Event log
 
-- 2026-10-28: Program prepared; no repository execution, branch creation, source modification, model reconfiguration, or research completion is claimed.
+- 2026-10-28: Program initialized on fresh branch from verified fetched master. Goal 02 remains NOT_STARTED until Goal 01 closing commit.
+
+- 2026-10-28: Planner contributions and full parser proposal preserved; source/coverage/data-flow maps authored and accepted. Research-only scope maintained.
+
+- 2026-10-28: M1-A e1943e90 and M1-B 9362ec5c accepted and pushed; source unchanged, no application execution. M2-A dispatched.
+
+- 2026-10-28: Audit M3-B separate review completed; parent applied two factual report/package clarifications, preserved raw roles and closed research with limitations. Goal 02 has not started and must inherit exact closing documentation commit.
+
+- 2026-10-28: Goal02 M3-B complete after separate review and one canonical F002 workflow-scope clarification; affected final checks pass. Both research handoffs and prioritized four-package catalog complete, all raw/frozen evidence preserved, no production/future-goal execution. Closing commit contains this status; exact final SHA and actual push outcome follow in final handoff.

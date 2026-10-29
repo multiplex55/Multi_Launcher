@@ -1,0 +1,544 @@
+{
+  "schema_version": 1,
+  "policy_revision": "g02-m1-b-v1",
+  "freeze_state": "FROZEN_FOR_EVALUATION_V1",
+  "scope": "Research definition only; no ranker/evaluator/prototype executed",
+  "source_sha": "59156d96adcc73939c7171487a0cb582e3286587",
+  "catalog_path": "../catalog/catalog.json",
+  "definition_authority": "../RANKING_SPECIFICATION.md",
+  "candidates": [
+    "P0",
+    "P1",
+    "P2"
+  ],
+  "normalization": {
+    "locale": "ASCII English-first only; non-ASCII fails admission, no Unicode folding/transliteration",
+    "allowed_raw_characters": "ASCII letters, digits, U+0020 space, internal hyphen only; all other punctuation/control/non-ASCII protected",
+    "lowercase": "ASCII A-Z to a-z only",
+    "token_pattern": "[a-z0-9]+",
+    "compound_rewrites": {
+      "sha-256": "sha256",
+      "sha-512": "sha512",
+      "sha-1": "sha1"
+    },
+    "stopwords": [
+      "a",
+      "an",
+      "and",
+      "for",
+      "from",
+      "in",
+      "into",
+      "me",
+      "my",
+      "of",
+      "on",
+      "please",
+      "the",
+      "to",
+      "with",
+      "open",
+      "show",
+      "use",
+      "launch",
+      "tool",
+      "utility"
+    ],
+    "inflections": {
+      "files": "file",
+      "folders": "folder",
+      "directories": "directory",
+      "images": "image",
+      "pixels": "pixel",
+      "photos": "photo",
+      "duplicates": "duplicate",
+      "tables": "table",
+      "rows": "row",
+      "columns": "column",
+      "values": "value",
+      "expressions": "expression",
+      "tasks": "task",
+      "workers": "worker",
+      "names": "name",
+      "checksums": "checksum",
+      "digests": "digest"
+    },
+    "query_tokens": "normalize, then deduplicate as sorted unique set; repetition adds no score",
+    "max_raw_utf8_bytes": 256,
+    "max_raw_tokens": 24,
+    "max_unique_content_tokens": 12,
+    "min_total_content_letters": 4,
+    "single_token_min_length": 4,
+    "max_token_length": 24
+  },
+  "common_admission": {
+    "opt_in": false,
+    "allowed_surfaces": [
+      "LauncherList",
+      "LauncherGrid"
+    ],
+    "required_origin": "proposed FreshUserEdit",
+    "canonical_result_count": 0,
+    "provider_pending": false,
+    "provider_deferral": "None",
+    "result_catalog_stable": true,
+    "reserved_route_coverage": "Complete and current; disabled/denied owners still protected",
+    "unknown_or_stale": "CLOSED_NO_DISCOVERY",
+    "dangerous_verb_tokens": [
+      "delete",
+      "remove",
+      "erase",
+      "wipe",
+      "replace",
+      "overwrite",
+      "execute",
+      "run",
+      "kill",
+      "terminate",
+      "extract",
+      "unzip",
+      "compress",
+      "encrypt",
+      "decrypt",
+      "send",
+      "upload",
+      "download",
+      "paste",
+      "write"
+    ],
+    "unsupported_rules": [
+      {
+        "id": "macro_history",
+        "all_groups": [
+          [
+            "macro",
+            "macros"
+          ],
+          [
+            "history"
+          ]
+        ]
+      },
+      {
+        "id": "semantic_images",
+        "all_groups": [
+          [
+            "image",
+            "photo",
+            "pixel"
+          ],
+          [
+            "ai",
+            "semantic",
+            "perceptual",
+            "similar"
+          ]
+        ]
+      },
+      {
+        "id": "unmaterialized_export",
+        "all_groups": [
+          [
+            "export"
+          ],
+          [
+            "all",
+            "full",
+            "unmaterialized"
+          ],
+          [
+            "row",
+            "file"
+          ]
+        ]
+      }
+    ],
+    "no_prefill": "Exact fixed Action + args None only; no text/path/clipboard/content injection",
+    "coverage_scope": "Includes disabled/capability-denied registered owners and session tombstones;81 builtin registration survey is not a Complete grammar manifest",
+    "canonical_coverage_claim": "No default-live reachability established;43 global body contracts remain unclassified at M1-B"
+  },
+  "bounds": {
+    "max_descriptors": 64,
+    "max_aliases_per_descriptor": 8,
+    "max_alias_utf8_bytes": 96,
+    "max_alias_tokens": 8,
+    "max_document_tokens": 128,
+    "max_shortcuts_per_descriptor": 8,
+    "max_typo_pairs": 4096,
+    "top_k": 5,
+    "max_descriptor_id_bytes": 64,
+    "descriptor_id_pattern": "[a-z][a-z0-9_.-]{0,63}"
+  },
+  "matching": {
+    "exact_hit": 100,
+    "prefix_hit": 70,
+    "typo_hit": 55,
+    "prefix_min_query_length": 4,
+    "prefix_max_extra_characters": 4,
+    "typo_min_lengths": 5,
+    "typo_max_lengths": 24,
+    "typo_max_distance": 1,
+    "typo_operations": [
+      "insert",
+      "delete",
+      "substitute",
+      "one_adjacent_transposition"
+    ],
+    "max_corrected_query_tokens_per_descriptor": 1,
+    "typo_pair_order": "query-token then document-token ASCII lexicographic; choose first query token having any allowed one-edit match, then smallest matched document token",
+    "prefix_query_position": "last content token of normalized ordered query phrase only"
+  },
+  "P0": {
+    "fields": [
+      "normalized_label",
+      "normalized_existing_shortcut_labels"
+    ],
+    "exact_phrase_bonus": 20,
+    "coverage_numerator": 4,
+    "coverage_denominator": 5,
+    "unmatched_penalty": 10,
+    "typos": false
+  },
+  "P1": {
+    "fields": [
+      "normalized_label",
+      "normalized_existing_shortcut_labels",
+      "normalized_proposed_aliases"
+    ],
+    "exact_phrase_bonus": 20,
+    "coverage_numerator": 4,
+    "coverage_denominator": 5,
+    "unmatched_penalty": 10,
+    "typos": false
+  },
+  "P2": {
+    "fields": [
+      "normalized_label",
+      "normalized_existing_shortcut_labels",
+      "normalized_proposed_aliases",
+      "entry_intent_vocabulary",
+      "entry_object_vocabulary"
+    ],
+    "exact_phrase_fields": [
+      "normalized_label",
+      "normalized_existing_shortcut_labels",
+      "normalized_proposed_aliases"
+    ],
+    "exact_phrase_bonus": 15,
+    "coverage_numerator": 3,
+    "coverage_denominator": 5,
+    "matched_intent_bonus": 15,
+    "matched_object_bonus": 15,
+    "unmatched_penalty": 8,
+    "intent_conflict_penalty": 25,
+    "object_conflict_penalty": 30,
+    "typos": true,
+    "role_coverage": "I/O are floor(100 * covered recognized codes / recognized codes), zero if none; exact raw-token role codes plus chosen prefix/typo targets per descriptor",
+    "role_bonus_arithmetic": "floor(15*I/100) + floor(15*O/100); conflict penalty only when recognized set nonempty and zero intersection"
+  },
+  "result_policy": {
+    "min_score": 60,
+    "clear_single_min_score": 75,
+    "clear_single_margin": 12,
+    "near_tie_margin_is_strictly_less_than": 12,
+    "one_weak_candidate": "ABSTAIN_LOW_EVIDENCE",
+    "zero_candidates": "ABSTAIN_NO_MATCH",
+    "clear_single": "SUGGEST_OPEN_TOOL_NOT_ACTIVATE",
+    "ambiguous": "CHOOSER_EXPLICIT_SELECTION",
+    "sort": [
+      "score descending",
+      "synthetic descriptor ID ASCII ascending"
+    ],
+    "duplicate_key": [
+      "Action.action exact bytes",
+      "Action.args exact optional bytes"
+    ],
+    "duplicate_representative": "highest score then smallest descriptor ID; retain contributor IDs in explanation only"
+  },
+  "personalization": {
+    "shipping_weight": 0,
+    "prototype_weight": 0,
+    "history_input": false,
+    "synthetic_perturbation": "Counts 0 versus 1000000 are ignored; same output required. No extra ranking candidate or recency mode."
+  },
+  "intent_vocabulary": {
+    "inspect": [
+      "inspect",
+      "view",
+      "viewer",
+      "browse",
+      "read"
+    ],
+    "format": [
+      "format",
+      "formatter",
+      "pretty",
+      "readable",
+      "indent",
+      "beautify"
+    ],
+    "minify": [
+      "minify",
+      "minifier",
+      "compact",
+      "strip"
+    ],
+    "compute_hash": [
+      "hash",
+      "checksum",
+      "digest",
+      "calculate",
+      "compute"
+    ],
+    "validate": [
+      "validate",
+      "validation",
+      "check"
+    ],
+    "test_regex": [
+      "test",
+      "tester",
+      "match",
+      "matching",
+      "pattern"
+    ],
+    "filter": [
+      "filter"
+    ],
+    "compare": [
+      "compare",
+      "comparison",
+      "difference",
+      "diff"
+    ],
+    "find": [
+      "find",
+      "search",
+      "locate"
+    ],
+    "monitor": [
+      "status",
+      "running",
+      "background",
+      "work",
+      "task",
+      "worker"
+    ]
+  },
+  "object_vocabulary": {
+    "json": [
+      "json"
+    ],
+    "xml": [
+      "xml",
+      "xpath"
+    ],
+    "hash": [
+      "hash",
+      "checksum",
+      "digest",
+      "sha256",
+      "sha512",
+      "sha1"
+    ],
+    "regex": [
+      "regex",
+      "regexp",
+      "expression",
+      "pattern"
+    ],
+    "table": [
+      "table",
+      "row",
+      "column",
+      "tsv"
+    ],
+    "csv": [
+      "csv",
+      "comma",
+      "separated",
+      "value"
+    ],
+    "image": [
+      "image",
+      "pixel",
+      "rgba",
+      "photo"
+    ],
+    "file": [
+      "file",
+      "directory",
+      "folder",
+      "disk"
+    ],
+    "filename": [
+      "filename",
+      "name"
+    ],
+    "file_content": [
+      "content",
+      "inside"
+    ],
+    "text": [
+      "text"
+    ],
+    "duplicate": [
+      "duplicate",
+      "identical",
+      "repeated"
+    ],
+    "activity": [
+      "activity",
+      "worker",
+      "task",
+      "background",
+      "status"
+    ]
+  },
+  "entry_roles": {
+    "tool.json.open": {
+      "intents": [
+        "inspect"
+      ],
+      "objects": [
+        "json"
+      ]
+    },
+    "tool.json.format": {
+      "intents": [
+        "format"
+      ],
+      "objects": [
+        "json"
+      ]
+    },
+    "tool.json.minify": {
+      "intents": [
+        "minify"
+      ],
+      "objects": [
+        "json"
+      ]
+    },
+    "tool.hash.open": {
+      "intents": [
+        "compute_hash"
+      ],
+      "objects": [
+        "hash",
+        "file",
+        "text"
+      ]
+    },
+    "tool.xml.open": {
+      "intents": [
+        "inspect",
+        "validate",
+        "format"
+      ],
+      "objects": [
+        "xml"
+      ]
+    },
+    "tool.regex.open": {
+      "intents": [
+        "test_regex"
+      ],
+      "objects": [
+        "regex",
+        "text"
+      ]
+    },
+    "tool.table.open": {
+      "intents": [
+        "inspect",
+        "filter"
+      ],
+      "objects": [
+        "table",
+        "csv"
+      ]
+    },
+    "tool.csv.open": {
+      "intents": [
+        "inspect"
+      ],
+      "objects": [
+        "csv"
+      ]
+    },
+    "tool.image_compare.open": {
+      "intents": [
+        "compare"
+      ],
+      "objects": [
+        "image"
+      ]
+    },
+    "tool.duplicates.open": {
+      "intents": [
+        "find",
+        "inspect"
+      ],
+      "objects": [
+        "duplicate",
+        "file"
+      ]
+    },
+    "tool.activity.open": {
+      "intents": [
+        "monitor"
+      ],
+      "objects": [
+        "activity"
+      ]
+    },
+    "tool.diff.open": {
+      "intents": [
+        "compare"
+      ],
+      "objects": [
+        "file"
+      ]
+    },
+    "tool.file_search.open": {
+      "intents": [
+        "find"
+      ],
+      "objects": [
+        "file"
+      ]
+    },
+    "tool.file_search.filename": {
+      "intents": [
+        "find"
+      ],
+      "objects": [
+        "file",
+        "filename"
+      ]
+    },
+    "tool.file_search.content": {
+      "intents": [
+        "find"
+      ],
+      "objects": [
+        "file",
+        "file_content",
+        "text"
+      ]
+    }
+  },
+  "subset_reporting": "Full 15 and initial 11 use same cases/labels/denominators. Absent-target and gates reported separately; no silent case dropping.",
+  "engineering_targets_unmeasured": {
+    "default_result_cache_entries": 0,
+    "projection_limit_utf8_bytes": 131072,
+    "target_rust_warm_query_ms": 2,
+    "target_rust_projection_build_ms": 10,
+    "target_selection_to_dispatch_overhead_ms": 2
+  },
+  "freeze_id": "g02-eval-v1",
+  "route_fixture_path": "route_fixtures.json",
+  "protocol_path": "EVALUATION_PROTOCOL.md",
+  "freeze_scope": "M1-C frozen numeric definitions; no ranker/evaluator implementation or execution at freeze"
+}

@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "aggregate_limit_seconds": 600,
+  "nominal_maximum_seconds": 510,
+  "correction_cycle": {
+    "reason": "Q122 data viewer label contradicts already-frozen reserved data head; measurement-only v2 overlay",
+    "candidates": [
+      "P0",
+      "P1",
+      "P2"
+    ]
+  },
+  "attempts": [
+    {
+      "id": "smoke-initial",
+      "kind": "smoke",
+      "phase": "initial",
+      "candidates": [],
+      "limit_seconds": 15.0,
+      "status": "COMPLETED",
+      "correction_reason": "",
+      "output_directory": "evaluation/results/smoke-initial",
+      "elapsed_seconds": 0.03367809997871518
+    },
+    {
+      "id": "P0-initial",
+      "kind": "evaluate",
+      "phase": "initial",
+      "candidates": [
+        "P0"
+      ],
+      "limit_seconds": 120.0,
+      "status": "COMPLETED",
+      "correction_reason": "",
+      "output_directory": "evaluation/results/P0-initial",
+      "elapsed_seconds": 0.45876049995422363
+    },
+    {
+      "id": "P1-initial",
+      "kind": "evaluate",
+      "phase": "initial",
+      "candidates": [
+        "P1"
+      ],
+      "limit_seconds": 120.0,
+      "status": "COMPLETED",
+      "correction_reason": "",
+      "output_directory": "evaluation/results/P1-initial",
+      "elapsed_seconds": 0.4963672999292612
+    },
+    {
+      "id": "P2-initial",
+      "kind": "evaluate",
+      "phase": "initial",
+      "candidates": [
+        "P2"
+      ],
+      "limit_seconds": 120.0,
+      "status": "COMPLETED",
+      "correction_reason": "",
+      "output_directory": "evaluation/results/P2-initial",
+      "elapsed_seconds": 0.9163584001362324
+    },
+    {
+      "id": "P0-P1-P2-corrective",
+      "kind": "evaluate",
+      "phase": "corrective",
+      "candidates": [
+        "P0",
+        "P1",
+        "P2"
+      ],
+      "limit_seconds": 120.0,
+      "status": "COMPLETED",
+      "correction_reason": "Q122 data viewer label contradicts already-frozen reserved data head; measurement-only v2 overlay",
+      "output_directory": "evaluation/results/P0-P1-P2-corrective",
+      "elapsed_seconds": 0.9645643001422286
+    }
+  ],
+  "cumulative_actual_seconds": 2.869728600140661
+}

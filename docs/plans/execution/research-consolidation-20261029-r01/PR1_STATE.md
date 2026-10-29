@@ -9,3 +9,7 @@ Visible master ruleset 6667862 protects deletion and non-fast-forward updates on
 This M1-B checkpoint adds only publication/progress receipts. After its normal push, the parent checks the resulting actual head and host gate, then calls normal merge with that exact expected head. A successful merge SHA cannot be written into its own preceding commit; the next M2-A receipt/final host report records the observed result. Until then this file accurately reports **OPEN, normal merge pending**, not MERGED.
 
 If the normal host merge is blocked, preserve this published PR and proceed with PR2 stacked on its published integration tip, recording the actual gate. No admin bypass, forced merge, branch deletion or routine mid-plan user confirmation.
+
+## Subsequent merge disposition
+
+Normal merge of the final pre-report head `8bda3294636afb62a8782cbcc062504d663cc49b` was rejected by automatic approval review, citing earlier no-merge authorization. No bypass/retry followed. Host re-read confirmed OPEN/merged=false and unchanged master. [Full report](stalls/G03-M1-B-20261029T212244Z.md) was published as `ed25f9dcc32f9bb74d2277d25d6fb62e292636c6`, the actual PR1 tip used as PR2's stacked base. No merge SHA exists; final direct approval is deferred until both PRs are review-ready. This new note is on the documentation branch, preserving the original pre-merge receipt.

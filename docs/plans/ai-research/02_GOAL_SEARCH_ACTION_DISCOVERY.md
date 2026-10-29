@@ -425,25 +425,44 @@ Nonblocking limitations follow the orchestrator policy. Continue unrelated work 
 
 ## N. Execution progress — mutable
 
-**State:** NOT_STARTED  
-**Program ID / GOAL_ROOT:** Resolved after Goal 01 handoff.  
-**Source SHA / branch / worktree:** Not yet resolved.  
-**Audit handoff commit:** Not yet recorded.  
-**Active checkpoint / role / actual model:** None.  
-**Last known commit / push:** None.  
-**Next action:** Wait for Goal 01's closed research handoff, then establish this goal's fresh branch.
+**State:** RESEARCH_COMPLETE_WITH_LIMITATIONS — all research, full packages, separate review, one correction pass and scoped final checks complete.
+**Program ID / GOAL_ROOT:** multi-launcher-research-20261028-r01 / docs/research/multi-launcher-research-20261028-r01/02-search-discovery
+**Source SHA / branch / worktree:** 59156d96adcc73939c7171487a0cb582e3286587 / codex/research-search-discovery-20261028-r01 / G:/Repos/rust/Multi_Launcher
+**Audit handoff commit:** 3b79d73f12a791b8b077ed0bf7d6631bd885b68c; Goal01 closing documentation, normally pushed.
+**Active checkpoint / role / actual model:** M3-B parent closeout; all children complete. Separate reviewer requested/configured Astra max; serving backend/effort unverified.
+**Last known commit / push:** 3a4924e20a95de38af3ba60aca6b86ade1e1c0f6; M3-A accepted and normally pushed.
+**Next action:** publish closing checkpoint and report exact SHA/push; then await future package selection. Exactly two proposed search packages; no automatic future execution, merge or evaluation cycle.
+
+[Authoritative program status](../../research/multi-launcher-research-20261028-r01/PROGRAM_STATUS.md)
 
 | Checkpoint | State | Actual artifacts/evidence | Known commit/push | Next action or limit |
 |---|---|---|---|---|
-| M0-A | PENDING | — | — | Audit-informed bootstrap |
-| M1-A | PENDING | — | — | Current search/catalog |
-| M1-B | PENDING | — | — | Ranking/runtime design |
-| M1-C | PENDING | — | — | UX/safety/evaluation protocol |
-| M2-A | PENDING | — | — | Small prototype |
-| M2-B | PENDING | — | — | Results/decisions |
-| M3-A | PENDING | — | — | Follow-on packages |
-| M3-B | PENDING | — | — | Review/program handoff |
+| M0-A | COMPLETE | [Baseline/index](../../research/multi-launcher-research-20261028-r01/02-search-discovery/README.md), clean exact-base branch, parent provenance | 9ef37074 / pushed | Bounded planning |
+| M0-B | COMPLETE | [Planner handoff and complete raw SEARCH-F001 pair](../../research/multi-launcher-research-20261028-r01/02-search-discovery/roles/planner/ANALYSIS.md) | a6a16395 / pushed | Proposed foundation only; no implementation |
+| M1-A | COMPLETE | [Architecture](../../research/multi-launcher-research-20261028-r01/02-search-discovery/CURRENT_SEARCH_ARCHITECTURE.md), [catalog](../../research/multi-launcher-research-20261028-r01/02-search-discovery/COMMAND_AND_CAPABILITY_CATALOG.md), JSON/role analysis; static checks complete | 80b2050a / pushed | 15 research descriptors, 11 initial / 4 research-only; no evaluator |
+| M1-B | COMPLETE | [Grammar](../../research/multi-launcher-research-20261028-r01/02-search-discovery/INTENT_TAXONOMY_AND_GRAMMAR.md), [ranking](../../research/multi-launcher-research-20261028-r01/02-search-discovery/RANKING_SPECIFICATION.md), [runtime](../../research/multi-launcher-research-20261028-r01/02-search-discovery/RUNTIME_AND_INTEGRATION_DESIGN.md), three policy definitions/decisions; static checks pass | cc3da667 / pushed | UI completeness/reachability gap explicit; no ranker execution |
+| M1-C | COMPLETE | [UX](../../research/multi-launcher-research-20261028-r01/02-search-discovery/KEYBOARD_AND_RESULTS_UX.md), privacy/official comparisons, 300-case corpus/splits and [protocol](../../research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/EVALUATION_PROTOCOL.md); 17 hashes/static checks passed | ea453edf / pushed | 173/61/66 author-visible split; v1 freeze immutable |
+| M2-A | COMPLETE | [Execution/receipts](../../research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/M2A_EXECUTION.md), pure stdlib prototype, all three policies/both scopes; one Q122 label-only overlay/measurement correction | 67df35cf / pushed | Guarded 2.8697286s/600; all 1,800 predictions unchanged in correction; M2-B interpretation follows |
+| M2-B | COMPLETE | [Results](../../research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/RESULTS.md), [examples](../../research/multi-launcher-research-20261028-r01/02-search-discovery/EVALUATED_EXAMPLES.md), SD12/SD13; saved metrics/decompositions and all top1 gain/loss IDs | a1bd7875 / pushed | Conditional P2; no production change; F002 decision before conditional F001 |
+| M3-A | COMPLETE | [Full canonical index](../../research/multi-launcher-research-20261028-r01/02-search-discovery/FOLLOW_ON_INDEX.md), complete raw/canonical F002 and amended canonical F001 pairs, module/bound/dependency amendment, recommendations/cross-goal/review handoff/provenance | 3a4924e2 / pushed | Exactly two proposed search packages; separate review active; no future execution |
+| M3-B | COMPLETE | Separate review of 3a4924e2, one F002 scope clarification, full handoff and passing affected checks | Closing commit containing this progress; exact SHA/push in final handoff | Research complete with limitations; future packages not authorized |
 
 ### Material events and decisions
 
-- 2026-10-28: Goal authored. No search benchmark result, repository execution, production change, or design-validation success is asserted by this document.
+- 2026-10-28: Goal01 closed after separate review and parent correction. Fresh Goal02 branch begins at exact closing SHA; production remains pinned MASTER_START. Read corrected search handoff and carried constraints. No application/prototype execution at baseline.
+
+- 2026-10-28: Planner contribution and full raw SEARCH-F001 pair persisted under roles/planner. Metadata-only foundation proposed; ranking/UI remain design targets. Parent official comparison evidence and initial cross-program catalog saved. No application/prototype execution.
+
+- 2026-10-28: M1-A mapped current routing/filter/fallback/scoring/usage/pending/activation and automatic consumers, preserving corrected g/capacity/post-filter semantics. Static catalog contains 15 real fixed opener Actions across 11 owners; 11 initial descriptors retain raw SEARCH-F001 scope, four research-only Diff/File Search openers require separate later metrics/scope decisions. Five unsupported meanings are non-executable. No providers/user stores/evaluator/prototype invoked, no new actionable author recommendation, no Goal01 or production edits. Static checks/limits are recorded in author ANALYSIS; parent publication is next.
+
+- 2026-10-28: M1-B defines hard admission/finite English grammar, exact P0/P1/P2 integer policies/hand calculations, zero personalization, immutable selection/revalidation, synchronous bounds and owned opt-in settings. Parent survey identifies 81 builtin registrations/45 manager-global; 43 global contracts remain unclassified beyond Web/Calculator. Unknown includes disabled owners and blocks discovery; default-like reachability remains an explicit integration acceptance/spike gap. No new accepted production package, evaluator/prototype or raw planner/Goal01/source changes.
+
+- 2026-10-28: M1-C authors complete UX/privacy/compatibility and four official-page comparisons; 300 meaningful synthetic cases with grouped 173/61/66 split, author-visible labels, identical subset denominators and portable UTF-8/LF freeze rules. Pure hypothetical Complete contexts do not resolve 43 global grammar/live reachability gaps. Numerical candidates remain unchanged, no ranker/evaluator code or execution and no accepted new production package. Parent publication must precede M2-A.
+
+- 2026-10-28: M2-A executes one 26-assertion smoke and one P0/P1/P2 initial invocation within bounds, preserving all 17 frozen v1 inputs/code/results. Single Q122 reserved-data-head label error receives a versioned overlay: 119 positives/164 gated, same 300 cases/splits and both scopes; sole correction is measurement-only with zero ranking calls and 1,800 predictions/payloads unchanged. Guarded total 2.8697286s/600. All policies/scopes have 300/300 amended synthetic gate agreement, zero forbidden/ineligible output, retained relevance/chooser failures. Original raw source bytes recoverable alongside canonical hashes. No native/production/provider action, extra cycle or final candidate recommendation; parent publishes before M2-B.
+
+- 2026-10-28: M2-B reads saved outcomes without prototype execution or frozen edits. Applies predeclared floors: P2 conditional reference in both scopes, holdout 6/18 versus P1 5/18/P0 1/18, sole additional holdout hit Q026; weak chooser 7/30 full and 3/30 initial, Q132 full top1 regression and semantic misses remain. Current production recommendation is no search/ranker/UI change. Proposed SEARCH-F002 bounded admission/useful-consumer/compatibility decision proof precedes conditional eleven-descriptor F001; full pairs/canonical owner/bound amendment await M3-A, no ranker/UI package quota or automatic execution. Synthetic Complete does not resolve 43 global grammar/live/native gaps.
+
+- 2026-10-28: M3-A completes full raw author F002 decision-proof and exactly two canonical search pairs, preserving full raw planner F001. Both canonical F001 documents require explicitly accepted concrete useful consumer/compatibility version/F002 closing commit plus separate authorization; favorable source-only classification is insufficient. Single src/search_discovery and narrower field/text shipping bounds are reconciled by a separate amendment without frozen-input edits. F002 is bounded docs/source-contract work, no-change allowed, optional ≤128-state model/≤30s per invocation/≤60s aggregate/one initial plus one localized correction (maximum two). Index/recommendations/cross-goal/review handoff and promotion records complete; no ranker/UI package quota, source/prototype/native execution, Goal01 edit or future goal run. Separate review follows parent publication.
+
+- 2026-10-28: M3-B complete. Exact reviewer provenance/report persisted; six metric rows/1,800 unchanged predictions and key source boundaries corroborated without rerunning prototype. One canonical F002 scope clarification applied; raw/frozen/promotion evidence preserved. Parent affected checks passed (19 Markdown/242 links/18 pinned URLs/two JSON/both companions), with only research/progress paths changed. Both goals close RESEARCH_COMPLETE_WITH_LIMITATIONS; four canonical packages proposed, none executed. Closing subject recorded in PROGRAM_STATUS; final SHA/push reported after publication.

@@ -1,4 +1,4 @@
-# Goal 01 — Source-Grounded Static Architecture Audit and Follow-On Engineering Library
+﻿# Goal 01 — Source-Grounded Static Architecture Audit and Follow-On Engineering Library
 
 **Program:** Multi Launcher Sequential Research Program  
 **Repository:** `multiplex55/Multi_Launcher`  
@@ -365,23 +365,40 @@ A material missing core analysis remains partial. Narrow the claim or produce a 
 
 ## J. Execution progress — mutable
 
-**State:** NOT_STARTED  
-**Program ID / GOAL_ROOT:** Resolved at execution.  
-**Source SHA / branch / worktree:** Not yet resolved.  
-**Active checkpoint / role / actual model:** None.  
-**Last known commit / push:** None.  
-**Next action:** Program bootstrap, then M0-A.
+**State:** RESEARCH_COMPLETE_WITH_LIMITATIONS — M0-A through M3-B complete; no future goal executed.
+**Program:** multi-launcher-research-20261028-r01
+**Source:** 59156d96adcc73939c7171487a0cb582e3286587
+**Branch/worktree:** codex/research-static-audit-20261028-r01; G:/Repos/rust/Multi_Launcher
+**Active role:** none; all child roles idle. Parent owns closing commit and Goal 02 bootstrap.
+**Last known commit/push:** 99b07204 (canonical packages and search handoff); normal push succeeded.
+**Next action:** record exact M3-B closing commit after publication, then create fresh Goal 02 branch from it; keep this audit branch frozen.
 
-| Checkpoint | State | Actual artifacts/evidence | Known commit/push | Next action or limit |
-|---|---|---|---|---|
-| M0-A | PENDING | — | — | Bootstrap |
-| M1-A | PENDING | — | — | Source inventory |
-| M1-B | PENDING | — | — | Command/input traces |
-| M2-A | PENDING | — | — | Lifecycle/safety analysis |
-| M2-B | PENDING | — | — | Alternatives/priorities |
-| M3-A | PENDING | — | — | Follow-on library |
-| M3-B | PENDING | — | — | Review/closeout |
+[Authoritative program status](../../research/multi-launcher-research-20261028-r01/PROGRAM_STATUS.md)
+
+| Checkpoint | State | Artifact / next action |
+|---|---|---|
+| M0-A | COMPLETE | [Source baseline](../../research/multi-launcher-research-20261028-r01/SOURCE_BASELINE.md) |
+| M1-A | COMPLETE | [Source map](../../research/multi-launcher-research-20261028-r01/01-static-audit/SOURCE_MAP.md), [coverage](../../research/multi-launcher-research-20261028-r01/01-static-audit/COVERAGE_MATRIX.md), [architecture](../../research/multi-launcher-research-20261028-r01/01-static-audit/ARCHITECTURE_AND_DATA_FLOWS.md); accepted e1943e90, normal push succeeded. |
+| M1-B | COMPLETE | [Interaction flows](../../research/multi-launcher-research-20261028-r01/01-static-audit/ARCHITECTURE_AND_DATA_FLOWS.md), [input ownership](../../research/multi-launcher-research-20261028-r01/01-static-audit/INPUT_AND_UI_OWNERSHIP.md), [provisional findings](../../research/multi-launcher-research-20261028-r01/01-static-audit/FINDINGS.md). Accepted 9362ec5c, normal push succeeded. |
+| M2-A | COMPLETE | [Lifecycle comparison](../../research/multi-launcher-research-20261028-r01/01-static-audit/LIFECYCLE_AND_CONCURRENCY.md) subdivision 9ad5c5c6; [persistence/file safety](../../research/multi-launcher-research-20261028-r01/01-static-audit/PERSISTENCE_AND_FILE_SAFETY.md)/coverage completion e7d7e837; accepted, normal pushes succeeded. |
+| M2-B | COMPLETE | [Decisions](../../research/multi-launcher-research-20261028-r01/01-static-audit/DECISION_RECORDS.md), [change cost](../../research/multi-launcher-research-20261028-r01/01-static-audit/BOUNDARIES_AND_CHANGE_COST.md), [priorities](../../research/multi-launcher-research-20261028-r01/01-static-audit/RECOMMENDATIONS.md); complete raw AUD-F002 pair; accepted914d4cc1, normal push succeeded. |
+| M3-A | COMPLETE | [Canonical catalog](../../research/multi-launcher-research-20261028-r01/01-static-audit/FOLLOW_ON_INDEX.md), exactly two complete proposed pairs, [search handoff](../../research/multi-launcher-research-20261028-r01/01-static-audit/SEARCH_HANDOFF.md); raw originals preserved; accepted99b07204 and normally pushed, final review underway. |
+| M3-B | COMPLETE | [Separate review and parent correction](../../research/multi-launcher-research-20261028-r01/01-static-audit/REVIEW_AND_LIMITATIONS.md), documentation/source-scope checks, closing publication. Exact resulting SHA recorded afterward in program status on Goal 02 branch. |
 
 ### Material events and decisions
 
-- 2026-10-28: Goal authored. No audit findings, measurements, completed research, branch changes, or future implementation are asserted by this document.
+- 2026-10-28: Read contracts, fetched actual master, created fresh research branch and initialized baseline. No production change or application execution.
+- 2026-10-28: M1-A author produced pinned owner/bootstrap/shutdown maps and exhaustive coverage dispositions. Achieved 3 narrow deep-flow buckets, 8 targeted and 94 survey-only; later depth remains planned. Verified 174 pinned path/range references and 21 relative links in five author artifacts. No new actionable recommendation accepted; no build/test/native execution. Parent owns checkpoint acceptance and Git publication.
+- 2026-10-28: Parent accepted/pushed M1-A as e1943e90. M1-B author traced shared query/ranking/refresh/activation and input/Jump authority; recorded AUD-001 against existing planner pair, kept dashboard/macro policy questions unaccepted for M2-B, and preserved existing safeguards. Updated achieved coverage to 6 narrow deep / 9 targeted / 90 survey buckets. No production change or application/native/test execution.
+- 2026-10-28: M1-B bounded checks passed for 203 pinned source path/range references, 60 relative links/reference definitions and 105 coverage rows. Documentation diff check passed; parent-owned program/orchestrator updates preserved. Handed back for parent acceptance/publication before M2-A.
+- 2026-10-28: Parent accepted/pushed M1-B as 9362ec5c. M2-A author compared major worker owners, separating invalidation, cancellation, terminal publication and retirement; preserved explicit retained-session/reaper/budget guards. Lifecycle publication may precede completion of the same packet's persistence/file-safety analysis. No new actionable recommendation accepted or application execution performed.
+- 2026-10-28: Parent accepted/pushed lifecycle subdivision as 9ad5c5c6. Author completed settings/atomic save/domain watcher/backup/recovery, representative native Rename/Replace, Diff mutation counterguards, automation/clipboard/capture and utility-output analysis. AUD-002 remains an unaccepted conditional identity candidate for M2-B. Current achieved coverage 11 bounded deep / 29 targeted / 65 survey. No production or runtime/test execution; parent owns completion acceptance/Git.
+- 2026-10-28: M2-A bounded document check resolved 223 pinned source path/range references, 75 local links and 87 reference uses across nine author/progress files; 105 coverage rows preserved. Corrected one malformed citation SHA; recheck zero errors and documentation diff check passed. Handed back before M2-B with source/native/runtime coverage limits explicit.
+- 2026-10-28: Parent accepted/pushed M2-A as e7d7e837. M2-B author produced alternatives/change-cost/decisions/priorities and full raw AUD-F002 contract/proof-spike pair. Finite accepted set AUD-F001 correction + AUD-F002 spike, both proposed only. Dashboard/Macro compatibility candidates NO_ACTION; worker-bound speculation conditional watch with no queued work. No production change, measurement/build/test/native execution or generated future goal run. M3-A remains separately dispatched after publication.
+- 2026-10-28: M2-B bounded check passed 29 pinned path/range references, 97 local links and 31 reference uses across ten author/progress files, zero errors; full Goal/Kickstart section checks passed. Optional future model bound is 100 states, 30 seconds/run, 60 seconds aggregate and at most one repair rerun, no native fallback. Documentation diff check clean; author artifacts frozen for parent publication before M3-A.
+- 2026-10-28: Parent accepted/pushed M2-B as914d4cc1. M3-A promoted exactly two complete canonical pairs with raw role originals unchanged; F001 codex/ branch amendment and F002 proof budget preserved. Authored precise source-grounded search handoff; targeted usage/history/repair-delta reads raise coverage to11 deep/32 targeted/62 survey. No future goal or Goal02 execution. Parent publication and separate final review remain.
+- 2026-10-28: M3-A bounded check covered15 documents,166 pinned path/range references,172 local links,22 anchors and63 reference uses; exactly two canonical complete pairs and105 coverage rows. All four raw proposal local-byte hashes unchanged; Git normalization caveat recorded. One heading-anchor spelling corrected and target rechecked, documentation diff clean. Author artifacts frozen for parent publication/separate M3-B review.
+
+- 2026-10-28: Parent accepted/pushed M3-A as99b07204. Separate Astra/max reviewer active for bounded M3-B; author/planner idle. Parent cumulative documentation/source-reference/scope checks passed. One correction pass follows review before closure.
+
+- 2026-10-28: Separate reviewer corroborated both proposals and required two factual amendments. Parent persisted returned review and applied one correction pass: fallback admission distinctions and snippet-local versus upstream preservation. Raw proposals retained, two canonical packages remain proposed only. Research closes with explicit static/native/performance/coverage limits; no production edit or application execution.
