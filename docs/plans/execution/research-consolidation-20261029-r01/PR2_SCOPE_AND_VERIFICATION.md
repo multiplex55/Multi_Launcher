@@ -19,3 +19,7 @@ Initial pass used; **zero correction/rechecks**, no old prototype/checker or Rus
 ## Separate review disposition
 
 **ACCEPTED**, no substantive findings or corrections. The [review](roles/reviewer/PR2_REVIEW.md) and [role record](roles/reviewer/PR2_ROLE_RECORD.md) preserve independent authorship, bounded read-only tree/scope corroboration and serving-model uncertainty. No checker or experiment was rerun. The actual stacked diff's ordinary `git diff --check <base>` also passed. The entire research/decision data remains frozen; only actual host-state/progress receipts follow.
+
+## Actual host publication
+
+PR2 [#1457](https://github.com/multiplex55/Multi_Launcher/pull/1457) is OPEN, base PR1 branch/ed25f9dc, candidate303b75b0. GitHub complete paginated file inventory:186 paths, all docs; host clean/mergeable. Zero check runs/statuses/GitHub reviews. [Host receipt](receipts/pr2-publication.json) preserves the snapshot. Only final handoff/progress receipts are added afterwards; no archived blob changes or new checker pass. PR1 remains blocked by automatic approval review; no merge/retarget before resolving that gate.

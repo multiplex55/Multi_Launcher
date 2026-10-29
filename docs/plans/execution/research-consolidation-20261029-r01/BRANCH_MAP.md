@@ -10,3 +10,7 @@ See [intake](INTAKE_AND_PROVENANCE.md) for exact source pins/dates and [Goal](..
 ## Actual stacked topology
 
 PR1 #1456 remains OPEN after automatic approval review rejected its normal merge. PR1 published integration tip is `ed25f9dcc32f9bb74d2277d25d6fb62e292636c6`. PR2 branch `codex/integrate-research-docs-20261029-r01` starts at that exact tip and will target `codex/integrate-query-escape-20261029-r01`. State STACKED_ON_UNMERGED_PR1; its docs-only scope is measured against that branch/tip, never against master while the code remains unmerged.
+
+## Actual PR publication
+
+PR1 [#1456](https://github.com/multiplex55/Multi_Launcher/pull/1456) targets master; published head ed25f9dc. PR2 [#1457](https://github.com/multiplex55/Multi_Launcher/pull/1457) targets the PR1 integration branch at ed25f9dc; reviewed/check-receipt candidate303b75b0, final administrative head follows. Neither is merged; automatic approval rejected the one normal PR1 merge. Both remain review-ready in the safe stacked topology. No merge SHA or post-merge master is invented. See FINAL_HANDOFF/Goal for exact continuation.

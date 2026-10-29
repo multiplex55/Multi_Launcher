@@ -320,26 +320,26 @@ The independent reviewer should address material risks, not cosmetic formatting:
 
 ## 9. Execution progress — mutable
 
-**State:** `IN_PROGRESS`
+**State:** `PR_READY_WITH_EXTERNAL_MERGE_GATE` — both PRs published/reviewed; neither merged; direct approval handoff
 **RUN_ID:** `20261029-r01`
 **Observed initial master:** `59156d96adcc73939c7171487a0cb582e3286587` (one normal fetch; local equals remote)
 **PR 1:** [#1456](https://github.com/multiplex55/Multi_Launcher/pull/1456), OPEN / BLOCKED_EXTERNAL: automatic approval review rejected normal master merge
-**PR 2:** `NOT_CREATED`
+**PR 2:** [#1457](https://github.com/multiplex55/Multi_Launcher/pull/1457), OPEN / STACKED_ON_UNMERGED_PR1, docs-only against actual base
 **Active branch/worktree:** `codex/integrate-research-docs-20261029-r01`, STACKED_ON_UNMERGED_PR1; `G:/Repos/rust/Multi_Launcher`
 **Current owner/role:** `/root`, sole integration writer and Git/PR owner; separate reviewer follows
-**Last accepted checkpoint / commit / push:** M2-B `3f65d2eb20e68b592d2735a56d429d863eecd43f`, pushed; 171 immutable source imports complete
-**Next action:** Publish accepted M2-C preservation/review receipts, create stacked PR2, inspect actual host diff and finish exact approval handoff
+**Last accepted checkpoint / commit / push:** M2-C `303b75b00e161f95abeeb0047c34470a92690b05`, pushed; both PRs created/attached, reviews accepted; final administrative receipt publication follows
+**Next action:** Direct approval of normal #1456 master merge, then #1457 retarget/docs-only recheck/normal master merge; no bypass or new feature work
 **Output index:** [STATUS](../execution/research-consolidation-20261029-r01/STATUS.md).
 
 | Milestone | State | Evidence / next action |
 |---|---|---|
-| M0-A — baseline | COMPLETE | [Intake](../execution/research-consolidation-20261029-r01/INTAKE_AND_PROVENANCE.md), [branch map](../execution/research-consolidation-20261029-r01/BRANCH_MAP.md), [host receipt](../execution/research-consolidation-20261029-r01/receipts/host-intake.json); commit/push follows |
-| M1-A — exact fix | COMPLETE | Exact three Rust blobs and nine evidence files, same baseline; [parity/scope](../execution/research-consolidation-20261029-r01/PR1_SCOPE_AND_VERIFICATION.md), [independent review ACCEPTED](../execution/research-consolidation-20261029-r01/roles/reviewer/PR1_REVIEW.md). Commit/push follows this checkpoint |
+| M0-A — baseline | COMPLETE | [Intake](../execution/research-consolidation-20261029-r01/INTAKE_AND_PROVENANCE.md), [branch map](../execution/research-consolidation-20261029-r01/BRANCH_MAP.md), [host receipt](../execution/research-consolidation-20261029-r01/receipts/host-intake.json); `762ce52d5aabe52fc6006dff30430a63d97cccc6`, pushed |
+| M1-A — exact fix | COMPLETE | Exact three Rust blobs and nine evidence files, same baseline; [parity/scope](../execution/research-consolidation-20261029-r01/PR1_SCOPE_AND_VERIFICATION.md), [independent review ACCEPTED](../execution/research-consolidation-20261029-r01/roles/reviewer/PR1_REVIEW.md). `0035d85d39d0fa27583547764969fdf362ea1abc`, pushed |
 | M1-B — PR 1 | BLOCKED_EXTERNAL | #1456 OPEN; host clean/no checks reported, but automatic approval review rejected merge. [Report](../execution/research-consolidation-20261029-r01/stalls/G03-M1-B-20261029T212244Z.md), pushed reporting tip ed25f9dc. Continue stacked docs |
-| M2-A — research docs | COMPLETE | [Exact 133-file research import](../execution/research-consolidation-20261029-r01/M2A_RESEARCH_IMPORT.md), source tree parity; stacked base ed25f9dc. Publication follows |
-| M2-B — decisions/queue | COMPLETE | [Manifest](../execution/research-consolidation-20261029-r01/INTEGRATION_MANIFEST.md): exact decision roots and final Diff ledger/G04; source parity, 3 complete/1 deferred, future Diff pair proposed only. Publication follows |
-| M2-C — PR 2 | IN_PROGRESS | [Metadata PASS](../execution/research-consolidation-20261029-r01/PR2_SCOPE_AND_VERIFICATION.md): 1497 assertions, 2.547s/60s; [separate review ACCEPTED](../execution/research-consolidation-20261029-r01/roles/reviewer/PR2_REVIEW.md), no corrections/recheck. Stacked PR publication next |
-| M3-A — final check | PENDING | Verify actual master/PR state and report |
+| M2-A — research docs | COMPLETE | [Exact 133-file research import](../execution/research-consolidation-20261029-r01/M2A_RESEARCH_IMPORT.md), source tree parity; stacked base ed25f9dc; `6f8de6cfa4d1e8bc82c2eabac41fb43299402049`, pushed |
+| M2-B — decisions/queue | COMPLETE | [Manifest](../execution/research-consolidation-20261029-r01/INTEGRATION_MANIFEST.md): exact decision roots and final Diff ledger/G04; source parity, 3 complete/1 deferred, future Diff pair proposed only; `3f65d2eb20e68b592d2735a56d429d863eecd43f`, pushed |
+| M2-C — PR 2 | COMPLETE | #1457 OPEN/stacked, host confirms docs-only actual diff; metadata PASS1497, 2.547s/60s, separate review ACCEPTED, no correction/recheck. [Actual PR2 state](../execution/research-consolidation-20261029-r01/PR2_STATE.md); merge waits for PR1 approval/merge/retarget |
+| M3-A — final check | COMPLETE | [Actual final handoff](../execution/research-consolidation-20261029-r01/FINAL_HANDOFF.md): both PRs OPEN, master59156d96 unchanged and lacks results; exact approval/retarget sequence, worktree/upstream reconciled. Final receipt-only publication follows |
 
 ### Material events
 
@@ -349,3 +349,11 @@ The independent reviewer should address material risks, not cosmetic formatting:
 ### Acceptance sign-off
 
 M0-A is accepted for publication from a safe, freshly verified baseline. Overall completion remains unproven until PR1/PR2 actual outcomes and master/worktree reconciliation are recorded. A later external gate must retain review-ready artifacts and exact next action; it does not authorize a bypass.
+
+### Final observed outcome — 2026-10-29
+
+PR1 #1456 is published at `ed25f9dcc32f9bb74d2277d25d6fb62e292636c6`, targeting master; one normal merge was rejected by automatic approval review. PR2 #1457 is published and independently accepted, targeting PR1's branch at that exact base; checked candidate `303b75b00e161f95abeeb0047c34470a92690b05`, final handoff-only commit follows. Both host gates report clean mergeability and no statuses/check runs/GitHub reviews. This means no checks reported, not CI passed. No actual merge SHA exists. No second merge attempt or PR2-to-PR1 merge was made.
+
+One final master fetch confirmed `59156d96adcc73939c7171487a0cb582e3286587`, local master equal; old Rust blobs and absent completed result roots prove neither change set is integrated. Current branch's inherited fix and 171 exact research/decision files are preserved. Three complete/one deferred catalog and proposed-only Diff follow-on remain intact. No new Rust/prototype/native run, force/configuration change, history rewrite, third PR or branch deletion.
+
+This contract's accurately blocked/review-ready fallback is delivered. Master integration itself remains externally gated. [FINAL_HANDOFF](../execution/research-consolidation-20261029-r01/FINAL_HANDOFF.md), [PR2 host receipt](../execution/research-consolidation-20261029-r01/receipts/pr2-publication.json), [pre-closing reconciliation](../execution/research-consolidation-20261029-r01/receipts/final-reconciliation-before-closing.json) and the preserved rejection identify the exact safe continuation. The final administrative commit cannot name its own SHA; actual resulting head/push/host status is reported after publication, without a third PR or recursive commit.
