@@ -503,7 +503,12 @@ pub struct ExecutionReport {
     pub cancelled: bool,
 }
 
-fn fresh(plan: &CopyPlan, item: &PlannedCopy, dirty: &HashSet<PathBuf>) -> Result<(), String> {
+fn fresh(
+    plan: &CopyPlan,
+    item: &PlannedCopy,
+    dirty: &HashSet<PathBuf>,
+    read_destination: &mut impl FnMut(&Path) -> io::Result<FileIdentity>,
+) -> Result<(), String> {
     if !same_root_identity(&plan.source_root)? || !same_root_identity(&plan.destination_root)? {
         return Err("comparison root identity changed".into());
     }
@@ -518,7 +523,11 @@ fn fresh(plan: &CopyPlan, item: &PlannedCopy, dirty: &HashSet<PathBuf>) -> Resul
     if mutation_contains_dirty_path(&dst, dirty) {
         return Err("destination has unsaved Diff changes".into());
     }
-    let now = FileIdentity::read(&dst).ok();
+    let now = match read_destination(&dst) {
+        Ok(identity) => Some(identity),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("destination '{}': {error}", dst.display())),
+    };
     if now != item.expected_destination {
         return Err("destination type or overwrite state changed since confirmation".into());
     }
@@ -556,6 +565,15 @@ pub fn execute_copy(
     plan: &CopyPlan,
     dirty: &HashSet<PathBuf>,
     cancel: &AtomicBool,
+) -> ExecutionReport {
+    execute_copy_with_destination_read(plan, dirty, cancel, FileIdentity::read)
+}
+
+fn execute_copy_with_destination_read(
+    plan: &CopyPlan,
+    dirty: &HashSet<PathBuf>,
+    cancel: &AtomicBool,
+    mut read_destination: impl FnMut(&Path) -> io::Result<FileIdentity>,
 ) -> ExecutionReport {
     let mut items = vec![];
     let mut affected = vec![];
@@ -606,7 +624,7 @@ pub fn execute_copy(
             });
             return finish(plan, items, affected, true);
         }
-        let outcome = match fresh(plan, c, dirty) {
+        let outcome = match fresh(plan, c, dirty, &mut read_destination) {
             Err(e) => ItemOutcome::Failed(e),
             Ok(()) => match fs::copy(&c.source, &c.target) {
                 Ok(_) => {
@@ -895,4 +913,163 @@ pub fn spawn_recycle_delete(
         receiver: rx,
         cancel,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn copy_fixture(
+        destination_contents: Option<&[u8]>,
+    ) -> (tempfile::TempDir, tempfile::TempDir, CopyPlan) {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("item.txt"), b"new source contents").unwrap();
+        if let Some(contents) = destination_contents {
+            fs::write(destination.path().join("item.txt"), contents).unwrap();
+        }
+        let plan = plan_copy(
+            source.path(),
+            destination.path(),
+            CopyDirection::LeftToRight,
+            [PathBuf::from("item.txt")],
+            7,
+        )
+        .unwrap();
+        assert!(plan.errors.is_empty());
+        assert!(plan.directories.is_empty());
+        assert_eq!(plan.copies.len(), 1);
+        (source, destination, plan)
+    }
+
+    fn assert_copy_refused(plan: &CopyPlan, report: &ExecutionReport, message: String) {
+        assert_eq!(report.generation, plan.generation);
+        assert_eq!(
+            report.items,
+            vec![ItemResult {
+                relative: PathBuf::from("item.txt"),
+                outcome: ItemOutcome::Failed(message),
+            }]
+        );
+        assert_eq!(report.affected_subtree, None);
+        assert!(!report.cancelled);
+    }
+
+    #[test]
+    fn destination_not_found_allows_new_copy() {
+        let (_source, destination, plan) = copy_fixture(None);
+        assert_eq!(plan.copies[0].expected_destination, None);
+        let mut reads = 0;
+        let report = execute_copy_with_destination_read(
+            &plan,
+            &HashSet::new(),
+            &AtomicBool::new(false),
+            |path| {
+                assert_eq!(path, plan.copies[0].target.as_path());
+                reads += 1;
+                Err(io::Error::new(io::ErrorKind::NotFound, "injected absence"))
+            },
+        );
+        assert_eq!(reads, 1);
+        assert_eq!(report.items[0].outcome, ItemOutcome::Copied);
+        assert_eq!(
+            fs::read(destination.path().join("item.txt")).unwrap(),
+            b"new source contents"
+        );
+    }
+
+    fn assert_destination_read_errors_preserve_contents(destination_contents: Option<&[u8]>) {
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::InvalidInput] {
+            let (_source, destination, plan) = copy_fixture(destination_contents);
+            let message = format!("injected {kind:?} destination observation");
+            let mut reads = 0;
+            let report = execute_copy_with_destination_read(
+                &plan,
+                &HashSet::new(),
+                &AtomicBool::new(false),
+                |path| {
+                    assert_eq!(path, plan.copies[0].target.as_path());
+                    reads += 1;
+                    Err(io::Error::new(kind, message.clone()))
+                },
+            );
+            assert_eq!(reads, 1);
+            assert_copy_refused(
+                &plan,
+                &report,
+                format!(
+                    "destination '{}': {message}",
+                    plan.copies[0].target.display()
+                ),
+            );
+            let target = destination.path().join("item.txt");
+            if let Some(contents) = destination_contents {
+                assert_eq!(fs::read(target).unwrap(), contents);
+            } else {
+                assert!(!target.exists());
+            }
+        }
+    }
+
+    #[test]
+    fn destination_read_errors_prevent_new_copy() {
+        assert_destination_read_errors_preserve_contents(None);
+    }
+
+    #[test]
+    fn destination_read_errors_prevent_overwrite() {
+        assert_destination_read_errors_preserve_contents(Some(b"old destination"));
+    }
+
+    #[test]
+    fn destination_missing_after_preview_prevents_overwrite() {
+        let (_source, destination, plan) = copy_fixture(Some(b"old destination"));
+        assert!(plan.copies[0].expected_destination.is_some());
+        let report = execute_copy_with_destination_read(
+            &plan,
+            &HashSet::new(),
+            &AtomicBool::new(false),
+            |_| Err(io::Error::new(io::ErrorKind::NotFound, "injected absence")),
+        );
+        assert_copy_refused(
+            &plan,
+            &report,
+            "destination type or overwrite state changed since confirmation".into(),
+        );
+        assert_eq!(
+            fs::read(destination.path().join("item.txt")).unwrap(),
+            b"old destination"
+        );
+    }
+
+    #[test]
+    fn destination_changed_identity_prevents_overwrite() {
+        let (_source, destination, plan) = copy_fixture(Some(b"old destination"));
+        fs::write(
+            destination.path().join("item.txt"),
+            b"changed after preview",
+        )
+        .unwrap();
+        let report = execute_copy(&plan, &HashSet::new(), &AtomicBool::new(false));
+        assert_copy_refused(
+            &plan,
+            &report,
+            "destination type or overwrite state changed since confirmation".into(),
+        );
+        assert_eq!(
+            fs::read(destination.path().join("item.txt")).unwrap(),
+            b"changed after preview"
+        );
+    }
+
+    #[test]
+    fn destination_matching_identity_allows_overwrite() {
+        let (_source, destination, plan) = copy_fixture(Some(b"old destination"));
+        let report = execute_copy(&plan, &HashSet::new(), &AtomicBool::new(false));
+        assert_eq!(report.items[0].outcome, ItemOutcome::Overwritten);
+        assert_eq!(
+            fs::read(destination.path().join("item.txt")).unwrap(),
+            b"new source contents"
+        );
+    }
 }

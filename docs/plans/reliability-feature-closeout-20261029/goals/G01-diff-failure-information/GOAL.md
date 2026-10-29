@@ -134,10 +134,10 @@ Both information losses are fixed at their existing owners, selective tests pass
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `NOT_STARTED`.
-- **Run ID and branch:** assigned by the orchestrator after safe source verification.
-- **Actual master/source base:** `UNVERIFIED_FOR_EXECUTION`.
-- **Current milestone:** `M0-A` pending.
+- **Current state:** `IN_PROGRESS` / 20261029-r01.
+- **Run ID and branch:** 20261029-r01; codex/closeout-g01-diff-failure-information-20261029-r01.
+- **Actual master/source base:** master 4a1283e6edd2c245f562a07dbe3dcc6a61061eed; program bootstrap 02d0ac64d51655f43d6e958ea551f5bf658ee48d.
+- **Current milestone:** M1-A source checkpoint in progress; combined focused verification after M1-B.
 - **Active role and requested/configured/resolved model:** `NONE / unverified`.
 - **Last known commit / push:** none for this package.
 - **Next action:** read [KICKSTART](KICKSTART.md), confirm prerequisite and revalidate source; then begin on a fresh task branch.
@@ -154,3 +154,5 @@ Both information losses are fixed at their existing owners, selective tests pass
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
+
+- Runtime 2026-10-29: M0-A 269508d4 pushed. Planner /root/g00_planner (Astra/max requested, backend UNVERIFIED) revalidated both information losses and returned separate owner-specific packets. M1-A implementer active; no tests yet; pending source checkpoint cannot be integrated until focused proof and review.
