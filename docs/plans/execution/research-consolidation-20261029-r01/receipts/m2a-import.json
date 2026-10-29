@@ -1,0 +1,22 @@
+{
+  "source": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+  "audit_ancestor": "3b79d73f12a791b8b077ed0bf7d6631bd885b68c",
+  "audit_ancestor_verified": true,
+  "stacked_base": "ed25f9dcc32f9bb74d2277d25d6fb62e292636c6",
+  "stacked_base_branch": "codex/integrate-query-escape-20261029-r01",
+  "intended_pr_base": "codex/integrate-query-escape-20261029-r01",
+  "master_unchanged": "59156d96adcc73939c7171487a0cb582e3286587",
+  "imported_file_count": 133,
+  "whitelist": [
+    "docs/research/multi-launcher-research-20261028-r01/",
+    "docs/plans/ai-research/01_GOAL_STATIC_ARCHITECTURE_AUDIT.md",
+    "docs/plans/ai-research/02_GOAL_SEARCH_ACTION_DISCOVERY.md",
+    "docs/plans/ai-research/ORCHESTRATOR_GOAL.md"
+  ],
+  "research_tree": "3fd137be37d700e5cd186a5649eac79e05d21520",
+  "index_vs_source_whitelist_diff_exit": 0,
+  "production_diff_vs_stack_base": "EMPTY",
+  "research_status_both": "RESEARCH_COMPLETE_WITH_LIMITATIONS",
+  "prototype_and_cargo_invocations": 0,
+  "metadata_check": "RESERVED_FOR_M2-C; no parse/ranking run here"
+}

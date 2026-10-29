@@ -1,0 +1,15 @@
+# AUD-F002 — Diff mutation authority decision spike
+
+Authorized sequential catalog execution, 2026-10-29. **Complete: H0 research decision**, independently reviewed with one proposal correction resolved. M0-A was published as 1725f0fdab6de1993cad9dc99e164467454c4a41; M1-A as ab5088f94f4f0d25783b05f4a2cdc3148d453270. This is the M2-A closing documentation checkpoint; the [queue index](../../plans/execution/research-follow-ons-20261029/INTEGRATION_STATUS.md) records its actual publication receipt afterward. Read the complete [Goal](GOAL.md) and [Kickstart](KICKSTART.md); Goal section 13 owns milestone progress.
+
+Source/base: `59156d96adcc73939c7171487a0cb582e3286587`, freshly verified actual master. Branch: `codex/research-diff-mutation-authority-r01`. Worktree: `G:/Repos/rust/Multi_Launcher`. Historical research contract: `cc94dbf4f98f155bcdef81165f647cbafb472eb0`.
+
+The [decision](DECISION.md) selects **H0: retain best-effort external-writer authority with explicit limits**. It does not establish exact approved-object mutation, effect-time absence, unconditional recycling or rollback. The [limitations](LIMITATIONS.md) distinguish those unproven native properties from source-proven failure-information gaps. No production repair, native mutation or Cargo/test/lint campaign occurs.
+
+[Contract/evidence](CONTRACT_AND_EVIDENCE.md), [identity proof](IDENTITY_PROOF.md), [primary API references](API_REFERENCES.md), and [source/test inventory](SOURCE_AND_TEST_INVENTORY.md) distinguish path freshness, native object identity, overwrite authority and Shell recycling. Both static replacement witnesses retain existing counterguards. The optional model is NOT_NEEDED; native and application tests are NOT_RUN. See [verification](VERIFICATION.md) for exact scope and unused budgets.
+
+[Planner analysis](roles/planner/ANALYSIS.md) and [provenance](roles/planner/ROLE_RECORD.md) identify current owners; [author analysis](roles/implementer/ANALYSIS.md) and [provenance](roles/implementer/ROLE_RECORD.md) record the evidence contribution. One active child and single writer; configured Astra/max planner/reviewer and Astra/xhigh author, serving backend unverified. Parent owns publication and queue metadata.
+
+One [future Goal](proposals/diff-failure-information/GOAL.md) and [Kickstart](proposals/diff-failure-information/KICKSTART.md) propose preserving destination read failures and delivered GUI failure/cancellation feedback at existing owners. The complete pair is **PROPOSED_NOT_AUTHORIZED**; it is neither executed nor automatically added to the user's original catalog.
+
+[Independent review and parent resolution](REVIEW.md) bind the proposal's feedback lifetime to the owning view and ordered comparison roots, preserving feedback through ordinary rescans while refusing stale swapped-comparison reports. The single [static check receipt](receipts/static-initial.json) records 190 assertions passed in 0.650496 seconds. No correction recheck, model, native operation or application/test run occurred; no production source changed. Native authority/recycling guarantees remain unproven as stated in the decision.

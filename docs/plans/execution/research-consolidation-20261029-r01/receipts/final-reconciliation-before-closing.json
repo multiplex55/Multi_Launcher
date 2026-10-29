@@ -1,0 +1,60 @@
+{
+  "observed_utc": "2026-10-29T21:39:02Z",
+  "master": "59156d96adcc73939c7171487a0cb582e3286587",
+  "local_master": "59156d96adcc73939c7171487a0cb582e3286587",
+  "pr1": {
+    "number": 1456,
+    "url": "https://github.com/multiplex55/Multi_Launcher/pull/1456",
+    "state": "open",
+    "merged": false,
+    "actual_merge_sha": null,
+    "head": "ed25f9dcc32f9bb74d2277d25d6fb62e292636c6",
+    "base": "master",
+    "base_sha": "59156d96adcc73939c7171487a0cb582e3286587",
+    "mergeable": true,
+    "mergeable_state": "clean",
+    "status_count": 0,
+    "check_run_count": 0,
+    "github_review_count": 0,
+    "independent_review": "ACCEPTED",
+    "merge_block": "Automatic approval review rejected the one normal merge; exact diagnostic in G03-M1-B report."
+  },
+  "pr2": {
+    "number": 1457,
+    "url": "https://github.com/multiplex55/Multi_Launcher/pull/1457",
+    "state": "open",
+    "merged": false,
+    "actual_merge_sha": null,
+    "head": "303b75b00e161f95abeeb0047c34470a92690b05",
+    "base": "codex/integrate-query-escape-20261029-r01",
+    "base_sha": "ed25f9dcc32f9bb74d2277d25d6fb62e292636c6",
+    "mergeable": true,
+    "mergeable_state": "clean",
+    "status_count": 0,
+    "check_run_count": 0,
+    "github_review_count": 0,
+    "independent_review": "ACCEPTED",
+    "merge_attempted": false
+  },
+  "worktree": {
+    "path": "G:/Repos/rust/Multi_Launcher",
+    "branch": "codex/integrate-research-docs-20261029-r01",
+    "head": "303b75b00e161f95abeeb0047c34470a92690b05",
+    "upstream": "303b75b00e161f95abeeb0047c34470a92690b05",
+    "status_before_closing_receipt": "CLEAN",
+    "stacked_base": "ed25f9dcc32f9bb74d2277d25d6fb62e292636c6"
+  },
+  "master_includes_verified_fix": false,
+  "master_includes_completed_research_or_decisions_or_final_queue": false,
+  "preserved_query_blobs_in_both_integration_branches": true,
+  "metadata_check": {
+    "assertions": 1497,
+    "passed": true,
+    "seconds": 2.547,
+    "limit": 60,
+    "reruns": 0,
+    "corrections": 0
+  },
+  "new_rust_or_prototype_or_native_runs": 0,
+  "closing_note": "This is an actual snapshot before the report-only closing commit. Its later head SHA and push/host result are reported by Git/final handoff, not guessed here."
+}

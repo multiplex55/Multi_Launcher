@@ -1,0 +1,29 @@
+{
+  "cases": 300,
+  "conditional_positives": 119,
+  "positive_by_split": {
+    "development": 68,
+    "holdout": 18,
+    "validation": 33
+  },
+  "gates": {
+    "ProtectedSyntax": 104,
+    "ADMIT": 136,
+    "InputBound": 11,
+    "Disabled": 2,
+    "ExcludedSurfaceOrOrigin": 12,
+    "BusyOrStale": 11,
+    "CoverageUnknown": 3,
+    "NoEligibleOwner": 1,
+    "UnsupportedIntent": 20
+  },
+  "forbidden_case_denominator": 181,
+  "abstention_denominator": 181,
+  "chooser_denominator": 30,
+  "split_counts": {
+    "development": 173,
+    "holdout": 66,
+    "validation": 61
+  },
+  "case_reference_base": "evaluation/; source_refs preserve original base, not this nested folder"
+}

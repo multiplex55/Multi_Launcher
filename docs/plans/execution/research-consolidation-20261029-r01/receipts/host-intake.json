@@ -1,0 +1,104 @@
+{
+  "observed_utc": "2026-10-29T21:11:35Z",
+  "repository": {
+    "id": "918448387",
+    "name": "Multi_Launcher",
+    "owner": {
+      "login": "multiplex55",
+      "id": 6619098,
+      "type": "User",
+      "avatar_url": "https://avatars.githubusercontent.com/u/6619098?v=4",
+      "url": "https://api.github.com/users/multiplex55"
+    },
+    "repository_full_name": "multiplex55/Multi_Launcher",
+    "permissions": {
+      "admin": true,
+      "maintain": true,
+      "pull": true,
+      "push": true,
+      "triage": true
+    },
+    "allow_auto_merge": false,
+    "allow_merge_commit": true,
+    "allow_rebase_merge": true,
+    "allow_squash_merge": true,
+    "allow_update_branch": false,
+    "clone_url": "https://github.com/multiplex55/Multi_Launcher.git",
+    "size": 50052,
+    "default_branch": "master",
+    "git_commits_url": "https://api.github.com/repos/multiplex55/Multi_Launcher/git/commits{/sha}",
+    "git_refs_url": "https://api.github.com/repos/multiplex55/Multi_Launcher/git/refs{/sha}",
+    "git_url": "git://github.com/multiplex55/Multi_Launcher.git",
+    "master_branch": null,
+    "visibility": "public",
+    "archived": false,
+    "is_code_search_indexed": null
+  },
+  "open_pr_count": 0,
+  "recent_pr_max": 1455,
+  "existing_matching_integration_prs": [],
+  "master_branch": {
+    "name": "master",
+    "sha": "59156d96adcc73939c7171487a0cb582e3286587",
+    "protected": true,
+    "protection": {
+      "enabled": false,
+      "required_status_checks": {
+        "enforcement_level": "off",
+        "contexts": [],
+        "checks": []
+      }
+    }
+  },
+  "ruleset": {
+    "id": 6667862,
+    "name": "master",
+    "target": "branch",
+    "source_type": "Repository",
+    "source": "multiplex55/Multi_Launcher",
+    "enforcement": "active",
+    "conditions": {
+      "ref_name": {
+        "exclude": [],
+        "include": [
+          "~DEFAULT_BRANCH"
+        ]
+      }
+    },
+    "rules": [
+      {
+        "type": "deletion"
+      },
+      {
+        "type": "non_fast_forward"
+      }
+    ],
+    "node_id": "RRS_lACqUmVwb3NpdG9yec42vmkDzgBlvlY",
+    "created_at": "2025-07-13T11:38:26.673-04:00",
+    "updated_at": "2025-07-13T11:38:26.673-04:00",
+    "bypass_actors": [
+      {
+        "actor_id": 5,
+        "actor_type": "RepositoryRole",
+        "bypass_mode": "always"
+      }
+    ],
+    "current_user_can_bypass": "always",
+    "_links": {
+      "self": {
+        "href": "https://api.github.com/repos/multiplex55/Multi_Launcher/rulesets/6667862"
+      },
+      "html": {
+        "href": "https://github.com/multiplex55/Multi_Launcher/rules/6667862"
+      }
+    }
+  },
+  "protection_endpoint": {
+    "status": 403,
+    "diagnostic": "Resource not accessible by integration; no administration permission requested."
+  },
+  "unsupported_rules_endpoint": "/rules/branches/master rejected by connector; read ruleset collection and exact ruleset instead.",
+  "github_cli": "NOT_AVAILABLE; Get-Command gh returned no command.",
+  "connector_recovery": "Initial get_repo/search_prs argument binding errors corrected once using exposed schema; no authentication retry.",
+  "policy": "MERGE_WHEN_GATES_PASS; normal merge-commit strategy; no bypass or repository-setting change."
+}

@@ -1,0 +1,83 @@
+# Goal 02 orchestration analysis
+
+The closed audit supplies real owners, not an absence-of-architecture thesis. Research must preserve exact prefixes/literal data, Action plus args, provider eligibility and existing execution authority. Its two reviewer corrections are load-bearing: g-route/capacity fallback is not generic; snippet no-tag preservation does not undo upstream manager reconstruction. Treat usage counts, pins, raw history and content as separate classes.
+
+No new recommendation is accepted at baseline. AUD-F001 is the canonical parser correction and AUD-F002 the independent Diff contract/proof spike; neither is executed or duplicated here. The planner should bound the search design before the author creates catalog/algorithm/evaluation artifacts. A metadata lookup must not call effectful plugin search to construct a catalog. Ranking can recommend a safe existing entry action but cannot manufacture a deferred utility or execution authority.
+
+The prototype will be isolated standard-library code returning IDs/explanations, never an application benchmark. Candidate definitions, family splits and metrics must freeze before evaluations; synthetic author-visible labels are not blind human ground truth. A no-gain result is a valid research outcome and must change the recommendation honestly.
+
+## Planning synthesis
+
+Planner source inspection found an existing `PluginCatalogSnapshot` with catalog revision, owner origin/epoch, enablement and capabilities. Accept that as the metadata ownership seam for the proposed SEARCH-F001 foundation, subject to its full bounded package and later review. Do not invent a second registry or enumerate capabilities by invoking provider search. Eleven fixed safe-open descriptors across nine owners are a bounded initial implementation proposal, not a claim of full capability coverage; the research catalog may inventory more real and deferred capabilities.
+
+Preserve the existing canonical `search()` result vector and Macro instantaneous cardinality. Interactive discovery must have explicit query-origin admission; action invocation source and result surface are different concerns. The planner corrected terminology to actual `commands::ActivationSource`, `universal_actions::ActionSurface` and `UniversalActionInvocationContext`. A main-launcher-only policy maps to existing `LauncherList`/`LauncherGrid` surfaces; no existing `MainLauncher` or `CommandInvocationSource` enum is assumed. A new query-origin discriminator remains proposed design. This is an amendment/constraint on the planner's metadata and eventual integration packages, not a separate recommendation.
+
+The [official comparison evidence](EXTERNAL_EVIDENCE.md) supports visible fallback admission, typed target eligibility, safe argument prompting and stable selected-item actions. Existing owners take precedence; no product imitation, external algorithm claim or new dispatcher is justified. All accepted implications must be traced into canonical packages after design/evaluation rather than creating duplicate work.
+
+The program [follow-on catalog](../../../FOLLOW_ON_CATALOG.md) preserves the two audit packages and no-action dispositions. Its initial search entries remain unaccepted until complete evidence and pairs exist. Parent consolidation will record precise amendments and dependency choices; no raw role proposal is silently overwritten.
+
+## M1-A acceptance and evidence boundaries
+
+Accepted the source-grounded current architecture and exact capability catalog at `80b2050a6e6c0a78b90bbfb60db822d399d2c82d`, normally pushed. The author reconciled 15 existing openers across 11 owners, associated shortcuts, fixed encodings, source references and links. Parent inspected the reports and task diff, verified immutable charters, and confirmed frozen audit/application/configuration paths unchanged. These are document/static-source checks, not executed providers or typed Rust parser tests.
+
+The four additions beyond the planner's eleven are empty Diff and File Search general/filename/content-mode opening. They are research coverage, not an accepted expansion of SEARCH-F001. Require identical case denominators when comparing full and initial subsets; retain cases whose target is absent and report that limitation. A later canonical scope change must update owners, constructors, migration and future tests in both Goal and Kickstart, preserving the raw planner pair. Relevance gains from a broader catalog cannot justify a smaller deployment.
+
+`queryexec:` first-result activation joins Macro as a concrete reason to keep discovery out of canonical results. Current query shortcuts and returned openers are not interchangeable: Diff has a direct encoded shortcut while most tool shortcuts re-enter query routing. These are constraints on existing metadata/integration proposals, not separate work items.
+
+M1-B is assigned to the same sole author. Numeric policies, complete-route admission, selection identity and runtime budgets must be explicit before the M1-C corpus/protocol freeze. A source or integration uncertainty may yield a bounded spike or fail-closed design; it must not become an implied runtime guarantee.
+
+### Admission usefulness challenge
+
+The author's proposed revisioned reserved-route metadata has Complete/Unknown state and closes discovery on stale or unclassified grammar. That is a safety boundary, but its product reachability must also be stated: synthetic `complete + canonical-empty` fixtures do not show that an ordinary real configuration reaches admission. Require a source-plausible configuration and sequence, explain known versus opaque global grammar, and identify blocked configuration classes. Do not weaken unknown handling to improve relevance scores. If default-like reachability cannot be established statically, keep it as a precise future integration acceptance/spike gap and report synthetic coverage conditionally. This is a required clarification to the eventual integration proposal, not a separate production recommendation or additional runtime experiment.
+
+The bounded [routing metadata survey](ROUTING_METADATA_SURVEY.md) supplies the actual declaration inventory: 81 unique builtin registrations, 37 nonempty prefix overrides, 44 default-global providers plus Snippets' always-search exception, hence 45 manager-global and 36 prefix-gated. This is a different denominator from the audit's plugin-file roster. Constants/comment handling were manually resolved before publishing the asserted counts. Settings defaults have no provider/capability restriction, but no user's live configuration was read. The survey does not classify all global bodies or certify a Complete manifest. It turns the integration gap into a named owner list and requires explicit treatment of disabled Unknown owners. The author received this evidence without a duplicate source survey.
+
+## M1-B acceptance and consolidation constraints
+
+Accepted the four design reports and three precisely bounded integer policies at `cc3da667348df76abdd81bb4057a0df8393089fc`, normally pushed. UI remains NOT_IMPLEMENTATION_READY. The pure research comparison can be informative even if admission is not yet useful in default-like configurations; it cannot justify shipping unused infrastructure. Final sequencing must place the completeness/usability decision before production foundation work when no accepted consumer exists. This is an amendment to the metadata/integration dependency boundary, not a new duplicate package.
+
+Canonical consolidation must choose one proposed domain owner: the raw planner uses `src/search_discovery`, while M1-B illustrative sketches use `src/discovery`. Preserve the raw contribution and reconcile canonical/design references explicitly. Likewise distinguish or amend the raw foundation limits (64-byte aliases/32KiB text) versus research projection limits (96-byte aliases/128KiB serialized metadata). Their different denominators do not automatically conflict, but a future implementer needs one enforceable contract. These are bounded existing-pair amendments, not additional architecture recommendations.
+
+M1-C is the sole active child checkpoint. Freeze inputs/configuration/protocol using explicitly portable UTF-8 LF semantics before the prototype. Family splits reduce direct template leakage but do not establish blind labels or user-grounded relevance. Retain identical denominators and absent-target accounting across15 versus11.
+
+## M1-C freeze acceptance
+
+Parent read the UX/privacy/alternatives and exact dataset/protocol, inspected the policy/catalog/design diff and accepted the300-case freeze. Numeric formulas/aliases were not tuned after labels; changes from M1-B only record freeze metadata/status. Actual split173/61/66 has120 conditional positives (68/34/18), not300 relevance examples. Complete-route contexts are hypothetical and availability-only isolation fixtures are not necessarily realizable UI configurations. Holdout thresholds can be crossed by a single case, so exact counts and fragility must remain visible.
+
+The author performed the scoped structural/link/hash check; parent did not claim to independently adjudicate all300 labels. The frozen17 inputs remain immutable; future canonical source-owner/bound amendments must be separate. Parent publication precedes all prototype code/execution. A parent publication-helper key lookup used inputs rather than the actual files key and stopped before writes; correcting the key was an administrative repair, not a prototype run or input change.
+
+## Cross-goal dependency judgment before results
+
+Do not create an execution dependency on AUD-F001 or AUD-F002 merely because search uses queries or includes an empty Diff opener. The frozen proposal bypasses protected raw payloads before normalization and leaves canonical ActionFilters untouched; existing parser correction remains independently useful. A fixed no-args Diff opener changes none of its planning/mutation/confirmation authority, so the separate native-contract spike is not a ranking prerequisite. Final canonical search packages should cite those limitations without making unrelated code or native proof a hidden gate. This is dependency reconciliation of already packaged findings, not a new future goal.
+
+## M2-A single label-integrity correction
+
+Initial candidate runs exposed Q122, `data viewer`: v1 expected ADMIT while its already-frozen route fixture reserves `data`. Parent independently read [DataPlugin search and prefix declaration](https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/data.rs#L25-L68). The source consumes this head even though an unsupported subcommand can yield no rows; the declared discovery policy preserves that route rather than interpreting the remaining text. This is an expected-gate label inconsistency, not evidence the ranker or production routing is defective.
+
+The author will preserve all17 v1 inputs/protocol/manifest/raw outputs and apply one versioned Q122-only label/denominator amendment consistently to all three candidates and both scopes. Recomputing metrics from saved outputs consumes the permitted corrective cycle; no ranks, weights, aliases or payloads change. No further evaluation cycle is authorized under this program. Parent source corroboration is a static read, not a provider invocation or independent rerun. Final receipts will distinguish original versus corrected-label metrics.
+
+## M2-A publication acceptance
+
+Read the complete execution receipt and scoped static-check results, inspected prototype imports/modules and final changed paths. Accepted the bounded source/result evidence: five completed guarded invocations totaling2.8697286s, with one label-only correction and all1,800 result objects unchanged. Original five source/README files and recoverable later-captured raw bytes remain; initial receipts prove canonical identity rather than retroactive raw-byte capture. The author checked17 frozen inputs,384 aggregate groups and7,296 ratios. Parent has not rerun or independently implemented the metric calculations.
+
+Conditional top1 is P0/P1/P2 full8/50/71 out of119, initial7/39/58; holdout1/5/6 out of18. P2 chooser7/30 full and3/30 initial remains weak. These observations must not be reduced to a headline synthetic gain. M2-B must apply the preregistered criteria using the actual split metrics and preserve negative examples, source coverage and absent-target ceilings. The one correction cycle is exhausted; further issues must remain explicit within that budget. No production or final shipping choice is implied by publication.
+
+## M2-B sequencing response
+
+The author reports P2 meets the preregistered conditional comparison in both scopes, but only Q026 separates its holdout top1 from P1. Q132 is a real full-scope regression: File Search and Duplicate Finder tie at90, and stable ID order puts the wrong opener first. A stable tie is not correct intent resolution. Parent supports retaining P2 as a research reference, with no production ranker/UI recommendation now.
+
+Reserve SEARCH-F002 for a bounded admission/useful-consumer decision proof, ahead of conditionally held SEARCH-F001 metadata. Canonical F001 must explicitly amend the raw planner's independent-execution assumption, preserve its11-opener scope and establish one module/bound contract outside frozen inputs. A favorable source-only decision cannot establish live/native coverage; an accepted concrete consumer/compatibility contract must exist before infrastructure is recommended for execution. A no-change outcome remains valid. These are precise dependency/acceptance amendments to the two package boundaries, not extra standalone goals. Final M2-B evidence and complete M3-A pairs remain pending at this entry.
+
+## M3-A program reconciliation and precise amendments
+
+The parent accepted M2-B as a conditional P2 research choice and no production search change. It consolidates exactly four cross-program packages: independent AUD-F001/AUD-F002, new SEARCH-F002 decision proof, and conditional SEARCH-F001. No parent-specific implementation package is added.
+
+Precise canonical amendments to existing F001: both Goal and Kickstart must supersede raw independent execution with an accepted concrete useful consumer/compatibility outcome from F002 plus separate authorization; one domain owner is `src/search_discovery`; initial eleven descriptors retain narrower aliases of at most eight/64 UTF-8 bytes and static metadata below32 KiB with explicit accounting, while frozen96-byte/128-KiB study bounds remain historical. No frozen design, raw planner proposal or saved experiment is rewritten. F002 must permit no-change and cannot equate source classification with live/native proof. These amendments belong to the two canonical search pairs and CANONICAL_DESIGN_AMENDMENTS, not a duplicate future goal.
+
+Parent program synthesis supplies the four-package catalog, dependency-safe order, scope/model/measurement limits, PR draft and future launch requests. Tokenizer work is the first small code-change recommendation; admission/consumer proof is the first search follow-on; Diff remains an independent selected-priority spike. No ranker/UI package quota or automatic chain is adopted. Separate final review remains pending at this checkpoint.
+
+## M3-B separate review and one parent correction
+
+Separate reused reviewer context /root/research_reviewer reviewed stable pushed3a4924e2, corroborating six saved v2 metric rows, all1,800 unchanged predictions and key source/algorithm/package boundaries. Exact reviewer files are preserved. Requested/configured Astra max remains backend-unverified. Parent applies G02-REVIEW-01 to canonical F002 Goal/Kickstart and records A05: permitted separately authorized local/Git/direct Python orchestration versus forbidden proof-side network/subprocess effects; invariant9 and promotion/provenance/index agree. This precise existing-pair amendment requires no new goal, experiment or production change. Raw author F002, raw planner F001, historical promotion/code/inputs/results and Goal01 remain unchanged.
+
+Parent inspected the affected diff, preserves pre/post hashes in M3B_CORRECTION_RECORD and owns final affected document checks. Whole-program baseline checking found no source/frozen changes; checker-only BOM/inline-regex assumptions were corrected without altering artifacts. Five source-SHA transcription omissions in initial reviewer persistence were restored to match the returned review. No second child review, fresh ranking run or further package is inferred. Final recommendation stays no production discovery change; four canonical packages remain proposed only.

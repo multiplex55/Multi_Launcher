@@ -1,0 +1,21 @@
+{
+  "command": [
+    "C:\\Python311\\python.exe",
+    "-X",
+    "utf8",
+    "-B",
+    "docs\\plans\\execution\\research-consolidation-20261029-r01\\receipts\\check_docs.py"
+  ],
+  "pid": 13104,
+  "start_utc": "2026-10-29T21:32:40.069809+00:00",
+  "end_utc": "2026-10-29T21:32:42.621867+00:00",
+  "elapsed_seconds": 2.547,
+  "deadline_seconds": 60,
+  "timed_out": false,
+  "exit_code": 0,
+  "stdout_bytes": 2946,
+  "stderr_bytes": 0,
+  "output_drained": true,
+  "cleanup": "Normal process exit; no termination required.",
+  "application_or_prototype_invocations": 0
+}

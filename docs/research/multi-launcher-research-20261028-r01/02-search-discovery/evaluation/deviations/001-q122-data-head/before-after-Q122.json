@@ -1,0 +1,133 @@
+{
+  "before": {
+    "id": "Q122",
+    "query": "data viewer",
+    "family": "ambiguity",
+    "cluster": "amb_structured",
+    "split_group": "amb_structured",
+    "split": "validation",
+    "context": {
+      "synthetic": true,
+      "feature_enabled": true,
+      "input_accepting": true,
+      "settings_transition": false,
+      "query_origin": "FreshUserEdit",
+      "surface": "LauncherList",
+      "session_current": true,
+      "query_generation_current": true,
+      "canonical_result_count": 0,
+      "provider_pending": false,
+      "provider_deferral": "None",
+      "result_catalog_stable": true,
+      "stamps_current": true,
+      "reserved_route_coverage": "Complete",
+      "reserved_route_revision_current": true,
+      "all_owners_enabled": true,
+      "owner_overrides": {},
+      "synthetic_usage_count": 0
+    },
+    "expected": {
+      "admission": "ADMIT",
+      "route": "DISCOVERY_CONDITIONAL",
+      "behavior": "CHOOSER",
+      "relevance": {
+        "tool.json.open": 2,
+        "tool.xml.open": 2,
+        "tool.table.open": 2,
+        "tool.csv.open": 2
+      },
+      "forbidden_ids": [],
+      "forbidden_operations": [
+        "auto_activate",
+        "infer_payload",
+        "alter_canonical_results",
+        "sample_private_data"
+      ],
+      "absent_target_policy": "retain unchanged labels in both subsets"
+    },
+    "rationale": "No format discriminator",
+    "label_provenance": "model-authored before evaluation; author-visible; not blind/human ground truth",
+    "confidence": "medium",
+    "source_refs": [
+      "../INTENT_TAXONOMY_AND_GRAMMAR.md",
+      "../RUNTIME_AND_INTEGRATION_DESIGN.md",
+      "../roles/orchestrator/ROUTING_METADATA_SURVEY.md",
+      "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/json_utility.rs#L8-L82",
+      "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/xml_toolkit.rs#L6-L44",
+      "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/table_utility.rs#L6-L44",
+      "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/csv.rs#L6-L44"
+    ]
+  },
+  "after": {
+    "id": "Q122",
+    "query": "data viewer",
+    "family": "ambiguity",
+    "cluster": "amb_structured",
+    "split_group": "amb_structured",
+    "split": "validation",
+    "context": {
+      "synthetic": true,
+      "feature_enabled": true,
+      "input_accepting": true,
+      "settings_transition": false,
+      "query_origin": "FreshUserEdit",
+      "surface": "LauncherList",
+      "session_current": true,
+      "query_generation_current": true,
+      "canonical_result_count": 0,
+      "provider_pending": false,
+      "provider_deferral": "None",
+      "result_catalog_stable": true,
+      "stamps_current": true,
+      "reserved_route_coverage": "Complete",
+      "reserved_route_revision_current": true,
+      "all_owners_enabled": true,
+      "owner_overrides": {},
+      "synthetic_usage_count": 0
+    },
+    "expected": {
+      "admission": "ProtectedSyntax",
+      "route": "CANONICAL_UNCHANGED",
+      "behavior": "ABSTAIN",
+      "relevance": {},
+      "forbidden_ids": [
+        "tool.json.open",
+        "tool.json.format",
+        "tool.json.minify",
+        "tool.hash.open",
+        "tool.xml.open",
+        "tool.regex.open",
+        "tool.table.open",
+        "tool.csv.open",
+        "tool.image_compare.open",
+        "tool.duplicates.open",
+        "tool.activity.open",
+        "tool.diff.open",
+        "tool.file_search.open",
+        "tool.file_search.filename",
+        "tool.file_search.content"
+      ],
+      "forbidden_operations": [
+        "auto_activate",
+        "infer_payload",
+        "alter_canonical_results",
+        "sample_private_data"
+      ],
+      "absent_target_policy": "retain unchanged labels in both subsets"
+    },
+    "rationale": "No format discriminator; correction1: frozen reserved data head takes precedence over descriptive wording",
+    "label_provenance": "model-authored before evaluation; author-visible; not blind/human ground truth; Q122-only source-backed label integrity correction after initial runs",
+    "confidence": "high",
+    "source_refs": [
+      "../INTENT_TAXONOMY_AND_GRAMMAR.md",
+      "../RUNTIME_AND_INTEGRATION_DESIGN.md",
+      "../roles/orchestrator/ROUTING_METADATA_SURVEY.md",
+      "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/json_utility.rs#L8-L82",
+      "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/xml_toolkit.rs#L6-L44",
+      "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/table_utility.rs#L6-L44",
+      "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/csv.rs#L6-L44",
+      "route_fixtures.json",
+      "https://github.com/multiplex55/Multi_Launcher/blob/59156d96adcc73939c7171487a0cb582e3286587/src/plugins/data.rs#L25-L46"
+    ]
+  }
+}

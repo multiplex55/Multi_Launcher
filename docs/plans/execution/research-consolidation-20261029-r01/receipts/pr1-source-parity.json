@@ -1,0 +1,34 @@
+{
+  "kind": "query_integration_exact_parity",
+  "status": "PASS",
+  "historical_source": "2db6c8a8e3c7b9c6de8c1f2c1dccd3ca0c2a77c5",
+  "historical_and_current_baseline": "59156d96adcc73939c7171487a0cb582e3286587",
+  "source_blob_rows": [
+    {
+      "path": "src/common/query.rs",
+      "verified_source_blob": "e0413a822fc3e071244fd3a321ea959665cf63ed",
+      "integration_index_blob": "e0413a822fc3e071244fd3a321ea959665cf63ed",
+      "current_master_blob": "216ef070aa52e29f435e9cad1501cfc1ff5c542a"
+    },
+    {
+      "path": "src/plugin.rs",
+      "verified_source_blob": "aa0fc9a470bbb85d46e259cdbb128f7e6ab93d47",
+      "integration_index_blob": "aa0fc9a470bbb85d46e259cdbb128f7e6ab93d47",
+      "current_master_blob": "8ae24aeef0050b17a14cb688e18c12d05771f0ba"
+    },
+    {
+      "path": "src/plugins/snippets.rs",
+      "verified_source_blob": "41e660a8cfe042752879c78b57b322d856d93e8b",
+      "integration_index_blob": "41e660a8cfe042752879c78b57b322d856d93e8b",
+      "current_master_blob": "9038c09452906968c2aaca2a83322ef29a8853bf"
+    }
+  ],
+  "owned_evidence_files_exact": 9,
+  "obsolete_queue_imported": false,
+  "new_cargo_nextest_clippy_invocations": 0,
+  "historical_selected_tests": "11/11 PASS, including five new regressions",
+  "historical_clippy": "scoped library --no-deps PASS",
+  "historical_review": "ACCEPTED, no corrections",
+  "M0_A": "762ce52d5aabe52fc6006dff30430a63d97cccc6; pushed",
+  "scope": "No changed source baseline or code delta requiring a new build."
+}

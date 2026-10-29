@@ -1441,6 +1441,90 @@ mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
 
+    struct TerminalEscapeEchoPlugin {
+        policy: PluginQueryPolicy,
+        prefixes: &'static [&'static str],
+    }
+
+    impl Plugin for TerminalEscapeEchoPlugin {
+        fn search(&self, query: &str) -> Vec<Action> {
+            vec![Action {
+                label: "Echo".into(),
+                desc: "Echo".into(),
+                action: "echo:terminal".into(),
+                args: Some(query.to_owned()),
+            }]
+        }
+
+        fn name(&self) -> &str {
+            "terminal_escape_echo"
+        }
+
+        fn description(&self) -> &str {
+            "Pure query echo"
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &["search"]
+        }
+
+        fn query_policy(&self) -> PluginQueryPolicy {
+            self.policy
+        }
+
+        fn query_prefixes(&self) -> &[&str] {
+            self.prefixes
+        }
+    }
+
+    #[test]
+    fn action_filters_terminal_escape_matches_synchronous_and_snapshot_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut manager = PluginManager::new_inert_for_test_at(directory.path());
+        manager.register(Box::new(TerminalEscapeEchoPlugin {
+            policy: PluginQueryPolicy::ActionFilters,
+            prefixes: &[],
+        }));
+
+        for count in 1..=4 {
+            let escapes = "\\".repeat(count);
+            let input = format!(
+                "  before\t kind:EcHo !kind:other id:ECHO:TERMINAL !id:other:terminal \"秘密 text\" tail{escapes}"
+            );
+            let expected = format!("before \"秘密 text\" tail{escapes}");
+            let actions = manager.search_filtered(&input, None, None);
+            let snapshot = manager.search_snapshot(None, None).search(&input);
+
+            assert_eq!(actions.len(), 1);
+            assert_eq!(snapshot.actions, actions);
+            assert_eq!(actions[0].action, "echo:terminal");
+            assert_eq!(actions[0].args.as_deref(), Some(expected.as_str()));
+        }
+
+        drop(manager);
+        directory.close().expect("remove owned inert manager root");
+    }
+
+    #[test]
+    fn matching_prefix_literal_terminal_escape_preserves_original_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut manager = PluginManager::new_inert_for_test_at(directory.path());
+        manager.register(Box::new(TerminalEscapeEchoPlugin {
+            policy: PluginQueryPolicy::Literal,
+            prefixes: &["literal"],
+        }));
+        let input = "  LiTeRaL\t kind:missing !id:echo:terminal \"秘密 text\" tail\\";
+        let actions = manager.search_filtered(input, None, None);
+        let snapshot = manager.search_snapshot(None, None).search(input);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(snapshot.actions, actions);
+        assert_eq!(actions[0].args.as_deref(), Some(input));
+
+        drop(manager);
+        directory.close().expect("remove owned inert manager root");
+    }
+
     struct UnlabelledProviderPlugin;
 
     impl Plugin for UnlabelledProviderPlugin {

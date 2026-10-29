@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "freeze_id": "g02-eval-v1",
+  "status": "FROZEN_BEFORE_IMPLEMENTATION_OR_EVALUATION",
+  "authored_date": "2026-10-28",
+  "application_source_sha": "59156d96adcc73939c7171487a0cb582e3286587",
+  "goal01_closing_commit": "3b79d73f12a791b8b077ed0bf7d6631bd885b68c",
+  "accepted_design_commit": "cc3da667348df76abdd81bb4057a0df8393089fc",
+  "hash_algorithm": "SHA-256",
+  "canonicalization": "utf8-lf-text-v1: strict UTF-8; reject BOM; physical CRLF->LF; reject remaining physical CR; preserve other text/key order/Unicode/spacing/final newline; no JSON reformatting",
+  "identity_scope": "Canonical content, NOT raw Windows working-copy bytes, Git blob identity or fetched external-page bytes",
+  "manifest_self_hash": "EXCLUDED",
+  "case_count": 300,
+  "split_counts": {
+    "development": 173,
+    "validation": 61,
+    "holdout": 66
+  },
+  "candidate_ids": [
+    "P0",
+    "P1",
+    "P2"
+  ],
+  "catalog_subsets": {
+    "full": 15,
+    "initial": 11
+  },
+  "label_visibility": "Author-visible synthetic labels; not blind/human ground truth/current Rust replay",
+  "runtime_admission_limit": "Complete fixtures are hypothetical;43 global grammar/default-like coverage gap remains",
+  "preservation": "Keep these v1 files immutable through M2/M3. Corrections use versioned copies/deviation manifests; canonical source-owner/bound amendments live separately.",
+  "mutable_exclusions": [
+    "evaluation/freeze_manifest.json",
+    "README.md",
+    "DECISION_RECORDS.md",
+    "roles/implementer/ANALYSIS.md",
+    "roles/implementer/ROLE_RECORD.md",
+    "evaluation/results/",
+    "prototype/",
+    "Goal02 mutable N and program/orchestrator progress"
+  ],
+  "execution_disposition_at_freeze": "No ranker/evaluator/prototype implemented or run",
+  "files": [
+    {
+      "path": "catalog/catalog.json",
+      "sha256": "bf5dc51273bebae40610d763445148507288b2940e1b4d92a1239061a3835fb5",
+      "canonical_utf8_bytes": 85619,
+      "canonical_line_count": 1991
+    },
+    {
+      "path": "evaluation/candidate_policies.json",
+      "sha256": "c906952e0f8b9c7e328b8cda13ed949ef517aa7a1454f719825f8451769ce3be",
+      "canonical_utf8_bytes": 12007,
+      "canonical_line_count": 544
+    },
+    {
+      "path": "evaluation/queries.jsonl",
+      "sha256": "9dc9da67a36d02728e4c581179597fefcc5a5023ddaa530fdfd931b203b7b46d",
+      "canonical_utf8_bytes": 453565,
+      "canonical_line_count": 300
+    },
+    {
+      "path": "evaluation/splits.json",
+      "sha256": "23aecd15c04dc67bfba569266d533afcadde649045ea1922aab3ef1151dad472",
+      "canonical_utf8_bytes": 5580,
+      "canonical_line_count": 345
+    },
+    {
+      "path": "evaluation/route_fixtures.json",
+      "sha256": "6b6ecd814bee5a8178c5365bae3cc8aa93037456b09e7742479b19af57657a91",
+      "canonical_utf8_bytes": 928,
+      "canonical_line_count": 58
+    },
+    {
+      "path": "evaluation/DATASET_README.md",
+      "sha256": "4fa0775e6f94b72cb38913eadbc55d948f464dfedd5c69f2e6ee9da4bf7aacbe",
+      "canonical_utf8_bytes": 7699,
+      "canonical_line_count": 48
+    },
+    {
+      "path": "evaluation/EVALUATION_PROTOCOL.md",
+      "sha256": "6279c15b50e3ac6c1510783642fd2c8227298258c6f7829bf694aa2199911224",
+      "canonical_utf8_bytes": 14275,
+      "canonical_line_count": 84
+    },
+    {
+      "path": "INTENT_TAXONOMY_AND_GRAMMAR.md",
+      "sha256": "c81df2189dcf60e2f17a3d8abd572c3ad53599f64949e44fac1e8e4d94870525",
+      "canonical_utf8_bytes": 14771,
+      "canonical_line_count": 84
+    },
+    {
+      "path": "RANKING_SPECIFICATION.md",
+      "sha256": "1617fe502a06ec1f60c72546bcccbac636fa7895e18b8ea57758d28993146494",
+      "canonical_utf8_bytes": 16343,
+      "canonical_line_count": 111
+    },
+    {
+      "path": "RUNTIME_AND_INTEGRATION_DESIGN.md",
+      "sha256": "c9423b5c2f18318964d14c0642c8bd90fe97c2da9e75ed7a3089dbfb6d226c80",
+      "canonical_utf8_bytes": 25822,
+      "canonical_line_count": 166
+    },
+    {
+      "path": "KEYBOARD_AND_RESULTS_UX.md",
+      "sha256": "182dbc43d4df930c80be43ac00f8897239b5bc1a35b959368f656253a397f946",
+      "canonical_utf8_bytes": 8515,
+      "canonical_line_count": 78
+    },
+    {
+      "path": "PRIVACY_SAFETY_AND_COMPATIBILITY.md",
+      "sha256": "9998d65d3baacc7d9a8df23e09374f43ccf8dbd3b04accb565b3c35d25c317de",
+      "canonical_utf8_bytes": 8130,
+      "canonical_line_count": 46
+    },
+    {
+      "path": "ALTERNATIVES_AND_EXTERNAL_REFERENCES.md",
+      "sha256": "d99c75c6ab3fa6d9b6958ba5053740f6141d367c15626be9c59ed4b2e0ee2f1a",
+      "canonical_utf8_bytes": 5736,
+      "canonical_line_count": 28
+    },
+    {
+      "path": "CURRENT_SEARCH_ARCHITECTURE.md",
+      "sha256": "22f055b4bd8756d7205dfd29365de9a7b1d99a879def94a738fc122ab539c31c",
+      "canonical_utf8_bytes": 22802,
+      "canonical_line_count": 157
+    },
+    {
+      "path": "COMMAND_AND_CAPABILITY_CATALOG.md",
+      "sha256": "ae9c2d8d6fab436bd1a642b9eaf94d87364b5f0f4fb9d40de4458a46a030e64f",
+      "canonical_utf8_bytes": 22182,
+      "canonical_line_count": 139
+    },
+    {
+      "path": "roles/orchestrator/EXTERNAL_EVIDENCE.md",
+      "sha256": "883ce09ee21e3767d7321e36a19b683b2b9ba3b3fe47187588ce5b7cd0820c78",
+      "canonical_utf8_bytes": 3668,
+      "canonical_line_count": 18
+    },
+    {
+      "path": "roles/orchestrator/ROUTING_METADATA_SURVEY.md",
+      "sha256": "2d6b06c93bb1f62b1d0c971c96813083bd2fd775c9b1bc0f741a3ac4d6a286bc",
+      "canonical_utf8_bytes": 24465,
+      "canonical_line_count": 107
+    }
+  ]
+}
