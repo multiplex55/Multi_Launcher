@@ -1,0 +1,16 @@
+{
+  "kind": "static_artifact_consistency",
+  "status": "PASS",
+  "assertions": 190,
+  "failures": [],
+  "markdown_files": 20,
+  "local_links": 70,
+  "pinned_repository_links": 15,
+  "external_links_not_refetched": 17,
+  "source_hashes": 12,
+  "head": "ab5088f94f4f0d25783b05f4a2cdc3148d453270",
+  "base": "59156d96adcc73939c7171487a0cb582e3286587",
+  "script_sha256": "e4ad8d122f31364ac4bc7d72f0067c1adb76a7c10ca44ca98a65eb992937658c",
+  "elapsed_seconds": 0.650496,
+  "scope": "Documentation/link/hash/scope consistency only; no behavioral, model or native proof."
+}

@@ -1,0 +1,1231 @@
+{
+  "run_id": "20261029-r01",
+  "stacked_base_branch": "codex/integrate-query-escape-20261029-r01",
+  "stacked_base_sha": "ed25f9dcc32f9bb74d2277d25d6fb62e292636c6",
+  "initial_master": "59156d96adcc73939c7171487a0cb582e3286587",
+  "M2_A_commit": "6f8de6cfa4d1e8bc82c2eabac41fb43299402049",
+  "M2_A_pushed": true,
+  "import_counts": {
+    "research": 133,
+    "admission": 15,
+    "diff_and_final_queue": 23
+  },
+  "pr2_imports": [
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/plans/ai-research/01_GOAL_STATIC_ARCHITECTURE_AUDIT.md",
+      "mode": "100644",
+      "blob": "e4a8c42fd0764e5620952d28a1e9a1a667860ace"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/plans/ai-research/02_GOAL_SEARCH_ACTION_DISCOVERY.md",
+      "mode": "100644",
+      "blob": "c87d560a17619b3c44f3b3fdc4dbf914da597450"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/plans/ai-research/ORCHESTRATOR_GOAL.md",
+      "mode": "100644",
+      "blob": "fd9e5cfaf678b68e9ab0ad442b031c3740916b68"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/ARCHITECTURE_AND_DATA_FLOWS.md",
+      "mode": "100644",
+      "blob": "9e21f87a0d1241f55456af0f1642757ac58c72e8"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/BOUNDARIES_AND_CHANGE_COST.md",
+      "mode": "100644",
+      "blob": "ea1973b38bb54835d0208ed92db584ca27a048d1"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/COVERAGE_MATRIX.md",
+      "mode": "100644",
+      "blob": "1fd136c590c9c32ddaa8f94f9a7dfe59a7ca83ce"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/DECISION_RECORDS.md",
+      "mode": "100644",
+      "blob": "d601315ac0ffa830eadcc62bd53ddc898648b47f"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/FINDINGS.md",
+      "mode": "100644",
+      "blob": "5370d08c5fcf0110b6d3520b18b4c11ba03c980f"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/FOLLOW_ON_INDEX.md",
+      "mode": "100644",
+      "blob": "a83290db115f3fb281a0a2cf704e6accf9014ea2"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/INPUT_AND_UI_OWNERSHIP.md",
+      "mode": "100644",
+      "blob": "739962d51ce9466f8f84cff192bc54a365951654"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/LIFECYCLE_AND_CONCURRENCY.md",
+      "mode": "100644",
+      "blob": "399753efe45d66aaeccae4accdff7bb8a2299770"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/PERSISTENCE_AND_FILE_SAFETY.md",
+      "mode": "100644",
+      "blob": "a56c7169c95252a46a62071ae34f70775277354b"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/README.md",
+      "mode": "100644",
+      "blob": "1a75d034bce35a6b26066d1a99c052a60b0798ca"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/RECOMMENDATIONS.md",
+      "mode": "100644",
+      "blob": "a9f36bbfc895adfa697e87c26ad0b42c7f66426c"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/REVIEW_AND_LIMITATIONS.md",
+      "mode": "100644",
+      "blob": "846b22db0849ed187be710e8339ecbc194b6826c"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/SEARCH_HANDOFF.md",
+      "mode": "100644",
+      "blob": "11c2a51f89d4b80fdb7a0c25e36c2d427dd8cc2b"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/SOURCE_MAP.md",
+      "mode": "100644",
+      "blob": "b271b818e63c0fa799d2131d69e252e3915d2b57"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/evidence/DOCUMENT_CHECKS.md",
+      "mode": "100644",
+      "blob": "1e921b1ceee6312bf0670bed57c57c0adf945b70"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/evidence/SOURCE_INVENTORY.md",
+      "mode": "100644",
+      "blob": "0968b81b7eaed8ce801da8e453937e3d8264c141"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/findings/AUD-001-terminal-query-escape.md",
+      "mode": "100644",
+      "blob": "0c1b534a584cb19f10fe6b5bb4bc7a2c8881c734"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/findings/AUD-002-diff-mutation-identity.md",
+      "mode": "100644",
+      "blob": "ad992ca58d13409b9439f3064763d6df1ebf51ee"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/follow-on/AUD-F001-preserve-terminal-query-escape/GOAL.md",
+      "mode": "100644",
+      "blob": "017641db49a91dfb1f94f3c3b2878eda4b75223e"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/follow-on/AUD-F001-preserve-terminal-query-escape/KICKSTART.md",
+      "mode": "100644",
+      "blob": "1f5550381ae7d7d099ca9c8beeb2cf33b7a13de8"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/follow-on/AUD-F002-diff-mutation-authority/GOAL.md",
+      "mode": "100644",
+      "blob": "3f664544e7812edf9d64b1cf406de78fd2cd8467"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/follow-on/AUD-F002-diff-mutation-authority/KICKSTART.md",
+      "mode": "100644",
+      "blob": "0accf98a159d6b614d830935ea9e7c4b681abf17"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/roles/implementer/ANALYSIS.md",
+      "mode": "100644",
+      "blob": "d13e5b98ce4d3df79a276d73411559e18b286e23"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/roles/implementer/ROLE_RECORD.md",
+      "mode": "100644",
+      "blob": "1599e175964965e194e38cc6fe129a9d7aed8b22"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/roles/implementer/follow-on/AUD-F002-diff-mutation-authority/GOAL.md",
+      "mode": "100644",
+      "blob": "10f1e67ef2f4f1f06de5d37c44c3535353cfcea3"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/roles/implementer/follow-on/AUD-F002-diff-mutation-authority/KICKSTART.md",
+      "mode": "100644",
+      "blob": "0accf98a159d6b614d830935ea9e7c4b681abf17"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/roles/orchestrator/DECISIONS.md",
+      "mode": "100644",
+      "blob": "8051c735a37c0b0809a20b834df423dcffef4762"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/roles/orchestrator/PLATFORM_EVIDENCE.md",
+      "mode": "100644",
+      "blob": "42bbddd7ef064160a70ceb7e539115a1793eb200"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/roles/orchestrator/ROLE_RECORD.md",
+      "mode": "100644",
+      "blob": "e20684d7ac0c53fb15255c2e2caa9fff8716c009"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/roles/planner/ANALYSIS.md",
+      "mode": "100644",
+      "blob": "200692b021e9a069a1ee24b2d46e6d9527651caf"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/roles/planner/ROLE_RECORD.md",
+      "mode": "100644",
+      "blob": "3c03ebbbf255d2b45aa68b2aad7a659343e8fa78"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/roles/planner/follow-on/AUD-F001-preserve-terminal-query-escape/GOAL.md",
+      "mode": "100644",
+      "blob": "e1bbbeeab2ce6cdedda575260a46978bd225310d"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/roles/planner/follow-on/AUD-F001-preserve-terminal-query-escape/KICKSTART.md",
+      "mode": "100644",
+      "blob": "81886beb767feffd3f89dfd5ade5aaed44cae2e4"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/roles/reviewer/REVIEW.md",
+      "mode": "100644",
+      "blob": "f63e6a395754cc88bd24ffd70f91fd3f826cee1c"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/01-static-audit/roles/reviewer/ROLE_RECORD.md",
+      "mode": "100644",
+      "blob": "64319d78d44844cefe82cc183d38f8d2f71e2d9c"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/ALTERNATIVES_AND_EXTERNAL_REFERENCES.md",
+      "mode": "100644",
+      "blob": "bfb81276b8f2076b2419485a0b577b24bff37afc"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/CANONICAL_DESIGN_AMENDMENTS.md",
+      "mode": "100644",
+      "blob": "c759f73be347d30f0c25ccdb75b57651d3f76a5a"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/COMMAND_AND_CAPABILITY_CATALOG.md",
+      "mode": "100644",
+      "blob": "92e4a36a286eb8cbc7fc92b431536645375a4e5e"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/CURRENT_SEARCH_ARCHITECTURE.md",
+      "mode": "100644",
+      "blob": "7e0236b22de8d2e39ece7d7e6e6192bb21876601"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/DECISION_RECORDS.md",
+      "mode": "100644",
+      "blob": "e6c669601d4bf447989872bed78d2d37818d52a7"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/EVALUATED_EXAMPLES.md",
+      "mode": "100644",
+      "blob": "512fe05f5a7fba1091aa0dfbb5aba29287bc9a4a"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/FOLLOW_ON_INDEX.md",
+      "mode": "100644",
+      "blob": "e61c43e1771b4162c55b7b28a73e06713f74ecbb"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/INTENT_TAXONOMY_AND_GRAMMAR.md",
+      "mode": "100644",
+      "blob": "4ad742e131d5fde4b4ca743248a05a84d7b81ab7"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/KEYBOARD_AND_RESULTS_UX.md",
+      "mode": "100644",
+      "blob": "ab6fac8689376a289aa45c3fd8bb12159bf8cd52"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/M3A_CHECKS.json",
+      "mode": "100644",
+      "blob": "d58791e395fdf82be9aac28097da33b0ab963503"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/M3A_PROMOTION_RECORD.json",
+      "mode": "100644",
+      "blob": "41a11fa280aabde54e6fc1db93233c5730251de9"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/M3B_CORRECTION_RECORD.json",
+      "mode": "100644",
+      "blob": "bb3c172c77f92f102a9a18e8dc1813beb1e998f7"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/PRIVACY_SAFETY_AND_COMPATIBILITY.md",
+      "mode": "100644",
+      "blob": "2cc56d79375be2471ce5c33999398514a57c958d"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/RANKING_SPECIFICATION.md",
+      "mode": "100644",
+      "blob": "f8a64daff8e0c4ff0ed867360d6b2d0dd205463e"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/README.md",
+      "mode": "100644",
+      "blob": "4c913e3bf8b1f9cde1f47ff5cbb5bd8d187255a7"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/RECOMMENDATIONS.md",
+      "mode": "100644",
+      "blob": "2b53340d67fff369ebadda34d327329f68092ada"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/REVIEW_AND_LIMITATIONS.md",
+      "mode": "100644",
+      "blob": "baddad1b7186f1fc69a5b10ffb905337729b539e"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/REVIEW_HANDOFF.md",
+      "mode": "100644",
+      "blob": "22d08f3a8cd45176b02cf01311953bd16bc283ee"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/RUNTIME_AND_INTEGRATION_DESIGN.md",
+      "mode": "100644",
+      "blob": "13bf2dfb0e5ae9163138bf51f956b6dccd5b0d69"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/catalog/catalog.json",
+      "mode": "100644",
+      "blob": "e6ec5511052ac50c78f60e2dc21ccca10e732fd6"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/cross-goal/SEARCH_AUDIT_RECONCILIATION.md",
+      "mode": "100644",
+      "blob": "2f6715411894b959a38b1e931814f332ec08aa52"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/DATASET_README.md",
+      "mode": "100644",
+      "blob": "8f6a484d3b8c5026ef5212d62238c8a1aa2e9848"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/EVALUATION_PROTOCOL.md",
+      "mode": "100644",
+      "blob": "c587994e8cd6c83087d985dcadce2a4593f80a65"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/EXECUTION_BUDGET.json",
+      "mode": "100644",
+      "blob": "f8a08d3a05a9f0382230c63d4c4c3e85af46c643"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/M2A_CHECKS.json",
+      "mode": "100644",
+      "blob": "956c69e3e0f2d7f692d137bf614a5fc3297f4f97"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/M2A_EXECUTION.md",
+      "mode": "100644",
+      "blob": "af29e787f19bb8da8c52fa07a8d50c3c89cbedf8"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/M2B_CHECKS.json",
+      "mode": "100644",
+      "blob": "b8671fd3cb2147ad78e9dde0acde711b981b4e7a"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/RESULTS.md",
+      "mode": "100644",
+      "blob": "79a6cd41f0f554eb2eaf579027bf4ff738386841"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/candidate_policies.json",
+      "mode": "100644",
+      "blob": "92e3e02663f3747919d7b01ae5b6f7b7d2927ec0"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/deviations/001-q122-data-head/DEVIATION.md",
+      "mode": "100644",
+      "blob": "036541086592094ce8620e6c7256407fc7b33cf9"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/deviations/001-q122-data-head/amendment_manifest.json",
+      "mode": "100644",
+      "blob": "ff3854ab6219a5bb936123654b11d867597ac8c7"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/deviations/001-q122-data-head/before-after-Q122.json",
+      "mode": "100644",
+      "blob": "268128006f95505696f89e766294d7c0a47264d1"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/deviations/001-q122-data-head/counts-v2.json",
+      "mode": "100644",
+      "blob": "58b5d27e5f5ce5250a8fefdde254cdaf62b343f5"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/deviations/001-q122-data-head/queries-v2.jsonl",
+      "mode": "100644",
+      "blob": "8c089ee06d1ced66bd00f8d29e512567aaf7e4d5"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/freeze_manifest.json",
+      "mode": "100644",
+      "blob": "3d3565a0945cb0237e0c2e958065935dcac96cd0"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/queries.jsonl",
+      "mode": "100644",
+      "blob": "595bd956276e179c2a7f3ab95c5d4f78f5c48d29"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P0-P1-P2-corrective/P0/cases-full.jsonl",
+      "mode": "100644",
+      "blob": "21dea5fd9ee8f394f8a3cb58234b7b2514f49576"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P0-P1-P2-corrective/P0/cases-initial.jsonl",
+      "mode": "100644",
+      "blob": "d200cf513fc7cb4fb3d637f8c674331a873e9434"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P0-P1-P2-corrective/P0/summary.json",
+      "mode": "100644",
+      "blob": "4317c97bb7566ff02e337b7cd0c5554e18d22ada"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P0-P1-P2-corrective/P1/cases-full.jsonl",
+      "mode": "100644",
+      "blob": "ad0c78b735b41a320f27ec8afb70a5a6e57f568c"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P0-P1-P2-corrective/P1/cases-initial.jsonl",
+      "mode": "100644",
+      "blob": "69456f317f0a9f97b06993d45aef3aafc69146df"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P0-P1-P2-corrective/P1/summary.json",
+      "mode": "100644",
+      "blob": "933a7e112d1aa6c5249f9f474e06cb243bac5132"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P0-P1-P2-corrective/P2/cases-full.jsonl",
+      "mode": "100644",
+      "blob": "3d57d2377cf97b870954db5d585873d452942acf"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P0-P1-P2-corrective/P2/cases-initial.jsonl",
+      "mode": "100644",
+      "blob": "5173763227deb6acc54527e0261c4e7fd31a95fb"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P0-P1-P2-corrective/P2/summary.json",
+      "mode": "100644",
+      "blob": "cb7a8fa89b83fd01f82a0f9fe1d1fa9aa4be5998"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P0-P1-P2-corrective/initial-source-snapshot.json",
+      "mode": "100644",
+      "blob": "76e5a395e36f017f3ebed0f13df59ca34e436f37"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P0-P1-P2-corrective/receipt.json",
+      "mode": "100644",
+      "blob": "580f6beeb5f275c185b45877f92505707a99f199"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P0-initial/P0/cases-full.jsonl",
+      "mode": "100644",
+      "blob": "49093a6828af56ff4d0205f71156503781cb84a5"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P0-initial/P0/cases-initial.jsonl",
+      "mode": "100644",
+      "blob": "ef2a70f33394ed234bc85fdc9c85e831b44e5729"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P0-initial/P0/summary.json",
+      "mode": "100644",
+      "blob": "8c580932a40991d08db047ec719a08b84c272cbc"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P0-initial/receipt.json",
+      "mode": "100644",
+      "blob": "f5f1fc3f2b19b197e4603372ef555dfcd2ec25b3"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P1-initial/P1/cases-full.jsonl",
+      "mode": "100644",
+      "blob": "0624fbbf880fb10edf623310be94e5f115180b53"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P1-initial/P1/cases-initial.jsonl",
+      "mode": "100644",
+      "blob": "972aa8847304f9a2bef5d4c216ddbba11b36d499"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P1-initial/P1/summary.json",
+      "mode": "100644",
+      "blob": "6235e78d09eae7d6ead6ce22e38743c48ce615de"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P1-initial/receipt.json",
+      "mode": "100644",
+      "blob": "81636beaa3955b0a026389f8cecc06c3c57a666a"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P2-initial/P2/cases-full.jsonl",
+      "mode": "100644",
+      "blob": "25957f1f8003c4e447197a04acebf2614e50ed17"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P2-initial/P2/cases-initial.jsonl",
+      "mode": "100644",
+      "blob": "521ba6a721dbda9acafb7909b69904468b07e1c0"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P2-initial/P2/summary.json",
+      "mode": "100644",
+      "blob": "3ead7f96e7e19e70eee6efa464e36f6fbd958f51"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/P2-initial/receipt.json",
+      "mode": "100644",
+      "blob": "88e17d36f951d8f42c6d08373986448fc1e3f986"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/results/smoke-initial/receipt.json",
+      "mode": "100644",
+      "blob": "446583f0ed878d4e32666602cac6f735435a99ea"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/route_fixtures.json",
+      "mode": "100644",
+      "blob": "5097041048285b35a1a8428d63bf9bfb7d337dab"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/evaluation/splits.json",
+      "mode": "100644",
+      "blob": "a395130f0766461febad1cf1eed5a9b5ada1a663"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/follow-on/SEARCH-F001-built-in-discovery-metadata/GOAL.md",
+      "mode": "100644",
+      "blob": "13359ecb6bd922eea956744fdf7fce047e348443"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/follow-on/SEARCH-F001-built-in-discovery-metadata/KICKSTART.md",
+      "mode": "100644",
+      "blob": "3b92a82a5d5ce19ae55d2880762af213f15818d7"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/follow-on/SEARCH-F002-discovery-admission-consumer-proof/GOAL.md",
+      "mode": "100644",
+      "blob": "910e5c32aece70c4bb0db463ce3eb530e09d087c"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/follow-on/SEARCH-F002-discovery-admission-consumer-proof/KICKSTART.md",
+      "mode": "100644",
+      "blob": "f69c6e75d4050a5400dafb278c2a5fbfd746f06b"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/prototype/README.md",
+      "mode": "100644",
+      "blob": "52c7ec3fe7632497204911386978da53b86180c4"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/prototype/evaluate.py",
+      "mode": "100644",
+      "blob": "5d5c441c0b8f40705a92e5d5df1dbf2a11e2016d"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/prototype/reference.py",
+      "mode": "100644",
+      "blob": "3d8a917f6cf87d1bea22c1839549ce7001660fbb"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/prototype/remeasure_label_correction.py",
+      "mode": "100644",
+      "blob": "cb5f2a2f0b10b7b8b29f3c580b44207bd0f699d2"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/prototype/runtime_io.py",
+      "mode": "100644",
+      "blob": "78953606d09ead46b86b0b9361cd4a5ce0ef8977"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/prototype/smoke.py",
+      "mode": "100644",
+      "blob": "36e47f2fc97100a034f74b5b3cb35d8c65251bd5"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/roles/implementer/ANALYSIS.md",
+      "mode": "100644",
+      "blob": "380eb13591ff45a39f1e2875e4d816f618e0989e"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/roles/implementer/ROLE_RECORD.md",
+      "mode": "100644",
+      "blob": "5b84231cf09815b0132665bc5327016933c77ec2"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/roles/implementer/follow-on/SEARCH-F002-discovery-admission-consumer-proof/GOAL.md",
+      "mode": "100644",
+      "blob": "a30ce40462eed2b9a0b7ac33124ce1613e76b018"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/roles/implementer/follow-on/SEARCH-F002-discovery-admission-consumer-proof/KICKSTART.md",
+      "mode": "100644",
+      "blob": "d581508290383d0777e4c99528adaa5f71e63d24"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/roles/orchestrator/ANALYSIS.md",
+      "mode": "100644",
+      "blob": "76d23f7b7b7e935a5fead92e7842bc5f479112eb"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/roles/orchestrator/EXTERNAL_EVIDENCE.md",
+      "mode": "100644",
+      "blob": "6a690d66543356ef02db966b3e8ce91577c94b60"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/roles/orchestrator/ROLE_RECORD.md",
+      "mode": "100644",
+      "blob": "5685e570f0ec407fdc6cf302628d22aab93e56bf"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/roles/orchestrator/ROUTING_METADATA_SURVEY.md",
+      "mode": "100644",
+      "blob": "bbf8d42bb1479edf66482256b4e1c2a0b2097da0"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/roles/planner/ANALYSIS.md",
+      "mode": "100644",
+      "blob": "c068f4d2aa6683f23a8d4256ff137c4da6ac1571"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/roles/planner/ROLE_RECORD.md",
+      "mode": "100644",
+      "blob": "a0870543086a9eab04ae0551f9c1ca0e219a66b2"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/roles/planner/follow-on/SEARCH-F001-built-in-discovery-metadata/GOAL.md",
+      "mode": "100644",
+      "blob": "aff73aad6c44cdb2e885bb7217e0d1cbeb639b08"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/roles/planner/follow-on/SEARCH-F001-built-in-discovery-metadata/KICKSTART.md",
+      "mode": "100644",
+      "blob": "d24a8cc40cb14ada3ed7884ecb9f7122dc13ebbe"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/roles/reviewer/REVIEW.md",
+      "mode": "100644",
+      "blob": "2eb453da105384e2e35fa4e90dd9c8d3aec6f57d"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/02-search-discovery/roles/reviewer/ROLE_RECORD.md",
+      "mode": "100644",
+      "blob": "1554706fc53da8648f18b64b7767daf27e195f35"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/DECISIONS_AND_LIMITATIONS.md",
+      "mode": "100644",
+      "blob": "5cd69421fb5f1a2b46c1a798b59b5e47ef81328f"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/FINAL_DOCUMENT_CHECKS.json",
+      "mode": "100644",
+      "blob": "4dda28720683cc347cb4a6486cbeae401d9c25bc"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/FOLLOW_ON_CATALOG.md",
+      "mode": "100644",
+      "blob": "bd1d627b318da350cdc4385c01478741b17a3a1b"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/HANDOFF.md",
+      "mode": "100644",
+      "blob": "5e631c8ef7067aa88fc64999a8a052d1e9e15523"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/NEXT_IMPLEMENTATION_WAVE.md",
+      "mode": "100644",
+      "blob": "8d207d2d6cda9cd4db8c50a7abdd01d683c14195"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/PROGRAM_STATUS.md",
+      "mode": "100644",
+      "blob": "d147ec57ab960dfc4d76a47ec26dc7b527bbc16a"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/PR_SUMMARY.md",
+      "mode": "100644",
+      "blob": "462dd865a3976341da25476b87dab4e1c1f44c39"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/README.md",
+      "mode": "100644",
+      "blob": "dace5e2cdb192a7b612f3caaf79e500f357aeb31"
+    },
+    {
+      "group": "research",
+      "source_commit": "cc94dbf4f98f155bcdef81165f647cbafb472eb0",
+      "path": "docs/research/multi-launcher-research-20261028-r01/SOURCE_BASELINE.md",
+      "mode": "100644",
+      "blob": "5e7637d5282e93d536751accbac6814188fe2674"
+    },
+    {
+      "group": "admission",
+      "source_commit": "cc6ed8ad91711c834631074a2cb1c96ec22fd6ae",
+      "path": "docs/implementation/SEARCH-F002-discovery-admission-consumer-proof/ADMISSION_DECISION.md",
+      "mode": "100644",
+      "blob": "0e54cd654e80cc03028e91f3092531e1f08a90c5"
+    },
+    {
+      "group": "admission",
+      "source_commit": "cc6ed8ad91711c834631074a2cb1c96ec22fd6ae",
+      "path": "docs/implementation/SEARCH-F002-discovery-admission-consumer-proof/CLOSURE_RECEIPT.md",
+      "mode": "100644",
+      "blob": "7596cd985a6702a7ca1263e2db08687ad02e05c1"
+    },
+    {
+      "group": "admission",
+      "source_commit": "cc6ed8ad91711c834631074a2cb1c96ec22fd6ae",
+      "path": "docs/implementation/SEARCH-F002-discovery-admission-consumer-proof/CONSUMER_COMPATIBILITY_CONTRACT.md",
+      "mode": "100644",
+      "blob": "44366dd27958d797387084a81227aa78df75514e"
+    },
+    {
+      "group": "admission",
+      "source_commit": "cc6ed8ad91711c834631074a2cb1c96ec22fd6ae",
+      "path": "docs/implementation/SEARCH-F002-discovery-admission-consumer-proof/GOAL.md",
+      "mode": "100644",
+      "blob": "0a73d1578359067264a872c96034a3d02b10838f"
+    },
+    {
+      "group": "admission",
+      "source_commit": "cc6ed8ad91711c834631074a2cb1c96ec22fd6ae",
+      "path": "docs/implementation/SEARCH-F002-discovery-admission-consumer-proof/KICKSTART.md",
+      "mode": "100644",
+      "blob": "45a4620cdf7177f823eb927d70ffd2ad66d870b3"
+    },
+    {
+      "group": "admission",
+      "source_commit": "cc6ed8ad91711c834631074a2cb1c96ec22fd6ae",
+      "path": "docs/implementation/SEARCH-F002-discovery-admission-consumer-proof/SOURCE_ADMISSION_MANIFEST.md",
+      "mode": "100644",
+      "blob": "bcb20e7db33396c18f1397e4094459b20a429334"
+    },
+    {
+      "group": "admission",
+      "source_commit": "cc6ed8ad91711c834631074a2cb1c96ec22fd6ae",
+      "path": "docs/implementation/SEARCH-F002-discovery-admission-consumer-proof/VERIFICATION.md",
+      "mode": "100644",
+      "blob": "f09bd814a50af468dccce96d3b68c312fb78987c"
+    },
+    {
+      "group": "admission",
+      "source_commit": "cc6ed8ad91711c834631074a2cb1c96ec22fd6ae",
+      "path": "docs/implementation/SEARCH-F002-discovery-admission-consumer-proof/receipts/static-check-initial.json",
+      "mode": "100644",
+      "blob": "c7dcc0da2632647e76081089c54b31808aaeffac"
+    },
+    {
+      "group": "admission",
+      "source_commit": "cc6ed8ad91711c834631074a2cb1c96ec22fd6ae",
+      "path": "docs/implementation/SEARCH-F002-discovery-admission-consumer-proof/receipts/static_check.py",
+      "mode": "100644",
+      "blob": "f862c59f16a8dabf9b3a364078f6eb6c7bab8524"
+    },
+    {
+      "group": "admission",
+      "source_commit": "cc6ed8ad91711c834631074a2cb1c96ec22fd6ae",
+      "path": "docs/implementation/SEARCH-F002-discovery-admission-consumer-proof/roles/implementer/ANALYSIS.md",
+      "mode": "100644",
+      "blob": "bfe52e42b6b9aa889d1958047a2d086ba8a2fd52"
+    },
+    {
+      "group": "admission",
+      "source_commit": "cc6ed8ad91711c834631074a2cb1c96ec22fd6ae",
+      "path": "docs/implementation/SEARCH-F002-discovery-admission-consumer-proof/roles/implementer/ROLE_RECORD.md",
+      "mode": "100644",
+      "blob": "82e2f7e8ab183f458e4662d297254e173dc31dcd"
+    },
+    {
+      "group": "admission",
+      "source_commit": "cc6ed8ad91711c834631074a2cb1c96ec22fd6ae",
+      "path": "docs/implementation/SEARCH-F002-discovery-admission-consumer-proof/roles/planner/ANALYSIS.md",
+      "mode": "100644",
+      "blob": "ac2f8c139bff978738ab3f8690e50642229c6447"
+    },
+    {
+      "group": "admission",
+      "source_commit": "cc6ed8ad91711c834631074a2cb1c96ec22fd6ae",
+      "path": "docs/implementation/SEARCH-F002-discovery-admission-consumer-proof/roles/planner/ROLE_RECORD.md",
+      "mode": "100644",
+      "blob": "e2e065b4257a24830a3be13c0b74833cc4201b22"
+    },
+    {
+      "group": "admission",
+      "source_commit": "cc6ed8ad91711c834631074a2cb1c96ec22fd6ae",
+      "path": "docs/implementation/SEARCH-F002-discovery-admission-consumer-proof/roles/reviewer/REVIEW.md",
+      "mode": "100644",
+      "blob": "854cb7bfed31e251c61147695d3210e6d12f51b6"
+    },
+    {
+      "group": "admission",
+      "source_commit": "cc6ed8ad91711c834631074a2cb1c96ec22fd6ae",
+      "path": "docs/implementation/SEARCH-F002-discovery-admission-consumer-proof/roles/reviewer/ROLE_RECORD.md",
+      "mode": "100644",
+      "blob": "b03dccc724c73505ebfa3531339bba0e47534ead"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/plans/execution/research-follow-ons-20261029/INTEGRATION_STATUS.md",
+      "mode": "100644",
+      "blob": "e63c378cce60406355549c217cf1f9359f775442"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/plans/execution/research-follow-ons-20261029/stalls/G04-prerequisite-20261029T120120Z.md",
+      "mode": "100644",
+      "blob": "846230909bc38f798a260e8855b8517a2eb3d73b"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/API_REFERENCES.md",
+      "mode": "100644",
+      "blob": "0cc34078dbcb26342c526d687b4779223e42c23a"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/CONTRACT_AND_EVIDENCE.md",
+      "mode": "100644",
+      "blob": "2b1be7ba7306d52076ad7e1d1a01237a967d5343"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/DECISION.md",
+      "mode": "100644",
+      "blob": "1031ccfd4b620111e4b4bde1635ebb79ff52227f"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/GOAL.md",
+      "mode": "100644",
+      "blob": "7263b7bbc9920b6b8a1623af314ca68af2932a64"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/IDENTITY_PROOF.md",
+      "mode": "100644",
+      "blob": "4af1a11f2af2b1b0a8e4f95e7bc2f5cfbc2579b9"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/KICKSTART.md",
+      "mode": "100644",
+      "blob": "0d693f6681aab099cb1ead90db2bf51f0df58dd0"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/LIMITATIONS.md",
+      "mode": "100644",
+      "blob": "ecc3d7c5f6345d84c28839a07cd119f0e57a9f9d"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/README.md",
+      "mode": "100644",
+      "blob": "b9e06405f609dd557c590a526638950742fbe920"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/REVIEW.md",
+      "mode": "100644",
+      "blob": "d1b50d13d94a8c9326ad57719b06a965b8d28af0"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/SOURCE_AND_TEST_INVENTORY.md",
+      "mode": "100644",
+      "blob": "c63d7e6d67881d4b2d59068389630425207c4d24"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/VERIFICATION.md",
+      "mode": "100644",
+      "blob": "2d21cd1c58df08061a87ba2f20b5dca2ba71bf96"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/proposals/diff-failure-information/GOAL.md",
+      "mode": "100644",
+      "blob": "dc8479fe646b44e93cfe7ad251aac28cd917d8d6"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/proposals/diff-failure-information/KICKSTART.md",
+      "mode": "100644",
+      "blob": "44dd1dd340a682d84ff8040aa4f59daa3212a617"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/receipts/static-initial.json",
+      "mode": "100644",
+      "blob": "6c2dbeee4a4c1273aebb7a6660425d1e23b455e5"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/receipts/static_check.py",
+      "mode": "100644",
+      "blob": "a0fdb9fc754f64c7ea7562b6334dd0db026c28c9"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/roles/implementer/ANALYSIS.md",
+      "mode": "100644",
+      "blob": "b2e25838ad52644668c6c744f2c92aae6e994ebf"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/roles/implementer/ROLE_RECORD.md",
+      "mode": "100644",
+      "blob": "cc306ffc8e7793e41e7b0292db6edb8dfc3b8032"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/roles/planner/ANALYSIS.md",
+      "mode": "100644",
+      "blob": "2af5ef3e946edcf9b2adc792d9eb69f63e53e4a3"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/roles/planner/ROLE_RECORD.md",
+      "mode": "100644",
+      "blob": "241744b1edb716ab43269b45dd3df3097c47103b"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/roles/reviewer/REVIEW.md",
+      "mode": "100644",
+      "blob": "42854885b351c387afc6fc4688827142a3fe76b2"
+    },
+    {
+      "group": "diff_and_final_queue",
+      "source_commit": "124f929dbcc272396a329c0adf380d223ece07b9",
+      "path": "docs/research/diff-mutation-authority-r01/roles/reviewer/ROLE_RECORD.md",
+      "mode": "100644",
+      "blob": "0ef50ee1078f5064545535adb0c025493a1daccd"
+    }
+  ],
+  "preservation_policy": "Every listed blob imported unchanged. No historical record/label/result/proposal rewritten.",
+  "integration_administration": [
+    "docs/plans/execution/research-consolidation-20261029-r01/",
+    "docs/plans/research-merge-20261029/GOAL_RESEARCH_INTEGRATION_AND_MERGE.md (mutable section 9 only; required by the active contract)"
+  ],
+  "intentional_omissions": [
+    "Separate audit branch import: already ancestor of SOURCE_RESEARCH",
+    "Query and admission interim four-package ledgers: final Diff source is authoritative",
+    "SOURCE_DIFF .codex model/configuration changes: forbidden in integration PRs",
+    "Other ai-research templates: preserved from base",
+    "Future SEARCH-F001 metadata/ranker/UI and proposed Diff implementation: not executed"
+  ],
+  "pr1_inherited_only": [
+    "src/common/query.rs",
+    "src/plugin.rs",
+    "src/plugins/snippets.rs",
+    "docs/plans/execution/standalone/preserve-terminal-query-escape/"
+  ],
+  "metadata_check": "One 60-second M2-C pass and at most one localized correction/recheck; not yet run."
+}

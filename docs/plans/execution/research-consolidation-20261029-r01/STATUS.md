@@ -7,3 +7,5 @@ PR1 [#1456](https://github.com/multiplex55/Multi_Launcher/pull/1456) is OPEN; au
 M2-A acceptance complete: [133 exact research files](M2A_RESEARCH_IMPORT.md) preserve both studies and all original data/prototype/roles; no production difference against PR1. PR2 NOT_CREATED, planned base `codex/integrate-query-escape-20261029-r01`.
 
 Next: publish M2-A, import both decision trees and final Diff queue/G04, run one bounded metadata pass, obtain separate docs review, open review-ready stacked PR2. No mid-plan user action or merge workaround.
+
+M2-A actually published as `6f8de6cfa4d1e8bc82c2eabac41fb43299402049`. M2-B import/manifest is complete for publication: 171 exact imported source files total, preserving admission H0/rejected consumer, Diff H0/proposed pair and authoritative final queue/G04. [Manifest](INTEGRATION_MANIFEST.md) names all sources/omissions; final structured-data/link check remains M2-C.
