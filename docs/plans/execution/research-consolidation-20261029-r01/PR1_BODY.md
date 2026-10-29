@@ -1,0 +1,9 @@
+Queries ending with an unmatched escape can gain a duplicate backslash when raw tokens are reconstructed. Preserve the original raw spelling at tokenizer EOF while retaining the existing decoded value. Add five focused regressions for token/filter reconstruction, synchronous and snapshot provider transport, Literal input, and snippet parsing.
+
+This PR imports exactly the previously reviewed source blobs in `src/common/query.rs`, `src/plugin.rs`, and `src/plugins/snippets.rs` from [the original correction](https://github.com/multiplex55/Multi_Launcher/commit/2db6c8a8e3c7b9c6de8c1f2c1dccd3ca0c2a77c5), plus its owned verification/review documents and integration receipts. The old query branch's interim follow-on ledger is excluded; the final research ledger belongs to PR 2.
+
+Verification reuses the original **11/11 focused Nextest PASS** (six existing tests, five new), scoped library Clippy PASS and touched-file formatting PASS. The current master baseline is identical, and all three imported Rust Git blobs plus nine evidence files match exactly. No new Cargo/Nextest/Clippy run was needed or performed. Recorded warnings are in unchanged code; no full-suite, native or application acceptance is claimed.
+
+New integration checks: exact blob/evidence parity, allowed-path inspection and a clean source-import `git diff --check`. The supplied integration contract preserves its intentional Markdown hard breaks, disclosed in the intake. Separate integration review is recorded before publication in the execution receipts. GitHub checks/reviews and actual merge disposition are inspected after PR creation; this body does not invent CI success.
+
+The complete research and two no-change decision studies are reserved for a separate documentation-only PR. No discovery metadata, ranker, UI or proposed Diff improvement is implemented here.

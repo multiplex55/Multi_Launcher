@@ -1064,6 +1064,26 @@ mod persistence_tests {
     }
 
     #[test]
+    fn snippet_tag_terminal_escape_preserves_reconstruction_and_no_tag_input() {
+        for count in 1..=4 {
+            let escapes = "\\".repeat(count);
+            let input = format!(
+                "  tag:\"High   Priority\"\t before !TAG:Obsolete  \"秘密 text\" tail{escapes}"
+            );
+            let filters = parse_snippet_query_filters(&input);
+            assert_eq!(filters.text, format!("before \"秘密 text\" tail{escapes}"));
+            assert_eq!(filters.include_tags, ["high priority"]);
+            assert_eq!(filters.exclude_tags, ["obsolete"]);
+
+            let ordinary_query = format!("  before\t\"秘密 text\"  tail{escapes}");
+            let ordinary_filters = parse_snippet_query_filters(&ordinary_query);
+            assert_eq!(ordinary_filters.text, ordinary_query);
+            assert!(ordinary_filters.include_tags.is_empty());
+            assert!(ordinary_filters.exclude_tags.is_empty());
+        }
+    }
+
+    #[test]
     fn snippet_run_action_round_trips_alias_bytes_and_rejects_invalid_encoding() {
         for alias in [
             "simple",

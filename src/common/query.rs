@@ -161,7 +161,7 @@ pub fn tokenize_query_with_raw(input: &str) -> Vec<RawToken> {
     }
 
     if escape {
-        raw.push('\\');
+        // The source backslash is already in raw; only decoding was deferred.
         value.push('\\');
     }
 
@@ -396,6 +396,27 @@ mod tests {
     }
 
     #[test]
+    fn tokenize_raw_terminal_escape_preserves_spelling_and_decoding() {
+        for (input, expected_value) in [
+            (r"x\", "x\\"),
+            (r"x\\", "x\\"),
+            (r"x\\\", "x\\\\"),
+            (r"x\\\\", "x\\\\"),
+            (r"秘密🧪\", "秘密🧪\\"),
+            (r#""two words"\"#, "two words\\"),
+            (r#""open quote\"#, "open quote\\"),
+            (r#"'two words'"#, "two words"),
+            (r"nonterminal\ space", "nonterminal space"),
+            (r#"say\"hi"#, "say\"hi"),
+        ] {
+            let tokens = tokenize_query_with_raw(input);
+            assert_eq!(tokens.len(), 1, "input: {input:?}");
+            assert_eq!(tokens[0].raw, input, "raw input: {input:?}");
+            assert_eq!(tokens[0].value, expected_value, "decoded input: {input:?}");
+        }
+    }
+
+    #[test]
     fn parse_query_filters_handles_negated_tags_and_kinds() {
         let filters = parse_query_filters("todo kind:work !tag:chore", &["tag:", "@", "#"]);
         assert_eq!(filters.remaining_tokens, vec!["todo"]);
@@ -421,6 +442,29 @@ mod tests {
         assert_eq!(query, r#"todo list tag:"high priority""#);
         assert_eq!(filters.include_kinds, vec!["todo"]);
         assert_eq!(filters.exclude_ids, vec!["todo:done:1"]);
+    }
+
+    #[test]
+    fn split_action_filters_terminal_escape_preserves_order_and_metadata() {
+        for count in 1..=4 {
+            let escapes = "\\".repeat(count);
+            let input = format!(
+                "  before  kind:ToDo\t!KIND:Note ID:ToDo:Item:1 !id:Note:Item:2 \"middle text\" after{escapes}"
+            );
+            let (query, filters) = split_action_filters(&input);
+
+            assert_eq!(query, format!("before \"middle text\" after{escapes}"));
+            assert_eq!(
+                filters,
+                QueryFilters {
+                    include_kinds: vec!["todo".into()],
+                    exclude_kinds: vec!["note".into()],
+                    include_ids: vec!["todo:item:1".into()],
+                    exclude_ids: vec!["note:item:2".into()],
+                    ..QueryFilters::default()
+                }
+            );
+        }
     }
 
     #[test]

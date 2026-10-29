@@ -327,14 +327,14 @@ The independent reviewer should address material risks, not cosmetic formatting:
 **PR 2:** `NOT_CREATED`
 **Active branch/worktree:** `codex/integrate-query-escape-20261029-r01`; `G:/Repos/rust/Multi_Launcher`
 **Current owner/role:** `/root`, sole integration writer and Git/PR owner; separate reviewer follows
-**Last accepted checkpoint / commit / push:** M0-A acceptance complete for this publication; actual SHA/push recorded by next checkpoint
-**Next action:** M1-A exact query-fix import and review
+**Last accepted checkpoint / commit / push:** M0-A `762ce52d5aabe52fc6006dff30430a63d97cccc6`, pushed
+**Next action:** Publish accepted M1-A, then create/inspect PR1 and resolve its normal merge gate
 **Output index:** [STATUS](../execution/research-consolidation-20261029-r01/STATUS.md).
 
 | Milestone | State | Evidence / next action |
 |---|---|---|
 | M0-A — baseline | COMPLETE | [Intake](../execution/research-consolidation-20261029-r01/INTAKE_AND_PROVENANCE.md), [branch map](../execution/research-consolidation-20261029-r01/BRANCH_MAP.md), [host receipt](../execution/research-consolidation-20261029-r01/receipts/host-intake.json); commit/push follows |
-| M1-A — exact fix | PENDING | Import only exact three Rust files and owned evidence; separate review |
+| M1-A — exact fix | COMPLETE | Exact three Rust blobs and nine evidence files, same baseline; [parity/scope](../execution/research-consolidation-20261029-r01/PR1_SCOPE_AND_VERIFICATION.md), [independent review ACCEPTED](../execution/research-consolidation-20261029-r01/roles/reviewer/PR1_REVIEW.md). Commit/push follows this checkpoint |
 | M1-B — PR 1 | PENDING | Create, inspect gates and normally merge or record actual external block |
 | M2-A — research docs | PENDING | Base on updated master or published PR1; import full two-goal whitelist |
 | M2-B — decisions/queue | PENDING | Exact decision roots and final Diff ledger/G04 |
