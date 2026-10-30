@@ -4,9 +4,9 @@ PROGRAM_ID: multi-launcher-reliability-closeout-20261029-20261029-r01
 MASTER_START: 4a1283e6edd2c245f562a07dbe3dcc6a61061eed
 INTEGRATION_BRANCH: codex/closeout-integration-20261029-r01
 INTEGRATION_LAST_ACCEPTED_SHA: 4999a47c68a9e4e5b8531cf31e018eda3eefda4f (G01 plus G05 M1-A and corrected B1 foundations)
-ACTIVE_GOAL: G05 / M1-B2 native ownership planning
-ACTIVE_WRITER: NONE; read-only planner next
-NEXT_EXACT_ACTION: fresh B2 packet against corrected accepted stream API; prove native read cancellation/retirement, guarded transfer and actual queued-start binding before enablement.
+ACTIVE_GOAL: G06 / baseline next
+ACTIVE_WRITER: NONE
+NEXT_EXACT_ACTION: verify current master, create G06 branch from bootstrap, read full contract and dispatch planner.
 LAST_PUSHED: donor37512cb9; B1 packet import e1ff5141 and accepted cumulative4999a47c; all normal pushes succeeded.
 
 | Goal | State | Gate / next action |
@@ -16,7 +16,7 @@ LAST_PUSHED: donor37512cb9; B1 packet import e1ff5141 and accepted cumulative499
 | G02 | DEFERRED_WITH_DESIGN / NATIVE_NOT_PROVEN | donor011af0c4 pushed; source f879a2a8 UNACCEPTED; reviewed docs only |
 | G03 | DEFERRED_DEPENDENCY | reviewed docs only; G02 accepted source/native/lifecycle missing; original conditional pair retained |
 | G04 | NATIVE_PROOF_DEFERRED | reviewed source/protocol docs only; documented API lacks held-secondary drag, binary/clipboard proof missing |
-| G05 | IN_PROGRESS | corrected B1 accepted22/22 imported4999a47c; R1 closed; B2/native/editor/TestRule/enablement still required |
+| G05 | PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED | M1-A/corrected B1 accepted; B2 pending-file-read retirement proof not established; full continuation preserved/gates retained |
 | G06 | PENDING | preferences and focus |
 | G07 | PENDING | safe writer before UI |
 | G08 | PENDING | bounded private history |

@@ -28,3 +28,4 @@
 - G05 B1 source bab309689e5acf0b1924fb20842fe06c53b37fec and review6cbb6e43f8655b62e3cd29b836a24ba9335ef0b4 pushed. Source UNACCEPTED/not imported: P2 R1 terminal-byte accounting classification; one bounded correction next. M1-A acceptance unchanged.
 
 - G05 B1 R1 correction944f9d0ef4ed5ceee54c9a3d255c40e9a220494d, confirmation37512cb9de1e6a9246890cfd9908fbe55f946d3d pushed. Packet1c5b3b88 ->e1ff5141 via cherry-pick -x. Cumulative donorsbab30968/6cbb6e43/944f9d0e/37512cb9 -> ONE accepted source import4999a47c68a9e4e5b8531cf31e018eda3eefda4f, full provenance in commit body. All normal pushes succeeded; initially rejected standalonebab never independently accepted/imported. R1 closed, B2 planning next.
+- G05 closure donora78895c63f31c9f48ae579e3203c14fa3faa8c35 -> docs import1c68ad5656f39c4cfd628e78e34f620a679cf9bc, both pushed. No new source; accepted source remains4999a47c. Whole goal PARTIAL_ACCEPTED/NATIVE_PROOF_DEFERRED.
