@@ -1,0 +1,11 @@
+# G03 implementer role record
+
+Context `/root/implementer` reused sequentially. Requested `gpt-6-astra/xhigh`; local configured `.codex/agents/implementer.toml` remains `gpt-6-luna/max`; actual serving model/effort/backend **UNVERIFIED**. No role/configuration changes.
+
+Read complete G03 Goal/Kickstart, current G03 receipts and approved planner packet. Source baseline `bfa14e7c7da32d604ded46f5dc2b67263dfe5f2c` on `codex/closeout-g03-table-full-file-operations-20261029-r01`; authoritative integration `78dd134b044820cb8dbed2856d5830271d72bc70` read directly. Last accepted integration source is `fd300ff748e54cee167a038337220e33beba2322`. G02 donor source `f879a2a880d59e941486241e652299dabc002365` remains UNACCEPTED; `011af0c448dfdcdc0eb747083f909d3bfa6c1ab2` is its documentation-only closure. Both G02 batches were 15 passed / 4 failed / 19 selected before staging at CreateFileW OS error 5; denied ancestor/cause unknown, M1-B unstarted.
+
+Executed only the approved dependency-disposition packet: updated own PROGRESS/VERIFICATION/RISKS, this record, [actual-UTC stall](../../stalls/M0-A-20261030T011507Z.md) and original Goal mutable progress. Result **DEFERRED_DEPENDENCY**. No fallback: the hard gate requires skipping G03 implementation. No algorithm selection, source edit, Cargo/native/large fixture, application/worker/persistent process/temp resource, Git mutation, acceptance or next-goal dispatch. Parent/planner/source baseline/global documents preserved. Minimal path/link/diff checks recorded in [verification](../../VERIFICATION.md).
+
+**NO_ACTION** for distinct follow-ons. The existing complete [G03 Goal](../../../../../../reliability-feature-closeout-20261029/goals/G03-table-full-file-operations/GOAL.md) and [Kickstart](../../../../../../reliability-feature-closeout-20261029/goals/G03-table-full-file-operations/KICKSTART.md) remain the conditional future pair; no duplicate package or initiative created.
+
+Restart only after all G02 native/lifecycle/recovery acceptance and independently reviewed source integration, a valid G03 base with accepted dependency ancestry, and a fresh full-contract/current-source M0 handoff. Parent reviews/closes these safe docs and proceeds G04. No production acceptance is claimed.

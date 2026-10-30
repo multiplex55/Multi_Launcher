@@ -130,25 +130,27 @@ The exact chosen full-file capability works with accepted publisher, scoped test
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `DEFERRED_DEPENDENCY`; M0-A documentation review pending.
+- **Current state:** `DEFERRED_DEPENDENCY`; precise M0-A dependency report recorded, parent review pending.
 - **Run ID and branch:** 20261029-r01 / codex/closeout-g03-table-full-file-operations-20261029-r01.
 - **Actual master/source base:** fetched master4a1283e6; branch bootstrap02d0ac64; integration dependency receipt78dd134b.
-- **Current milestone:** `M0-A` pending.
-- **Active role and requested/configured/resolved model:** `NONE / unverified`.
-- **Last known commit / push:** none for this package.
-- **Next action:** bounded planner confirms dependency deferral; documentation-only writer/reviewer, then G04.
+- **Current milestone:** `M0-A` documentation-only stop; all implementation and tests unexecuted.
+- **Active role and requested/configured/resolved model:** implementer / requested Astra-xhigh / local Luna-max unchanged / actual backend UNVERIFIED.
+- **Last known commit / push:** parent documentation baseline bfa14e7c7da32d604ded46f5dc2b67263dfe5f2c; no implementer commit/push.
+- **Next action:** parent reviews/closes dependency documentation, then proceeds independent G04. Future G03 requires all G02 lifecycle/native/recovery acceptance, reviewed integration, accepted dependency ancestry and a fresh full-contract/current-source M0 handoff.
 - **Blocker and scope:** G02 DEFERRED_WITH_DESIGN/NATIVE_NOT_PROVEN, source unaccepted; documentation only, no source.
 
 | Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
 |---|---|---|---|
-| `M0-A` | PENDING | — | Hard readiness gate and user-facing scope |
-| `M1-A` | PENDING | — | Bounded full-file worker |
-| `M1-B` | PENDING | — | Unambiguous UI and progress |
-| `M2-A` | PENDING | — | Focused proof and decision |
-| `M3-A` | PENDING | — | Close or defer |
+| `M0-A` | DEFERRED_DEPENDENCY | Dependency-only report/stall at bfa14e7c; feature scope selection unexecuted | Parent documentation review |
+| `M1-A` | DEFERRED_DEPENDENCY | Worker unexecuted; no source changes | Await accepted G02 and fresh M0 |
+| `M1-B` | DEFERRED_DEPENDENCY | UI/progress unexecuted | Await accepted G02 and fresh M0 |
+| `M2-A` | DEFERRED_DEPENDENCY | All tests/native/large-source proof NOT_RUN | Await accepted G02 and fresh M0 |
+| `M3-A` | DEFERRED_DEPENDENCY | Safe documentation handoff only; no feature acceptance | Parent closes docs and proceeds G04 |
 
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
 
 - Runtime2026-10-30: G02 lacks ACCEPTED_COMPLETE/native/lifecycle proof. Integration78dd134b accepted safe docs only; failed donor sourcef879a2a8 excluded. G03 fresh bootstrap branch documentation only; no accepted dependency base exists. No source work or large fixture authorized.
+
+- 2026-10-30 01:15:07 UTC: planner dependency packet executed as documentation only; [stall](../../../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G03/stalls/M0-A-20261030T011507Z.md) recorded. Both G02 batches were 15 passed / 4 failed / 19 selected before staging at CreateFileW OS error 5; ancestor/cause unknown, M1-B unstarted. Last accepted integration source fd300ff7. No fallback because hard gate requires skip; no G03 implementation/tests/resources. Original complete Goal/Kickstart retained as conditional future contract; NO_ACTION for distinct follow-ons.
