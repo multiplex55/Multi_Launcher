@@ -1,8 +1,9 @@
 # Multi Launcher — Reliability, Safety and Incomplete Feature Closure (Mega Goal)
 
 **Program ID:** `multi-launcher-reliability-closeout-20261029`; allocate exact `<RUN_ID>` on first invocation.  
-**Status:** `NOT_STARTED` — this is an authored execution contract, not evidence that any changes/tests/branches have begun.  
-**Current source reference:** [`master` @ `56223fdc123396f4c41c48e0542506d912c6c634`](https://github.com/multiplex55/Multi_Launcher/commit/56223fdc123396f4c41c48e0542506d912c6c634) after both [#1456](https://github.com/multiplex55/Multi_Launcher/pull/1456) and [#1457](https://github.com/multiplex55/Multi_Launcher/pull/1457) merged. Reverify `origin/master` at execution time.  
+**Status:** `IN_PROGRESS` — G00–G09 dispositions recorded; G10 documentation/final review/publication pending. See [authoritative current run](../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/PROGRAM_STATUS.md).
+**Historical planning source reference:** [`master` @ `56223fdc123396f4c41c48e0542506d912c6c634`](https://github.com/multiplex55/Multi_Launcher/commit/56223fdc123396f4c41c48e0542506d912c6c634), after #1456/#1457. Authored source observations below describe plan creation; current fetched master is `4a1283e6edd2c245f562a07dbe3dcc6a61061eed`. The original continuation warning was resolved by G00; the two live links now point to this contract and the current run status.
+
 **Orchestrator:** [ORCHESTRATOR_KICKSTART.md](ORCHESTRATOR_KICKSTART.md).  
 **Goal contracts:** eleven separate [Goal/Kickstart pairs](#2-fixed-goal-manifest) executed **strictly sequentially**, not concurrently.  
 **Output root:** `docs/plans/execution/multi-launcher-reliability-closeout-20261029-<RUN_ID>/`; human-readable Markdown for progress, source decisions, reviews and stalls.  
@@ -22,19 +23,19 @@ This program is meant to be **implementation-oriented, not another unlimited sta
 
 ## 2. Fixed Goal manifest
 
-| Goal | Product workstream | Priority | Dependency / gate | Initial status |
+| Goal | Product workstream | Priority | Dependency / gate | Current disposition |
 |---|---|---|---|---|
-| [G00](goals/G00-baseline-and-continuation/GOAL.md) | Source Baseline, Stale Continuation Cleanup and Execution Ledger | P0 / mandatory | None; must complete before production work | `NOT_STARTED` |
-| [G01](goals/G01-diff-failure-information/GOAL.md) | Folder Diff: Preserve Destination Read Errors and Operation Feedback | P0 / first production fix | None; primary source-supported bugfix | `NOT_STARTED` |
-| [G02](goals/G02-table-publication-safety/GOAL.md) | G09 Table Utility: Full-File Publication Safety Foundation | P1 / high safety | None; G03 depends on this goal reaching ACCEPTED_COMPLETE | `NOT_STARTED` |
-| [G03](goals/G03-table-full-file-operations/GOAL.md) | G09 Table Utility: Conditional Full-File Operations and UX Closure | P2 / hard-gated | G02 accepted safety foundation, otherwise DEFERRED_DEPENDENCY without source changes | `NOT_STARTED` |
-| [G04](goals/G04-screenshot-native-redaction/GOAL.md) | G12 Screenshot Redaction: Native Crop, Output and Interaction Acceptance | P1 / output safety | No Table dependency; native proof required for end-to-end completion | `NOT_STARTED` |
-| [G05](goals/G05-hotfolder-condition-evaluator/GOAL.md) | G16 Hot Folder: Safe Size, Age and Literal-Content Conditions | P1 / unattended automation | None, but fail-closed condition guarantee is mandatory | `NOT_STARTED` |
-| [G06](goals/G06-jump-settings-and-focus/GOAL.md) | G11 Jump Mode: Finish Customization UI and Focus Regression Coverage | P2 / daily usability | None | `NOT_STARTED` |
-| [G07](goals/G07-zip-extraction/GOAL.md) | G14 ZIP: Bounded Extraction Writer and Safe UI Integration | P2 / security-sensitive utility | A safe writer and exact output contract must precede extraction UI enablement | `NOT_STARTED` |
-| [G08](goals/G08-mkmacro-run-history/GOAL.md) | G15 MkMacro: Bounded Run History and Conditional Safe Recipes | P2 / productivity | Recipes require accepted history and explicit policy; do not auto-run after mere display success | `NOT_STARTED` |
-| [G09](goals/G09-activity-center-retirement/GOAL.md) | G06 Activity Center: Source-Grounded Native Retirement Acceptance | P2 / reliability | Native proof when owner retirement is claimed; do not infer from terminal UI | `NOT_STARTED` |
-| [G10](goals/G10-residual-defect-triage-integration/GOAL.md) | Residual Defects, Deferred Goals and Final Integration Closeout | P0 at end / coordination | Follows individual goal dispositions, never requires all goals to pass | `NOT_STARTED` |
+| [G00](goals/G00-baseline-and-continuation/GOAL.md) | Source Baseline, Stale Continuation Cleanup and Execution Ledger | P0 / mandatory | None; must complete before production work | `ACCEPTED_COMPLETE` |
+| [G01](goals/G01-diff-failure-information/GOAL.md) | Folder Diff: Preserve Destination Read Errors and Operation Feedback | P0 / first production fix | None; primary source-supported bugfix | `ACCEPTED_COMPLETE` |
+| [G02](goals/G02-table-publication-safety/GOAL.md) | G09 Table Utility: Full-File Publication Safety Foundation | P1 / high safety | None; G03 depends on this goal reaching ACCEPTED_COMPLETE | `DEFERRED_WITH_DESIGN / NATIVE_NOT_PROVEN` |
+| [G03](goals/G03-table-full-file-operations/GOAL.md) | G09 Table Utility: Conditional Full-File Operations and UX Closure | P2 / hard-gated | G02 accepted safety foundation, otherwise DEFERRED_DEPENDENCY without source changes | `DEFERRED_DEPENDENCY` |
+| [G04](goals/G04-screenshot-native-redaction/GOAL.md) | G12 Screenshot Redaction: Native Crop, Output and Interaction Acceptance | P1 / output safety | No Table dependency; native proof required for end-to-end completion | `NATIVE_PROOF_DEFERRED` |
+| [G05](goals/G05-hotfolder-condition-evaluator/GOAL.md) | G16 Hot Folder: Safe Size, Age and Literal-Content Conditions | P1 / unattended automation | None, but fail-closed condition guarantee is mandatory | `PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED` |
+| [G06](goals/G06-jump-settings-and-focus/GOAL.md) | G11 Jump Mode: Finish Customization UI and Focus Regression Coverage | P2 / daily usability | None | `PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED` |
+| [G07](goals/G07-zip-extraction/GOAL.md) | G14 ZIP: Bounded Extraction Writer and Safe UI Integration | P2 / security-sensitive utility | A safe writer and exact output contract must precede extraction UI enablement | `DEFERRED_WITH_DESIGN / FAILED_VERIFICATION / WRITER_DEFERRED` |
+| [G08](goals/G08-mkmacro-run-history/GOAL.md) | G15 MkMacro: Bounded Run History and Conditional Safe Recipes | P2 / productivity | Recipes require accepted history and explicit policy; do not auto-run after mere display success | `DEFERRED_WITH_DESIGN / VERIFICATION_DEFERRED` |
+| [G09](goals/G09-activity-center-retirement/GOAL.md) | G06 Activity Center: Source-Grounded Native Retirement Acceptance | P2 / reliability | Native proof when owner retirement is claimed; do not infer from terminal UI | `NO_CHANGE_REVALIDATED / TEST_STRENGTHENING_ACCEPTED` |
+| [G10](goals/G10-residual-defect-triage-integration/GOAL.md) | Residual Defects, Deferred Goals and Final Integration Closeout | P0 at end / coordination | Follows individual goal dispositions, never requires all goals to pass | `IN_PROGRESS` |
 
 All 11 goals have a separate, complete `GOAL.md` and `KICKSTART.md`. G00 supplies baseline and safe continuation; G10 is final cross-goal triage and integration. **G02 → G03** is the only hard new implementation dependency: full-file Table operations must not run without accepted publication safety. Within G04 screenshot and G07 ZIP, a demonstrated native/writer gate must pass before effectful UI acceptance. G08 safe run history can close while recipes are deferred. G09 can close only its actually proved worker owner subset; do not invent universal retirement proof.
 
@@ -171,28 +172,30 @@ At close, ensure exact user-facing reports show accepted vs deferred and test/na
 
 ## 10. Execution progress — mutable
 
-**State:** `NOT_STARTED`.  
-**Actual source/master after runtime verification:** unset; planning-time ref `56223fdc123396f4c41c48e0542506d912c6c634`.  
-**Program branch/worktree:** not created.  
-**Active goal/role:** `G00 / none`.  
-**Last accepted checkpoint and normal push:** none.  
-**Next exact action:** read [ORCHESTRATOR_KICKSTART](ORCHESTRATOR_KICKSTART.md), verify repo/source, bootstrap this package on new integration branch and dispatch G00 only.  
-**Next dependent gate:** G03 must wait for accepted G02; G04/G07 native/writer gates are independent.  
-**Known blocker:** none reported at package creation.
+**State:** `IN_PROGRESS` — G10 reconciliation prepared; independent cumulative review, accepted docs import and final PR facts pending.
+**Actual fetched master:** `4a1283e6edd2c245f562a07dbe3dcc6a61061eed`; bootstrap `02d0ac64d51655f43d6e958ea551f5bf658ee48d`.
+**Program branch:** `codex/closeout-integration-20261029-r01`, accepted docs baseline `ea3a7007e23090c1c2b13ea9018b29754579e4ef`.
+**Active goal/role:** G10 / parent materialization and review next; Implementer proposal handoff complete.
+**Latest accepted test / production:** `fc9e5c7cbb509397b47c4d7f2902899c9d04dd43` / `b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7`; distinct from documentation tip.
+**G10 supplied head:** `874065dbe21f227c4c3189dc859ba5521b210eb5`, parent reports committed/pushed; final head/push/PR/CI/review PENDING.
+**Next exact action:** apply reviewed docs proposals, obtain independent cumulative review, import accepted docs and record one PR's actual host facts. No new source or automatic historical queue execution.
+**Next dependent gate:** fully accepted G02 before new accepted-ancestry G03; other native/writer/privacy gates remain as documented.
 
-| Goal | State | Actual goal branch/head/push | Accepted source or explicit defer | Next safe step |
-|---|---|---|---|---|
-| G00 | PENDING | — | — | Read G00 Kickstart at dispatch |
-| G01 | PENDING | — | — | Read G01 Kickstart at dispatch |
-| G02 | PENDING | — | — | Read G02 Kickstart at dispatch |
-| G03 | PENDING | — | — | Read G03 Kickstart at dispatch |
-| G04 | PENDING | — | — | Read G04 Kickstart at dispatch |
-| G05 | PENDING | — | — | Read G05 Kickstart at dispatch |
-| G06 | PENDING | — | — | Read G06 Kickstart at dispatch |
-| G07 | PENDING | — | — | Read G07 Kickstart at dispatch |
-| G08 | PENDING | — | — | Read G08 Kickstart at dispatch |
-| G09 | PENDING | — | — | Read G09 Kickstart at dispatch |
-| G10 | PENDING | — | — | Read G10 Kickstart at dispatch |
+| Goal | Current state | Exact branch tip / evidence | Next safe step |
+|---|---|---|---|
+| G00 | ACCEPTED_COMPLETE | `7e53f4d28ca5b66a21e30e41545692cce5fa6b6a`; [current record](../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G00/PROGRESS.md) | No restart; read current status. |
+| G01 | ACCEPTED_COMPLETE | `13243515329ce4010bd6db981f1fd3bcc26f2dec`; [current record](../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G01/PROGRESS.md) | Keep accepted scope; independent File Search fixture pair remains proposed. |
+| G02 | DEFERRED_WITH_DESIGN / NATIVE_NOT_PROVEN | `011af0c448dfdcdc0eb747083f909d3bfa6c1ab2`; [current record](../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G02/PROGRESS.md) | Complete native admission and all lifecycle/recovery gates before G03. |
+| G03 | DEFERRED_DEPENDENCY | `e0f556cd8041c502d63479d89d0e68301cceb3b2`; [current record](../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G03/PROGRESS.md) | Require fully accepted G02, reviewed integration ancestry and fresh G03 M0. |
+| G04 | NATIVE_PROOF_DEFERRED | `ea27ce749318ab2c261384385fd03ef05f882b4f`; [current record](../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G04/PROGRESS.md) | Establish supported capability/isolation, then existing pixel protocol. |
+| G05 | PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED | `a78895c63f31c9f48ae579e3203c14fa3faa8c35`; [current record](../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/PROGRESS.md) | Complete B2 native ownership/retirement, effect and queued-start binding, editor/Test Rule and review before activation. |
+| G06 | PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED | `d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436`; [current record](../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G06/PROGRESS.md) | Obtain supported owned window for exact-source isolated app, then native protocol. |
+| G07 | DEFERRED_WITH_DESIGN / FAILED_VERIFICATION / WRITER_DEFERRED | `5d4d3054c5b52510a38d96faf201c6c0ca2e07f7`; [current record](../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G07/PROGRESS.md) | Resolve exact endpoint and guarded no-replace proof before Stored writer and later UI. |
+| G08 | DEFERRED_WITH_DESIGN / VERIFICATION_DEFERRED | `e505f961849475ecf3affda40064b96a60243f9d`; [current record](../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G08/PROGRESS.md) | Fresh source packet and explicit finite verification budget; privacy R1 review before history acceptance, then separately selected recipe policy. |
+| G09 | NO_CHANGE_REVALIDATED / TEST_STRENGTHENING_ACCEPTED | `174b6fff5eba1a28de6fb8b73d3a5ea77c91187a`; [current record](../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/PROGRESS.md) | No broader native or global retirement claim; no new initiative. |
+| G10 | IN_PROGRESS | `874065dbe21f227c4c3189dc859ba5521b210eb5`; [current record](../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G10/PROGRESS.md) | Parent materializes, independently reviews cumulative scope, imports accepted docs, then records actual PR/head/check facts. |
+
+All exact branch names, baseline remote-tracking receipts and import provenance are in the [branch map](../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/BRANCH_MAP.md). Current scope/gates are in [status](../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/PROGRAM_STATUS.md) and [dependency map](../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/DEPENDENCY_MAP.md). Do not treat historical event next-actions below as current instructions.
 
 ### Event log (append only)
 
@@ -201,3 +204,5 @@ At close, ensure exact user-facing reports show accepted vs deferred and test/na
 - Runtime 20261029-r01: actual master 4a1283e6edd2c245f562a07dbe3dcc6a61061eed; bootstrap 02d0ac64; G00 ACCEPTED_COMPLETE docs integrated/pushed at 41cc682e. G01 next. Authoritative current state: docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/PROGRAM_STATUS.md. Configuration drift recorded; explicit Astra roles requested without config edits. No source tests yet.
 
 - Runtime event20261029-r01: G01 ACCEPTED_COMPLETE; donor13243515 pushed; exact corrected cumulative integrationfd300ff7 pushed. Final focused32/32; FileSearch domain fixture compilation limitation preserved as proposed follow-on. G02 next, G03 still requires accepted G02. Current authority remains allocated PROGRAM_STATUS.
+
+- 2026-10-30 G10 reconciliation proposal checkpoint: G00–G09 dispositions and accepted-only manifest prepared from parent receipts; no new source/Cargo/native. Final review/import/PR facts remain pending in authoritative run status. Existing event history retained.

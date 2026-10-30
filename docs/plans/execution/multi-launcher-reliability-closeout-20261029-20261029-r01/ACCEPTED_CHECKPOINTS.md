@@ -1,5 +1,24 @@
 # Accepted checkpoints
 
+## Current accepted boundary
+
+Through accepted integration `ea3a7007e23090c1c2b13ea9018b29754579e4ef`: G00 documentation; G01 two bounded fixes; G05 M1-A and corrected B1 foundations only; G06 corrected editor/transaction; G09 selected-owner tests. G02/G03/G04/G07/G08 contribute reviewed documentation only. Whole G05/G06 remain partial. G10 is **not yet an accepted checkpoint**; append its actual review/import only after parent obtains them.
+
+| Scope | Accepted cumulative source/test import | Boundary |
+|---|---|---|
+| G01 | `fd300ff748e54cee167a038337220e33beba2322` (plus earlier M1-A `ddbbf4c4`) | Corrected combined scope; rejected standalone `8d183f66` never independently accepted. |
+| G05 M1-A | `8f6befe70c402157f99bdae3404513ca02e46ecd` | Metadata and candidate/control binding; conditions refused. |
+| G05 corrected B1 | `4999a47c68a9e4e5b8531cf31e018eda3eefda4f` | Pure stream foundation including R1 correction; rejected standalone `bab30968` never independently accepted. |
+| G06 corrected cumulative | `b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7` | Includes final real resolver correction; rejected standalone `b708e38a` never independently accepted. Native proof deferred. |
+| G09 | `fc9e5c7cbb509397b47c4d7f2902899c9d04dd43` | Three test modules only; production unchanged. |
+
+[Manifest](INTEGRATION_MANIFEST.md) records all 20 exact source/test blobs; [status](PROGRAM_STATUS.md) records all eleven current dispositions. Closing donor refs can include rejected prototypes and must never be imported wholesale merely because their documentation was accepted. Counts below belong to separate checkpoints, not a unique aggregate test suite.
+
+## Historical acceptance/import receipts — preserved
+
+The following receipts and their dated/staged next actions are retained verbatim. The current boundary above governs resumption.
+
+
 Bootstrap was scaffolding; current accepted dispositions are recorded below.
 
 ## G00 accepted receipt

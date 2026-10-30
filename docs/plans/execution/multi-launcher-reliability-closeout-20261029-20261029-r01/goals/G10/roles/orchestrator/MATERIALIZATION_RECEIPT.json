@@ -1,0 +1,127 @@
+{
+  "utc": "2026-10-30T08:27:02.744442+00:00",
+  "stage": "G10 review draft, not accepted integration",
+  "operations": [
+    {
+      "destination": "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/PROGRAM_STATUS.md",
+      "proposal": "PROGRAM_STATUS.md",
+      "mode": "replace_file",
+      "preimage_verified": true
+    },
+    {
+      "destination": "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/BRANCH_MAP.md",
+      "proposal": "BRANCH_MAP.md",
+      "mode": "replace_file",
+      "preimage_verified": true
+    },
+    {
+      "destination": "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/ACCEPTED_CHECKPOINTS.md",
+      "proposal": "ACCEPTED_CHECKPOINTS.md",
+      "mode": "replace_file",
+      "preimage_verified": true
+    },
+    {
+      "destination": "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/FOLLOW_ON_CATALOG.md",
+      "proposal": "FOLLOW_ON_CATALOG.md",
+      "mode": "replace_file",
+      "preimage_verified": true
+    },
+    {
+      "destination": "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/DEPENDENCY_MAP.md",
+      "proposal": "DEPENDENCY_MAP.md",
+      "mode": "replace_file",
+      "preimage_verified": true
+    },
+    {
+      "destination": "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/INTEGRATION_MANIFEST.md",
+      "proposal": "INTEGRATION_MANIFEST.md",
+      "mode": "replace_file",
+      "preimage_verified": true
+    },
+    {
+      "destination": "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/PR_SUMMARY.md",
+      "proposal": "PR_SUMMARY.md",
+      "mode": "replace_file",
+      "preimage_verified": true
+    },
+    {
+      "destination": "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/MANUAL_REVIEW_CHECKLIST.md",
+      "proposal": "MANUAL_REVIEW_CHECKLIST.md",
+      "mode": "replace_file",
+      "preimage_verified": true
+    },
+    {
+      "destination": "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/FINAL_HANDOFF.md",
+      "proposal": "FINAL_HANDOFF.md",
+      "mode": "replace_file",
+      "preimage_verified": true
+    },
+    {
+      "destination": "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/RISKS_AND_DECISIONS.md",
+      "proposal": "RISKS_AND_DECISIONS.md",
+      "mode": "replace_file",
+      "preimage_verified": true
+    },
+    {
+      "destination": "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G10/PROGRESS.md",
+      "proposal": "G10_PROGRESS.md",
+      "mode": "replace_file",
+      "preimage_verified": true
+    },
+    {
+      "destination": "docs/plans/reliability-feature-closeout-20261029/MEGA_GOAL.md",
+      "proposal": "MEGA_HEADER.md",
+      "mode": "replace_between",
+      "preimage_verified": true
+    },
+    {
+      "destination": "docs/plans/reliability-feature-closeout-20261029/MEGA_GOAL.md",
+      "proposal": "MEGA_GOAL_MATRIX.md",
+      "mode": "replace_between",
+      "preimage_verified": true
+    },
+    {
+      "destination": "docs/plans/reliability-feature-closeout-20261029/MEGA_GOAL.md",
+      "proposal": "MEGA_PROGRESS.md",
+      "mode": "replace_between",
+      "preimage_verified": true
+    },
+    {
+      "destination": "docs/plans/reliability-feature-closeout-20261029/goals/G00-baseline-and-continuation/GOAL.md",
+      "proposal": "G00_MUTABLE_PROGRESS.md",
+      "mode": "replace_between",
+      "preimage_verified": true
+    },
+    {
+      "destination": "docs/plans/reliability-feature-closeout-20261029/goals/G03-table-full-file-operations/GOAL.md",
+      "proposal": "G03_MUTABLE_PROGRESS.md",
+      "mode": "replace_between",
+      "preimage_verified": true
+    },
+    {
+      "destination": "docs/plans/reliability-feature-closeout-20261029/goals/G10-residual-defect-triage-integration/GOAL.md",
+      "proposal": "G10_MUTABLE_PROGRESS.md",
+      "mode": "replace_between",
+      "preimage_verified": true
+    }
+  ],
+  "destination_count": 15,
+  "output_sha256": {
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/PROGRAM_STATUS.md": "48593ac801d2f88609674aba6740b2d1d2a598a1a321352158ba2eda817b5054",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/BRANCH_MAP.md": "69b300bfbd76482853b092fa067dc6b4769f9cc9d79628193ba793e8cd0febc2",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/ACCEPTED_CHECKPOINTS.md": "f6c775e1dbb5395fc2b9b088fde57b37c9c7ac296fe2cd62e6704a4da81c8175",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/FOLLOW_ON_CATALOG.md": "7ddc45a171b081252f62ecee96f29368a917bdb3f5892a3b584efca54df3f4e7",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/DEPENDENCY_MAP.md": "e67371fe3c1e594195339a2558e2eca2dd3c93dbbf12ae3debaae44d6cb1bc5e",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/INTEGRATION_MANIFEST.md": "af5b819ef7cec5ce919cf278e339a737925cb995bef43ad04e861449f3ab22cf",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/PR_SUMMARY.md": "5617660c492e17439ca8494444cdde89ca64b8681fa1541fb7de9c0c7cf08a81",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/MANUAL_REVIEW_CHECKLIST.md": "fb138cbc2e52581642b3f5f84de7e0a47565498a148b6f66e51f7ac304a06975",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/FINAL_HANDOFF.md": "89ed3e294ebd64756c6681e5d8d797f8ab42579674aafdff25e6317dbb70f5fb",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/RISKS_AND_DECISIONS.md": "8ba375cb861eaa0b1c87bbd1d580484376bd4bd713e4b0d956f68e37661c922b",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G10/PROGRESS.md": "c42c2d81be2ef7d3464f03284976db903e92cb18fbe6b895975f2dea91ed6764",
+    "docs/plans/reliability-feature-closeout-20261029/MEGA_GOAL.md": "b49256bfa21a0a1a312e922ff1a854234dce07301bedbd260f6275a5b0887854",
+    "docs/plans/reliability-feature-closeout-20261029/goals/G00-baseline-and-continuation/GOAL.md": "b70e5c0ad6c76f92e6618cf0e67bd977e7fb8ef460d66ee958527c825289092f",
+    "docs/plans/reliability-feature-closeout-20261029/goals/G03-table-full-file-operations/GOAL.md": "74d27b053d0b34f13752569eaef3f70c0a8238bc1947695d862d214ad0c8c1c1",
+    "docs/plans/reliability-feature-closeout-20261029/goals/G10-residual-defect-triage-integration/GOAL.md": "e195f0b12842eaef9a42ec3a1754b98f70ac192262100dcd693d9b6473522dae"
+  },
+  "source_writes": 0
+}

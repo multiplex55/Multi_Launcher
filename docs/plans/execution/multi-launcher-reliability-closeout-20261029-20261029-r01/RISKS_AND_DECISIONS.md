@@ -1,5 +1,26 @@
 # Risks and decisions
 
+## Current unresolved boundaries — G10 reconciliation
+
+Accepted integration baseline `ea3a7007e23090c1c2b13ea9018b29754579e4ef` contains only reviewed G01, gated G05, corrected G06 and G09 test-only source scopes. [Manifest](INTEGRATION_MANIFEST.md) records exact accepted/excluded bytes. All other prototype code remains excluded, and G10 acceptance/publication remains pending.
+
+- G02 native parent admission fails OS5 before staging; ancestor/cause unknown. All lifecycle/native/publication/cancel/cleanup/recovery acceptance remains necessary before G03. No guard weakening or environment theory is adopted.
+- G04 lacks the supported secondary-drag, binary and actual clipboard/output observations needed for its native protocol. No defect or unit/native pass is inferred. G06 separately lacks supported owned-window discovery; its exact build and29 tests do not establish native editor/focus proof.
+- G05 conditions remain refused. Accepted descriptive metadata and pure literal-stream evidence do not prove pending native read retirement, retained source/effect ownership or actual queued-start binding. No enablement until the complete continuation passes.
+- G07 final10/12 leaves guarded publication OS32 and an UNKNOWN source/alias deletion endpoint. Weaker-directory control success is diagnostic, not authority. G08 old14/14 predates the actual toolbar privacy issue; corrected preparation timed out32s and drained101.880s with late0, no R1 tests. Both prototypes remain excluded.
+- G09 accepts only the selected actual owner ordering and controlled pre-read file-handle proof. Terminal status, local transfer and capacity reclamation are not universally successful joins. Screenshot shutdown `Unavailable` remains truthful. Initial preparation exit null is preserved beside the matching12/12 run exit0.
+- Original queue04/05 user stops are distinct from07/08/13 historical proof stops and10/17 dependencies. Missing historical local receipts stay absent; Planner's pinned remote matrix is historical evidence, not a recreated local run.
+- AUD-F001 remains already fixed/merged; Diff H0/native authority and search admission limits remain closed decisions. No new query/ranker/UI, generic framework or runtime defect initiative is authorized.
+- Provenance coverage correction: the original baseline excluded11 `src` entries omitted two G02 crate files from its table. The supplemental parent receipt proves those files baseline-identical; the complete manifest now records13 per-goal entries/12 physical paths. No imported-source issue or new initiative was found.
+- Final cumulative review/PR/head/push/check facts remain PENDING. No source-overlap or manifest drift is shown by the parent baseline; no new Cargo is justified solely by documentation. Parent alone resolves a concrete later conflict and verifies materialized source/config parity.
+
+[Dependencies](DEPENDENCY_MAP.md), [canonical continuations](FOLLOW_ON_CATALOG.md) and [single final checklist](MANUAL_REVIEW_CHECKLIST.md) are current. G10 distinct new finding: **NO_ACTION**.
+
+## Historical decisions and intermediate states — preserved
+
+The following original entries are retained verbatim in order. Formerly pending, next-goal and rejected-source statements describe their recorded stage; the current section above supersedes them for resumption. No historical failure or author-stage limitation was deleted.
+
+
 - No full suites/build campaigns, config changes, historical rewrite, or automatic master merge.
 - Native proof remains separate from deterministic/source evidence.
 - Role configuration drift is recorded; explicit user-requested Astra dispatch overrides without editing configuration.

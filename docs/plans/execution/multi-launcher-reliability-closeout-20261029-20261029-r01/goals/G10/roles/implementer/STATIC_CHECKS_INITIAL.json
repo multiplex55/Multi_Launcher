@@ -1,0 +1,209 @@
+{
+  "checked_utc": "2026-10-30T08:20:52.236461+00:00",
+  "mode": "filesystem/in-memory static; no Git/source audit/Cargo/native/CI",
+  "proposal_entries": 17,
+  "intended_destinations": 15,
+  "global_files": 10,
+  "g10_progress_files": 1,
+  "mutable_fragments": 6,
+  "unique_goals": 11,
+  "branch_receipt_entries": 12,
+  "accepted_paths": 20,
+  "accepted_by_goal": {
+    "G01": 4,
+    "G05": 4,
+    "G06": 9,
+    "G09": 3
+  },
+  "excluded_src_entries": 11,
+  "excluded_crate_entries": 2,
+  "excluded_total_owner_path_entries": 13,
+  "excluded_unique_physical_paths": 12,
+  "absent_exclusion_entries": 3,
+  "manifest_inputs": 2,
+  "canonical_conditional_pairs": 9,
+  "local_links_checked": 230,
+  "fragment_links_checked": 0,
+  "external_links_not_fetched": 14,
+  "json_receipts_and_artifacts_parsed": [
+    {
+      "file": "docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G02\\roles\\implementer\\verification\\m1a\\native-correction-run.receipt.json",
+      "required_fields": [
+        "phase",
+        "command",
+        "head",
+        "source_git_blobs",
+        "start_utc",
+        "end_utc",
+        "cap_seconds",
+        "elapsed_seconds",
+        "timed_out",
+        "exit_code"
+      ],
+      "parsed": true
+    },
+    {
+      "file": "docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G02\\roles\\implementer\\verification\\m1a\\selected-inventory.json",
+      "required_fields": [],
+      "parsed": true
+    },
+    {
+      "file": "docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G07\\roles\\implementer\\verification\\run-native-isolation.receipt.json",
+      "required_fields": [
+        "phase",
+        "command",
+        "head",
+        "source_git_blobs",
+        "start_utc",
+        "end_utc",
+        "cap_seconds",
+        "elapsed_seconds",
+        "timed_out",
+        "exit_code"
+      ],
+      "parsed": true
+    },
+    {
+      "file": "docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G08\\roles\\implementer\\verification\\r1-late-selected-inventory.json",
+      "required_fields": [],
+      "parsed": true
+    },
+    {
+      "file": "docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G08\\roles\\implementer\\verification\\r1-prepare.receipt.json",
+      "required_fields": [
+        "phase",
+        "command",
+        "head",
+        "source_git_blobs",
+        "start_utc",
+        "end_utc",
+        "cap_seconds",
+        "elapsed_seconds",
+        "timed_out",
+        "exit_code"
+      ],
+      "parsed": true
+    },
+    {
+      "file": "docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G08\\roles\\implementer\\verification\\r1-prepare.timeout.json",
+      "required_fields": [],
+      "parsed": true
+    },
+    {
+      "file": "docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G09\\roles\\implementer\\verification\\initial-list.receipt.json",
+      "required_fields": [
+        "phase",
+        "command",
+        "head",
+        "source_git_blobs",
+        "start_utc",
+        "end_utc",
+        "cap_seconds",
+        "elapsed_seconds",
+        "timed_out",
+        "exit_code"
+      ],
+      "parsed": true
+    },
+    {
+      "file": "docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G09\\roles\\implementer\\verification\\initial-run.receipt.json",
+      "required_fields": [
+        "phase",
+        "command",
+        "head",
+        "source_git_blobs",
+        "start_utc",
+        "end_utc",
+        "cap_seconds",
+        "elapsed_seconds",
+        "timed_out",
+        "exit_code"
+      ],
+      "parsed": true
+    },
+    {
+      "file": "docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G10\\roles\\implementer\\destination-map.json",
+      "required_fields": [
+        "authority",
+        "entries"
+      ],
+      "parsed": true
+    },
+    {
+      "file": "docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G10\\roles\\implementer\\package-index.json",
+      "required_fields": [
+        "packages"
+      ],
+      "parsed": true
+    },
+    {
+      "file": "docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G10\\roles\\implementer\\reconciliation-data.json",
+      "required_fields": [
+        "supplied_head",
+        "integration_baseline",
+        "latest_production",
+        "latest_tests",
+        "goals",
+        "accepted_imports"
+      ],
+      "parsed": true
+    },
+    {
+      "file": "docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G10\\roles\\orchestrator\\BASELINE_BRANCH_RECEIPT.json",
+      "required_fields": [
+        "utc",
+        "snapshot_head",
+        "master",
+        "origin_master",
+        "branches"
+      ],
+      "parsed": true
+    },
+    {
+      "file": "docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G10\\roles\\orchestrator\\BASELINE_SOURCE_PARITY.json",
+      "required_fields": [
+        "utc",
+        "head",
+        "accepted",
+        "excluded",
+        "manifests"
+      ],
+      "parsed": true
+    },
+    {
+      "file": "docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G10\\roles\\orchestrator\\SUPPLEMENTAL_EXCLUDED_CRATES.json",
+      "required_fields": [
+        "utc",
+        "head",
+        "excluded",
+        "note"
+      ],
+      "parsed": true
+    }
+  ],
+  "null_exit_and_late_zero_preserved": true,
+  "preimage_hashes_match": true,
+  "historical_bodies_and_goal_events_preserved": false,
+  "continue_links": [
+    "reliability-feature-closeout-20261029/ORCHESTRATOR_KICKSTART.md",
+    "execution/multi-launcher-reliability-closeout-20261029-20261029-r01/PROGRAM_STATUS.md"
+  ],
+  "continue_disposition": "NO_CHANGE",
+  "trailing_whitespace": [],
+  "errors": [
+    "incomplete pair structure G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G01\\follow-on\\file-search-sender-fixture\\KICKSTART.md",
+    "incomplete pair structure G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G02\\follow-on\\native-parent-admission-proof\\KICKSTART.md",
+    "incomplete pair structure G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G04\\follow-on\\native-gesture-output-proof\\KICKSTART.md",
+    "incomplete pair structure G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G05\\follow-on\\g05-native-read-retirement\\KICKSTART.md",
+    "incomplete pair structure G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G06\\follow-on\\native-jump-focus-proof\\KICKSTART.md",
+    "incomplete pair structure G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G07\\follow-on\\native-guard-publication-compatibility\\KICKSTART.md",
+    "incomplete pair structure G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G08\\follow-on\\g08-history-verification-restart\\KICKSTART.md",
+    "incomplete pair structure G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G08\\follow-on\\explicit-invocation-recipe-policy\\KICKSTART.md",
+    "JSON schema missing G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G02\\roles\\implementer\\verification\\m1a\\native-correction-run.receipt.json",
+    "JSON expected object G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G02\\roles\\implementer\\verification\\m1a\\selected-inventory.json"
+  ],
+  "git_diff_check": "NOT_RUN by explicit child no-Git scope; parent performs after materialization",
+  "source_parity": "Parent receipts reused; no fresh source audit",
+  "owned_write_root": "docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G10\\roles\\implementer",
+  "final_acceptance": "PENDING parent independent review and publication"
+}

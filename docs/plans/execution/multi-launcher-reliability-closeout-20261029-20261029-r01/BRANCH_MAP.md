@@ -1,5 +1,30 @@
 # Branch map
 
+Current reconciliation uses the parent [baseline receipt](goals/G10/roles/orchestrator/BASELINE_BRANCH_RECEIPT.json) at `2026-10-30T07:46:39.1610151Z`. Every baseline local tip equals its remote-tracking tip. Parent-supplied later G10 packet `874065dbe21f227c4c3189dc859ba5521b210eb5` is committed/pushed; final closing/PR refs remain PENDING. No branches are deleted or rewritten.
+
+Master/origin/master: `4a1283e6edd2c245f562a07dbe3dcc6a61061eed`. Bootstrap: `02d0ac64d51655f43d6e958ea551f5bf658ee48d`. Integration accepted baseline: `ea3a7007e23090c1c2b13ea9018b29754579e4ef`. Newest test checkpoint: `fc9e5c7cbb509397b47c4d7f2902899c9d04dd43`. Last production behavior: `b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7`.
+
+| Goal | Branch | Baseline closing local = remote-tracking tip | Ancestry / current note |
+|---|---|---|---|
+| G00 | `codex/closeout-g00-baseline-and-continuation-20261029-r01` | `7e53f4d28ca5b66a21e30e41545692cce5fa6b6a` | Independent bootstrap branch. |
+| G01 | `codex/closeout-g01-diff-failure-information-20261029-r01` | `13243515329ce4010bd6db981f1fd3bcc26f2dec` | Independent bootstrap branch. |
+| G02 | `codex/closeout-g02-table-publication-safety-20261029-r01` | `011af0c448dfdcdc0eb747083f909d3bfa6c1ab2` | Independent bootstrap branch. |
+| G03 | `codex/closeout-g03-table-full-file-operations-20261029-r01` | `e0f556cd8041c502d63479d89d0e68301cceb3b2` | Bootstrap documentation-only exception: no accepted G02 base existed. Future implementation needs new accepted dependency ancestry. |
+| G04 | `codex/closeout-g04-screenshot-native-redaction-20261029-r01` | `ea27ce749318ab2c261384385fd03ef05f882b4f` | Independent bootstrap branch. |
+| G05 | `codex/closeout-g05-hotfolder-condition-evaluator-20261029-r01` | `a78895c63f31c9f48ae579e3203c14fa3faa8c35` | Independent bootstrap branch. |
+| G06 | `codex/closeout-g06-jump-settings-and-focus-20261029-r01` | `d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436` | Independent bootstrap branch. |
+| G07 | `codex/closeout-g07-zip-extraction-20261029-r01` | `5d4d3054c5b52510a38d96faf201c6c0ca2e07f7` | Independent bootstrap branch. |
+| G08 | `codex/closeout-g08-mkmacro-run-history-20261029-r01` | `e505f961849475ecf3affda40064b96a60243f9d` | Independent bootstrap branch. |
+| G09 | `codex/closeout-g09-activity-center-retirement-20261029-r01` | `174b6fff5eba1a28de6fb8b73d3a5ea77c91187a` | Independent bootstrap branch. |
+| G10 | `codex/closeout-g10-residual-defect-triage-integration-20261029-r01` | `535993a4fa32a5646e0ade6076c6941a71d47230` | Dependent branch from accepted integration `ea3a7007e23090c1c2b13ea9018b29754579e4ef`; later supplied packet `874065dbe21f227c4c3189dc859ba5521b210eb5` pushed. Final tip pending. |
+
+Integration branch `codex/closeout-integration-20261029-r01` baseline local and remote-tracking tip: `ea3a7007e23090c1c2b13ea9018b29754579e4ef`. No new refs were queried by this documentation writer.
+
+## Historical staged and closure events — preserved
+
+These entries are historical observations in their original order, including formerly pending states and abbreviated refs. The current table above supersedes their next-step instructions; [accepted checkpoints](ACCEPTED_CHECKPOINTS.md) preserves cumulative import details.
+
+
 - master / origin/master: 4a1283e6edd2c245f562a07dbe3dcc6a61061eed
 - codex/closeout-integration-20261029-r01: created from MASTER_START; bootstrap SHA recorded in next event.
 - Independent goals start at exact PROGRAM_BOOTSTRAP_SHA. G03 requires accepted G02 tip; G10 starts at accepted integration tip.
