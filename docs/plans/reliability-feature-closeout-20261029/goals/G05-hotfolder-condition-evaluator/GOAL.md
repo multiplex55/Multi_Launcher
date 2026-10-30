@@ -164,3 +164,5 @@ Size/age/literal conditions and Test Rule are implemented with accepted safety p
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
 
 - Runtime2026-10-30: prior goals dispositions closed sequentially throughG04; G05 independent frombootstrap. Master4a1283e6 unchanged after fetch, integration5873cb8a authoritative. Conditions fail-closed safety remains until actual evidence. Planner next; no source/test/native work at baseline.
+
+- Scope clarification2026-10-29session/2026-10-30UTC: necessary later narrow existing file_operations HotFolder ownership handoff and actual GUI dispatch binding are authorized by parent to avoid copied-evidence/path-reopen mismatch. No duplicate FFI/reader/framework/externalauthority redesign. M1-A constrained to existing model/execution/minimalvisibility/shared semantics, all condition gates retained. Planner safety contract/packet persisted; source implementation pending.
