@@ -1,0 +1,13 @@
+# G07 planner role record
+
+Date: 2026-10-30. Requested Planner Astra/max; configured `.codex/agents/planner.toml` remains Sol/high; actual serving backend UNVERIFIED. Parent-supplied goal tip `eaf8aac2876fdc6efb363b4a444529c3a450e285`, bootstrap `02d0ac64`, unchanged master `4a1283e6`, authoritative separate integration `92c7076a`.
+
+Read the complete active G07 Goal/Kickstart, execution baseline/progress/risk/verification and active verification policy. Inspected current archive model/catalog/plan, physical IDs/revision/local-header facts, command/GUI reachability, dependency declaration and relevant tests. Inspected only the native file-operations admission/read/stage/no-replace/cleanup owners needed for the first checkpoint, plus the unsuitable atomic state-replacement primitive. Verified relevant Windows/ZIP semantics against the primary references linked in the decision record.
+
+Observed: read-only archive catalog/planning has no production GUI/command callers. It intentionally does not own source handles or validate local headers/payloads. Existing native file primitives offer a bounded implementation path. Ancestor handles currently permit write sharing, so safe reparse-conversion containment must be proved or narrowly strengthened inside the native owner. The existing stage opener requests replacement-specific security rights; archive-only rights may be narrowed without changing other consumers. Neither observation establishes a host failure or permits assuming success.
+
+Produced [SECURITY_FORMAT_DECISION.md](SECURITY_FORMAT_DECISION.md) and [M1_A_HANDOFF.md](M1_A_HANDOFF.md): one source-session/strict flat Stored ZIP32/local-validation/native-reservation checkpoint, concrete actual native acceptance and bounded stop gates. Parent's scope clarification authorizes only the required narrow archive policy/adapter within the existing native owner, preserving shared defaults. Writer/UI remain gated until the prior proof is accepted.
+
+Evidence: SOURCE_OBSERVED and primary-document corroboration only. No production source, Cargo/build/test/native probe, app/UI, Git mutation or agent dispatch. Wrote only these three G07 planner Markdown documents. Test names are source-observed, not executed. Native success, adversarial containment and cleanup remain NOT_RUN.
+
+Disposition: DESIGN_READY for one writer after M0-A commit. No distinct actionable follow-on finding: NO_ACTION. Known missing writer/proof and excluded formats are active G07 work, not extra initiatives. A complete continuation pair is required if the actual bounded native proof fails; there is no proven failure to invent one for now. Parent owns authoritative progress, source commits/pushes and integration.

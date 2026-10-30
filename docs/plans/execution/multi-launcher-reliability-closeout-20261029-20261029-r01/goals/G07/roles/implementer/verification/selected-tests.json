@@ -1,0 +1,62 @@
+[
+  {
+    "binary": "multi_launcher",
+    "test": "archive::catalog::tests::metadata_catalog_preserves_physical_duplicates_and_never_reads_payloads",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "test": "archive::catalog::tests::unsupported_encrypted_unsafe_and_bad_encoding_entries_remain_visible",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "test": "archive::plan::tests::physical_duplicate_names_keep_distinct_ids_and_conflict_only_when_both_selected",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "test": "archive::plan::tests::read_only_occupancy_probe_blocks_existing_file_and_is_bounded",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "test": "archive::plan::tests::windows_case_separator_and_file_ancestor_collisions_are_rejected",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "test": "archive::preparation::tests::g07_captured_quotas_cannot_be_raised_and_refuse_early",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "test": "archive::preparation::tests::g07_physical_duplicates_bind_the_selected_range_without_reading_payload",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "test": "archive::preparation::tests::g07_physical_headers_ranges_and_execution_subset_refuse_before_reservation",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "test": "archive::preparation::tests::g07_preparation_cancellation_and_create_failure_abort_owned_stages",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "test": "file_operations::archive_io::tests::g07_native_source_holding_and_ancestor_conversion_are_fenced",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "test": "file_operations::archive_io::tests::g07_native_stages_publish_no_replace_and_retire_exact_ownership",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "test": "file_operations::tests::m10c_native_copy_move_rename_collision_and_stream_refusal_stay_in_fixture",
+    "ignored": false
+  }
+]

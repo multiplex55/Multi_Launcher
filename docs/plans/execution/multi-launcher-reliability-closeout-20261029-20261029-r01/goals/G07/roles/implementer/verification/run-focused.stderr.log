@@ -1,0 +1,293 @@
+warning: variant `Unknown` is never constructed
+   --> vendor\epaint\src\text\font.rs:361:5
+    |
+357 | pub(crate) enum ShapeBufferProvenance {
+    |                 --------------------- variant in this enum
+...
+361 |     Unknown,
+    |     ^^^^^^^
+    |
+    = note: `ShapeBufferProvenance` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `epaint` (lib) generated 1 warning
+warning: use of deprecated constant `std::f32::EPSILON`: replaced by the `EPSILON` associated constant on `f32`
+  --> vendor\egui\src\containers\scene.rs:79:42
+   |
+79 |             zoom_range: Rangef::new(f32::EPSILON, 1.0),
+   |                                          ^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: `egui` (lib) generated 1 warning
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:720:19
+    |
+720 |     pub fn pixels(&self) -> Pixels<P> {
+    |                   ^^^^^     ^^^^^^^^^ the same lifetime is hidden here
+    |                   |
+    |                   the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+720 |     pub fn pixels(&self) -> Pixels<'_, P> {
+    |                                    +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:733:17
+    |
+733 |     pub fn rows(&self) -> Rows<P> {
+    |                 ^^^^^     ^^^^^^^ the same lifetime is hidden here
+    |                 |
+    |                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+733 |     pub fn rows(&self) -> Rows<'_, P> {
+    |                                +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:742:29
+    |
+742 |     pub fn enumerate_pixels(&self) -> EnumeratePixels<P> {
+    |                             ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                             |
+    |                             the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+742 |     pub fn enumerate_pixels(&self) -> EnumeratePixels<'_, P> {
+    |                                                       +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:754:27
+    |
+754 |     pub fn enumerate_rows(&self) -> EnumerateRows<P> {
+    |                           ^^^^^     ^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                           |
+    |                           the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+754 |     pub fn enumerate_rows(&self) -> EnumerateRows<'_, P> {
+    |                                                   +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:898:23
+    |
+898 |     pub fn pixels_mut(&mut self) -> PixelsMut<P> {
+    |                       ^^^^^^^^^     ^^^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+898 |     pub fn pixels_mut(&mut self) -> PixelsMut<'_, P> {
+    |                                               +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:911:21
+    |
+911 |     pub fn rows_mut(&mut self) -> RowsMut<P> {
+    |                     ^^^^^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                     |
+    |                     the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+911 |     pub fn rows_mut(&mut self) -> RowsMut<'_, P> {
+    |                                           +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:918:33
+    |
+918 |     pub fn enumerate_pixels_mut(&mut self) -> EnumeratePixelsMut<P> {
+    |                                 ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                 |
+    |                                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+918 |     pub fn enumerate_pixels_mut(&mut self) -> EnumeratePixelsMut<'_, P> {
+    |                                                                  +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:931:31
+    |
+931 |     pub fn enumerate_rows_mut(&mut self) -> EnumerateRowsMut<P> {
+    |                               ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                               |
+    |                               the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+931 |     pub fn enumerate_rows_mut(&mut self) -> EnumerateRowsMut<'_, P> {
+    |                                                              +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\image.rs:932:15
+    |
+932 |     fn pixels(&self) -> Pixels<Self>
+    |               ^^^^^     ^^^^^^^^^^^^ the same lifetime is hidden here
+    |               |
+    |               the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+932 |     fn pixels(&self) -> Pixels<'_, Self>
+    |                                +++
+
+warning: `image` (lib) generated 9 warnings (run `cargo fix --lib -p image` to apply 9 suggestions)
+warning: constant `SCANNER_CANCELLATION_INTERVAL` is never used
+  --> crates\multi_launcher_table_core\src\lib.rs:53:7
+   |
+53 | const SCANNER_CANCELLATION_INTERVAL: usize = 4096;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scanner_cancellation_checkpoint` is never used
+    --> crates\multi_launcher_table_core\src\lib.rs:1031:4
+     |
+1031 | fn scanner_cancellation_checkpoint(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `end_offset` is never read
+  --> crates\multi_launcher_table_core\src\stream_scan.rs:25:9
+   |
+22 | pub(crate) struct StreamRecord {
+   |                   ------------ field in this struct
+...
+25 |     pub end_offset: u64,
+   |         ^^^^^^^^^^
+   |
+   = note: `StreamRecord` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: `multi_launcher_table_core` (lib) generated 3 warnings
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+  --> src\archive\preparation.rs:85:14
+   |
+85 |             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+   |              ^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+   |
+85 -             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+85 +             .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+   |
+
+warning: unused variable: `replaced_scan_job`
+    --> src\table_utility_session.rs:3521:13
+     |
+3521 |         let replaced_scan_job = session.active_key.expect("the replaceable scan has a key");
+     |             ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_replaced_scan_job`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `multi_launcher` (lib test) generated 2 warnings (run `cargo fix --lib -p multi_launcher --tests` to apply 2 suggestions)
+    Finished `fast-dev` profile [unoptimized + debuginfo] target(s) in 1.61s
+────────────
+ Nextest run ID 76e14960-95e9-4729-8fb4-c071d7d77bf4 with nextest profile: default
+    Starting 12 tests across 1 binary (6450 tests skipped)
+        PASS [   0.031s] ( 1/12) multi_launcher archive::plan::tests::read_only_occupancy_probe_blocks_existing_file_and_is_bounded
+        PASS [   0.038s] ( 2/12) multi_launcher archive::preparation::tests::g07_physical_duplicates_bind_the_selected_range_without_reading_payload
+        FAIL [   0.052s] ( 3/12) multi_launcher archive::preparation::tests::g07_physical_headers_ranges_and_execution_subset_refuse_before_reservation
+  stdout ───
+
+    running 1 test
+    test archive::preparation::tests::g07_physical_headers_ranges_and_execution_subset_refuse_before_reservation ... FAILED
+
+    failures:
+
+    failures:
+        archive::preparation::tests::g07_physical_headers_ranges_and_execution_subset_refuse_before_reservation
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6461 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'archive::preparation::tests::g07_physical_headers_ranges_and_execution_subset_refuse_before_reservation' (12852) panicked at src\archive\preparation.rs:426:10:
+    called `Result::unwrap()` on an `Err` value: Malformed(InvalidEntryRecord)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.067s] ( 4/12) multi_launcher archive::plan::tests::physical_duplicate_names_keep_distinct_ids_and_conflict_only_when_both_selected
+        PASS [   0.069s] ( 5/12) multi_launcher archive::preparation::tests::g07_captured_quotas_cannot_be_raised_and_refuse_early
+        PASS [   0.075s] ( 6/12) multi_launcher archive::catalog::tests::unsupported_encrypted_unsafe_and_bad_encoding_entries_remain_visible
+        PASS [   0.080s] ( 7/12) multi_launcher archive::plan::tests::windows_case_separator_and_file_ancestor_collisions_are_rejected
+        PASS [   0.083s] ( 8/12) multi_launcher archive::catalog::tests::metadata_catalog_preserves_physical_duplicates_and_never_reads_payloads
+        FAIL [   0.126s] ( 9/12) multi_launcher file_operations::archive_io::tests::g07_native_source_holding_and_ancestor_conversion_are_fenced
+  stdout ───
+
+    running 1 test
+    test file_operations::archive_io::tests::g07_native_source_holding_and_ancestor_conversion_are_fenced ... FAILED
+
+    failures:
+
+    failures:
+        file_operations::archive_io::tests::g07_native_source_holding_and_ancestor_conversion_are_fenced
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6461 filtered out; finished in 0.09s
+
+  stderr ───
+
+    thread 'file_operations::archive_io::tests::g07_native_source_holding_and_ancestor_conversion_are_fenced' (30116) panicked at src\file_operations.rs:9615:68:
+    called `Result::unwrap()` on an `Err` value: Custom { kind: InvalidFilename, error: NativeIoContext { operation: "GetFileAttributesW", source: Os { code: 123, kind: InvalidFilename, message: "The filename, directory name, or volume label syntax is incorrect." } } }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.179s] (10/12) multi_launcher archive::preparation::tests::g07_preparation_cancellation_and_create_failure_abort_owned_stages
+  stdout ───
+
+    running 1 test
+    test archive::preparation::tests::g07_preparation_cancellation_and_create_failure_abort_owned_stages ... FAILED
+
+    failures:
+
+    failures:
+        archive::preparation::tests::g07_preparation_cancellation_and_create_failure_abort_owned_stages
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6461 filtered out; finished in 0.14s
+
+  stderr ───
+
+    thread 'archive::preparation::tests::g07_preparation_cancellation_and_create_failure_abort_owned_stages' (30048) panicked at src\archive\preparation.rs:680:88:
+    called `Result::unwrap()` on an `Err` value: Io(Os { code: 123, kind: InvalidFilename, message: "The filename, directory name, or volume label syntax is incorrect." })
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.155s] (11/12) multi_launcher file_operations::archive_io::tests::g07_native_stages_publish_no_replace_and_retire_exact_ownership
+  stdout ───
+
+    running 1 test
+    test file_operations::archive_io::tests::g07_native_stages_publish_no_replace_and_retire_exact_ownership ... FAILED
+
+    failures:
+
+    failures:
+        file_operations::archive_io::tests::g07_native_stages_publish_no_replace_and_retire_exact_ownership
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6461 filtered out; finished in 0.13s
+
+  stderr ───
+
+    thread 'file_operations::archive_io::tests::g07_native_stages_publish_no_replace_and_retire_exact_ownership' (26988) panicked at src\file_operations.rs:9703:58:
+    called `Result::unwrap()` on an `Err` value: Custom { kind: Uncategorized, error: NativeIoContext { operation: "SetFileInformationByHandle(FileRenameInfo, no replace)", source: Os { code: 32, kind: Uncategorized, message: "The process cannot access the file because it is being used by another process." } } }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.312s] (12/12) multi_launcher file_operations::tests::m10c_native_copy_move_rename_collision_and_stream_refusal_stay_in_fixture
+────────────
+     Summary [   0.449s] 12 tests run: 8 passed, 4 failed, 6450 skipped
+        FAIL [   0.052s] ( 3/12) multi_launcher archive::preparation::tests::g07_physical_headers_ranges_and_execution_subset_refuse_before_reservation
+        FAIL [   0.126s] ( 9/12) multi_launcher file_operations::archive_io::tests::g07_native_source_holding_and_ancestor_conversion_are_fenced
+        FAIL [   0.179s] (10/12) multi_launcher archive::preparation::tests::g07_preparation_cancellation_and_create_failure_abort_owned_stages
+        FAIL [   0.155s] (11/12) multi_launcher file_operations::archive_io::tests::g07_native_stages_publish_no_replace_and_retire_exact_ownership
+error: test run failed

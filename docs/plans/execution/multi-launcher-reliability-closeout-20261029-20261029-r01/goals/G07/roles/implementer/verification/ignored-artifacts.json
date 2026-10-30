@@ -1,0 +1,27 @@
+[
+  {
+    "path": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g07-m1a-20261030-r01\\invoke-focused.ps1",
+    "bytes": 3203,
+    "sha256": "41E121F3AF2609D0A838B3AEC78B226B496B262900554B910408585410331145"
+  },
+  {
+    "path": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g07-m1a-20261030-r01\\prepare-correction.all-tests.json",
+    "bytes": 1184769,
+    "sha256": "996E2963C5C54FC51AEF93FB4B8B1831FF1ED4853FB7589EDE310580D07B732B"
+  },
+  {
+    "path": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g07-m1a-20261030-r01\\prepare-final.all-tests.json",
+    "bytes": 1184769,
+    "sha256": "996E2963C5C54FC51AEF93FB4B8B1831FF1ED4853FB7589EDE310580D07B732B"
+  },
+  {
+    "path": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g07-m1a-20261030-r01\\prepare-initial.all-tests.json",
+    "bytes": 0,
+    "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+  },
+  {
+    "path": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g07-m1a-20261030-r01\\prepare-native-isolation.all-tests.json",
+    "bytes": 1184769,
+    "sha256": "996E2963C5C54FC51AEF93FB4B8B1831FF1ED4853FB7589EDE310580D07B732B"
+  }
+]
