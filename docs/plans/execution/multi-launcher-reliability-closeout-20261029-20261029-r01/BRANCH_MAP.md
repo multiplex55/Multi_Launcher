@@ -22,3 +22,5 @@
 - G05 branch codex/closeout-g05-hotfolder-condition-evaluator-20261029-r01 from bootstrap02d0ac64; baseline d845e0aab65f49913996791e26e8951d69a0637c and safety contract c009b533059acb9404f453484b053363dd1d51af pushed. No G05 source yet accepted/imported; M1-A metadata foundation next.
 
 - G05 M1-A source8b4d01a4cff48c2bdfaa30f760c03e91cbb6f9be reviewed without substantive findings; review donor b14967e5a1eaddfad9290da2847ec90997e5bb53. Imports: d845e0aa->ea4d13ff, c009b533->fa54142a,8b4d01a4->8f6befe70c402157f99bdae3404513ca02e46ecd,b14967e5->97f64137a166f4a2728c9e91685477077da2b33d via cherry-pick -x. Each normally pushed. Foundation only; whole G05 in progress/conditions refused.
+
+- G05 B1 packet1c5b3b88acc2c285a08b00d3aeb6406bbe08c045 pushed on same goal branch. Pure streaming-evidence checkpoint only; native B2, editor/TestRule, final proof/enablement remain pending. No new source imported.
