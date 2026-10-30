@@ -37,3 +37,10 @@ Dated scope clarification(session2026-10-29): parent authorizes necessary narrow
 Later first_matching_rule selects first fully matching admissible rule, not first filename match. Unknown/changed never permits falling through to another action. Preserve current unconditioned order. TestRule same pure predicate/separate sample admission; never production lease/action/journal/live watcher. Editor identity/draft revision result authority; obsolete bounded reads cancel/retire. Preserve v1 read-only load/intentionalv2upgrade/defaultdisabled/untouchedrules/existingv2fields/sanitized quarantine. No schema, idle polling, recursive backfill, extra production worker/global config.
 
 Keep FILE_CONDITIONS_NOT_EVALUATED in model/capability/runtime/execution until evaluator/reader/editor/TestRule/native through-effect proof and independent review complete. M1-A foundation cannot authorize conditioned effects.
+## 2026-10-29 — ordered M1-B foundation
+
+M1-B is split at its existing ownership boundary. B1 implements pure streaming literal evidence/composition under one bounded literal set, shared8 MiB/64 KiB/two-second monotonic limits. Both modes require complete valid UTF-8/no NUL/genuine EOF/terminal checks; provisional hit never bypasses later validation.
+
+The stream owns no filesystem reader and grants no authority. Its cancellation/deadline checks prove bounded cooperative parser processing only, not blocked native-read interruption/retirement. Current ScanCancellation AtomicBool and synchronous hash_reader checks leave native proof required. Next checkpoint adapts existing Hot Folder owner, never duplicates a reader or treats cooperative checks as sufficient.
+
+Next checkpoint also must hold/verify transfer through effect, avoid guard/reopen sharing conflict and bind queued launcher/MkMacro at actual start with existing authorization/cancellation/completion owners. All FILE_CONDITIONS_NOT_EVALUATED gates remain until M1-C/M2/M3/full independent acceptance. B1 is not native readiness or M1-B/G05 completion. Remaining work stays active G05 scope, not a separate deferral.

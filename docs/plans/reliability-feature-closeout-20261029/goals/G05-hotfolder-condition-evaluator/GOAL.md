@@ -170,3 +170,5 @@ Size/age/literal conditions and Test Rule are implemented with accepted safety p
 - Runtime M1-A2026-10-30: corrected19/19 focused tests; two approved source modules only. All configured conditions still refused. Initial4fixture failures preserved; representable subsecond timestamps/real WrongServiceLease correction, no production weakening. Prep381.358s, incremental88.824s, finalrun4.742s within caps; cleanup complete. Parent source checkpoint then independent review, no M1-B work yet.
 
 - Independent M1-A review2026-10-30: no substantive findings, metadata/binding foundation accepted at8b4d01a4 only. Parent records/integrates reviewed checkpoint and requests fresh M1-B packet. Whole G05 remains IN_PROGRESS; no native lifetime/reader/queued effect/editor/TestRule acceptance.
+
+- M1-B ordered scope amendment2026-10-30UTC: first B1 pure bounded streaming literal evidence/composition; no filesystem reader or condition enablement. Next native owner/cancellation/retirement/source-to-effect/actual queued-start packet remains required. All guards stay closed. This split follows existing ownership, not a deferral or whole-feature acceptance.
