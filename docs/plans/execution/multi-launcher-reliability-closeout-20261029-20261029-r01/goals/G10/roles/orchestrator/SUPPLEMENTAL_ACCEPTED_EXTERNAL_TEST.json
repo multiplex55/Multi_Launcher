@@ -1,0 +1,15 @@
+{
+  "observed_utc": "2026-10-30 08:43:35 UTC",
+  "goal": "G06",
+  "path": "tests/settings_editor.rs",
+  "donor": "d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436",
+  "accepted_import": "b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7",
+  "donor_blob": "8ab1163c63889beebf622d5d47303fd97ce97306",
+  "current_blob": "8ab1163c63889beebf622d5d47303fd97ce97306",
+  "equal": true,
+  "change": "Three existing to_settings test callers unwrap the newly fallible conversion; no assertion removed or behavior weakened.",
+  "prior_identity_receipt": "goals/G06/roles/implementer/verification/r1/prepare-r1.receipt.json",
+  "execution_limit": "External fixture not selected in G06's 29 lib/bin cases; no G10 Cargo. Matching source identity is not an external test execution claim.",
+  "coverage": "Original receipt covers20 src Rust paths; this adds1 external Rust test path. Full non-documentation Git delta is21 paths, with no other changed production/config/manifest files.",
+  "stage": "Provenance coverage correction only; no source edit."
+}

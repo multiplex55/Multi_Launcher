@@ -11,11 +11,11 @@ Observation: parent branch receipt `2026-10-30T07:46:39.1610151Z`, source parity
 | Last production behavior change | `b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7` |
 | G10 original dependency baseline | `535993a4fa32a5646e0ade6076c6941a71d47230` from accepted integration |
 | G10 supplied planner packet | `874065dbe21f227c4c3189dc859ba5521b210eb5`; parent reported committed/pushed |
-| Accepted G10 review/closing import | Review7318e862; closing `792b1a531a4b5a392be977de94afee4d745b8685` -> `2234ed892f8a3a5a6b2feb0579ac160f32e26aad`, normally pushed; PR host facts pending |
+| Accepted G10 review/closing import | Review7318e862; closing `792b1a531a4b5a392be977de94afee4d745b8685` -> `2234ed892f8a3a5a6b2feb0579ac160f32e26aad`, normally pushed; PR1459 open, creation head `b128db10b0cb1652c4f28c96570ef282014c18c9`, base `4a1283e6edd2c245f562a07dbe3dcc6a61061eed` |
 
-## Accepted source/test delta — 20 unique paths
+## Accepted source/test delta — 21 unique Rust paths (20 src + 1 external test)
 
-Each row records the approved closing source donor, its exact blob, current baseline blob and accepted cumulative import carrying those bytes. Closing donor equality proves only the listed accepted path; it never authorizes wholesale import of a rejected donor tree. G01 and G05 earlier source lineage and all correction donors remain in [accepted checkpoint history](ACCEPTED_CHECKPOINTS.md). G09 rows are test-only. The four accepted owners are disjoint: G01 four paths, G05 four, G06 nine, G09 three.
+Each row records the approved closing source donor, its exact blob, current baseline blob and accepted cumulative import carrying those bytes. Closing donor equality proves only the listed accepted path; it never authorizes wholesale import of a rejected donor tree. G01 and G05 earlier source lineage and all correction donors remain in [accepted checkpoint history](ACCEPTED_CHECKPOINTS.md). G09 rows are test-only. The four accepted owners are disjoint: G01 four paths, G05 four, G06 ten (nine src plus one external test), G09 three.
 
 | Goal | Path | Approved closing donor | Donor blob | Current baseline blob | Accepted cumulative source/test import |
 |---|---|---|---|---|---|
@@ -36,6 +36,7 @@ Each row records the approved closing source donor, its exact blob, current base
 | G06 | `src/settings_editor/save.rs` | `d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436` | `482da92cdb0c1bf07751502c75c9fcfcbfe61f82` | `482da92cdb0c1bf07751502c75c9fcfcbfe61f82` | `b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7` |
 | G06 | `src/settings_editor/state.rs` | `d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436` | `981e8d23308ea121cba97ece47138d07836d8237` | `981e8d23308ea121cba97ece47138d07836d8237` | `b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7` |
 | G06 | `src/settings_save.rs` | `d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436` | `443d33aaa82cf3fad6eca2559ccab4163ebc469b` | `443d33aaa82cf3fad6eca2559ccab4163ebc469b` | `b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7` |
+| G06 | `tests/settings_editor.rs` | `d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436` | `8ab1163c63889beebf622d5d47303fd97ce97306` | `8ab1163c63889beebf622d5d47303fd97ce97306` | `b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7` |
 | G09 | `src/duplicate_finder/tests.rs` | `174b6fff5eba1a28de6fb8b73d3a5ea77c91187a` | `18788605f3024df573c89c8703c520e4cf3c903d` | `18788605f3024df573c89c8703c520e4cf3c903d` | `fc9e5c7cbb509397b47c4d7f2902899c9d04dd43` |
 | G09 | `src/gui/screenshot_capture.rs` | `174b6fff5eba1a28de6fb8b73d3a5ea77c91187a` | `168cb728eedc115f001880e15a9fd5d6d7f30172` | `168cb728eedc115f001880e15a9fd5d6d7f30172` | `fc9e5c7cbb509397b47c4d7f2902899c9d04dd43` |
 | G09 | `src/thread_reaper.rs` | `174b6fff5eba1a28de6fb8b73d3a5ea77c91187a` | `ab1efa9dc88b3efd87ba7d9986fc052a29acf128` | `ab1efa9dc88b3efd87ba7d9986fc052a29acf128` | `fc9e5c7cbb509397b47c4d7f2902899c9d04dd43` |
@@ -72,7 +73,7 @@ The original receipt covers 11 `src` owner/path entries over 10 physical paths (
 | `Cargo.toml` | `994a55fea039ca79614fbb019ac1b05cfab7381b` | `994a55fea039ca79614fbb019ac1b05cfab7381b` | true |
 | `Cargo.lock` | `648e143ad2ca902e04ae9b7d4cf57899a2db8380` | `648e143ad2ca902e04ae9b7d4cf57899a2db8380` | true |
 
-Planner's scoped changed-path observation reports no changed `crates`, `.cargo` or `.codex` path. The exact 20-path accepted delta and the two unchanged manifest/lock identities support evidence reuse; editing documentation does not require a new Cargo run. Shared references are not changed-owner overlap. Only an actual conflict or source interaction identified by final review warrants a newly scoped check decided by parent.
+Planner's scoped changed-path observation reports no changed `crates`, `.cargo` or `.codex` path. The exact 21-path accepted delta and the two unchanged manifest/lock identities support evidence reuse; editing documentation does not require a new Cargo run. Shared references are not changed-owner overlap. Only an actual conflict or source interaction identified by final review warrants a newly scoped check decided by parent.
 
 ## Verification and exclusion truth
 
@@ -83,3 +84,10 @@ Planner's scoped changed-path observation reports no changed `crates`, `.cargo` 
 - [G08 R1 preparation](goals/G08/roles/implementer/verification/r1-prepare.receipt.json): timed_out true, cap32s, actual drain101.880s, late exit0 and no qualifying R1 test run. Late successful compilation does not accept source or revive budget.
 
 Counts are separate checkpoint evidence, not one combined unique suite. No G10 source, Cargo, build, native or CI execution. Parent must record final source/no-config parity after materialization/import and host-confirmed PR facts; this baseline is never renamed as a final receipt.
+
+
+## Complete-delta amendment and publication
+
+The original baseline source receipt enumerated20 `src` paths, not the complete Rust delta. The [external-test supplement](goals/G10/roles/orchestrator/SUPPLEMENTAL_ACCEPTED_EXTERNAL_TEST.json) adds the required G06 fixture caller migration above: three `.unwrap()` adaptations, assertions unchanged, exact donor/import/current blob equality, already present in G06 R1 source identities. This external fixture was NOT selected by the recorded29 lib/bin cases; no execution is inferred. The [reviewer amendment](goals/G10/roles/reviewer/ROLE_RECORD.md) accepts this provenance correction. Full non-documentation Git delta is21 Rust paths and no other files; all remain at accepted donor bytes. Original receipts remain historical and unchanged.
+
+[PR1459](https://github.com/multiplex55/Multi_Launcher/pull/1459) is open, ready for review and unmerged. [Publication receipt](goals/G10/roles/orchestrator/PUBLICATION_RECEIPT.json) records creation head b128db10b0cb1652c4f28c96570ef282014c18c9, base 4a1283e6edd2c245f562a07dbe3dcc6a61061eed, later mergeable=true, no reviews and no PR-triggered workflow runs returned. Empty workflows are not a CI pass. Final documentation commits do not change source; the live PR head and orchestrator final response identify the last receipt commit without embedding its own unknown SHA here.

@@ -7,14 +7,14 @@ INTEGRATION_BRANCH: codex/closeout-integration-20261029-r01
 INTEGRATION_LAST_ACCEPTED_DOCS_SHA: 2234ed892f8a3a5a6b2feb0579ac160f32e26aad (G10 accepted documentation; subsequent publication receipts only)
 NEWEST_ACCEPTED_TEST_SOURCE_SHA: fc9e5c7cbb509397b47c4d7f2902899c9d04dd43
 LAST_ACCEPTED_PRODUCTION_SHA: b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7
-ACTIVE_GOAL: G10 / accepted integration complete; PR publication next
-ACTIVE_WRITER: NONE after proposal handoff; parent owns materialization and publication
+ACTIVE_GOAL: NONE; G00-G10 execution closeout complete
+ACTIVE_WRITER: NONE
 G10_SUPPLIED_HEAD: 874065dbe21f227c4c3189dc859ba5521b210eb5 (parent reports committed/pushed packet; not final closing head)
-NEXT_EXACT_ACTION: open one reviewed integration PR to freshly verified master4a1283e6, then record actual host head/base/check/review facts. Accepted G10 imports are complete.
-FINAL_ACCEPTANCE: PENDING
-FINAL_PR_URL: PENDING
-FINAL_PR_HEAD_AND_PUSH: PENDING
-FINAL_CI_AND_REVIEW: independent cumulative review ACCEPTED on7318e862; GitHub checks/reviews PENDING
+NEXT_EXACT_ACTION: Human review PR1459 using MANUAL_REVIEW_CHECKLIST.md; select any future canonical pair explicitly. No automatic merge or deferred-feature restart.
+FINAL_ACCEPTANCE: ACCEPTED_COMPLETE for program closeout; feature dispositions below remain partial/deferred
+FINAL_PR_URL: https://github.com/multiplex55/Multi_Launcher/pull/1459 (OPEN, ready for review, NOT MERGED)
+FINAL_PR_HEAD_AND_PUSH: Publication head b128db10b0cb1652c4f28c96570ef282014c18c9 normally pushed; live integration/PR ref carries subsequent documentation receipts. The orchestrator final response reports the final receipt commit SHA.
+FINAL_CI_AND_REVIEW: Independent cumulative review ACCEPTED 7318e862509113ed44b857483ff28219ea8700b7 plus named external-fixture amendment; host snapshot mergeable=true, reviews=[], PR-triggered workflow_runs=[] (not CI pass; first-page scope only).
 
 Accepted production comprises G01 Diff fixes, gated G05 foundations and G06 editor/transaction. G09 changes tests only. G02/G07/G08 prototype source is excluded. Current progress is not completion of every feature.
 
@@ -30,7 +30,7 @@ Accepted production comprises G01 Diff fixes, gated G05 foundations and G06 edit
 | G07 | DEFERRED_WITH_DESIGN / FAILED_VERIFICATION / WRITER_DEFERRED | Reviewed documentation only; all archive prototype source excluded. Final 10/12. Guarded publication OS32; source/alias deletion endpoint UNKNOWN, no post-delete binding claim. [verification](goals/G07/VERIFICATION.md). | Resolve exact endpoint and guarded no-replace proof before Stored writer and later UI. |
 | G08 | DEFERRED_WITH_DESIGN / VERIFICATION_DEFERRED | History prototype and toolbar privacy correction excluded; recipes unimplemented. Initial 14/14 applies to old blobs only. R1 preparation timed out at 32s, drained101.880s/late exit0; R1 tests NOT_RUN. [verification](goals/G08/VERIFICATION.md). | Fresh source packet and explicit finite verification budget; privacy R1 review before history acceptance, then separately selected recipe policy. |
 | G09 | NO_CHANGE_REVALIDATED / TEST_STRENGTHENING_ACCEPTED | Selected retained/cancellable owner production logic unchanged; tests accepted. 12/12 serial run exit0. Native pre-read acquired file handle: held OS32, post-join exclusive success, warm restart/cleanup. Preparation numeric exit null retained. [verification](goals/G09/VERIFICATION.md). | No broader native or global retirement claim; no new initiative. |
-| G10 | IN_PROGRESS | Documentation reconciliation proposals only; final materialization/review/import/publication pending. Parent baseline receipts reused; bounded static checks only. No Cargo/build/native/CI. [verification](goals/G10/VERIFICATION.md). | Parent materializes, independently reviews cumulative scope, imports accepted docs, then records actual PR/head/check facts. |
+| G10 | ACCEPTED_COMPLETE | Accepted-only reconciliation, cumulative review, all 21 Rust paths and13 exclusions documented; PR1459 open/attached, source unchanged. | Human review; no automatic merge. |
 
 [Branch map](BRANCH_MAP.md), [accepted checkpoints](ACCEPTED_CHECKPOINTS.md), [integration manifest](INTEGRATION_MANIFEST.md), [dependencies](DEPENDENCY_MAP.md), [future work](FOLLOW_ON_CATALOG.md) and [final handoff](FINAL_HANDOFF.md) contain the exact boundaries. Do not resume the historical queue or allocate another test budget from this status.
 

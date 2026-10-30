@@ -2,7 +2,7 @@
 
 ## Current unresolved boundaries — G10 reconciliation
 
-Accepted integration baseline `ea3a7007e23090c1c2b13ea9018b29754579e4ef` contains only reviewed G01, gated G05, corrected G06 and G09 test-only source scopes. [Manifest](INTEGRATION_MANIFEST.md) records exact accepted/excluded bytes. All other prototype code remains excluded, and G10 acceptance/publication remains pending.
+Accepted integration baseline `ea3a7007e23090c1c2b13ea9018b29754579e4ef` contains only reviewed G01, gated G05, corrected G06 and G09 test-only source scopes. [Manifest](INTEGRATION_MANIFEST.md) records exact accepted/excluded bytes. All other prototype code remains excluded, and G10 reconciliation is accepted and PR1459 is open/unmerged.
 
 - G02 native parent admission fails OS5 before staging; ancestor/cause unknown. All lifecycle/native/publication/cancel/cleanup/recovery acceptance remains necessary before G03. No guard weakening or environment theory is adopted.
 - G04 lacks the supported secondary-drag, binary and actual clipboard/output observations needed for its native protocol. No defect or unit/native pass is inferred. G06 separately lacks supported owned-window discovery; its exact build and29 tests do not establish native editor/focus proof.
@@ -12,7 +12,7 @@ Accepted integration baseline `ea3a7007e23090c1c2b13ea9018b29754579e4ef` contain
 - Original queue04/05 user stops are distinct from07/08/13 historical proof stops and10/17 dependencies. Missing historical local receipts stay absent; Planner's pinned remote matrix is historical evidence, not a recreated local run.
 - AUD-F001 remains already fixed/merged; Diff H0/native authority and search admission limits remain closed decisions. No new query/ranker/UI, generic framework or runtime defect initiative is authorized.
 - Provenance coverage correction: the original baseline excluded11 `src` entries omitted two G02 crate files from its table. The supplemental parent receipt proves those files baseline-identical; the complete manifest now records13 per-goal entries/12 physical paths. No imported-source issue or new initiative was found.
-- Final cumulative review/PR/head/push/check facts remain PENDING. No source-overlap or manifest drift is shown by the parent baseline; no new Cargo is justified solely by documentation. Parent alone resolves a concrete later conflict and verifies materialized source/config parity.
+- Cumulative review accepted; PR1459 open, ready for review and unmerged. Host publication snapshot has no submitted reviews or PR-triggered workflow runs returned; no CI/approval pass claimed. No source-overlap or manifest drift is shown by the parent baseline; no new Cargo is justified solely by documentation. Parent alone resolves a concrete later conflict and verifies materialized source/config parity.
 
 [Dependencies](DEPENDENCY_MAP.md), [canonical continuations](FOLLOW_ON_CATALOG.md) and [single final checklist](MANUAL_REVIEW_CHECKLIST.md) are current. G10 distinct new finding: **NO_ACTION**.
 
@@ -56,3 +56,6 @@ G05 B1 R1 RESOLVED_IN_G05 at944f9d0e, confirmed independently; received bytes di
 G08 decision: no source acceptance. Initialhistory14/14 did not cover sharedtoolbar; independentreview caughtP2privacyR1. Proposedcorrection unverified afterremaining32s prepdeadline; OSdenied ownedtree termination, processdrained101.880s/late0; no test or renewal, no remainingownedprocess. This is a scoped verification limit, not a native/UI impossibility claim. Preserve exactdonorbb8c5720/e505f961 and completecanonicalrestart; integrationdocs-only/sourceparityb9 unchanged. Recipes separatelydeferredwithpolicy. IndependentG09 next.
 
 G09 selected proof accepted with no productioncorrection. RetainedDuplicateFinder and cancellableScreenshot owner tests distinguishcancel/terminal/localtransferfromactualjoin. Nativeproof only acquired syntheticfilehandle beforeReadFile; no global/pending-I/O/capture/apartment claim. Initialcapacityerror resolved by single samerole retry, no model/configfallback. Preparationnumericexitnull retained; exact12/12runexit0 suffices withoutredundantbuild. No newfutureinitiative. G10 next fromaccepted integrationtip, notbootstrap.
+
+
+Final completeness correction:20srcpaths were not the entire Rust delta; the supplemental accepted externalfixture tests/settings_editor.rs brings it to21. Reviewer confirmed exact donor/import/current identity and unchanged assertions, with no extra test execution or source correction. All13excludedprototypeentries remain baseline/absent. Requested/configured/backend attribution remains explicit; no claim that the requested Astra pins prove actual serving identity.

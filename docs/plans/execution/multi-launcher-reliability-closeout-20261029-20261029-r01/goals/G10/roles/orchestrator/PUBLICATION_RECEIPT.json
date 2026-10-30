@@ -1,0 +1,25 @@
+{
+  "observed_utc": "2026-10-30 08:43:35 UTC",
+  "pr": {
+    "url": "https://github.com/multiplex55/Multi_Launcher/pull/1459",
+    "number": 1459,
+    "state": "open",
+    "merged": false,
+    "draft": false,
+    "mergeable": true,
+    "base": "master",
+    "base_sha": "4a1283e6edd2c245f562a07dbe3dcc6a61061eed",
+    "head": "codex/closeout-integration-20261029-r01",
+    "head_sha": "b128db10b0cb1652c4f28c96570ef282014c18c9",
+    "created_at": "2026-10-30T08:41:05Z",
+    "updated_at": "2026-10-30T08:41:05Z",
+    "commits": 52,
+    "changed_files": 399
+  },
+  "attachment": "Attached to current Codex task",
+  "workflow_runs": [],
+  "reviews": [],
+  "limits": "Workflow wrapper returns first page of pull-request-triggered GitHub Actions runs only; empty is not a CI pass. No merge or workflow rerun requested. PR creation mergeable=false was superseded by fetched mergeable=true.",
+  "publication_head": "b128db10b0cb1652c4f28c96570ef282014c18c9",
+  "later_changes": "Documentation receipts/provenance correction may follow; source remains unchanged."
+}

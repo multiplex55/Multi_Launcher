@@ -138,26 +138,25 @@ Final integration branch contains only accepted work; a truthful PR and dependen
 
 **Required closure record:** real branch/base, all milestone dispositions, exact changed files, accepted and rejected interfaces, focused test counts and command receipts, actual native proof or `NOT_RUN`, model/role provenance, reviewer disposition, commits/pushes, output/follow-on paths, source safety constraints, and exact next action. No PR merge/CI success may be claimed without host-confirmed evidence.
 
-## 10. Execution progress — mutable (Codex updates here)
+## 10. Execution progress - mutable (Codex updates here)
 
-- **Current state:** `IN_PROGRESS`.
-- **Run ID and branch:** `20261029-r01` / `codex/closeout-g10-residual-defect-triage-integration-20261029-r01`.
-- **Actual master:** `4a1283e6edd2c245f562a07dbe3dcc6a61061eed`. Authoritative run: [PROGRAM_STATUS](../../../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/PROGRAM_STATUS.md).
-- **Dependency base:** accepted integration `ea3a7007e23090c1c2b13ea9018b29754579e4ef`, not bootstrap; original G10 baseline `535993a4fa32a5646e0ade6076c6941a71d47230`.
-- **Current supplied packet/head:** `874065dbe21f227c4c3189dc859ba5521b210eb5`, parent reports committed/pushed. Final closing/import/PR SHA and host checks/review remain PENDING.
-- **Current milestone:** M2-A accepted cumulative review; parent integration and publication next.
-- **Active role/model:** Implementer requested Astra/xhigh, configured Luna/max unchanged, serving backend UNVERIFIED; no independent acceptance claim.
-- **Next action:** parent reviews/applies exact proposals, obtains cumulative review, imports accepted docs, creates/updates one PR and records actual host facts. No source/Cargo/native/CI work in this checkpoint.
-- **Blocker/scope:** no distinct runtime finding (NO_ACTION). Existing incomplete/native gates remain; documentation preparation is not final program acceptance.
+- **Current state:** `ACCEPTED_COMPLETE` for program closeout; feature partial/deferred dispositions remain explicit.
+- **Run ID/branch:** `20261029-r01`, `codex/closeout-g10-residual-defect-triage-integration-20261029-r01`; dependent base accepted integrationea3a7007.
+- **Master:** `4a1283e6edd2c245f562a07dbe3dcc6a61061eed`, unchanged. Closing donor `792b1a531a4b5a392be977de94afee4d745b8685` imported as `2234ed892f8a3a5a6b2feb0579ac160f32e26aad`; publication head `b128db10b0cb1652c4f28c96570ef282014c18c9`.
+- **Current milestone:** M3-A final source-of-truth reconciliation complete. Actual final documentation receipt SHA is reported by live integration/PR ref and orchestrator response, not guessed here.
+- **Active role:** NONE. Requested/configured/backend distinctions preserved; actual serving backend UNVERIFIED.
+- **PR:** [https://github.com/multiplex55/Multi_Launcher/pull/1459](https://github.com/multiplex55/Multi_Launcher/pull/1459), OPEN/ready-for-review/attached/UNMERGED. Internal cumulative review accepted; host reviews/workflows empty as observed, not approval/CI success.
+- **Next action:** human review using the single checklist; explicitly select future pairs. No automatic merge/restart.
+- **Scope:**21Rustpaths (20src+oneexternalfixture),13excludedprototypeentries, unchanged manifests/config. No G10 source/Cargo/native/CI campaign; no distinct new finding.
 
-| Milestone | State | Evidence / next action |
+| Milestone | State | Evidence |
 |---|---|---|
-| M0-A | ACCEPTED_COMPLETE | Eleven dispositions, branch/source provenance and dependencies reconciled. |
-| M1-A | NO_ACTION | Existing residuals preserved, no new distinct demonstrated defect. |
-| M1-B | ACCEPTED_COMPLETE | Accepted G10 docs imported through2234ed89; source unchanged. |
-| M2-A | ACCEPTED_COMPLETE | Independent cumulative review accepted7318e862, no substantive findings or extra tests. |
-| M2-B | PENDING | PR summary/handoff/checklist prepared; actual publication/head/check facts pending. |
-| M3-A | PENDING | Final reconciliation after parent operations; no merge/master-change claim. |
+| M0-A | ACCEPTED_COMPLETE | All eleven dispositions, branches, source and dependencies reconciled. |
+| M1-A | ACCEPTED_COMPLETE | Residual authority/gates and complete canonical pairs; NO_ACTION distinct defect. |
+| M1-B | ACCEPTED_COMPLETE | Accepted-only G10 docs imported through2234ed89; source unchanged. |
+| M2-A | ACCEPTED_COMPLETE | Cumulative review7318e862 and externalfixture coverage amendment accepted; no new tests. |
+| M2-B | ACCEPTED_COMPLETE | PR1459 open ready for review and attached; actual host snapshot recorded. |
+| M3-A | ACCEPTED_COMPLETE | Final handoff/checklist and current source-of-truth reconciliation; no merge. |
 
 ### Append-only execution events
 
@@ -166,3 +165,5 @@ Final integration branch contains only accepted work; a truthful PR and dependen
 - Runtime2026-10-30 M0-A IN_PROGRESS: dependentbranch codex/closeout-g10-residual-defect-triage-integration-20261029-r01 fromaccepted integrationea3a7007; unchangedfetchedmaster4a. Allpriorgoaldispositionspresent. Boundedreconciliationplanner next; no newproductionfeature/testcampaign.
 
 - 2026-10-30 G10 documentation reconciliation: current G10 mutable fields aligned with existing receipts and preserved contracts/events; no new feature/source/test acceptance. Authoritative current action remains parent G10 review/import/publication.
+
+- 2026-10-30 final publication: PR1459 open/attached/unmerged; cumulative and namedprovenance review accepted, source21paths/13exclusions exact. Finalhost facts recorded with first-pageworkflow limits; all deferred gates remain.

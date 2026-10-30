@@ -1,8 +1,8 @@
-# Final handoff — prepared, publication pending
+# Final handoff - PR open for review
 
-The accepted integration contains two bounded Diff fixes, gated Hot Folder foundations, the corrected Jump editor/save transaction and selected-owner test strengthening. It does not complete all original features. G10 prepares reconciliation only; independent cumulative review accepted `7318e862`; accepted documentation is imported through `2234ed892f8a3a5a6b2feb0579ac160f32e26aad`; PR publication remains pending.
+The sequential G00-G10 execution closeout is complete. The PR includes two bounded Diff fixes, gated Hot Folder foundations, corrected Jump editor/save validation and selected-owner test strengthening. Deferred features remain deferred; this is not feature-wide completion. Independent cumulative review and the named external-fixture provenance amendment are accepted. [PR1459](https://github.com/multiplex55/Multi_Launcher/pull/1459) is open, attached and unmerged.
 
-## Exact known refs and pending host facts
+## Exact refs and host publication snapshot
 
 | Fact | Value / evidence |
 |---|---|
@@ -13,8 +13,8 @@ The accepted integration contains two bounded Diff fixes, gated Hot Folder found
 | G10 branch | `codex/closeout-g10-residual-defect-triage-integration-20261029-r01`, dependent on accepted integration |
 | Parent-supplied committed/pushed packet | `874065dbe21f227c4c3189dc859ba5521b210eb5`; not final closing head |
 | Final G10 reviewer disposition/import | Cumulative review ACCEPTED on `7318e862`; closing `792b1a531a4b5a392be977de94afee4d745b8685` imported as `2234ed892f8a3a5a6b2feb0579ac160f32e26aad` |
-| Actual PR URL / reviewed head / base | PENDING |
-| Final normal push / host checks / host reviews | PENDING |
+| Actual PR URL / reviewed head / base | [PR1459](https://github.com/multiplex55/Multi_Launcher/pull/1459); review donor `7318e862509113ed44b857483ff28219ea8700b7`; creation head `b128db10b0cb1652c4f28c96570ef282014c18c9`; base `4a1283e6edd2c245f562a07dbe3dcc6a61061eed` |
+| Normal push / host checks / host reviews | All checkpoint pushes succeeded through publication head; host mergeable=true, reviews=[], PR-triggered workflow_runs=[] as observed. Not CI pass; final metadata commit follows and live PR head is authoritative. |
 | Merge/master change | NOT_PERFORMED by this checkpoint; no automatic merge |
 
 [Baseline branch receipt](goals/G10/roles/orchestrator/BASELINE_BRANCH_RECEIPT.json) records earlier exact goal tips and remote-tracking equality at its timestamp. [Branch map](BRANCH_MAP.md) and [integration manifest](INTEGRATION_MANIFEST.md) distinguish that snapshot, source donors, cumulative imports and later documentation. Parent must update pending facts from actual operations, never invent the SHA of the commit containing this file.
@@ -33,7 +33,7 @@ The accepted integration contains two bounded Diff fixes, gated Hot Folder found
 | G07 | DEFERRED_WITH_DESIGN / FAILED_VERIFICATION / WRITER_DEFERRED | Reviewed documentation only; all archive prototype source excluded. Final 10/12. Guarded publication OS32; source/alias deletion endpoint UNKNOWN, no post-delete binding claim. [Evidence](goals/G07/VERIFICATION.md). |
 | G08 | DEFERRED_WITH_DESIGN / VERIFICATION_DEFERRED | History prototype and toolbar privacy correction excluded; recipes unimplemented. Initial 14/14 applies to old blobs only. R1 preparation timed out at 32s, drained101.880s/late exit0; R1 tests NOT_RUN. [Evidence](goals/G08/VERIFICATION.md). |
 | G09 | NO_CHANGE_REVALIDATED / TEST_STRENGTHENING_ACCEPTED | Selected retained/cancellable owner production logic unchanged; tests accepted. 12/12 serial run exit0. Native pre-read acquired file handle: held OS32, post-join exclusive success, warm restart/cleanup. Preparation numeric exit null retained. [Evidence](goals/G09/VERIFICATION.md). |
-| G10 | IN_PROGRESS | Documentation reconciliation proposals only; final materialization/review/import/publication pending. Parent baseline receipts reused; bounded static checks only. No Cargo/build/native/CI. [Evidence](goals/G10/VERIFICATION.md). |
+| G10 | ACCEPTED_COMPLETE | Sequential program dispositions, accepted-only manifest21Rustpaths/13exclusions, dependencies, complete future pairs and final PR publication recorded. No new source or expanded Rust/native campaign. |
 
 ## Remaining work and authority
 
@@ -47,8 +47,8 @@ Accepted checkpoint counts are32/32 G01,19/19 G05 M1-A,22/22 corrected B1,29/29 
 
 Requested roles: orchestrator Astra/xhigh, planner/reviewer Astra/max, implementer Astra/xhigh. Actual checked-in child configuration differs: planner/reviewer Sol/high and implementer Luna/max remain unchanged; actual serving backends are UNVERIFIED. Per-role records govern attribution; no self-review is called independent. G10 [implementer record](goals/G10/roles/implementer/ROLE_RECORD.md) and [static checks](goals/G10/roles/implementer/STATIC_CHECKS.md) identify this proposal work only.
 
-## Parent's exact next action
+## Final next action
 
-Materialize the approved proposals without altering immutable charters or historical events; verify unchanged source/config against accepted baseline; obtain one independent cumulative review. If accepted, import documentation with actual provenance and attempt a normal push. Create/update one reviewable integration PR to then-current master, attach it to the task, and replace pending fields with host-confirmed URL/head/base/check/review facts. Do not merge, delete branches, force-push or retry indefinitely. If publication fails, retain exact local/remote refs and the actual failure with one concrete manual publication step.
+Review [PR1459](https://github.com/multiplex55/Multi_Launcher/pull/1459) using the [single manual review checklist](MANUAL_REVIEW_CHECKLIST.md). The human may select a canonical future pair independently; no automatic merge or restart is authorized. All eleven goal branches are preserved, including unaccepted prototypes. Exact closing tips and import lineage are in [BRANCH_MAP](BRANCH_MAP.md). Source/manifest/configuration bytes remain unchanged by final publication receipts.
 
-Use only the [single final manual review checklist](MANUAL_REVIEW_CHECKLIST.md); no mid-goal manual test request or new acceptance campaign is implied.
+The published-head snapshot is timestamped, not a guessed SHA of its containing commit. Read the live PR ref or the orchestrator final response for the final documentation receipt commit. Host CI/approval success is not claimed; the workflow query is limited to the first page of PR-triggered runs.

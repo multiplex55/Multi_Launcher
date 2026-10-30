@@ -128,7 +128,7 @@ The new run has a verified source/role baseline, a safe current continuation poi
 - **Source base:** bootstrap `02d0ac64d51655f43d6e958ea551f5bf658ee48d`; closing donor `7e53f4d28ca5b66a21e30e41545692cce5fa6b6a`, imported as `41cc682e` (full original provenance in run ledger); normal pushes recorded.
 - **Current milestone:** all M0-A through M3-A accepted, documentation only after independent review.
 - **Active role/model:** none for G00; historical requested/configured/backend distinctions retained in role records.
-- **Next action:** do not restart G00; resume current G10 parent review/publication from run status.
+- **Next action:** do not restart G00; read final run handoff and review PR1459.
 - **Blocker/scope:** missing old local historical reports remain an evidence limitation. No source/config changes; Cargo/native NOT_RUN. Existing continuation's two live links are correct.
 
 | Milestone | State | Evidence / next action |

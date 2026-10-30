@@ -2,7 +2,7 @@
 
 ## Current accepted boundary
 
-Through accepted integration `ea3a7007e23090c1c2b13ea9018b29754579e4ef`: G00 documentation; G01 two bounded fixes; G05 M1-A and corrected B1 foundations only; G06 corrected editor/transaction; G09 selected-owner tests. G02/G03/G04/G07/G08 contribute reviewed documentation only. Whole G05/G06 remain partial. G10 documentation is accepted after cumulative review7318e862; closing `792b1a531a4b5a392be977de94afee4d745b8685` imported as `2234ed892f8a3a5a6b2feb0579ac160f32e26aad`. No source behavior changed in G10; PR facts remain pending.
+Through accepted integration `ea3a7007e23090c1c2b13ea9018b29754579e4ef`: G00 documentation; G01 two bounded fixes; G05 M1-A and corrected B1 foundations only; G06 corrected editor/transaction; G09 selected-owner tests. G02/G03/G04/G07/G08 contribute reviewed documentation only. Whole G05/G06 remain partial. G10 documentation is accepted after cumulative review7318e862; closing `792b1a531a4b5a392be977de94afee4d745b8685` imported as `2234ed892f8a3a5a6b2feb0579ac160f32e26aad`. No source behavior changed in G10; [PR1459](https://github.com/multiplex55/Multi_Launcher/pull/1459) is open and unmerged; publication facts are recorded in FINAL_HANDOFF.
 
 | Scope | Accepted cumulative source/test import | Boundary |
 |---|---|---|
@@ -12,7 +12,7 @@ Through accepted integration `ea3a7007e23090c1c2b13ea9018b29754579e4ef`: G00 doc
 | G06 corrected cumulative | `b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7` | Includes final real resolver correction; rejected standalone `b708e38a` never independently accepted. Native proof deferred. |
 | G09 | `fc9e5c7cbb509397b47c4d7f2902899c9d04dd43` | Three test modules only; production unchanged. |
 
-[Manifest](INTEGRATION_MANIFEST.md) records all 20 exact source/test blobs; [status](PROGRAM_STATUS.md) records all eleven current dispositions. Closing donor refs can include rejected prototypes and must never be imported wholesale merely because their documentation was accepted. Counts below belong to separate checkpoints, not a unique aggregate test suite.
+[Manifest](INTEGRATION_MANIFEST.md) records all 21 exact Rust source/test blobs; [status](PROGRAM_STATUS.md) records all eleven current dispositions. Closing donor refs can include rejected prototypes and must never be imported wholesale merely because their documentation was accepted. Counts below belong to separate checkpoints, not a unique aggregate test suite.
 
 ## Historical acceptance/import receipts — preserved
 
@@ -93,3 +93,8 @@ Donor090df0d0859189d63804c4e79524fb7a3be2478b -> fc9e5c7cbb509397b47c4d7f2902899
 ## G10 accepted documentation import
 
 535993a4fa32a5646e0ade6076c6941a71d47230 -> cb8ec0bf6a176f9e1c9707367b404f7338616299; 874065dbe21f227c4c3189dc859ba5521b210eb5 -> c703c43c778160d6bb40471d002b7808590c84ab; reviewed7318e862509113ed44b857483ff28219ea8700b7 -> b46ca96336950b2fffdd006c50ba6ba9d9e03faa; closing792b1a531a4b5a392be977de94afee4d745b8685 -> 2234ed892f8a3a5a6b2feb0579ac160f32e26aad. Every import uses cherry-pick -x and normal push succeeded. Cumulative reviewer ACCEPT/no substantivefindings; no new source/Cargo/native/CI. Exact source/crate/manifest/config comparison to closing donor is empty/exit0. Fresh origin/master remains4a1283e6. PR publication next.
+
+
+## Final publication and manifest coverage amendment
+
+PR1459 opened ready-for-review from publication head b128db10b0cb1652c4f28c96570ef282014c18c9 to master4a1283e6edd2c245f562a07dbe3dcc6a61061eed and attached. Cumulative review accepted 7318e862509113ed44b857483ff28219ea8700b7; named externalfixture amendment confirms21Rustpaths (20src+tests/settings_editor.rs), not20entiredelta. Externalfixture blob8ab1163c equals G06 donor/import/current and prior recorded input; three fallible-conversion caller migrations, assertions unchanged, externaltests NOT_RUN by29lib/binselection. No source edit/newtest or newinitiative. Publication receipt and final handoff distinguish snapshothead from subsequent documentation receipts, internalreview from GitHubreviews, and emptyPRworkflows from CIpass. No merge/masterchange.

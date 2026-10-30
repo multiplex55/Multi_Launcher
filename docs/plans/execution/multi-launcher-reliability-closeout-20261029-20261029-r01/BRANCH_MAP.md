@@ -1,10 +1,10 @@
 # Branch map
 
-Current reconciliation uses the parent [baseline receipt](goals/G10/roles/orchestrator/BASELINE_BRANCH_RECEIPT.json) at `2026-10-30T07:46:39.1610151Z`. Every baseline local tip equals its remote-tracking tip. Parent-supplied later G10 packet `874065dbe21f227c4c3189dc859ba5521b210eb5` is committed/pushed; final closing/PR refs remain PENDING. No branches are deleted or rewritten.
+Current reconciliation uses the parent [baseline receipt](goals/G10/roles/orchestrator/BASELINE_BRANCH_RECEIPT.json) at `2026-10-30T07:46:39.1610151Z`. Every baseline local tip equals its remote-tracking tip. Parent-supplied later G10 packet `874065dbe21f227c4c3189dc859ba5521b210eb5` is committed/pushed; G10 closing tip is `792b1a531a4b5a392be977de94afee4d745b8685`; [PR1459](https://github.com/multiplex55/Multi_Launcher/pull/1459) is open and unmerged. No branches are deleted or rewritten.
 
 Master/origin/master: `4a1283e6edd2c245f562a07dbe3dcc6a61061eed`. Bootstrap: `02d0ac64d51655f43d6e958ea551f5bf658ee48d`. Integration accepted baseline: `ea3a7007e23090c1c2b13ea9018b29754579e4ef`. Newest test checkpoint: `fc9e5c7cbb509397b47c4d7f2902899c9d04dd43`. Last production behavior: `b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7`.
 
-| Goal | Branch | Baseline closing local = remote-tracking tip | Ancestry / current note |
+| Goal | Branch | Recorded closing local / remote-tracking tip | Ancestry / current note |
 |---|---|---|---|
 | G00 | `codex/closeout-g00-baseline-and-continuation-20261029-r01` | `7e53f4d28ca5b66a21e30e41545692cce5fa6b6a` | Independent bootstrap branch. |
 | G01 | `codex/closeout-g01-diff-failure-information-20261029-r01` | `13243515329ce4010bd6db981f1fd3bcc26f2dec` | Independent bootstrap branch. |
@@ -16,7 +16,7 @@ Master/origin/master: `4a1283e6edd2c245f562a07dbe3dcc6a61061eed`. Bootstrap: `02
 | G07 | `codex/closeout-g07-zip-extraction-20261029-r01` | `5d4d3054c5b52510a38d96faf201c6c0ca2e07f7` | Independent bootstrap branch. |
 | G08 | `codex/closeout-g08-mkmacro-run-history-20261029-r01` | `e505f961849475ecf3affda40064b96a60243f9d` | Independent bootstrap branch. |
 | G09 | `codex/closeout-g09-activity-center-retirement-20261029-r01` | `174b6fff5eba1a28de6fb8b73d3a5ea77c91187a` | Independent bootstrap branch. |
-| G10 | `codex/closeout-g10-residual-defect-triage-integration-20261029-r01` | `792b1a531a4b5a392be977de94afee4d745b8685` | Dependent branch from accepted integration `ea3a7007e23090c1c2b13ea9018b29754579e4ef`; later supplied packet `874065dbe21f227c4c3189dc859ba5521b210eb5` pushed. Final tip pending. |
+| G10 | `codex/closeout-g10-residual-defect-triage-integration-20261029-r01` | `792b1a531a4b5a392be977de94afee4d745b8685` | Dependent branch from accepted integration `ea3a7007e23090c1c2b13ea9018b29754579e4ef`; later supplied packet `874065dbe21f227c4c3189dc859ba5521b210eb5` pushed. Closing tip recorded; final publication receipts are on the integration branch. |
 
 Integration branch `codex/closeout-integration-20261029-r01` baseline local and remote-tracking tip: `ea3a7007e23090c1c2b13ea9018b29754579e4ef`. No new refs were queried by this documentation writer.
 
@@ -62,3 +62,8 @@ These entries are historical observations in their original order, including for
 
 
 G10 closing donor 792b1a531a4b5a392be977de94afee4d745b8685 normallypushed; accepted docs imported through 2234ed892f8a3a5a6b2feb0579ac160f32e26aad with four -x commits and normalpushes. G10 table now records its actual closing tip. Integration publication-receipt commits may follow; live integration ref/PR will be authoritative rather than guessing the SHA of a document containing itself.
+
+
+## Publication snapshot
+
+PR1459: https://github.com/multiplex55/Multi_Launcher/pull/1459; creation head b128db10b0cb1652c4f28c96570ef282014c18c9 on codex/closeout-integration-20261029-r01, base master4a1283e6edd2c245f562a07dbe3dcc6a61061eed. G10 donor tip792b1a531a4b5a392be977de94afee4d745b8685 is preserved; all other goal tips in the table are unchanged and pushed. Final receipt commits update integration documentation only. Use live PR head/orchestrator final response for its final SHA rather than a self-referential document hash.
