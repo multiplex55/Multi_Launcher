@@ -1,0 +1,29 @@
+{
+  "utc": "2026-10-30T06:57:04.356956+00:00",
+  "status": "UNACCEPTED_TESTS_NOT_RUN",
+  "source_blobs_equal_timeout_receipt": true,
+  "source_git_blobs": {
+    "Cargo.toml": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+    "Cargo.lock": "648e143ad2ca902e04ae9b7d4cf57899a2db8380",
+    "src/mkmacro/runtime/summary.rs": "0ede3520e02c3e453ab00b28a12d0f73a6c5199f",
+    "src/mkmacro/runtime.rs": "fa011b29318e8cfd673a35f8a3d0d985f0aed36f",
+    "src/gui/mkmacro_dialog/history.rs": "83870dc43072b30956c8142bc1a383d35dc59128",
+    "src/gui/mkmacro_dialog/mod.rs": "b9d87841395834e8e38c61fb17a31e5b80cd458c",
+    "src/gui/mkmacro_dialog/toolbar.rs": "6e76306b4645cf79a867e3a6f1f2a728eaf9b2a7"
+  },
+  "diff_check_exit": 0,
+  "owned_markdown_links_checked": 46,
+  "owned_links_resolve": true,
+  "tracked_changed_paths": [
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G08/PROGRESS.md",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G08/RISKS.md",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G08/SOURCE_REVALIDATION.md",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G08/VERIFICATION.md",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G08/roles/implementer/ROLE_RECORD.md",
+    "docs/plans/reliability-feature-closeout-20261029/goals/G08-mkmacro-run-history/GOAL.md",
+    "src/gui/mkmacro_dialog/history.rs",
+    "src/gui/mkmacro_dialog/toolbar.rs"
+  ],
+  "git_mutations": "NONE",
+  "test_execution": "NOT_RUN"
+}

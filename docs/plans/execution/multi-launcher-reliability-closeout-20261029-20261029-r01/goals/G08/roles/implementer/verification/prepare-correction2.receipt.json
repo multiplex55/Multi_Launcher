@@ -1,0 +1,29 @@
+{
+  "phase": "prepare-correction2",
+  "command": "cargo nextest list -p multi_launcher --lib --cargo-profile fast-dev --offline --locked -E \"test(g08_history_) | test(=mkmacro::runtime::summary::tests::row_and_history_caps_preserve_totals_and_evict_oldest_completed) | test(=mkmacro::runtime::summary::tests::active_byte_pressure_evicts_old_rows_before_growth_and_keeps_current_terminal) | test(=mkmacro::runtime::summary::tests::failure_summary_keeps_only_safe_location_not_diagnostic_payload) | test(=mkmacro::runtime::run_mode_tests::admitted_macro_summary_records_source_subset_and_only_safe_visit_metadata) | test(=mkmacro::runtime::run_mode_tests::stop_after_execution_uses_one_terminal_classification_for_snapshot_and_summary) | test(=gui::mkmacro_dialog::toolbar::tests::running_and_paused_controls_are_deterministic) | test(=gui::mkmacro_dialog::tests::minimum_size_main_layout_keeps_toolbar_and_steps_reachable_without_mutation)\" --message-format json",
+  "head": "826e418b9a812128801cbbe742410889212d87bd",
+  "source_git_blobs": {
+    "Cargo.toml": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+    "Cargo.lock": "648e143ad2ca902e04ae9b7d4cf57899a2db8380",
+    "src/mkmacro/runtime/summary.rs": "0ede3520e02c3e453ab00b28a12d0f73a6c5199f",
+    "src/mkmacro/runtime.rs": "fa011b29318e8cfd673a35f8a3d0d985f0aed36f",
+    "src/gui/mkmacro_dialog/history.rs": "07b280ff936bcc3ef80ff0bfe193d42ab7889941",
+    "src/gui/mkmacro_dialog/mod.rs": "b9d87841395834e8e38c61fb17a31e5b80cd458c",
+    "src/gui/mkmacro_dialog/toolbar.rs": "5f242aac8dba6b1d73a35e4dc67861254c032909"
+  },
+  "toolchain": {
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "nextest": "cargo-nextest 0.9.135 (610eefb88 2026-05-14)\r\nrelease: 0.9.135\r\ncommit-hash: 610eefb88762529a316373f4a50f5fd9194c3c35\r\ncommit-date: 2026-05-14\r\nhost: x86_64-pc-windows-msvc"
+  },
+  "start_utc": "2026-10-30T06:22:31.8186766Z",
+  "cap_seconds": 107,
+  "timed_out": false,
+  "stdout": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g08-m1-20261030-r01\\prepare-correction2.all-tests.json",
+  "stderr": "G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G08\\roles\\implementer\\verification\\prepare-correction2.stderr.log",
+  "pid": 16700,
+  "end_utc": "2026-10-30T06:23:46.9189663Z",
+  "elapsed_seconds": 75.097,
+  "exit_code": 0,
+  "output_drained": true
+}

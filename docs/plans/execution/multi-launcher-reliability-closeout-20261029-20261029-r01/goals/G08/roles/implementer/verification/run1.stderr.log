@@ -1,0 +1,225 @@
+warning: variant `Unknown` is never constructed
+   --> vendor\epaint\src\text\font.rs:361:5
+    |
+357 | pub(crate) enum ShapeBufferProvenance {
+    |                 --------------------- variant in this enum
+...
+361 |     Unknown,
+    |     ^^^^^^^
+    |
+    = note: `ShapeBufferProvenance` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `epaint` (lib) generated 1 warning
+warning: use of deprecated constant `std::f32::EPSILON`: replaced by the `EPSILON` associated constant on `f32`
+  --> vendor\egui\src\containers\scene.rs:79:42
+   |
+79 |             zoom_range: Rangef::new(f32::EPSILON, 1.0),
+   |                                          ^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: `egui` (lib) generated 1 warning
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:720:19
+    |
+720 |     pub fn pixels(&self) -> Pixels<P> {
+    |                   ^^^^^     ^^^^^^^^^ the same lifetime is hidden here
+    |                   |
+    |                   the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+720 |     pub fn pixels(&self) -> Pixels<'_, P> {
+    |                                    +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:733:17
+    |
+733 |     pub fn rows(&self) -> Rows<P> {
+    |                 ^^^^^     ^^^^^^^ the same lifetime is hidden here
+    |                 |
+    |                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+733 |     pub fn rows(&self) -> Rows<'_, P> {
+    |                                +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:742:29
+    |
+742 |     pub fn enumerate_pixels(&self) -> EnumeratePixels<P> {
+    |                             ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                             |
+    |                             the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+742 |     pub fn enumerate_pixels(&self) -> EnumeratePixels<'_, P> {
+    |                                                       +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:754:27
+    |
+754 |     pub fn enumerate_rows(&self) -> EnumerateRows<P> {
+    |                           ^^^^^     ^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                           |
+    |                           the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+754 |     pub fn enumerate_rows(&self) -> EnumerateRows<'_, P> {
+    |                                                   +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:898:23
+    |
+898 |     pub fn pixels_mut(&mut self) -> PixelsMut<P> {
+    |                       ^^^^^^^^^     ^^^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+898 |     pub fn pixels_mut(&mut self) -> PixelsMut<'_, P> {
+    |                                               +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:911:21
+    |
+911 |     pub fn rows_mut(&mut self) -> RowsMut<P> {
+    |                     ^^^^^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                     |
+    |                     the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+911 |     pub fn rows_mut(&mut self) -> RowsMut<'_, P> {
+    |                                           +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:918:33
+    |
+918 |     pub fn enumerate_pixels_mut(&mut self) -> EnumeratePixelsMut<P> {
+    |                                 ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                 |
+    |                                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+918 |     pub fn enumerate_pixels_mut(&mut self) -> EnumeratePixelsMut<'_, P> {
+    |                                                                  +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:931:31
+    |
+931 |     pub fn enumerate_rows_mut(&mut self) -> EnumerateRowsMut<P> {
+    |                               ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                               |
+    |                               the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+931 |     pub fn enumerate_rows_mut(&mut self) -> EnumerateRowsMut<'_, P> {
+    |                                                              +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\image.rs:932:15
+    |
+932 |     fn pixels(&self) -> Pixels<Self>
+    |               ^^^^^     ^^^^^^^^^^^^ the same lifetime is hidden here
+    |               |
+    |               the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+932 |     fn pixels(&self) -> Pixels<'_, Self>
+    |                                +++
+
+warning: `image` (lib) generated 9 warnings (run `cargo fix --lib -p image` to apply 9 suggestions)
+warning: constant `SCANNER_CANCELLATION_INTERVAL` is never used
+  --> crates\multi_launcher_table_core\src\lib.rs:53:7
+   |
+53 | const SCANNER_CANCELLATION_INTERVAL: usize = 4096;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scanner_cancellation_checkpoint` is never used
+    --> crates\multi_launcher_table_core\src\lib.rs:1031:4
+     |
+1031 | fn scanner_cancellation_checkpoint(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `end_offset` is never read
+  --> crates\multi_launcher_table_core\src\stream_scan.rs:25:9
+   |
+22 | pub(crate) struct StreamRecord {
+   |                   ------------ field in this struct
+...
+25 |     pub end_offset: u64,
+   |         ^^^^^^^^^^
+   |
+   = note: `StreamRecord` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: `multi_launcher_table_core` (lib) generated 3 warnings
+warning: unused variable: `replaced_scan_job`
+    --> src\table_utility_session.rs:3521:13
+     |
+3521 |         let replaced_scan_job = session.active_key.expect("the replaceable scan has a key");
+     |             ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_replaced_scan_job`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `multi_launcher` (lib test) generated 1 warning (run `cargo fix --lib -p multi_launcher --tests` to apply 1 suggestion)
+    Finished `fast-dev` profile [unoptimized + debuginfo] target(s) in 1.55s
+────────────
+ Nextest run ID 78021d29-a6f3-48f3-86af-5ad84eb25f1d with nextest profile: default
+    Starting 14 tests across 1 binary (6444 tests skipped)
+        PASS [   0.092s] ( 1/14) multi_launcher mkmacro::runtime::run_mode_tests::admitted_macro_summary_records_source_subset_and_only_safe_visit_metadata
+        PASS [   0.094s] ( 2/14) multi_launcher gui::mkmacro_dialog::toolbar::tests::running_and_paused_controls_are_deterministic
+        PASS [   0.130s] ( 3/14) multi_launcher mkmacro::runtime::run_mode_tests::stop_after_execution_uses_one_terminal_classification_for_snapshot_and_summary
+        PASS [   0.135s] ( 4/14) multi_launcher mkmacro::runtime::run_mode_tests::g08_history_paused_and_busy_admission_absent_until_terminal
+        FAIL [   0.126s] ( 5/14) multi_launcher gui::mkmacro_dialog::history::tests::g08_history_actual_controls_visible_lifecycle_and_document_preservation
+  stdout ───
+
+    running 1 test
+    test gui::mkmacro_dialog::history::tests::g08_history_actual_controls_visible_lifecycle_and_document_preservation ... FAILED
+
+    failures:
+
+    failures:
+        gui::mkmacro_dialog::history::tests::g08_history_actual_controls_visible_lifecycle_and_document_preservation
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6457 filtered out; finished in 0.03s
+
+  stderr ───
+
+    thread 'gui::mkmacro_dialog::history::tests::g08_history_actual_controls_visible_lifecycle_and_document_preservation' (36180) panicked at src\gui\mkmacro_dialog\history.rs:383:9:
+    assertion failed: dialog.history.active
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.051s] ( 6/14) multi_launcher mkmacro::runtime::summary::tests::active_byte_pressure_evicts_old_rows_before_growth_and_keeps_current_terminal
+        PASS [   0.163s] ( 7/14) multi_launcher mkmacro::runtime::run_mode_tests::g08_history_registry_unlock_concurrent_publish_clear_and_generation_release
+        PASS [   0.054s] ( 8/14) multi_launcher mkmacro::runtime::summary::tests::failure_summary_keeps_only_safe_location_not_diagnostic_payload
+        PASS [   0.042s] ( 9/14) multi_launcher mkmacro::runtime::summary::tests::g08_history_bounds_sanitization_and_stable_selection
+        PASS [   0.040s] (10/14) multi_launcher mkmacro::runtime::summary::tests::g08_history_clear_publication_and_active_accounting_during_view
+        PASS [   0.039s] (11/14) multi_launcher mkmacro::runtime::summary::tests::g08_history_free_headroom_busy_and_unwind_release_exact_charge
+        PASS [   0.204s] (12/14) multi_launcher gui::mkmacro_dialog::history::tests::g08_history_render_safe_labels_fallback_expiry_and_payload_exclusion
+        PASS [   0.028s] (13/14) multi_launcher mkmacro::runtime::summary::tests::row_and_history_caps_preserve_totals_and_evict_oldest_completed
+        PASS [   0.688s] (14/14) multi_launcher gui::mkmacro_dialog::tests::minimum_size_main_layout_keeps_toolbar_and_steps_reachable_without_mutation
+────────────
+     Summary [   0.711s] 14 tests run: 13 passed, 1 failed, 6444 skipped
+        FAIL [   0.126s] ( 5/14) multi_launcher gui::mkmacro_dialog::history::tests::g08_history_actual_controls_visible_lifecycle_and_document_preservation
+error: test run failed

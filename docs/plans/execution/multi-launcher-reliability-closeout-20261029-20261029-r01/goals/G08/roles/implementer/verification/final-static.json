@@ -1,0 +1,19 @@
+{
+  "utc": "2026-10-30T06:27:10.520642+00:00",
+  "diff_check_exit": 0,
+  "owned_links_resolve": true,
+  "source_blobs_equal_run2": true,
+  "source_git_blobs": {
+    "Cargo.toml": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+    "Cargo.lock": "648e143ad2ca902e04ae9b7d4cf57899a2db8380",
+    "src/mkmacro/runtime/summary.rs": "0ede3520e02c3e453ab00b28a12d0f73a6c5199f",
+    "src/mkmacro/runtime.rs": "fa011b29318e8cfd673a35f8a3d0d985f0aed36f",
+    "src/gui/mkmacro_dialog/history.rs": "07b280ff936bcc3ef80ff0bfe193d42ab7889941",
+    "src/gui/mkmacro_dialog/mod.rs": "b9d87841395834e8e38c61fb17a31e5b80cd458c",
+    "src/gui/mkmacro_dialog/toolbar.rs": "5f242aac8dba6b1d73a35e4dc67861254c032909"
+  },
+  "incremental_prep_seconds": 567.882,
+  "incremental_cap_seconds": 600,
+  "git_mutations": "NONE",
+  "native_manual": "NOT_RUN"
+}
