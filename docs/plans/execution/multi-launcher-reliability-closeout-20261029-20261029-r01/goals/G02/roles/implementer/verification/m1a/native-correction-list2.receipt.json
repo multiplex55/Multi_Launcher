@@ -1,0 +1,26 @@
+{
+  "phase": "G02-M1-A native reservation correction preparation retry",
+  "command": "cargo nextest list -p multi_launcher -p multi_launcher_table_core --cargo-profile fast-dev --lib --offline --locked --color never -E \"test(table_publication_) | test(resource_pool_leases_share_usage_and_release_on_last_owner) | test(partial_temp_append_failure_keeps_charge_until_owned_file_is_removed) | test(failed_temp_deletion_keeps_a_retryable_charge_until_removed) | test(cloned_snapshot_handles_keep_each_allocation_charged_after_session_drop) | test(pending_job_releases_its_resource_leases_before_confirmed_activity_retirement) | test(file_page_failure_and_cancellation_preserve_the_last_good_page) | test(file_page_completion_from_closed_lifetime_is_ignored_after_reopen) | test(table_session_draft_edits_revoke_queued_export_receipts) | test(table_file_save_refuses_to_replace_the_opened_source) | test(table_file_save_requires_confirmation_and_publishes_the_captured_output)\" --message-format json",
+  "head": "24f3c13f812a8e1654c490c15729142c721e469b",
+  "source_git_blobs": {
+    "src/table_utility_session.rs": "f0f9c6b5deb3fbbd39b079600b3efdd2ee508f07",
+    "src/table_utility_session/publication.rs": "8c5de16370cf0bfc5168cdb1df8d1e2277dc9695",
+    "src/file_operations.rs": "61a4bc3e41b1f4b36f8cc7fdbcb78e96631ec7dd",
+    "crates/multi_launcher_table_core/src/resource.rs": "7adf7f8cf557b12eb6220c85b9341937e0954ec4",
+    "crates/multi_launcher_table_core/src/lib.rs": "0e4dccc43056ac0a4e29b4329dac5626cf784d5b",
+    "Cargo.toml": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+    "Cargo.lock": "648e143ad2ca902e04ae9b7d4cf57899a2db8380"
+  },
+  "first_error": "E0277 RootError does not implement StdError at file_operations.rs:8132",
+  "correction": "Convert existing RootError diagnostic to io::Error text at new adapter only",
+  "start": "2026-10-29T20:55:05.4985858-04:00",
+  "cap_seconds": 365,
+  "aggregate_incremental_cap_seconds": 600,
+  "prior_incremental_seconds": 234.356,
+  "timed_out": false,
+  "pid": 30416,
+  "end": "2026-10-29T20:56:31.2947789-04:00",
+  "elapsed_seconds": 85.792,
+  "exit_code": 0,
+  "output_drained": true
+}

@@ -1,6 +1,6 @@
 # Accepted checkpoints
 
-None yet. Bootstrap is scaffolding, not production acceptance.
+Bootstrap was scaffolding; current accepted dispositions are recorded below.
 
 ## G00 accepted receipt
 
@@ -21,3 +21,10 @@ None yet. Bootstrap is scaffolding, not production acceptance.
 - After commit, git diff donor13243515 HEAD across four Rust paths plus manifest/lock/original Diff fixture exited0; diff --check master..HEAD passed. Reused exact-source receipts, no redundant run. No merge conflicts.
 - Final blobs: file_ops7e9fab3d4eb09a735f4c347ab86e0832fd3f8a66; folder_runtimee7cac72dbc89977556a475045d7ab0410b5c59e3; dialogecfd6e76f38cbcf16c5b914b610cc47d1fa61fa8; previewa1d93a6951a0e335768ccbc3a7e39b6438440db8.
 - Next G02 only; G03 hard gate unchanged. Complete proposed FileSearch fixture pair cataloged separately.
+
+## G02 documentation-only disposition receipt
+
+- Donor011af0c448dfdcdc0eb747083f909d3bfa6c1ab2, baseline50608bd4, contract24f3c13f, failed sourcef879a2a8. All pushed normally.
+- Independent reviewer2026-10-30 01:05:51UTC accepted documentation/deferral only; no substantive defect. Path-limited restore selects only G02 execution docs and mutable G02 Goal progress. All five source files explicitly excluded. Staged-path inspection and diff--check pass; git diff fd300ff7 across src/crates/Cargo.toml/Cargo.lock empty. No accepted-source change or redundant Cargo.
+- Both recorded runs19 selected15pass4fail; native CreateFileW OS error5 before stage creation. Denied ancestor/root cause unknown. Deterministic/early-refusal limits explicit, correction320.148s/600, cleanup limits retained. Complete canonical P1 future pair and exact stall report. G02 not accepted implementation; G03 blocked.
+- Documentation closure files checked for local Markdown links: zero broken. Parent maintains canonical future catalog. Source remains donor-only.

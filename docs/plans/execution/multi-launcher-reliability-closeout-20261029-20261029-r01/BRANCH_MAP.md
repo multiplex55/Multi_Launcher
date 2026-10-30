@@ -12,3 +12,5 @@
 - G01 closing donor13243515329ce4010bd6db981f1fd3bcc26f2dec (pushed). Accepted integration M0-A21f5b01b, M1-Addbbf4c4, corrected cumulativefeedbackfd300ff748e54cee167a038337220e33beba2322 (all pushed). Rejected standalone8d never an independent accepted import.
 
 - G02 branch codex/closeout-g02-table-publication-safety-20261029-r01 from bootstrap 02d0ac64; M0-A baseline 50608bd417b34854358989a5d4b1325e95293063; source-grounded safety contract 24f3c13f812a8e1654c490c15729142c721e469b. Both pushed. Source and native proof pending, no G02 code imported; G03 blocked.
+
+- G02 final donor011af0c448dfdcdc0eb747083f909d3bfa6c1ab2 pushed; source checkpointf879a2a880d59e941486241e652299dabc002365 UNACCEPTED. Current disposition supersedes prior pending event: DEFERRED_WITH_DESIGN/NATIVE_NOT_PROVEN. Only docs selected into integration, no five-file source import. G03 still blocked.

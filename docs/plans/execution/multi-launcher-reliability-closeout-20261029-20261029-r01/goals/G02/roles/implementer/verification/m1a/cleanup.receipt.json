@@ -1,0 +1,68 @@
+{
+  "checked_at": "2026-10-29T20:58:32.4090385-04:00",
+  "source_identity": {
+    "src/table_utility_session.rs": {
+      "matches_final_run": true,
+      "blob": "f0f9c6b5deb3fbbd39b079600b3efdd2ee508f07"
+    },
+    "src/table_utility_session/publication.rs": {
+      "matches_final_run": true,
+      "blob": "8c5de16370cf0bfc5168cdb1df8d1e2277dc9695"
+    },
+    "src/file_operations.rs": {
+      "matches_final_run": true,
+      "blob": "61a4bc3e41b1f4b36f8cc7fdbcb78e96631ec7dd"
+    },
+    "crates/multi_launcher_table_core/src/resource.rs": {
+      "matches_final_run": true,
+      "blob": "7adf7f8cf557b12eb6220c85b9341937e0954ec4"
+    },
+    "crates/multi_launcher_table_core/src/lib.rs": {
+      "matches_final_run": true,
+      "blob": "0e4dccc43056ac0a4e29b4329dac5626cf784d5b"
+    },
+    "Cargo.toml": {
+      "matches_final_run": true,
+      "blob": "994a55fea039ca79614fbb019ac1b05cfab7381b"
+    },
+    "Cargo.lock": {
+      "matches_final_run": true,
+      "blob": "648e143ad2ca902e04ae9b7d4cf57899a2db8380"
+    }
+  },
+  "owned_process_ids": [
+    10200,
+    37236,
+    22880,
+    38624,
+    30416,
+    9948
+  ],
+  "remaining_owned_processes": [],
+  "process_commandline_inspection": "Get-CimInstance Win32_Process denied by host; Get-Process of recorded owned PIDs succeeded",
+  "raw_ignored_evidence": [
+    {
+      "path": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g02-m1a-20261029-r01\\correction-list.stdout.json",
+      "bytes": 1193726,
+      "sha256": "94979D578CB3B1B886E685E210D6CD14E5D1189F11296EE8BC098475C9C139BE"
+    },
+    {
+      "path": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g02-m1a-20261029-r01\\list.stdout.json",
+      "bytes": 0,
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+    },
+    {
+      "path": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g02-m1a-20261029-r01\\native-correction-list.stdout.json",
+      "bytes": 0,
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+    },
+    {
+      "path": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g02-m1a-20261029-r01\\native-correction-list2.stdout.json",
+      "bytes": 1193726,
+      "sha256": "94979D578CB3B1B886E685E210D6CD14E5D1189F11296EE8BC098475C9C139BE"
+    }
+  ],
+  "diff_check_exit_code": 0,
+  "wrapper_created": false,
+  "fixture_cleanup": "Native failed cases unwind TempDir before stage creation; resource cases assert exact owner cleanup and charge retirement; no task process remains. No directory cleanup outside proven task ownership attempted."
+}
