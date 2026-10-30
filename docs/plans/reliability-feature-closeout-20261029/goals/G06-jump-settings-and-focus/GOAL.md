@@ -153,3 +153,4 @@ Settings UI, committed-state behavior and focused keyboard/viewport regressions 
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
+- Runtime2026-10-30: M0-A IN_PROGRESS; branch codex/closeout-g06-jump-settings-and-focus-20261029-r01 from bootstrap02d0ac64; fetched actual master4a1283e6 unchanged; integrationcda36e81 authoritative. Read-only planner next; no source/tests/native yet.
